@@ -73,6 +73,7 @@ const WALLET_DIR: [&str; 3] = ["ElastOS", "SystemServices", "Wallet"];
 /// provider's storage-root layout from its name.
 const DID_PROVIDER: &str = "did-provider";
 const WALLET_PROVIDER: &str = "wallet-provider";
+const MODEL_PROVIDER: &str = "model-provider";
 /// The isolated fixture device key, the same input did's own confinement test
 /// uses, so a started did provider derives the same DID there and here.
 const DID_DEVICE_KEY: [u8; 32] = [0x42; 32];
@@ -408,13 +409,13 @@ fn repository_root() -> &'static Path {
     ROOT.as_path()
 }
 
-/// The did-provider crate's directory, the source of its binary, profile and
+/// The named provider crate's directory, the source of its binary, profile and
 /// declared-rights fixture.
-fn did_provider_dir() -> PathBuf {
+fn provider_dir(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("capsules/wallet-provider must sit under capsules/")
-        .join(DID_PROVIDER)
+        .join(name)
 }
 
 /// The declared-rights fixture of the named provider, the stand-in's input.
@@ -436,27 +437,36 @@ fn confine_oracle_path(name: &str) -> PathBuf {
         .join("confine.sb")
 }
 
-/// The did-provider binary this test crate starts.
+/// The named provider's binary this test crate starts.
 ///
-/// One `cargo build` for did's manifest, run once per test process by the
-/// `LazyLock` below, reads the `did-provider` bin artifact's `executable`. The
+/// One `cargo build` for each provider's manifest, run once per test process by
+/// the `LazyLock`s below, reads that provider's bin artifact's `executable`. The
 /// build uses the `CARGO` environment variable when set, `--locked` and
 /// `--offline`, and creates nothing outside cargo's own target directories. A
 /// failed build, or an artifact that names no executable, fails with the
 /// command's output; there is no skip and no fallback to another binary.
-fn did_provider_binary() -> &'static Path {
-    static BINARY: LazyLock<PathBuf> = LazyLock::new(build_did_provider_binary);
-    BINARY.as_path()
+fn provider_binary(name: &'static str) -> &'static Path {
+    static DID_BINARY: LazyLock<PathBuf> = LazyLock::new(|| build_provider_binary(DID_PROVIDER));
+    static MODEL_BINARY: LazyLock<PathBuf> =
+        LazyLock::new(|| build_provider_binary(MODEL_PROVIDER));
+    match name {
+        DID_PROVIDER => DID_BINARY.as_path(),
+        MODEL_PROVIDER => MODEL_BINARY.as_path(),
+        other => panic!(
+            "the stand-in builds only the {DID_PROVIDER} and {MODEL_PROVIDER} binaries, \
+             so {other} has none"
+        ),
+    }
 }
 
-/// The `did-provider` bin artifact's `executable` that cargo's JSON output
-/// reports, or a refusal that names `did-provider` and `executable`.
+/// The named provider's bin artifact's `executable` that cargo's JSON output
+/// reports, or a refusal that names that provider and `executable`.
 ///
-/// `build_did_provider_binary` feeds this function did's build output, and
-/// `did_binary_is_the_executable_the_build_reports` feeds it fixture lines.
-/// One reader serves both, so the output has one parser and no other place
-/// reads a path from the build (P10).
-fn did_binary_executable(build_output: &str) -> Result<PathBuf, String> {
+/// `build_provider_binary` feeds this function the build output of the provider
+/// it builds, and `did_binary_is_the_executable_the_build_reports` feeds it
+/// fixture lines. One reader serves both, so the output has one parser and no
+/// other place reads a path from the build (P10).
+fn binary_executable(name: &str, build_output: &str) -> Result<PathBuf, String> {
     for line in build_output.lines() {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -464,7 +474,7 @@ fn did_binary_executable(build_output: &str) -> Result<PathBuf, String> {
         if message["reason"].as_str() != Some("compiler-artifact") {
             continue;
         }
-        if message["target"]["name"].as_str() != Some(DID_PROVIDER) {
+        if message["target"]["name"].as_str() != Some(name) {
             continue;
         }
         let is_bin = message["target"]["kind"]
@@ -478,12 +488,12 @@ fn did_binary_executable(build_output: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "cargo's JSON output carries no {DID_PROVIDER} bin artifact that names an executable"
+        "cargo's JSON output carries no {name} bin artifact that names an executable"
     ))
 }
 
-fn build_did_provider_binary() -> PathBuf {
-    let manifest = did_provider_dir().join("Cargo.toml");
+fn build_provider_binary(name: &'static str) -> PathBuf {
+    let manifest = provider_dir(name).join("Cargo.toml");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(&cargo)
         .arg("build")
@@ -492,46 +502,44 @@ fn build_did_provider_binary() -> PathBuf {
         .arg("--manifest-path")
         .arg(&manifest)
         .arg("--bin")
-        .arg(DID_PROVIDER)
+        .arg(name)
         .arg("--message-format=json")
-        .current_dir(did_provider_dir())
+        .current_dir(provider_dir(name))
         .output()
-        .unwrap_or_else(|err| {
-            panic!(
-                "did-provider build {} must start: {err}",
-                manifest.display()
-            )
-        });
+        .unwrap_or_else(|err| panic!("{name} build {} must start: {err}", manifest.display()));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "did-provider build {} must succeed: {stderr}",
+        "{name} build {} must succeed: {stderr}",
         manifest.display()
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    did_binary_executable(&stdout)
+    binary_executable(name, &stdout)
         .unwrap_or_else(|reason| panic!("{reason}; standard output: {stdout}"))
 }
 
 /// The storage root a provider name keeps under `base`. did-provider keeps
 /// its identity state at `<base>/did`; wallet-provider keeps its state under
-/// `wallet_dir(base)`. The launcher and the oracle both read this one
+/// `wallet_dir(base)`; model-provider keeps its run journal at
+/// `<base>/providers/model-provider`, the root its own `journal_root` derives
+/// from `base_path`. The launcher and the oracle both read this one
 /// derivation, so a did start cannot drift into wallet's layout. Any other
-/// name is refused, because the stand-in serves these two and a guessed layout
-/// would be a fallback (P11).
+/// name is refused, because the stand-in serves these three and a guessed
+/// layout would be a fallback (P11).
 fn provider_storage_root(name: &str, base: &Path) -> PathBuf {
     match name {
         DID_PROVIDER => base.join("did"),
         WALLET_PROVIDER => wallet_dir(base),
+        MODEL_PROVIDER => base.join("providers").join(MODEL_PROVIDER),
         other => panic!(
-            "the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, \
+            "the stand-in serves only {DID_PROVIDER}, {WALLET_PROVIDER} and {MODEL_PROVIDER}, \
              so {other} has no storage root layout"
         ),
     }
 }
 
 /// The layout derivation refuses a provider name it does not serve, and the
-/// refusal names the name and both served names.
+/// refusal names the name and all three served names.
 ///
 /// The test calls the derivation only and starts nothing.
 ///
@@ -540,16 +548,16 @@ fn provider_storage_root(name: &str, base: &Path) -> PathBuf {
 #[test]
 fn provider_storage_root_refuses_an_unknown_provider_name() {
     let base = Path::new("/fixture/base");
-    let refusal = std::panic::catch_unwind(|| provider_storage_root("model-provider", base))
+    let refusal = std::panic::catch_unwind(|| provider_storage_root("engine-provider", base))
         .expect_err("an unknown provider name must be refused");
     let message = refusal
         .downcast_ref::<String>()
         .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
     assert_eq!(
         message.as_str(),
-        "the stand-in serves only did-provider and wallet-provider, \
-         so model-provider has no storage root layout",
-        "the refusal must name the unknown provider and both served names"
+        "the stand-in serves only did-provider, wallet-provider and model-provider, \
+         so engine-provider has no storage root layout",
+        "the refusal must name the unknown provider and all three served names"
     );
 }
 
@@ -598,13 +606,13 @@ struct ProviderRulesetInputs {
 /// `read_declared_rights`, which refuses a file that names another provider
 /// (P11).
 fn provider_ruleset_inputs(name: &str, base: &Path) -> Result<ProviderRulesetInputs, String> {
-    // did's binary is the one this crate builds; every other served name uses
+    // did's and model's binaries are the ones this crate builds; wallet uses
     // this crate's own binary. An unknown name never reaches a returned value,
     // because `canonical_bindings` refuses it through `provider_storage_root`.
-    let binary = if name == DID_PROVIDER {
-        did_provider_binary()
-    } else {
-        Path::new(PROVIDER_BINARY)
+    let binary = match name {
+        DID_PROVIDER => provider_binary(DID_PROVIDER),
+        MODEL_PROVIDER => provider_binary(MODEL_PROVIDER),
+        _ => Path::new(PROVIDER_BINARY),
     };
     let bindings = canonical_bindings(name, base, binary);
     let declared = read_declared_rights(name, &declared_rights_path(name))?;
@@ -616,15 +624,75 @@ fn provider_ruleset_inputs(name: &str, base: &Path) -> Result<ProviderRulesetInp
 }
 
 /// The `init` config the stand-in sends for `name` at `base`. The stand-in
-/// sends `base_path` to both providers, and did also receives the isolated
-/// fixture device key so its `get_did` answers. It builds this one config for
-/// both providers.
+/// sends `base_path` to every provider. did also receives the isolated fixture
+/// device key so its `get_did` answers. model receives its own real config: the
+/// provider id, a hosted text offer that touches no file and contacts no
+/// endpoint at init, and a journal directory under the storage root this
+/// derivation names. It builds this one config for every provider.
 fn provider_init_config(name: &str, base: &Path) -> Value {
     let mut config = json!({ "base_path": base.display().to_string() });
-    if name == DID_PROVIDER {
-        config["encryption_key"] = json!(hex::encode(DID_DEVICE_KEY));
+    match name {
+        DID_PROVIDER => {
+            config["encryption_key"] = json!(hex::encode(DID_DEVICE_KEY));
+        }
+        MODEL_PROVIDER => {
+            config["extra"] = json!({
+                "provider_id": MODEL_PROVIDER,
+                "journal_dir": provider_storage_root(MODEL_PROVIDER, base).display().to_string(),
+                "offers": [model_hosted_offer()],
+            });
+        }
+        _ => {}
     }
     config
+}
+
+/// The hosted text offer the model init declares. Its endpoint is never
+/// contacted by `init`, `status` or `offers_list`, and it reads no file, so a
+/// confined model start needs no network.
+fn model_hosted_offer() -> Value {
+    json!({
+        "id": "confine-hosted-text",
+        "title": "Confined Hosted Text",
+        "operation": "text.generate",
+        "input_modalities": ["text/plain"],
+        "output_modalities": ["text/plain"],
+        "policy": {
+            "concurrency_limit": 1,
+            "input_bytes_limit": 4096,
+            "inline_output_bytes_limit": 4096,
+            "event_bytes_limit": 4096,
+            "runtime_ms_limit": 10000,
+            "retention_secs": 60,
+            "cancel_settlement_timeout_ms": 100
+        },
+        "adapter": {
+            "kind": "open_ai_compatible_text",
+            "api_url": "https://hosted.invalid/v1/chat/completions",
+            "model": "confine/text",
+            "hosted": {
+                "backend_provider_label": "Confine Fixture",
+                "selection_mode": "pinned",
+                "privacy_policy_ref": "fixture:privacy:confine",
+                "terms_ref": "fixture:terms:confine",
+                "upstream_routing_fallback_assertion": "operator_asserted_disabled"
+            }
+        },
+        "enabled": true
+    })
+}
+
+/// One `init` request for `name` at `base`, built from the one config above.
+#[cfg(target_os = "linux")]
+fn provider_init_request(name: &str, base: &Path) -> Value {
+    json!({ "op": "init", "config": provider_init_config(name, base) })
+}
+
+/// `init` and `status` report the model provider with its one offer ready.
+#[cfg(target_os = "linux")]
+fn assert_serving(data: &Value) {
+    assert_eq!(data["provider"], MODEL_PROVIDER, "{data}");
+    assert_eq!(data["offers_ready"], 1, "{data}");
 }
 
 /// The test creates the directory `STORAGE_PARENT` names before the launch,
@@ -4132,8 +4200,8 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
 /// starts no process and needs no sandbox.
 ///
 /// Falsifier: WP128 returns
-/// `did_provider_dir().join("target/debug/did-provider")` instead of the
-/// reported `executable`, so this test fails on the fixture path.
+/// `provider_dir(DID_PROVIDER).join("target/debug/did-provider")` instead of
+/// the reported `executable`, so this test fails on the fixture path.
 /// `standin_launcher_finds_the_built_did_binary` alone still passes under
 /// WP128, because the guessed file exists after did's build. WP130 disables
 /// the kind check, so this test fails because the non-bin artifact's
@@ -4159,14 +4227,15 @@ fn did_binary_is_the_executable_the_build_reports() {
         .map(|line| line.to_string())
         .join("\n");
     assert_eq!(
-        did_binary_executable(&output).expect("the did-provider bin artifact must be read"),
+        binary_executable(DID_PROVIDER, &output)
+            .expect("the did-provider bin artifact must be read"),
         PathBuf::from("/fixture/out/did-provider"),
         "the reader must return the executable the build reports"
     );
     let without_did_bin = [did_test, other_bin]
         .map(|line| line.to_string())
         .join("\n");
-    let reason = did_binary_executable(&without_did_bin)
+    let reason = binary_executable(DID_PROVIDER, &without_did_bin)
         .expect_err("output without a did-provider bin artifact must be refused");
     assert!(
         reason.contains(DID_PROVIDER) && reason.contains("executable"),
@@ -4176,15 +4245,16 @@ fn did_binary_is_the_executable_the_build_reports() {
 
 /// The stand-in finds the did binary through one build of did's manifest.
 ///
-/// `did_provider_binary` runs `cargo build --locked --offline --manifest-path
-/// capsules/did-provider/Cargo.toml --bin did-provider --message-format=json`
-/// once and reads the bin artifact's `executable`. The path must be an existing
-/// file named `did-provider` under did's own `target` directory, or under the
-/// target directory cargo reported. A failed build fails this test with the
-/// build's output; there is no skip and no fallback to another binary.
+/// `provider_binary(DID_PROVIDER)` runs `cargo build --locked --offline
+/// --manifest-path capsules/did-provider/Cargo.toml --bin did-provider
+/// --message-format=json` once and reads the bin artifact's `executable`. The
+/// path must be an existing file named `did-provider` under did's own `target`
+/// directory, or under the target directory cargo reported. A failed build
+/// fails this test with the build's output; there is no skip and no fallback to
+/// another binary.
 #[test]
 fn standin_launcher_finds_the_built_did_binary() {
-    let binary = did_provider_binary();
+    let binary = provider_binary(DID_PROVIDER);
     assert!(
         binary.is_file(),
         "the did-provider binary must exist: {}",
@@ -4196,13 +4266,13 @@ fn standin_launcher_finds_the_built_did_binary() {
         "the binary must be named {DID_PROVIDER}: {}",
         binary.display()
     );
-    let did_target = did_provider_dir().join("target");
+    let did_target = provider_dir(DID_PROVIDER).join("target");
     let cargo_target = std::env::var_os("CARGO_TARGET_DIR").map(|dir| {
         let dir = PathBuf::from(dir);
         if dir.is_absolute() {
             dir
         } else {
-            did_provider_dir().join(dir)
+            provider_dir(DID_PROVIDER).join(dir)
         }
     });
     assert!(
@@ -4756,7 +4826,7 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
 /// Linux host that reports nothing missing; a reported missing primitive is
 /// refused whatever its OS. Every refused case returns no provider, writes no
 /// profile and creates no storage root. The did
-/// binary comes from `did_provider_binary`; the wallet binary comes from
+/// binary comes from `provider_binary(DID_PROVIDER)`; the wallet binary comes from
 /// `CARGO_BIN_EXE_wallet-provider`. Linux stays a design plus a simulated
 /// refusal: nothing here probes a real kernel or claims Linux enforcement. The
 /// stand-in is test code and not the Runtime.
@@ -4787,7 +4857,7 @@ fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
     let providers: [(&str, &Path, Value); 2] = [
         (
             DID_PROVIDER,
-            did_provider_binary(),
+            provider_binary(DID_PROVIDER),
             read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
                 .unwrap_or_else(|err| panic!("{err}")),
         ),
@@ -5551,7 +5621,7 @@ fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
     let providers = [
         B3Provider {
             name: DID_PROVIDER,
-            binary: did_provider_binary(),
+            binary: provider_binary(DID_PROVIDER),
             suite: did_standin_suite,
             cases: &DID_SUITE_CASES,
         },
@@ -6213,6 +6283,23 @@ const STARTUP_RULES: [&str; 2] = [
     r#"(allow file-read* (literal "/"))"#,
     r#"(allow sysctl-read)"#,
 ];
+/// The model profile reads the root directory with this narrower form.
+const MODEL_ROOT_READ_RULE: &str = r#"(allow file-read-data (literal "/"))"#;
+/// The calls a process makes reading the root directory at startup.
+const ROOT_READ_SYSCALLS: &[&str] = &[
+    "faccessat",
+    "fstat",
+    "getdents64",
+    "lseek",
+    "newfstatat",
+    "openat",
+    "openat2",
+    "pread64",
+    "read",
+    "readlinkat",
+    "readv",
+    "statx",
+];
 /// The one id the shared contract names for each pinned allow rule: the three
 /// shared rules and the two startup forms. A shared rule must be claimed by its
 /// id, and a startup form must be claimed by its id whenever the profile holds
@@ -6540,23 +6627,10 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
             "writev",
         ],
     ),
-    (
-        STARTUP_RULES[0],
-        &[
-            "faccessat",
-            "fstat",
-            "getdents64",
-            "lseek",
-            "newfstatat",
-            "openat",
-            "openat2",
-            "pread64",
-            "read",
-            "readlinkat",
-            "readv",
-            "statx",
-        ],
-    ),
+    (STARTUP_RULES[0], ROOT_READ_SYSCALLS),
+    // The model profile's narrower spelling of the same startup read. A seccomp
+    // filter reads syscall numbers, so the two spellings answer alike.
+    (MODEL_ROOT_READ_RULE, ROOT_READ_SYSCALLS),
     (STARTUP_RULES[1], &["uname", "sysinfo"]),
 ];
 
@@ -6572,28 +6646,44 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     // x86-64 only: aarch64 sets its thread pointer without a call.
     ("arch_prctl", Some(158), None),
     ("bpf", Some(321), Some(280)),
+    ("brk", Some(12), Some(214)),
+    ("clone", Some(56), Some(220)),
+    ("clone3", Some(435), Some(435)),
     ("close", Some(3), Some(57)),
     ("connect", Some(42), Some(203)),
+    ("epoll_create1", Some(291), Some(20)),
+    ("epoll_ctl", Some(233), Some(21)),
+    ("epoll_pwait", Some(281), Some(22)),
+    // x86-64 only, the older form of epoll_pwait that the model calls there.
+    ("epoll_wait", Some(232), None),
+    ("eventfd2", Some(290), Some(19)),
     ("execve", Some(59), Some(221)),
     ("execveat", Some(322), Some(281)),
+    ("exit", Some(60), Some(93)),
     ("exit_group", Some(231), Some(94)),
     ("faccessat", Some(269), Some(48)),
     ("fchmod", Some(91), Some(52)),
+    ("fcntl", Some(72), Some(25)),
     ("fdatasync", Some(75), Some(83)),
+    ("flock", Some(73), Some(32)),
     ("fstat", Some(5), Some(80)),
     ("fsync", Some(74), Some(82)),
     ("ftruncate", Some(77), Some(46)),
+    ("futex", Some(202), Some(98)),
     ("getdents64", Some(217), Some(61)),
+    ("geteuid", Some(107), Some(175)),
     ("getrandom", Some(318), Some(278)),
     ("keyctl", Some(250), Some(219)),
     ("linkat", Some(265), Some(37)),
     ("lseek", Some(8), Some(62)),
+    ("madvise", Some(28), Some(233)),
     // x86-64 only, the older form of mkdirat that glibc calls there.
     ("mkdir", Some(83), None),
     ("mkdirat", Some(258), Some(34)),
     ("mmap", Some(9), Some(222)),
     ("mount", Some(165), Some(40)),
     ("mprotect", Some(10), Some(226)),
+    ("munmap", Some(11), Some(215)),
     ("newfstatat", Some(262), Some(79)),
     ("openat", Some(257), Some(56)),
     ("openat2", Some(437), Some(437)),
@@ -6602,6 +6692,7 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("poll", Some(7), None),
     ("ppoll", Some(271), Some(73)),
     ("pread64", Some(17), Some(67)),
+    ("prlimit64", Some(302), Some(261)),
     ("process_vm_readv", Some(310), Some(270)),
     ("process_vm_writev", Some(311), Some(271)),
     ("ptrace", Some(101), Some(117)),
@@ -6611,8 +6702,14 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("readv", Some(19), Some(65)),
     ("recvmsg", Some(47), Some(212)),
     ("renameat2", Some(316), Some(276)),
+    ("rseq", Some(334), Some(293)),
     ("rt_sigaction", Some(13), Some(134)),
+    ("rt_sigprocmask", Some(14), Some(135)),
+    ("sched_getaffinity", Some(204), Some(123)),
     ("sendmsg", Some(46), Some(211)),
+    ("set_robust_list", Some(273), Some(99)),
+    ("set_tid_address", Some(218), Some(96)),
+    ("sigaltstack", Some(131), Some(132)),
     ("socket", Some(41), Some(198)),
     ("socketpair", Some(53), Some(199)),
     ("statx", Some(332), Some(291)),
@@ -6637,7 +6734,7 @@ const SECCOMP_AUDIT_ARCH: u32 = 0;
 
 /// The calls the table carries for x86-64 alone: older forms of admitted
 /// calls, or calls aarch64 does not have.
-const X86_64_ONLY_SYSCALLS: &[&str] = &["arch_prctl", "mkdir", "poll", "unlink"];
+const X86_64_ONLY_SYSCALLS: &[&str] = &["arch_prctl", "epoll_wait", "mkdir", "poll", "unlink"];
 
 /// The first number of the x32 call space on x86-64.
 const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
@@ -6683,6 +6780,74 @@ impl SeccompInstruction {
     }
 }
 
+/// What a runtime with threads needs beyond `LAUNCH_ESSENTIALS`, measured with
+/// strace on the model provider's `init`, `status` and `shutdown` on aarch64,
+/// kernel 7.0. did and wallet are single-threaded and have none of these, so their
+/// programs stay byte-equal. `clone`, `clone3` and `socketpair` are not here: they
+/// take the argument-checked rules in `seccomp_program_with_thread_rules`.
+/// `epoll_wait` is the x86-64 form of `epoll_pwait`, named by a run on GitHub's
+/// x86-64 runner whose filter logged instead of refusing (run 42448113772);
+/// dropped alone there, both model journeys failed (run 42454795461). aarch64
+/// has no `epoll_wait`, so its list is unchanged.
+///
+/// Each remaining call was dropped alone on aarch64 (evidence
+/// model-drop1/aarch64-af92d32f*.log): with `epoll_create1`, `epoll_ctl`,
+/// `epoll_pwait`, `eventfd2`, `flock`, `geteuid` or `rseq` refused, a model
+/// journey fails; with `exit` refused, the thread test never ends. `brk`,
+/// `rt_sigprocmask`, `sched_getaffinity`, `set_robust_list`, `set_tid_address`
+/// and `sigaltstack` were removed: refused alone, every model test passed.
+/// `madvise` was removed too: refused alone, every model test passed, and it
+/// does more than release memory (`MADV_POPULATE_WRITE` populates it).
+/// `munmap` also passes when refused, and stays as a stated exception, not a
+/// measured need: it unmaps only the caller's own memory, so refusing it takes
+/// no authority away and only stops memory being returned. No run shows a leak.
+const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "epoll_wait",
+    "eventfd2",
+    "exit",
+    "flock",
+    "geteuid",
+    "munmap",
+    "rseq",
+];
+/// Argument words in `seccomp_data`: each argument is 64 bits, low word first on
+/// both aarch64 and x86_64.
+const SECCOMP_ARG0_LOW: u32 = 16;
+const SECCOMP_ARG0_HIGH: u32 = 20;
+const SECCOMP_ARG1_LOW: u32 = 24;
+const SECCOMP_ARG2_LOW: u32 = 32;
+const SECCOMP_ARG2_HIGH: u32 = 36;
+const SECCOMP_BPF_JSET_K: u16 = 0x45;
+/// The calls `seccomp_program_with_thread_rules` admits only with checked arguments.
+const THREAD_RULE_CALLS: [&str; 6] = [
+    "clone3",
+    "clone",
+    "socketpair",
+    "fcntl",
+    "prlimit64",
+    "futex",
+];
+const SECCOMP_BPF_AND_K: u16 = 0x54;
+/// Linux ABI values, written out because this builder compiles on macOS too, where
+/// libc has different numbers or none. `linux_abi_constants_match_libc` checks them.
+const LINUX_ENOSYS: u32 = 38;
+const LINUX_CLONE_THREAD: u32 = 0x1_0000;
+const LINUX_AF_UNIX: u32 = 1;
+const LINUX_F_GETFD: u32 = 1;
+const LINUX_F_DUPFD_CLOEXEC: u32 = 1030;
+/// The kernel's `FUTEX_CMD_MASK`: every bit except `FUTEX_PRIVATE_FLAG` (0x80) and
+/// `FUTEX_CLOCK_REALTIME` (0x100).
+const LINUX_FUTEX_CMD_MASK: u32 = 0xffff_fe7f;
+const LINUX_FUTEX_WAIT: u32 = 0;
+const LINUX_FUTEX_WAKE: u32 = 1;
+const LINUX_FUTEX_WAIT_BITSET: u32 = 9;
+const LINUX_FUTEX_WAKE_BITSET: u32 = 10;
+/// `SECCOMP_RET_ERRNO` with `ENOSYS`, so glibc falls back from `clone3` to `clone`.
+const SECCOMP_RET_ENOSYS: u32 = 0x0005_0000 | LINUX_ENOSYS;
+
 /// The value the filter returns for a refused call: `SECCOMP_RET_ERRNO` with
 /// the deny marker.
 const fn seccomp_deny_return() -> u32 {
@@ -6726,9 +6891,18 @@ impl SeccompAllowList {
     /// journey that installs the result is Linux-only, and the list a launch
     /// would install can be read and compared wherever the tests run.
     fn with_launch_essentials(&self) -> Self {
+        let threaded = self.provider == MODEL_PROVIDER;
         let mut syscalls = self.syscalls.clone();
-        for (syscall, _) in LAUNCH_ESSENTIALS {
-            let syscall = *syscall;
+        let runtime: &[&'static str] = if threaded {
+            MODEL_RUNTIME_ESSENTIALS
+        } else {
+            &[]
+        };
+        for syscall in LAUNCH_ESSENTIALS
+            .iter()
+            .map(|(syscall, _)| *syscall)
+            .chain(runtime.iter().copied())
+        {
             if seccomp_syscall_number(syscall, self.audit_arch).is_none() {
                 continue;
             }
@@ -6740,7 +6914,11 @@ impl SeccompAllowList {
         Self {
             provider: self.provider.clone(),
             audit_arch: self.audit_arch,
-            program: seccomp_program(&syscalls, self.audit_arch),
+            program: if threaded {
+                seccomp_program_with_thread_rules(&syscalls, self.audit_arch)
+            } else {
+                seccomp_program(&syscalls, self.audit_arch)
+            },
             syscalls,
             #[cfg(target_os = "linux")]
             injected_step_failure: self.injected_step_failure,
@@ -6785,6 +6963,16 @@ fn seccomp_allow_list_from_declared_rights(
     name: &str,
     declared: &Value,
 ) -> Result<SeccompAllowList, String> {
+    seccomp_allow_list_for_arch(name, declared, SECCOMP_AUDIT_ARCH)
+}
+
+/// The one builder for an audit architecture that need not be this target's, so
+/// a test can render the program another architecture would install.
+fn seccomp_allow_list_for_arch(
+    name: &str,
+    declared: &Value,
+    audit_arch: u32,
+) -> Result<SeccompAllowList, String> {
     let rendered = generate_profile(name, declared)?;
     // The rows below grant by form, so a form claimed under another id would
     // bring that right's calls without the right. The pin table decides who
@@ -6811,7 +6999,7 @@ fn seccomp_allow_list_from_declared_rights(
         for syscall in row.1 {
             // A row may name an older call one architecture alone has; a
             // target without it admits nothing for that name.
-            if seccomp_syscall_number(syscall, SECCOMP_AUDIT_ARCH).is_none() {
+            if seccomp_syscall_number(syscall, audit_arch).is_none() {
                 continue;
             }
             if !syscalls.contains(syscall) {
@@ -6819,7 +7007,7 @@ fn seccomp_allow_list_from_declared_rights(
             }
         }
     }
-    if SECCOMP_AUDIT_ARCH == 0 {
+    if audit_arch == 0 {
         return Err(format!(
             "{name} seccomp allow list is unavailable on target architecture {}: \
              the lab filter checks one audit architecture and this target has none",
@@ -6827,10 +7015,10 @@ fn seccomp_allow_list_from_declared_rights(
         ));
     }
     syscalls.sort_unstable();
-    let program = seccomp_program(&syscalls, SECCOMP_AUDIT_ARCH);
+    let program = seccomp_program(&syscalls, audit_arch);
     Ok(SeccompAllowList {
         provider: name.to_string(),
-        audit_arch: SECCOMP_AUDIT_ARCH,
+        audit_arch,
         syscalls,
         program,
         #[cfg(target_os = "linux")]
@@ -6867,6 +7055,87 @@ fn seccomp_program(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompIns
         SECCOMP_BPF_RET_K,
         seccomp_deny_return(),
     ));
+    program
+}
+
+/// `seccomp_program` with the argument-checked rules a threaded runtime needs,
+/// before the final denial. Each admits only the form the model was measured
+/// using:
+/// - `clone3` answers `ENOSYS`, because a filter cannot read its argument struct,
+///   so glibc falls back to `clone`;
+/// - `clone` only with `CLONE_THREAD`, so threads start and new processes don't;
+/// - `socketpair` only for `AF_UNIX`, so `socket` and the network stay refused;
+/// - `fcntl` only for `F_GETFD` and `F_DUPFD_CLOEXEC`, so no `F_SETOWN` can aim a
+///   signal at another process;
+/// - `prlimit64` only for pid 0 with no new limit, so it reads its own limits and
+///   changes nobody's;
+/// - `futex` only for wait and wake, plain or bitset, so the priority-inheritance
+///   and requeue operations, which can reach another task named in shared memory,
+///   are refused.
+///
+/// Each rule returns on both arms, so the number stays loaded for the next one.
+/// None of these five calls may also sit in the unconditional list, or its
+/// `ALLOW` would come first; `thread_rule_calls_are_not_in_the_unconditional_list`
+/// pins that.
+fn seccomp_program_with_thread_rules(
+    syscalls: &[&'static str],
+    audit_arch: u32,
+) -> Vec<SeccompInstruction> {
+    let deny = SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return());
+    let allow = SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ALLOW);
+    let number = |name| {
+        seccomp_syscall_number(name, audit_arch)
+            .unwrap_or_else(|| panic!("{name} must have a number on this architecture"))
+    };
+    for call in THREAD_RULE_CALLS {
+        assert!(
+            !syscalls.contains(&call),
+            "{call} takes an argument-checked rule, so it must not be admitted unconditionally"
+        );
+    }
+    let mut program = seccomp_program(syscalls, audit_arch);
+    program.pop();
+    program.extend([
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone3"), 0, 1),
+        SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ENOSYS),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone"), 0, 4),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JSET_K, LINUX_CLONE_THREAD, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("socketpair"), 0, 4),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_AF_UNIX, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("fcntl"), 0, 5),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFD, 1, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_DUPFD_CLOEXEC, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("prlimit64"), 0, 10),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 7),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_HIGH),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 5),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG2_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 3),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG2_HIGH),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 0, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("futex"), 0, 8),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),
+        SeccompInstruction::stmt(SECCOMP_BPF_AND_K, LINUX_FUTEX_CMD_MASK),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAIT, 3, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAKE, 2, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAIT_BITSET, 1, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAKE_BITSET, 0, 1),
+        allow,
+        deny,
+        deny,
+    ]);
     program
 }
 
@@ -7039,6 +7308,8 @@ const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
     ),
     (SHARED_RULES[1], 0),
     (STARTUP_RULES[0], 0),
+    // None either: a read rule on `/` would grant the whole filesystem.
+    (MODEL_ROOT_READ_RULE, 0),
     (STARTUP_RULES[1], 0),
 ];
 
@@ -7178,10 +7449,11 @@ struct LandlockRuleset {
 ///
 /// On the Linux host measured for the stopped file-row branch, a ruleset that
 /// grants `EXECUTE` on the bound wallet binary alone makes `execve` fail
-/// `EACCES` (13) before the provider's first instruction. These four paths are
-/// the aarch64 loader and the libraries that binary maps. Each entry carries
-/// `EXECUTE | READ_FILE`. The note after each path is the failure that named it
-/// when that entry alone was dropped from a working ruleset on that host:
+/// `EACCES` (13) before the provider's first instruction. These three paths are
+/// the aarch64 loader and the two libraries both binaries map. Each entry
+/// carries `EXECUTE | READ_FILE`. The note after each path is the failure that
+/// named it when that entry alone was dropped from a working ruleset on that
+/// host:
 ///
 /// - `/lib/ld-linux-aarch64.so.1`: without `EXECUTE` the loader cannot be
 ///   entered, and `execve` answers `EACCES` (13) before the provider's first
@@ -7192,9 +7464,10 @@ struct LandlockRuleset {
 /// - `/lib/aarch64-linux-gnu/libgcc_s.so.1`: without `READ_FILE` the loader
 ///   fails to map `libgcc_s.so.1` and exits with `error while loading shared
 ///   libraries: libgcc_s.so.1: cannot open shared object file`.
-/// - `/lib/aarch64-linux-gnu/libm.so.6`: without `READ_FILE` the loader fails
-///   to map `libm.so.6` and exits with `error while loading shared libraries:
-///   libm.so.6: cannot open shared object file`.
+///
+/// The model and wallet also map `libm.so.6` here; that entry is in
+/// `LIBM_LANDLOCK_LOADER_PATHS` below and goes only to the providers in
+/// `LIBM_LOADER_USERS`, so did keeps no rule for a library it does not load.
 ///
 /// That drop-one measurement was not repeated against each binary on the host
 /// `CONFINEMENT-LINUX.md` names; the run there shows the list is enough for both.
@@ -7218,20 +7491,34 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
         "without READ_FILE here the loader fails to map libgcc_s.so.1 and exits with \
          `error while loading shared libraries: libgcc_s.so.1: cannot open shared object file`",
     ),
-    (
-        "/lib/aarch64-linux-gnu/libm.so.6",
-        "without READ_FILE here the loader fails to map libm.so.6 and exits with \
-         `error while loading shared libraries: libm.so.6: cannot open shared object file`",
-    ),
 ];
 
-/// The x86-64 loader and the libraries both providers map there, read from
+/// The providers that map `libm.so.6` on aarch64. With it left to the model
+/// alone, the wallet's start exited 127 with `error while loading shared
+/// libraries: libm.so.6` (receipt pr1549-0473c994-aarch64, sha256 c2434a86...);
+/// did starts without it. Both architectures' tables compile on every target, so
+/// `landlock_ruleset_names_each_measured_loader_entry` checks each.
+const LIBM_LOADER_USERS_AARCH64: &[&str] = &[MODEL_PROVIDER, WALLET_PROVIDER];
+#[cfg(not(target_arch = "x86_64"))]
+const LIBM_LOADER_USERS: &[&str] = LIBM_LOADER_USERS_AARCH64;
+#[cfg(not(target_arch = "x86_64"))]
+const LIBM_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
+    "/lib/aarch64-linux-gnu/libm.so.6",
+    "without READ_FILE here the loader fails to map libm.so.6 and exits with \
+     `error while loading shared libraries: libm.so.6: cannot open shared object file`",
+)];
+
+/// The x86-64 loader and the two libraries both providers map there, read from
 /// `readelf -l` and `ldd` on GitHub's ubuntu-24.04 runner (glibc 2.39, run
 /// 42447112526): the interpreter `/lib64/ld-linux-x86-64.so.2`, a link to
 /// `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` that the `O_PATH` open follows,
-/// then `libc.so.6` and `libgcc_s.so.1`. Neither binary maps `libm.so.6` there,
-/// so it takes no rule. Each entry was then dropped alone on that runner (run
-/// 42454795461), and every provider's file-row start failed without it.
+/// then `libc.so.6` and `libgcc_s.so.1`. did and wallet do not map `libm.so.6`
+/// there; the model provider does, and its entry is
+/// `LIBM_LANDLOCK_LOADER_PATHS` below. The model's start first failed without it
+/// (run 42448388508). Each entry was then dropped alone on that runner, from this
+/// model leg's tree (run 42454795461): without the interpreter, `libc.so.6` or
+/// `libgcc_s.so.1` every provider's file-row start failed, and without
+/// `libm.so.6` only the model's did.
 #[cfg(target_arch = "x86_64")]
 const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
     (
@@ -7248,6 +7535,30 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
         "ldd on both x86-64 providers names libgcc_s.so.1; the loader maps it with READ_FILE",
     ),
 ];
+
+/// The providers that map `libm.so.6` on x86-64: the model alone, as did and
+/// wallet do not (run 42454795461).
+const LIBM_LOADER_USERS_X86_64: &[&str] = &[MODEL_PROVIDER];
+#[cfg(target_arch = "x86_64")]
+const LIBM_LOADER_USERS: &[&str] = LIBM_LOADER_USERS_X86_64;
+#[cfg(target_arch = "x86_64")]
+const LIBM_LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[(
+    "/lib/x86_64-linux-gnu/libm.so.6",
+    "without READ_FILE here the x86-64 model provider exits 127 with `error while \
+     loading shared libraries: libm.so.6: cannot open shared object file`; did and \
+     wallet do not map it",
+)];
+
+/// The loader paths a launch of `name` passes: the shared entries every
+/// dynamically linked provider maps, plus the `libm` entry for the providers
+/// in `LIBM_LOADER_USERS`.
+fn landlock_loader_paths(name: &str) -> Vec<(&'static str, &'static str)> {
+    let mut paths = LANDLOCK_LOADER_PATHS.to_vec();
+    if LIBM_LOADER_USERS.contains(&name) {
+        paths.extend_from_slice(LIBM_LANDLOCK_LOADER_PATHS);
+    }
+    paths
+}
 
 /// The one builder of a provider's Landlock file row: the ruleset of `name`,
 /// rendered from the profile `generate_profile` produces from `declared` and read
@@ -7274,7 +7585,7 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 /// The loader entries are added only where the provider needs them, which is
 /// every launch of a dynamically linked provider; the builder takes them as an
 /// input so a test can build a ruleset without them and read the difference.
-/// A launch of the real binary passes `LANDLOCK_LOADER_PATHS`. A test that
+/// A launch of the real binary passes `landlock_loader_paths(name)`. A test that
 /// reads the declared rows alone passes an empty list.
 fn landlock_path_rules(
     name: &str,
@@ -7524,7 +7835,7 @@ fn landlock_ruleset_follows_the_declared_rights() {
         let ruleset = landlock_path_rules(name, declared, bindings, 7, &[])
             .unwrap_or_else(|err| panic!("{err}"));
         assert!(ruleset.injected_step_failure.is_none());
-        assert_eq!(LANDLOCK_RULE_RIGHTS.len(), 5);
+        assert_eq!(LANDLOCK_RULE_RIGHTS.len(), 6);
 
         let rule = |parameter: &str| {
             ruleset
@@ -8050,11 +8361,16 @@ fn landlock_install_record_decodes_each_failed_step() {
 /// Wallet's ruleset names each measured loader entry with `EXECUTE | READ_FILE`,
 /// and the storage-root rule keeps the eight rights the declared row carries.
 /// The test builds the ruleset from wallet's committed declared-rights file
-/// through `landlock_path_rules` and `LANDLOCK_LOADER_PATHS`. It starts no
-/// process and calls no kernel, so it runs on every OS.
+/// through `landlock_path_rules` and `LANDLOCK_LOADER_PATHS`. It then requires
+/// each architecture's `libm` users to be the set written here, not read from
+/// the tables that grant it: the model and wallet on aarch64, the model alone on
+/// x86-64, did on neither. On this target a provider's launch list carries the
+/// `libm` entry exactly when it is in this target's set. It starts no process
+/// and calls no kernel, so it runs on every OS.
 ///
-/// Falsifier: WP212 adds the loader entry without `READ_FILE`, so this test
-/// fails on the rule's rights.
+/// Falsifiers: WP212 adds the loader entry without `READ_FILE`, so this test
+/// fails on the rule's rights. WP251 adds wallet to the x86-64 users, so this
+/// test fails on the x86-64 set on any host.
 #[test]
 fn landlock_ruleset_names_each_measured_loader_entry() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -8105,6 +8421,70 @@ fn landlock_ruleset_names_each_measured_loader_entry() {
             | LANDLOCK_ACCESS_FS_TRUNCATE,
         "the storage-root rule must keep the eight rights the declared row carries"
     );
+
+    // Only the providers that map `libm` carry its entry: did never does, and
+    // the model always does; wallet does on aarch64 alone.
+    let libm_users = [
+        (
+            "aarch64",
+            LIBM_LOADER_USERS_AARCH64,
+            [MODEL_PROVIDER, WALLET_PROVIDER].as_slice(),
+        ),
+        (
+            "x86-64",
+            LIBM_LOADER_USERS_X86_64,
+            [MODEL_PROVIDER].as_slice(),
+        ),
+    ];
+    for (arch, users, expected) in libm_users {
+        let mut users = users.to_vec();
+        users.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            users, expected,
+            "the {arch} libm users must be exactly these"
+        );
+    }
+    let host = if cfg!(target_arch = "x86_64") {
+        "x86-64"
+    } else {
+        "aarch64"
+    };
+    let (_, _, host_users) = libm_users
+        .iter()
+        .find(|(arch, _, _)| *arch == host)
+        .unwrap();
+    for name in [DID_PROVIDER, WALLET_PROVIDER, MODEL_PROVIDER] {
+        let carries = landlock_loader_paths(name)
+            .iter()
+            .any(|(path, _)| path.contains("libm.so.6"));
+        assert_eq!(
+            carries,
+            host_users.contains(&name),
+            "{name}'s libm entry on {host}"
+        );
+    }
+    let model = landlock_loader_paths(MODEL_PROVIDER);
+    assert_eq!(
+        model.len(),
+        LANDLOCK_LOADER_PATHS.len() + LIBM_LANDLOCK_LOADER_PATHS.len(),
+        "the model list must carry the shared entries and the model-only entry"
+    );
+    assert!(
+        !LIBM_LOADER_USERS.contains(&DID_PROVIDER),
+        "did must not carry libm"
+    );
+    for (path, _) in LIBM_LANDLOCK_LOADER_PATHS {
+        assert!(
+            path.contains("libm.so.6"),
+            "the model's extra entry must be libm: {path}"
+        );
+        assert!(
+            model.iter().any(|(candidate, _)| *candidate == *path),
+            "the model list must carry {path}"
+        );
+    }
 }
 
 /// The one install record writer, and it makes no kernel call: it writes the
@@ -9008,6 +9388,7 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
     for (name, libc_number) in [
         ("arch_prctl", libc::SYS_arch_prctl),
         ("poll", libc::SYS_poll),
+        ("epoll_wait", libc::SYS_epoll_wait),
         ("mkdir", libc::SYS_mkdir),
         ("unlink", libc::SYS_unlink),
     ] {
@@ -10334,8 +10715,14 @@ fn write_number(fd: std::os::fd::RawFd, value: i64) {
 /// It refuses, with `read_declared_rights`' or `seccomp_allow_list_from_declared_rights`'
 /// own reason unchanged, a name whose declared-rights file cannot be read.
 fn seccomp_probe_list(name: &str) -> Result<SeccompAllowList, String> {
+    seccomp_probe_list_for_arch(name, SECCOMP_AUDIT_ARCH)
+}
+
+/// `seccomp_probe_list` for `audit_arch`, so a test reads the list and program
+/// either architecture would install through the same builder and join.
+fn seccomp_probe_list_for_arch(name: &str, audit_arch: u32) -> Result<SeccompAllowList, String> {
     let declared = read_declared_rights(name, &declared_rights_path(name))?;
-    seccomp_allow_list_from_declared_rights(name, &declared)
+    seccomp_allow_list_for_arch(name, &declared, audit_arch)
         .map(|allow| allow.with_launch_essentials())
 }
 
@@ -10393,6 +10780,355 @@ fn seccomp_allow_list_names_the_provider_it_was_built_for() {
         refusal.contains(&declared_rights_path(missing).display().to_string()),
         "the refusal must name the path it could not read: {refusal}"
     );
+}
+
+/// The calls the model's final program must refuse, with their numbers on both
+/// audit architectures. The list is written here rather than read from
+/// `MODEL_RUNTIME_ESSENTIALS` or `SECCOMP_SYSCALL_NUMBERS`, so a plant that
+/// widens one of those tables cannot also widen this check. Each call reaches
+/// another task, another process's memory, the kernel, a filesystem, a
+/// namespace, a keyring or a kernel-instrumentation interface. On a Linux host
+/// `model_syscall_lists_match_libc` compares that host's column with libc.
+const MODEL_FORBIDDEN_CALLS: &[(&str, u32, u32)] = &[
+    ("ptrace", 101, 117),
+    ("process_vm_readv", 310, 270),
+    ("process_vm_writev", 311, 271),
+    ("kexec_load", 246, 104),
+    ("kexec_file_load", 320, 294),
+    ("init_module", 175, 105),
+    ("finit_module", 313, 273),
+    ("bpf", 321, 280),
+    ("mount", 165, 40),
+    ("umount2", 166, 39),
+    ("pivot_root", 155, 41),
+    ("unshare", 272, 97),
+    ("setns", 308, 268),
+    ("keyctl", 250, 219),
+    ("add_key", 248, 217),
+    ("request_key", 249, 218),
+    ("perf_event_open", 298, 241),
+    ("userfaultfd", 323, 282),
+];
+
+/// The model's final list and rendered program admit none of the fixed
+/// forbidden calls on either architecture.
+///
+/// The model's expected list and expected program elsewhere both come from
+/// `MODEL_RUNTIME_ESSENTIALS` and the shared builder, so adding a call to that
+/// table would pass those comparisons. This check takes its calls and their
+/// numbers from the fixed table above, which no builder reads, and requires the
+/// model's rendered program to test no equality against any of them. It fails
+/// if the model's program admits one of them on either architecture.
+///
+/// The test reads the model's declared-rights file and builds two programs. It
+/// starts no process and makes no kernel call, so it runs on every OS.
+///
+/// Falsifiers: WP248 adds `ptrace` to `MODEL_RUNTIME_ESSENTIALS` only, so the
+/// model's list and both rendered programs admit it while the other model
+/// comparisons still agree with that table, and this test fails on the `ptrace`
+/// case. WP250 puts a `JEQ 246` in the model's thread rules, so the x86-64
+/// program tests `kexec_load`'s number and this test fails on that case.
+#[test]
+fn seccomp_model_program_admits_no_forbidden_call_on_either_architecture() {
+    let allow = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = seccomp_probe_list_for_arch(MODEL_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
+        for &(call, x86_64, aarch64) in MODEL_FORBIDDEN_CALLS {
+            assert!(
+                !allow.syscalls.contains(&call),
+                "the model list must admit no forbidden call, and it admits {call}"
+            );
+            let number = if arch == 0xc000_003e { x86_64 } else { aarch64 };
+            assert!(
+                !program
+                    .iter()
+                    .any(|instruction| instruction.code == SECCOMP_BPF_JEQ_K
+                        && instruction.k == number),
+                "the {arch_name} model program must test no equality against {call}'s number \
+                 {number}"
+            );
+        }
+    }
+}
+
+/// The model's whole allow list on each architecture: every call its final
+/// program lets run, unconditionally or through an argument-checked rule, by
+/// `libc::SYS_*` name and number. No builder reads it. Each macro hands its rows
+/// to `$rows`, so the same rows give literal numbers on every OS and are compared
+/// with `libc::SYS_*` on the Linux host of that architecture.
+macro_rules! model_allowed_x86_64 {
+    ($rows:ident) => {
+        $rows! {
+            SYS_read = 0, SYS_write = 1, SYS_close = 3, SYS_fstat = 5, SYS_poll = 7, SYS_lseek = 8,
+            SYS_mmap = 9, SYS_mprotect = 10, SYS_munmap = 11, SYS_rt_sigaction = 13,
+            SYS_pread64 = 17, SYS_pwrite64 = 18, SYS_readv = 19, SYS_writev = 20,
+            SYS_socketpair = 53, SYS_clone = 56, SYS_execve = 59, SYS_exit = 60, SYS_uname = 63,
+            SYS_fcntl = 72, SYS_flock = 73, SYS_fsync = 74, SYS_fdatasync = 75, SYS_ftruncate = 77,
+            SYS_mkdir = 83, SYS_unlink = 87, SYS_fchmod = 91, SYS_sysinfo = 99, SYS_geteuid = 107,
+            SYS_arch_prctl = 158, SYS_futex = 202, SYS_getdents64 = 217, SYS_exit_group = 231,
+            SYS_epoll_wait = 232, SYS_epoll_ctl = 233, SYS_openat = 257, SYS_mkdirat = 258,
+            SYS_newfstatat = 262, SYS_unlinkat = 263, SYS_linkat = 265, SYS_readlinkat = 267,
+            SYS_faccessat = 269, SYS_ppoll = 271, SYS_epoll_pwait = 281, SYS_eventfd2 = 290,
+            SYS_epoll_create1 = 291, SYS_prlimit64 = 302, SYS_renameat2 = 316, SYS_getrandom = 318,
+            SYS_execveat = 322, SYS_statx = 332, SYS_rseq = 334, SYS_openat2 = 437,
+        }
+    };
+}
+macro_rules! model_allowed_aarch64 {
+    ($rows:ident) => {
+        $rows! {
+            SYS_eventfd2 = 19, SYS_epoll_create1 = 20, SYS_epoll_ctl = 21, SYS_epoll_pwait = 22,
+            SYS_fcntl = 25, SYS_flock = 32, SYS_mkdirat = 34, SYS_unlinkat = 35, SYS_linkat = 37,
+            SYS_ftruncate = 46, SYS_faccessat = 48, SYS_fchmod = 52, SYS_openat = 56,
+            SYS_close = 57, SYS_getdents64 = 61, SYS_lseek = 62, SYS_read = 63, SYS_write = 64,
+            SYS_readv = 65, SYS_writev = 66, SYS_pread64 = 67, SYS_pwrite64 = 68, SYS_ppoll = 73,
+            SYS_readlinkat = 78, SYS_newfstatat = 79, SYS_fstat = 80, SYS_fsync = 82,
+            SYS_fdatasync = 83, SYS_exit = 93, SYS_exit_group = 94, SYS_futex = 98,
+            SYS_rt_sigaction = 134, SYS_uname = 160, SYS_geteuid = 175, SYS_sysinfo = 179,
+            SYS_socketpair = 199, SYS_munmap = 215, SYS_clone = 220, SYS_execve = 221,
+            SYS_mmap = 222, SYS_mprotect = 226, SYS_prlimit64 = 261, SYS_renameat2 = 276,
+            SYS_getrandom = 278, SYS_execveat = 281, SYS_statx = 291, SYS_rseq = 293,
+            SYS_openat2 = 437,
+        }
+    };
+}
+macro_rules! syscall_rows {
+    ($($name:ident = $number:literal,)*) => {
+        &[$((stringify!($name), $number),)*]
+    };
+}
+const MODEL_ALLOWED_X86_64: &[(&str, u32)] = model_allowed_x86_64!(syscall_rows);
+const MODEL_ALLOWED_AARCH64: &[(&str, u32)] = model_allowed_aarch64!(syscall_rows);
+
+/// The syscall numbers `program` lets run on `audit_arch` for some arguments:
+/// every number below 1024 and every constant the program holds, walked through
+/// it. An argument word is unknown, so a jump on one takes both arms. A return
+/// that is not an errno, trap or kill lets the call run. An instruction this
+/// reader does not know is a panic, not a pass.
+fn seccomp_numbers_let_run(program: &[SeccompInstruction], audit_arch: u32) -> Vec<u32> {
+    fn runs(program: &[SeccompInstruction], pc: usize, acc: Option<u32>, data: [u32; 2]) -> bool {
+        let at = program[pc];
+        let next = |pc, acc| runs(program, pc, acc, data);
+        let (taken, skipped) = (pc + 1 + usize::from(at.jt), pc + 1 + usize::from(at.jf));
+        let branch = |hit: Option<bool>| match hit {
+            Some(hit) => next(if hit { taken } else { skipped }, acc),
+            None => next(taken, acc) || next(skipped, acc),
+        };
+        match at.code {
+            SECCOMP_BPF_RET_K => !matches!(
+                at.k & 0xffff_0000,
+                0 | 0x0003_0000 | 0x0005_0000 | 0x8000_0000
+            ),
+            SECCOMP_BPF_LD_W_ABS if at.k == SECCOMP_NUMBER_OFFSET => next(pc + 1, Some(data[0])),
+            SECCOMP_BPF_LD_W_ABS if at.k == SECCOMP_ARCH_OFFSET => next(pc + 1, Some(data[1])),
+            SECCOMP_BPF_LD_W_ABS => next(pc + 1, None),
+            SECCOMP_BPF_AND_K => next(pc + 1, acc.map(|a| a & at.k)),
+            SECCOMP_BPF_JEQ_K => branch(acc.map(|a| a == at.k)),
+            SECCOMP_BPF_JGE_K => branch(acc.map(|a| a >= at.k)),
+            SECCOMP_BPF_JSET_K => branch(acc.map(|a| a & at.k != 0)),
+            code => panic!("instruction {pc} has code {code:#x}, which this reader does not know"),
+        }
+    }
+    let mut candidates: Vec<u32> = (0..1024).chain(program.iter().map(|at| at.k)).collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates.retain(|&number| runs(program, 0, None, [number, audit_arch]));
+    candidates
+}
+
+/// On a Linux host, each row of that architecture's model allow list and each
+/// forbidden call's number there is the number `libc::SYS_*` gives, so neither
+/// literal list can name a call by another call's number.
+#[cfg(target_os = "linux")]
+#[test]
+fn model_syscall_lists_match_libc() {
+    macro_rules! against_libc {
+        ($($name:ident = $number:literal,)*) => {
+            &[$((stringify!($name), $number, libc::$name as u32),)*]
+        };
+    }
+    #[cfg(target_arch = "x86_64")]
+    let allowed: &[(&str, u32, u32)] = model_allowed_x86_64!(against_libc);
+    #[cfg(target_arch = "aarch64")]
+    let allowed: &[(&str, u32, u32)] = model_allowed_aarch64!(against_libc);
+    for (name, number, libc_number) in allowed {
+        assert_eq!(
+            number, libc_number,
+            "the model allow list's {name} must be libc's"
+        );
+    }
+    macro_rules! libc_numbers {
+        ($($name:ident,)*) => {
+            [$((stringify!($name), libc::$name as u32),)*]
+        };
+    }
+    let libc_forbidden = libc_numbers! {
+        SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_kexec_load,
+        SYS_kexec_file_load, SYS_init_module, SYS_finit_module, SYS_bpf, SYS_mount, SYS_umount2,
+        SYS_pivot_root, SYS_unshare, SYS_setns, SYS_keyctl, SYS_add_key, SYS_request_key,
+        SYS_perf_event_open, SYS_userfaultfd,
+    };
+    assert_eq!(libc_forbidden.len(), MODEL_FORBIDDEN_CALLS.len());
+    for (call, x86_64, aarch64) in MODEL_FORBIDDEN_CALLS {
+        let number = if cfg!(target_arch = "x86_64") {
+            x86_64
+        } else {
+            aarch64
+        };
+        let libc_name = format!("SYS_{call}");
+        let libc_number = libc_forbidden.iter().find(|(name, _)| **name == libc_name);
+        assert_eq!(
+            libc_number.map(|(_, number)| number),
+            Some(number),
+            "the forbidden list's {call} must be libc's number"
+        );
+    }
+    // Each golden line that names a call is that call's libc number, and every
+    // other equality in the golden is an argument or architecture check.
+    let clone3 = ("SYS_clone3", 0, libc::SYS_clone3 as u32);
+    for (at, comment) in model_seccomp_golden(SECCOMP_AUDIT_ARCH) {
+        let label = comment.split_whitespace().next().unwrap_or_default();
+        if label.starts_with("SYS_") {
+            let row = allowed.iter().chain([&clone3]).find(|row| row.0 == label);
+            let libc_number = row.unwrap_or_else(|| panic!("the golden's {label} has no libc row"));
+            assert_eq!(at[0], 0x15, "a call's line must be a JEQ: {comment}");
+            assert_eq!(
+                at[3], libc_number.2,
+                "the golden's {label} must be libc's number"
+            );
+        } else if at[0] == 0x15 {
+            assert!(label.starts_with("arg") || label == "arch", "{comment}");
+        }
+    }
+}
+
+/// The checked-in golden copy of the model's final program for `audit_arch`,
+/// one instruction per line as `code jt jf k  # comment`, read as four plain
+/// integers and the comment. It builds no `SeccompInstruction` and calls nothing
+/// the builder uses, so a defect in the builder's constructors cannot also change
+/// what the golden says.
+fn model_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
+    let text = match audit_arch {
+        0xc000_003e => include_str!("model-seccomp-x86_64.golden"),
+        0xc000_00b7 => include_str!("model-seccomp-aarch64.golden"),
+        other => panic!("no golden model program for audit architecture {other:#x}"),
+    };
+    let number = |word: &str| match word.strip_prefix("0x") {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => word.parse(),
+    };
+    let lines = text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty());
+    lines
+        .map(|line| {
+            let (fields, comment) = line
+                .split_once("  # ")
+                .unwrap_or_else(|| panic!("golden line {line:?} must end in a comment"));
+            let fields: Vec<u32> = fields
+                .split_whitespace()
+                .map(|word| number(word).unwrap_or_else(|err| panic!("{line:?}: {err}")))
+                .collect();
+            let [code, jt, jf, k] = fields[..] else {
+                panic!("golden line {line:?} must hold code, jt, jf and k")
+            };
+            assert!(
+                code <= 0xffff && jt <= 0xff && jf <= 0xff,
+                "{line:?} is out of range"
+            );
+            ([code, jt, jf, k], comment)
+        })
+        .collect()
+}
+
+/// The model's final program on each architecture equals its checked-in golden
+/// copy, instruction for instruction: every call, argument check, return action
+/// and jump target. Any change to the filter fails here until the golden file
+/// changes in the same diff, where a reviewer reads it. The program is rendered
+/// through the one builder and join, the host's being the launch's, with no
+/// kernel call, so the test runs on every OS.
+///
+/// Falsifiers: WP248, WP249 and WP250 add `ptrace`, `pidfd_getfd` and a
+/// `JEQ 246`; WP252 admits `fcntl` command 2; WP253 loosens the `futex` mask;
+/// WP254 makes `clone3` return `SECCOMP_RET_LOG`; WP255 retargets the `clone`
+/// rule's jump. Each makes the program differ from its golden copy. WP256
+/// changes the shared `SeccompInstruction::jump` constructor so `F_DUPFD_CLOEXEC`
+/// becomes a bit test; the golden is read without that constructor, so it
+/// still says `JEQ` and this test fails.
+#[test]
+fn seccomp_model_program_equals_its_golden_copy() {
+    let host = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = seccomp_probe_list_for_arch(MODEL_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
+        if arch == host.audit_arch {
+            assert_eq!(
+                program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        // Both sides are plain integers: the rendered program's four fields read
+        // directly, and the golden's own parse.
+        let program: Vec<[u32; 4]> = program
+            .iter()
+            .map(|at| [u32::from(at.code), u32::from(at.jt), u32::from(at.jf), at.k])
+            .collect();
+        let golden: Vec<[u32; 4]> = model_seccomp_golden(arch)
+            .into_iter()
+            .map(|(at, _)| at)
+            .collect();
+        let first = (0..program.len().max(golden.len())).find(|&i| program.get(i) != golden.get(i));
+        assert!(
+            first.is_none(),
+            "the {arch_name} model program must equal its golden copy: it has {} instructions \
+             and the golden {}, and instruction {first:?} differs, in hex: {:x?} against {:x?}",
+            program.len(),
+            golden.len(),
+            first.and_then(|i| program.get(i)),
+            first.and_then(|i| golden.get(i)),
+        );
+    }
+}
+
+/// The model's final program lets run exactly the listed calls on each
+/// architecture. The other model checks read `MODEL_RUNTIME_ESSENTIALS` or name
+/// only forbidden calls, so a widening can pass them. This test renders each
+/// architecture's program through the one builder and join, the host's being the
+/// launch's, and requires the numbers it lets run to equal the literal list. It
+/// makes no kernel call, so it runs on every OS. It is a readable second net
+/// behind `seccomp_model_program_equals_its_golden_copy`, not the pin: it sees
+/// which calls can run, not which arguments, and it samples numbers below 1024
+/// and the program's constants on the program's own architecture only.
+///
+/// Falsifiers: WP248 adds `ptrace` and WP249 adds `pidfd_getfd` to
+/// `MODEL_RUNTIME_ESSENTIALS`, and WP250 puts a `JEQ 246` with an `ALLOW` behind
+/// it in the model's thread rules; each lets run a number the list does not hold.
+#[test]
+fn seccomp_model_program_lets_run_exactly_the_listed_calls() {
+    let host = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name, listed) in [
+        (0xc000_003e_u32, "x86-64", MODEL_ALLOWED_X86_64),
+        (0xc000_00b7, "aarch64", MODEL_ALLOWED_AARCH64),
+    ] {
+        let allow =
+            seccomp_probe_list_for_arch(MODEL_PROVIDER, arch).unwrap_or_else(|err| panic!("{err}"));
+        if arch == host.audit_arch {
+            assert_eq!(
+                allow.program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        let mut expected: Vec<u32> = listed.iter().map(|(_, number)| *number).collect();
+        expected.sort_unstable();
+        assert_eq!(
+            seccomp_numbers_let_run(&allow.program, arch),
+            expected,
+            "the {arch_name} model program must let run exactly the listed calls"
+        );
+    }
 }
 
 /// The one judge of the socket sweep accepts a report where every type swept
@@ -12134,6 +12870,12 @@ fn landlock_file_fixture(
     create_shared_ancestors(&bindings);
     let root = provider_storage_root(name, &base);
     fs::create_dir_all(&root).expect("the provider root must be creatable");
+    if name == MODEL_PROVIDER {
+        // The model's journal refuses a root anyone else can read.
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("the model root must take owner-only bits");
+    }
 
     let reported_abi = landlock_abi().unwrap_or_else(|failure| {
         panic!("the host must report a Landlock ABI for this row: {failure}")
@@ -12268,7 +13010,7 @@ fn linux_landlock_requires_no_new_privs() {
 /// `bindings` the three paths its launch carries and `base` the temporary root
 /// both the launch and the probe use. The permitted calls are the caller's own:
 /// `permitted` drives them on the started provider and returns the number of
-/// answers the caller then judges, so this one body serves both providers
+/// answers the caller then judges, so this one body serves every provider
 /// without a per-provider launcher, list builder or probe (P10).
 ///
 /// The positive control uses the same uid and the same fixtures and no ruleset,
@@ -12279,10 +13021,12 @@ fn linux_landlock_requires_no_new_privs() {
 /// read and write succeed, and so does the read of the bound executable, because
 /// `execve` needs it. The caller drives its own permitted calls through
 /// `permitted`, because `status` is wallet's and did's `handle` has no such
-/// arm. The caller's first effect outside `STORAGE_ROOT` is refused `storage_error`
-/// with `Permission denied` and creates nothing. The truncate fixture keeps its
-/// bytes. A start on a non-Linux host, and a start on a host that reports
-/// Landlock missing, are refused.
+/// arm. The caller's first effect outside `STORAGE_ROOT` is refused with the
+/// caller's own `outside_code` and `outside_reason` and creates nothing:
+/// wallet's and did's answer `storage_error` with `Permission denied`, and
+/// model's answers `journal_access_denied` with `model run journal is not
+/// writable`. The truncate fixture keeps its bytes. A start on a non-Linux
+/// host, and a start on a host that reports Landlock missing, are refused.
 ///
 /// The two Linux-only plants are recorded in `CONFINEMENT-LINUX.md` and are not
 /// registered: a launcher that skips only its own Landlock install fails the
@@ -12297,6 +13041,8 @@ fn landlock_file_row_journey(
     base: &Path,
     bindings: &[(&'static str, PathBuf)],
     ruleset: &LandlockRuleset,
+    outside_code: &str,
+    outside_reason: &str,
     permitted: impl FnOnce(&mut ConfinedProvider),
     first_effect_outside: impl FnOnce(&mut ConfinedProvider, &Path) -> Value,
 ) {
@@ -12385,15 +13131,16 @@ fn landlock_file_row_journey(
         "the first effect for a base outside STORAGE_ROOT must be refused under the launch: {outside}"
     );
     assert_eq!(
-        outside["code"], "storage_error",
-        "the outside effect must be a storage refusal: {outside}"
+        outside["code"], outside_code,
+        "the outside effect must answer the caller's own code `{outside_code}`: {outside}"
     );
     let reason = outside["message"]
         .as_str()
         .unwrap_or_else(|| panic!("the outside effect must carry a reason: {outside}"));
     assert!(
-        reason.contains("Permission denied"),
-        "the outside effect must be refused by the kernel's own denial, and it answered: {reason}"
+        reason.contains(outside_reason),
+        "the outside effect must answer the caller's own reason `{outside_reason}` under the \
+         kernel's denial, and it answered: {reason}"
     );
     assert!(
         !outside_base.exists() && !provider_storage_root(name, &outside_base).exists(),
@@ -12492,7 +13239,8 @@ fn landlock_file_row_journey(
 #[test]
 fn linux_wallet_file_row_is_refused_outside_storage_root() {
     let binary = Path::new(PROVIDER_BINARY);
-    let fixture = landlock_file_fixture(WALLET_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    let loader = landlock_loader_paths(WALLET_PROVIDER);
+    let fixture = landlock_file_fixture(WALLET_PROVIDER, binary, &loader);
     landlock_file_row_journey(
         WALLET_PROVIDER,
         binary,
@@ -12500,6 +13248,8 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         &fixture.base,
         &fixture.bindings,
         &fixture.ruleset,
+        "storage_error",
+        "Permission denied",
         |provider| {
             let status = provider.send(&json!({ "op": "status" }));
             assert_eq!(status["status"], "ok", "status must answer: {status}");
@@ -12541,8 +13291,9 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_did_file_row_is_refused_outside_storage_root() {
-    let binary = did_provider_binary();
-    let fixture = landlock_file_fixture(DID_PROVIDER, binary, LANDLOCK_LOADER_PATHS);
+    let binary = provider_binary(DID_PROVIDER);
+    let loader = landlock_loader_paths(DID_PROVIDER);
+    let fixture = landlock_file_fixture(DID_PROVIDER, binary, &loader);
     let label = "did-provider landlock file row";
     landlock_file_row_journey(
         DID_PROVIDER,
@@ -12551,6 +13302,8 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
         &fixture.base,
         &fixture.bindings,
         &fixture.ruleset,
+        "storage_error",
+        "Permission denied",
         |provider| {
             let record = did_standin_permitted_operations(provider, &fixture.base, label);
             assert_suite_outcomes(label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
@@ -12571,6 +13324,59 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
             let init = provider.init(outside);
             assert_eq!(init["status"], "ok", "did's Init writes nothing: {init}");
             provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }))
+        },
+    );
+}
+
+/// The model caller of the one file row. The same body, installer, policy and
+/// `pre_exec` start run the model's own binary, with model's own committed
+/// declared-rights file and its own `canonical_bindings` for its `STORAGE_ROOT`
+/// (`<base>/providers/model-provider`) and `STORAGE_PARENT`
+/// (`<base>/providers`).
+///
+/// The permitted calls are the model's own `init` with its real config, which
+/// names the provider id, the one hosted offer and a journal directory under
+/// its root, and then `status`, which answers `ok` with the offer ready. No
+/// model request needs a network.
+///
+/// The outside effect is an `init` whose base lies under the granted
+/// `STORAGE_PARENT` but outside `STORAGE_ROOT`, so the model derives its
+/// journal there and the kernel refuses the journal's own directory creation.
+/// The model reports that as `journal_access_denied` with `model run journal is
+/// not writable`, not as `storage_error`, and nothing is created.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_model_file_row_is_refused_outside_storage_root() {
+    let binary = provider_binary(MODEL_PROVIDER);
+    let loader = landlock_loader_paths(MODEL_PROVIDER);
+    let fixture = landlock_file_fixture(MODEL_PROVIDER, binary, &loader);
+    landlock_file_row_journey(
+        MODEL_PROVIDER,
+        binary,
+        &fixture.declared,
+        &fixture.base,
+        &fixture.bindings,
+        &fixture.ruleset,
+        "journal_access_denied",
+        "model run journal is not writable",
+        |provider| {
+            let init = provider.send(&provider_init_request(MODEL_PROVIDER, &fixture.base));
+            assert_eq!(init["status"], "ok", "the model init must answer: {init}");
+            assert_serving(&init["data"]);
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            assert_serving(&status["data"]);
+        },
+        // The model refuses a second Init whose configuration differs, before
+        // touching any file, so that answer would prove nothing about the
+        // kernel. A fresh model under the same ruleset and filter takes the
+        // outside base as its first Init instead.
+        |_, outside| {
+            let allow = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+            let mut fresh =
+                ConfinedProvider::start_under_landlock(&allow, &fixture.ruleset, binary)
+                    .unwrap_or_else(|err| panic!("a second confined model must start: {err}"));
+            fresh.send(&provider_init_request(MODEL_PROVIDER, outside))
         },
     );
 }
@@ -12628,59 +13434,78 @@ fn seccomp_journey_runs_beneath_an_inherited_filter(name: &str, test_name: &str)
     false
 }
 
-/// One provider's named seccomp journey paths, so both journeys compare the same
+/// One provider's named seccomp journey paths, so every journey compares the same
 /// three named fixtures instead of restating them per caller.
 ///
-/// `inside` is the file the run writes under `STORAGE_ROOT`, `inside_fixture` is
-/// a fixed-byte file beside it that the read-only calls must not change, and
-/// `outside` is a sibling path outside `STORAGE_ROOT` that must stay absent. The
-/// sibling is derived from `storage_parent` for both providers, so a path that
-/// drifts out of the grant shows as a present file. `expected_fixture` is the
-/// provider's own known bytes, so a run that wrote the wrong file fails.
+/// `inside` is the file the run writes under `STORAGE_ROOT`, for a provider whose
+/// permitted call writes one. The model's `init` creates its journal directories
+/// and no file, so its journey names none. `inside_fixture` is a fixed-byte file
+/// beside it that the read-only calls must not change, and `outside` is a sibling
+/// path outside `STORAGE_ROOT` that must stay absent. The sibling is derived from
+/// `storage_parent` for every provider, so a path that drifts out of the grant
+/// shows as a present file. `expected_fixture` is the provider's own known bytes,
+/// so a run that wrote the wrong file fails.
 struct SeccompJourneyFiles {
-    inside: PathBuf,
+    inside: Option<PathBuf>,
     inside_fixture: PathBuf,
     outside: PathBuf,
     expected_fixture: &'static [u8],
 }
 
 /// The named journey fixtures of `name` under `base`, or a panic naming the
-/// provider whose layout this function does not know. The lab serves two
+/// provider whose layout this function does not know. The lab serves three
 /// providers and a guessed layout would be a fallback (P11).
 fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
     let root = provider_storage_root(name, base);
-    let (inside_name, expected_fixture): (&str, &[u8]) = match name {
-        WALLET_PROVIDER => (WALLET_KEY_FILE, b"wallet seccomp journey fixture\n"),
-        DID_PROVIDER => ("nickname.enc", b"did seccomp journey fixture\n"),
+    let (inside_name, expected_fixture): (Option<&str>, &[u8]) = match name {
+        WALLET_PROVIDER => (Some(WALLET_KEY_FILE), b"wallet seccomp journey fixture\n"),
+        DID_PROVIDER => (Some("nickname.enc"), b"did seccomp journey fixture\n"),
+        MODEL_PROVIDER => (None, b"model seccomp journey fixture\n"),
         other => panic!("the journey names no provider whose fixtures it knows: {other}"),
     };
     SeccompJourneyFiles {
-        inside: root.join(inside_name),
+        inside: inside_name.map(|name| root.join(name)),
         inside_fixture: root.join("seccomp-inside-write"),
         outside: storage_parent(name, base).join("seccomp-outside-write"),
         expected_fixture,
     }
 }
 
-/// Both callers use these same comparisons after shutdown. Wallet's key-format
-/// assertions then inspect the returned bytes separately.
+/// Every caller uses these same comparisons after shutdown. Wallet's key-format
+/// assertions then inspect the returned bytes separately. A caller whose
+/// permitted calls write no file passes `None` for `expected_inside` and gets
+/// `None` back; the fixed-byte fixture and the absent outside sibling are
+/// compared for every caller.
 fn assert_seccomp_journey_files(
     name: &str,
     files: &SeccompJourneyFiles,
-    expected_inside: &[u8],
-) -> Vec<u8> {
-    let inside_reason = match name {
-        WALLET_PROVIDER => {
-            "the read-only journey must keep the exact key bytes from init".to_owned()
+    expected_inside: Option<&[u8]>,
+) -> Option<Vec<u8>> {
+    let written = match (&files.inside, expected_inside) {
+        (Some(path), Some(expected_inside)) => {
+            let inside_reason = match name {
+                WALLET_PROVIDER => {
+                    "the read-only journey must keep the exact key bytes from init".to_owned()
+                }
+                DID_PROVIDER => format!(
+                    "the {name} journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT"
+                ),
+                other => panic!("the journey names no provider whose file evidence it knows: {other}"),
+            };
+            let written = fs::read(path)
+                .unwrap_or_else(|err| panic!("the launch must write {}: {err}", path.display()));
+            assert_eq!(written, expected_inside, "{inside_reason}");
+            Some(written)
         }
-        DID_PROVIDER => format!(
-            "the {name} journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT"
+        (Some(path), None) => panic!(
+            "{name}: the inside file {} needs the bytes its run writes",
+            path.display()
         ),
-        other => panic!("the journey names no provider whose file evidence it knows: {other}"),
+        (None, Some(_)) => {
+            panic!("{name}: the journey names no inside file for the bytes its run writes")
+        }
+        (None, None) => None,
     };
-    let written = fs::read(&files.inside)
-        .unwrap_or_else(|err| panic!("the launch must write {}: {err}", files.inside.display()));
-    assert_eq!(written, expected_inside, "{inside_reason}");
     assert_eq!(
         fs::read(&files.inside_fixture).expect("the named inside fixture must remain readable"),
         files.expected_fixture,
@@ -12705,13 +13530,17 @@ fn seccomp_journey_file_comparison_catches_corruption_for_each_provider() {
             fs::create_dir_all(provider_storage_root(name, base.path()))
                 .expect("the provider fixture root must exist");
             let expected_inside = b"bytes written by the provider";
-            fs::write(&files.inside, expected_inside).expect("the provider file must be writable");
+            let inside = files
+                .inside
+                .as_ref()
+                .expect("wallet and did name an inside file for this comparison");
+            fs::write(inside, expected_inside).expect("the provider file must be writable");
             fs::write(&files.inside_fixture, files.expected_fixture)
                 .expect("the named inside fixture must be writable");
-            assert_seccomp_journey_files(name, &files, expected_inside);
+            assert_seccomp_journey_files(name, &files, Some(expected_inside.as_slice()));
 
             let changed_path = match changed {
-                "inside" => &files.inside,
+                "inside" => inside,
                 "inside_fixture" => &files.inside_fixture,
                 "outside" => &files.outside,
                 _ => unreachable!(),
@@ -12719,7 +13548,7 @@ fn seccomp_journey_file_comparison_catches_corruption_for_each_provider() {
             fs::write(changed_path, b"corrupt journey bytes")
                 .expect("the plant must write its file");
             let failure = std::panic::catch_unwind(|| {
-                assert_seccomp_journey_files(name, &files, expected_inside)
+                assert_seccomp_journey_files(name, &files, Some(expected_inside.as_slice()))
             })
             .expect_err("each changed file must fail the shared journey comparison");
             let reason = failure
@@ -12825,9 +13654,9 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // With that row the same journeys then took SIGSEGV: the provider's check of
     // its standard descriptors calls poll on x86-64, where aarch64 calls ppoll,
     // and poll([{fd=0}, {fd=1}, {fd=2}], 3, 0) = -1 EACCES made it abort
-    // (run 42447112526). Every other refused call in that trace (brk,
+    // (run 42447112526). Every other refused call in that did trace (brk,
     // set_tid_address, set_robust_list, rseq, prlimit64, munmap) is one the
-    // aarch64 run also refuses and the provider tolerates.
+    // aarch64 run also refuses for did and wallet, and the provider tolerates.
     // Then the providers started and their storage calls were refused. A run
     // whose filter logged instead of refusing (measure branch only, run
     // 42447514431) named mkdir (83), unlink (87) and access (21), the older
@@ -12835,7 +13664,10 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     // that aarch64 does not have. The other logged calls (brk, fcntl, getpid,
     // munmap, prlimit64, rseq, sched_getaffinity, set_robust_list,
     // set_tid_address, sigaltstack) exist on both and are refused on aarch64
-    // too, so they stay out.
+    // too, so they stay out of the launch set did and wallet share. The model
+    // is not covered by this sentence: it admits rseq and munmap through
+    // MODEL_RUNTIME_ESSENTIALS, and fcntl and prlimit64 through argument-checked
+    // rules, as its golden programs show.
     //
     // Each x86-64 row was then dropped alone under the real filter (measure
     // branch, run 42454795461). Without arch_prctl every journey failed "Cannot
@@ -12852,12 +13684,39 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         "the seccomp allow list must name the provider it was built for"
     );
     let wallet_allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(
-        allow.program, wallet_allow.program,
-        "the {name} program must equal wallet's: the two declared-rights files \
-         declare the same rights and the same two platform-baseline ids with \
-         identical rule text, so a difference is a per-provider widening"
-    );
+    if name == MODEL_PROVIDER {
+        // The model differs from wallet by exactly the runtime's measured calls
+        // and the three argument-checked thread rules, so any other difference
+        // is a widening.
+        let mut expected = wallet_allow.syscalls.clone();
+        for syscall in MODEL_RUNTIME_ESSENTIALS {
+            // A call this architecture lacks, such as x86-64's epoll_wait on
+            // aarch64, is never admitted.
+            if seccomp_syscall_number(syscall, allow.audit_arch).is_none() {
+                continue;
+            }
+            if !expected.contains(syscall) {
+                expected.push(syscall);
+            }
+        }
+        expected.sort_unstable();
+        assert_eq!(
+            allow.syscalls, expected,
+            "the model list must differ only by the runtime"
+        );
+        assert_eq!(
+            allow.program,
+            seccomp_program_with_thread_rules(&expected, allow.audit_arch),
+            "the model program must be that list with the thread rules"
+        );
+    } else {
+        assert_eq!(
+            allow.program, wallet_allow.program,
+            "the {name} program must equal wallet's: the two declared-rights files \
+             declare the same rights and the same two platform-baseline ids with \
+             identical rule text, so a difference is a per-provider widening"
+        );
+    }
     eprintln!("{}", linux_seccomp_journey_label());
 
     let fixture = tempfile::tempdir().expect("temporary provider base");
@@ -12887,13 +13746,19 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         .expect("the named inside fixture must be writable");
     // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
     // the provider wrote it: wallet's `init` writes the random key, and did's
-    // `set_nickname` writes the encrypted nickname.
-    let expected_inside = match name {
+    // `set_nickname` writes the encrypted nickname. The model's `init` creates
+    // its journal directories and no file, so its permitted calls, `init` and
+    // `status`, carry no inside file to compare.
+    let expected_inside: Option<Vec<u8>> = match name {
         WALLET_PROVIDER => {
             // Init creates the random key. Keep those exact bytes as the expected
             // value across the read-only calls, and also compare a fixed byte
             // fixture.
-            let expected_key = fs::read(&files.inside).expect("init must create the storage key");
+            let key_file = files
+                .inside
+                .as_ref()
+                .expect("wallet names its storage key file");
+            let expected_key = fs::read(key_file).expect("init must create the storage key");
             let status = provider.send(&json!({ "op": "status" }));
             assert_eq!(status["status"], "ok", "status must answer: {status}");
             let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
@@ -12904,17 +13769,27 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
                 json!([]),
                 "a fresh wallet lists no account"
             );
-            expected_key
+            Some(expected_key)
         }
         DID_PROVIDER => {
             let record = did_standin_permitted_operations(&mut provider, &base, &label);
             assert_suite_outcomes(&label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
-            fs::read(&files.inside).unwrap_or_else(|err| {
+            let nickname = files.inside.as_ref().expect("did names its nickname file");
+            Some(fs::read(nickname).unwrap_or_else(|err| {
                 panic!(
                     "{label}: set_nickname must write {}: {err}",
-                    files.inside.display()
+                    nickname.display()
                 )
-            })
+            }))
+        }
+        MODEL_PROVIDER => {
+            let init = provider.send(&provider_init_request(MODEL_PROVIDER, &base));
+            assert_eq!(init["status"], "ok", "the model init must answer: {init}");
+            assert_serving(&init["data"]);
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            assert_serving(&status["data"]);
+            None
         }
         other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
     };
@@ -12944,9 +13819,14 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
     );
     provider.shutdown();
 
-    let written = assert_seccomp_journey_files(name, &files, &expected_inside);
+    let written = assert_seccomp_journey_files(name, &files, expected_inside.as_deref());
     if name == WALLET_PROVIDER {
-        let text = String::from_utf8(written).expect("the storage key must be hex text");
+        let key_file = files
+            .inside
+            .as_ref()
+            .expect("wallet names its storage key file");
+        let text = String::from_utf8(written.expect("wallet's init must write its storage key"))
+            .expect("the storage key must be hex text");
         let digits = text
             .strip_suffix('\n')
             .expect("the storage key must end with a newline");
@@ -12955,12 +13835,12 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
             2 * WALLET_KEY_BYTES,
             "the storage key must hold its {} hex digits and a newline: {}",
             2 * WALLET_KEY_BYTES,
-            files.inside.display()
+            key_file.display()
         );
         assert!(
             digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "the storage key must be hex: {}",
-            files.inside.display()
+            key_file.display()
         );
     }
 
@@ -13060,9 +13940,202 @@ fn linux_did_journey_runs_under_the_seccomp_allow_list() {
         .unwrap_or_else(|err| panic!("{err}"));
     seccomp_confined_journey(
         DID_PROVIDER,
-        did_provider_binary(),
+        provider_binary(DID_PROVIDER),
         &declared,
         "linux_did_journey_runs_under_the_seccomp_allow_list",
+    );
+}
+
+/// The model half of the Linux journey: the same body, the same installer and
+/// the same program as wallet, with the model's own binary, the model's own
+/// committed declared-rights file and the model's own permitted calls. Wallet
+/// owns the four-call probe run.
+///
+/// The permitted calls are the model's own `init` with its real config, which
+/// names the provider id, the one hosted offer and a journal directory under
+/// its root, and then `status`, which answers `ok` with the offer ready. The
+/// model's `init` creates journal directories and no file, so its journey names
+/// no inside file, while the fixed-byte inside fixture and the absent outside
+/// sibling are compared as for every caller. No model request needs a network.
+///
+/// Falsifier: a model launcher that skips only its `pre_exec` install is the
+/// same plant as WP176 on this caller, caught by the `SECCOMP_MODE_FILTER` mode
+/// plus the inherited-fixture before/after comparison; and a model provider that
+/// writes the named outside sibling is WP177's plant on this caller, caught by
+/// the absent sibling. Both reach a Linux-only test, so neither is registered in
+/// `falsifiers.json`.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_model_filter_admits_threads_and_refuses_new_processes() {
+    const CHILD: &str = "ELASTOS_MODEL_FILTER_CHILD";
+    let test = "linux_model_filter_admits_threads_and_refuses_new_processes";
+    if std::env::var_os(CHILD).is_none() {
+        // Its own process, so the filter never reaches the rest of the test run.
+        let status = Command::new(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .status()
+            .expect("the filter child must start");
+        assert!(status.success(), "the filter child must pass: {status}");
+        return;
+    }
+    let allow = seccomp_probe_list(MODEL_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    install_seccomp(&allow).unwrap_or_else(|err| panic!("{err:?}"));
+
+    let thread = std::thread::spawn(|| 7);
+    assert_eq!(
+        thread.join().expect("a thread must run under the filter"),
+        7
+    );
+
+    // SAFETY: each call takes plain integers or a local array, and each result is
+    // only compared. A fork that wrongly succeeds exits at once in the child.
+    unsafe {
+        let child = libc::fork();
+        if child == 0 {
+            libc::_exit(0);
+        }
+        assert_eq!(child, -1, "a new process must be refused");
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        assert_eq!(libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0), -1);
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        let mut pair = [0; 2];
+        assert_eq!(
+            libc::socketpair(libc::AF_INET, libc::SOCK_STREAM, 0, pair.as_mut_ptr()),
+            -1,
+            "a non-AF_UNIX pair must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        assert_eq!(
+            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, pair.as_mut_ptr()),
+            0,
+            "an AF_UNIX pair must be admitted"
+        );
+
+        // clone3 answers ENOSYS by name. Admitted, a zero size would be EINVAL.
+        assert_eq!(
+            libc::syscall(libc::SYS_clone3, std::ptr::null::<u8>(), 0usize),
+            -1
+        );
+        assert_eq!(
+            *libc::__errno_location(),
+            libc::ENOSYS,
+            "clone3 must answer ENOSYS"
+        );
+
+        // fcntl: the two measured commands work; F_SETOWN, which can aim a signal
+        // at another process, is refused by the filter.
+        assert!(
+            libc::fcntl(pair[0], libc::F_GETFD) >= 0,
+            "F_GETFD must work"
+        );
+        let dup = libc::fcntl(pair[0], libc::F_DUPFD_CLOEXEC, 3);
+        assert!(dup >= 0, "F_DUPFD_CLOEXEC must work");
+        assert_eq!(
+            libc::fcntl(pair[0], libc::F_SETOWN, 1),
+            -1,
+            "F_SETOWN must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+
+        // prlimit64: reading its own limit works; another process's limit, or
+        // setting one, is refused by the filter (the kernel would say EPERM).
+        let mut old = std::mem::zeroed::<libc::rlimit>();
+        assert_eq!(
+            libc::prlimit(0, libc::RLIMIT_STACK, std::ptr::null(), &mut old),
+            0
+        );
+        assert_eq!(
+            libc::prlimit(1, libc::RLIMIT_NOFILE, std::ptr::null(), &mut old),
+            -1,
+            "another process's limit must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        let lower = libc::rlimit {
+            rlim_cur: old.rlim_cur,
+            rlim_max: old.rlim_max,
+        };
+        assert_eq!(
+            libc::prlimit(0, libc::RLIMIT_NOFILE, &lower, std::ptr::null_mut()),
+            -1,
+            "setting a limit must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+
+        // futex: wait and wake run the thread above; a priority-inheritance lock,
+        // which can reach another task through shared memory, is refused.
+        let word = 0u32;
+        assert_eq!(
+            libc::syscall(
+                libc::SYS_futex,
+                &word,
+                libc::FUTEX_LOCK_PI | libc::FUTEX_PRIVATE_FLAG,
+                0,
+                0
+            ),
+            -1,
+            "FUTEX_LOCK_PI must be refused"
+        );
+        assert_eq!(*libc::__errno_location(), SECCOMP_DENY_ERRNO);
+        assert_eq!(
+            libc::syscall(
+                libc::SYS_futex,
+                &word,
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                1,
+                0
+            ),
+            0,
+            "FUTEX_WAKE must work"
+        );
+    }
+}
+
+/// The Linux ABI values the portable builder writes out are libc's on Linux.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_abi_constants_match_libc() {
+    assert_eq!(LINUX_ENOSYS, libc::ENOSYS as u32);
+    assert_eq!(LINUX_CLONE_THREAD, libc::CLONE_THREAD as u32);
+    assert_eq!(LINUX_AF_UNIX, libc::AF_UNIX as u32);
+    assert_eq!(LINUX_F_GETFD, libc::F_GETFD as u32);
+    assert_eq!(LINUX_F_DUPFD_CLOEXEC, libc::F_DUPFD_CLOEXEC as u32);
+    assert_eq!(
+        LINUX_FUTEX_CMD_MASK,
+        !(libc::FUTEX_PRIVATE_FLAG | libc::FUTEX_CLOCK_REALTIME) as u32
+    );
+    assert_eq!(LINUX_FUTEX_WAIT, libc::FUTEX_WAIT as u32);
+    assert_eq!(LINUX_FUTEX_WAKE, libc::FUTEX_WAKE as u32);
+    assert_eq!(LINUX_FUTEX_WAIT_BITSET, libc::FUTEX_WAIT_BITSET as u32);
+    assert_eq!(LINUX_FUTEX_WAKE_BITSET, libc::FUTEX_WAKE_BITSET as u32);
+}
+
+/// A call with an argument-checked rule placed in the unconditional list would be
+/// admitted before its rule is read, so the builder refuses that list.
+#[test]
+fn thread_rule_calls_are_not_in_the_unconditional_list() {
+    for call in THREAD_RULE_CALLS {
+        assert!(!MODEL_RUNTIME_ESSENTIALS.contains(&call), "{call}");
+        assert!(
+            LAUNCH_ESSENTIALS.iter().all(|(listed, _)| *listed != call),
+            "{call}"
+        );
+        let refused =
+            std::panic::catch_unwind(|| seccomp_program_with_thread_rules(&[call], 0xc000_00b7));
+        assert!(refused.is_err(), "{call} in the list must be refused");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_model_journey_runs_under_the_seccomp_allow_list() {
+    let declared = read_declared_rights(MODEL_PROVIDER, &declared_rights_path(MODEL_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    seccomp_confined_journey(
+        MODEL_PROVIDER,
+        provider_binary(MODEL_PROVIDER),
+        &declared,
+        "linux_model_journey_runs_under_the_seccomp_allow_list",
     );
 }
 
@@ -18568,9 +19641,9 @@ fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
 /// Fails when a file outside test code names the lab generator or writer.
 ///
 /// A file may name `generate_profile` or `write_generated_profile` only when
-/// its path relative to `root` has a component exactly `tests`, its file name
-/// is exactly `falsifiers.json`, or its extension is `md`. Every other file
-/// fails. The walk reads every regular file as bytes, so a non-UTF-8 file is
+/// its path relative to `root` has a component exactly `tests`, its path is
+/// one of the two falsifier lists that name it, or its extension is `md`.
+/// Every other file fails. The walk reads every regular file as bytes, so a non-UTF-8 file is
 /// read, not skipped, and matches each name as a plain byte substring, so a
 /// longer name that contains one also fails (P11). It does not follow symbolic
 /// links. It skips `.git` (git data), `node_modules` (dependency build output)
@@ -18581,6 +19654,13 @@ fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
 /// offending path, relative to `root` and sorted, with the reason.
 fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
     const NAMES: [&[u8]; 2] = [b"generate_profile", b"write_generated_profile"];
+    /// The two falsifier lists that name the lab generator, by their exact
+    /// repository-relative paths. A file with a similar name elsewhere is not
+    /// test code.
+    const FALSIFIER_LISTS: [&str; 2] = [
+        "capsules/model-provider/confine-falsifiers.json",
+        "capsules/wallet-provider/falsifiers.json",
+    ];
     let mut pending = vec![root.to_path_buf()];
     let mut read = 0usize;
     let mut offending: Vec<PathBuf> = Vec::new();
@@ -18616,9 +19696,11 @@ fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
             let in_tests = relative
                 .components()
                 .any(|component| component.as_os_str().to_str() == Some("tests"));
-            let file_name = path.file_name().and_then(|name| name.to_str());
             let extension = path.extension().and_then(|extension| extension.to_str());
-            if in_tests || file_name == Some("falsifiers.json") || extension == Some("md") {
+            let is_falsifier_list = relative
+                .to_str()
+                .is_some_and(|path| FALSIFIER_LISTS.contains(&path));
+            if in_tests || is_falsifier_list || extension == Some("md") {
                 continue;
             }
             if NAMES
@@ -18659,12 +19741,15 @@ fn lab_generator_is_named_only_in_test_code() {
 /// A non-test file that names the lab generator is refused, and the exempt
 /// files and build output are not.
 ///
-/// The fixture holds `src/main.rs` and `elastos/x.py` naming the generator and
-/// writer, the exempt `tests`, `falsifiers.json` and `md` names, and a
-/// `target/` file naming it. The refusal names exactly the first two, sorted;
-/// after they are removed the check returns `Ok`. A longer name that contains
-/// `generate_profile` and a non-UTF-8 file naming it are then each refused,
-/// because the check matches plain bytes and reads every file as bytes.
+/// The fixture holds `src/main.rs`, `elastos/x.py`, `src/falsifiers.json`,
+/// `src/notfalsifiers.json`, `elastos/x-falsifiers.json` and a
+/// `runtime-falsifiers.json` under `src/` naming the generator and writer,
+/// the two exact falsifier lists that may name them, the exempt `tests` path
+/// and `md` extension, and a `target/` file naming the generator. The refusal
+/// names exactly the six, sorted; after they are removed the check returns
+/// `Ok`. A longer name that contains `generate_profile` and a non-UTF-8 file
+/// naming it are then each refused, because the check matches plain bytes and
+/// reads every file as bytes.
 #[test]
 fn lab_generator_name_check_refuses_a_non_test_file() {
     let root = tempfile::tempdir().expect("temporary repository root");
@@ -18672,12 +19757,23 @@ fn lab_generator_name_check_refuses_a_non_test_file() {
     let files = [
         ("src/main.rs", "fn main() { generate_profile(); }\n"),
         ("elastos/x.py", "write_generated_profile(path)\n"),
-        ("crate/tests/a.rs", "generate_profile\n"),
-        ("crate/src/tests/b.rs", "write_generated_profile\n"),
         (
-            "crate/falsifiers.json",
+            "capsules/wallet-provider/src/runtime-falsifiers.json",
             "{\"about\": \"generate_profile\"}\n",
         ),
+        ("elastos/x-falsifiers.json", "generate_profile\n"),
+        ("src/falsifiers.json", "generate_profile\n"),
+        ("src/notfalsifiers.json", "generate_profile\n"),
+        (
+            "capsules/model-provider/confine-falsifiers.json",
+            "{\"about\": \"generate_profile\"}\n",
+        ),
+        (
+            "capsules/wallet-provider/falsifiers.json",
+            "{\"about\": \"write_generated_profile\"}\n",
+        ),
+        ("crate/tests/a.rs", "generate_profile\n"),
+        ("crate/src/tests/b.rs", "write_generated_profile\n"),
         ("crate/README.md", "generate_profile\n"),
         ("target/debug/planted.rs", "generate_profile\n"),
     ];
@@ -18691,14 +19787,27 @@ fn lab_generator_name_check_refuses_a_non_test_file() {
         .expect_err("a non-test file that names the generator must be refused");
     assert_eq!(
         refusal,
-        "elastos/x.py names the lab generator, which is test code only\n\
-         src/main.rs names the lab generator, which is test code only"
+        "capsules/wallet-provider/src/runtime-falsifiers.json names the lab generator, which is \
+         test code only\n\
+         elastos/x-falsifiers.json names the lab generator, which is test code only\n\
+         elastos/x.py names the lab generator, which is test code only\n\
+         src/falsifiers.json names the lab generator, which is test code only\n\
+         src/main.rs names the lab generator, which is test code only\n\
+         src/notfalsifiers.json names the lab generator, which is test code only"
     );
-    fs::remove_file(root.join("elastos/x.py")).expect("remove the python fixture");
-    fs::remove_file(root.join("src/main.rs")).expect("remove the rust fixture");
+    for path in [
+        "capsules/wallet-provider/src/runtime-falsifiers.json",
+        "elastos/x-falsifiers.json",
+        "elastos/x.py",
+        "src/falsifiers.json",
+        "src/main.rs",
+        "src/notfalsifiers.json",
+    ] {
+        fs::remove_file(root.join(path)).expect("remove a refused fixture");
+    }
     assert_eq!(
         check_lab_generator_names(root).expect("only test code and build output remain"),
-        4
+        5
     );
     fs::write(root.join("crate/longer.rs"), "regenerate_profile\n")
         .expect("a fixture file under crate/");

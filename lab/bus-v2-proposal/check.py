@@ -6,6 +6,7 @@ One parser. ``problems`` is the only function that decides a citation.
 import bisect
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 # One line: the prefix, a space, and forty lowercase hex digits.
@@ -18,6 +19,35 @@ CITATION = re.compile(
 )
 
 DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
+
+# Section 0 states each core-call proposal once. Each group starts with a
+# heading, and its propose lines stand under that heading.
+SECTION_0 = "## 0. What this proposes"
+SECTION_1 = "## 1. Agent identity"
+PROPOSE = "propose:"
+PROPOSE_LINE = re.compile(r"(?<![A-Za-z0-9_])propose:")
+PROPOSE_PARTS = ("Name:", "Inputs:", "Refusal:", "Owner:")
+PROPOSE_NAME = re.compile(r"(?:^|\. )Name: ([^.]+)\.")
+
+# The six core calls. Each one owns one propose line, named by its Name: field,
+# so a group with two calls cannot pass on one of them.
+PROPOSE_CALLS = (
+    ("A3", "agent principal"),
+    ("A3", "owned journal root"),
+    ("A4", "hosted model call"),
+    ("A5", "grant handle"),
+    ("A7", "usage reservation"),
+    ("B2", "typed operation"),
+)
+PROPOSE_GROUPS = "|".join(dict.fromkeys(re.escape(group) for group, _ in PROPOSE_CALLS))
+PROPOSE_GROUP = re.compile(r"^(" + PROPOSE_GROUPS + r")\. ")
+
+# Draft prose uses ASCII letters/digits and these punctuation marks, all inert
+# inside these line forms. Hashes belong only to the fixed ATX heading prefixes.
+SECTION_0_CHAR = re.compile(r"[A-Za-z0-9 ',.\-:;]")
+
+# The groups that must hold at least one propose line.
+PROPOSE_REQUIRED = ("A3", "A5", "A7", "B2")
 
 # The one owned citation. Its quotation stays unchecked until a slice owns it.
 OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
@@ -352,7 +382,8 @@ def load_draft(root):
     draft = Path(root) / DRAFT
     if not draft.is_file():
         return None
-    return draft.read_text(encoding="utf-8")
+    # GitHub drops an initial UTF-8 BOM before parsing Markdown; keep later BOMs.
+    return draft.read_text(encoding="utf-8-sig")
 
 
 def _pin_lines(text):
@@ -1014,6 +1045,297 @@ def a3_claim_refusals(text):
     return refusals
 
 
+FENCE, COMMENT, HEADING_KIND, TEXT = "fence", "comment", "heading", "text"
+HEADING = re.compile(r" {0,3}(#{1,6})(?=[ \t]|$)[ \t]*(.*?)[ \t]*$")
+
+
+def _heading(line):
+    """Return (level, text) for an ATX heading indented 0-3, else None."""
+    match = HEADING.match(line)
+    if match is None:
+        return None
+    return len(match.group(1)), match.group(2)
+
+
+def classify_lines(lines):
+    """Classify raw lines, then expose visible text without changing their roles.
+
+    An open fence reads only its closer. Otherwise an open comment reads only
+    through its closer, and owns that whole line. Only neutral lines can open
+    a fence or become a heading; comment markers in a fence are literal text.
+    Inline comments must close on their own line or classification is refused.
+    A comment that closes and reopens on one line is refused as ambiguous.
+    """
+    records = []
+    fence = None
+    comment = False
+    for number, line in enumerate(lines, 1):
+        stripped = line.lstrip()
+        if (line.lstrip(" \t") != stripped
+                and stripped.startswith(("```", "~~~", "#", "<!--", "propose:"))):
+            raise ValueError(
+                "refuse: non-ASCII whitespace before a block marker on line %d"
+                % number
+            )
+        width = sum(4 if char == "\t" else 1
+                    for char in line[:len(line) - len(line.lstrip(" \t"))])
+        if fence is not None:
+            fence = fence if width > 3 else _fence_after(line, fence)
+            records.append((FENCE, None, ""))
+            continue
+        if (comment or width <= 3) and re.search(r"-->.*<!--", line):
+            raise ValueError("refuse: comment closes and reopens on line %d" % number)
+        if comment:
+            comment = "-->" not in line
+            records.append((COMMENT, None, ""))
+            continue
+        fence = None if width > 3 else _fence_after(line, None)
+        if fence is not None:
+            records.append((FENCE, None, ""))
+            continue
+        if width > 3:
+            records.append((TEXT, None, line))
+            continue
+        _, text, comment = _visible(line, False)
+        block_comment = line.lstrip(" ").startswith("<!--")
+        if block_comment:
+            comment = "-->" not in line
+        elif comment:
+            raise ValueError("refuse: unclosed inline HTML comment at line %d" % number)
+        # Raw syntax owns the role; comment removal only supplies visible text.
+        heading = _heading(text) if _heading(line) is not None else None
+        if block_comment:
+            records.append((COMMENT, None, ""))
+        elif heading is not None:
+            records.append((HEADING_KIND, heading[0], heading[1]))
+        else:
+            records.append((TEXT, None, text))
+    return records
+
+
+def _headings(lines):
+    """Yield each heading's index and (level, text) from the classifier."""
+    for index, (kind, level, text) in enumerate(classify_lines(lines)):
+        if kind == HEADING_KIND:
+            yield index, (level, text)
+
+
+def section_0_bounds(lines):
+    """Return the start and end indexes of section 0, or None when it is absent."""
+    start = None
+    for index, (level, text) in _headings(lines):
+        if start is None:
+            if level == 2 and text == SECTION_0[3:]:
+                start = index
+        elif level <= 2:
+            return start, index
+    if start is None:
+        return None
+    return start, len(lines)
+
+
+def _fence_after(line, fence):
+    """Return the fence still open after this line: (char, count) or None."""
+    # CommonMark allows only ASCII spaces and tabs around a closing fence.
+    stripped = line.strip(" \t")
+    if fence is None:
+        for char in ("`", "~"):
+            if stripped.startswith(char * 3):
+                count = len(stripped) - len(stripped.lstrip(char))
+                if char == "`" and "`" in stripped[count:]:
+                    return None
+                return char, count
+        return None
+    char, count = fence
+    if len(stripped) >= count and stripped == char * len(stripped):
+        return None
+    return fence
+
+
+def _has_value(text):
+    """True when TEXT holds a letter or digit outside category Cf."""
+    for char in text:
+        category = unicodedata.category(char)
+        if category != "Cf" and category[0] in "LN":
+            return True
+    return False
+
+
+def _visible(line, comment):
+    """Return (starts inside, visible text, comment), masking hidden columns."""
+    pieces = []
+    inside = comment
+    index = 0
+    while index < len(line):
+        if comment:
+            found = line.find("-->", index)
+            if found < 0:
+                pieces.append(" " * (len(line) - index))
+                break
+            pieces.append(" " * (found + 3 - index))
+            comment = False
+            index = found + 3
+        else:
+            found = line.find("<!--", index)
+            if found < 0:
+                pieces.append(line[index:])
+                break
+            pieces.append(line[index:found])
+            pieces.append(" " * 4)
+            comment = True
+            index = found + 4
+    return inside, "".join(pieces), comment
+
+
+def _empty_fields(line):
+    """Return, in label order, the fields of LINE that hold no value."""
+    positions = []
+    for part in PROPOSE_PARTS:
+        start = 0
+        while True:
+            found = line.find(part, start)
+            if found < 0:
+                break
+            positions.append((found, part))
+            start = found + len(part)
+    positions.sort()
+    empty = set(PROPOSE_PARTS) - set(part for _, part in positions)
+    for index, (found, part) in enumerate(positions):
+        stop = positions[index + 1][0] if index + 1 < len(positions) else len(line)
+        if not _has_value(line[found + len(part):stop]):
+            empty.add(part)
+    return [part for part in PROPOSE_PARTS if part in empty]
+
+
+def _section_0_line_refusals(lines, records, start, end):
+    """Accept blank lines, ATX section/group headings, the introduction,
+    left-margin proposals and evidence pointers. There are no continuations.
+    Raw lines own admission; HTML and hidden lines are outside this grammar.
+    """
+    allowed = re.compile(
+        r"(?:[ \t]*| {0,3}##[ \t]+0\. What this proposes[ \t]*"
+        r"| {0,3}###[ \t]+(?:" + PROPOSE_GROUPS + r")\. .*"
+        r"|This section states each core-call proposal once; section 7 holds its evidence\."
+        r"|propose:.*|Evidence: section 7, (?:" + PROPOSE_GROUPS + r")\.)"
+    )
+    return [
+        ("refuse: unsupported section 0 line at line %d: %r; section 0 allows: "
+         "blank, its heading, group headings, the introduction, propose:, Evidence: section 7")
+        % (index + 1, lines[index])
+        + ("; character U+%04X" % ord(bad) if bad else "")
+        for index in range(start, end)
+        for bad in [next((char for char in re.sub(r"^ {0,3}#{2,3}[ \t]+", "", lines[index])
+                          if SECTION_0_CHAR.fullmatch(char) is None), None)]
+        if records[index][0] in (FENCE, COMMENT)
+        or allowed.fullmatch(lines[index]) is None
+        or (PROPOSE_LINE.search(lines[index]) and not lines[index].startswith(PROPOSE))
+        or bad
+    ]
+
+
+def proposal_refusals(text):
+    """Return one refusal per missing section, incomplete call or stray proposal.
+
+    Section 0 sits before section 1 and holds one complete propose line for
+    each of the six named core calls, under the heading of its group. Only a
+    line at the left margin outside a fence and outside an HTML comment is a
+    proposal; a line in a fence, in a comment or indented as code is refused by
+    its own reason, and a propose line outside section 0 is refused.
+    """
+    # Preserve Unicode whitespace within a Markdown line for the refusal guard.
+    lines = re.split(r"\r\n?|\n", text)
+    try:
+        records = classify_lines(lines)
+    except ValueError as error:
+        return [str(error)]
+    html = [
+        "refuse: HTML block start at line %d: %r" % (index + 1, lines[index])
+        for index, (kind, _, _) in enumerate(records)
+        if kind not in (FENCE, COMMENT) and re.match(r" {0,3}<[A-Za-z/?!]", lines[index])
+    ]
+    if html:
+        return html
+    bounds = section_0_bounds(lines)
+    if bounds is None:
+        return ["refuse: draft has no section 0"]
+    start, end = bounds
+    refusals = ["refuse: HTML before section 0 at line %d" % (index + 1)
+                for index in range(start) if "<" in lines[index]]
+    for index, (_, text) in _headings(lines):
+        if text == SECTION_1[3:]:
+            if index < start:
+                refusals.append("refuse: section 0 is not before section 1")
+            break
+    names = {group: set() for group, _ in PROPOSE_CALLS}
+    proposed = set()
+    group = None
+    for index, (kind, level, text) in enumerate(records):
+        line = lines[index]
+        if kind == HEADING_KIND:
+            found = PROPOSE_GROUP.match(text)
+            if found is not None and level == 3 and start <= index < end:
+                group = found.group(1)
+        found = PROPOSE_LINE.search(line)
+        if found is None:
+            continue
+        number = index + 1
+        if kind == FENCE:
+            refusals.append(
+                "refuse: propose line at line %d is in a fenced code block"
+                % number
+            )
+            continue
+        if kind == COMMENT or (
+            len(PROPOSE_LINE.findall(line)) > len(PROPOSE_LINE.findall(text))
+        ):
+            refusals.append(
+                "refuse: propose line at line %d is in an HTML comment" % number
+            )
+            continue
+        if line.startswith("\t") or len(line) - len(line.lstrip(" \t")) >= 4:
+            refusals.append(
+                "refuse: propose line at line %d is indented as code" % number
+            )
+            continue
+        if not start <= index < end:
+            refusals.append(
+                "refuse: propose line outside section 0 at line %d" % number
+            )
+            continue
+        parsed = text.strip()
+        name = PROPOSE_NAME.search(parsed)
+        missing = _empty_fields(parsed)
+        body = parsed[PROPOSE_LINE.search(parsed).end():]
+        labels = [body.find(part) for part in PROPOSE_PARTS if part in body]
+        preamble = body[:min(labels)] if labels else body
+        if not _has_value(preamble) and len(missing) < len(PROPOSE_PARTS):
+            missing.append("the proposal text")
+        if name is None and "Name:" not in missing:
+            missing.append("Name:")
+        if missing:
+            refusals.append(
+                "refuse: propose line at line %d is not a proposal (missing %s)"
+                % (number, ", ".join(missing))
+            )
+            continue
+        if name is not None and group in names:
+            proposed.add(group)
+            names[group].add(name.group(1).strip().casefold())
+    for name in PROPOSE_REQUIRED:
+        if name not in proposed:
+            refusals.append("refuse: section 0 has no propose line for " + name)
+    for group, call in PROPOSE_CALLS:
+        if call.casefold() not in names[group]:
+            refusals.append(
+                "refuse: section 0 has no proposal named "
+                + call
+                + " under "
+                + group
+            )
+    # Preserve the established named refusals before reporting grammar errors.
+    return refusals or _section_0_line_refusals(lines, records, start, end)
+
+
 def _past_end(number, rel, count):
     return "refuse: line %s is past the end of %s (%s lines)" % (number, rel, count)
 
@@ -1064,11 +1386,12 @@ def pin_allows_structural_reads(pin_reason, pinned):
 
 
 def problems(root):
-    """Return one refusal per bad pin or citation, pin refusals first.
+    """Return one refusal per bad pin, citation or section 0 rule, pin first.
 
     A bad pin, a bad pin line or an unknown pin is the only refusal of its own,
     because no revision is named to read. The structural reads run only once
-    the pin names a commit, and they read that commit.
+    the pin names a commit, and they read that commit. The section 0 rules read
+    the draft alone, so they run even when the pin does not name a commit.
     """
     text = load_draft(root)
     if text is None:
@@ -1096,6 +1419,7 @@ def problems(root):
                 refused_spans.add(span)
         refusals.extend(_quote_refusals(root, text, sha, refused_spans))
         refusals.extend(a3_claim_refusals(text))
+    refusals.extend(proposal_refusals(text))
     return refusals
 
 

@@ -12,8 +12,9 @@ seccomp part is a generated allow list and a recorded wallet Linux run in which
 the refused calls answer the filter's own marker. The did caller uses the same
 path. The file-row installer is the one Linux launch: it installs the Landlock
 ruleset and then the seccomp filter, and the one record carries a Landlock step.
-The file row of "The contract on Linux" passes for did and wallet on one recorded
-host, named in "The file row". The model provider has no Linux run yet.
+The file row of "The contract on Linux" passes for did, wallet and the model
+provider on the recorded aarch64 host named in "The file row", and on GitHub's
+x86-64 runner.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -76,7 +77,22 @@ their storage, and without `unlink` wallet's init fails. The same run dropped
 `access`, which glibc also calls there, and every journey still passed, so it is
 not admitted. The storage row is shared, so did and the model also receive
 `unlink`, though only wallet failed without it; each already holds `unlinkat`,
-which does the same thing.
+which does the same thing. The model also admits `epoll_wait` on x86-64, the
+older form of `epoll_pwait`: a logging filter named it (run 42448113772), and with
+it dropped alone both model journeys failed (run 42454795461).
+
+TODO, x86-64 drop-one not yet run: the model's runtime calls `epoll_create1`,
+`epoll_ctl`, `epoll_pwait`, `eventfd2`, `exit`, `flock`, `geteuid` and `rseq`
+were each refused alone only on aarch64 (model-drop1/aarch64-af92d32f*.log). On
+x86-64 the model journeys pass with them, which shows the list is enough there,
+not that each call is needed there. The same holds for the seven shared
+`LAUNCH_ESSENTIALS` entries below and for the model's five argument-checked
+rules (`clone`, `socketpair`, `fcntl`, `prlimit64`, `futex`). Each needs a run on
+GitHub's x86-64 runner that refuses it alone and runs the three `linux_model_*`
+tests (and the did and wallet journeys for a launch entry). `munmap` is a stated
+exception, not a measured need, so a green drop-one would not remove it. The
+x86-64-only rows (`epoll_wait`, `arch_prctl`, `poll`, `mkdir`, `unlink`) and the
+x86-64 loader entries already have that run (42454795461).
 
 The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
 nothing, so they take no row and add no syscall. An allow form with no row is a
@@ -443,18 +459,22 @@ is decided here. `install_landlock` is the one kernel caller of that order.
 
 ## The file row
 
-The file row passes for `wallet-provider` and `did-provider` on one recorded host,
-under the lab stand-in. This is not the Runtime, and it does not count toward
-B4-R. `linux` stays out of `DECLARED_CONFINED_OS`: the model provider has no Linux
-run, and the departures under "What this does not cover" stay open too.
+The file row passes for `wallet-provider`, `did-provider` and `model-provider` on
+the recorded aarch64 host and on GitHub's x86-64 runner, under the lab stand-in.
+This is not the Runtime, and it does not count toward B4-R. `linux` stays out of
+`DECLARED_CONFINED_OS`: the departures under "What this does not cover" stay open,
+and B4's Linux cells are credited per architecture and boundary, not flipped.
 
     host: linux/aarch64, Ubuntu 24.04.5 in UTM, kernel 7.0.0-42-generic, Landlock ABI 8
     rustc 1.91.0, binary sha256 e567baad76790ac298a9aa951cb6689a4de0d31c58b97409e92076eeef127160
-    cargo test --locked (capsules/wallet-provider), umask 022: 438 passed, 109 passed in tests/confine.rs
+    cargo test --locked (capsules/wallet-provider), umask 022: 438 passed, 109 passed in tests/confine.rs (did and wallet)
+    cargo test --locked --test confine at the model leg's head: 114 passed (did, wallet and model);
+      receipt ~/Sparks/office/evidence/b4-x86/pr1549-42900e7c-aarch64.log
+    x86-64, GitHub ubuntu-24.04, kernel 7.0.0-1017-azure: the same 114 passed (run 42456977016)
 
 Every control call succeeded, and under the ruleset the two inside calls and the
 read of the bound executable succeeded while the other six answered `EACCES` (13).
-The outside effect was refused by the kernel for both providers and created
+The outside effect was refused by the kernel for each provider and created
 nothing. Wallet's `Init` is that effect. did's `Init` records the root and writes
 nothing, so its first write is.
 
@@ -515,10 +535,15 @@ against each binary on this host; the run shows only that they are enough for bo
 providers on this distribution. Other distributions may keep them elsewhere, in
 which case the start is refused rather than unconfined.
 
+The `libm.so.6` entry goes only to providers that map it: `landlock_loader_paths`
+appends `LIBM_LANDLOCK_LOADER_PATHS` for those in `LIBM_LOADER_USERS`. That is the
+model and the wallet on aarch64, where the wallet's start exits 127 without it, and
+the model alone on x86-64 (run 42454795461). did never carries it.
+
 Two departures from "The frame" below stay open, so this row is lab evidence and
 not the designed policy:
 
-- **The loader.** This dynamic build needs its interpreter and three libraries,
+- **The loader.** This dynamic build needs its interpreter and library rules,
   where the frame allows no library rule. With the interpreter executable and
   `execve` on the list, a compromised provider could run a file it can read, such
   as one from its own `STORAGE_ROOT`, through the interpreter. That program runs
@@ -803,6 +828,17 @@ oracle text rather than the Linux policy:
 `profile_denies_network`. `linux` joins `DECLARED_CONFINED_OS` only when the
 Linux counterparts exist and pass, and the gate then holds Linux to them (027).
 Until then, adding `linux` fails the gate on purpose.
+
+The model provider's three Linux tests are `linux_model_journey_runs_under_the_seccomp_allow_list`,
+`linux_model_file_row_is_refused_outside_storage_root` and
+`linux_model_filter_admits_threads_and_refuses_new_processes`. The model's filter
+writes some Linux ABI values out, because it is built on macOS too, and
+`linux_abi_constants_match_libc` checks them against libc on Linux. The model's
+literal allow list for each architecture, which
+`seccomp_model_program_lets_run_exactly_the_listed_calls` compares with the
+numbers its program lets run, and the forbidden-call table are checked against
+`libc::SYS_*` on the Linux host of each architecture by
+`model_syscall_lists_match_libc`.
 
 Today `sandbox_gate` requires `/usr/bin/sandbox-exec`, and
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` explicitly expects

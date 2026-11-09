@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use elastos_runtime::capability::evaluator::ShellPassthroughVerifier;
 use elastos_runtime::capability::{
-    Action, AutoGrantVerifier, CapabilityManager, CapabilityStore, GrantDuration,
-    PendingRequestStore, PolicyEvaluator, PolicyOutcome, ResourceId, RulesVerifier,
-    TokenConstraints,
+    pending::PendingCapabilityRequest, Action, AutoGrantVerifier, CapabilityManager,
+    CapabilityStore, GrantDuration, PendingRequestStore, PolicyEvaluator, PolicyOutcome,
+    ResourceId, RulesVerifier, Settler, TokenConstraints,
 };
 use elastos_runtime::content::{ContentResolver, NullFetcher, ResolverConfig};
 use elastos_runtime::namespace::NamespaceStore;
@@ -233,7 +233,11 @@ async fn test_deny_capability_request() {
 
     // Deny the request
     let result = pending_store
-        .deny_request(&request.id.to_string(), "Access denied by policy")
+        .deny_request_by(
+            &request.id.to_string(),
+            "Access denied by policy",
+            Settler::Shell,
+        )
         .await;
 
     assert!(result.is_ok());
@@ -244,8 +248,9 @@ async fn test_deny_capability_request() {
 
     let updated = updated.unwrap();
     match &updated.status {
-        elastos_runtime::capability::RequestStatus::Denied { reason } => {
+        elastos_runtime::capability::RequestStatus::Denied { reason, settled_by } => {
             assert_eq!(reason, "Access denied by policy");
+            assert_eq!(*settled_by, Settler::Shell);
         }
         _ => panic!("Expected Denied status"),
     }
@@ -275,7 +280,7 @@ async fn test_deny_nonexistent_request_fails() {
     let (_, _, pending_store) = create_test_infra();
 
     let result = pending_store
-        .deny_request("nonexistent-request-id", "Denied")
+        .deny_request_by("nonexistent-request-id", "Denied", Settler::Shell)
         .await;
 
     assert!(result.is_err());
@@ -340,13 +345,13 @@ async fn test_cannot_deny_already_denied_request() {
 
     // First deny should succeed
     let result1 = pending_store
-        .deny_request(&request.id.to_string(), "Denied")
+        .deny_request_by(&request.id.to_string(), "Denied", Settler::Shell)
         .await;
     assert!(result1.is_ok());
 
     // Second deny should fail
     let result2 = pending_store
-        .deny_request(&request.id.to_string(), "Denied again")
+        .deny_request_by(&request.id.to_string(), "Denied again", Settler::Shell)
         .await;
     assert!(result2.is_err());
 }
@@ -893,6 +898,17 @@ async fn test_namespace_cid_returned_on_write() {
     assert!(result.namespace_cid.to_string().contains("sha256"));
 }
 
+/// One session's granted requests, projected from the store's global list.
+async fn session_granted(
+    store: &PendingRequestStore,
+    session_id: &str,
+) -> Vec<PendingCapabilityRequest> {
+    let granted = store.list_granted().await.into_iter();
+    granted
+        .filter(|r| r.session_id.to_string() == session_id)
+        .collect()
+}
+
 #[tokio::test]
 async fn test_session_info_capabilities_count() {
     let (session_registry, capability_manager, pending_store) = create_test_infra();
@@ -903,7 +919,7 @@ async fn test_session_info_capabilities_count() {
     let session_id = session.id.to_string();
 
     // Initially zero granted capabilities
-    let granted = pending_store.list_session_granted(&session_id).await;
+    let granted = session_granted(&pending_store, &session_id).await;
     assert_eq!(granted.len(), 0, "should start with 0 capabilities");
 
     // Create and grant first capability
@@ -928,7 +944,7 @@ async fn test_session_info_capabilities_count() {
         .await
         .unwrap();
 
-    let granted = pending_store.list_session_granted(&session_id).await;
+    let granted = session_granted(&pending_store, &session_id).await;
     assert_eq!(
         granted.len(),
         1,
@@ -957,7 +973,7 @@ async fn test_session_info_capabilities_count() {
         .await
         .unwrap();
 
-    let granted = pending_store.list_session_granted(&session_id).await;
+    let granted = session_granted(&pending_store, &session_id).await;
     assert_eq!(
         granted.len(),
         2,
@@ -973,7 +989,7 @@ async fn test_session_info_capabilities_count() {
         )
         .await;
 
-    let granted = pending_store.list_session_granted(&session_id).await;
+    let granted = session_granted(&pending_store, &session_id).await;
     assert_eq!(
         granted.len(),
         2,
@@ -1007,7 +1023,7 @@ async fn test_session_info_capabilities_count() {
         .await
         .unwrap();
 
-    let granted = pending_store.list_session_granted(&session_id).await;
+    let granted = session_granted(&pending_store, &session_id).await;
     assert_eq!(
         granted.len(),
         2,

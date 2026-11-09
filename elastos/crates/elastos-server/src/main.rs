@@ -57,6 +57,13 @@ const ELASTOS_VERSION: &str = env!("ELASTOS_VERSION");
 
 #[cfg(unix)]
 fn is_interactive_frontdoor_command(argv: &[String]) -> bool {
+    // The installer runs setup with stdin from /dev/null. Output on a terminal
+    // still means someone watches it, and Ctrl+C must stop it. Setup's writes
+    // already survive a killed process: locks are released and staging is
+    // removed by the next run.
+    if argv.first().is_some_and(|arg| arg == "setup") {
+        return std::io::stdout().is_terminal();
+    }
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return false;
     }
@@ -119,8 +126,8 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0:3000")]
         addr: String,
 
-        /// Storage directory
-        #[arg(long, default_value = "/tmp/elastos/storage")]
+        /// Storage directory (default: storage under the Home data directory)
+        #[arg(long, default_value_os_t = default_data_dir().join("storage"))]
         storage_path: PathBuf,
 
         /// Capsule directory to serve (web capsule or MicroVM)
@@ -1345,7 +1352,7 @@ async fn run() -> anyhow::Result<()> {
     ) {
         match NOFILE_RAISE.get() {
             Some(Ok((before, after))) => {
-                tracing::info!("open-file soft limit {after} (was {before})")
+                tracing::debug!("open-file soft limit {after} (was {before})")
             }
             Some(Err(err)) => tracing::warn!("could not raise open-file limit: {err}"),
             None => {}
@@ -2288,7 +2295,11 @@ pub(crate) fn open_browser(url: &str) {
 pub(crate) async fn create_runtime(
     storage_path: impl AsRef<std::path::Path>,
 ) -> anyhow::Result<Runtime> {
-    let storage = Arc::new(LocalFSProvider::new(storage_path.as_ref().to_path_buf()).await?);
+    let path = storage_path.as_ref();
+    let storage = LocalFSProvider::new(path.to_path_buf())
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot open storage {}: {e}", path.display()))?;
+    let storage = Arc::new(storage);
 
     // Components have a dedicated provider; host-specific VM providers remain
     // behind the same Runtime compute contract.
@@ -2629,6 +2640,12 @@ mod tests {
             assert_eq!(super::should_isolate_process_group(&args), !interactive);
         }
         assert!(super::should_isolate_process_group(&["serve".to_string()]));
+        // Installer setup has stdin from /dev/null; a watched terminal still
+        // keeps it in the foreground group so Ctrl+C stops it.
+        assert_eq!(
+            super::should_isolate_process_group(&["setup".to_string()]),
+            !std::io::stdout().is_terminal()
+        );
     }
 
     #[test]
