@@ -1839,7 +1839,34 @@ class SourceRecordTest(unittest.TestCase):
             self.assertEqual(fixture_git.shared_config(source), config, "the fixture's shared git config changed")
             receipt = stage / "platform-input.json"
             bound = json.loads(receipt.read_text())["source"]["commit"] if receipt.is_file() else None
-            self.assertEqual(bound, commit, "record bound GIT_DIR's repository")
+            self.assertEqual(bound, commit, "a source read resolved GIT_DIR's repository, not the fixture")
+
+    def test_record_leaves_a_same_commit_git_dir_index_unchanged(self):
+        """GIT_DIR names a clone at the fixture's commit, so a leaked read passes the
+        identity check and reaches ``git status``, which would refresh the clone's index."""
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source, stage, args, commit, tree, git = self.record_fixture(root)
+            env = fixture_git.fixture_git_env(root)
+            victim = root / "victim"
+            subprocess.run(["git", "clone", "--quiet", str(source), str(victim)], env=env, check=True,
+                           capture_output=True)
+            for name in ("components.json", "Cargo.lock"):
+                os.utime(victim / name, (1, 1))  # stale index entries that a leaked status rewrites
+            index = (victim / ".git" / "index").read_bytes()
+            before = fixture_git.repo_state(victim)
+            checkouts = (source, victim, Path(__file__).resolve().parent)
+            configs = [fixture_git.shared_config(path) for path in checkouts]
+            pointed = {"GIT_DIR": str(victim / ".git"), "GIT_WORK_TREE": str(victim)}
+            run = self.fixture_run(inputs.run)
+            with patch.object(inputs, "SOURCE_ROOT", source), patch.object(inputs, "run", side_effect=run), \
+                    patch.dict(os.environ, pointed):
+                inputs.record(args, env=env)
+            self.assertEqual((victim / ".git" / "index").read_bytes(), index, "a git read rewrote GIT_DIR's index")
+            self.assertEqual(fixture_git.repo_state(victim), before, "a source read wrote to GIT_DIR's repo")
+            self.assertEqual([fixture_git.shared_config(path) for path in checkouts], configs,
+                             "the fixture's, GIT_DIR's or this checkout's shared git config changed")
+            self.assertEqual(inputs.verify(stage)["source"]["commit"], commit)
 
 
 
