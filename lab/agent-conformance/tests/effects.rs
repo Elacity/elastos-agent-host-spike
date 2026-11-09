@@ -1136,9 +1136,9 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
     let view = standin
         .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
         .map_err(|(_, reason)| reason)?;
-    match grants::live_grant_state(&view) {
-        Ok("pending:0 grants:0") => {}
-        Ok(state) => return Err(state.to_owned()),
+    match grants::live_grant_state(&view, &BTreeSet::new()) {
+        Ok(grants::GrantCensus::Empty) => {}
+        Ok(state) => return Err(format!("{state:?}")),
         Err(reason) => return Err(reason.to_owned()),
     }
     let listed = standin
