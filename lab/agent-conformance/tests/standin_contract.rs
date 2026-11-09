@@ -143,8 +143,8 @@ fn standin_matches_ra1_fields() {
     );
 
     let shell = standin
-        .get_capability_list(Caller::Shell, None)
-        .expect("the stand-in returns the seeded shell list");
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
+        .expect("the stand-in returns the seeded shell scope list");
     assert_eq!(
         request_ids(&shell),
         BTreeSet::from(["req-live".to_owned()]),
@@ -900,7 +900,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
     );
 
     let both_live = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists both live grants before the cancel");
     assert_eq!(
         request_ids(&both_live),
@@ -975,7 +975,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
     );
 
     let after_cancel = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the live grants after the cancel");
     assert_eq!(
         request_ids(&after_cancel),
@@ -1396,7 +1396,7 @@ fn standin_refuses_a_content_bundle_at_the_admission_seam() {
         .get_capsules(Caller::Shell)
         .expect("the stand-in lists the app instance");
     let grants_before = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the app grant");
 
     let content = SignedBundle::content();
@@ -1441,7 +1441,7 @@ fn standin_refuses_a_content_bundle_at_the_admission_seam() {
         Ok(body) => panic!("a content CID must not launch: {body}"),
     }
     let grants_after = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the grants after the refusal");
     assert_eq!(
         grants_after, grants_before,
@@ -1494,7 +1494,7 @@ fn assert_admission_refused(standin: &mut StandIn, shared: &SignedBundle, reason
         .get_capsules(Caller::Shell)
         .expect("the stand-in lists the capsules before");
     let grants_before = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the grants before");
     let refused = standin.admit_resident(
         shared.path(),
@@ -1518,7 +1518,7 @@ fn assert_admission_refused(standin: &mut StandIn, shared: &SignedBundle, reason
     );
     assert_eq!(
         standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
             .expect("the stand-in lists the grants after"),
         grants_before,
         "the refused admission minted no grant"
