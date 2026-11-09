@@ -1713,9 +1713,13 @@ fn handle_library_request(
             Ok(json!({ "deleted_uri": target.uri }))
         }
         ObjectProviderRequest::EmptyTrash { principal_id } => {
-            let root = crate::auth::principal_localhost_root(&principal_id);
+            let root =
+                crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?
+                    .localhost_root()
+                    .to_string();
             let trash_root = format!("{root}/.Trash");
-            let target = library_target(data_dir, &principal_id, &trash_root)?;
+            let target = library_target(data_dir, &principal_id, &trash_root)
+                .with_context(|| format!("Library empty Trash at {trash_root}"))?;
             refuse_deleting_published(data_dir, &principal_id, &target.uri)?;
             let mut deleted_uris = Vec::new();
             if target.path.exists() {
@@ -10770,6 +10774,45 @@ mod r5a_tests {
             ObjectProviderRequest::List {
                 principal_id: r4_fixture::ID.into(),
                 uri: None,
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn empty_trash_resolves_agent_root_before_the_remaining_target_gate() {
+        let agent = home(PrincipalKind::Agent);
+        let result = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(
+            result.as_ref().is_err_and(|error| error
+                .to_string()
+                .contains(&format!("{}/.Trash", r4_fixture::AGENT_ROOT))),
+            "{result:?}"
+        );
+        let human = home(PrincipalKind::Human);
+        let emptied = handle_library_request(
+            human.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(emptied["deleted_count"], 0);
+        let absent = tempfile::tempdir().unwrap();
+        let result = handle_library_request(
+            absent.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
             },
         );
         assert!(
