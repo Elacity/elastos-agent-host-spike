@@ -8522,7 +8522,9 @@ fn library_events(
     since: Option<u64>,
     limit: Option<usize>,
 ) -> anyhow::Result<Vec<LibraryEvent>> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let uri_filter = uri_filter
         .map(|uri| clean_library_uri(&root, uri))
         .transpose()?;
