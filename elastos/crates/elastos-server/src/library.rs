@@ -10074,12 +10074,16 @@ mod publish_tests {
             .register_sub_provider("content", content.clone())
             .await
             .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::auth::principal_localhost_root(principal);
+        crate::auth::store_test_human_principal(dir.path(), principal);
+        crate::auth::store_test_principal_root_protection_for(dir.path(), principal, &root);
         Home {
-            dir: tempfile::tempdir().unwrap(),
+            dir,
             registry,
             content,
             principal,
-            root: crate::auth::principal_localhost_root(principal),
+            root,
         }
     }
 
@@ -10473,6 +10477,12 @@ mod publish_tests {
         let bruno_uri = format!(
             "{}/Documents/same.txt",
             crate::auth::principal_localhost_root(bruno_id)
+        );
+        crate::auth::store_test_human_principal(alma.dir.path(), bruno_id);
+        crate::auth::store_test_principal_root_protection_for(
+            alma.dir.path(),
+            bruno_id,
+            &crate::auth::principal_localhost_root(bruno_id),
         );
         let as_bruno = |op: &str, mut body: Value| {
             body["op"] = json!(op);
