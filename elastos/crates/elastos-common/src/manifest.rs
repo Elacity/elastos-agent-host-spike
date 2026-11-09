@@ -1,6 +1,6 @@
 //! Capsule manifest types
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -116,9 +116,11 @@ pub struct CapsuleManifest {
     #[serde(default)]
     pub microvm: Option<MicroVmConfig>,
 
-    /// Required providers (scheme -> source, e.g. "local" -> "built-in")
+    /// Required providers (scheme -> source, e.g. "local" -> "built-in").
+    ///
+    /// Ordered so the signed serialization does not depend on a hash order.
     #[serde(default)]
-    pub providers: Option<std::collections::HashMap<String, String>>,
+    pub providers: Option<BTreeMap<String, String>>,
 
     /// Capsule-relative directory holding this capsule's own app icon set.
     ///
@@ -2536,6 +2538,18 @@ mod tests {
 
         let manifest: CapsuleManifest = serde_json::from_str(json).unwrap();
         assert!(manifest.providers.is_none());
+    }
+
+    /// S0: provider keys serialize in map order, so the signed bytes have one spelling.
+    #[test]
+    fn test_providers_serialize_in_key_order() {
+        let json = r#"{"schema":"elastos.capsule/v1","version":"0.1.0","name":"ordered","role":"app","type":"wasm","entrypoint":"main.wasm","providers":{"zeta":"z","mu":"m","beta":"b","alpha":"a"}}"#;
+        let manifest: CapsuleManifest = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(manifest.providers.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"alpha":"a","beta":"b","mu":"m","zeta":"z"}"#
+        );
     }
 
     #[test]
