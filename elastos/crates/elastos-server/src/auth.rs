@@ -7499,6 +7499,16 @@ impl ResolvedPrincipalRoot {
             .map_err(|err| anyhow!(err))
     }
 
+    /// The localhost root this principal owns. A remote principal owns no
+    /// localhost path, so it has the empty root: every path resolver refuses
+    /// an empty root, and no caller falls back to the principal-id rule.
+    pub(crate) fn localhost_root(&self) -> &str {
+        match &self.0 {
+            RootArm::Local(root) => root,
+            RootArm::Remote => "",
+        }
+    }
+
     /// The device arm for a launch token whose signature already verified
     /// against `did`, the Runtime's trusted signer. A subordinate Runtime
     /// trusts its parent's DID without holding that device key, so this takes
@@ -10991,6 +11001,34 @@ pub(crate) fn store_test_human_principal(data_dir: &Path, principal_id: &str) ->
     })
     .unwrap();
     record
+}
+
+#[cfg(test)]
+pub(crate) mod r4_fixture {
+    use super::*;
+    pub const ID: &str = "person:local:r4";
+    pub const HUMAN_ROOT: &str = "localhost://Users/b2caa01d2e3d5fb2ec0d1478";
+    pub const AGENT_ROOT: &str = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478";
+
+    pub fn store(data_dir: &Path, kind: PrincipalKind) {
+        store_test_human_principal(data_dir, ID);
+        // As in the auth Agent tests: change the stored fixture under the lock.
+        mutate_auth_state(data_dir, |state| {
+            let record = state
+                .principals
+                .iter_mut()
+                .find(|p| p.principal_id == ID)
+                .unwrap();
+            record.kind = kind;
+            record.localhost_root = match kind {
+                PrincipalKind::Human => HUMAN_ROOT,
+                PrincipalKind::Agent => AGENT_ROOT,
+            }
+            .to_string();
+            Ok(())
+        })
+        .unwrap();
+    }
 }
 
 /// The test protection written under a caller-named root, so a test can put
