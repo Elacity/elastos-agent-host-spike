@@ -5667,15 +5667,17 @@ mod tests {
             .unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
             let status = response.status();
-            (
-                status,
-                serde_json::from_slice(
-                    &axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                        .await
-                        .unwrap(),
-                )
-                .unwrap(),
-            )
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            // A refusal body is text, not JSON. Return that text so a caller's
+            // status assertion names the refusal instead of a parse panic.
+            let value = if status.is_success() {
+                serde_json::from_slice(&body).unwrap()
+            } else {
+                serde_json::json!({ "unparsed_body": String::from_utf8_lossy(&body) })
+            };
+            (status, value)
         }
 
         async fn drain_readiness_worker(root: &Path) {
