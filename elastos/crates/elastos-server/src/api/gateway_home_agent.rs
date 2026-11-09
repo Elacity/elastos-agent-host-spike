@@ -223,3 +223,72 @@ pub(super) fn validate_legacy_workspace_bytes(bytes: &[u8]) -> anyhow::Result<se
     validate_workspace(&workspace)?;
     Ok(serde_json::from_slice(bytes)?)
 }
+
+#[cfg(test)]
+mod r3_tests {
+    use super::super::r3_stored_root_tests::{fixture, seed, HUMAN_ROOT, NEEDS_PROTECTION};
+    use super::*;
+
+    #[test]
+    fn agent_uri_uses_stored_root() {
+        let (_dir, context) = fixture(true);
+        assert_eq!(
+            home_agent_workspace_uri(&context),
+            "localhost://UsersAI/12f27c37e15084ebad04eaa4/.AppData/ElastOS/HomeAgent/workspace.json",
+            "R3 home_agent URI uses UsersAI"
+        );
+    }
+
+    #[test]
+    fn agent_read_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        seed(dir.path(), ".AppData/ElastOS/HomeAgent/workspace.json",
+            br#"{"schema":"elastos.home-agent.workspace/v1","revision":7,"document":{"draft":"agent draft"}}"#);
+        let result = load_home_agent_workspace(dir.path(), &context)
+            .map(|workspace| workspace.revision)
+            .map_err(|err| err.to_string());
+        assert_eq!(result, Ok(7), "R3 home_agent read uses UsersAI");
+    }
+
+    #[test]
+    fn agent_write_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        let request = serde_json::from_value(serde_json::json!({
+            "schema": "elastos.home-agent.workspace/v1", "if_revision": 0,
+            "document":{"draft":"agent draft"}
+        }))
+        .unwrap();
+        let result = save_home_agent_workspace(dir.path(), &context, request);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            NEEDS_PROTECTION,
+            "R3 home_agent write reaches UsersAI protection gate"
+        );
+    }
+
+    #[test]
+    fn human_keeps_workspace_round_trip() {
+        let (dir, context) = fixture(false);
+        assert_eq!(
+            home_agent_workspace_uri(&context),
+            format!("{HUMAN_ROOT}/.AppData/ElastOS/HomeAgent/workspace.json")
+        );
+        assert_eq!(
+            load_home_agent_workspace(dir.path(), &context)
+                .unwrap()
+                .revision,
+            0
+        );
+        let request = serde_json::from_value(serde_json::json!({
+            "schema": "elastos.home-agent.workspace/v1", "if_revision": 0,
+            "document":{"draft":"human draft"}
+        }))
+        .unwrap();
+        let saved = save_home_agent_workspace(dir.path(), &context, request).unwrap();
+        assert_eq!(saved.revision, 1);
+        assert_eq!(
+            load_home_agent_workspace(dir.path(), &context).unwrap(),
+            saved
+        );
+    }
+}
