@@ -844,12 +844,14 @@ impl StandIn {
         Ok(())
     }
 
-    /// Lab test seam, not a route. Private to this module.
+    /// Lab test seam, not a route. Fixtures use it to store a request record
+    /// the routes do not reach, such as one that is still pending after its
+    /// session stopped.
     ///
     /// Stores one pending request at the current instant. This method reads no
     /// clock and no disk. Its route caller `post_capability_request` runs
     /// `declared_ask` first, so an id it stores carries a declared ask.
-    pub(crate) fn seed_request(
+    pub fn seed_request(
         &mut self,
         request_id: &str,
         session_id: &str,

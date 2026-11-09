@@ -1451,6 +1451,26 @@ fn standin_stopped_run_leaves_no_live_grant() {
         standin_a12_census_settles(&stopped_run, &home, port).is_ok(),
         "the stand-in leaves no live grant, live instance, pending request or physical leftover after both stops"
     );
+    stopped_run
+        .seed_request(
+            "req-late",
+            "component-1",
+            "localhost://Public/resident-instances/shared.txt",
+            "read",
+            "read after the stop",
+        )
+        .expect("the stand-in stores one pending request after the stop");
+    let census = standin_a12_census(&stopped_run, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason == "pending request leftover"),
+        "the stand-in refuses a pending request after the stop: {census:?}"
+    );
+    stopped_run
+        .post_capability_deny(
+            StandInCaller::Shell,
+            &json!({ "request_id": "req-late", "reason": "settle the late request" }),
+        )
+        .expect("the stand-in denies the late request");
     let leftover = home.temp().join("a12-temp-leftover");
     std::fs::write(&leftover, b"leftover").expect("the stand-in run plants one temp file");
     let census = standin_a12_census(&stopped_run, &home, port);
