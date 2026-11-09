@@ -1008,6 +1008,8 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
                 // Create a pending request — the shell decides whether to grant.
+                let (store, manager) = (&ctx.pending_store, &ctx.capability_manager);
+                crate::api::handlers::capability::retire_dead_grants(store, manager).await;
                 let pending = ctx
                     .pending_store
                     .create_request_with_reason(

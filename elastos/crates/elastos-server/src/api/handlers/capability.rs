@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use elastos_common::localhost::{is_supported_resource_scheme, is_system_only_backend_resource};
 use elastos_runtime::capability::{
-    pending::{PendingCapabilityRequest, PendingRequestStore},
+    pending::{PendingCapabilityRequest, PendingRequestStore, MAX_PENDING_REQUESTS},
     Action, CapabilityManager, CapabilityStore, GrantDuration, PolicyEvaluator, PolicyOutcome,
     RequestStatus, ResourceId, Settler, TokenConstraints,
 };
@@ -122,6 +122,7 @@ pub async fn request_capability(
     // For now, all requests go to pending (no auto-grant policy yet)
     // Future: check if session already has this capability, or if policy allows auto-grant
 
+    retire_dead_grants(&state.pending_store, &state.capability_manager).await;
     let request = state
         .pending_store
         .create_request_with_reason(session.id.clone(), resource, action, input.reason)
@@ -457,28 +458,42 @@ fn capability_output(
     })
 }
 
-/// A granted record whose token still authorises: not revoked by id, not
-/// spent, not past its expiry, and minted in the current epoch.
-async fn is_live(store: &CapabilityStore, r: &PendingCapabilityRequest) -> bool {
-    let Some(token) = r.granted_token() else {
-        return false;
-    };
-    let spent = match token.constraints().max_uses() {
-        Some(max_uses) => store.has_exceeded_uses(token.id(), max_uses).await,
+/// A granted record whose token can still validate, by the Runtime's one
+/// rule (`CapabilityManager::can_still_validate`).
+async fn is_live(manager: &CapabilityManager, r: &PendingCapabilityRequest) -> bool {
+    match r.granted_token() {
+        Some(token) => manager.can_still_validate(token).await,
         None => false,
-    };
-    let expired = token.expiry().is_some_and(|expiry| expiry.is_expired());
-    !store.is_token_revoked(token.id()).await
-        && !spent
-        && !expired
-        && store.is_epoch_valid(token.constraints().epoch())
+    }
+}
+
+/// At capacity, settle each granted record whose token can no longer
+/// validate as denied by the Runtime, so the store's capacity cleanup can
+/// reclaim it. A grant that can still validate is left alone, and below
+/// capacity nothing changes. Both request-creation paths call this first.
+pub async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityManager) {
+    let held = store.list_requests().await;
+    if held.len() < MAX_PENDING_REQUESTS {
+        return;
+    }
+    for r in held {
+        let Some(token) = r.granted_token() else {
+            continue;
+        };
+        if !manager.can_still_validate(token).await {
+            let reason = "grant can no longer validate";
+            store
+                .revoke_request_by(r.id.as_str(), reason, Settler::Runtime)
+                .await;
+        }
+    }
 }
 
 /// Every session's live grants, sorted by session then request id.
 async fn live_capabilities(state: &CapabilityState) -> ListCapabilitiesOutput {
     let mut live = Vec::new();
     for r in state.pending_store.list_requests().await {
-        if is_live(&state.capability_store, &r).await {
+        if is_live(&state.capability_manager, &r).await {
             live.push(r);
         }
     }
