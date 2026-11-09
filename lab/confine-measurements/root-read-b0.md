@@ -1,8 +1,8 @@
 # B0: one macOS root-read baseline for did, wallet and model
 
 Measurement only. This record changes no provider profile and no Runtime code.
-Base: `ea80c9ef` on `claude/confine-b0-rootread`. Host: macOS 26.5.2, arm64,
-Rust 1.91.0, `/usr/bin/sandbox-exec` present.
+Base: `ea80c9ef` on `claude/confine-b0-rootread`. Host: `Darwin 25.5.0 arm64`,
+rustc 1.91.0 (receipt lines 5-6); `sandbox-exec` ran in the suites (229).
 
 The evidence is one receipt,
 `~/Sparks/office/evidence/confine-b0-fix/receipt-6676d467.log`, which pins head
@@ -42,7 +42,9 @@ grant is not enough (`capsules/model-provider/CONFINEMENT.md:101`).
 
 Seatbelt reads narrow in this order: `file-read*` (data, metadata and
 attributes), `file-read-data` (file content), `file-read-metadata` (names and
-attributes), then no rule. The measured candidates are those four rungs.
+attributes), then no rule (Seatbelt operation names, not measured here). did
+and wallet ran `file-read*` as their control and the other three as plants.
+model's control is `file-read-data`; model never ran `file-read*`.
 
 ## Runs
 
@@ -129,13 +131,37 @@ they pass in the metadata and none runs:
   require `init` to serve. `standin_launch_uses_the_generated_profile`
   (`:4261`; ok at 1927 and 2187) requires `init` to answer
   `journal_access_denied`.
-- The did suite holds no generated-profile start (passing tests 342-395).
+- The did suite holds no generated-profile start. Its ok rows in the none run
+  are 346, 367, 371, 372, 377, 389, 390 and 395; none of them requires an
+  `init` answer.
 
 The other five model `generated_profile_*` tests fail in those runs at their
 allow-line comparison with the committed file, before any start (none
-1984-2024). `byte_different_file_at_bound_path_starts` passes in every model run
-(1548, 1737, 1997) because it accepts any exit but 65 and 71; its printed
-outcome is signal 6 under metadata and none (1729, 1989).
+1984-2024).
+
+Launches of the committed `confine.sb` that pass with the line deleted, none of
+which requires an `init` answer:
+
+- `unbound_copy_is_refused_under_profile`, did (395) and wallet (1497): it
+  starts a copy of the binary under `PROFILE_PATH`
+  (`capsules/did-provider/tests/confine.rs:1385`,
+  `capsules/wallet-provider/tests/confine.rs:5808`) and requires `sandbox-exec`
+  to refuse the exec with exit 71, before the binary runs. model's
+  `model_unbound_program_refused_under_profile` (2186,
+  `tests/confine/main.rs:3008`) does the same.
+- `startup_is_refused_when_the_profile_cannot_be_applied`, did (389), wallet
+  (1484) and model (2190): one case binds `PROFILE_PATH` without
+  `STORAGE_ROOT` (did `:1314`, wallet `:3922`, model `:3728`), so the profile
+  does not apply and nothing runs.
+- `bound_executable_digest_mismatch_refuses_start`, model (1975): the lab
+  launch helper refuses a changed copy of `/usr/bin/true` before `spawn`
+  (`:3568`).
+- `byte_different_file_at_bound_path_starts`, model (1997): it runs a
+  byte-different copy of the binary under `PROFILE_PATH` (`:3338`) and fails
+  only on exit 65, or on exit 71 with `execvp()` and `Operation not permitted`
+  on stderr (`:3346-3356`). It passes in every model run (1548, 1737, 1997);
+  the outcome is still running at 2 seconds under data (1547) and signal 6
+  under metadata and none (1729, 1989).
 
 ## Conclusion
 
@@ -143,20 +169,24 @@ With the root line deleted from the committed `confine.sb`:
 
 | Provider | Fails (list) | Passes that start a provider and need an answer |
 |---|---|---|
-| did | 8 committed-profile starts (400-407) | none (342-395) |
+| did | 8 committed-profile starts (400-407) | none |
 | wallet | 15 committed-profile starts, 6 text checks (1502-1522) | `standin_c0` (1430), `standin_start_runs_...` (1433) |
-| model | 10 committed-profile starts, 5 generated-profile oracle checks, 3 text checks (2195-2212) the three model starts above (1990, 2010, 2187) |
+| model | 10 committed-profile starts, 5 generated-profile oracle checks, 3 text checks (2195-2212) | the three model starts above (1990, 2010, 2187) |
 
-The narrower conclusion: for starts that load the committed `confine.sb`,
-`(allow file-read-data (literal "/"))` is the narrowest measured form that
-serves did, wallet and model, and removing the line fails those starts at
-`init`, so on those starts the form is needed. The generated-profile starts
-never ran under a candidate; they show the fixture row works and nothing about
-narrowing or deleting it. Unmeasured: did and wallet starts from a generated
+The narrower conclusion: for starts that load the committed `confine.sb`, run
+the provider binary and wait for its `init` answer (did 8, wallet 15, model 10,
+listed above), `(allow file-read-data (literal "/"))` is the narrowest measured
+form that serves did, wallet and model, and removing the line fails those
+starts at `init`, so on those starts the form is needed. The receipt does not
+show it needed for the committed-profile launches listed above that pass with
+the line deleted, such as `unbound_copy_is_refused_under_profile` in did (395)
+and wallet (1497), which expect `sandbox-exec` to refuse a copy before the
+binary runs. The generated-profile starts never ran under a candidate; they
+show the fixture row works and nothing about narrowing or deleting it. Unmeasured: did and wallet starts from a generated
 profile whose root row is `file-read-data`, and any generated-profile start
 without a root-read row.
 
-On the committed-profile starts, the did and wallet `file-read*` form is broader
+On those init-answer starts, the did and wallet `file-read*` form is broader
 than they need, and the metadata rung fails them for all three providers, which
 agrees with the model document's sentence.
 
@@ -169,7 +199,8 @@ generator renders it is not measured for them.
 
 ## Limits
 
-- Measured on arm64 macOS 26.5.2 only; no x86-64 macOS host was available.
+- Measured on one `Darwin 25.5.0 arm64` host (5); the receipt holds no x86-64
+  run.
 - Each plant ran the whole suite, but the generated-profile starts ran on the
   fixture row in every plant, so they are not results under a candidate form.
 - The six text checks named above all fail when the line is substituted:
@@ -183,6 +214,6 @@ generator renders it is not measured for them.
   `linux_contract_table_covers_every_committed_allow_form` (1279), which the
   `metadata` run fails (864-866). The receipt lists each run's failing set.
 - The measurement covers startup and the journeys in the three suites that
-  load the committed `confine.sb`. It does not enumerate the file operations
+  load the committed `confine.sb` and wait for an `init` answer. It does not enumerate the file operations
   the loader performs, so it does not prove the form will serve a future
   provider that reads the root directory differently.
