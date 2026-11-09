@@ -839,6 +839,9 @@ function controllerFixture() {
     getElementById: () => null, addEventListener() {}, removeEventListener() {} };
   Object.assign(window, { setTimeout, clearTimeout, setInterval, clearInterval,
     requestAnimationFrame: () => 1, cancelAnimationFrame() {} });
+  // These lifecycle tests keep layout inert; Chromium covers scroll/resize.
+  globalThis.requestAnimationFrame = window.requestAnimationFrame;
+  globalThis.ResizeObserver = globalThis.MutationObserver = class { observe() {} disconnect() {} };
   const ctx = { activeSessionId: "one", sessions: [{ id: "one", messages: [] }, { id: "two", messages: [] }],
     streamGeneration: 0, turnBusy: true, streamTimer: 0, followUpQueue: [] };
   controller.bindAgentStream(ctx, { streamEl: () => null, titleEl: () => null });
@@ -897,6 +900,10 @@ function createDomNode(tag = "div") {
     removeEventListener() {},
     setAttribute() {},
     scrollIntoView() {},
+    scrollTo({ top, behavior }) {
+      assert.equal(behavior, "instant");
+      this.scrollTop = Math.max(0, Math.min(top, this.scrollHeight - this.clientHeight));
+    },
     contains() { return false; },
     querySelectorAll() { return []; },
     closest() { return null; },
