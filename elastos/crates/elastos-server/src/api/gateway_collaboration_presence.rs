@@ -215,11 +215,11 @@ pub(super) fn authenticated_presence_presentation_for_context(
     if principal.principal_id != context.principal_id() {
         return Err(HomePresenceAuthenticationError::Denied);
     }
-    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
+    let localhost_root = context.root().localhost_root();
     let profile = crate::collaboration_profile_authority::load_profile_authority(
         &state.data_dir,
         context.principal_id(),
-        &localhost_root,
+        localhost_root,
     )
     .map_err(|_| HomePresenceAuthenticationError::Internal)?;
     let profile = profile.ok_or(HomePresenceAuthenticationError::ProfileRequired)?;
@@ -1070,4 +1070,5 @@ mod tests {
             presence_heartbeat_request_id(&changed, 44).unwrap()
         );
     }
+
 }

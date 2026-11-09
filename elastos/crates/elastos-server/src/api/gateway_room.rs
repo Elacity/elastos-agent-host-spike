@@ -1341,11 +1341,11 @@ pub(super) fn trusted_chat_room_profile_authority(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument> {
-    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
+    let localhost_root = context.root().localhost_root();
     crate::collaboration_profile_authority::load_profile_authority(
         data_dir,
         context.principal_id(),
-        &localhost_root,
+        localhost_root,
     )?
     .ok_or_else(|| anyhow::anyhow!("signed Profile is unavailable"))
 }
@@ -2702,3 +2702,4 @@ pub(super) fn room_service_join_error_response(err: tokio::task::JoinError) -> R
     )
         .into_response()
 }
+

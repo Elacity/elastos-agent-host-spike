@@ -2117,12 +2117,11 @@ mod discovery_summary_tests {
 
         assert_eq!(fixture.store.snapshot().unwrap().contacts().len(), 1);
         let response_read = fixture.store.read_only_snapshot().unwrap();
-        let context = HomeLaunchTokenContext::for_test(
-            fixture.store.principal_id().to_string(),
-            "session".to_string(),
-            Some("proof".to_string()),
-            "grant".to_string(),
+        let principal = crate::auth::store_test_human_principal(
+            fixture.store.data_root(),
+            fixture.store.principal_id(),
         );
+        let context = stored_passkey_principal_context(fixture.store.data_root(), &principal).unwrap();
         let authority = ConfiguredContactAuthority {
             profile: fixture.local_profile.clone(),
             store: fixture.store.clone(),
@@ -2280,14 +2279,10 @@ mod discovery_summary_tests {
         fs::create_dir_all(&data_root).unwrap();
         fs::set_permissions(&data_root, fs::Permissions::from_mode(0o700)).unwrap();
         let principal_id = "person:local:legacy-people-ignore".to_string();
+        let record = crate::auth::store_test_human_principal(&data_root, &principal_id);
         let protection =
             crate::auth::store_test_principal_root_protection(&data_root, &principal_id);
-        let context = HomeLaunchTokenContext::for_test(
-            principal_id.clone(),
-            "session".to_string(),
-            Some("proof".to_string()),
-            "grant".to_string(),
-        );
+        let context = stored_passkey_principal_context(&data_root, &record).unwrap();
         let legacy_path = home_services_peer_contacts_path(&data_root, &context).unwrap();
         let legacy_state = HomeServicesPeerContactsState {
             schema: HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string(),
@@ -2904,7 +2899,7 @@ pub(super) async fn services_offer_update(
 fn home_services_selection_state_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/.AppData/ElastOS/Home/services-state.json",
-        crate::auth::principal_localhost_root(context.principal_id())
+        context.root().localhost_root()
     )
 }
 
@@ -2935,7 +2930,7 @@ fn home_services_default_selection_state(
     HomeServicesSelectionState {
         schema: HOME_SERVICES_STATE_SCHEMA.to_string(),
         principal_id: context.principal_id().to_string(),
-        localhost_root: crate::auth::principal_localhost_root(context.principal_id()),
+        localhost_root: context.root().localhost_root().to_string(),
         updated_at: 0,
         local_offer_ids: BTreeSet::new(),
         remote_offer_ids: BTreeSet::new(),
@@ -3043,7 +3038,7 @@ fn home_state_write_error(err: anyhow::Error, path: &std::path::Path) -> anyhow:
 fn home_services_requests_state_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/.AppData/ElastOS/Home/services-requests.json",
-        crate::auth::principal_localhost_root(context.principal_id())
+        context.root().localhost_root()
     )
 }
 
@@ -3061,7 +3056,7 @@ fn home_services_default_requests_state(
     HomeServicesRequestsState {
         schema: HOME_SERVICES_REQUESTS_SCHEMA.to_string(),
         principal_id: context.principal_id().to_string(),
-        localhost_root: crate::auth::principal_localhost_root(context.principal_id()),
+        localhost_root: context.root().localhost_root().to_string(),
         updated_at: 0,
         requests: BTreeMap::new(),
         catalog_last_response_at: BTreeMap::new(),
@@ -6839,7 +6834,7 @@ fn home_browser_principal_id(context: &HomeLaunchTokenContext) -> String {
 }
 
 fn home_browser_localhost_root(context: &HomeLaunchTokenContext) -> String {
-    crate::auth::principal_localhost_root(context.principal_id())
+    context.root().localhost_root().to_string()
 }
 
 fn home_desktop_uri(context: &HomeLaunchTokenContext) -> String {
@@ -9373,3 +9368,4 @@ mod home_events_pacing_tests {
         }
     }
 }
+
