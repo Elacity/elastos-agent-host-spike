@@ -368,3 +368,100 @@ pub(super) fn preserve_legacy_home_agent(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod r3_tests {
+    use super::super::r3_stored_root_tests::{fixture, seed, NEEDS_PROTECTION};
+    use super::*;
+
+    #[test]
+    fn agent_location_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        let (uri, path) = object_location(dir.path(), &context, RELATIVE_PATH).unwrap();
+        assert_eq!(uri,
+            "localhost://UsersAI/12f27c37e15084ebad04eaa4/.AppData/ElastOS/Assistant/workspace-v2.json",
+            "R3 v2 location uses UsersAI");
+        assert_eq!(
+            path,
+            dir.path().join(
+                "UsersAI/12f27c37e15084ebad04eaa4/.AppData/ElastOS/Assistant/workspace-v2.json"
+            )
+        );
+    }
+
+    #[test]
+    fn agent_optional_read_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        seed(
+            dir.path(),
+            ".AppData/ElastOS/Assistant/workspace-v2.json",
+            b"agent bytes",
+        );
+        let result = optional_object(dir.path(), &context, RELATIVE_PATH, MAX_BYTES)
+            .map_err(|err| err.to_string());
+        assert_eq!(
+            result,
+            Ok(Some(b"agent bytes".to_vec())),
+            "R3 v2 read uses UsersAI"
+        );
+    }
+
+    #[test]
+    fn agent_legacy_identity_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        seed(
+            dir.path(),
+            ".AppData/ElastOS/Home/browser-state.json",
+            br#"{
+            "schema":"elastos.home.browser-state/v1", "principal_id":"person:local:r3-agent",
+            "localhost_root":"localhost://UsersAI/12f27c37e15084ebad04eaa4",
+            "session":{"windows":[],"agent":{"draft":"legacy agent"}},
+            "layout":null,"recent_targets":[]
+        }"#,
+        );
+        let result = legacy_home_agent(dir.path(), &context).map_err(|err| err.to_string());
+        assert_eq!(
+            result,
+            Ok(Some(serde_json::json!({"draft":"legacy agent"}))),
+            "R3 v2 legacy identity uses UsersAI"
+        );
+    }
+
+    #[test]
+    fn agent_write_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        let initial = read(dir.path(), &context).unwrap();
+        let request = PutRequest {
+            schema: "elastos.assistant.workspace/v2".into(),
+            if_revision: 0,
+            document: serde_json::json!({"draft":"agent draft"}),
+            migration_revision: Some(initial["migration_revision"].as_str().unwrap().into()),
+        };
+        let result = save(dir.path(), &context, request);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            NEEDS_PROTECTION,
+            "R3 v2 write reaches UsersAI protection gate"
+        );
+    }
+
+    #[test]
+    fn human_keeps_workspace_round_trip() {
+        let (dir, context) = fixture(false);
+        let initial = read(dir.path(), &context).unwrap();
+        assert_eq!(initial["revision"], 0);
+        let request = PutRequest {
+            schema: "elastos.assistant.workspace/v2".into(),
+            if_revision: 0,
+            document: serde_json::json!({"draft":"human draft"}),
+            migration_revision: Some(initial["migration_revision"].as_str().unwrap().into()),
+        };
+        let saved = save(dir.path(), &context, request).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({"schema":"elastos.assistant.workspace/v2",
+            "revision":1, "document":{"draft":"human draft"}})
+        );
+        assert_eq!(read(dir.path(), &context).unwrap(), saved);
+    }
+}
