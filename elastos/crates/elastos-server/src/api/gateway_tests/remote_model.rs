@@ -512,6 +512,41 @@ impl TwoRuntimes {
         crate::auth::principal_localhost_root(&self.authority.principal_id)
     }
 
+    /// The context launch verification builds: the stored principal root
+    /// resolved the way `require_home_launch_token_value_from_expected_did`
+    /// resolves it, never the fixture's `for_test` root.
+    fn resolved_context(
+        &self,
+        principal_id: &str,
+        session_id: &str,
+        proof_binding_id: Option<String>,
+        grant_id: &str,
+    ) -> HomeLaunchTokenContext {
+        let data_dir = self.owner.path();
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(
+            data_dir,
+            &crate::api::gateway::gateway_home_token::home_launch_auth_data_dir(data_dir),
+            principal_id,
+        )
+        .expect("fixture principal has a stored root");
+        HomeLaunchTokenContext::resolved(
+            root,
+            principal_id.to_string(),
+            session_id.to_string(),
+            proof_binding_id,
+            grant_id.to_string(),
+        )
+    }
+
+    fn owner_context(&self) -> HomeLaunchTokenContext {
+        self.resolved_context(
+            &self.authority.principal_id,
+            &self.authority.session_id,
+            Some(self.authority.proof_binding_id.clone()),
+            &self.authority.grant_id,
+        )
+    }
+
     fn write_request_record(&self, status: &str) {
         self.write_request_record_with_expiry(status, now_ts() + 3600);
     }
@@ -1636,15 +1671,6 @@ mod denial_authority {
     use crate::api::gateway::gateway_model_service::deny_grant_and_settle;
 
     impl TwoRuntimes {
-        fn owner_context(&self) -> HomeLaunchTokenContext {
-            HomeLaunchTokenContext::for_test(
-                self.authority.principal_id.clone(),
-                self.authority.session_id.clone(),
-                Some(self.authority.proof_binding_id.clone()),
-                self.authority.grant_id.clone(),
-            )
-        }
-
         async fn deny_as(&self, context: &HomeLaunchTokenContext) -> anyhow::Result<String> {
             deny_grant_and_settle(
                 Some(self.registry.clone()),
@@ -2143,12 +2169,7 @@ async fn assistant_and_home_agent_keeps_separate_runs_for_the_same_request_id() 
     let result = crate::api::gateway::gateway_model_service::deny_grant_and_settle(
         Some(fx.registry.clone()),
         fx.owner.path(),
-        &HomeLaunchTokenContext::for_test(
-            fx.authority.principal_id.clone(),
-            fx.authority.session_id.clone(),
-            Some(fx.authority.proof_binding_id.clone()),
-            fx.authority.grant_id.clone(),
-        ),
+        &fx.owner_context(),
         None,
         REQUEST_ID,
     )
