@@ -277,6 +277,10 @@ async fn remote_engine_preparation_replay_close_and_late_input_keep_exact_native
     let requests = provider.calls.lock().await.clone();
     let native = requests.iter().find(|r| r["op"] == "launch").unwrap();
     assert_eq!(native["principal_id"], owner.storage_principal());
+    assert_eq!(
+        native["profile"]["uri"],
+        "localhost://Users/remote-engine-594321e52caebd3b7afc9f03bf002e82d1006a3dfa8e8e96a8619224ad233861/BrowserProfiles/default/profile.ext4"
+    );
     assert!(native["profile"]["disk_path"]
         .as_str()
         .unwrap()
