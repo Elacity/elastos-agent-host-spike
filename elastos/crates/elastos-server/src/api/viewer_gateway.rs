@@ -966,13 +966,57 @@ mod r4_root_tests {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), PrincipalKind::Agent);
         active_viewer(dir.path());
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let now = crate::auth::now_ts();
+        let proof_binding_id = format!("test-binding:{ID}");
+        crate::auth::store_session_grant(
+            dir.path(),
+            elastos_runtime::auth::AuthSessionGrantV1 {
+                schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
+                grant_id: "grant:r4-viewer".into(),
+                session_id: "session:r4-viewer".into(),
+                principal_id: ID.into(),
+                proof_binding_id: proof_binding_id.clone(),
+                issued_at: now,
+                expires_at: now + 600,
+                apps: vec!["documents".into()],
+            },
+        )
+        .unwrap();
         let root = crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), ID).unwrap();
         let context = HomeLaunchTokenContext::resolved(
             root,
             ID.into(),
-            "session".into(),
-            None,
-            "grant".into(),
+            "session:r4-viewer".into(),
+            Some(proof_binding_id),
+            "grant:r4-viewer".into(),
+        );
+        let token = crate::api::gateway::issue_home_launch_token_with_context(
+            dir.path(),
+            "documents",
+            &context,
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "null".parse().unwrap());
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        let live_target = viewer_storage_target(
+            dir.path(),
+            &headers,
+            "documents",
+            "documents",
+            "save",
+            "note.md",
+        )
+        .expect("R4 viewer request reaches stored Agent root");
+        assert_eq!(
+            live_target.localhost_root, AGENT_ROOT,
+            "R4 viewer request root"
+        );
+        assert_eq!(
+            live_target.object_uri,
+            format!("{AGENT_ROOT}/Documents/note.md")
         );
         let uri = viewer_storage_root_uri(dir.path(), &context, "documents", "documents")
             .expect("R4 viewer grant reaches stored Agent root");
