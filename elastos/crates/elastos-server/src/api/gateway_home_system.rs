@@ -5428,31 +5428,6 @@ fn home_services_mark_access_request(
     .into_message()
 }
 
-/// The root a saved decision is keyed by. The requests state is opened under
-/// the root the principal's stored record names, which is the root launch-token
-/// verification resolves before it builds a context
-/// (`require_home_launch_token_value_from_expected_did`, via
-/// `launch_principal_root`). Resolving it here means the decision path never
-/// depends on the caller having passed through that verifier, and a principal
-/// with no stored record refuses.
-fn home_service_decision_context(
-    data_dir: &std::path::Path,
-    context: &HomeLaunchTokenContext,
-) -> anyhow::Result<HomeLaunchTokenContext> {
-    let root = super::gateway_home_token::launch_principal_root(
-        data_dir,
-        &super::home_launch_auth_data_dir(data_dir),
-        context.principal_id(),
-    )?;
-    Ok(HomeLaunchTokenContext::resolved(
-        root,
-        context.principal_id().to_string(),
-        context.session_id().to_string(),
-        context.proof_binding_id().map(ToString::to_string),
-        context.grant_id().to_string(),
-    ))
-}
-
 /// Authorize (principal-scoped lookup), apply and save the decision, then try
 /// to deliver it. `Err` means nothing was saved; `Ok` means the decision is
 /// this Runtime's truth even if `delivery` failed.
@@ -5470,7 +5445,6 @@ fn home_services_record_access_decision(
     if !home_services_request_id_is_valid(request_id) {
         anyhow::bail!("service request id is invalid");
     }
-    let context = &home_service_decision_context(data_dir, context)?;
     let mutation_lock = home_services_mutation_lock(data_dir)?;
     let _guard = mutation_lock
         .lock()

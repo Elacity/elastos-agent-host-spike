@@ -642,7 +642,7 @@ fn wallet_principal_root(
 /// A launch context's root, resolved in the store its grant was validated
 /// against. A missing or unreadable record refuses with a named error; there is
 /// no id-rule fallback.
-pub(in crate::api) fn launch_principal_root(
+fn launch_principal_root(
     data_dir: &std::path::Path,
     auth_data_dir: &std::path::Path,
     principal_id: &str,
