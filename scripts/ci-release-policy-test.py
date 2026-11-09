@@ -3837,14 +3837,29 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     owner.observe()
                     expected = {"phase": phase, "type": "RuntimeError", "message": str(error), "runtime_exited": exited}
                     self.assertEqual(owner.failure, expected)
-                    self.assertEqual(owner.poll(), 1)
+                    self.assertEqual(owner.poll(), self.journey["EXIT_STATUS_UNKNOWN"])
                     # The same cause reaches the CI log line that used to end the job without it.
-                    with self.assertRaisesRegex(AssertionError, re.escape(f"exited before health (exit 1) ({phase}: RuntimeError: {error})")):
+                    with self.assertRaisesRegex(AssertionError, re.escape(f"did not become healthy ({phase}: RuntimeError: {error})")):
                         self.journey["wait_healthy"](owner, "127.0.0.1:1", "Runtime")
                     receipt = owner.finish()
                 self.assertEqual(receipt["status"], "failed")
                 self.assertEqual(receipt["observer_failure"], expected)
                 self.assertEqual(receipt.get("runtime_exited_before_cleanup"), True if exited else None)
+
+    def test_finite_poll_reports_no_status_it_cannot_observe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            owner, _ = self.finite_owner(Path(temp))
+            owner.started, owner.fds = time.monotonic(), {100: 1100}
+            with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd: False}), mock.patch.object(os, "close"):
+                self.assertIsNone(owner.poll())
+                owner.error = "finite_resource_observation_failed"
+                self.assertIs(owner.poll(), self.journey["EXIT_STATUS_UNKNOWN"])
+                self.assertFalse(isinstance(owner.poll(), int))
+                owner.error = None
+                self.assertIsNone(owner.poll())
+            with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd: fd == 1100}), mock.patch.object(os, "close"):
+                self.assertIs(owner.poll(), self.journey["EXIT_STATUS_UNKNOWN"])
+                self.assertFalse(isinstance(owner.poll(), int))
 
     def test_observer_failure_text_is_bounded_and_single_line(self):
         cause = self.journey["observer_failure"]("census", OSError("first line\nsecond " + "x" * 2000))
@@ -3866,7 +3881,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
             (home / "journey-runtime.private.log").write_text("private Runtime log line\n")
             factory = mock.Mock(return_value=owner)
             with self.assertRaisesRegex(AssertionError, re.escape(
-                    "installed Runtime exited before health (exit 1) (census: RuntimeError: finite journey Runtime left its unit)")):
+                    "installed Runtime did not become healthy (census: RuntimeError: finite journey Runtime left its unit)")):
                 case.execute(home, data, evidence, memory_gib=4, finite=factory)
             factory.assert_called_once()
             record = json.loads((evidence / "installed-journeys.json").read_text())
@@ -3911,7 +3926,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
             case = InstalledJourneyTests()
             home, data, evidence, _ = case.fixture(Path(temp) / "journey", "linux")
             (home / "journey-runtime.private.log").write_text("")
-            with self.assertRaisesRegex(AssertionError, "installed Runtime exited before health") as raised:
+            with self.assertRaisesRegex(AssertionError, "installed Runtime did not become healthy") as raised:
                 case.execute(home, data, evidence, memory_gib=4, finite=mock.Mock(return_value=owner))
             saved = (evidence / "installed-journeys.json").read_text()
             failure = json.loads(saved)["finite_memory"]["observer_failure"]

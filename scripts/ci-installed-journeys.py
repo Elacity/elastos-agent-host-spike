@@ -394,6 +394,13 @@ def runtime_unit_helper(control):
         os.close(owner_fd)
 
 
+class ExitStatusUnknown:
+    """The child has stopped, but this outside observer cannot read a status."""
+
+
+EXIT_STATUS_UNKNOWN = ExitStatusUnknown()
+
+
 class FiniteRuntime:
     """Outside observer for one identity-bound transient CI service."""
     def __init__(self, home, data, address, environment, gib, platform=sys.platform):
@@ -500,7 +507,9 @@ class FiniteRuntime:
         return result
 
     def poll(self):
-        return 1 if self.error or self.pid in self.fds and pidfd_exited(self.fds[self.pid]) else None
+        # The helper owns the Runtime's wait, so no exit status reaches this
+        # outside observer. Report the stop without inventing a code.
+        return EXIT_STATUS_UNKNOWN if self.error or self.pid in self.fds and pidfd_exited(self.fds[self.pid]) else None
 
     def observe_once(self, require_runtime=True):
         if (self.metric("memory.max") != str(self.budget) or self.metric("memory.swap.max") != "0"
@@ -1079,9 +1088,9 @@ def wait_healthy(child, address, label, stop=None, log=None):
     while time.monotonic() < deadline and not (stop and stop.is_set()):
         code = child.poll()
         if code is not None:
-            status = f"exit {code}" if code >= 0 else f"signal {-code}"
+            status = (f" (exit {code})" if code >= 0 else f" (signal {-code})") if type(code) is int else ""
             tail = redact(child_output_tail(log)) if log else ""
-            raise AssertionError(f"installed {label} exited before health ({status})"
+            raise AssertionError(f"installed {label} did not become healthy{status}"
                                  + failure_suffix(getattr(child, "failure", None))
                                  + (f"; last output:\n{tail}" if tail else ""))
         try:
