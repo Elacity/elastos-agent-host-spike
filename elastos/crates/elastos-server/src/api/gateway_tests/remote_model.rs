@@ -1764,7 +1764,12 @@ mod denial_authority {
             let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             crate::auth::write_principal_root_object(
-                data_dir, principal_id, root, &uri, &path, bytes,
+                data_dir,
+                principal_id,
+                root,
+                &uri,
+                &path,
+                bytes,
             )
             .unwrap();
         }
@@ -1827,10 +1832,7 @@ mod denial_authority {
             &serde_json::to_vec_pretty(&owner_state).unwrap(),
         );
         let result = fx.deny_as(&context).await;
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "service request not found"
-        );
+        assert_eq!(result.unwrap_err().to_string(), "service request not found");
         assert_eq!(fx.provider_ops().await, ops_before, "no cancel may follow");
         assert_eq!(
             fx.create_run("seed-req-still-open", "qwen-local").await["ok"],
