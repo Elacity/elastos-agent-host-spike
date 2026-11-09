@@ -151,6 +151,20 @@
       c.querySelector(".agent-msg-agent").style.cssText = "position:absolute;top:0;left:0";
       for (const node of c.querySelectorAll(".agent-progress")) node.style.cssText = "position:absolute;top:0;left:0";
     }
+    for (const [label, resize] of [
+      ["content growth with a queued pin scroll", () => { c.style.height = "2700px"; }],
+      ["composer resize with a queued pin scroll", () => { s.style.height = "320px"; }],
+    ]) {
+      await reset();
+      const before = snap();
+      resize();
+      // Deliver a queued pin's scroll notification before ResizeObserver can pin.
+      s.dispatchEvent(new Event("scroll"));
+      await settle();
+      const after = snap();
+      result.cases[label] = { before, after };
+      expect(before.follow && after.follow && !after.jump && after.fromEnd <= 8, label);
+    }
     await reset();
     const native = async (phase, extra = {}, element = s) => {
       const firstEvent = events.length;

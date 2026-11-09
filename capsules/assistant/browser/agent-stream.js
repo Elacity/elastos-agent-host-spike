@@ -175,8 +175,10 @@ function observeTranscript(scroller, content) {
   scroller.addEventListener("scroll", () => {
     // Momentum can continue after a quiet gap closed the input gesture.
     // A smaller range can clamp the scroll before ResizeObserver pins it.
+    // A queued pin event can also arrive after content grows or the viewport
+    // shrinks. Only upward movement belongs to the reader in that case.
     const max = scroller.scrollHeight - scroller.clientHeight;
-    if (!readerPending && atEnd && !nearEnd() && max >= lastScrollMax) {
+    if (!readerPending && atEnd && !nearEnd() && max >= lastScrollMax && scroller.scrollTop < lastScrollTop) {
       readerInput();
       readerMoved = true;
     }
