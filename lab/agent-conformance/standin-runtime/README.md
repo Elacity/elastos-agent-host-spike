@@ -4,7 +4,7 @@ This value is the lab stand-in for the shell-only view of every session's live g
 
 `StandIn::get_capability_list` answers `GET /api/capability/list`. `scope: None` is the plain route. `scope: Some("all_sessions_live")` is `GET /api/capability/list?scope=all_sessions_live`. The caller is `Shell` or `Client { session_id }`, a method argument for the authenticated session. It is not a JSON field.
 
-A shell caller with the plain route receives a body whose only key is `capabilities`; a shell holds no grant, so its own body is empty. A shell caller with `scope: Some("all_sessions_live")` receives a body whose keys are `scope` and `capabilities`. `scope` is `all_sessions_live`. Each entry's keys are `request_id`, `session_id`, `resource`, `action`, `duration` and `granted_at`. Entries are sorted by `session_id`, then `request_id`.
+A shell caller with the plain route receives a body whose only key is `capabilities`; it holds the shell session's own live grants, exactly as the real handler lists the caller's session, and is empty when that session holds none. A shell caller with `scope: Some("all_sessions_live")` receives a body whose keys are `scope` and `capabilities`. `scope` is `all_sessions_live`. Each entry's keys are `request_id`, `session_id`, `resource`, `action`, `duration` and `granted_at`. Entries are sorted by `session_id`, then `request_id`.
 
 A client caller with the plain route receives a body whose only key is `capabilities`. Entries are that session only, sorted by `request_id`. Each entry's keys are `request_id`, `resource`, `action`, `duration` and `granted_at`. A client session with no grant receives `capabilities: []`.
 

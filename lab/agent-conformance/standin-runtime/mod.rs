@@ -105,6 +105,10 @@ pub enum Caller<'a> {
     Client { session_id: &'a str },
 }
 
+/// The stand-in's session id for the shell caller. The plain list route reads
+/// the caller's own session, and the shell is one session in this model.
+const SHELL_SESSION: &str = "shell";
+
 /// Life of one seeded grant. The filter keeps `Live`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Life {
@@ -1194,13 +1198,16 @@ impl StandIn {
     }
 
     /// The plain route's answer: the caller's own session, five fields per
-    /// entry and no `scope` key. A shell is not a session that holds a grant,
-    /// so its own answer is empty.
+    /// entry and no `scope` key. The shell caller answers for the shell
+    /// session, so it lists exactly the grants that session holds.
     fn render_own(&self, caller: Caller<'_>) -> Value {
-        let mut grants = match caller {
-            Caller::Shell => Vec::new(),
-            Caller::Client { .. } => self.kept(caller),
+        let own = match caller {
+            Caller::Shell => Caller::Client {
+                session_id: SHELL_SESSION,
+            },
+            Caller::Client { .. } => caller,
         };
+        let mut grants = self.kept(own);
         grants.sort_by(|left, right| left.request_id.cmp(&right.request_id));
         let capabilities = grants
             .iter()
@@ -3093,7 +3100,7 @@ mod tests {
             .collect()
     }
 
-    /// The shell's plain default: its own session, which holds no grant.
+    /// The shell's plain default: the shell session's own grants.
     fn shell_plain(standin: &StandIn) -> Value {
         standin
             .get_capability_list(Caller::Shell, None)
@@ -3219,6 +3226,44 @@ mod tests {
                 ],
             }),
             "the stand-in shell body is the seeded live grants"
+        );
+    }
+
+    #[test]
+    fn standin_shell_plain_lists_the_shells_own_grants() {
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-shell",
+            SHELL_SESSION,
+            "res-shell",
+            "read",
+            "session",
+            7,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-client",
+            "s-a",
+            "res-client",
+            "read",
+            "once",
+            9,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            shell_plain(&standin),
+            json!({
+                "capabilities": [{
+                    "request_id": "req-shell",
+                    "resource": "res-shell",
+                    "action": "read",
+                    "duration": "session",
+                    "granted_at": 7
+                }]
+            }),
+            "the shell's plain view lists only the shell session's grants"
         );
     }
 
