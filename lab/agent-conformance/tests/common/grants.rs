@@ -1643,9 +1643,11 @@ pub(super) fn live_grant_state(response: &Value) -> Result<&'static str> {
     let grants = response["capabilities"]
         .as_array()
         .ok_or("cleanup grant response requires a capability list")?;
-    // Future Runtime contract: the shell gets an explicit global live scope,
-    // with exhausted/revoked grants filtered by Runtime. A local empty list
-    // and audit events cannot substitute for that evidence.
+    // The scoped route exists today: `GET /api/capability/list?scope=all_sessions_live`
+    // in `elastos/crates/elastos-server/src/api/handlers/capability.rs`
+    // (`list_capabilities`, `live_capabilities`), which filters exhausted,
+    // revoked and expired grants. A local empty list and audit events cannot
+    // substitute for that evidence.
     if response["scope"] != "all_sessions_live" {
         return Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)");
     }
