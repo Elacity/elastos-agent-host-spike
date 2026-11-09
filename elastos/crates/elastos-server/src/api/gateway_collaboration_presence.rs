@@ -782,6 +782,90 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn r4_presence_pass_uses_agent_root() {
+        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        const AGENT_ROOT: &str = "localhost://UsersAI/5dca74bd48d800a148776e87";
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let now = crate::auth::now_ts();
+        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+            elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: "r4-presence-agent".into(),
+                public_key: "r4-key".into(),
+                sign_count: 1,
+                user_verified: true,
+                origin: "https://elastos.elacitylabs.com".into(),
+                rp_id: "elastos.elacitylabs.com".into(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+        );
+        crate::auth::upsert_principal_for_binding_as_role_named(
+            dir.path(),
+            binding,
+            ID.into(),
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("R4 Agent"),
+            now,
+        )
+        .unwrap();
+        crate::auth::r4_fixture::set_kind(
+            dir.path(),
+            ID,
+            crate::auth::PrincipalKind::Agent,
+            AGENT_ROOT,
+        );
+        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, AGENT_ROOT);
+        let record = crate::auth::stored_principal_record(dir.path(), ID)
+            .unwrap()
+            .unwrap();
+        let _profile = crate::collaboration_profile_authority::update_profile_authority(
+            dir.path(),
+            ID,
+            AGENT_ROOT,
+            &record.proof_binding_id,
+            "R4 Agent",
+            None,
+            now,
+        )
+        .unwrap();
+        assert!(
+            crate::collaboration_profile_authority::load_profile_authority(
+                dir.path(),
+                ID,
+                AGENT_ROOT,
+            )
+            .unwrap()
+            .is_some()
+        );
+        let path =
+            crate::collaboration_profile_authority::profile_authority_path(dir.path(), AGENT_ROOT)
+                .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let chat = crate::collaboration_product::test_chat_product_port(
+            dir.path(),
+            "r4-agent-root",
+            "community",
+        );
+        let port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            chat.test_core().clone(),
+        )
+        .unwrap();
+        let result = publish_runtime_owned_presence_pass(dir.path(), &port, now).await;
+        assert!(
+            matches!(&result, Err(error) if error.to_string() == "profile authority bundle must be a regular file"),
+            "R4 presence looked up the Agent profile under {AGENT_ROOT}: {result:?}"
+        );
+    }
+
     #[test]
     fn r4_runtime_presence_uses_stored_root() {
         use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
