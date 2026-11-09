@@ -11017,4 +11017,73 @@ mod r5a_tests {
             "{warning}"
         );
     }
+
+    fn trash(root: &str) -> LibraryTrashRecord {
+        LibraryTrashRecord {
+            schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
+            trash_uri: format!("{root}/.Trash/t.txt"),
+            original_uri: format!("{root}/Documents/t.txt"),
+            original_name: "t.txt".into(),
+            trashed_at: 1,
+        }
+    }
+
+    #[test]
+    fn trash_record_write_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            let result = write_trash_record(dir.path(), r4_fixture::ID, &record);
+            let uri = trash_record_uri(root, &record.trash_uri);
+            assert!(
+                result.is_ok()
+                    && rooted_localhost_fs_path(dir.path(), &uri)
+                        .unwrap()
+                        .is_file(),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = write_trash_record(dir.path(), r4_fixture::ID, &trash(r4_fixture::HUMAN_ROOT));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn trash_record_read_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            write_trash_record(dir.path(), r4_fixture::ID, &record).unwrap();
+            let result = read_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|value| value.original_uri == format!("{root}/Documents/t.txt")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_trash_record(
+            dir.path(),
+            r4_fixture::ID,
+            &trash(r4_fixture::HUMAN_ROOT).trash_uri,
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
