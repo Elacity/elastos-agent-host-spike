@@ -501,6 +501,11 @@ fn invalidate_verified_auth_state_cache(data_dir: &Path) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn invalidate_verified_auth_state_cache_for_test(data_dir: &Path) {
+    invalidate_verified_auth_state_cache(data_dir);
+}
+
 fn store_verified_auth_state_cache(
     data_dir: &Path,
     auth_state_identity: Option<AuthStateFileIdentity>,
@@ -658,7 +663,7 @@ fn run_verified_auth_state_cache_fill_hook(data_dir: &Path) -> anyhow::Result<()
 }
 
 #[cfg(test)]
-fn install_verified_auth_state_cache_hit_hook(
+pub(crate) fn install_verified_auth_state_cache_hit_hook(
     data_dir: &Path,
 ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
     let key = auth_state_cache_key(data_dir);

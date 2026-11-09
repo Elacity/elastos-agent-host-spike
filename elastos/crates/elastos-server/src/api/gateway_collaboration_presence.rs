@@ -215,11 +215,11 @@ pub(super) fn authenticated_presence_presentation_for_context(
     if principal.principal_id != context.principal_id() {
         return Err(HomePresenceAuthenticationError::Denied);
     }
-    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
+    let localhost_root = context.root().localhost_root();
     let profile = crate::collaboration_profile_authority::load_profile_authority(
         &state.data_dir,
         context.principal_id(),
-        &localhost_root,
+        localhost_root,
     )
     .map_err(|_| HomePresenceAuthenticationError::Internal)?;
     let profile = profile.ok_or(HomePresenceAuthenticationError::ProfileRequired)?;
@@ -1395,5 +1395,124 @@ mod tests {
             inside_bucket,
             presence_heartbeat_request_id(&changed, 44).unwrap()
         );
+    }
+
+    /// A stored passkey principal with a signed Profile, plus its GatewayState.
+    fn stored_presence_fixture(
+        temp: &std::path::Path,
+    ) -> (GatewayState, crate::auth::PrincipalRecord) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(temp).unwrap();
+        let now = crate::auth::now_ts();
+        let rp_id = "elastos.elacitylabs.com";
+        let credential_id = "presence-stored-root";
+        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+            elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: credential_id.to_string(),
+                public_key: "presence-stored-root-public-key".to_string(),
+                sign_count: 1,
+                user_verified: true,
+                origin: "https://elastos.elacitylabs.com".to_string(),
+                rp_id: rp_id.to_string(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+        );
+        let principal_id =
+            crate::auth::passkey_credential_principal_id(rp_id, credential_id).unwrap();
+        let principal = crate::auth::upsert_principal_for_binding_as_role_named(
+            temp,
+            binding,
+            principal_id,
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("Stored Presence"),
+            now,
+        )
+        .unwrap();
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp, &principal.principal_id);
+        crate::collaboration_profile_authority::update_profile_authority(
+            temp,
+            &principal.principal_id,
+            &protection.localhost_root,
+            &principal.proof_binding_id,
+            "Stored Presence",
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        let state = GatewayState {
+            carrier_endpoint: None,
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            collaboration_discovery_service: None,
+            identity_manager: std::sync::Arc::new(std::sync::OnceLock::new()),
+            cache_dir: temp.to_path_buf(),
+            data_dir: temp.to_path_buf(),
+        };
+        (state, principal)
+    }
+
+    #[test]
+    fn a_presence_context_without_a_stored_root_is_refused_before_the_id_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, principal) = stored_presence_fixture(temp.path());
+        let unstored = HomeLaunchTokenContext::for_test(
+            "person:local:presence-no-stored-record",
+            "session",
+            Some("proof:no-stored-record".to_string()),
+            "grant",
+        );
+        assert!(
+            matches!(
+                authenticated_presence_presentation_for_context(&state, &unstored),
+                Err(HomePresenceAuthenticationError::Denied)
+            ),
+            "a principal with no stored record is refused"
+        );
+        let fixture_root = HomeLaunchTokenContext::for_test(
+            principal.principal_id.clone(),
+            "session",
+            Some(principal.proof_binding_id.clone()),
+            "grant",
+        );
+        assert!(
+            matches!(
+                authenticated_presence_presentation_for_context(&state, &fixture_root),
+                Err(HomePresenceAuthenticationError::Internal)
+            ),
+            "a context root no stored record backs is refused, not served from the id-rule root"
+        );
+    }
+
+    #[test]
+    fn a_stored_presence_principal_keeps_its_stored_profile_presentation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, principal) = stored_presence_fixture(temp.path());
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(
+            temp.path(),
+            temp.path(),
+            &principal.principal_id,
+        )
+        .unwrap();
+        let context = HomeLaunchTokenContext::resolved(
+            root,
+            principal.principal_id.clone(),
+            "session".to_string(),
+            Some(principal.proof_binding_id.clone()),
+            "grant".to_string(),
+        );
+        let Ok(presentation) = authenticated_presence_presentation_for_context(&state, &context)
+        else {
+            panic!("a stored principal must present its signed Profile");
+        };
+        assert_eq!(presentation.display_name, "Stored Presence");
+        assert_eq!(presentation.principal_id, principal.principal_id);
     }
 }
