@@ -8570,7 +8570,7 @@ fn library_events(
         .map(|uri| clean_library_uri(&root, uri))
         .transpose()?;
     let limit = limit.unwrap_or(64).clamp(1, MAX_LIBRARY_EVENTS);
-    let mut events = read_library_events(data_dir, principal_id)?;
+    let mut events = read_library_events_with_root(data_dir, principal_id, &root)?;
     events.retain(|event| {
         since.map(|since| event.at > since).unwrap_or(true)
             && uri_filter
@@ -8615,7 +8615,15 @@ fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Ve
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
-    let event_uri = library_event_log_uri(&root);
+    read_library_events_with_root(data_dir, principal_id, &root)
+}
+
+fn read_library_events_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+) -> anyhow::Result<Vec<LibraryEvent>> {
+    let event_uri = library_event_log_uri(root);
     let event_path = rooted_localhost_fs_path(data_dir, &event_uri)
         .ok_or_else(|| anyhow!("invalid library event log path"))?;
     if !event_path.exists() {
@@ -8624,7 +8632,7 @@ fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Ve
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
         principal_id,
-        &root,
+        root,
         &event_uri,
         &event_path,
     )?;
