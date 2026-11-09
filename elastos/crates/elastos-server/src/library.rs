@@ -2518,7 +2518,13 @@ fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
 
 /// Every publish record of this person, active or not.
 fn publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRecord> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = match crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id) {
+        Ok(root) => root.localhost_root().to_string(),
+        Err(error) => {
+            tracing::warn!(%error, "library: skipping unresolved publish-record principal");
+            return Vec::new();
+        }
+    };
     read_runtime_json_dir::<LibraryPublishRecord>(
         data_dir,
         principal_id,
@@ -10887,4 +10893,65 @@ mod r5a_tests {
         );
     }
 
+    #[derive(Clone)]
+    struct WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for WarningWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn publish_records_uses_stored_root_and_skips_unresolved_principals() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/{LIBRARY_RUNTIME_DIR}/Published/r5a.json");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let object_uri = format!("{root}/Documents/r5a.txt");
+            let record = json!({
+                "schema": "elastos.library.publish/v1", "object_uri": object_uri,
+                "cid": "cid-r5a", "published_at": 1, "receipt": {},
+                "availability": {},
+            });
+            crate::auth::write_principal_root_object(
+                dir.path(),
+                r4_fixture::ID,
+                root,
+                &uri,
+                &path,
+                &serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            let records = publish_records(dir.path(), r4_fixture::ID);
+            assert_eq!(records.len(), 1, "{root}");
+            assert_eq!(records[0].object_uri, format!("{root}/Documents/r5a.txt"));
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let writer = WarningWriter(warnings.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(publish_records(absent.path(), r4_fixture::ID).is_empty());
+        });
+        let warning = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
+        assert!(
+            warning.contains("skipping unresolved publish-record principal")
+                && warning.contains("has no stored record"),
+            "{warning}"
+        );
+    }
 }
