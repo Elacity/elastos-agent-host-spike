@@ -10798,7 +10798,7 @@ mod r5a_tests {
     }
 
     #[test]
-    fn list_resolves_agent_root_before_the_remaining_target_gate() {
+    fn list_uses_the_stored_agent_root_end_to_end() {
         let agent = home(PrincipalKind::Agent);
         let result = handle_library_request(
             agent.path(),
@@ -10807,12 +10807,9 @@ mod r5a_tests {
                 uri: None,
             },
         );
-        assert!(
-            result
-                .as_ref()
-                .is_err_and(|error| error.to_string().contains(r4_fixture::AGENT_ROOT)),
-            "{result:?}"
-        );
+        let listed = result.unwrap();
+        assert_eq!(listed["uri"], r4_fixture::AGENT_ROOT);
+        assert_eq!(listed["objects"], json!([]));
         let human = home(PrincipalKind::Human);
         let listed = handle_library_request(
             human.path(),
@@ -10840,7 +10837,7 @@ mod r5a_tests {
     }
 
     #[test]
-    fn empty_trash_resolves_agent_root_before_the_remaining_target_gate() {
+    fn empty_trash_uses_the_stored_agent_root_end_to_end() {
         let agent = home(PrincipalKind::Agent);
         let result = handle_library_request(
             agent.path(),
@@ -10848,11 +10845,11 @@ mod r5a_tests {
                 principal_id: r4_fixture::ID.into(),
             },
         );
-        assert!(
-            result.as_ref().is_err_and(|error| error
-                .to_string()
-                .contains(&format!("{}/.Trash", r4_fixture::AGENT_ROOT))),
-            "{result:?}"
+        assert_eq!(result.unwrap()["deleted_count"], 0);
+        let events = read_library_events(agent.path(), r4_fixture::ID).unwrap();
+        assert_eq!(
+            events.last().unwrap().uri,
+            format!("{}/.Trash", r4_fixture::AGENT_ROOT)
         );
         let human = home(PrincipalKind::Human);
         let emptied = handle_library_request(
