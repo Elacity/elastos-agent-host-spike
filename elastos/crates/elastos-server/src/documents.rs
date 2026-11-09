@@ -1529,25 +1529,116 @@ fn remove_file_if_exists(path: PathBuf) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// A5-S3c-0b, documents: a stored Agent's Documents root sits under its
-    /// own UsersAI root. Expected-fail: the id rule. Flipped by A5-S3c-3b.
+    /// A5-S3c-0b: Documents resolves the Agent root from the stored record.
     #[test]
-    #[ignore = "expected-fail until A5-S3c-3b"]
     fn a_stored_agents_documents_root_is_under_its_usersai_root() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let id = "person:local:s3c-agent-documents";
-        crate::auth::store_test_human_principal(data_dir.path(), id);
-        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
-        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
-        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
-        let rooted = format!("{}/Documents", root.strip_prefix("localhost://").unwrap());
+        use crate::auth::r4_fixture::{AGENT_ROOT, ID};
+        let data_dir = r6_document_home(crate::auth::PrincipalKind::Agent);
+        let rooted = format!(
+            "{}/Documents",
+            AGENT_ROOT.strip_prefix("localhost://").unwrap()
+        );
         let want = rooted_localhost_fs_path(data_dir.path(), &rooted).unwrap();
-        assert_eq!(documents_root(data_dir.path(), id).unwrap(), want);
+        assert_eq!(documents_root(data_dir.path(), ID).unwrap(), want);
+    }
+
+    fn r6_document_home(kind: crate::auth::PrincipalKind) -> tempfile::TempDir {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), kind);
+        let root = if kind == crate::auth::PrincipalKind::Agent {
+            AGENT_ROOT
+        } else {
+            HUMAN_ROOT
+        };
+        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, root);
+        dir
+    }
+
+    #[test]
+    fn r6_documents_root_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_document_home(kind);
+            let result = documents_root(dir.path(), ID).unwrap();
+            assert_eq!(
+                result,
+                rooted_localhost_fs_path(
+                    dir.path(),
+                    &format!("{}/Documents", root.strip_prefix("localhost://").unwrap())
+                )
+                .unwrap()
+            );
+        }
+        let missing = tempfile::tempdir().unwrap();
+        assert!(documents_root(missing.path(), ID)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+
+    #[test]
+    fn r6_documents_write_body_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_document_home(kind);
+            let result = documents_create_local(dir.path(), ID, Some("R6"));
+            assert!(result.is_ok(), "stored {kind:?} body write: {result:?}");
+            assert_eq!(
+                result.unwrap().working_copy_uri,
+                format!("{root}/Documents/r6.md")
+            );
+        }
+        let missing = tempfile::tempdir().unwrap();
+        assert!(documents_create_local(missing.path(), ID, Some("R6"))
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+
+    #[test]
+    fn r6_documents_load_body_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_document_home(kind);
+            let created = documents_create_local(dir.path(), ID, Some("R6")).unwrap();
+            let result = documents_load_document(dir.path(), ID, &created.doc_did);
+            assert!(result.is_ok(), "stored {kind:?} body read: {result:?}");
+            assert_eq!(
+                result.unwrap().working_copy_uri,
+                format!("{root}/Documents/r6.md")
+            );
+        }
+        let missing = r6_document_home(crate::auth::PrincipalKind::Human);
+        let created = documents_create_local(missing.path(), ID, Some("R6")).unwrap();
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        let result = documents_load_document(missing.path(), ID, &created.doc_did);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
     }
 
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
     const TEST_PRINCIPAL: &str = "person:local:test-documents";
     const OTHER_PRINCIPAL: &str = "person:local:other-documents";
+
+    fn test_home() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for principal in [TEST_PRINCIPAL, OTHER_PRINCIPAL] {
+            crate::auth::store_test_human_principal(dir.path(), principal);
+        }
+        dir
+    }
 
     fn save_request(
         document: &DocumentsDocumentView,
@@ -1563,7 +1654,7 @@ mod tests {
 
     #[tokio::test]
     async fn documents_save_requires_revision_before_any_write() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let registry = Arc::new(ProviderRegistry::new());
@@ -1595,7 +1686,7 @@ mod tests {
 
     #[test]
     fn documents_save_revision_covers_title_and_body_changes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let original =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let title_only = documents_save_local(
@@ -1638,7 +1729,7 @@ mod tests {
 
     #[test]
     fn documents_save_revision_binds_principal_document_and_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let objects = crate::auth::PrincipalRootObjectMutation::acquire(dir.path()).unwrap();
