@@ -11218,4 +11218,36 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    #[test]
+    fn publish_record_write_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = published(root);
+            let uri = publish_record_uri(root, &record.object_uri);
+            let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+            assert!(
+                result.is_ok()
+                    && rooted_localhost_fs_path(dir.path(), &uri)
+                        .unwrap()
+                        .is_file(),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = write_publish_record(
+            dir.path(),
+            r4_fixture::ID,
+            &published(r4_fixture::HUMAN_ROOT),
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
