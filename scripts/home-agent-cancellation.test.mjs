@@ -1396,6 +1396,59 @@ test("only an exact provider-refused expired fresh create permits deliberate ret
   }
 });
 
+test("a same-Home authority timeout tells the person to try again", async t => {
+  t.after(() => live.selectLiveOffer(""));
+  const offerId = "remote:g:fixture";
+  const message = "The Home could not check model access in time. Try again.";
+  assert.equal(controller.formatStreamError({
+    code: "remote_model_invocation_refused",
+    reason: "authority_timeout",
+    preDispatchRefusal: true,
+  }), message);
+  assert.equal(controller.formatStreamError({
+    code: "remote_model_invocation_refused",
+    reason: "denied",
+    preDispatchRefusal: true,
+  }), "Request refused. This attempt stopped before provider dispatch. Review service access before a new request.");
+  const states = [];
+  globalThis.fetch = async (url, init) => {
+    const op = new URL(url).pathname.split("/").pop();
+    if (op === "offers_list") return { ok: true, json: async () => ({ offers: [
+      { id: offerId, title: "Fixture", operation: "text.generate", input_modalities: ["text/plain"], output_modalities: ["text/plain"], context: fixtureContext },
+    ] }) };
+    if (op !== "runs_create") throw new Error(`unexpected ${op}`);
+    const body = JSON.parse(init.body);
+    return { ok: false, status: 409, json: async () => ({
+      status: "error",
+      code: "remote_model_invocation_refused",
+      reason: "authority_timeout",
+      message,
+      refusal: {
+        schema: "elastos.model.invocation-refusal/v1",
+        scope: "invocation",
+        dispatch: "not_started",
+        request_id: body.request_id,
+        offer_id: body.offer_id,
+      },
+    }) };
+  };
+  live.selectLiveOffer(offerId);
+  await live.probeLiveInference({ force: true });
+  await assert.rejects(
+    live.streamChatViaContract([{ role: "user", content: "fixture" }], {
+      onState: (state) => states.push(state),
+    }),
+    (error) => {
+      assert.equal(error.reason, "authority_timeout");
+      assert.equal(controller.formatStreamError(error), message);
+      assert.equal(error.preDispatchRefusal, true);
+      return error.code === "remote_model_invocation_refused";
+    },
+  );
+  assert.equal(states.at(-1).state, "failed");
+  assert.equal(Boolean(states.at(-1).completedAt), true);
+});
+
 test("the open model menu follows each read, keeps focus on its action, and closing Assistant stops re-reads", async t => {
   t.after(() => live.selectLiveOffer(""));
   t.mock.timers.enable({ apis: ["setTimeout"] });

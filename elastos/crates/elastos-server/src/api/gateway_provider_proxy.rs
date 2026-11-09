@@ -1811,9 +1811,7 @@ pub(super) async fn gateway_provider_proxy(
                         StatusCode::CONFLICT,
                         Json(serde_json::json!({
                             "status": "error", "code": "remote_model_invocation_refused",
-                            "message": if reason == elastos_model_contract::MODEL_REQUEST_EXPIRED_CODE {
-                                elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE
-                            } else { "This invocation was refused before provider dispatch." },
+                            "message": super::gateway_model_service::invocation_refusal_message(&reason),
                             "reason": reason, "refusal": binding,
                         })),
                     )
