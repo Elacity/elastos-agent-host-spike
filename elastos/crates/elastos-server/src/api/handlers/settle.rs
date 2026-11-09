@@ -53,9 +53,13 @@ mod tests {
     fn state() -> CapabilityState {
         let audit = Arc::new(AuditLog::new());
         let tokens = Arc::new(CapabilityStore::new());
-        let manager =
-            CapabilityManager::new(tokens, audit.clone(), Arc::new(MetricsManager::new()));
+        let manager = CapabilityManager::new(
+            tokens.clone(),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        );
         CapabilityState {
+            capability_store: tokens,
             pending_store: Arc::new(PendingRequestStore::new(audit.clone())),
             capability_manager: Arc::new(manager),
             policy_evaluator: Arc::new(PolicyEvaluator::new(
