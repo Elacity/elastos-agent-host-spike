@@ -8590,6 +8590,116 @@ async fn test_runtime_custody_buy_fails_before_effects_when_fresh_availability_i
 }
 
 #[tokio::test]
+async fn r4_runtime_custody_buy_loads_agent_profile() {
+    const AGENT_ROOT: &str = "localhost://UsersAI/bcc3d29f8ca3acb6b983a085";
+    let _guard = protected_content_gateway_mock_test_guard().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    crate::protected_content_runtime::tests::write_device_key(dir.path(), 0x5a);
+    let (state, wallet_provider) = wallet_chain_test_state_with_observer(dir.path()).await;
+    state
+        .provider_registry
+        .as_ref()
+        .unwrap()
+        .register_sub_provider("content", Arc::new(MockContentProvider))
+        .await
+        .unwrap();
+    reset_mock_protected_content_chain_mode();
+    reset_mock_protected_content_purchase_fixture();
+    set_mock_protected_content_purchase_native();
+    reset_mock_chain_raw_requests();
+
+    let buyer = passkey_authority_with_name_role_credential(
+        dir.path(),
+        Some("buyer"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "r4-buyer-agent",
+    );
+    provision_signed_profile(dir.path(), &buyer, "buyer");
+    assert_eq!(
+        buyer.principal_id,
+        "person:local:e8e0cb09b0580620ff24feff5184f5d3"
+    );
+    let account_id = wallet_provider
+        .provider
+        .seed_managed_evm_account_for_principal(&buyer.principal_id)
+        .await;
+    set_mock_wallet_transaction_default(
+        &wallet_provider.provider,
+        &buyer.principal_id,
+        "eip155:8453",
+        &account_id,
+        10,
+    )
+    .await;
+    let human_root = crate::auth::principal_localhost_root(&buyer.principal_id);
+    let uri = format!("{human_root}/Documents/r4-buy");
+    let input = runtime_custody_creator_test_input(&buyer.principal_id, &uri, 0x97, &account_id);
+    let facts = seed_completed_runtime_custody_mint(dir.path(), &input);
+    seed_runtime_custody_creator_listing_for_buy(
+        dir.path(),
+        &buyer.principal_id,
+        &facts,
+        MOCK_MANAGED_EVM_ADDRESS,
+        true,
+    );
+    let human_profile =
+        crate::collaboration_profile_authority::profile_authority_path(dir.path(), &human_root)
+            .unwrap();
+    std::fs::remove_file(human_profile).unwrap();
+    crate::auth::r4_fixture::set_kind(
+        dir.path(),
+        &buyer.principal_id,
+        crate::auth::PrincipalKind::Agent,
+        AGENT_ROOT,
+    );
+    crate::auth::store_test_principal_root_protection_for(
+        dir.path(),
+        &buyer.principal_id,
+        AGENT_ROOT,
+    );
+    let agent_profile = crate::collaboration_profile_authority::update_profile_authority(
+        dir.path(),
+        &buyer.principal_id,
+        AGENT_ROOT,
+        &buyer.proof_binding_id,
+        "buyer",
+        None,
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    assert!(
+        crate::collaboration_profile_authority::load_profile_authority(
+            dir.path(),
+            &buyer.principal_id,
+            AGENT_ROOT,
+        )
+        .unwrap()
+        .is_some()
+    );
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &buyer);
+    let runtime_authority =
+        runtime_wallet_authority_for_app_token(dir.path(), LIBRARY_CAPSULE_ID, &token);
+    let registry = state.provider_registry.as_ref().unwrap().clone();
+    let error = crate::api::gateway::runtime_custody_buy_via_gateway(
+        &state,
+        &runtime_authority,
+        registry,
+        crate::protected_content_runtime::RuntimeCustodyBuyInput {
+            principal_id: buyer.principal_id.clone(),
+            mint_id: hex::encode(facts.mint_id.as_bytes()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(agent_profile.document().display_name, "buyer");
+    assert_eq!(
+        error.to_string(),
+        crate::protected_content_runtime::RUNTIME_CUSTODY_PURCHASE_PENDING_MESSAGE,
+        "R4 buyer loaded the Agent profile under {AGENT_ROOT}"
+    );
+}
+
+#[tokio::test]
 async fn test_runtime_custody_buy_native_terminal_replay_is_exact_and_listing_stays_immutable() {
     let _guard = protected_content_gateway_mock_test_guard().lock().await;
     let dir = tempfile::tempdir().unwrap();

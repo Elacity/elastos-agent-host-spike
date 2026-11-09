@@ -616,7 +616,7 @@ pub(in crate::api) fn require_home_runtime_wallet_authority(
 
 /// The auth store the launch token's grant was validated against. The reason is
 /// generic here; the chain stays in the log and the recovery boundary answers 403.
-fn wallet_principal_root(
+pub(super) fn wallet_principal_root(
     data_dir: &std::path::Path,
     principal_id: &str,
 ) -> anyhow::Result<crate::auth::ResolvedPrincipalRoot> {
@@ -638,7 +638,7 @@ fn wallet_principal_root(
 /// A launch context's root, resolved in the store its grant was validated
 /// against. A missing or unreadable record refuses with a named error; there is
 /// no id-rule fallback.
-fn launch_principal_root(
+pub(in crate::api) fn launch_principal_root(
     data_dir: &std::path::Path,
     auth_data_dir: &std::path::Path,
     principal_id: &str,
