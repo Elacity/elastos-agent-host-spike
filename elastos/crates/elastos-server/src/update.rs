@@ -350,6 +350,13 @@ async fn verify_candidate_before_migration(
     verify_installed_binary_version(&path, version).await
 }
 
+// Unit-test binaries can spend several seconds scheduling a child under load.
+// The installed Runtime keeps the short limit for an untrusted candidate.
+#[cfg(test)]
+const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(not(test))]
+const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn verify_installed_binary_version(
     bin_path: &Path,
     expected_version: &str,
@@ -377,7 +384,7 @@ async fn verify_installed_binary_version(
     let mut stderr = child.stderr.take().unwrap().take(4097);
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let result = tokio::time::timeout(VERSION_CHECK_TIMEOUT, async {
         // Keep the leader unreaped until pipe admission has finished. Its PID
         // then anchors the owned process group throughout any timeout cleanup.
         tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
@@ -399,7 +406,10 @@ async fn verify_installed_binary_version(
             let _ = child.kill().await;
             let _ = child.wait().await;
             match failure {
-                Err(_) => anyhow::bail!("installed binary version check timed out after 5 seconds"),
+                Err(_) => anyhow::bail!(
+                    "installed binary version check timed out after {} seconds",
+                    VERSION_CHECK_TIMEOUT.as_secs()
+                ),
                 Ok(Err(error)) => return Err(error.into()),
                 _ => unreachable!(),
             }
@@ -4883,6 +4893,23 @@ mod tests {
             crate::install_transaction::TEXT_FILE_BUSY_SEEN.get() >= 1,
             "exec must have reported ETXTBSY"
         );
+    }
+
+    #[tokio::test]
+    async fn version_check_allows_a_slow_test_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("slow-candidate");
+        std::fs::write(
+            &bin,
+            b"#!/bin/sh\n/bin/sleep 6\nprintf 'elastos 0.1.0\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        verify_installed_binary_version(&bin, "0.1.0")
+            .await
+            .unwrap();
     }
 
     /// install.sh admission and recovery through the shared installation writer.
