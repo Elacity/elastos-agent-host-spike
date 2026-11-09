@@ -962,6 +962,96 @@ mod tests {
         assert_eq!(state.pending_store.list_granted().await.len(), 2);
     }
 
+    /// Grants one write request in `session`; returns its request id and token.
+    async fn grant_in(
+        state: &CapabilityState,
+        session: &str,
+        max_uses: Option<u32>,
+        expiry: Option<elastos_common::SecureTimestamp>,
+    ) -> (String, elastos_runtime::capability::CapabilityToken) {
+        let resource = ResourceId::new("elastos://content/publish");
+        let session_id = elastos_runtime::session::SessionId::from_string(session);
+        let store = &state.pending_store;
+        let request = store.create_request(session_id, resource.clone(), Action::Write);
+        let id = request.await.id.to_string();
+        let constraints = TokenConstraints::new(0, false, None, max_uses);
+        let manager = &state.capability_manager;
+        let token = manager.grant(session, resource, Action::Write, constraints, expiry);
+        store
+            .grant_request(&id, token.clone(), GrantDuration::Session)
+            .await
+            .unwrap();
+        (id, token)
+    }
+
+    /// Lists `?scope=all_sessions_live` as the shell; returns the body and its request ids.
+    async fn live_view(state: &CapabilityState) -> (serde_json::Value, Vec<String>) {
+        let uri = "http://runtime/api/capability/list?scope=all_sessions_live";
+        let query = Query::try_from_uri(&uri.parse().unwrap()).unwrap();
+        let shell = Extension(Session::new_shell("shell-vm".to_string()));
+        let body = list_capabilities(State(state.clone()), shell, query).await;
+        let body = serde_json::to_value(body.unwrap().0).unwrap();
+        let ids = body["capabilities"].as_array().unwrap().iter();
+        let ids = ids.map(|c| c["request_id"].as_str().unwrap().to_owned());
+        let ids = ids.collect();
+        (body, ids)
+    }
+
+    #[tokio::test]
+    async fn live_scope_lists_only_live_grants_of_every_session() {
+        let start = elastos_common::SecureTimestamp::now().unix_secs;
+        let state = test_state();
+        let manager = state.capability_manager.clone();
+        let (old_epoch, _) = grant_in(&state, "session-a", None, None).await;
+        manager.revoke_all("key rotated"); // its record stays granted
+        let (live_a, _) = grant_in(&state, "session-a", None, None).await;
+        let (live_b, _) = grant_in(&state, "session-b", None, None).await;
+        let (revoked, token) = grant_in(&state, "session-a", None, None).await;
+        manager.revoke(*token.id(), "operator detached").await; // record stays granted
+        let (spent, token) = grant_in(&state, "session-b", Some(1), None).await;
+        let resource = ResourceId::new("elastos://content/publish");
+        let used = manager.validate(&token, "session-b", Action::Write, &resource, None);
+        used.await.expect("the once grant is used");
+        let past = Some(elastos_common::SecureTimestamp::at(1));
+        let (expired, _) = grant_in(&state, "session-b", None, past).await;
+        let granted = state.pending_store.list_granted().await.len();
+        assert_eq!(
+            granted, 6,
+            "all six records are still granted, so only the live rule drops one"
+        );
+
+        let (mut body, ids) = live_view(&state).await;
+        assert!(
+            !ids.contains(&revoked),
+            "F-norevoke: a grant revoked by id is absent"
+        );
+        assert!(!ids.contains(&spent), "a spent once grant is absent");
+        assert!(
+            !ids.contains(&old_epoch),
+            "a grant from an old epoch is absent"
+        );
+        assert!(!ids.contains(&expired), "a grant past its expiry is absent");
+        let end = elastos_common::SecureTimestamp::now().unix_secs;
+        for entry in body["capabilities"].as_array_mut().unwrap() {
+            let granted_at = entry["granted_at"].as_u64().unwrap();
+            assert!(
+                (start..=end).contains(&granted_at),
+                "granted_at is the request time"
+            );
+            entry.as_object_mut().unwrap().remove("granted_at");
+        }
+        let entry = |id: &str, session: &str| {
+            json!({ "request_id": id, "session_id": session, "duration": "session",
+                    "resource": "elastos://content/publish", "action": "write" })
+        };
+        let expected = json!({ "scope": "all_sessions_live",
+            "capabilities": [entry(&live_a, "session-a"), entry(&live_b, "session-b")] });
+        assert_eq!(
+            body, expected,
+            "the live view is exactly the two live grants"
+        );
+    }
+
     #[tokio::test]
     async fn test_request_capability_denies_ipfs_backend() {
         let output = request_capability(
