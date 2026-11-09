@@ -43,8 +43,11 @@ impl HomeLaunchTokenContext {
 }
 
 impl HomeLaunchTokenContext {
-    /// `resolved()` is the one production constructor: the root is resolved and
-    /// refuses before a context exists, and it is stored here.
+    /// Production builds a context through `resolved`, which stores a root its
+    /// caller already resolved; this constructor neither resolves nor refuses.
+    /// The resolving callers are launch-token verification, the Wallet-link
+    /// reissue and the passkey authorize loops; `remote_context` builds the
+    /// model-provider context, whose root owns no localhost path.
     pub(in crate::api) fn resolved(
         root: crate::auth::ResolvedPrincipalRoot,
         principal_id: String,
