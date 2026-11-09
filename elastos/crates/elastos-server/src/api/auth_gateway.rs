@@ -3051,8 +3051,47 @@ async fn recovery_kit_import_inner(
             format!("invalid recovery kit: {err}"),
         );
     }
+    let recovered = if input.reassign_to_current_principal {
+        match crate::auth::stored_principal_record(&state.data_dir, &kit.principal_id) {
+            Ok(record) => record,
+            Err(_) => {
+                return fail_recovery_kit_request(
+                    state,
+                    &context,
+                    &principal,
+                    "auth.recovery_kit.import.rejected",
+                    "recovered principal root is not canonical for the recovered principal",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    if recovered
+        .as_ref()
+        .is_some_and(|record| record.kind != crate::auth::PrincipalKind::Human)
+    {
+        return fail_recovery_kit_request(
+            state,
+            &context,
+            &principal,
+            "auth.recovery_kit.import.rejected",
+            "recovered recovery kit requires a human principal",
+        );
+    }
     if input.reassign_to_current_principal
-        && kit.localhost_root != crate::auth::principal_localhost_root(&kit.principal_id)
+        && !recovered.as_ref().map_or_else(
+            || {
+                // A fresh Home has no recovered record. Verified Kit material
+                // supplies its Human root until reassignment stores the record.
+                crate::auth::ResolvedPrincipalRoot::verified_recovery_kit(
+                    &kit.principal_id,
+                    &kit.localhost_root,
+                )
+                .is_ok()
+            },
+            |record| record.localhost_root == kit.localhost_root,
+        )
     {
         return fail_recovery_kit_request(
             state,
@@ -7695,6 +7734,7 @@ mod tests {
             assert_eq!(counts(&after), counts(&before), "{keep_users_root}");
         }
     }
+
 
     #[tokio::test]
     async fn recovery_kit_import_rejects_wrong_key_binding_without_mutation() {
