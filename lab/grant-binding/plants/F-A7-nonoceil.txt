@@ -1,0 +1,13 @@
+id: F-A7-nonoceil
+file: src/ledger.rs
+test: ledger::model_each_grant_keeps_its_own_ceiling
+test: ledger::model_empty_ceilings_map_has_no_ceiling
+--- old
+        if !ledger.ceilings.contains_key(&key) {
+            return Err(ReserveRefuse::NoCeiling);
+        }
+--- new
+        if !ledger.ceilings.contains_key(&key) {
+            ledger.ceilings.insert(key.clone(), u64::MAX);
+        }
+--- end
