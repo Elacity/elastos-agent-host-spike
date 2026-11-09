@@ -1289,6 +1289,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requests_route_is_shell_only() {
+        use axum::{body::Body, http::header::AUTHORIZATION, http::Request};
+        use elastos_runtime::session::{SessionRegistry, SessionType};
+        use tower::ServiceExt;
+        let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let session_registry = Arc::new(SessionRegistry::new(audit));
+        let shell = session_registry.create_session(SessionType::Shell, None);
+        let shell = shell.await;
+        let client = session_registry.create_session(SessionType::Capsule, None);
+        let client = client.await;
+        let api_state = crate::api::middleware::ApiState { session_registry };
+        let app = crate::api::server::shell_capability_routes(api_state, test_state());
+        let get = |token: &str, query: &str| {
+            let request = Request::get(format!("/api/capability/requests{query}"));
+            let request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+            app.clone().oneshot(request.body(Body::empty()).unwrap())
+        };
+        let read = |response: axum::response::Response| async move {
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX);
+            (
+                status,
+                String::from_utf8(body.await.unwrap().to_vec()).unwrap(),
+            )
+        };
+
+        let refused = read(get(&client.token, "?session=session-a").await.unwrap()).await;
+        let shell_only = (StatusCode::FORBIDDEN, SHELL_REASON.to_owned());
+        assert_eq!(
+            refused, shell_only,
+            "a client session is refused the requests view"
+        );
+        let listed = read(get(&shell.token, "?session=session-a").await.unwrap()).await;
+        let empty = (StatusCode::OK, r#"{"requests":[]}"#.to_owned());
+        assert_eq!(listed, empty, "a shell session reads the requests view");
+        let missing = read(get(&shell.token, "").await.unwrap()).await;
+        let need = (
+            StatusCode::BAD_REQUEST,
+            "requests need a session".to_owned(),
+        );
+        assert_eq!(missing, need, "a shell request with no session is refused");
+    }
+
+    #[tokio::test]
     async fn test_request_capability_denies_ipfs_backend() {
         let output = request_capability(
             State(test_state()),
