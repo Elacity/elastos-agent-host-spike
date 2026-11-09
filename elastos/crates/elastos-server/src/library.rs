@@ -2558,10 +2558,18 @@ struct ChatAttachBinding {
     size_bytes: Option<u64>,
 }
 
-fn chat_attach_binding_uri(principal_id: &str, request_id: &str) -> String {
-    let root = crate::auth::principal_localhost_root(principal_id);
+fn chat_attach_binding_uri(
+    data_dir: &Path,
+    principal_id: &str,
+    request_id: &str,
+) -> anyhow::Result<String> {
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let digest = hex::encode(Sha256::digest(request_id.as_bytes()));
-    format!("{root}/{LIBRARY_RUNTIME_DIR}/ChatAttach/{digest}.json")
+    Ok(format!(
+        "{root}/{LIBRARY_RUNTIME_DIR}/ChatAttach/{digest}.json"
+    ))
 }
 
 /// The publication for one Chat attach request, under the publications lock
@@ -2585,7 +2593,7 @@ pub(crate) async fn chat_attach_publication(
 ) -> anyhow::Result<LibraryFilePublication> {
     let _serialized = PUBLICATIONS.lock().await;
     let uri = uri.trim();
-    let binding_uri = chat_attach_binding_uri(principal_id, request_id);
+    let binding_uri = chat_attach_binding_uri(data_dir, principal_id, request_id)?;
     let saved = read_runtime_json::<ChatAttachBinding>(data_dir, principal_id, &binding_uri).ok();
     if let Some(mut binding) = saved {
         if binding.uri != uri || binding.if_revision.as_deref() != if_revision {
@@ -10615,7 +10623,7 @@ mod publish_tests {
             write_runtime_json(
                 home.dir.path(),
                 home.principal,
-                &chat_attach_binding_uri(home.principal, request_id),
+                &chat_attach_binding_uri(home.dir.path(), home.principal, request_id).unwrap(),
                 &ChatAttachBinding {
                     schema: "elastos.library.chat-attach/v1".to_string(),
                     request_id: request_id.to_string(),
