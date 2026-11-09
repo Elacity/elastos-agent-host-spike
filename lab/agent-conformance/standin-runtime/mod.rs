@@ -3086,13 +3086,18 @@ mod tests {
             .collect()
     }
 
+    /// The shell's `?scope=all_sessions_live` view: every live grant.
+    fn shell_live(standin: &StandIn) -> Value {
+        standin
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("the stand-in shell all-sessions live view")
+    }
+
     fn shell_pair(standin: &StandIn) -> (Value, Value) {
         let plain = standin
             .get_capability_list(Caller::Shell, None)
             .expect("the stand-in shell plain view");
-        let query = standin
-            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
-            .expect("the stand-in shell query view");
+        let query = shell_live(standin);
         (plain, query)
     }
 
@@ -4872,7 +4877,7 @@ mod tests {
             "the stand-in denies the stopped instance's pending request and names the stop"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::new(),
             "the stand-in shell live-grant list is empty after the stop"
         );
@@ -5432,7 +5437,7 @@ mod tests {
             "the stand-in ends the waiting instance failed with the deny reason",
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view");
         assert_eq!(
             request_ids(&live),
@@ -6023,7 +6028,7 @@ mod tests {
             "the stand-in leaves the sibling settler null"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view");
         assert_eq!(
             request_ids(&live),
@@ -6110,7 +6115,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live view")
             ),
             BTreeSet::from(["request-1".to_owned()]),
@@ -6173,7 +6178,7 @@ mod tests {
             "the stand-in runs the sibling after its start returns",
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from(["request-1".to_owned(), "request-2".to_owned()]),
             "the stand-in lists the granted request-2 beside this test's grant"
         );
@@ -6187,13 +6192,13 @@ mod tests {
         let at_expiry = 4 + GRANT_LIFETIME_SECS;
         standin.set_instant(at_expiry - 1);
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from(["request-1".to_owned(), "request-2".to_owned()]),
             "the stand-in keeps the granted request live one second before its expiry"
         );
         standin.set_instant(at_expiry);
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from(["request-1".to_owned()]),
             "the stand-in drops the granted request at its expiry instant"
         );
@@ -6240,7 +6245,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live view one second before the expiry")
             ),
             BTreeSet::from([request_id.clone()]),
@@ -6257,7 +6262,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live view after spending the once grant")
             ),
             BTreeSet::new(),
@@ -6314,7 +6319,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live view at the expiry instant")
             ),
             BTreeSet::new(),
@@ -6595,7 +6600,7 @@ mod tests {
             assert_eq!(
                 request_ids(
                     &standin
-                        .get_capability_list(Caller::Shell, None)
+                        .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                         .expect("the stand-in shell live view")
                 ),
                 BTreeSet::new(),
@@ -6700,7 +6705,7 @@ mod tests {
             "the stand-in stores the default rationale with the shell as settler"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view");
         assert_eq!(
             live["capabilities"][0]["duration"], "session",
@@ -6767,7 +6772,7 @@ mod tests {
             "the stand-in keeps the settled record after the refused late grant"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view");
         assert!(
             !request_ids(&live).contains(&req_s),
@@ -7109,7 +7114,7 @@ mod tests {
             "the stand-in leaves the granted record from the shell"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view after the expiry");
         assert_eq!(
             request_ids(&live),
@@ -7139,7 +7144,7 @@ mod tests {
             "the stand-in leaves the expired record after both refusals"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view after both refusals");
         assert_eq!(
             request_ids(&live),
@@ -7946,7 +7951,7 @@ mod tests {
             "the stand-in did the work: the sibling refusal spends nothing"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from([request_id.clone()]),
             "the stand-in did the work: the refused sibling leaves the grant in the live view"
         );
@@ -7976,7 +7981,7 @@ mod tests {
             "the stand-in did the work: the owner's one use stores Exhausted"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::new(),
             "the stand-in did the work: the live view omits the spent grant"
         );
@@ -8011,7 +8016,7 @@ mod tests {
             "the stand-in stores the once grant live"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from([request_id.clone()]),
             "the stand-in lists the once grant live before its use"
         );
@@ -8038,7 +8043,7 @@ mod tests {
             "the stand-in did the work: the two refusals spend nothing"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from([request_id.clone()]),
             "the stand-in did the work: the two refusals leave the once grant live"
         );
@@ -8056,7 +8061,7 @@ mod tests {
             "the stand-in did the work: the owner's one use stores Exhausted"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::new(),
             "the stand-in omits the spent once grant from the live view"
         );
@@ -8107,7 +8112,7 @@ mod tests {
             )
             .expect("the shell grants the pending request once");
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from([request_id.clone()]),
             "the stand-in did the work: the live view lists the granted once request"
         );
@@ -8140,7 +8145,7 @@ mod tests {
                 "{message}: the refusal spends nothing"
             );
             assert_eq!(
-                request_ids(&shell_pair(&standin).0),
+                request_ids(&shell_live(&standin)),
                 BTreeSet::from([request_id.clone()]),
                 "{message}: the live view still lists the once grant"
             );
@@ -8163,7 +8168,7 @@ mod tests {
             "the stand-in did the work: that one use stores Exhausted"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::new(),
             "the stand-in did the work: the spent once grant leaves the live view"
         );
@@ -9270,7 +9275,7 @@ mod tests {
 
     fn assert_live_request_ids_empty(standin: &StandIn, message: &str) {
         let listed = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live-grant view");
         assert!(
             request_ids(&listed).is_empty(),
@@ -9705,7 +9710,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live-grant view")
             ),
             BTreeSet::from(["req-1".to_owned()]),
@@ -9761,7 +9766,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live-grant view")
             ),
             BTreeSet::from(["req-1".to_owned()]),
@@ -10443,7 +10448,7 @@ mod tests {
             "the stand-in did the work: the undeclared ask stores no request-8"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from(["req-tok".to_owned(), "request-4".to_owned()]),
             "the stand-in did the work: the shell live view keeps req-tok and request-4"
         );
