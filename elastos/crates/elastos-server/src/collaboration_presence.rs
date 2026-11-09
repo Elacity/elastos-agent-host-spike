@@ -283,7 +283,14 @@ impl CollaborationPresenceProductPort {
             }
             // The grant is bound to the current Profile, not the Profile in
             // an old envelope. A replacement Profile revokes the old grant.
-            let root = crate::auth::principal_localhost_root(principal_id);
+            let root = crate::auth::principal_stored_localhost_root(
+                Some(self.core.data_root()),
+                principal_id,
+            )
+            .inspect_err(
+                |error| tracing::warn!(%error, "Community presence skips unresolved principal"),
+            )
+            .ok()?;
             let profile = crate::collaboration_profile_authority::load_profile_authority(
                 self.core.data_root(),
                 principal_id,
@@ -328,7 +335,14 @@ impl CollaborationPresenceProductPort {
                 return None;
             }
             let principal = &operation.principal;
-            let root = crate::auth::principal_localhost_root(principal);
+            let root = crate::auth::principal_stored_localhost_root(
+                Some(self.core.data_root()),
+                principal,
+            )
+            .inspect_err(
+                |error| tracing::warn!(%error, "Community presence skips unresolved principal"),
+            )
+            .ok()?;
             let profile = crate::collaboration_profile_authority::load_profile_authority(
                 self.core.data_root(),
                 principal,
