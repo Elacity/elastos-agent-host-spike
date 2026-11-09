@@ -1174,6 +1174,120 @@ mod tests {
         }));
     }
 
+    type Records = std::collections::HashMap<String, serde_json::Value>;
+
+    /// Reads `?session=` back through the handler: the ids in order, and each record by id.
+    async fn records(state: &CapabilityState, session: &str) -> (Vec<String>, Records) {
+        let uri = format!("http://runtime/api/capability/requests?session={session}");
+        let query = Query::try_from_uri(&uri.parse().unwrap()).unwrap();
+        let shell = Extension(Session::new_shell("shell-vm".to_string()));
+        let body = session_requests(State(state.clone()), shell, query).await;
+        let body = serde_json::to_value(body.unwrap().0).unwrap();
+        let entries = body["requests"].as_array().unwrap().clone();
+        let id = |e: &serde_json::Value| e["request_id"].as_str().unwrap().to_owned();
+        let ids = entries.iter().map(id).collect();
+        (ids, entries.into_iter().map(|e| (id(&e), e)).collect())
+    }
+
+    fn record(
+        id: &str,
+        session: &str,
+        status: &str,
+        by: Option<&str>,
+    ) -> Option<serde_json::Value> {
+        Some(
+            json!({ "request_id": id, "session_id": session, "status": status,
+            "settled_by": by, "resource": "elastos://content/publish", "action": "write",
+            "reason": "" }),
+        )
+    }
+
+    #[tokio::test]
+    async fn session_requests_read_back_each_state_and_its_settler() {
+        let state = test_state();
+        let store = state.pending_store.clone();
+        let resource = ResourceId::new("elastos://content/publish");
+        let create = |session: &str| {
+            let session = elastos_runtime::session::SessionId::from_string(session);
+            store.create_request(session, resource.clone(), Action::Write)
+        };
+        let pending = create("session-a").await.id.to_string();
+        let by_shell = create("session-a").await.id.to_string();
+        let shell_deny = store.deny_request_by(&by_shell, "no", Settler::Shell);
+        shell_deny.await.unwrap();
+        let by_runtime = create("session-a").await.id.to_string();
+        let runtime_deny = store.deny_request_by(&by_runtime, "ended", Settler::Runtime);
+        runtime_deny.await.unwrap();
+        let (granted, _) = grant_in(&state, "session-a", None, None).await;
+        let (revoked, _) = grant_in(&state, "session-a", None, None).await;
+        store
+            .revoke_request_by(&revoked, "ended", Settler::Runtime)
+            .await;
+        create("session-b").await;
+
+        let (ids, by_id) = records(&state, "session-a").await;
+        let at = |id: &str| by_id.get(id).cloned();
+        let a = "session-a";
+        assert_eq!(
+            at(&pending),
+            record(&pending, a, "pending", None),
+            "a pending request"
+        );
+        let shell = record(&by_shell, a, "denied", Some("shell"));
+        assert_eq!(
+            at(&by_shell),
+            shell,
+            "a shell deny reads back denied, settled by the shell"
+        );
+        let runtime = record(&by_runtime, a, "denied", Some("runtime"));
+        assert_eq!(
+            at(&by_runtime),
+            runtime,
+            "a runtime deny reads back settled by the runtime"
+        );
+        assert_eq!(
+            at(&granted),
+            record(&granted, a, "granted", None),
+            "a granted request"
+        );
+        let revoke = record(&revoked, a, "denied", Some("runtime"));
+        assert_eq!(
+            at(&revoked),
+            revoke,
+            "a revoked grant reads back denied, by its revoker"
+        );
+        let mut want = vec![pending, by_shell, by_runtime, granted, revoked];
+        want.sort();
+        assert_eq!(
+            ids, want,
+            "exactly session-a's records, sorted by request id"
+        );
+
+        let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let pending_store = Arc::new(PendingRequestStore::with_timeout(audit, 0));
+        let expiring = CapabilityState {
+            pending_store,
+            ..test_state()
+        };
+        let session = elastos_runtime::session::SessionId::from_string("session-c");
+        let request = expiring
+            .pending_store
+            .create_request(session, resource, Action::Write);
+        let expired = request.await.id.to_string();
+        assert_eq!(
+            expiring.pending_store.cleanup_expired().await,
+            1,
+            "the request is due"
+        );
+        let (_, by_id) = records(&expiring, "session-c").await;
+        let want = record(&expired, "session-c", "expired", Some("runtime"));
+        assert_eq!(
+            by_id.get(&expired).cloned(),
+            want,
+            "an expired request, by the runtime"
+        );
+    }
+
     #[tokio::test]
     async fn test_request_capability_denies_ipfs_backend() {
         let output = request_capability(
