@@ -3867,7 +3867,10 @@ fn inferred_webspace_target_uri(uri: &str) -> Option<String> {
 }
 
 fn library_target(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<LibraryTarget> {
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root =
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+            .localhost_root()
+            .to_string();
     let uri = clean_library_uri(&localhost_root, uri)?;
     let rooted = uri
         .strip_prefix("localhost://")
