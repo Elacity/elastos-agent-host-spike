@@ -798,8 +798,10 @@ scope and the same invocation's VERSIONS.json keep these limits visible.
 `run_leaves_no_live_grant` is ignored with `blocked: AC-021-GRANTS`. When
 explicitly selected, it reuses the granted-read journey and requires an empty
 global live-grant result before the Home can pass. The normal journeys print
-`BLOCKED(AC-021-GRANTS:leftover)` while the scoped view holds a run's live
-grants, and `pending:0 grants:0` only when that view is empty.
+`BLOCKED(AC-021-GRANTS:leftover)` while the scoped view holds live grants this
+run's fixture minted, and `pending:0 grants:0` only when that view is empty. A
+live grant this run did not mint fails the journey as foreign or stale; it is
+never folded into the known gap.
 
 Runtime owns the grant lifetime. A `once` approval sets `max_uses = 1`
 (`elastos/crates/elastos-server/src/api/handlers/capability.rs:335`). The first
@@ -813,7 +815,9 @@ The `run` client attaches shell and client sessions
 `run_local` without a detach or grant-revoke call (`run_cmd.rs:264`). Thus client
 exit alone does not end its grants or prove their absence. The shell can see
 all pending requests (`api/handlers/capability.rs:244`). The plain list selects
-grants by the caller's session; the scoped view lists every session's live
+grants by the caller's session and keeps every record whose status is
+`Granted`, including a spent allowance or a past lifetime until revocation
+(`capability.rs:537-543`); the scoped view lists every session's live
 grants. A plain response is not a global inventory of remaining allowances.
 Audit events provide supporting history only.
 
@@ -821,8 +825,9 @@ The check uses the shell-authorized view of every session's live grants, with
 exhausted, revoked and expired grants filtered by Runtime. The fixture asks
 that view by `?scope=all_sessions_live` and requires the marker
 `scope: "all_sessions_live"`. An unmarked response stays
-`BLOCKED(AC-021-GRANTS)`; a scoped list that holds the run's live grants
-reports `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)`. Only an empty
+`BLOCKED(AC-021-GRANTS)`; a scoped list whose live ids were all minted by this
+run reports `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)`. A live id the
+run did not mint fails the census as foreign or stale. Only an empty
 scoped list reports `pending:0 grants:0`, and only `run_leaves_no_live_grant`
 requires it. Client callers retain their own-session view. This lane changes
 zero Runtime routes and performs zero revocations. F-cleanup-grant is deferred
