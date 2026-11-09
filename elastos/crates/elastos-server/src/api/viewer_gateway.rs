@@ -775,7 +775,7 @@ fn viewer_storage_target(
         anyhow::bail!("viewer storage does not support .AppData/Agents/ (agent journals)");
     }
     let principal_id = context.principal_id().to_string();
-    let localhost_root = crate::auth::principal_localhost_root(&principal_id);
+    let localhost_root = viewer_target_root(&context);
     Ok(ViewerStorageTarget {
         path: dir.join(file_name),
         principal_id,
@@ -808,12 +808,7 @@ fn viewer_storage_root_uri(
         &storage, context,
     ))
     .ok_or_else(|| anyhow::anyhow!("invalid viewer storage root"))?;
-    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
-    if root_uri != localhost_root
-        && !root_uri
-            .strip_prefix(&localhost_root)
-            .is_some_and(|rest| rest.starts_with('/'))
-    {
+    if !viewer_storage_root_matches(&root_uri, context) {
         anyhow::bail!("viewer storage must be scoped to the launch principal root");
     }
     Ok(root_uri)
@@ -852,8 +847,19 @@ pub(super) fn principal_root_protected_object_inventory(
 }
 
 fn principal_scoped_storage_uri(storage: &str, context: &HomeLaunchTokenContext) -> String {
-    let principal_root = crate::auth::principal_localhost_root(context.principal_id());
-    principal_scoped_storage_uri_for_root(storage, &principal_root)
+    principal_scoped_storage_uri_for_root(storage, context.root().localhost_root())
+}
+
+fn viewer_target_root(context: &HomeLaunchTokenContext) -> String {
+    context.root().localhost_root().to_string()
+}
+
+fn viewer_storage_root_matches(root_uri: &str, context: &HomeLaunchTokenContext) -> bool {
+    let localhost_root = context.root().localhost_root();
+    root_uri == localhost_root
+        || root_uri
+            .strip_prefix(localhost_root)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn principal_scoped_storage_uri_for_root(storage: &str, principal_root: &str) -> String {
@@ -911,4 +917,52 @@ fn viewer_error_response(err: anyhow::Error) -> Response {
         StatusCode::INTERNAL_SERVER_ERROR
     };
     (status, text).into_response()
+}
+
+#[cfg(test)]
+mod r4_root_tests {
+    use super::*;
+    use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+    use crate::auth::PrincipalKind;
+
+    #[test]
+    fn r4_viewer_uses_context_root_at_all_three_sites() {
+        let missing = tempfile::tempdir().unwrap();
+        assert_eq!(
+            crate::api::gateway::launch_principal_root(missing.path(), missing.path(), ID)
+                .unwrap_err()
+                .to_string(),
+            "Home launch principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            store(dir.path(), kind);
+            let root =
+                crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), ID).unwrap();
+            let context = HomeLaunchTokenContext::resolved(
+                root,
+                ID.to_string(),
+                "session".into(),
+                None,
+                "grant".into(),
+            );
+            assert_eq!(
+                viewer_target_root(&context),
+                expected,
+                "R4 viewer target root"
+            );
+            assert_eq!(
+                principal_scoped_storage_uri("localhost://Users/self/Documents/*", &context),
+                format!("{expected}/Documents"),
+                "R4 viewer scoped URI"
+            );
+            assert!(
+                viewer_storage_root_matches(&format!("{expected}/Documents"), &context),
+                "R4 viewer root check"
+            );
+        }
+    }
 }

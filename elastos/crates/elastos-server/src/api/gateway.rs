@@ -150,6 +150,8 @@ use gateway_home_terminal::*;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
+#[cfg(test)]
+pub(super) use gateway_home_token::launch_principal_root;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
 pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(super) use gateway_home_token::{
