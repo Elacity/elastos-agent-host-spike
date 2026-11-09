@@ -490,9 +490,10 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
             finished.is_ok(),
             "cleanup census refused leftovers; see checked reason"
         );
-        assert!(
-            cleanup_state.is_ok(),
-            "cleanup grant census failed; see checked reason"
+        assert_eq!(
+            cleanup_state,
+            Ok("pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)"),
+            "the run's session grants stay live after the clients exit: AC-021-GRANTS"
         );
         for client in client_homes {
             client.finish().unwrap();
