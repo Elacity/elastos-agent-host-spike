@@ -11370,4 +11370,29 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    #[test]
+    fn chat_attach_binding_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
+            assert!(
+                result.as_ref().is_ok_and(|uri| uri.starts_with(&format!(
+                    "{root}/.AppData/LocalHost/.Runtime/Library/ChatAttach/"
+                )) && uri.ends_with(".json")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
