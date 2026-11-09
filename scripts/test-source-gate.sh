@@ -17,10 +17,24 @@ prepush() {
 }
 
 redteam() {
-  # The wasm-capsule receipt probe: its plants anchor on capsule/src/lib.rs, so
-  # a moved anchor fails here instead of going stale silently. The module prints
-  # SKIPPED and builds nothing when rustc 1.91.0 or the wasm32 target is absent.
-  python3 -I -m unittest discover -s lab/redteam/py -p test_wasm_capsule_receipt.py -v
+  # Every plant's anchor must appear exactly once in its committed target file.
+  # This test builds nothing and needs no rustc or wasm32 target, so CI and the
+  # local pre-push both run it. A skip is not a pass: unittest exits 0 on an
+  # all-skipped run, so the exact run is checked below.
+  # The full receipt probe builds three copies and takes 8-11 minutes; it stays
+  # a local command, not part of this gate:
+  #   python3 -I -m unittest discover -s lab/redteam/py \
+  #     -p test_wasm_capsule_receipt.py -v
+  local output status=0
+  output="$(python3 -I -m unittest discover -s lab/redteam/py \
+    -p test_wasm_capsule_receipt.py \
+    -k test_every_plant_anchor_appears_exactly_once -v 2>&1)" || status=$?
+  printf '%s\n' "$output"
+  (( status == 0 )) || return "$status"
+  if [[ "$output" != *"Ran 1 test"* || "$output" == *"skipped"* ]]; then
+    echo "redteam: the anchor test did not run; a skip is not a pass" >&2
+    return 1
+  fi
 }
 
 product_ui() {
