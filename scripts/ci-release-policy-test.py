@@ -2944,11 +2944,10 @@ class InstalledJourneyTests(unittest.TestCase):
             self.assertEqual(child.wait(timeout=60), 3)
             with self.assertRaises(AssertionError) as raised:
                 journey["wait_healthy"](child, "127.0.0.1:1", "Runtime", evidence=evidence)
-            message = str(raised.exception)
-            self.assertIn("installed Runtime did not become healthy (exit 3)", message)
-            self.assertIn(f"evidence: {evidence}", message)
+            # The whole line is the allowed set: status and evidence path.
             # Runtime output stays in its private log, even when it explains the exit.
-            self.assertNotIn("gateway refused its provider config", message)
+            self.assertEqual(str(raised.exception),
+                             f"installed Runtime did not become healthy (exit 3); evidence: {evidence}")
 
     def test_signal_exit_reports_the_signal(self):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
@@ -3898,8 +3897,10 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     "installed Runtime did not become healthy (census: RuntimeError: finite journey Runtime left its unit)")) as raised:
                 case.execute(home, data, evidence, memory_gib=4, finite=factory)
             factory.assert_called_once()
-            self.assertNotIn("private Runtime log line", str(raised.exception))
-            self.assertIn(f"evidence: {evidence / 'installed-journeys.json'}", str(raised.exception))
+            self.assertEqual(str(raised.exception),
+                             "installed Runtime did not become healthy "
+                             "(census: RuntimeError: finite journey Runtime left its unit)"
+                             f"; evidence: {evidence / 'installed-journeys.json'}")
             record = json.loads((evidence / "installed-journeys.json").read_text())
             self.assertEqual(record["finite_memory"]["observer_failure"]["message"], "finite journey Runtime left its unit")
             self.assertEqual(record["finite_memory"]["observer_failure"]["phase"], "census")
