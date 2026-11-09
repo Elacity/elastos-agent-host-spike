@@ -326,6 +326,7 @@ async fn verify_candidate_before_migration(
     transaction: &InstallTransaction,
     bytes: &[u8],
     version: &str,
+    deadline: std::time::Duration,
 ) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -347,19 +348,18 @@ async fn verify_candidate_before_migration(
     probe.as_file().sync_all()?;
     // Linux requires the writer descriptor to close before executing these bytes.
     let path = probe.into_temp_path();
-    verify_installed_binary_version(&path, version).await
+    verify_installed_binary_version(&path, version, deadline).await
 }
 
-// Unit-test binaries can spend several seconds scheduling a child under load.
-// The installed Runtime keeps the short limit for an untrusted candidate.
-#[cfg(test)]
-const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-#[cfg(not(test))]
+/// Hard limit for an untrusted candidate's `--version` probe. Every build
+/// ships this value; callers that need another deadline pass it explicitly.
 const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const _: () = assert!(VERSION_CHECK_TIMEOUT.as_secs() == 5);
 
 async fn verify_installed_binary_version(
     bin_path: &Path,
     expected_version: &str,
+    deadline: std::time::Duration,
 ) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     use tokio::io::AsyncReadExt;
@@ -384,7 +384,7 @@ async fn verify_installed_binary_version(
     let mut stderr = child.stderr.take().unwrap().take(4097);
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let result = tokio::time::timeout(VERSION_CHECK_TIMEOUT, async {
+    let result = tokio::time::timeout(deadline, async {
         // Keep the leader unreaped until pipe admission has finished. Its PID
         // then anchors the owned process group throughout any timeout cleanup.
         tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
@@ -408,7 +408,7 @@ async fn verify_installed_binary_version(
             match failure {
                 Err(_) => anyhow::bail!(
                     "installed binary version check timed out after {} seconds",
-                    VERSION_CHECK_TIMEOUT.as_secs()
+                    deadline.as_secs()
                 ),
                 Ok(Err(error)) => return Err(error.into()),
                 _ => unreachable!(),
@@ -1589,7 +1589,15 @@ async fn run_upgrade_with_restart(
             (ReleaseFile::ReleaseManifest, release_bytes.as_slice()),
         ];
         transaction.preflight_prepare(&files, &previous.head, &previous.release)?;
-        on_heap(|| verify_candidate_before_migration(&transaction, &binary_data, version)).await?;
+        on_heap(|| {
+            verify_candidate_before_migration(
+                &transaction,
+                &binary_data,
+                version,
+                VERSION_CHECK_TIMEOUT,
+            )
+        })
+        .await?;
         crate::installed_release::load_or_migrate_for_update(
             data_dir,
             &bin_path,
@@ -1801,7 +1809,15 @@ async fn run_upgrade_with_restart(
         (ReleaseFile::ReleaseManifest, release_bytes.as_slice()),
     ];
     transaction.preflight_prepare(&files, &previous.head, &previous.release)?;
-    on_heap(|| verify_candidate_before_migration(&transaction, &binary_data, version)).await?;
+    on_heap(|| {
+        verify_candidate_before_migration(
+            &transaction,
+            &binary_data,
+            version,
+            VERSION_CHECK_TIMEOUT,
+        )
+    })
+    .await?;
     crate::installed_release::load_or_migrate_for_update(
         data_dir,
         bin_path,
@@ -4885,7 +4901,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (bin, release) =
             crate::install_transaction::tests::briefly_busy_binary(dir.path(), "0.1.0");
-        verify_installed_binary_version(&bin, "0.1.0")
+        verify_installed_binary_version(&bin, "0.1.0", VERSION_CHECK_TIMEOUT)
             .await
             .unwrap();
         release.join().unwrap();
@@ -4907,7 +4923,9 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        verify_installed_binary_version(&bin, "0.1.0")
+        // Six seconds is slower than the shipped bound, so a loaded harness
+        // needs an explicit generous deadline instead of the production one.
+        verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(30))
             .await
             .unwrap();
     }
