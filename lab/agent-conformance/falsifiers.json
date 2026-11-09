@@ -1143,8 +1143,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "controller.check_cleanup_wiring(|controller| controller.cleanup_state())",
-          "new": "controller.check_cleanup_wiring(|_controller| Ok(\"pending:0 grants:BLOCKED(AC-021-GRANTS)\"))"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    let cleanup_state = controller.check_cleanup_wiring(|_controller| Ok(\"pending:0 grants:BLOCKED(AC-021-GRANTS)\"));\n    let mut finished = operator.finish_check(sampled);"
         }
       ],
       "tests": [
