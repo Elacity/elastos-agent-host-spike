@@ -812,6 +812,26 @@ pub(in crate::api) fn require_carried_home_launch_token(
     )
 }
 
+/// Test-only entry to the one verifier below with the signer DID a subordinate
+/// gateway loads from its trusted-signer configuration. The verifier arm and
+/// its result stay the production ones.
+#[cfg(test)]
+pub(in crate::api) fn require_home_launch_token_value_from_expected_did_for_test(
+    data_dir: &std::path::Path,
+    token: &str,
+    allowed_apps: &[&str],
+    expected_did: String,
+    auth_data_dir: &std::path::Path,
+) -> anyhow::Result<RequiredHomeLaunchToken> {
+    require_home_launch_token_value_from_expected_did(
+        data_dir,
+        token,
+        allowed_apps,
+        expected_did,
+        auth_data_dir,
+    )
+}
+
 fn require_home_launch_token_value_from_expected_did(
     data_dir: &std::path::Path,
     token: &str,

@@ -1889,16 +1889,39 @@ mod denial_authority {
         let open = fx.create_run("seed-req-open", "qwen-local").await;
         assert_eq!(open["ok"], true, "{open}");
         let open_run_id = run_id_for(&fx.remote_principal(), "seed-req-open");
-        // The parent's DID is not this host's device key: a subordinate gateway
-        // trusts it through ELASTOS_HOME_LAUNCH_TRUSTED_SIGNER_DID only.
-        let parent_did = "did:key:z6MkParentSigner";
-        let context = HomeLaunchTokenContext::resolved(
-            crate::auth::ResolvedPrincipalRoot::verified_device_signer(parent_did),
-            format!("device:{parent_did}"),
-            "auth:local:parent".to_string(),
-            None,
-            "grant:local:parent".to_string(),
+        // The parent mints the token with its own device key. A subordinate
+        // gateway receives it and trusts that DID, which is not the host's key.
+        let parent = tempfile::tempdir().unwrap();
+        let (_parent_key, parent_did) =
+            elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let parent_context = local_home_launch_token_context(parent.path()).unwrap();
+        let token = issue_home_launch_token_with_context(
+            parent.path(),
+            SERVICES_CAPSULE_ID,
+            &parent_context,
+        )
+        .unwrap();
+        let verified =
+            crate::api::gateway::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+                fx.owner.path(),
+                &token,
+                &[SERVICES_CAPSULE_ID],
+                parent_did.clone(),
+                fx.owner.path(),
+            )
+            .expect("a parent-signed device token verifies for the subordinate gateway");
+        let context = verified.context;
+        let principal = format!("device:{parent_did}");
+        // The device root for that principal, written independently of the
+        // resolver the verifier uses.
+        let expected_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(principal.as_bytes())[..12])
         );
+        assert_eq!(verified.launch_context.executable_actor, SERVICES_CAPSULE_ID);
+        assert_eq!(context.principal_id(), principal);
+        assert_eq!(context.proof_binding_id(), None);
+        assert_eq!(context.root().localhost_root(), expected_root);
         fx.write_requests_state_for(&context);
         let result = fx.deny_as(&context).await;
         assert!(result.is_err(), "delivery failure surfaces: {result:?}");
