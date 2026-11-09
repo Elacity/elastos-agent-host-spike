@@ -7763,7 +7763,8 @@ pub(crate) fn load_runtime_custody_profile_did(
     data_dir: &Path,
     principal_id: &str,
 ) -> anyhow::Result<String> {
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root = crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+        .map_err(|_| release_unavailable_missing!()())?;
     let profile = crate::collaboration_profile_authority::load_profile_authority(
         data_dir,
         principal_id,

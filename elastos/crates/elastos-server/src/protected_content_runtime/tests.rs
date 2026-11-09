@@ -2323,8 +2323,8 @@ fn install_profile_authority_keeping_device_key(
     data_dir: &Path,
     principal_id: &str,
 ) -> (String, ProfileIdentityV1) {
-    let proof_binding_id =
-        store_profile_signing_passkey(data_dir, principal_id, "credential-protected-content");
+    let credential_id = format!("credential-protected-content-{principal_id}");
+    let proof_binding_id = store_profile_signing_passkey(data_dir, principal_id, &credential_id);
     crate::auth::store_test_principal_root_protection(data_dir, principal_id);
     let localhost_root = crate::auth::principal_localhost_root(principal_id);
     let profile = crate::collaboration_profile_authority::update_profile_authority(
@@ -13487,5 +13487,41 @@ fn runtime_media_source_uses_the_stored_principal_root() {
         let error =
             super::read_runtime_media_source(data_dir, r4_fixture::ID, &uri, &path).unwrap_err();
         assert!(error.to_string().contains("input is invalid"), "{error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_custody_profile_uses_the_stored_principal_root() {
+    use crate::auth::{r4_fixture, PrincipalKind};
+    for (kind, root) in [
+        (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+        (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        owner_only_dir(data_dir);
+        let proof = store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7");
+        r4_fixture::set_kind(data_dir, r4_fixture::ID, kind, root);
+        crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            data_dir,
+            r4_fixture::ID,
+            root,
+            &proof,
+            "R7 profile",
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        let actual = super::load_runtime_custody_profile_did(data_dir, r4_fixture::ID);
+        assert_eq!(
+            actual.as_deref().unwrap_or(""),
+            profile.document().profile_did.as_str(),
+            "{root}: {actual:?}"
+        );
+        r4_fixture::remove(data_dir, r4_fixture::ID);
+        let error = super::load_runtime_custody_profile_did(data_dir, r4_fixture::ID).unwrap_err();
+        assert!(error.to_string().contains("unavailable"), "{error}");
     }
 }
