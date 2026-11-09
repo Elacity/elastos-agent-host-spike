@@ -13,8 +13,9 @@ The evidence is one receipt,
 `~/Sparks/office/receipt-local.sh:32` appends the digest with `tee -a` while
 the log itself is overwritten; its second line is current and matches the
 recompute, and its first line (`1851b828...`) is an earlier write of the same
-path. The log prints the head, tree, toolchain and every command
-with its full output and exit.
+path. The log prints the head, tree, toolchain and every command with its
+exit and its output, apart from the Cargo progress lines (`Compiling`,
+`Checking`, `Downloading` and the like) that `receipt-local.sh:26` filters.
 
 ## The committed forms
 
@@ -42,9 +43,11 @@ grant is not enough (`capsules/model-provider/CONFINEMENT.md:101`).
 
 Seatbelt reads narrow in this order: `file-read*` (data, metadata and
 attributes), `file-read-data` (file content), `file-read-metadata` (names and
-attributes), then no rule (Seatbelt operation names, not measured here). did
-and wallet ran `file-read*` as their control and the other three as plants.
-model's control is `file-read-data`; model never ran `file-read*`.
+attributes), then no rule (Seatbelt operation names, not measured here). All
+three providers ran the no-rule form as a plant (receipt lines 333, 1141,
+1962). did and wallet ran `file-read*` as their control and `file-read-data`,
+`file-read-metadata` and no rule as plants. model's control is
+`file-read-data`; model never ran `file-read*`.
 
 ## Runs
 
@@ -88,9 +91,12 @@ profile from `declared-rights.json` keep the fixture row in every run.
 The model profile already holds `file-read-data`, so its `data` plant is the
 control run of the same line and changes no byte.
 
-The six wallet `file-read-data` failures are profile-text checks. They compare a
-generated profile or a document with the committed profile, so the substituted
-line fails them by construction:
+The six wallet `file-read-data` failures are profile-text checks, and the
+substituted line fails them by construction. Five compare a generated profile
+or a document with the committed profile.
+`every_did_and_wallet_allow_rule_has_a_registered_removal` instead compares the
+committed allow rules with the registered removal entries (`:19125`), and its
+panic names the substituted line as a rule no entry removes (452):
 
 - `generated_did_and_wallet_profiles_match_their_committed_oracles`
   (`capsules/wallet-provider/tests/confine.rs:18553`)
@@ -151,17 +157,20 @@ which requires an `init` answer:
   `tests/confine/main.rs:3008`) does the same.
 - `startup_is_refused_when_the_profile_cannot_be_applied`, did (389), wallet
   (1484) and model (2190): one case binds `PROFILE_PATH` without
-  `STORAGE_ROOT` (did `:1314`, wallet `:3922`, model `:3728`), so the profile
-  does not apply and nothing runs.
-- `bound_executable_digest_mismatch_refuses_start`, model (1975): the lab
-  launch helper refuses a changed copy of `/usr/bin/true` before `spawn`
-  (`:3568`).
+  `STORAGE_ROOT` (did `:1314`, wallet `:3922`, model `:3728`). `sandbox-exec`
+  runs, cannot apply the profile, and exits 65 before the provider runs (did
+  387, wallet 1482: `child exit status: 65`).
 - `byte_different_file_at_bound_path_starts`, model (1997): it runs a
   byte-different copy of the binary under `PROFILE_PATH` (`:3338`) and fails
   only on exit 65, or on exit 71 with `execvp()` and `Operation not permitted`
   on stderr (`:3346-3356`). It passes in every model run (1548, 1737, 1997);
   the outcome is still running at 2 seconds under data (1547) and signal 6
   under metadata and none (1729, 1989).
+
+`bound_executable_digest_mismatch_refuses_start` (model, 1975) is not a launch
+of the committed profile: the digest check panics on the changed copy of
+`/usr/bin/true` at `tests/confine/main.rs:345` (1973-1974), called from
+`check_provider_executable` before `sandboxed` loads the profile (`:395-397`).
 
 ## Conclusion
 
