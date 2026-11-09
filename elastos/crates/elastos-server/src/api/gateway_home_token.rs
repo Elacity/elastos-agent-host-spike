@@ -14,6 +14,7 @@ pub(in crate::api) struct HomeLaunchTokenContext {
     pub session_id: String,
     pub proof_binding_id: Option<String>,
     pub grant_id: String,
+    pub root: crate::auth::ResolvedPrincipalRoot,
 }
 
 impl HomeLaunchTokenContext {
@@ -32,16 +33,20 @@ impl HomeLaunchTokenContext {
     pub(in crate::api) fn grant_id(&self) -> &str {
         &self.grant_id
     }
+
+    /// The root this context resolved before it existed. R1's issuer and
+    /// verifier read it here; the remaining G1 callers still use the
+    /// principal-id rule until R2-R4 switch them.
+    pub(in crate::api) fn root(&self) -> &crate::auth::ResolvedPrincipalRoot {
+        &self.root
+    }
 }
 
 impl HomeLaunchTokenContext {
-    /// `resolved()` is the constructor production code is moving to. The root
-    /// is resolved and refuses before a context exists, but it is not stored
-    /// yet: the `_root` argument is dropped. S3c-1a-iii stores it; until then
-    /// the production literals remain (this file :144, :243, :287, :796) and at
-    /// the not-yet-converted sites.
+    /// `resolved()` is the one production constructor: the root is resolved and
+    /// refuses before a context exists, and it is stored here.
     pub(in crate::api) fn resolved(
-        _root: crate::auth::ResolvedPrincipalRoot,
+        root: crate::auth::ResolvedPrincipalRoot,
         principal_id: String,
         session_id: String,
         proof_binding_id: Option<String>,
@@ -52,22 +57,25 @@ impl HomeLaunchTokenContext {
             session_id,
             proof_binding_id,
             grant_id,
+            root,
         }
     }
 }
 
 #[cfg(test)]
 impl HomeLaunchTokenContext {
-    /// Test-only: production builds only through `resolved`; S3c-1a-iii adds
-    /// the root here.
+    /// Test-only: production builds only through `resolved`. The fixture root is
+    /// visibly a test root, never a stored record's root.
     pub(in crate::api) fn for_test(
         principal_id: impl Into<String>,
         session_id: impl Into<String>,
         proof_binding_id: Option<String>,
         grant_id: impl Into<String>,
     ) -> Self {
+        let principal_id = principal_id.into();
         Self {
-            principal_id: principal_id.into(),
+            root: crate::auth::ResolvedPrincipalRoot::for_test_principal(&principal_id),
+            principal_id,
             session_id: session_id.into(),
             proof_binding_id,
             grant_id: grant_id.into(),
@@ -156,7 +164,7 @@ pub(in crate::api) struct RequiredHomeLaunchToken {
 pub(crate) struct RuntimeWalletAuthority {
     context: VerifiedWalletInvocationContext,
     #[allow(dead_code)] // P2a-ii reads it through `home_launch_context`.
-    root: crate::auth::ResolvedPrincipalRoot,
+    pub root: crate::auth::ResolvedPrincipalRoot,
 }
 
 impl RuntimeWalletAuthority {
@@ -165,12 +173,13 @@ impl RuntimeWalletAuthority {
     }
 
     pub(in crate::api) fn home_launch_context(&self) -> HomeLaunchTokenContext {
-        HomeLaunchTokenContext {
-            principal_id: self.context.principal_id().to_string(),
-            session_id: self.context.session_id().to_string(),
-            proof_binding_id: self.context.proof_binding_id().map(ToString::to_string),
-            grant_id: self.context.grant_id().to_string(),
-        }
+        HomeLaunchTokenContext::resolved(
+            self.root.clone(),
+            self.context.principal_id().to_string(),
+            self.context.session_id().to_string(),
+            self.context.proof_binding_id().map(ToString::to_string),
+            self.context.grant_id().to_string(),
+        )
     }
 
     #[cfg(test)]
@@ -267,14 +276,16 @@ pub(in crate::api) fn local_home_launch_token_context(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<HomeLaunchTokenContext> {
     let (_signing_key, did) = elastos_identity::load_or_create_did(data_dir)?;
-    Ok(HomeLaunchTokenContext {
-        principal_id: elastos_runtime::auth::PrincipalId::device_did(&did)
-            .as_str()
-            .to_string(),
-        session_id: format!("local:{}", uuid_like_token()),
-        proof_binding_id: None,
-        grant_id: format!("grant:local:{}", uuid_like_token()),
-    })
+    let principal_id = elastos_runtime::auth::PrincipalId::device_did(&did)
+        .as_str()
+        .to_string();
+    Ok(HomeLaunchTokenContext::resolved(
+        crate::auth::ResolvedPrincipalRoot::verified_device_signer(&did),
+        principal_id,
+        format!("local:{}", uuid_like_token()),
+        None,
+        format!("grant:local:{}", uuid_like_token()),
+    ))
 }
 
 pub(crate) fn uuid_like_token() -> String {
@@ -305,18 +316,37 @@ pub(crate) fn issue_home_launch_token_for_auth_grant(
     app: &str,
     grant: &elastos_runtime::auth::AuthSessionGrantV1,
 ) -> anyhow::Result<String> {
+    let root = launch_principal_root(
+        data_dir,
+        &home_launch_auth_data_dir(data_dir),
+        &grant.principal_id,
+    )?;
+    issue_home_launch_token_for_verified_grant(data_dir, app, grant, root)
+}
+
+/// The same issuer for a grant whose root verified recovery material proves,
+/// not a stored record. The recovery import issues its replacement grant
+/// before the recovered record is committed, so the caller passes the root the
+/// verified Recovery Kit established.
+pub(in crate::api) fn issue_home_launch_token_for_verified_grant(
+    data_dir: &std::path::Path,
+    app: &str,
+    grant: &elastos_runtime::auth::AuthSessionGrantV1,
+    root: crate::auth::ResolvedPrincipalRoot,
+) -> anyhow::Result<String> {
     if !grant.apps.iter().any(|allowed| allowed == app) {
         anyhow::bail!("auth session grant is not authorized for app");
     }
     issue_home_launch_token_with_context(
         data_dir,
         app,
-        &HomeLaunchTokenContext {
-            principal_id: grant.principal_id.clone(),
-            session_id: grant.session_id.clone(),
-            proof_binding_id: Some(grant.proof_binding_id.clone()),
-            grant_id: grant.grant_id.clone(),
-        },
+        &HomeLaunchTokenContext::resolved(
+            root,
+            grant.principal_id.clone(),
+            grant.session_id.clone(),
+            Some(grant.proof_binding_id.clone()),
+            grant.grant_id.clone(),
+        ),
     )
 }
 
@@ -605,8 +635,28 @@ fn wallet_principal_root(
     })
 }
 
-pub(in crate::api) fn runtime_wallet_authority(
+/// A launch context's root, resolved in the store its grant was validated
+/// against. A missing or unreadable record refuses with a named error; there is
+/// no id-rule fallback.
+fn launch_principal_root(
     data_dir: &std::path::Path,
+    auth_data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<crate::auth::ResolvedPrincipalRoot> {
+    crate::auth::ResolvedPrincipalRoot::resolve(data_dir, auth_data_dir, principal_id).map_err(
+        |err| {
+            tracing::warn!(
+                principal_id = %principal_id,
+                error = %format!("{err:#}"),
+                "Home launch principal root unresolved"
+            );
+            anyhow::anyhow!("Home launch principal root unresolved")
+        },
+    )
+}
+
+pub(in crate::api) fn runtime_wallet_authority(
+    _data_dir: &std::path::Path,
     required: &RequiredHomeLaunchToken,
 ) -> anyhow::Result<RuntimeWalletAuthority> {
     let context = VerifiedWalletInvocationContext::new(
@@ -618,7 +668,7 @@ pub(in crate::api) fn runtime_wallet_authority(
         required.launch_id.clone(),
     )
     .map_err(|err| anyhow::anyhow!("invalid verified Wallet authority: {err}"))?;
-    let root = wallet_principal_root(data_dir, required.context.principal_id())?;
+    let root = required.context.root().clone();
     Ok(RuntimeWalletAuthority { context, root })
 }
 
@@ -671,7 +721,7 @@ fn require_home_launch_token_for_any_from_with_origin(
 }
 
 fn require_home_launch_token_for_any_from_expected_did(
-    _data_dir: &std::path::Path,
+    data_dir: &std::path::Path,
     headers: &HeaderMap,
     allowed_apps: &[&str],
     cookie_name: Option<&str>,
@@ -684,6 +734,7 @@ fn require_home_launch_token_for_any_from_expected_did(
         (None, None) => anyhow::bail!("missing home launch token"),
         (Some(token), None) | (None, Some(token)) => {
             require_home_launch_token_value_from_expected_did(
+                data_dir,
                 token,
                 allowed_apps,
                 expected_did,
@@ -692,6 +743,7 @@ fn require_home_launch_token_for_any_from_expected_did(
         }
         (Some(header), Some(cookie)) if header == cookie => {
             require_home_launch_token_value_from_expected_did(
+                data_dir,
                 header,
                 allowed_apps,
                 expected_did,
@@ -704,12 +756,14 @@ fn require_home_launch_token_for_any_from_expected_did(
             // two tokens verify to different session authorities. Same
             // authority answers with the cookie, the newest server-set mint.
             let from_cookie = require_home_launch_token_value_from_expected_did(
+                data_dir,
                 cookie,
                 allowed_apps,
                 expected_did.clone(),
                 auth_data_dir,
             );
             let from_header = require_home_launch_token_value_from_expected_did(
+                data_dir,
                 header,
                 allowed_apps,
                 expected_did,
@@ -746,6 +800,7 @@ pub(in crate::api) fn require_carried_home_launch_token(
         .ok_or_else(|| anyhow::anyhow!("gateway identity is unavailable"))?;
     let auth_data_dir = home_launch_auth_data_dir(data_dir);
     require_home_launch_token_value_from_expected_did(
+        data_dir,
         token,
         allowed_apps,
         expected_did,
@@ -754,6 +809,7 @@ pub(in crate::api) fn require_carried_home_launch_token(
 }
 
 fn require_home_launch_token_value_from_expected_did(
+    data_dir: &std::path::Path,
     token: &str,
     allowed_apps: &[&str],
     expected_did: String,
@@ -805,7 +861,7 @@ fn require_home_launch_token_value_from_expected_did(
     {
         anyhow::bail!("home launch token is missing authority context");
     }
-    match envelope.payload.proof_binding_id.as_deref() {
+    let root = match envelope.payload.proof_binding_id.as_deref() {
         Some(proof_binding_id) if proof_binding_id.trim().is_empty() => {
             anyhow::bail!("home launch token is missing authority context")
         }
@@ -826,6 +882,7 @@ fn require_home_launch_token_value_from_expected_did(
             {
                 anyhow::bail!("home launch token authority context mismatch");
             }
+            launch_principal_root(data_dir, auth_data_dir, &envelope.payload.principal_id)?
         }
         None => {
             let expected_principal =
@@ -838,17 +895,19 @@ fn require_home_launch_token_value_from_expected_did(
                     "proofless home launch token is not exact Runtime-local device authority"
                 );
             }
+            crate::auth::ResolvedPrincipalRoot::verified_device_signer(&expected_dids[0])
         }
-    }
+    };
     Ok(RequiredHomeLaunchToken {
         launch_id: envelope.payload.launch_id,
         launch_context: envelope.payload.launch_context,
-        context: HomeLaunchTokenContext {
-            principal_id: envelope.payload.principal_id,
-            session_id: envelope.payload.session_id,
-            proof_binding_id: envelope.payload.proof_binding_id,
-            grant_id: envelope.payload.grant_id,
-        },
+        context: HomeLaunchTokenContext::resolved(
+            root,
+            envelope.payload.principal_id,
+            envelope.payload.session_id,
+            envelope.payload.proof_binding_id,
+            envelope.payload.grant_id,
+        ),
     })
 }
 
@@ -1316,6 +1375,7 @@ mod tests {
             Some("proof:passkey:alice".to_string()),
             "grant:alice",
         );
+        crate::auth::store_test_human_principal(data_dir.path(), context.principal_id());
         crate::auth::store_session_grant(
             data_dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
@@ -1534,6 +1594,7 @@ mod tests {
             Some("proof:passkey:alice".to_string()),
             "grant:alice",
         );
+        crate::auth::store_test_human_principal(data_dir.path(), stored.principal_id());
         crate::auth::store_session_grant(
             data_dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
@@ -1805,6 +1866,7 @@ mod tests {
             Some("proof:passkey:alice".to_string()),
             "grant:alice",
         );
+        crate::auth::store_test_human_principal(parent.path(), context.principal_id());
         crate::auth::store_session_grant(
             parent.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
@@ -1874,6 +1936,7 @@ mod tests {
             authority.home_launch_context().principal_id,
             context.principal_id
         );
+        assert_eq!(authority.home_launch_context().root(), context.root());
 
         headers.insert(axum::http::header::ORIGIN, "null".parse().unwrap());
         assert!(require_internal_shell_runtime_wallet_authority(
@@ -1903,7 +1966,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let now = now_ts();
-        let build = |principal_id: String| {
+        let build = |principal_id: String| -> anyhow::Result<RuntimeWalletAuthority> {
             let grant = AuthSessionGrantV1 {
                 schema: AuthSessionGrantV1::SCHEMA.to_string(),
                 grant_id: format!("grant:{}", uuid_like_token()),
@@ -1915,8 +1978,7 @@ mod tests {
                 apps: vec!["wallet".to_string()],
             };
             crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
-            let token =
-                issue_home_launch_token_for_auth_grant(dir.path(), "wallet", &grant).unwrap();
+            let token = issue_home_launch_token_for_auth_grant(dir.path(), "wallet", &grant)?;
             require_runtime_wallet_authority(dir.path(), &capsule_headers(&token), &["wallet"])
         };
 
@@ -1932,5 +1994,138 @@ mod tests {
         let control = build(stored.principal_id.clone()).unwrap();
         let launched = control.home_launch_context();
         assert_eq!(launched.principal_id(), stored.principal_id);
+        // R1: the wallet authority's context carries the root the token
+        // resolved, not a second derivation.
+        assert_eq!(
+            launched.root(),
+            &crate::auth::ResolvedPrincipalRoot::resolve(
+                dir.path(),
+                dir.path(),
+                &stored.principal_id
+            )
+            .unwrap()
+        );
+    }
+
+    /// R1: the local context stores the device root, and a launch token rebuilt
+    /// from the wire keeps it. Same Users root as before.
+    #[test]
+    fn r1_local_context_and_token_verification_keep_the_device_users_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(data_dir.path()).unwrap();
+        let users_root = crate::auth::principal_localhost_root(context.principal_id());
+        context
+            .root()
+            .owns_object_uri(&format!("{users_root}/Documents/a.txt"))
+            .unwrap();
+        let token =
+            issue_home_launch_token_with_context(data_dir.path(), HOME_CAPSULE_ID, &context)
+                .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        let verified = require_home_token_context(data_dir.path(), &headers).unwrap();
+        assert_eq!(verified, context);
+        assert_eq!(verified.root(), context.root());
+    }
+
+    /// R1: an auth-grant launch stores the stored Human's root, the same Users
+    /// root the id rule gave before.
+    #[test]
+    fn r1_auth_grant_launch_keeps_the_stored_humans_users_root() {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+
+        let dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let now = now_ts();
+        let record = crate::auth::store_test_human_principal(dir.path(), "person:local:r1-human");
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:r1-human".to_string(),
+            session_id: "auth:r1-human".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
+            apps: vec![HOME_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+        let token =
+            issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        let verified = require_home_token_context(dir.path(), &headers).unwrap();
+        let stored = crate::auth::ResolvedPrincipalRoot::resolve(
+            dir.path(),
+            dir.path(),
+            &record.principal_id,
+        )
+        .unwrap();
+        assert_eq!(verified.root(), &stored);
+        verified
+            .root()
+            .owns_object_uri(&format!(
+                "{}/Documents/a.txt",
+                crate::auth::principal_localhost_root(&record.principal_id)
+            ))
+            .unwrap();
+    }
+
+    fn r1_unstored_grant(
+        dir: &std::path::Path,
+        principal_id: &str,
+    ) -> elastos_runtime::auth::AuthSessionGrantV1 {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+        let now = now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{}", uuid_like_token()),
+            session_id: format!("auth:{}", uuid_like_token()),
+            principal_id: principal_id.to_string(),
+            proof_binding_id: format!("proof:r1:{principal_id}"),
+            issued_at: now,
+            expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
+            apps: vec![HOME_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(dir, grant.clone()).unwrap();
+        grant
+    }
+
+    /// R1: an unstored principal refuses before a token is minted. The named
+    /// error replaces the id-rule fallback.
+    #[test]
+    fn r1_auth_grant_issue_refuses_a_principal_with_no_stored_root() {
+        let dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let grant = r1_unstored_grant(dir.path(), "person:local:r1-no-record");
+        let err = issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Home launch principal root unresolved");
+    }
+
+    /// R1: a token whose principal has no stored record refuses when verified,
+    /// with the same named error.
+    #[test]
+    fn r1_launch_token_verification_refuses_a_principal_with_no_stored_root() {
+        let dir = tempfile::tempdir().unwrap();
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let grant = r1_unstored_grant(dir.path(), "person:local:r1-no-record");
+        let context = HomeLaunchTokenContext::for_test(
+            grant.principal_id.clone(),
+            grant.session_id.clone(),
+            Some(grant.proof_binding_id.clone()),
+            grant.grant_id.clone(),
+        );
+        let token =
+            issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        let err = require_home_token_context(dir.path(), &headers).unwrap_err();
+        assert_eq!(err.to_string(), "Home launch principal root unresolved");
     }
 }
