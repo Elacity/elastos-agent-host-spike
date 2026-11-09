@@ -176,3 +176,12 @@ export function createRuntimeApi({ launchToken }) {
 
   return { fetchJson, homeHeaders, requireViewer: requireBrowserViewer };
 }
+
+// Consent is separate from Engine readiness and viewer compatibility. The
+// Runtime creates the current request when Browser first reads this endpoint.
+export async function browserInternetGranted(fetchJson, showDecision = () => {}) {
+  const consent = await fetchJson("/api/apps/browser/internet");
+  const granted = consent?.status === "granted";
+  showDecision(granted);
+  return granted;
+}

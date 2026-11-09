@@ -418,6 +418,18 @@ engine display_session.initial_offer
 Browser UI supports both roles without fallback. The display session declares
 the role; the UI follows that one role and fails closed on mismatched signaling.
 
+Browser internet starts off on both new and updated Homes. The current Inbox
+card states what the owner permits and how to stop it. Allow needs a passkey and
+is bound to Runtime's request ID and expiry. Browser Settings offers Off, which
+opens System for passkey confirmation. Stop blocks later dispatch and cancels
+Runtime-owned streams; calls already accepted by a provider can finish. Home's
+approval display still has the trusted-display gap tracked in #178, as described
+in SECURITY.md.
+
+Runtime refuses internet through every non-VM Browser adapter, including the
+test-only hosted sender. Its standalone tests use local fixtures on explicit
+local ports; they do not establish Runtime product admission.
+
 The test-only hosted sender is implemented in `browser-playwright-engine`: it uses
 Playwright Chromium behind a loopback Runtime HTTP CONNECT proxy, and that proxy
 opens target TCP streams only through `browser-local-exit`. Normal browsing does

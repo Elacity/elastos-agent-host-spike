@@ -94,6 +94,17 @@ pub async fn request_capability(
         ));
     }
 
+    if input.resource == "elastos://browser/internet" {
+        return Ok(Json(RequestCapabilityOutput {
+            status: "denied".into(),
+            request_id: None,
+            token: None,
+            reason: Some(
+                "The Home owner grants Browser internet access from its current Inbox request."
+                    .into(),
+            ),
+        }));
+    }
     if is_system_only_backend_resource(&input.resource) {
         return Ok(Json(RequestCapabilityOutput {
             status: "denied".to_string(),
@@ -491,7 +502,13 @@ pub async fn revoke_capability(
             state
                 .capability_manager
                 .revoke(*token.id(), "Revoked by user via API")
-                .await;
+                .await
+                .map_err(|error| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Revocation could not be saved: {error}"),
+                    )
+                })?;
 
             // Mark the request as revoked in the pending store
             state.pending_store.revoke_request(&request_id).await;
@@ -774,6 +791,25 @@ mod tests {
                 audit_log,
             )),
         }
+    }
+
+    #[tokio::test]
+    async fn browser_internet_is_not_a_generic_app_capability() {
+        let output = request_capability(
+            State(test_state()),
+            Extension(Session::new_capsule("browser".into())),
+            Json(RequestCapabilityInput {
+                resource: "elastos://browser/internet".into(),
+                action: "execute".into(),
+                reason: "Browser".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(output.status, "denied");
+        assert!(output.request_id.is_none());
+        assert!(output.token.is_none());
     }
 
     #[tokio::test]

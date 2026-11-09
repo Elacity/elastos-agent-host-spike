@@ -412,6 +412,7 @@ pub(in crate::api::gateway) async fn browser_attach_runtime_stream_path(
     data_dir: &FsPath,
     mut receipt: serde_json::Value,
     carrier_endpoint: Option<&iroh::Endpoint>,
+    internet: gateway_browser_internet::BrowserInternetEffect,
 ) -> anyhow::Result<serde_json::Value> {
     let byte_transport = receipt
         .get("byte_transport")
@@ -442,7 +443,7 @@ pub(in crate::api::gateway) async fn browser_attach_runtime_stream_path(
         .to_string();
     let runtime_stream_path = browser_runtime_stream_socket_path(data_dir, &stream_id)
         .map_err(|err| anyhow::anyhow!("failed to allocate Browser runtime stream path: {err}"))?;
-    spawn_browser_runtime_stream_listener(&runtime_stream_path, target)
+    spawn_browser_runtime_stream_listener(&runtime_stream_path, target, Some(internet))
         .await
         .map_err(|err| {
             anyhow::anyhow!(
@@ -483,6 +484,13 @@ pub(in crate::api::gateway) async fn browser_attach_runtime_stream_path(
         "runtime_stream_path".to_string(),
         serde_json::json!(runtime_stream_path.to_string_lossy().to_string()),
     );
+    // Engine helpers can reach the dialer only through this Runtime listener.
+    if let Some(relay) = receipt
+        .get_mut("relay_ipc")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        relay.insert("path".into(), serde_json::json!(runtime_stream_path));
+    }
     Ok(receipt)
 }
 
@@ -1137,6 +1145,7 @@ async fn bridge_browser_runtime_stream_to_local_relay(
     session_path: &FsPath,
     stream: &mut UnixStream,
     relay: Option<BrowserExitRelay>,
+    internet: &gateway_browser_internet::BrowserInternetEffect,
 ) -> anyhow::Result<()> {
     let Some(relay) = relay else {
         tracing::info!(
@@ -1147,8 +1156,10 @@ async fn bridge_browser_runtime_stream_to_local_relay(
     };
     let (open_line, open_log) = read_browser_relay_open_line(stream).await?;
     validate_browser_runtime_relay_open(&open_log)?;
+    let guard = internet.fence.enter().await.map_err(anyhow::Error::msg)?;
     let mut relay_stream = UnixStream::connect(&relay.path).await?;
     relay_stream.write_all(&open_line).await?;
+    drop(guard);
     match copy_bidirectional(stream, &mut relay_stream).await {
         Ok((to_relay, to_engine)) => {
             tracing::info!(
@@ -1212,13 +1223,16 @@ async fn bridge_browser_runtime_stream_to_carrier(
     mut stream: UnixStream,
     route: BrowserCarrierExitRoute,
     endpoint: &iroh::Endpoint,
+    internet: &gateway_browser_internet::BrowserInternetEffect,
 ) -> anyhow::Result<()> {
     let (open_line, open_log) = read_browser_relay_open_line(&mut stream).await?;
     let request = browser_carrier_stream_request_for_open(&route, &open_log)?;
     let stream_id = request.stream_id.clone();
     let target = request.target.clone();
+    let guard = internet.fence.enter().await.map_err(anyhow::Error::msg)?;
     let mut carrier_stream = open_browser_carrier_stream_on_endpoint(endpoint, &request).await?;
     carrier_stream.send.write_all(&open_line).await?;
+    drop(guard);
     let (carrier_send, carrier_recv) = (&mut carrier_stream.send, &mut carrier_stream.recv);
     let (mut stream_read, mut stream_write) = stream.into_split();
     let to_carrier = async {
@@ -1264,6 +1278,7 @@ pub(in crate::api::gateway) async fn attach_remote_engine_stream(
             stream_id: stream_id.clone(),
             endpoint: endpoint.clone(),
         },
+        None,
     )
     .await?;
     receipt["adapter_ipc"] = serde_json::json!({"schema":"elastos.adapter-ipc/v1",
@@ -1277,11 +1292,13 @@ pub(in crate::api::gateway) async fn attach_remote_engine_stream(
 async fn spawn_browser_runtime_stream_listener(
     path: &FsPath,
     target: BrowserRuntimeStreamTarget,
+    internet: Option<gateway_browser_internet::BrowserInternetEffect>,
 ) -> anyhow::Result<()> {
     spawn_browser_runtime_stream_listener_with_accept_timeout(
         path,
         target,
         Duration::from_secs(BROWSER_RUNTIME_STREAM_ACCEPT_TIMEOUT_SECS),
+        internet,
     )
     .await
 }
@@ -1291,7 +1308,20 @@ async fn spawn_browser_runtime_stream_listener_with_accept_timeout(
     path: &FsPath,
     target: BrowserRuntimeStreamTarget,
     accept_timeout: Duration,
+    internet: Option<gateway_browser_internet::BrowserInternetEffect>,
 ) -> anyhow::Result<()> {
+    // Remote Engine copies return to the source Runtime's guarded listener.
+    anyhow::ensure!(
+        internet.is_some() || matches!(&target, BrowserRuntimeStreamTarget::RemoteEngine { .. }),
+        "Browser internet authority required"
+    );
+    let (registration, copy_lifetime) = match internet.as_ref() {
+        Some(internet) => {
+            let (guard, copy) = internet.register_copy().await?;
+            (Some(guard), Some(copy))
+        }
+        None => (None, None),
+    };
     let listeners = BROWSER_RUNTIME_STREAM_LISTENERS.get_or_init(Default::default);
     let mut listeners = listeners.lock().await;
     if listeners.contains_key(path) {
@@ -1340,15 +1370,24 @@ async fn spawn_browser_runtime_stream_listener_with_accept_timeout(
     listeners.insert(cleanup_path.clone(), cancel);
     drop(listeners);
     tokio::spawn(async move {
+        let _copy = copy_lifetime;
+        let mut internet_cancelled = internet.as_ref().map(|internet| internet.cancelled.clone());
         let mut accepted_any = false;
         let mut sessions = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 _ = cancelled.changed() => break,
+                _ = async {
+                    match internet_cancelled.as_mut() {
+                        Some(cancelled) => { let _ = cancelled.wait_for(|stopped| *stopped).await; },
+                        None => std::future::pending::<()>().await,
+                    }
+                } => break,
                 accepted = tokio::time::timeout(accept_timeout, listener.accept()) => match accepted {
                 Ok(Ok((mut stream, _addr))) => {
                     accepted_any = true;
                     let target = target.clone();
+                    let internet = internet.clone();
                     let session_path = cleanup_path.clone();
                     sessions.spawn(async move {
                         match target {
@@ -1372,6 +1411,7 @@ async fn spawn_browser_runtime_stream_listener_with_accept_timeout(
                                     &session_path,
                                     &mut stream,
                                     relay,
+                                    internet.as_ref().expect("local relay authority"),
                                 )
                                 .await
                                 {
@@ -1388,6 +1428,7 @@ async fn spawn_browser_runtime_stream_listener_with_accept_timeout(
                                     stream,
                                     route,
                                     &endpoint,
+                                    internet.as_ref().expect("Carrier relay authority"),
                                 )
                                 .await
                                 {
@@ -1437,6 +1478,7 @@ async fn spawn_browser_runtime_stream_listener_with_accept_timeout(
         let listeners = BROWSER_RUNTIME_STREAM_LISTENERS.get_or_init(Default::default);
         listeners.lock().await.remove(&cleanup_path);
     });
+    drop(registration);
     Ok(())
 }
 
@@ -1514,6 +1556,7 @@ pub(in crate::api::gateway) async fn close_browser_runtime_stream_listener(
 async fn spawn_browser_runtime_stream_listener(
     _path: &FsPath,
     _target: BrowserRuntimeStreamTarget,
+    _internet: Option<gateway_browser_internet::BrowserInternetEffect>,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Browser runtime stream sockets require a Unix host adapter");
 }
@@ -1808,9 +1851,14 @@ mod tests {
             }
         });
 
-        let attached = browser_attach_runtime_stream_path(dir.path(), receipt, None)
-            .await
-            .unwrap();
+        let attached = browser_attach_runtime_stream_path(
+            dir.path(),
+            receipt,
+            None,
+            gateway_browser_internet::transport_fixture(),
+        )
+        .await
+        .unwrap();
         let adapter_ipc = attached.get("adapter_ipc").unwrap();
         let path = adapter_ipc
             .get("path")
@@ -1884,6 +1932,7 @@ mod tests {
             &runtime_path,
             BrowserRuntimeStreamTarget::LocalRelay(Some(BrowserExitRelay { path: relay_path })),
             Duration::from_millis(100),
+            Some(gateway_browser_internet::transport_fixture()),
         )
         .await
         .unwrap();
@@ -1942,6 +1991,7 @@ mod tests {
         let error = spawn_browser_runtime_stream_listener(
             &first_path,
             BrowserRuntimeStreamTarget::LocalRelay(None),
+            Some(gateway_browser_internet::transport_fixture()),
         )
         .await
         .unwrap_err();
@@ -1951,6 +2001,7 @@ mod tests {
         spawn_browser_runtime_stream_listener(
             &second_path,
             BrowserRuntimeStreamTarget::LocalRelay(None),
+            Some(gateway_browser_internet::transport_fixture()),
         )
         .await
         .unwrap();
@@ -2045,9 +2096,14 @@ mod tests {
             }
         });
 
-        let attached = browser_attach_runtime_stream_path(dir.path(), receipt, None)
-            .await
-            .unwrap();
+        let attached = browser_attach_runtime_stream_path(
+            dir.path(),
+            receipt,
+            None,
+            gateway_browser_internet::transport_fixture(),
+        )
+        .await
+        .unwrap();
         let adapter_ipc = attached.get("adapter_ipc").unwrap();
         assert_eq!(
             adapter_ipc.get("path").and_then(|value| value.as_str()),
@@ -2197,10 +2253,14 @@ mod tests {
             .unwrap();
         browser_side.shutdown().await.unwrap();
 
-        let err =
-            bridge_browser_runtime_stream_to_local_relay(&session_path, &mut runtime_side, relay)
-                .await
-                .unwrap_err();
+        let err = bridge_browser_runtime_stream_to_local_relay(
+            &session_path,
+            &mut runtime_side,
+            relay,
+            &gateway_browser_internet::transport_fixture(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             err.to_string().contains("not JSON (http)"),
@@ -2264,9 +2324,14 @@ mod tests {
             "carrier":{"schema":"elastos.exit.remote-carrier/v1", "transport":"carrier_stream",
                 "connect_ticket":"ticket:test", "carrier_service":"elastos://exit/open_stream", "grant_id":"grant:test"}
         });
-        let error = browser_attach_runtime_stream_path(dir.path(), receipt, None)
-            .await
-            .unwrap_err();
+        let error = browser_attach_runtime_stream_path(
+            dir.path(),
+            receipt,
+            None,
+            gateway_browser_internet::transport_fixture(),
+        )
+        .await
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("owning Runtime Carrier endpoint"));

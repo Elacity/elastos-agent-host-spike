@@ -134,6 +134,19 @@ fn test_launch_token_from_route(route: &str) -> String {
     .expect("launch route home token")
 }
 
+// These fixtures exercise effects after the owner has granted internet. Default
+// state and the #559 journey tests start without consent and use the real Inbox.
+fn granted_browser_internet(data: &std::path::Path) -> Arc<BrowserInternetService> {
+    let Some(owner) = crate::auth::list_passkey_principals(data)
+        .unwrap()
+        .into_iter()
+        .find(crate::auth::is_admin)
+    else {
+        return Arc::new(BrowserInternetService::default());
+    };
+    gateway_browser_internet::granted_fixture(data, &owner.principal_id, &owner.proof_binding_id)
+}
+
 fn test_state(cache_dir: &std::path::Path) -> GatewayState {
     seed_test_browser_capsules(cache_dir);
     GatewayState {
@@ -142,6 +155,7 @@ fn test_state(cache_dir: &std::path::Path) -> GatewayState {
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: Default::default(),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -330,6 +344,7 @@ async fn documents_test_state(cache_dir: &std::path::Path) -> GatewayState {
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: Default::default(),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -366,6 +381,7 @@ async fn library_external_provider_test_state(cache_dir: &std::path::Path) -> Ga
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: Default::default(),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -399,6 +415,7 @@ async fn library_webspace_test_state(cache_dir: &std::path::Path) -> GatewayStat
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: Default::default(),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -433,6 +450,7 @@ async fn library_test_state_with_content(
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: Default::default(),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -452,6 +470,7 @@ async fn chain_test_state(cache_dir: &std::path::Path) -> GatewayState {
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: Default::default(),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -471,6 +490,7 @@ async fn content_test_state(cache_dir: &std::path::Path) -> GatewayState {
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: Default::default(),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -490,6 +510,7 @@ async fn net_test_state(cache_dir: &std::path::Path) -> GatewayState {
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -513,6 +534,7 @@ async fn net_exit_test_state(cache_dir: &std::path::Path) -> GatewayState {
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -637,6 +659,7 @@ async fn browser_engine_reconciliation_test_state(
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: granted_browser_internet(cache_dir),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: cache_dir.to_path_buf(),
             data_dir: cache_dir.to_path_buf(),
@@ -720,6 +743,7 @@ async fn browser_engine_retrying_close_test_state(
         collaboration_presence_product_port: None,
         carrier_endpoint,
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -747,6 +771,7 @@ async fn browser_engine_policy_blocked_test_state(cache_dir: &std::path::Path) -
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -809,6 +834,7 @@ async fn browser_engine_remote_carrier_exit_test_state_with_close_failures(
                 .unwrap(),
         ),
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -868,6 +894,7 @@ async fn rejecting_browser_engine_remote_carrier_exit_test_state_with_close_fail
                 .unwrap(),
         ),
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -898,6 +925,7 @@ async fn malformed_browser_summary_test_state(cache_dir: &std::path::Path) -> Ga
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -934,6 +962,7 @@ async fn browser_engine_attached_test_state_with_relay(
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -982,6 +1011,7 @@ async fn wallet_test_state_with_shared_provider(
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),
@@ -1036,6 +1066,7 @@ async fn wallet_chain_test_state_with_shared_wallet_provider(
         collaboration_presence_product_port: None,
         carrier_endpoint: None,
         collaboration_discovery_service: None,
+        browser_internet: granted_browser_internet(cache_dir),
         identity_manager: Arc::new(std::sync::OnceLock::new()),
         cache_dir: cache_dir.to_path_buf(),
         data_dir: cache_dir.to_path_buf(),

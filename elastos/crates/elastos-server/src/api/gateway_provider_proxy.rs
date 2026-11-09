@@ -1727,6 +1727,22 @@ pub(super) async fn gateway_provider_proxy(
     /* The verified capsule behind the launch token: model runs are bound and
     audited to it, never to a fixed name. */
     let launch_capsule_id = required.launch_context.executable_actor.clone();
+    let internet = if scheme == "net" && op != "status" {
+        match gateway_browser_internet::effect(
+            &state,
+            &context,
+            &required.launch_context.authority_actor,
+            &required.launch_id,
+            false,
+        )
+        .await
+        {
+            Ok(effect) => Some(effect),
+            Err(error) => return gateway_browser_internet::refusal(error),
+        }
+    } else {
+        None
+    };
     let registry = match state.provider_registry.as_ref().cloned() {
         Some(registry) => registry,
         None => {
@@ -1904,7 +1920,15 @@ pub(super) async fn gateway_provider_proxy(
     }
 
     if scheme == "net" && op == "http" {
-        return gateway_browser::gateway_browser_net_http(registry.as_ref(), &request).await;
+        return internet
+            .as_ref()
+            .expect("net HTTP authority")
+            .fence
+            .scope(gateway_browser::gateway_browser_net_http(
+                registry.as_ref(),
+                &request,
+            ))
+            .await;
     }
     if scheme == "net" && op == "stream" {
         return (
@@ -2024,7 +2048,15 @@ pub(super) async fn gateway_provider_proxy(
         )
         .await
     } else {
-        match registry.send_raw(&scheme, &request).await {
+        match match internet.as_ref() {
+            Some(effect) => {
+                effect
+                    .fence
+                    .scope(registry.send_raw(&scheme, &request))
+                    .await
+            }
+            None => registry.send_raw(&scheme, &request).await,
+        } {
             Ok(value)
                 if scheme == "net"
                     && value.get("status").and_then(|v| v.as_str()) == Some("error") =>

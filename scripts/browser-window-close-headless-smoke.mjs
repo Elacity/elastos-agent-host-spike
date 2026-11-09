@@ -18,6 +18,9 @@ const state = {
   serverErrors: [],
   requests: [],
   unknownOpenResult: null,
+  openMode: "deferred",
+  deferredOpen: null,
+  internetEnds: 0,
 };
 
 function assert(condition, message, details = undefined) {
@@ -137,6 +140,7 @@ function shellDocument(homeOrigin) {
         results() {
           return results;
         },
+        clearResults() { results.length = 0; },
         send(message) {
           browser.contentWindow.postMessage(message, "*");
         },
@@ -202,6 +206,13 @@ async function handleApi(req, res, url) {
     res.end();
     return true;
   }
+  if (url.pathname === "/api/apps/browser/internet") {
+    if (req.method === "POST") {
+      assert((await readBody(req))?.action === "end", "Browser close sends an action object");
+      state.internetEnds += 1;
+    }
+    json(res,200,{status:req.method === "GET" ? (state.openMode === "fresh" ? "revoked" : "granted") : "ended"}); return true;
+  }
   if (url.pathname === "/api/apps/browser/summary" && req.method === "GET") {
     json(res, 200, {
       schema: "elastos.browser.runtime/v1",
@@ -236,15 +247,23 @@ async function handleApi(req, res, url) {
       return true;
     }
     state.openRequests += 1;
-    if (state.openRequests === 1) {
-      await new Promise((resolveOpen) => {
-        state.releaseInitialOpen = resolveOpen;
-      });
+    if (state.openMode === "deferred") {
+      // Replaying the aborted initial POST settles the same Runtime owner.
+      if (!state.deferredOpen) {
+        const result = openResult();
+        state.deferredOpen = new Promise(resolveOpen => {
+          state.releaseInitialOpen = () => resolveOpen(result);
+        });
+      }
+      json(res, 200, await state.deferredOpen);
+      return true;
+    }
+    if (state.openMode === "navigation") {
       json(res, 200, openResult());
       return true;
     }
-    if (state.openRequests === 2) {
-      state.unknownOpenResult = openResult();
+    if (state.openMode === "unknown") {
+      state.unknownOpenResult ||= openResult();
       json(res, 202, {
         schema: "elastos.browser.open-accepted/v1",
         status: "pending",
@@ -488,12 +507,28 @@ try {
     { state, transitionResult },
   );
   state.releaseInitialOpen();
-  await browserFrame.waitForFunction(
-    () => window.__elastosBrowserCurrentPageId === "page-1",
-  );
+  await shellFrame.waitForFunction(() => window.__browserCloseProof.results().at(-1)?.state === "terminal");
+  assert(state.closeCalls.length === 1 && state.closeCalls[0].pageId === "page-1" && state.internetEnds === 1,
+    "Close during Open must settle the exact page, close it and end its internet instance", state);
+  assert(!await browserFrame.evaluate(() => window.__elastosBrowserCurrentPageId),
+    "Close during Open displayed the page after cleanup");
   assert((await shellFrame.evaluate(() => self.origin)) === "null", "Home GUI fixture is not opaque");
   assert((await browserFrame.evaluate(() => self.origin)) === "null", "Browser fixture is not opaque");
 
+  // A separate launch proves that ordinary iframe navigation keeps its owner.
+  await shellFrame.evaluate(() => window.__browserCloseProof.navigateAway());
+  await waitForFrame(page, frame => frame.url().includes("/blank"), "closed Browser frame");
+  state.openMode = "navigation";
+  state.closeCalls.length = 0;
+  state.openRequests = 0;
+  state.openCalls = 0;
+  state.internetEnds = 0;
+  await shellFrame.evaluate(() => {
+    window.__browserCloseProof.clearResults();
+    window.__browserCloseProof.reopen();
+  });
+  browserFrame = await waitForFrame(page, frame => frame.url().includes("/apps/browser/"), "navigation Browser");
+  await browserFrame.waitForFunction(() => window.__elastosBrowserCurrentPageId === "page-1");
   await shellFrame.evaluate(() => window.__browserCloseProof.navigateAway());
   await waitForFrame(
     page,
@@ -502,10 +537,11 @@ try {
   );
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   assert(
-    state.closeCalls.length === 0,
+    state.closeCalls.length === 0 && state.internetEnds === 0,
     "generic Browser iframe navigation called Runtime close",
     state,
   );
+  state.openMode = "unknown";
   await shellFrame.evaluate(() => window.__browserCloseProof.reopen());
   browserFrame = await waitForFrame(
     page,
@@ -566,7 +602,7 @@ try {
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   assert(
     state.closeCalls.length === 0 &&
-      (await shellFrame.evaluate(() => window.__browserCloseProof.resultCount())) === 1,
+      (await shellFrame.evaluate(() => window.__browserCloseProof.resultCount())) === 0,
     "a source, token, instance, type, or shape substitution reached Runtime close",
     state,
   );
@@ -575,25 +611,9 @@ try {
     (message) => window.__browserCloseProof.send(message),
     pendingRequest,
   );
-  await shellFrame.waitForFunction(() => window.__browserCloseProof.resultCount() === 2);
-  const pendingResult = await shellFrame.evaluate(
-    () => window.__browserCloseProof.results().at(-1),
-  );
-  assert(
-    state.closeCalls.length === 0 &&
-      pendingResult.state === "pending" &&
-      pendingResult.terminalKind === "" &&
-      pendingResult.reason === "runtime_open_status_pending",
-    "ownerless close claimed terminal while the exact async open was pending",
-    { state, pendingResult },
-  );
-
-  const request = {
-    ...pendingRequest,
-    requestId: "headless-close-unknown-completed",
-  };
-  await shellFrame.evaluate((message) => window.__browserCloseProof.send(message), request);
-  await shellFrame.waitForFunction(() => window.__browserCloseProof.resultCount() === 4);
+  // One Close keeps settling the pending job until the exact owner can close.
+  const request = pendingRequest;
+  await shellFrame.waitForFunction(() => window.__browserCloseProof.results().at(-1)?.state === "terminal");
   const results = await shellFrame.evaluate(() => window.__browserCloseProof.results());
   const binding = results.at(-2);
   const result = results.at(-1);
@@ -603,7 +623,8 @@ try {
       state.closeCalls[0].pageId === "page-2" &&
       state.closeCalls[0].body?.schema === "elastos.browser.close-request/v2" &&
       state.closeCalls[0].body?.cleanup_id === "cleanup-2" &&
-      state.closeCalls[0].body?.browser_instance === browserInstance,
+      state.closeCalls[0].body?.browser_instance === browserInstance &&
+      state.internetEnds === 1,
     "actual Browser did not close the exact Runtime owner once",
     state,
   );
@@ -633,6 +654,7 @@ try {
     "old retained Browser frame did not accept the exact already-absent reap receipt",
     result,
   );
+  state.openMode = "fresh";
   await shellFrame.evaluate(() => window.__browserCloseProof.openFresh());
   browserFrame = await waitForFrame(
     page,
@@ -666,10 +688,10 @@ try {
     (message) => window.__browserCloseProof.send(message),
     { ...request, requestId: "headless-close-exact-absence" },
   );
-  await shellFrame.waitForFunction(() => window.__browserCloseProof.resultCount() === 5);
+  await shellFrame.waitForFunction(() => window.__browserCloseProof.results().at(-1)?.requestId === "headless-close-exact-absence");
   const freshResult = await shellFrame.evaluate(() => window.__browserCloseProof.results().at(-1));
   assert(
-    state.openRequests === 2 && state.closeCalls.length === 1 &&
+    state.openRequests === 2 && state.closeCalls.length === 1 && state.internetEnds === 2 &&
       freshResult.state === "terminal" &&
       freshResult.terminalKind === "no_page" &&
       freshResult.pageId === "" &&
