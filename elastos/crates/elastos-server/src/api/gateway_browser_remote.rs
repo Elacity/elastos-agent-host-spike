@@ -639,6 +639,28 @@ fn remote_wallet_consumer_mediation(
     })
 }
 
+// The serving Engine's profile is owned by its authenticated remote owner,
+// which is not a principal in this Runtime's auth store.
+fn remote_engine_profile(data_dir: &FsPath, owner: &RemoteEngineOwner) -> Result<Value> {
+    let storage = owner.storage_principal();
+    let uri = format!("localhost://Users/{storage}/BrowserProfiles/default/profile.ext4");
+    let disk_path = rooted_localhost_fs_path(data_dir, &uri)
+        .context("Remote Engine profile path invalid")?
+        .to_str()
+        .context("Remote Engine profile path must be UTF-8")?
+        .to_owned();
+    Ok(json!({
+        "schema":"elastos.browser.profile/v1", "scope":"active_principal",
+        "storage":"principal_owned_profile_disk",
+        "storage_posture":"principal_owned_reset_scoped_unprotected",
+        "protected_storage":false, "encrypted":false, "recoverable":false,
+        "recovery":"not_recovery_kit_packaged", "uri":uri,
+        "public_uri":"localhost://Users/self/BrowserProfiles/default/profile.ext4",
+        "profile_key":owner.profile_key, "disk_path":disk_path,
+        "reset":"whole_profile"
+    }))
+}
+
 fn remote_wallet_consumer_request(
     mediation: &Value,
     operation: &str,
@@ -808,12 +830,7 @@ async fn prepare(page: &ServedPage) -> Result<Prepared> {
             egress_runtime_socket_path:stream["adapter_ipc"]["runtime_stream_path"].as_str().unwrap_or_default(),
         }).map_err(anyhow::Error::msg)?.context("Remote Engine transport preparation unsupported")?;
         bind_browser_vz_transport_authority(&gateway.data_dir, &reservation, stream_id, None, transport.authority.clone()).await.map_err(anyhow::Error::msg)?;
-        let (_, mut profile) = browser_profile_launch_descriptor(
-            &gateway.data_dir,
-            &principal,
-            &super::gateway_home_token::wallet_principal_root(&gateway.data_dir, &principal)?,
-        )?;
-        profile["profile_key"] = json!(owner.profile_key);
+        let profile = remote_engine_profile(&gateway.data_dir, owner)?;
         let viewer = browser_vz_viewer_turn_capability(&transport.authority, &transport.secret).map_err(anyhow::Error::msg)?;
         crate::carrier::browser_engine_media::bind_target(&gateway.data_dir, owner.requester_endpoint.parse()?, &transport.authority, page.closing.clone()).await?;
         let wallet = remote_wallet_consumer_mediation(&owner.requester_endpoint, &owner.page_id, &owner.generation);
