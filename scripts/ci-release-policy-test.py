@@ -2933,20 +2933,22 @@ class InstalledJourneyTests(unittest.TestCase):
             groups.assert_not_called()
             kill.assert_not_called()
 
-    def test_early_exit_reports_its_status_and_last_output(self):
+    def test_early_exit_reports_its_status_and_evidence_path(self):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
         with tempfile.TemporaryDirectory() as temp:
-            log = Path(temp) / "journey-runtime.private.log"
-            with log.open("wb") as output:
+            evidence = Path(temp) / "installed-journeys.json"
+            with (Path(temp) / "journey-runtime.private.log").open("wb") as output:
                 child = subprocess.Popen([sys.executable, "-c",
                                           "print('gateway refused its provider config', flush=True)\nraise SystemExit(3)"],
                                          stdout=output, stderr=output)
             self.assertEqual(child.wait(timeout=60), 3)
             with self.assertRaises(AssertionError) as raised:
-                journey["wait_healthy"](child, "127.0.0.1:1", "Runtime", log=log)
+                journey["wait_healthy"](child, "127.0.0.1:1", "Runtime", evidence=evidence)
             message = str(raised.exception)
-            self.assertIn("installed Runtime exited before health (exit 3)", message)
-            self.assertIn("gateway refused its provider config", message)
+            self.assertIn("installed Runtime did not become healthy (exit 3)", message)
+            self.assertIn(f"evidence: {evidence}", message)
+            # Runtime output stays in its private log, even when it explains the exit.
+            self.assertNotIn("gateway refused its provider config", message)
 
     def test_three_runs_use_distinct_fresh_state_and_continue_after_one_failed_run(self):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
@@ -3881,9 +3883,11 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
             (home / "journey-runtime.private.log").write_text("private Runtime log line\n")
             factory = mock.Mock(return_value=owner)
             with self.assertRaisesRegex(AssertionError, re.escape(
-                    "installed Runtime did not become healthy (census: RuntimeError: finite journey Runtime left its unit)")):
+                    "installed Runtime did not become healthy (census: RuntimeError: finite journey Runtime left its unit)")) as raised:
                 case.execute(home, data, evidence, memory_gib=4, finite=factory)
             factory.assert_called_once()
+            self.assertNotIn("private Runtime log line", str(raised.exception))
+            self.assertIn(f"evidence: {evidence / 'installed-journeys.json'}", str(raised.exception))
             record = json.loads((evidence / "installed-journeys.json").read_text())
             self.assertEqual(record["finite_memory"]["observer_failure"]["message"], "finite journey Runtime left its unit")
             self.assertEqual(record["finite_memory"]["observer_failure"]["phase"], "census")
