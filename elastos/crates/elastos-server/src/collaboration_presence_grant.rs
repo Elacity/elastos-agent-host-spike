@@ -227,36 +227,41 @@ pub(crate) fn presence_resource(scope: &PresenceScope, mode: PresenceMode) -> Re
     ))
 }
 
-fn object_uri(principal_id: &str) -> String {
-    format!(
+fn object_uri(data_dir: &std::path::Path, principal_id: &str) -> anyhow::Result<String> {
+    Ok(format!(
         "{}/{PRESENCE_GRANT_OBJECT}",
-        crate::auth::principal_localhost_root(principal_id)
-    )
+        crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+            .map_err(|err| anyhow::anyhow!(err))?
+    ))
 }
 
 fn object_path(
     data_dir: &std::path::Path,
     principal_id: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
-    elastos_common::localhost::rooted_localhost_fs_path(data_dir, &object_uri(principal_id))
-        .ok_or_else(|| anyhow::anyhow!("invalid Community presence grant root"))
+    elastos_common::localhost::rooted_localhost_fs_path(
+        data_dir,
+        &object_uri(data_dir, principal_id)?,
+    )
+    .ok_or_else(|| anyhow::anyhow!("invalid Community presence grant root"))
 }
 
-fn empty_file(principal_id: &str) -> PresenceGrantFile {
-    PresenceGrantFile {
+fn empty_file(data_dir: &std::path::Path, principal_id: &str) -> anyhow::Result<PresenceGrantFile> {
+    Ok(PresenceGrantFile {
         schema: PRESENCE_GRANT_SCHEMA.to_string(),
         principal_id: principal_id.to_string(),
-        localhost_root: crate::auth::principal_localhost_root(principal_id),
+        localhost_root: crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+            .map_err(|err| anyhow::anyhow!(err))?,
         grants: Vec::new(),
         requests: Vec::new(),
-    }
+    })
 }
 
 fn load_file(data_dir: &std::path::Path, principal_id: &str) -> anyhow::Result<PresenceGrantFile> {
     let path = object_path(data_dir, principal_id)?;
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(empty_file(principal_id))
+            return empty_file(data_dir, principal_id)
         }
         Err(error) => return Err(error).context("could not inspect Community presence grant"),
         Ok(metadata) if !metadata.is_file() => {
@@ -264,12 +269,13 @@ fn load_file(data_dir: &std::path::Path, principal_id: &str) -> anyhow::Result<P
         }
         Ok(_) => {}
     }
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root = crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+        .map_err(|err| anyhow::anyhow!(err))?;
     let raw = crate::auth::read_principal_root_object(
         data_dir,
         principal_id,
         &localhost_root,
-        &object_uri(principal_id),
+        &object_uri(data_dir, principal_id)?,
         &path,
     )?;
     if raw.len() > MAX_PRESENCE_GRANT_BYTES {
@@ -303,8 +309,9 @@ fn save_file(
     crate::auth::write_principal_root_object(
         data_dir,
         principal_id,
-        &crate::auth::principal_localhost_root(principal_id),
-        &object_uri(principal_id),
+        &crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+            .map_err(|err| anyhow::anyhow!(err))?,
+        &object_uri(data_dir, principal_id)?,
         &path,
         &raw,
     )
@@ -693,9 +700,11 @@ mod tests {
         let file = load_file(data_dir.path(), id).unwrap();
         assert_eq!(file.localhost_root, root);
         assert!(
-            object_uri(id).starts_with(&format!("{root}/")),
+            object_uri(data_dir.path(), id)
+                .unwrap()
+                .starts_with(&format!("{root}/")),
             "{}",
-            object_uri(id)
+            object_uri(data_dir.path(), id).unwrap()
         );
     }
 
@@ -961,7 +970,7 @@ mod tests {
         // Another person's token is refused for this person.
         let file = load_file(data, &principal).unwrap();
         let other = OTHER;
-        let mut forged = empty_file(other);
+        let mut forged = empty_file(data, other).unwrap();
         forged.grants = file.grants.clone();
         save_file(data, other, &forged).unwrap();
         assert_eq!(gate(&authority, data, other, ME, runtime, 5).await, None);
@@ -1182,7 +1191,7 @@ mod tests {
                 data,
                 &principal,
                 &crate::auth::principal_localhost_root(&principal),
-                &object_uri(&principal),
+                &object_uri(data, &principal).unwrap(),
                 &path,
                 &serde_json::to_vec(&value).unwrap(),
             )
