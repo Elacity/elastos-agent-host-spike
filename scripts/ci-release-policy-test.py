@@ -2933,6 +2933,21 @@ class InstalledJourneyTests(unittest.TestCase):
             groups.assert_not_called()
             kill.assert_not_called()
 
+    def test_early_exit_reports_its_status_and_last_output(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "journey-runtime.private.log"
+            with log.open("wb") as output:
+                child = subprocess.Popen([sys.executable, "-c",
+                                          "print('gateway refused its provider config', flush=True)\nraise SystemExit(3)"],
+                                         stdout=output, stderr=output)
+            self.assertEqual(child.wait(timeout=60), 3)
+            with self.assertRaises(AssertionError) as raised:
+                journey["wait_healthy"](child, "127.0.0.1:1", "Runtime", log=log)
+            message = str(raised.exception)
+            self.assertIn("installed Runtime exited before health (exit 3)", message)
+            self.assertIn("gateway refused its provider config", message)
+
     def test_three_runs_use_distinct_fresh_state_and_continue_after_one_failed_run(self):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
         for first_fails in (False, True):
@@ -3824,7 +3839,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     self.assertEqual(owner.failure, expected)
                     self.assertEqual(owner.poll(), 1)
                     # The same cause reaches the CI log line that used to end the job without it.
-                    with self.assertRaisesRegex(AssertionError, re.escape(f"exited before health ({phase}: RuntimeError: {error})")):
+                    with self.assertRaisesRegex(AssertionError, re.escape(f"exited before health (exit 1) ({phase}: RuntimeError: {error})")):
                         self.journey["wait_healthy"](owner, "127.0.0.1:1", "Runtime")
                     receipt = owner.finish()
                 self.assertEqual(receipt["status"], "failed")
@@ -3851,7 +3866,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
             (home / "journey-runtime.private.log").write_text("private Runtime log line\n")
             factory = mock.Mock(return_value=owner)
             with self.assertRaisesRegex(AssertionError, re.escape(
-                    "installed Runtime exited before health (census: RuntimeError: finite journey Runtime left its unit)")):
+                    "installed Runtime exited before health (exit 1) (census: RuntimeError: finite journey Runtime left its unit)")):
                 case.execute(home, data, evidence, memory_gib=4, finite=factory)
             factory.assert_called_once()
             record = json.loads((evidence / "installed-journeys.json").read_text())

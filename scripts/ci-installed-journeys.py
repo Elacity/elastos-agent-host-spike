@@ -218,6 +218,15 @@ def failure_suffix(failure):
     return f" ({failure['phase']}: {failure['type']}: {failure['message']})" if failure else ""
 
 
+def child_output_tail(log, lines=40):
+    """The last lines the child wrote to the file that receives its stdout and stderr."""
+    try:
+        data = Path(log).read_bytes()
+    except OSError:
+        return ""
+    return "\n".join(data[-65536:].decode("utf-8", "replace").splitlines()[-lines:])
+
+
 def linux_process_identity(pid, proc=Path("/proc"), retained=None):
     """Bind a live process by UID, kernel start tick and executable inode."""
     directory = proc / str(pid)
@@ -1065,10 +1074,16 @@ def free_port(kind=socket.SOCK_STREAM):
         return probe.getsockname()[1]
 
 
-def wait_healthy(child, address, label, stop=None):
+def wait_healthy(child, address, label, stop=None, log=None):
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline and not (stop and stop.is_set()):
-        assert child.poll() is None, f"installed {label} exited before health" + failure_suffix(getattr(child, "failure", None))
+        code = child.poll()
+        if code is not None:
+            status = f"exit {code}" if code >= 0 else f"signal {-code}"
+            tail = redact(child_output_tail(log)) if log else ""
+            raise AssertionError(f"installed {label} exited before health ({status})"
+                                 + failure_suffix(getattr(child, "failure", None))
+                                 + (f"; last output:\n{tail}" if tail else ""))
         try:
             with urllib.request.urlopen(f"http://{address}/healthz", timeout=1) as response:
                 if response.status == 200:
@@ -1109,7 +1124,7 @@ def start_holder(home, data, consumer_data, consumer_environment):
         child = subprocess.Popen([installed, "gateway", "--addr", f"127.0.0.1:{number}"], env=environment,
                                  stdout=log, stderr=log, start_new_session=True)
     try:
-        wait_healthy(child, f"localhost:{number}", "holder Runtime")
+        wait_healthy(child, f"localhost:{number}", "holder Runtime", log=log.name)
         deadline = time.monotonic() + 30
         while not (data / "gateway-runtime-coords.json").is_file() and time.monotonic() < deadline:
             time.sleep(0.25)
@@ -1274,7 +1289,7 @@ class RepairRuntime:
                 remaining -= len(part)
         self.kept = {"weights_bytes": whole, "weights_prefix_sha256": value.hexdigest(), "interrupted_process_cleanup": cleanup}
         self.launch()
-        wait_healthy(self.child, self.address, "restarted Runtime", self.stop)
+        wait_healthy(self.child, self.address, "restarted Runtime", self.stop, log=self.log.name)
         self.record["runtime_episodes"].append(self.identity())
         if weights.lstat().st_size < whole:
             raise RuntimeError("repair journey restart lost its kept prefix")
@@ -1459,7 +1474,7 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0, repair=Fa
             cleanup_runtime(holder, holder_data)
         raise
     try:
-        wait_healthy(child, address, "Runtime")
+        wait_healthy(child, address, "Runtime", log=log.name if log else home / "journey-runtime.private.log")
         command = ["node", "scripts/ci-installed-home-journey.mjs", f"http://{address}", str(evidence), str(data)]
         if finite:
             command += ["--memory-refusal" if memory_gib == 1 else "--resource-lifecycle", str(finite.control)]
