@@ -1559,6 +1559,41 @@ mod tests {
         (dir, port, profile, operation)
     }
 
+    #[derive(Clone)]
+    struct R6WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for R6WarningWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn r6_capture_warnings() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = R6WarningWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        (output, tracing::subscriber::set_default(subscriber))
+    }
+
+    fn r6_assert_unresolved_warning(output: &Arc<Mutex<Vec<u8>>>) {
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("Community presence denies unresolved principal")
+                && log.contains("has no stored record"),
+            "expected unresolved-principal denial warning: {log}"
+        );
+    }
+
     #[tokio::test]
     async fn r6_retire_denied_current_presence_uses_stored_kind() {
         const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
@@ -1575,16 +1610,23 @@ mod tests {
                 "stored {kind:?} current presence must remain granted"
             );
         }
-        let missing = tempfile::tempdir().unwrap();
-        let fixture = fixture_at(missing.path());
-        let port = fixture
-            .presence
-            .with_presence_authority(crate::collaboration_presence_grant::test_authority());
+        // The Human id-rule root has a valid Profile and grant. Only the
+        // missing stored record may deny this previously granted presence.
+        let (missing, port, profile, _) =
+            r6_own_presence_case(crate::auth::PrincipalKind::Human).await;
+        let profile_did = &profile.document().profile_did;
         assert!(
-            !port
-                .retire_denied_current_presence(ID, "did:key:missing", NOW)
+            port.retire_denied_current_presence(ID, profile_did, NOW)
                 .await
         );
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        let (warnings, _guard) = r6_capture_warnings();
+        assert!(
+            !port
+                .retire_denied_current_presence(ID, profile_did, NOW)
+                .await
+        );
+        r6_assert_unresolved_warning(&warnings);
     }
 
     #[tokio::test]
@@ -1599,27 +1641,21 @@ mod tests {
                 .await;
             assert!(result, "stored {kind:?} operation must remain granted");
         }
-        let missing = tempfile::tempdir().unwrap();
-        let fixture = fixture_at(missing.path());
-        let port = fixture
-            .presence
-            .with_presence_authority(crate::collaboration_presence_grant::test_authority());
-        let operation = presence_request_binding(
-            "r6-missing",
-            "person:local:missing",
-            &fixture.person_profile,
-        )
-        .unwrap();
+        let (missing, port, profile, operation) =
+            r6_own_presence_case(crate::auth::PrincipalKind::Human).await;
+        let profile_did = &profile.document().profile_did;
         assert!(
-            !port
-                .check_own_operation(
-                    &operation,
-                    &fixture.person_profile.document().profile_did,
-                    NOW,
-                    false
-                )
+            port.check_own_operation(&operation, profile_did, NOW, false)
                 .await
         );
+        crate::auth::r4_fixture::remove(missing.path(), &operation.principal);
+        let (warnings, _guard) = r6_capture_warnings();
+        assert!(
+            !port
+                .check_own_operation(&operation, profile_did, NOW, false)
+                .await
+        );
+        r6_assert_unresolved_warning(&warnings);
     }
 
     fn remote_authority(
