@@ -13757,7 +13757,7 @@ fn an_unresolvable_principal_root_is_not_a_contact() {
     let principals = std::collections::BTreeSet::from([principal_id]);
 
     // The record read must be the load that reuses the verified state.
-    crate::auth::invalidate_verified_auth_state_cache(dir.path());
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
     let (hit_observed, resume) =
         crate::auth::install_verified_auth_state_cache_hit_hook(dir.path());
     let data_dir = dir.path().to_path_buf();

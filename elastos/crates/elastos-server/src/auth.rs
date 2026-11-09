@@ -494,11 +494,16 @@ fn observe_runtime_device_key_file_identity(
     )
 }
 
-pub(crate) fn invalidate_verified_auth_state_cache(data_dir: &Path) {
+fn invalidate_verified_auth_state_cache(data_dir: &Path) {
     let key = auth_state_cache_key(data_dir);
     if let Ok(mut cache) = verified_auth_state_cache().lock() {
         cache.remove(&key);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn invalidate_verified_auth_state_cache_for_test(data_dir: &Path) {
+    invalidate_verified_auth_state_cache(data_dir);
 }
 
 fn store_verified_auth_state_cache(
