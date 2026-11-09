@@ -34,3 +34,98 @@ pub async fn settle_and_revoke(state: &CapabilityState, session_id: &str, cause:
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use elastos_runtime::capability::evaluator::ShellPassthroughVerifier;
+    use elastos_runtime::capability::manager::ValidationError;
+    use elastos_runtime::capability::{
+        Action, CapabilityManager, CapabilityStore, CapabilityToken, GrantDuration,
+        PendingRequestStore, PolicyEvaluator, ResourceId, TokenConstraints,
+    };
+    use elastos_runtime::primitives::{audit::AuditLog, metrics::MetricsManager};
+    use elastos_runtime::session::SessionId;
+    use std::sync::Arc;
+
+    const RESOURCE: &str = "elastos://content/publish";
+
+    fn state() -> CapabilityState {
+        let audit = Arc::new(AuditLog::new());
+        let tokens = Arc::new(CapabilityStore::new());
+        let manager =
+            CapabilityManager::new(tokens, audit.clone(), Arc::new(MetricsManager::new()));
+        CapabilityState {
+            pending_store: Arc::new(PendingRequestStore::new(audit.clone())),
+            capability_manager: Arc::new(manager),
+            policy_evaluator: Arc::new(PolicyEvaluator::new(
+                Box::new(ShellPassthroughVerifier),
+                audit,
+            )),
+        }
+    }
+
+    /// One pending and one granted request for `session`.
+    async fn seed(state: &CapabilityState, session: &str) -> (String, String, CapabilityToken) {
+        let store = &state.pending_store;
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let id = SessionId::from_string(session);
+            let request = store.create_request(id, ResourceId::new(RESOURCE), Action::Write);
+            ids.push(request.await.id.to_string());
+        }
+        let constraints = TokenConstraints::default();
+        let resource = ResourceId::new(RESOURCE);
+        let manager = &state.capability_manager;
+        let token = manager.grant(session, resource, Action::Write, constraints, None);
+        let granted = store.grant_request(&ids[1], token.clone(), GrantDuration::Session);
+        granted.await.unwrap();
+        (ids[0].clone(), ids[1].clone(), token)
+    }
+
+    async fn status(state: &CapabilityState, id: &str) -> RequestStatus {
+        state.pending_store.get_request(id).await.unwrap().status
+    }
+
+    async fn validate(
+        state: &CapabilityState,
+        session: &str,
+        token: &CapabilityToken,
+    ) -> Result<(), ValidationError> {
+        let resource = ResourceId::new(RESOURCE);
+        let manager = &state.capability_manager;
+        manager
+            .validate(token, session, Action::Write, &resource, None)
+            .await
+    }
+
+    #[tokio::test]
+    async fn settle_and_revoke_settles_only_the_named_session() {
+        let state = state();
+        let (a_pending, a_grant, a_token) = seed(&state, "session-a").await;
+        let (b_pending, b_grant, b_token) = seed(&state, "session-b").await;
+        settle_and_revoke(&state, "session-a", "stopped").await;
+
+        for id in [&a_pending, &a_grant] {
+            let RequestStatus::Denied { reason, settled_by } = status(&state, id).await else {
+                panic!("A request {id} is not denied");
+            };
+            assert_eq!(settled_by, Settler::Runtime, "A settler for {id}");
+            assert_eq!(reason, "instance ended: stopped", "A reason for {id}");
+        }
+        let a_check = validate(&state, "session-a", &a_token).await;
+        assert_eq!(a_check, Err(ValidationError::TokenRevoked), "A token");
+        let b_status = status(&state, &b_pending).await;
+        assert!(
+            matches!(b_status, RequestStatus::Pending),
+            "B request: {b_status:?}"
+        );
+        let b_status = status(&state, &b_grant).await;
+        assert!(
+            matches!(b_status, RequestStatus::Granted { .. }),
+            "B grant: {b_status:?}"
+        );
+        let b_check = validate(&state, "session-b", &b_token).await;
+        assert_eq!(b_check, Ok(()), "B token still live");
+    }
+}
