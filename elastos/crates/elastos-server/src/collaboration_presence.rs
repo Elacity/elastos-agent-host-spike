@@ -1587,6 +1587,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn r6_check_own_operation_uses_stored_kind() {
+        for kind in [
+            crate::auth::PrincipalKind::Agent,
+            crate::auth::PrincipalKind::Human,
+        ] {
+            let (_dir, port, profile, operation) = r6_own_presence_case(kind).await;
+            let result = port
+                .check_own_operation(&operation, &profile.document().profile_did, NOW, false)
+                .await;
+            assert!(result, "stored {kind:?} operation must remain granted");
+        }
+        let missing = tempfile::tempdir().unwrap();
+        let fixture = fixture_at(missing.path());
+        let port = fixture
+            .presence
+            .with_presence_authority(crate::collaboration_presence_grant::test_authority());
+        let operation = presence_request_binding(
+            "r6-missing",
+            "person:local:missing",
+            &fixture.person_profile,
+        )
+        .unwrap();
+        assert!(
+            !port
+                .check_own_operation(
+                    &operation,
+                    &fixture.person_profile.document().profile_did,
+                    NOW,
+                    false
+                )
+                .await
+        );
+    }
+
     fn remote_authority(
         fixture: &Fixture,
         display_name: &str,
