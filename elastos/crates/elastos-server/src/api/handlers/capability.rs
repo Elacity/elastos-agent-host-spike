@@ -477,7 +477,7 @@ async fn is_live(store: &CapabilityStore, r: &PendingCapabilityRequest) -> bool 
 /// Every session's live grants, sorted by session then request id.
 async fn live_capabilities(state: &CapabilityState) -> ListCapabilitiesOutput {
     let mut live = Vec::new();
-    for r in state.pending_store.list_granted().await {
+    for r in state.pending_store.list_requests().await {
         if is_live(&state.capability_store, &r).await {
             live.push(r);
         }
@@ -501,9 +501,8 @@ async fn session_granted(
     store: &PendingRequestStore,
     session_id: &str,
 ) -> Vec<PendingCapabilityRequest> {
-    let granted = store.list_granted().await.into_iter();
-    granted
-        .filter(|r| r.session_id.to_string() == session_id)
+    let held = store.list_requests().await.into_iter();
+    held.filter(|r| r.is_granted() && r.session_id.to_string() == session_id)
         .collect()
 }
 
@@ -959,7 +958,7 @@ mod tests {
         assert_eq!(listed, vec![ids[0].clone()]);
         let info = session_info(State(state.clone()), Extension(a)).await;
         assert_eq!(info.0.capabilities_count, 1);
-        assert_eq!(state.pending_store.list_granted().await.len(), 2);
+        assert_eq!(state.pending_store.list_requests().await.len(), 2);
     }
 
     /// Grants one write request in `session`; returns its request id and token.
@@ -1014,7 +1013,8 @@ mod tests {
         used.await.expect("the once grant is used");
         let past = Some(elastos_common::SecureTimestamp::at(1));
         let (expired, _) = grant_in(&state, "session-b", None, past).await;
-        let granted = state.pending_store.list_granted().await.len();
+        let held = state.pending_store.list_requests().await;
+        let granted = held.iter().filter(|r| r.is_granted()).count();
         assert_eq!(
             granted, 6,
             "all six records are still granted, so only the live rule drops one"
