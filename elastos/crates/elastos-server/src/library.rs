@@ -7761,7 +7761,9 @@ fn shared_access_open_contract(
 }
 
 fn library_roots(data_dir: &Path, principal_id: &str) -> Vec<LibraryRoot> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let mut roots: Vec<_> = [
         ("home", "Home", root.clone(), "principal-root"),
         ("desktop", "Desktop", format!("{root}/Desktop"), "directory"),
