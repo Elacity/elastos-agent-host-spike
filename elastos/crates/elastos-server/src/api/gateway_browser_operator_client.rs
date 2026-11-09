@@ -206,7 +206,10 @@ pub(in crate::api::gateway) async fn detach_operator(
         }
         if record.owner.is_none() {
             record.phase = "revoked";
-            service.pending.revoke_request(&id).await;
+            service
+                .pending
+                .revoke_request_by(&id, "Revoked by user", Settler::Shell)
+                .await;
             return Json(
                 serde_json::json!({"schema":"elastos.browser.operator-admission/v1",
                 "request_id":id,"status":"revoked","writer_acquired":false}),

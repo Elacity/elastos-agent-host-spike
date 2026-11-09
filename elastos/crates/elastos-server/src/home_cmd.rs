@@ -563,7 +563,7 @@ struct SessionCleanup {
     path: PathBuf,
 }
 
-struct ScopedEnvVar {
+pub(crate) struct ScopedEnvVar {
     name: &'static str,
     previous: Option<OsString>,
 }
@@ -586,7 +586,7 @@ impl Drop for SessionCleanup {
 }
 
 impl ScopedEnvVar {
-    fn set(name: &'static str, value: impl Into<OsString>) -> Self {
+    pub(crate) fn set(name: &'static str, value: impl Into<OsString>) -> Self {
         let previous = std::env::var_os(name);
         let value: OsString = value.into();
         std::env::set_var(name, &value);
@@ -3331,10 +3331,10 @@ fn component_available_in(components: &[ComponentStatus], name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    static HOME_CMD_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) static HOME_CMD_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn home_cli_renderer_resolves_only_the_installed_capsule() {

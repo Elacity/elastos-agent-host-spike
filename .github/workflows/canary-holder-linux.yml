@@ -259,6 +259,14 @@ jobs:
                   data = home / '.local/share/elastos'
                   (data / 'bin').mkdir(mode=0o700, parents=True)
                   (home / '.local/bin').mkdir(mode=0o700, parents=True)
+                  if role in ('holder', 'gateway'):
+                      # A seed, as production's content holders are (57627f88): an ordinary
+                      # Home's Carrier serves a publication only to the publisher's contacts,
+                      # and its raw CID routes need an authorized local session.
+                      seed = data
+                      for part in ('ElastOS', 'SystemServices', 'Publisher', 'artifacts'):
+                          seed = seed / part
+                          seed.mkdir(mode=0o700, exist_ok=True)
                   runtime = home / '.local/bin/elastos'
                   shutil.copyfile(accepted / 'elastos', runtime)
                   runtime.chmod(0o700)

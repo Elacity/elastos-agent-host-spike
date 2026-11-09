@@ -7,12 +7,13 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -29,6 +30,70 @@ IDENTITY = {
     "GIT_COMMITTER_NAME": "citation-check",
     "GIT_COMMITTER_EMAIL": "citation-check@example.com",
 }
+
+# Every fixture draft carries this section 0, so a citation rule is the only
+# reason its fixture adds. Each of the six core calls has its own propose line,
+# named by its Name: field.
+PROPOSAL_SKELETON = (
+    "## 0. What this proposes\n"
+    "\n"
+    "This section states each core-call proposal once; section 7 holds its evidence.\n"
+    "\n"
+    "### A3. Agent identity\n"
+    "propose: fixture agent principal. Name: agent principal. Inputs: fixture "
+    "inputs. Refusal: fixture refusal. Owner: fixture owner. A3 stays open.\n"
+    "propose: fixture owned journal root. Name: owned journal root. Inputs: "
+    "fixture inputs. Refusal: fixture refusal. Owner: fixture owner. A3 stays "
+    "open.\n"
+    "Evidence: section 7, A3.\n"
+    "\n"
+    "### A4. Model operations\n"
+    "propose: fixture hosted model call. Name: hosted model call. Inputs: "
+    "fixture inputs. Refusal: fixture refusal. Owner: fixture owner. A4 stays "
+    "open.\n"
+    "Evidence: section 7, A4.\n"
+    "\n"
+    "### A5. Grant handle\n"
+    "propose: fixture grant handle. Name: grant handle. Inputs: fixture inputs. "
+    "Refusal: fixture refusal. Owner: fixture owner. A5 stays open.\n"
+    "Evidence: section 7, A5.\n"
+    "\n"
+    "### A7. Usage reservation\n"
+    "propose: fixture usage reservation. Name: usage reservation. Inputs: "
+    "fixture inputs. Refusal: fixture refusal. Owner: fixture owner. A7 stays "
+    "open.\n"
+    "Evidence: section 7, A7.\n"
+    "\n"
+    "### B2. Typed operations\n"
+    "propose: fixture typed operation. Name: typed operation. Inputs: fixture "
+    "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays open.\n"
+    "Evidence: section 7, B2.\n"
+    "\n"
+    "## 1. Agent identity\n\n"
+)
+
+# The expected core calls and groups, stated literally so that removing one
+# from the production constant fails a test here.
+PROPOSAL_CALLS = (
+    ("A3", "agent principal"),
+    ("A3", "owned journal root"),
+    ("A4", "hosted model call"),
+    ("A5", "grant handle"),
+    ("A7", "usage reservation"),
+    ("B2", "typed operation"),
+)
+PROPOSAL_GROUPS = ("A3", "A5", "A7", "B2")
+SECTION_0_FORMS = (
+    "; section 0 allows: blank, its heading, group headings, the introduction, "
+    "propose:, Evidence: section 7"
+)
+
+
+def section_0_forms(row):
+    text = re.sub(r"^ {0,3}#{2,3}[ \t]+", "", row)
+    bad = next((c for c in text if c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ',.-:;"), None)
+    return SECTION_0_FORMS + ("; character U+%04X" % ord(bad) if bad else "")
+
 
 OWNED_REL = "examples/agent-host/src/lib.rs"
 OWNED_NUMBER = 3754
@@ -2491,8 +2556,8 @@ class CitationCheckTests(unittest.TestCase):
         self._git(root, "commit", "-q", "-m", "fixture")
         return self._git_output(root, "rev-parse", "HEAD")
 
-    def _draft(self, body, files=None):
-        """A temp root whose draft pins the repository's committed HEAD."""
+    def _bare_draft(self, body, files=None):
+        """A temp root whose draft pins HEAD and holds only BODY, no section 0."""
         root = self._temp_root()
         self._write(root, body, files or {})
         sha = self._commit_all(root)
@@ -2501,10 +2566,14 @@ class CitationCheckTests(unittest.TestCase):
         )
         return root
 
+    def _draft(self, body, files=None):
+        """A temp root whose draft pins HEAD and holds the section 0 skeleton."""
+        return self._bare_draft(PROPOSAL_SKELETON + body, files)
+
     def _raw_draft(self, body, files=None, commit=False):
         """A temp draft with the caller's pin text and no automatic pin."""
         root = self._temp_root()
-        self._write(root, body, files or {})
+        self._write(root, PROPOSAL_SKELETON + body, files or {})
         if commit:
             self._commit_all(root)
         return root
@@ -2517,7 +2586,7 @@ class CitationCheckTests(unittest.TestCase):
         config = fixture_git.shared_config(Path(__file__).parent)
         root = self._temp_root()
         self._write(root, "fixture\n", {})
-        with mock.patch.dict(os.environ, pointed):
+        with patch.dict(os.environ, pointed):
             try:
                 sha = self._commit_all(root)
             except subprocess.CalledProcessError as error:  # judged below, after the victim
@@ -2527,6 +2596,25 @@ class CitationCheckTests(unittest.TestCase):
                              capture_output=True, env=fixture_git.fixture_git_env(root)).stdout
         self.assertEqual(log, sha + " fixture\n", "the fixture repo lacks its one commit")
         self.assertEqual(fixture_git.shared_config(Path(__file__).parent), config, "the checkout's shared git config changed")
+
+    def _propose_line(self, group, call):
+        """One complete propose line, named by its Name: field."""
+        return (
+            "propose: fixture " + call + ". Name: " + call
+            + ". Inputs: fixture inputs. Refusal: fixture refusal."
+            + " Owner: fixture owner. " + group + " stays open.\n"
+        )
+
+    def _section_0(self, groups=("A3", "A4", "A5", "A7", "B2")):
+        """A valid section 0 with one complete propose line per core call."""
+        parts = ["## 0. What this proposes\n", "\n"]
+        for name in groups:
+            parts.append("### " + name + ". Fixture group\n")
+            for group, call in PROPOSAL_CALLS:
+                if group == name:
+                    parts.append(self._propose_line(group, call))
+            parts.append("Evidence: section 7, " + name + ".\n\n")
+        return "".join(parts)
 
     def _assert_one(self, body, files, expected):
         got = check.problems(self._draft(body, files))
@@ -3353,6 +3441,884 @@ class CitationCheckTests(unittest.TestCase):
             check.problems(Path(tmp.name)),
             ["refuse: proposal is absent"],
         )
+
+    def test_missing_section_0_is_refused(self):
+        # A draft with numbered sections and no section 0 states no proposal.
+        body = "## 1. Agent identity\n\nSee `pkg/kept.rs:1`.\n"
+        self.assertEqual(
+            check.problems(self._bare_draft(body, {"pkg/kept.rs": b"fn kept(\n"})),
+            ["refuse: draft has no section 0"],
+        )
+
+    def test_commented_section_0_heading_is_not_a_section(self):
+        # A heading inside an HTML comment does not render.
+        body = (
+            "<!--\n"
+            "## 0. What this proposes\n"
+            "-->\n"
+            "\n"
+            "## 1. Agent identity\n"
+        )
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: draft has no section 0"],
+        )
+
+    def test_indented_heading_closes_section_0(self):
+        # Markdown renders a heading indented three spaces, so section 7 starts
+        # there and the proposal below it is outside section 0.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = (
+            self._section_0()
+            + "   ## 7. Open questions\n\n"
+            + second
+            + "\n"
+        )
+        line = body.splitlines().index(second) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
+    def test_section_0_after_section_1_is_refused(self):
+        body = "## 1. Agent identity\n\n" + self._section_0()
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: section 0 is not before section 1"],
+        )
+
+    def test_section_0_needs_a_propose_line_for_each_required_group(self):
+        # Each required core call keeps its own propose line under its heading.
+        groups = ("A3", "A4", "A5", "A7", "B2")
+        for name in ("A3", "A5", "A7", "B2"):
+            body = self._section_0([group for group in groups if group != name])
+            expected = ["refuse: section 0 has no propose line for " + name]
+            expected += [
+                "refuse: section 0 has no proposal named "
+                + call
+                + " under "
+                + group
+                for group, call in PROPOSAL_CALLS
+                if group == name
+            ]
+            self.assertEqual(
+                check.problems(self._bare_draft(body)),
+                expected,
+                name,
+            )
+
+    def test_section_0_needs_the_named_proposal_for_each_core_call(self):
+        # A group with another call does not stand in for a missing call.
+        for group, call in PROPOSAL_CALLS:
+            body = self._section_0().replace(
+                "Name: " + call + ".", "Name: another call."
+            )
+            self.assertEqual(
+                check.problems(self._bare_draft(body)),
+                [
+                    "refuse: section 0 has no proposal named "
+                    + call
+                    + " under "
+                    + group
+                ],
+                call,
+            )
+
+    def test_a_group_with_no_proposal_still_needs_its_named_call(self):
+        # A4 has one call, so deleting that line leaves the call missing.
+        body = self._section_0().replace(
+            self._propose_line("A4", "hosted model call"), ""
+        )
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: section 0 has no proposal named hosted model call under A4"],
+        )
+
+    def test_whole_group_with_no_proposal_still_needs_its_named_call(self):
+        # Deleting the whole A4 group does not exempt its call.
+        body = self._section_0(("A3", "A5", "A7", "B2"))
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: section 0 has no proposal named hosted model call under A4"],
+        )
+
+    def test_call_moved_under_another_group_is_still_missing(self):
+        # Moving A4's line under A3 leaves A4 with no proposal.
+        line = self._propose_line("A4", "hosted model call")
+        body = self._section_0().replace(line, "")
+        body = body.replace(
+            "Evidence: section 7, A3.\n", line + "Evidence: section 7, A3.\n"
+        )
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: section 0 has no proposal named hosted model call under A4"],
+        )
+
+    def test_production_requires_the_six_named_core_calls(self):
+        # Stated here, not read back from production: dropping a call fails.
+        self.assertEqual(
+            tuple(check.PROPOSE_CALLS),
+            (
+                ("A3", "agent principal"),
+                ("A3", "owned journal root"),
+                ("A4", "hosted model call"),
+                ("A5", "grant handle"),
+                ("A7", "usage reservation"),
+                ("B2", "typed operation"),
+            ),
+        )
+        self.assertEqual(tuple(check.PROPOSE_REQUIRED), ("A3", "A5", "A7", "B2"))
+
+    def test_bare_propose_line_is_refused(self):
+        # A heading with nothing under it states no proposal.
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), "propose:\n"
+        )
+        line = body.splitlines().index("propose:") + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing Name:, Inputs:, Refusal:, Owner:)" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_propose_line_in_a_fenced_block_is_refused(self):
+        # A fenced block holds code, not the proposal Anders reads.
+        hidden = "```\n" + self._propose_line("A5", "grant handle") + "```\n"
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), hidden
+        )
+        line = body.splitlines().index(self._propose_line("A5", "grant handle").strip()) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is in a fenced code block" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_propose_line_in_an_html_comment_is_refused(self):
+        # An HTML comment does not render, so it states nothing.
+        hidden = "<!-- " + self._propose_line("A5", "grant handle").strip() + " -->\n"
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), hidden
+        )
+        line = body.splitlines().index(hidden.strip()) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is in an HTML comment" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_propose_line_with_empty_fields_is_refused(self):
+        # A label with no value states nothing, though its text is visible.
+        empty = (
+            "propose: . Name: grant handle. Inputs: . Refusal: . Owner: ."
+        )
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), empty + "\n"
+        )
+        line = body.splitlines().index(empty) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing Inputs:, Refusal:, Owner:, the proposal text)" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_propose_line_with_commented_fields_is_refused(self):
+        # A comment hides its text, so a visible propose line with commented
+        # fields states no field.
+        hidden = (
+            "propose: <!-- . Name: grant handle. Inputs: fixture inputs."
+            " Refusal: fixture refusal. Owner: fixture owner. -->"
+        )
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), hidden + "\n"
+        )
+        line = body.splitlines().index(hidden) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing Name:, Inputs:, Refusal:, Owner:)" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_propose_line_opening_a_fence_is_refused(self):
+        # The line that opens a fence is inside it: its text is code.
+        opening = (
+            "```propose: fixture grant handle. Name: grant handle. Inputs:"
+            " fixture inputs. Refusal: fixture refusal. Owner: fixture owner."
+        )
+        hidden = opening + "\n```\n"
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), hidden
+        )
+        line = body.splitlines().index(opening) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is in a fenced code block" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_propose_line_indented_as_code_is_refused(self):
+        # Four spaces make a code block, not a proposal.
+        indented = "    " + self._propose_line("A5", "grant handle")
+        body = self._section_0().replace(
+            self._propose_line("A5", "grant handle"), indented
+        )
+        line = body.splitlines().index(indented.rstrip("\n")) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is indented as code" % line,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_fence_closing_indented_four_spaces_does_not_close(self):
+        # A closing fence indented four spaces is indented code, so the fence
+        # stays open and both proposals below it stay inside the fence.
+        line = self._propose_line("A5", "grant handle")
+        hidden = "```\n" + line + "    ```\n" + line + "```\n"
+        body = self._section_0().replace(line, hidden)
+        rows = body.splitlines()
+        first = rows.index(line.strip()) + 2
+        second = rows.index(line.strip(), first - 1) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is in a fenced code block" % first,
+                "refuse: propose line at line %d is in a fenced code block" % second,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_fence_opener_indented_as_code_is_not_a_fence(self):
+        # A fence opener indented four spaces or one tab is indented code, so
+        # the section 1 heading below it closes section 0.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        for opener in ("    ```", "\t```"):
+            body = (
+                self._section_0()
+                + opener + "\n\n## 1. Agent identity\n\n" + second + "\n"
+            )
+            line = body.splitlines().index(second) + 2
+            self.assertEqual(
+                check.problems(self._bare_draft(body)),
+                ["refuse: propose line outside section 0 at line " + str(line)],
+                opener,
+            )
+
+    def test_backtick_in_info_string_does_not_open_fence(self):
+        falsifier = (
+            "``` bad`\n## 1. Agent identity\n```\n"
+            "propose: fixture another call. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays open."
+        )
+        body = self._section_0() + falsifier
+        self.assertEqual(check.proposal_refusals(body), [
+            "refuse: propose line at line %d is in a fenced code block"
+            % len(body.splitlines()),
+        ])
+        self.assertEqual(check.classify_lines(falsifier.splitlines()), [
+            ("text", None, "``` bad`"), ("heading", 2, "1. Agent identity"),
+            ("fence", None, ""), ("fence", None, ""),
+        ])
+        for opener, closer in (("```python", "```"), ("````", "````"),
+                               ("~~~ bad`", "~~~")):
+            with self.subTest(opener=opener):
+                self.assertEqual([kind for kind, _, _ in check.classify_lines([
+                    opener, "## hidden", closer, "## next",
+                ])], ["fence", "fence", "fence", "heading"])
+
+    def test_non_ascii_whitespace_before_block_marker_is_refused(self):
+        falsifier = (
+            "\x1f```\n## 1. Agent identity\n```\n"
+            "propose: fixture another call. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays open."
+        )
+        section = self._section_0()
+        number = len(section.splitlines()) + 1
+        reason = "refuse: non-ASCII whitespace before a block marker on line %d"
+        self.assertEqual(check.proposal_refusals(section + falsifier), [reason % number])
+        for space in ("\x1f", "\u00a0", "\u3000", "\v", "\f", "\x1c", "\x1d",
+                      "\x1e", "\x85", "\u2028", "\u2029"):
+            for indent in (space, " \t" + space + "\t "):
+                for marker in ("```", "~~~", "# title", "<!-- hidden -->", "propose: call"):
+                    for context in ("", "```\n", "<!--\n"):
+                        with self.subTest(indent=indent, marker=marker, context=context):
+                            body = section + context + indent + marker + "\n"
+                            self.assertEqual(check.proposal_refusals(body), [
+                                reason % (number + context.count("\n")),
+                            ])
+
+    def test_non_ascii_whitespace_after_fence_keeps_b2_hidden(self):
+        section = self._section_0()
+        missing = [
+            "refuse: section 0 has no propose line for B2",
+            "refuse: section 0 has no proposal named typed operation under B2",
+        ]
+        self.assertEqual(check.proposal_refusals(section), [])
+        self.assertEqual(check.proposal_refusals(
+            self._section_0(groups=("A3", "A4", "A5", "A7"))), missing)
+        for fence in ("```", "~~~"):
+            for suffix in ("\u00a0", "\u3000", "\x1f", "\f", "\v", "\x85",
+                           "\u2028", "\u2029", "\x1c", "\x1d", "\x1e", "", " \t"):
+                with self.subTest(fence=fence, suffix=suffix):
+                    body = section.replace("### B2. Fixture group",
+                        fence + "\n" + fence + suffix + "\n### B2. Fixture group")
+                    expected = [
+                        "refuse: unsupported section 0 line at line %d: %r" % (i + 20, row) + section_0_forms(row)
+                        for i, row in enumerate((fence, fence + suffix))
+                    ] if suffix in ("", " \t") else [
+                        "refuse: propose line at line 23 is in a fenced code block",
+                    ] + missing
+                    self.assertEqual(check.proposal_refusals(body), expected)
+
+    def test_section_0_allowlist(self):
+        section = self._section_0()
+        self.assertEqual(check.proposal_refusals(section), [])
+        self.assertEqual(check.proposal_refusals(check.load_draft(check.worktree_root())), [])
+        line = self._propose_line("B2", "typed operation").rstrip("\n")
+        b2 = section[section.index("### B2."):]
+        single = '[x]: /u "' + line + '"'
+        multi = '[x]: /u "'
+        cases = [
+            ("link title", b2.replace(line, "\n" + single), [single]),
+            ("multiline link title", b2.replace(line, "\n" + multi + "\n" + line + '"'), [multi, line + '"']),
+            ("setext", b2.replace(line, line + "\n---"), ["---"]),
+            ("quote", b2.replace(line, "> " + line), ["> " + line]),
+            ("heading proposal", b2.replace(line, "### B2. " + line), ["### B2. " + line]),
+        ]
+        for extra in ("- item", "1. item", "| a | b |", "    code",
+                      "```\n```", "<!-- comment -->", "#### deeper", "ordinary prose"):
+            cases.append((extra, b2 + extra + "\n", extra.split("\n")))
+        for name, replacement, rejected in cases:
+            with self.subTest(form=name):
+                body = section.replace(b2, replacement)
+                self.assertEqual(check.proposal_refusals(body), [
+                    "refuse: unsupported section 0 line at line %d: %r" % (i + 1, row) + section_0_forms(row)
+                    for i, row in enumerate(body.split("\n")) if row in rejected
+                ])
+                # The same new grammar has no effect beyond section 0.
+                outside = section + "## 1. Agent identity\n" + replacement.replace("propose:", "call:")
+                self.assertEqual(check.proposal_refusals(outside), [])
+
+    def test_section_0_brackets(self):
+        line = self._propose_line("B2", "typed operation").rstrip("\n")
+        other = line.replace("typed operation", "another call").rstrip(".")
+        cases = (
+            ("link title", other + ' [.](/u "\n' + line + '")', 2),
+            ("image alt", other + " ![\n" + line + "](/missing.png)", 2),
+            ("hidden fields", line.replace(". Name:", ' [.](/u "x. Name:')
+             .split(" B2 stays open.")[0] + '")', 1),
+        )
+        self.assertEqual(check.proposal_refusals(PROPOSAL_SKELETON), [])
+        for name, replacement, count in cases:
+            with self.subTest(form=name):
+                body = PROPOSAL_SKELETON.replace(line, replacement)
+                self.assertEqual(check.proposal_refusals(body), [
+                    "refuse: unsupported section 0 line at line %d: %r" % (i + 1, row) + section_0_forms(row)
+                    for i, row in enumerate(body.split("\n")) if row in replacement.split("\n")[:count]
+                ])
+        for bracket in "[]":
+            with self.subTest(heading=bracket):
+                row = "### B2. Typed operations" + bracket
+                body = PROPOSAL_SKELETON.replace("### B2. Typed operations", row)
+                self.assertEqual(check.proposal_refusals(body), [
+                    "refuse: unsupported section 0 line at line 22: %r" % row + section_0_forms(row),
+                ])
+
+    def test_section_0_characters(self):
+        self.assertEqual(check.proposal_refusals(PROPOSAL_SKELETON), [])
+        self.assertEqual(check.proposal_refusals(check.load_draft(check.worktree_root())), [])
+        line = self._propose_line("B2", "typed operation").rstrip("\n")
+        plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ',.-:;"
+        self.assertEqual(check.proposal_refusals(PROPOSAL_SKELETON.replace(line, line + plain)), [])
+        samples = (r"$\phantom{x. Name: typed operation. Inputs: fixture inputs. Refusal: fixture refusal. Owner: fixture owner.}$",
+                   "`code`", "*emphasis*", "_emphasis_", "~~strike~~", r"\escape", "&lt;", "|")
+        samples += tuple("<>[]()${}!&#\\`*_~|\u00e9\u200b\t/+?=\"")
+        for row in (line, "### B2. Typed operations", "Evidence: section 7, B2.",
+                    "This section states each core-call proposal once; section 7 holds its evidence."):
+            for sample in samples:
+                with self.subTest(row=row, sample=sample):
+                    replacement = row + " " + sample
+                    if row == line and sample.startswith(r"$\phantom"):
+                        replacement = "propose: fixture typed operation " + sample + " B2 stays open."
+                    body = PROPOSAL_SKELETON.replace(row, replacement)
+                    number = body.split("\n").index(replacement) + 1
+                    self.assertEqual(check.proposal_refusals(body), [
+                        "refuse: unsupported section 0 line at line %d: %r" % (number, replacement)
+                        + section_0_forms(replacement),
+                    ])
+
+    def test_preamble_html(self):
+        for opener, closer in (("<?", "?>"), ("<!X", ">"), ("<![CDATA[", "]]>"),
+                               ("See below. <details>", "Done. </details>"),
+                               ("See below.\n    <details>", "")):
+            with self.subTest(opener=opener):
+                body = "# Core calls proposal\n\n" + opener + "\n\n" + PROPOSAL_SKELETON + closer
+                number = 3 + opener.count("\n")
+                reason = ("refuse: HTML block start at line %d: %r" % (number, opener)
+                          if opener.startswith("<") else "refuse: HTML before section 0 at line %d" % number)
+                self.assertEqual(check.proposal_refusals(body), [reason])
+                if opener.startswith("<"):
+                    for indent in range(4):
+                        after = " " * indent + opener
+                        self.assertEqual(check.proposal_refusals(PROPOSAL_SKELETON + after), [
+                            "refuse: HTML block start at line %d: %r"
+                            % (len(PROPOSAL_SKELETON.split("\n")), after),
+                        ])
+
+    def test_draft_html_block_starts(self):
+        live = check.load_draft(check.worktree_root())
+        self.assertFalse(any(re.match(r" {0,3}<[A-Za-z/]", row) for row in live.split("\n")))
+        self.assertEqual(check.proposal_refusals(live), [])
+        for tag in ("details", "pre", "span"):
+            for indent in ("", " ", "  ", "   "):
+                with self.subTest(tag=tag, indent=indent):
+                    opener, closer = indent + "<" + tag + ">", indent + "</" + tag + ">"
+                    body = "# Core calls proposal\n\n" + opener + "\n\n" + PROPOSAL_SKELETON + closer
+                    self.assertEqual(check.proposal_refusals(body), [
+                        "refuse: HTML block start at line %d: %r" % (i + 1, row)
+                        for i, row in enumerate(body.split("\n")) if row in (opener, closer)
+                    ])
+        for hidden in ("```\n<pre>\n</pre>\n```", "~~~\n<details>\n</details>\n~~~",
+                       "<!--\n<details>\n</details>\n-->", "    <pre>", "\t<details>"):
+            with self.subTest(hidden=hidden):
+                self.assertEqual(check.proposal_refusals(PROPOSAL_SKELETON + hidden), [])
+
+    def test_initial_bom_fence_hides_section_0(self):
+        root = self._temp_root()
+        draft = root / check.DRAFT
+        section = self._section_0()
+        body = "```\n" + section + "```\n## 1. Agent identity\n"
+        draft.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [
+            "refuse: draft has no section 0",
+        ])
+        draft.write_bytes(b"\xef\xbb\xbf" + section.encode("utf-8"))
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [])
+        removed = self._section_0(groups=("A3", "A4", "A5", "A7"))
+        draft.write_bytes(b"\xef\xbb\xbf" + removed.encode("utf-8"))
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [
+            "refuse: section 0 has no propose line for B2",
+            "refuse: section 0 has no proposal named typed operation under B2",
+        ])
+        draft.write_text("\n\ufeff" + body, encoding="utf-8")
+        self.assertEqual(check.load_draft(root), "\n\ufeff" + body)
+        self.assertEqual(check.proposal_refusals(check.load_draft(root)), [
+            "refuse: unsupported section 0 line at line %d: %r" % (i + 26, row) + section_0_forms(row)
+            for i, row in enumerate(("```", "## 1. Agent identity", ""))
+        ])
+
+    def test_proposal_indentation_counts_only_ascii_whitespace(self):
+        line = self._propose_line("B2", "typed operation")
+        for prefix in ("\u00a0" * 4, "\u3000" * 4, "\f" * 4):
+            with self.subTest(prefix=prefix):
+                body = self._section_0().replace(line, prefix + "Text. " + line)
+                self.assertEqual(check.proposal_refusals(body), [
+                    "refuse: unsupported section 0 line at line 21: %r"
+                    % (prefix + "Text. " + line.rstrip("\n")) + section_0_forms(prefix + "Text. " + line.rstrip("\n")),
+                ])
+
+    def test_non_ascii_whitespace_in_prose_outside_section_0_is_unchanged(self):
+        for prose in ("\u00a0ordinary prose", " \t\u3000prose with ``` and #",
+                      "\x1f", "\u00a0`inline code`", "\u3000~~strike~~"):
+            with self.subTest(prose=prose):
+                self.assertEqual(check.classify_lines([prose]), [("text", None, prose)])
+                self.assertEqual(check.proposal_refusals(
+                    self._section_0() + "## 1. Agent identity\n" + prose), [])
+
+    def test_ascii_block_indentation_is_unchanged(self):
+        for indent in ("", " ", "   ", "    ", "\t", " \t"):
+            for marker, kind in (("```", "fence"), ("~~~", "fence"),
+                                 ("# title", "heading"), ("<!-- hidden -->", "comment"),
+                                 ("propose: call", "text")):
+                with self.subTest(indent=indent, marker=marker):
+                    expected = "text" if len(indent) > 3 or "\t" in indent else kind
+                    self.assertEqual(check.classify_lines([indent + marker])[0][0], expected)
+        for ending in ("\n", "\r\n", "\r"):
+            with self.subTest(ending=ending):
+                self.assertEqual(check.proposal_refusals(
+                    self._section_0().replace("\n", ending)), [])
+
+    def test_comment_marker_inside_a_fence_opens_no_comment(self):
+        # Inside a fence nothing else is read, so the heading after the fence
+        # is real and closes section 0.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = (
+            self._section_0()
+            + "```\n<!--\n```\n\n## 1. Agent identity\n\n" + second + "\n"
+        )
+        line = body.splitlines().index(second) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
+    def test_empty_level_two_heading_closes_section_0(self):
+        # A bare ## renders as an empty heading and still ends section 0.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = self._section_0() + "## \n\n" + second + "\n\n## 1. Agent identity\n"
+        line = body.splitlines().index(second) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
+    def test_group_heading_indented_four_spaces_is_not_a_group(self):
+        # Four spaces make indented code, so the A5 heading groups nothing.
+        body = self._section_0().replace(
+            "### A5. Fixture group\n", "    ### A5. Fixture group\n"
+        )
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_field_value_needs_a_letter_or_digit(self):
+        # A zero-width space is a format character and states no value.
+        line = self._propose_line("A5", "grant handle")
+        for broken, missing in (
+            (line.replace("Inputs: fixture inputs.", "Inputs: \u200b."), "Inputs:"),
+            (
+                line.replace("propose: fixture grant handle. ", "propose:\u200b"),
+                "the proposal text, Name:",
+            ),
+        ):
+            body = self._section_0().replace(line, broken)
+            number = body.splitlines().index(broken.strip()) + 2
+            self.assertEqual(
+                check.problems(self._bare_draft(body)),
+                [
+                    "refuse: propose line at line %d is not a proposal "
+                    "(missing %s)" % (number, missing),
+                    "refuse: section 0 has no propose line for A5",
+                    "refuse: section 0 has no proposal named grant handle under A5",
+                ],
+                broken,
+            )
+
+    def test_repeated_empty_field_label_is_refused(self):
+        # The first Name: is empty, so every occurrence of the label counts.
+        line = self._propose_line("A5", "grant handle")
+        broken = line.replace("Name: grant handle.", "Name: . Name: grant handle.")
+        body = self._section_0().replace(line, broken)
+        number = body.splitlines().index(broken.strip()) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing Name:)" % number,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_empty_preamble_guard_refuses_the_proposal_text(self):
+        # Text after propose: needs a letter or digit; a format character and
+        # a full stop state nothing.
+        line = self._propose_line("A5", "grant handle")
+        broken = "propose:\u200b. " + line[len("propose: fixture grant handle. "):]
+        body = self._section_0().replace(line, broken)
+        number = body.splitlines().index(broken.strip()) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            [
+                "refuse: propose line at line %d is not a proposal "
+                "(missing the proposal text)" % number,
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ],
+        )
+
+    def test_fenced_heading_does_not_close_section_0(self):
+        # A fenced heading leaves section 0 open; its lines fail the grammar.
+        second = (
+            "propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = (
+            self._section_0()
+            + "```\n## 1. Agent identity\n```\n\n" + second + "\n"
+        )
+        self.assertEqual(check.problems(self._bare_draft(body)), [
+            "refuse: unsupported section 0 line at line %d: %r" % (i + 25, row) + section_0_forms(row)
+            for i, row in enumerate(("```", "## 1. Agent identity", "```"))
+        ])
+
+    def test_live_draft_passes(self):
+        root = check.worktree_root()
+        if check.load_draft(root) is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.problems(root), [])
+
+    def test_comment_prefix_cannot_create_live_a5_heading(self):
+        root = check.worktree_root()
+        draft = check.load_draft(root)
+        self.assertIsNotNone(draft)
+        heading = "### A5. Grant handle"
+        self.assertEqual(draft.count(heading), 1)
+        broken = draft.replace(heading, "<!-- hidden -->" + heading)
+        with patch.object(check, "load_draft", return_value=broken):
+            self.assertEqual(check.problems(root), [
+                "refuse: section 0 has no propose line for A5",
+                "refuse: section 0 has no proposal named grant handle under A5",
+            ])
+
+    def test_inline_comment_proposal_in_live_draft_is_refused(self):
+        root = check.worktree_root()
+        draft = check.load_draft(root)
+        self.assertIsNotNone(draft)
+        for prefix in ("visible text ", "propose: visible text "):
+            with self.subTest(prefix=prefix):
+                broken = draft + "\n" + prefix + "<!-- propose: rubbish -->\n"
+                number = len(broken.splitlines())
+                with patch.object(check, "load_draft", return_value=broken):
+                    self.assertEqual(check.problems(root), [
+                        "refuse: propose line at line %d is in an HTML comment" % number,
+                    ])
+
+    def test_comment_removal_preserves_raw_line_roles(self):
+        cases = (
+            ("<!-- hidden -->### A5. Grant handle", "comment"),
+            ("#<!-- hidden --># next", "text"),
+            ("    <!-- hidden -->## next", "text"),
+            ("### <!-- hidden -->A5. Grant handle", "heading"),
+            ("visible text <!-- propose: rubbish -->", "text"),
+            ("pro<!-- hidden -->pose: rubbish", "text"),
+        )
+        for line, role in cases:
+            with self.subTest(line=line):
+                self.assertEqual(check.classify_lines([line])[0][0], role)
+        self.assertEqual(check.problems(self._bare_draft(
+            self._section_0() + "pro<!-- hidden -->pose: rubbish\n"
+        )), ["refuse: unsupported section 0 line at line 25: 'pro<!-- hidden -->pose: rubbish'" + section_0_forms("pro<!-- hidden -->pose: rubbish")])
+
+    def test_heading_proposal_in_live_draft_is_refused(self):
+        root = check.worktree_root()
+        draft = check.load_draft(root)
+        self.assertIsNotNone(draft)
+        broken = draft + "\n### propose: rubbish\n"
+        with patch.object(check, "load_draft", return_value=broken):
+            self.assertEqual(check.problems(root), [
+                "refuse: propose line outside section 0 at line %d"
+                % len(broken.splitlines()),
+            ])
+
+    def test_heading_proposal_is_checked_at_each_level(self):
+        for level in range(1, 7):
+            for proposal in ("propose: rubbish", "<!-- propose: rubbish -->"):
+                with self.subTest(level=level, proposal=proposal):
+                    body = self._section_0() + "#" * level + " " + proposal + "\n"
+                    number = len(body.splitlines()) + 1
+                    if proposal.startswith("<!--"):
+                        reason = "at line %d is in an HTML comment" % number
+                    elif level <= 2:
+                        reason = "outside section 0 at line %d" % number
+                    else:
+                        reason = ("at line %d is not a proposal "
+                                  "(missing Name:, Inputs:, Refusal:, Owner:)" % number)
+                    self.assertEqual(check.problems(self._bare_draft(body)), [
+                        "refuse: propose line " + reason,
+                    ])
+
+    def test_fences_inside_comments_leave_section_1_visible(self):
+        second = self._propose_line("B2", "another call")
+        body = (self._section_0() + "<!--\n~~~\n-->\n## 1. Agent identity\n\n"
+                "<!--\n~~~\n-->\n" + second)
+        self.assertEqual(check.problems(self._bare_draft(body)), [
+            "refuse: propose line outside section 0 at line %d"
+            % (len(body.splitlines()) + 1),
+        ])
+
+    def test_unclosed_inline_html_comment_is_refused(self):
+        falsifier = "Some text <!--\n## 1. Agent identity\n-->\npropose: …\n"
+        self.assertEqual(check.proposal_refusals(falsifier), [
+            "refuse: unclosed inline HTML comment at line 1",
+        ])
+        for opener in ("Some text <!--", "### title <!--"):
+            with self.subTest(opener=opener):
+                body = (self._section_0() + opener + "\n## 1. Agent identity\n-->\n"
+                        + self._propose_line("B2", "another call"))
+                number = body.splitlines().index(opener) + 2
+                self.assertEqual(check.problems(self._bare_draft(body)), [
+                    "refuse: unclosed inline HTML comment at line %d" % number,
+                ])
+                with self.assertRaisesRegex(ValueError,
+                        "^refuse: unclosed inline HTML comment at line 1$"):
+                    check.classify_lines([opener, "## 1. Agent identity", "-->"])
+        for indent in range(4):
+            with self.subTest(indent=indent):
+                lines = [" " * indent + "<!--", "## hidden", "-->", "## next"]
+                self.assertEqual([kind for kind, _, _ in check.classify_lines(lines)],
+                                 ["comment", "comment", "comment", "heading"])
+
+    def test_comment_closes_and_reopens_on_one_line_is_refused(self):
+        falsifier = "<!-- closed --> text <!--\npropose: hidden call\n-->\npropose: after"
+        self.assertEqual(check.proposal_refusals(falsifier), [
+            "refuse: comment closes and reopens on line 1",
+        ])
+        for opener in ("<!-- closed --> text <!--", "<!--\n--> text <!--",
+                       "text <!-- closed --> <!--"):
+            with self.subTest(opener=opener):
+                body = self._section_0() + opener + "\n" + self._propose_line("B2", "another call")
+                number = len(self._section_0().splitlines()) + len(opener.splitlines())
+                self.assertEqual(check.proposal_refusals(body), [
+                    "refuse: comment closes and reopens on line %d" % number,
+                ])
+                with self.assertRaisesRegex(ValueError,
+                        "^refuse: comment closes and reopens on line %d$"
+                        % len(opener.splitlines())):
+                    check.classify_lines((opener + "\n## next").splitlines())
+        self.assertEqual(check.classify_lines([
+            "<!-- closed -->", "## 1. Agent identity", "propose: after",
+        ]), [
+            ("comment", None, ""), ("heading", 2, "1. Agent identity"),
+            ("text", None, "propose: after"),
+        ])
+
+    def test_indented_comment_opener_leaves_section_1_visible(self):
+        for indent in ("    ", "     ", "        ", "\t", " \t"):
+            with self.subTest(indent=indent):
+                opener = indent + "<!--"
+                second = self._propose_line("B2", "another call")
+                body = self._section_0() + opener + "\n## 1. Agent identity\n-->\n" + second
+                self.assertEqual(check.problems(self._bare_draft(body)), [
+                    "refuse: propose line outside section 0 at line %d"
+                    % (len(body.splitlines()) + 1),
+                ])
+                self.assertEqual(check.classify_lines(
+                    [opener, "## 1. Agent identity", "-->"]), [
+                    ("text", None, opener),
+                    ("heading", 2, "1. Agent identity"),
+                    ("text", None, "-->"),
+                ])
+                closed = indent + "<!-- propose: rubbish -->"
+                self.assertEqual(check.classify_lines([closed]), [("text", None, closed)])
+
+    def test_mixed_fence_comment_heading_roles(self):
+        cases = (
+            ("fence/comment", ["~~~", "<!--", "~~~", "## next"],
+             "fence fence fence heading"),
+            ("comment/fence/heading", ["<!--", "~~~", "## hidden", "-->", "## next"],
+             "comment comment comment comment heading"),
+            ("heading/fence", ["### ~~~", "~~~", "# hidden", "~~~"],
+             "heading fence fence fence"),
+            ("heading/comment", ["### title <!-- hidden -->", "## next"],
+             "heading heading"),
+            ("fence opener/comment", ["~~~ <!--", "## hidden", "~~~", "## next"],
+             "fence fence fence heading"),
+            ("closed comment/fence", ["<!-- hidden -->~~~", "## next"],
+             "comment heading"),
+            ("comment closer/heading", ["<!--", "--> ## hidden", "## next"],
+             "comment comment heading"),
+            ("fence/fence", ["```", "~~~", "## hidden", "```", "## next"],
+             "fence fence fence fence heading"),
+            ("comment/comment", ["<!--", "<!--", "-->", "## next"],
+             "comment comment comment heading"),
+            ("heading/heading", ["## title", "### ~~~", "### <!-- hidden --> title"],
+             "heading heading heading"),
+        )
+        for name, lines, roles in cases:
+            with self.subTest(pairing=name):
+                self.assertEqual([kind for kind, _, _ in check.classify_lines(lines)],
+                                 roles.split())
+
+    def test_indented_propose_line_outside_section_0_is_refused(self):
+        # Three spaces is not code, but it is still outside section 0.
+        second = (
+            "   propose: a second spelling. Name: another call. Inputs: fixture "
+            "inputs. Refusal: fixture refusal. Owner: fixture owner. B2 stays "
+            "open."
+        )
+        body = self._section_0() + "## 7. Open questions\n\n" + second + "\n"
+        line = body.splitlines().index(second) + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
+    def test_propose_line_outside_section_0_is_refused(self):
+        # One rule has one spelling: section 0 holds the proposal, and section 7
+        # points to it.
+        body = (
+            self._section_0()
+            + "## 7. Open questions\n\npropose: a second spelling.\n"
+        )
+        line = body.splitlines().index("propose: a second spelling.") + 2
+        self.assertEqual(
+            check.problems(self._bare_draft(body)),
+            ["refuse: propose line outside section 0 at line " + str(line)],
+        )
+
+    def _live_refusals(self):
+        """The refusals this worktree's draft gives, or a skip without a draft."""
+        root = check.worktree_root()
+        if check.load_draft(root) is None:
+            self.skipTest("no draft in this worktree")
+        return check.problems(root)
+
+    def test_live_draft_has_section_0(self):
+        found = [
+            reason for reason in self._live_refusals()
+            if reason == "refuse: draft has no section 0"
+        ]
+        self.assertEqual(found, [])
+
+    def test_live_draft_section_0_holds_every_required_proposal(self):
+        found = [
+            reason for reason in self._live_refusals()
+            if reason.startswith("refuse: section 0 has no propose line for ")
+        ]
+        self.assertEqual(found, [])
+
+    def test_live_draft_has_no_propose_line_outside_section_0(self):
+        found = [
+            reason for reason in self._live_refusals()
+            if "propose line outside section 0" in reason
+        ]
+        self.assertEqual(found, [])
 
     def test_missing_pin_is_refused(self):
         # An absent path in the same draft adds no second line: no revision is
@@ -5106,7 +6072,7 @@ class CitationCheckTests(unittest.TestCase):
         self._write(root, body, {"pkg/pin.rs": source})
         sha = self._commit_all(root)
         (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
-            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+            "Pinned commit: " + sha + "\n" + PROPOSAL_SKELETON + body, encoding="utf-8"
         )
         (root / "pkg" / "pin.rs").unlink()
         self.assertEqual(check.problems(root), [])
@@ -5117,7 +6083,8 @@ class CitationCheckTests(unittest.TestCase):
         (root / worktree_only).write_bytes(b"fn only_here(\n")
         extended = body + "Also `" + worktree_only + "::only_here`.\n"
         (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
-            "Pinned commit: " + sha + "\n" + extended, encoding="utf-8"
+            "Pinned commit: " + sha + "\n" + PROPOSAL_SKELETON + extended,
+            encoding="utf-8",
         )
         self.assertEqual(
             check.problems(root),
@@ -10148,7 +11115,8 @@ class CitationCheckTests(unittest.TestCase):
         check.pinned_line = record
         try:
             (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
-                "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+                "Pinned commit: " + sha + "\n" + PROPOSAL_SKELETON + body,
+                encoding="utf-8",
             )
             got = check.problems(root)
         finally:
