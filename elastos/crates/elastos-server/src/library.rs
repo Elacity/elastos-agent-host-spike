@@ -1286,9 +1286,13 @@ fn handle_library_request(
             Ok(json!({ "roots": library_roots(data_dir, &principal_id) }))
         }
         ObjectProviderRequest::List { principal_id, uri } => {
-            let root = crate::auth::principal_localhost_root(&principal_id);
+            let root =
+                crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?
+                    .localhost_root()
+                    .to_string();
             let uri = uri.unwrap_or_else(|| root.clone());
-            let target = library_target(data_dir, &principal_id, &uri)?;
+            let target = library_target(data_dir, &principal_id, &uri)
+                .with_context(|| format!("Library list at {uri}"))?;
             if !target.path.exists() {
                 return Ok(json!({ "uri": target.uri, "objects": [] }));
             }
@@ -10715,4 +10719,65 @@ mod publish_tests {
             .await;
         assert_eq!(trash["status"], "ok", "{trash}");
     }
+}
+
+#[cfg(test)]
+mod r5a_tests {
+    use super::*;
+    use crate::auth::{r4_fixture, PrincipalKind};
+    use std::sync::Mutex;
+
+    fn home(kind: PrincipalKind) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        r4_fixture::store(dir.path(), kind);
+        let root = match kind {
+            PrincipalKind::Agent => r4_fixture::AGENT_ROOT,
+            PrincipalKind::Human => r4_fixture::HUMAN_ROOT,
+        };
+        crate::auth::store_test_principal_root_protection_for(dir.path(), r4_fixture::ID, root);
+        dir
+    }
+
+    #[test]
+    fn list_resolves_agent_root_before_the_remaining_target_gate() {
+        let agent = home(PrincipalKind::Agent);
+        let result = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains(r4_fixture::AGENT_ROOT)),
+            "{result:?}"
+        );
+        let human = home(PrincipalKind::Human);
+        let listed = handle_library_request(
+            human.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(listed["uri"], r4_fixture::HUMAN_ROOT);
+        let absent = tempfile::tempdir().unwrap();
+        let result = handle_library_request(
+            absent.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
 }
