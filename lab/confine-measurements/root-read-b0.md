@@ -4,9 +4,11 @@ Measurement only. This record changes no provider profile and no Runtime code.
 Base: `ea80c9ef` on `claude/confine-b0-rootread`. Host: `Darwin 25.5.0 arm64`,
 rustc 1.91.0 (receipt lines 5-6); `sandbox-exec` ran in the suites (229).
 
-The evidence is one receipt,
-`~/Sparks/office/evidence/confine-b0-fix/receipt-6676d467.log`, which pins head
-`6676d467` and tree `d87a2130` (receipt line 3). Its sha256, recomputed with
+The evidence is two receipts in `~/Sparks/office/evidence/confine-b0-fix/`.
+The first, `receipt-6676d467.log`, holds the control and plant runs; it pins
+head `6676d467` and tree `d87a2130` (receipt line 3), and bare line numbers in
+this record refer to it. The second, `receipt-<head8>-interrupt.log`, holds
+the interrupt check and is described under Runs. For the first receipt: Its sha256, recomputed with
 `shasum -a 256`, is
 `e49a33b6e1d1d30eedc3734b2b063a78b49dfa15675ffc417dbfed492917c608`. The sibling
 `receipt-6676d467.sha256` holds two lines because
@@ -72,18 +74,18 @@ sets. That run predates the test's exit-143 check, added at `741c53da`. The
 remove-restore falsifier fails at its `cmp` with `falsifier interrupt exit=5`
 (2223-2227).
 
-A second receipt runs the test with that check:
-`~/Sparks/office/evidence/confine-b0-fix/receipt-af44019e-interrupt.log`,
-which pins head `af44019e` and tree `85c96eb9` (its line 3), sha256
-`42fc64737dc81ab2063900d4d42e7fdc974e06e8fbf4defba5ff7e6e0532940f`, recomputed
-with `shasum -a 256` and equal to the one line of its `.sha256` sidecar. In
-that log the test prints `interrupted plant exit=143` and exits 0 (its lines
-11-13). Its falsifier drops the test's `kill -TERM "$pid"` line, so the plant
-runs the whole wallet suite (97 passed, 6 failed, its line 338) and restores on
-the normal path; the test then prints `plant exit=101, not 143: the plant was
-not interrupted` and exits 7 (its lines 343-345). In both receipts no line
-separates the SIGTERM line from the exit-143 line (200-201 here, 11-12 there),
-so neither shows whether the plant's child-kill branch ran.
+The second receipt, `receipt-<head8>-interrupt.log`, is captured at the head
+that holds this text, so the record names it by that pattern and leaves its
+sha256 to the change description. It runs two commands. The first runs
+`root-read-b0-interrupt-test.sh` with its exit-143 check: the test prints
+`interrupted plant exit=143; profile restored and tree clean` and exits 0. The
+second runs a copy of the test without its `kill -TERM "$pid"` line, so the
+plant runs the whole wallet suite under the `data` plant (97 passed, 6 failed)
+and restores on the normal path; the test prints `plant exit=101, not 143: the
+plant was not interrupted` and exits 7, and the command prints
+`falsifier no-kill exit=7`. In both receipts no line separates the SIGTERM line
+from the exit-143 line (200-201 in the first), so neither shows whether the
+plant's child-kill branch ran.
 
 Each plant run records a result for every test in that provider's suite
 (receipt lines 244, 325, 409, 739, 1133, 1524, 1697, 1954, 2214; bare numbers
@@ -102,11 +104,15 @@ The model profile already holds `file-read-data`, so its `data` plant is the
 control run of the same line and changes no byte.
 
 The six wallet `file-read-data` failures are profile-text checks, and the
-substituted line fails them by construction. Five compare a generated profile
-or a document with the committed profile.
-`every_did_and_wallet_allow_rule_has_a_registered_removal` instead compares the
-committed allow rules with the registered removal entries (`:19125`), and its
-panic names the substituted line as a rule no entry removes (452):
+substituted line fails them by construction. Four compare a generated profile
+or a document with the committed profile. Two compare the committed allow rules
+with other lists and generate no profile:
+`every_did_and_wallet_allow_rule_traces_to_one_declared_right` with the
+declared-rights and platform-baseline entries (`:18451-18465`; its panic at 455
+names the substituted line as a rule with no declared right), and
+`every_did_and_wallet_allow_rule_has_a_registered_removal` with the registered
+removal entries (`:19125`; its panic at 452 names it as a rule no entry
+removes):
 
 - `generated_did_and_wallet_profiles_match_their_committed_oracles`
   (`capsules/wallet-provider/tests/confine.rs:18553`)
