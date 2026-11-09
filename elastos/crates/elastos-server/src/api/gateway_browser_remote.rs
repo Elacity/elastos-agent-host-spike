@@ -808,7 +808,11 @@ async fn prepare(page: &ServedPage) -> Result<Prepared> {
             egress_runtime_socket_path:stream["adapter_ipc"]["runtime_stream_path"].as_str().unwrap_or_default(),
         }).map_err(anyhow::Error::msg)?.context("Remote Engine transport preparation unsupported")?;
         bind_browser_vz_transport_authority(&gateway.data_dir, &reservation, stream_id, None, transport.authority.clone()).await.map_err(anyhow::Error::msg)?;
-        let (_, mut profile) = browser_profile_launch_descriptor(&gateway.data_dir, &principal)?;
+        let (_, mut profile) = browser_profile_launch_descriptor(
+            &gateway.data_dir,
+            &principal,
+            &super::gateway_home_token::wallet_principal_root(&gateway.data_dir, &principal)?,
+        )?;
         profile["profile_key"] = json!(owner.profile_key);
         let viewer = browser_vz_viewer_turn_capability(&transport.authority, &transport.secret).map_err(anyhow::Error::msg)?;
         crate::carrier::browser_engine_media::bind_target(&gateway.data_dir, owner.requester_endpoint.parse()?, &transport.authority, page.closing.clone()).await?;
@@ -1638,8 +1642,11 @@ pub(super) async fn select(
     );
     // An existing local profile requires an approved transfer. Selecting
     // execution cannot silently fork its cookies onto another Runtime.
-    let (local_profile, _) =
-        browser_profile_launch_descriptor(&gateway.data_dir, context.principal_id())?;
+    let (local_profile, _) = browser_profile_launch_descriptor(
+        &gateway.data_dir,
+        context.principal_id(),
+        context.root(),
+    )?;
     ensure!(
         !local_profile.exists(),
         "This Browser profile requires an approved transfer before remote placement"
