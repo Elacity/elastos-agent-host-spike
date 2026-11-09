@@ -66,22 +66,25 @@ fn standin_matches_ra1_fields() {
     let query = standin
         .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in returns the shell scope list");
-    for list in [&plain, &query] {
-        assert_keys(
-            list,
-            &["capabilities", "scope"],
-            "the stand-in did the work: the shell body carries scope and capabilities",
-        );
-        assert_eq!(
-            list["scope"], LIVE_SCOPE,
-            "the stand-in did the work: the shell body marks all_sessions_live"
-        );
-        assert_eq!(
-            list["capabilities"],
-            json!([]),
-            "the stand-in did the work: the shell lists no grant before any seed"
-        );
-    }
+    assert_eq!(
+        plain,
+        json!({ "capabilities": [] }),
+        "the stand-in did the work: the plain shell body is its own session, with no scope key"
+    );
+    assert_keys(
+        &query,
+        &["capabilities", "scope"],
+        "the stand-in did the work: the shell scope body carries scope and capabilities",
+    );
+    assert_eq!(
+        query["scope"], LIVE_SCOPE,
+        "the stand-in did the work: the shell scope body marks all_sessions_live"
+    );
+    assert_eq!(
+        query["capabilities"],
+        json!([]),
+        "the stand-in did the work: the shell scope list is empty before any seed"
+    );
 
     let empty_client = standin
         .get_capability_list(

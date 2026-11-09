@@ -1,8 +1,11 @@
 //! Lab stand-in for the Runtime's live-grant view, not the Runtime.
 //!
 //! `get_capability_list` is the one answer for `GET /api/capability/list`.
-//! `None` is the plain route. `Some("all_sessions_live")` is the query form.
-//! One filter keeps a grant whose life is `Live`. An ended session stays.
+//! `None` is the plain route: the caller's own session, five fields per entry
+//! and no `scope` key. `Some("all_sessions_live")` is the shell-only
+//! all-sessions view: every live grant, six fields per entry with its
+//! `session_id`, and the `scope` key. One filter keeps a grant whose life is
+//! `Live`. An ended session stays in the all-sessions view.
 //!
 //! `post_capsules`, `get_capsules` and `delete_capsule` answer the capsule
 //! routes for an admitted resident guest. Admission names a bundle by its lab
@@ -1169,13 +1172,18 @@ impl StandIn {
     }
 
     /// `GET /api/capability/list` for the plain route or `?scope=`.
+    ///
+    /// The plain route is the real default: the caller's own session, five
+    /// fields per entry and no `scope` key. A shell owns no grant, so its
+    /// plain answer is empty. `?scope=all_sessions_live` is the shell-only
+    /// all-sessions view, six fields per entry with the grant's session.
     pub fn get_capability_list(
         &self,
         caller: Caller<'_>,
         scope: Option<&str>,
     ) -> Result<Value, (u16, String)> {
         match scope {
-            None => Ok(self.render_plain(caller)),
+            None => Ok(self.render_own(caller)),
             Some(LIVE_SCOPE) => {
                 require_shell(caller)?;
                 Ok(self.render_all_live())
@@ -1184,16 +1192,9 @@ impl StandIn {
         }
     }
 
-    /// The plain route. A shell sees every live grant; a client sees its own.
-    fn render_plain(&self, caller: Caller<'_>) -> Value {
-        match caller {
-            Caller::Shell => self.render_all_live(),
-            Caller::Client { .. } => self.render_own(caller),
-        }
-    }
-
-    /// A caller's own session: five fields per entry and no `scope` key. A
-    /// shell is not a session that holds a grant, so its own answer is empty.
+    /// The plain route's answer: the caller's own session, five fields per
+    /// entry and no `scope` key. A shell is not a session that holds a grant,
+    /// so its own answer is empty.
     fn render_own(&self, caller: Caller<'_>) -> Value {
         let mut grants = match caller {
             Caller::Shell => Vec::new(),
@@ -1207,8 +1208,8 @@ impl StandIn {
         json!({ "capabilities": capabilities })
     }
 
-    /// The shell's all-sessions view: every live grant, six fields per entry
-    /// with its session, sorted by session then request.
+    /// The shell's `?scope=all_sessions_live` answer: every live grant, six
+    /// fields per entry with its session, sorted by session then request.
     fn render_all_live(&self) -> Value {
         let mut grants = self.kept(Caller::Shell);
         grants.sort_by(|left, right| {
@@ -3096,19 +3097,18 @@ mod tests {
             .collect()
     }
 
+    /// The shell's plain default: its own session, which holds no grant.
+    fn shell_plain(standin: &StandIn) -> Value {
+        standin
+            .get_capability_list(Caller::Shell, None)
+            .expect("the stand-in shell plain view")
+    }
+
     /// The shell's `?scope=all_sessions_live` view: every live grant.
     fn shell_live(standin: &StandIn) -> Value {
         standin
             .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell all-sessions live view")
-    }
-
-    fn shell_pair(standin: &StandIn) -> (Value, Value) {
-        let plain = standin
-            .get_capability_list(Caller::Shell, None)
-            .expect("the stand-in shell plain view");
-        let query = shell_live(standin);
-        (plain, query)
     }
 
     const SHELL_ENTRY: &[&str] = &[
@@ -3161,37 +3161,38 @@ mod tests {
             Life::Live,
             true,
         );
-        let (plain, query) = shell_pair(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
+            shell_plain(&standin),
+            json!({ "capabilities": [] }),
+            "the shell's plain view is its own session, with no scope key"
         );
+        let query = shell_live(&standin);
         assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-a".to_owned(), "req-b".to_owned(), "req-z".to_owned()]),
             "the stand-in lists every live grant"
         );
         assert_eq!(
-            request_order(&plain),
+            request_order(&query),
             ["req-a", "req-z", "req-b"],
             "the stand-in sorts live grants by session then request"
         );
         assert_keys(
-            &plain,
+            &query,
             &["capabilities", "scope"],
             "the stand-in shell view carries the scope marker",
         );
         assert_eq!(
-            plain["scope"], "all_sessions_live",
+            query["scope"], "all_sessions_live",
             "the stand-in marks the shell view all_sessions_live"
         );
         assert_entry_keys(
-            &plain,
+            &query,
             SHELL_ENTRY,
             "the stand-in shell entry carries the live-grant fields",
         );
         assert_eq!(
-            plain,
+            query,
             json!({
                 "scope": "all_sessions_live",
                 "capabilities": [
@@ -3228,22 +3229,23 @@ mod tests {
     #[test]
     fn standin_empty_shell_view_has_the_scope_marker() {
         let standin = StandIn::new();
-        let (plain, query) = shell_pair(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one empty shell body for both route forms"
+            shell_plain(&standin),
+            json!({ "capabilities": [] }),
+            "the stand-in empty plain view is the shell's own session and has no scope key"
         );
+        let query = shell_live(&standin);
         assert_keys(
-            &plain,
+            &query,
             &["capabilities", "scope"],
             "the stand-in empty shell view has the scope marker",
         );
         assert_eq!(
-            plain["scope"], "all_sessions_live",
+            query["scope"], "all_sessions_live",
             "the stand-in marks an empty shell view all_sessions_live"
         );
         assert_eq!(
-            plain["capabilities"],
+            query["capabilities"],
             json!([]),
             "the stand-in returns an empty capability list when nothing is live"
         );
@@ -4105,15 +4107,16 @@ mod tests {
             "starting",
             "the instance still exists while it holds no grant"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
             request_ids(&query),
             BTreeSet::new(),
             "the shell grant view is empty after a signed launch"
         );
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
+            shell_plain(&standin),
+            json!({ "capabilities": [] }),
+            "the shell's plain view is its own empty session after a signed launch"
         );
     }
 
