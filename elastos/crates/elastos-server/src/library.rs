@@ -8860,27 +8860,40 @@ mod tests {
         assert!(parsed.is_err(), "{parsed:?}");
     }
 
-    /// A5-S3c-0a, library: a stored Agent's Library roots sit under its own
-    /// UsersAI root. Expected-fail: library_roots still applies the id rule.
-    /// Flipped by A5-S3c-2b.
+    /// A5-S3c-0a: the Roots handler returns this stored Agent's UsersAI root.
     #[test]
-    #[ignore = "expected-fail until A5-S3c-2b"]
     fn a_stored_agents_library_roots_are_under_its_usersai_root() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let id = "person:local:s3c-agent-library";
-        crate::auth::store_test_human_principal(data_dir.path(), id);
-        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
-        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
-        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
-        let principal_id = id.to_string();
-        let request = super::ObjectProviderRequest::Roots { principal_id };
-        let roots = super::handle_library_request(data_dir.path(), request).unwrap();
-        let roots = roots["roots"].as_array().unwrap();
-        assert!(roots.len() > 1, "{roots:?}");
-        for entry in roots.iter().filter(|r| r["kind"] != "webspace-root") {
-            let uri = entry["uri"].as_str().unwrap();
-            assert!(uri == root || uri.starts_with(&format!("{root}/")), "{uri}");
+        use crate::auth::{r4_fixture, PrincipalKind};
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            r4_fixture::store(dir.path(), kind);
+            let request = super::ObjectProviderRequest::Roots {
+                principal_id: r4_fixture::ID.into(),
+            };
+            let roots = super::handle_library_request(dir.path(), request).unwrap();
+            let roots = roots["roots"].as_array().unwrap();
+            assert!(roots.len() > 1, "{roots:?}");
+            for entry in roots.iter().filter(|r| r["kind"] != "webspace-root") {
+                let uri = entry["uri"].as_str().unwrap();
+                assert!(uri == root || uri.starts_with(&format!("{root}/")), "{uri}");
+            }
         }
+        let absent = tempfile::tempdir().unwrap();
+        let result = super::handle_library_request(
+            absent.path(),
+            super::ObjectProviderRequest::Roots {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
     }
 
     #[test]
