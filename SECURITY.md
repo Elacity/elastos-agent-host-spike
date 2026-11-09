@@ -52,7 +52,11 @@ Inbox and Browser responses contain no token bytes.
 
 Runtime admits internet access only through VM Browser engines. This includes
 remote VM engines. Hosted, native and test-only Playwright engines are refused
-on the Runtime Browser path. Each Browser launch receives its own Runtime
+on the Runtime Browser path. The Browser frame uses the VM Open route; legacy
+Net HTTP, connect, resolve and stream routes return 410. Runtime owns Exit and
+Net resources. App capability requests and existing app tokens cannot access
+them. Direct owner shell network writes require an explicit capability token.
+Each Browser launch receives its own Runtime
 instance binding. Runtime checks the current grant at provider dispatch and at
 each Exit relay open. Stop writes the revoked decision before it invalidates the
 grant generation, cancels Runtime-owned byte copies and acknowledges completion.

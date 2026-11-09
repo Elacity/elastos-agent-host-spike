@@ -223,88 +223,6 @@ impl Drop for BrowserMediaSessionDiagnostic {
     }
 }
 
-pub(in crate::api::gateway) async fn gateway_browser_net_http(
-    registry: &ProviderRegistry,
-    request: &serde_json::Value,
-) -> Response {
-    let validation = match registry.send_raw("net", request).await {
-        Ok(value) => value,
-        Err(err) => {
-            return gateway_provider_error_response(
-                "net",
-                anyhow::anyhow!("net provider unavailable: {}", err),
-            )
-        }
-    };
-    let exit_handoff_message = validation
-        .get("message")
-        .and_then(|value| value.as_str())
-        .unwrap_or("Net provider requested internal Exit handoff")
-        .to_string();
-    match validation.get("status").and_then(|value| value.as_str()) {
-        Some("ok") => return Json(validation).into_response(),
-        Some("error")
-            if validation.get("code").and_then(|value| value.as_str())
-                == Some("exit_unavailable") =>
-        {
-            // Net validated the browser request and refused ambient networking.
-            // Runtime owns the handoff to the internal Exit provider.
-        }
-        Some("error") => {
-            let message = validation
-                .get("message")
-                .and_then(|value| value.as_str())
-                .unwrap_or("net provider rejected Browser request");
-            return gateway_provider_error_response("net", anyhow::anyhow!(message.to_string()));
-        }
-        _ => {
-            return gateway_provider_error_response(
-                "net",
-                anyhow::anyhow!("net provider returned an invalid response"),
-            )
-        }
-    }
-
-    let exit_request = serde_json::json!({
-        "op": "http_fetch",
-        "url": request.get("url").cloned().unwrap_or(serde_json::Value::Null),
-        "method": request.get("method").cloned().unwrap_or_else(|| serde_json::json!("GET")),
-        "principal_id": request.get("principal_id").cloned().unwrap_or(serde_json::Value::Null),
-        "reason": request.get("reason").cloned().unwrap_or(serde_json::Value::Null),
-    });
-    let response = match registry.send_raw("exit", &exit_request).await {
-        Ok(value) => value,
-        Err(err) => {
-            return gateway_provider_error_response(
-                "exit",
-                anyhow::anyhow!(
-                    "exit provider unavailable: {}; {}",
-                    exit_handoff_message,
-                    err
-                ),
-            )
-        }
-    };
-    if response.get("status").and_then(|value| value.as_str()) == Some("error") {
-        let code = response
-            .get("code")
-            .and_then(|value| value.as_str())
-            .unwrap_or("provider_error");
-        let message = response
-            .get("message")
-            .and_then(|value| value.as_str())
-            .unwrap_or("exit provider rejected Browser request");
-        if matches!(code, "exit_unavailable" | "backend_error") {
-            return gateway_provider_error_response(
-                "exit",
-                anyhow::anyhow!("exit provider unavailable: {}", message),
-            );
-        }
-        return gateway_provider_error_response("exit", anyhow::anyhow!(message.to_string()));
-    }
-    Json(response).into_response()
-}
-
 pub(in crate::api::gateway) async fn browser_reserve_stream_session(
     registry: &ProviderRegistry,
     request: &serde_json::Value,
@@ -434,7 +352,7 @@ pub(in crate::api::gateway) async fn browser_attach_runtime_stream_path(
                     .clone(),
             }
         }
-        _ => return Ok(receipt),
+        _ => anyhow::bail!("Browser stream receipt requires a supported guarded transport"),
     };
     let stream_id = receipt
         .get("stream_id")
@@ -1789,6 +1707,29 @@ fn scrub_browser_stream_authority_fields(value: &mut serde_json::Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn review559_stream_receipts_require_a_guarded_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        for receipt in [
+            json!({}),
+            json!({"byte_transport":"tcp", "runtime_stream_path":"/tmp/unguarded.sock"}),
+            json!({"byte_transport":"carrier_stream", "schema":EXIT_STREAM_SESSION_SCHEMA}),
+        ] {
+            let result = browser_attach_runtime_stream_path(
+                dir.path(),
+                receipt,
+                None,
+                gateway_browser_internet::transport_fixture(),
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "unsupported receipt escaped the guarded listener: {result:?}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn engine_stream_session_keeps_relay_ipc_for_vm_launch() {

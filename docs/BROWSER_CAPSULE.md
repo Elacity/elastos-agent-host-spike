@@ -131,7 +131,7 @@ adapter.
 
 ## Browser / Net / Exit ABI
 
-The browser capsule should target these contracts:
+Runtime owns these backend contracts:
 
 ```text
 elastos://net/resolve
@@ -140,11 +140,11 @@ elastos://net/stream
 elastos://net/http
 ```
 
-`elastos://net/http` is optional and constrained. General browsing should prefer
-a stream relay where the browser engine owns TLS. HTTP-fetch proxying is useful
-for controlled content, caching, diagnostics, or compatibility, but it makes the
-runtime or exit provider a content proxy and should not be the default browser
-path.
+Browser opens a VM session through `/api/apps/browser/open`. The Browser frame's
+legacy Net HTTP, connect, resolve and stream routes return 410. The VM engine
+owns TLS and uses Runtime's guarded stream relay. Apps cannot request raw Net
+or Exit capabilities or use existing tokens to reach those providers. Direct
+owner shell writes to Net and Exit require an explicit capability token.
 
 Wallet account, proof, approval, signing, Recovery, and transaction operations
 are not capsule-visible provider resources. The generic Wallet provider surface

@@ -701,6 +701,31 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn review559_exit_and_net_are_system_only_resources() {
+        for scheme in ["exit", "net"] {
+            for suffix in ["", "/http", "?query", "#fragment"] {
+                let resource = format!("elastos://{scheme}{suffix}");
+                assert!(is_system_only_backend_resource(&resource));
+                let result = request_capability(
+                    State(test_state()),
+                    Extension(Session::new_capsule("test-app".into())),
+                    Json(RequestCapabilityInput {
+                        resource,
+                        action: "write".into(),
+                        reason: "fixture".into(),
+                    }),
+                )
+                .await
+                .unwrap()
+                .0;
+                assert_eq!(result.status, "denied");
+                assert!(result.request_id.is_none());
+                assert!(result.token.is_none());
+            }
+        }
+    }
+
     #[test]
     fn test_supported_resource_schemes() {
         assert!(is_supported_resource_scheme("elastos://did/*"));

@@ -1502,15 +1502,13 @@ async fn test_browser_open_fails_closed_without_attached_engine_transport() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Runtime rejects the unsupported receipt before the Engine can launch.
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        payload["message"],
-        "Browser Engine failed to start cleanly."
-    );
+    assert_eq!(payload["message"], "Browser could not open. Try again.");
     assert!(!String::from_utf8_lossy(&body).contains("adapter_ipc"));
 }
 
@@ -8407,12 +8405,12 @@ async fn test_browser_net_provider_fails_closed_without_adapter_provider() {
         )
         .await
         .unwrap();
-    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(unavailable.status(), StatusCode::GONE);
     let body = axum::body::to_bytes(unavailable.into_body(), usize::MAX)
         .await
         .unwrap();
     let message = String::from_utf8(body.to_vec()).unwrap();
-    assert!(message.contains("net provider unavailable"));
+    assert!(message.contains("/api/provider/net/http is disabled"));
 }
 
 #[tokio::test]
@@ -8436,17 +8434,16 @@ async fn test_browser_net_provider_error_status_maps_to_fail_closed_http() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::GONE);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let message = String::from_utf8(body.to_vec()).unwrap();
-    assert!(message.contains("exit provider unavailable"));
-    assert!(message.contains("No Browser Exit provider is configured"));
+    assert!(message.contains("/api/provider/net/http is disabled"));
 }
 
 #[tokio::test]
-async fn test_browser_net_http_hands_validated_request_to_internal_exit_provider() {
+async fn test_browser_net_http_is_retired_even_with_internal_exit_provider() {
     let dir = tempfile::tempdir().unwrap();
     let authority = passkey_authority(dir.path());
     let browser_token = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
@@ -8466,19 +8463,7 @@ async fn test_browser_net_http_hands_validated_request_to_internal_exit_provider
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(
-        payload["data"]["schema"],
-        "elastos.exit.http-fetch.result/v1"
-    );
-    assert_eq!(payload["data"]["backend"], "mock-exit");
-    assert_eq!(payload["data"]["url"], "https://glidefinance.io/");
-    assert_eq!(payload["data"]["body_text"], "mock exit body");
+    assert_eq!(response.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
@@ -10664,8 +10649,8 @@ async fn browser_internet_allow_is_bound_to_current_request_and_consent_has_no_t
     let (status, _) = internet_route(
         &app,
         &browser,
-        "/api/provider/net/connect",
-        Some(json!({"target":"tls://example.com:443"})),
+        "/api/apps/browser/open",
+        Some(json!({"url":"https://example.com/", "display_mode":"webrtc_remote_display", "guarantee_level":"mechanism_microvm"})),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -10683,19 +10668,23 @@ impl Provider for InternetDialFixture {
         "internet-dial-fixture"
     }
     fn schemes(&self) -> Vec<&'static str> {
-        vec!["net"]
+        vec!["browser-engine"]
     }
     async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
         Err(ProviderError::Provider("raw only".into()))
     }
-    async fn send_raw(&self, _: &Value) -> Result<Value, ProviderError> {
-        panic!("unfenced Browser dial")
+    async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
+        assert_ne!(request["op"], "launch", "unfenced Browser launch");
+        MockBrowserEngineProvider.send_raw(request).await
     }
     async fn send_raw_fenced(
         &self,
-        _: &Value,
+        request: &Value,
         fence: Option<elastos_runtime::provider::dispatch::DispatchFence>,
     ) -> Result<Value, ProviderError> {
+        if request["op"] != "launch" {
+            return self.send_raw(request).await;
+        }
         let fence = fence.expect("Runtime supplies the grant generation");
         // The route has done its first check. The provider models either queued
         // dispatch or an already accepted call, independently of the caller task.
@@ -10710,7 +10699,7 @@ impl Provider for InternetDialFixture {
             self.paused.notify_one();
             self.resume.notified().await;
         }
-        Ok(json!({"status":"ok","data":{"connected":true}}))
+        MockBrowserEngineProvider.send_raw(request).await
     }
 }
 
@@ -10721,7 +10710,22 @@ async fn internet_stop_barrier(before: bool) {
     let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
     let system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &authority);
     let mut state = internet_test_state(dir.path());
+    seed_test_browser_capsules(dir.path());
     let registry = Arc::new(ProviderRegistry::new());
+    registry
+        .register_sub_provider("net", Arc::new(MockNetProvider))
+        .await
+        .unwrap();
+    registry
+        .register_sub_provider(
+            "exit",
+            Arc::new(MockAttachedExitProvider {
+                relay_ipc_path: None,
+                stream_id: mock_attached_stream_id(dir.path()),
+            }),
+        )
+        .await
+        .unwrap();
     let provider = Arc::new(InternetDialFixture {
         paused: Default::default(),
         resume: Default::default(),
@@ -10729,7 +10733,7 @@ async fn internet_stop_barrier(before: bool) {
         before,
     });
     registry
-        .register_sub_provider("net", provider.clone())
+        .register_sub_provider("browser-engine", provider.clone())
         .await
         .unwrap();
     state.provider_registry = Some(registry);
@@ -10737,8 +10741,8 @@ async fn internet_stop_barrier(before: bool) {
     let (status, _) = internet_route(
         &app,
         &browser,
-        "/api/provider/net/connect",
-        Some(json!({"target":"tls://example.com:443"})),
+        "/api/apps/browser/open",
+        Some(json!({"url":"https://example.com/", "display_mode":"webrtc_remote_display", "guarantee_level":"mechanism_microvm"})),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -10750,8 +10754,8 @@ async fn internet_stop_barrier(before: bool) {
         internet_route(
             &call_app,
             &call_token,
-            "/api/provider/net/connect",
-            Some(json!({"target":"tls://example.com:443"})),
+            "/api/apps/browser/open",
+            Some(json!({"url":"https://example.com/", "display_mode":"webrtc_remote_display", "guarantee_level":"mechanism_microvm"})),
         )
         .await
     });
@@ -10776,8 +10780,8 @@ async fn internet_stop_barrier(before: bool) {
     let (status, _) = internet_route(
         &app,
         &browser,
-        "/api/provider/net/connect",
-        Some(json!({"target":"tls://example.com:443"})),
+        "/api/apps/browser/open",
+        Some(json!({"url":"https://example.com/", "display_mode":"webrtc_remote_display", "guarantee_level":"mechanism_microvm"})),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -11127,8 +11131,8 @@ async fn browser_internet_stop_reports_failed_revoke_list_and_survives_restart()
     let (status, _) = internet_route(
         &app,
         &browser,
-        "/api/provider/net/connect",
-        Some(json!({"target":"tls://example.com:443"})),
+        "/api/apps/browser/open",
+        Some(json!({"url":"https://example.com/", "display_mode":"webrtc_remote_display", "guarantee_level":"mechanism_microvm"})),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -11181,7 +11185,7 @@ async fn browser_internet_ungranted_http_and_chain_read_are_refused_at_gateway()
         Some(json!({"url":"https://example.com/","method":"GET"})),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(status, StatusCode::GONE, "{body}");
     let (status, body) =
         browser_eth_call(app, &browser, "0x1111111111111111111111111111111111111111").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
@@ -11225,4 +11229,22 @@ async fn browser_internet_guest_instances_cannot_exhaust_owner_capacity() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn review559_legacy_net_routes_are_gone_with_or_without_a_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &owner);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let app = gateway_router(internet_test_state(dir.path()));
+    for granted in [false, true] {
+        if granted {
+            internet_allow(&app, dir.path(), &browser, &inbox).await;
+        }
+        for operation in ["http", "connect", "resolve", "stream"] {
+            let (status, _) = internet_route(&app, &browser, &format!("/api/provider/net/{operation}"), Some(json!({"url":"https://example.com/", "target":"tls://example.com:443", "host":"example.com"}))).await;
+            assert_eq!(status, StatusCode::GONE, "{operation} grant={granted}");
+        }
+    }
 }

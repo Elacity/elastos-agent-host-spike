@@ -92,6 +92,7 @@ homeClipboard.start();
 
 const form = document.querySelector("#browser-form");
 const addressInput = document.querySelector("#browser-url");
+let browserInternetAllowed = false;
 const backButton = document.querySelector("#browser-back");
 const forwardButton = document.querySelector("#browser-forward");
 const refreshButton = document.querySelector("#browser-refresh");
@@ -178,6 +179,8 @@ function openInternetControl(target, query = {}) {
 
 function checkBrowserInternet() {
   return browserInternetGranted(fetchJson, granted => {
+    browserInternetAllowed = granted;
+    setLoading(document.body.dataset.loading === "true");
     const panel = document.querySelector("#browser-internet-request");
     if (panel) panel.hidden = granted;
     const choice = document.querySelector("#browser-internet");
@@ -440,7 +443,7 @@ function requestFreshRuntimeAuthority(error) {
 
 function setLoading(loading) {
   document.body.dataset.loading = loading ? "true" : "false";
-  addressInput.disabled = loading;
+  addressInput.disabled = loading || !browserInternetAllowed;
   if (engineSelect) {
     engineSelect.disabled = loading;
   }

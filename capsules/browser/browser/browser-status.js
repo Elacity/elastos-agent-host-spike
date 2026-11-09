@@ -60,6 +60,9 @@ export function runtimeOpenOutcome(error) {
 }
 
 export function friendlyOpenError(error) {
+  if (error?.payload?.code === "browser_internet_grant_required") {
+    return "Browser needs the Home owner's permission. Review the request in Inbox, then open Browser after approval.";
+  }
   const text = sanitizedErrorText(error);
   if (isAuthoritySessionError(error)) {
     return "Browser session expired. Reopening from Home...";

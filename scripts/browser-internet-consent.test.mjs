@@ -50,6 +50,7 @@ test("updated Home shows one Browser permission request before any engine open, 
       await frame.locator("#browser-settings").click();
       await frame.locator("#browser-settings-close").click({timeout:3000});
       assert.match(await frame.locator("#browser-internet-request").innerText(),/this computer's internet connection.*turn it off in Browser Settings/s);
+      assert.equal(await frame.locator("#browser-url").isDisabled(),true,"address stays disabled until permission is active");
       assert.equal(opens,0);
       assert.equal(requests,1);
       await frame.locator("#browser-internet-review").click();
@@ -70,6 +71,8 @@ test("updated Home shows one Browser permission request before any engine open, 
       page.waitForResponse(response=>response.url().endsWith("/api/apps/browser/open")),
       frame.locator("#browser-internet-retry").click(),
     ]);
+    await frame.locator("#browser-url").waitFor();
+    await page.waitForFunction(()=>document.querySelector("iframe").contentDocument.querySelector("#browser-url").disabled === false);
     assert.equal(opens,1);
     assert.equal(await frame.locator("#browser-internet-request").isVisible(),false);
     await frame.locator("#browser-settings").click();
@@ -107,4 +110,13 @@ test("System retries an incomplete Stop after refresh without a second approval"
     assert.equal(await frame.locator("#browser-internet-stop").isDisabled(),true);
     assert.deepEqual(server.requestFailures,[]);
   } finally {await browser.close();await server.close();}
+});
+
+
+test("internet grant refusal explains the permission request", async () => {
+  const {friendlyOpenError} = await import("../capsules/browser/browser/browser-status.js");
+  for (const state of [undefined, "terminal_pre_effect_failure"]) {
+    const message = friendlyOpenError({status:403,payload:{code:"browser_internet_grant_required",outcome:state ? {state,effects:{page_acquired:false,vm_acquired:false,stream_acquired:false}} : undefined}});
+    assert.equal(message,"Browser needs the Home owner's permission. Review the request in Inbox, then open Browser after approval.");
+  }
 });
