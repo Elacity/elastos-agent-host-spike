@@ -288,7 +288,7 @@ impl CollaborationPresenceProductPort {
                 principal_id,
             )
             .inspect_err(
-                |error| tracing::warn!(%error, "Community presence skips unresolved principal"),
+                |error| tracing::warn!(%error, "Community presence denies unresolved principal"),
             )
             .ok()?;
             let profile = crate::collaboration_profile_authority::load_profile_authority(
@@ -340,7 +340,7 @@ impl CollaborationPresenceProductPort {
                 principal,
             )
             .inspect_err(
-                |error| tracing::warn!(%error, "Community presence skips unresolved principal"),
+                |error| tracing::warn!(%error, "Community presence denies unresolved principal"),
             )
             .ok()?;
             let profile = crate::collaboration_profile_authority::load_profile_authority(
