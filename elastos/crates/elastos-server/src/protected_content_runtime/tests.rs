@@ -8428,6 +8428,7 @@ fn media_preparation_source_input(
     root: &Path,
     principal_id: &str,
 ) -> RuntimeCustodyLibrarySourceInput {
+    crate::auth::store_test_human_principal(&root.join("data"), principal_id);
     RuntimeCustodyLibrarySourceInput {
         object_uri: format!(
             "{}/Documents/source.mp4",
@@ -13450,4 +13451,41 @@ async fn runtime_media_preparation_stages_plaintext_from_a_protected_principal_r
         fs::read(staging_root.join(operation_id).join("input.bin")).unwrap(),
         plaintext
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_media_source_uses_the_stored_principal_root() {
+    use crate::auth::{r4_fixture, PrincipalKind};
+    for (kind, root) in [
+        (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+        (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        r4_fixture::store(data_dir, kind);
+        let uri = format!("{root}/Documents/source.mp4");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for ancestor in path
+            .parent()
+            .unwrap()
+            .ancestors()
+            .take_while(|p| *p != data_dir)
+        {
+            fs::set_permissions(ancestor, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(&path, b"stored-root source").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let actual = super::read_runtime_media_source(data_dir, r4_fixture::ID, &uri, &path);
+        assert_eq!(
+            actual.as_ref().map(Vec::as_slice).unwrap_or(&[]),
+            b"stored-root source",
+            "{root}: {actual:?}"
+        );
+        r4_fixture::remove(data_dir, r4_fixture::ID);
+        let error =
+            super::read_runtime_media_source(data_dir, r4_fixture::ID, &uri, &path).unwrap_err();
+        assert!(error.to_string().contains("input is invalid"), "{error}");
+    }
 }

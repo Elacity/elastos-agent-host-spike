@@ -3460,7 +3460,8 @@ fn read_runtime_media_source(
             anyhow::anyhow!("stored source length {stored_len} is out of bounds").context(MESSAGE),
         );
     }
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root = crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+        .map_err(|error| anyhow::anyhow!(error).context(MESSAGE))?;
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
         principal_id,
