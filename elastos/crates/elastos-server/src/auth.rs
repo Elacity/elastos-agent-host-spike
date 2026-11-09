@@ -11038,7 +11038,7 @@ pub(crate) mod r4_fixture {
 /// The test protection written under a caller-named root, so a test can put
 /// an object under a root the human default does not name.
 #[cfg(test)]
-fn store_test_principal_root_protection_for(
+pub(crate) fn store_test_principal_root_protection_for(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
