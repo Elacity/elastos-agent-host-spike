@@ -1737,15 +1737,36 @@ mod denial_authority {
         }
 
         fn recorded_requests_state(&self, context: &HomeLaunchTokenContext) -> Value {
-            let path = elastos_common::localhost::rooted_localhost_fs_path(
+            let uri = format!(
+                "{}/.AppData/ElastOS/Home/services-requests.json",
+                context.root().localhost_root()
+            );
+            let path = elastos_common::localhost::rooted_localhost_fs_path(self.owner.path(), &uri)
+                .unwrap();
+            let raw = crate::auth::read_principal_root_object(
                 self.owner.path(),
-                &format!(
-                    "{}/.AppData/ElastOS/Home/services-requests.json",
-                    context.root().localhost_root()
-                ),
+                context.principal_id(),
+                context.root().localhost_root(),
+                &uri,
+                &path,
             )
             .unwrap();
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+            serde_json::from_slice(&raw).unwrap()
+        }
+
+        /// Writes raw state bytes at the context's root through the same
+        /// principal-root object writer the Runtime uses.
+        fn write_requests_state_bytes_for(&self, context: &HomeLaunchTokenContext, bytes: &[u8]) {
+            let data_dir = self.owner.path();
+            let principal_id = context.principal_id();
+            let root = context.root().localhost_root();
+            let uri = format!("{root}/.AppData/ElastOS/Home/services-requests.json");
+            let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            crate::auth::write_principal_root_object(
+                data_dir, principal_id, root, &uri, &path, bytes,
+            )
+            .unwrap();
         }
 
         fn owner_inbox_app(&self) -> axum::Router {
@@ -1786,14 +1807,30 @@ mod denial_authority {
         let open = fx.create_run("seed-req-open", "qwen-local").await;
         assert_eq!(open["ok"], true, "{open}");
         let ops_before = fx.provider_ops().await;
-        let intruder = HomeLaunchTokenContext::for_test(
-            "person:local:intruder",
-            "auth:intruder",
-            Some("proof:passkey:intruder".to_string()),
-            "grant:intruder",
+        let intruder = passkey_authority_with_name_role_credential(
+            fx.owner.path(),
+            Some("Intruder"),
+            crate::auth::RuntimePrincipalRole::Admin,
+            "gateway-test-intruder-passkey",
         );
-        let result = fx.deny_as(&intruder).await;
-        assert!(result.is_err(), "{result:?}");
+        let context = fx.resolved_context(
+            &intruder.principal_id,
+            &intruder.session_id,
+            Some(intruder.proof_binding_id.clone()),
+            &intruder.grant_id,
+        );
+        // The intruder's stored root carries a plaintext copy of the owner's
+        // state, so the principal-scoped lookup must refuse it by name.
+        let owner_state = fx.recorded_requests_state(&fx.owner_context());
+        fx.write_requests_state_bytes_for(
+            &context,
+            &serde_json::to_vec_pretty(&owner_state).unwrap(),
+        );
+        let result = fx.deny_as(&context).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "service request not found"
+        );
         assert_eq!(fx.provider_ops().await, ops_before, "no cancel may follow");
         assert_eq!(
             fx.create_run("seed-req-still-open", "qwen-local").await["ok"],
