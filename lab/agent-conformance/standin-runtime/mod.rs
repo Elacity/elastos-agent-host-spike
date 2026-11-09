@@ -20,7 +20,7 @@
 //! route. `post_capability_validate` and `post_hosted_effect` are the two
 //! use paths; the private `use_grant` runs `authorise` on that same filter,
 //! then `admit_effect`, which holds the ask on the grant's own ledger handle
-//! against the session ceiling the grant route set at bind, and only then
+//! against the grant's own ceiling the grant route set at bind, and only then
 //! spends a `once` grant (M1 checks A6, A7).
 //!
 //! `stop_one` and the `worker_exited` seam share one private end path,
@@ -302,11 +302,12 @@ pub struct StandIn {
     /// The `InstanceId` each live instance holds on `ledger`. It maps one
     /// instance id to one number and never goes the other way.
     instances_on_ledger: Vec<(String, InstanceId)>,
-    /// The bind step's one budget admission, by session. The first bind of a
-    /// session asks `EFFECT_BUDGET_CAP` and stores that as the session's
-    /// ceiling; a later bind of the same session asks nothing, so no use can
-    /// raise or lower the ceiling it reserves against.
-    admitted_on: Vec<String>,
+    /// The bind step's one budget admission, by grant handle. Each bind asks
+    /// `EFFECT_BUDGET_CAP` for the grant it just bound and stores that as that
+    /// grant's ceiling; a handle already admitted asks nothing, so no use can
+    /// raise or lower the ceiling its grant reserves against. Two grants of
+    /// one session keep separate ceilings.
+    admitted_on: Vec<Handle>,
 }
 
 impl StandIn {
@@ -825,7 +826,7 @@ impl StandIn {
             .expect("the caller just stored this request's grant");
         stored.binding = Some(bound);
         stored.run = mint_run_binding(request_id);
-        self.admit_on_ledger(&session_id, bound, instance)?;
+        self.admit_on_ledger(bound, instance)?;
         Ok(())
     }
 
@@ -1236,7 +1237,7 @@ impl StandIn {
     /// An authorised grant is then admitted for its one effect (M1 check
     /// A7): the body's optional `amount` is the ask, defaulting to
     /// `EFFECT_BUDGET_CAP`, and `admit_effect` reserves it against the
-    /// session ceiling on the shared ledger before the `once` spend. A
+    /// grant's own ceiling on the shared ledger before the `once` spend. A
     /// missing, non-numeric or
     /// negative `amount` is status 400 with
     /// `budget ask needs a non-negative integer amount`, from `validate_body`
@@ -1872,24 +1873,19 @@ impl StandIn {
             .map_err(|refusal| (403, refusal.to_string()))
     }
 
-    /// The one budget admission, run once per session by `bind_stored_grant`.
+    /// The one budget admission, run once per grant by `bind_stored_grant`.
     ///
-    /// The session's first bind asks `EFFECT_BUDGET_CAP` through
-    /// `Verifier::admit_ask`, which sets that session identity's ceiling to
-    /// the cap; a later bind of the same session skips the ask, so no use
-    /// raises or lowers the ceiling it reserves against. A refusal is status
-    /// 403 with `AdmitRefuse`'s text and the caller stores nothing.
+    /// Each bind asks `EFFECT_BUDGET_CAP` through `Verifier::admit_ask`, which
+    /// sets that grant's ceiling to the cap; a handle already admitted skips
+    /// the ask, so no use raises or lowers the ceiling its grant reserves
+    /// against. A refusal is status 403 with `AdmitRefuse`'s text and the
+    /// caller stores nothing.
     fn admit_on_ledger(
         &mut self,
-        session_id: &str,
         handle: Handle,
         instance: InstanceId,
     ) -> Result<(), (u16, String)> {
-        if self
-            .admitted_on
-            .iter()
-            .any(|admitted| admitted == session_id)
-        {
+        if self.admitted_on.iter().any(|admitted| *admitted == handle) {
             return Ok(());
         }
         let call = self.ledger.open_call(instance);
@@ -1903,7 +1899,7 @@ impl StandIn {
                 EFFECT_BUDGET_CAP,
             )
             .map_err(|refusal| (403, admit_text(&refusal)))?;
-        self.admitted_on.push(session_id.to_owned());
+        self.admitted_on.push(handle);
         Ok(())
     }
 
@@ -1939,7 +1935,7 @@ impl StandIn {
 
     /// The one budget use. `use_grant` is its caller, for both routes.
     ///
-    /// The bind set the identity's ceiling (`admit_on_ledger`); a use only
+    /// The bind set the grant's own ceiling (`admit_on_ledger`); a use only
     /// holds its amount on the grant's own handle. A `once` grant asks
     /// against the cap first: an ask above `EFFECT_BUDGET_CAP` is 403 with
     /// `AdmitRefuse`'s text (a plain compare, no ceiling write).
@@ -8216,6 +8212,67 @@ mod tests {
             "running",
             "",
             "the stand-in leaves instance 2 running",
+        );
+    }
+
+    /// F6 (Rong's table) on the stand-in path: `end_one_live_grant` runs the
+    /// `end_live_grant` step `revoke_live` runs, which ends the grant's
+    /// ledger binding through `Verifier::end_grant` and keeps the hold the
+    /// grant opened before the end. The hold comes from `admit_effect`, the
+    /// step the use routes run. After the end, a new hold on that handle is
+    /// refused `unknown handle`, and the earlier hold still releases through
+    /// the kept binding, which then leaves. Without the `end_grant` call the binding
+    /// stays live, so the new hold is refused over the ceiling instead.
+    #[test]
+    fn standin_ended_grant_keeps_its_open_hold() {
+        use grant_binding::ledger::{ReleaseRefuse, ReserveRefuse};
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-a",
+            "component-1",
+            "res",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        bind_seeded(&mut standin, "req-a", "component-1");
+        let handle = standin.grants[0].binding.expect("the bind stores a handle");
+        let hold = standin
+            .admit_effect("component-1", Some(handle), 4096)
+            .expect("the use step holds the whole cap");
+        let instance = standin.instance_on_ledger("component-1");
+        let call = standin.ledger.open_call(instance);
+        assert_eq!(
+            standin.ledger.reserve(&call, &guest_request(handle), 1),
+            Err(ReserveRefuse::OverCeiling {
+                ceiling: 4096,
+                held: 4096,
+                asked: 1
+            }),
+            "before the end, the open hold fills the grant's own ceiling"
+        );
+        standin.end_one_live_grant("req-a");
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Revoked, false),
+            "the stand-in writes Revoked on the ended grant"
+        );
+        assert_eq!(
+            standin.ledger.reserve(&call, &guest_request(handle), 1),
+            Err(ReserveRefuse::Binding(Refuse::UnknownHandle)),
+            "the end reached the ledger: the ended binding takes no new hold"
+        );
+        assert_eq!(
+            standin.ledger.release(&call, &guest_request(handle), hold),
+            Ok(()),
+            "the hold opened before the end is kept and releases through the kept binding"
+        );
+        assert_eq!(
+            standin.ledger.release(&call, &guest_request(handle), hold),
+            Err(ReleaseRefuse::Binding(Refuse::UnknownHandle)),
+            "the kept binding leaves the ledger with its last hold"
         );
     }
 

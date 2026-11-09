@@ -33,6 +33,9 @@ signer_spec.loader.exec_module(signer)
 provenance_spec = importlib.util.spec_from_file_location("release_provenance", Path(__file__).with_name("release-provenance.py"))
 provenance = importlib.util.module_from_spec(provenance_spec)
 provenance_spec.loader.exec_module(provenance)
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 
 
 def binary(platform):
@@ -576,9 +579,9 @@ class PlatformInputTest(unittest.TestCase):
         for args in (("init", "-q"), ("add", "."),
                      ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                       "commit", "-qm", "controlled publisher fixture")):
-            subprocess.run(["git", *args], cwd=source, check=True, capture_output=True)
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=source, text=True).strip()
+            subprocess.run(["git", *args], cwd=source, check=True, capture_output=True, env=fixture_git.fixture_git_env(self.root))
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True, env=fixture_git.fixture_git_env(self.root)).strip()
+        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=source, text=True, env=fixture_git.fixture_git_env(self.root)).strip()
         for root in self.bundles.values():
             receipt = json.loads((root / "platform-input.json").read_text())
             receipt["source"] = {"clean": True, "commit": commit, "tree": tree,
@@ -1892,48 +1895,109 @@ class SourceRecordTest(unittest.TestCase):
             self.assertFalse(outside.exists())
             self.assertTrue((stage / "platform-input.json").is_symlink())
 
+    def record_fixture(self, root):
+        """A committed source fixture and the staging directory that binds it."""
+        source = root / "source"
+        source.mkdir()
+        template = {"schema": "elastos.components/v1", "capsules": {},
+                    "profiles": {"home": {"components": []}}, "external": {}}
+        (source / "components.json").write_text(json.dumps(template))
+        (source / "Cargo.lock").write_text("version = 3\n")
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=source, text=True,
+                                           env=fixture_git.fixture_git_env(root)).strip()
+        git("init", "--quiet")
+        git("add", ".")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--quiet", "-m", "source fixture")
+        commit, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+        stage = root / "stage"
+        (stage / "artifacts").mkdir(parents=True)
+        (stage / "components.json").write_text(json.dumps(template))
+        runtime = stage / "artifacts/elastos-aarch64-darwin"
+        runtime.write_bytes(binary("aarch64-darwin"))
+        runtime.chmod(0o755)
+        omissions = root / "omissions.json"
+        omissions.write_text("[]")
+        args = SimpleNamespace(root=stage, version="0.7.1", platform="aarch64-darwin",
+                               target="aarch64-apple-darwin", source_commit=commit,
+                               source_tree=tree, omissions_json=omissions)
+        return source, stage, args, commit, tree, git
+
+    @staticmethod
+    def fixture_run(original):
+        def run(*args, **kwargs):
+            return "fixture-tool" if args[0] in ("rustc", "cargo") else original(*args, **kwargs)
+        return run
+
     def test_record_binds_real_git_source_and_rejects_changes(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
-            source = root / "source"
-            source.mkdir()
-            template = {"schema": "elastos.components/v1", "capsules": {},
-                        "profiles": {"home": {"components": []}}, "external": {}}
-            (source / "components.json").write_text(json.dumps(template))
-            (source / "Cargo.lock").write_text("version = 3\n")
-            def git(*args):
-                return subprocess.check_output(["git", *args], cwd=source, text=True).strip()
-            git("init", "--quiet")
-            git("add", ".")
-            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                "commit", "--quiet", "-m", "source fixture")
-            commit, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
-            stage = root / "stage"
-            (stage / "artifacts").mkdir(parents=True)
-            (stage / "components.json").write_text(json.dumps(template))
-            runtime = stage / "artifacts/elastos-aarch64-darwin"
-            runtime.write_bytes(binary("aarch64-darwin"))
-            runtime.chmod(0o755)
-            omissions = root / "omissions.json"
-            omissions.write_text("[]")
-            args = SimpleNamespace(root=stage, version="0.7.1", platform="aarch64-darwin",
-                                   target="aarch64-apple-darwin", source_commit=commit,
-                                   source_tree=tree, omissions_json=omissions)
-            original_run = inputs.run
-            def run(*args):
-                return "fixture-tool" if args[0] in ("rustc", "cargo") else original_run(*args)
+            source, stage, args, commit, tree, git = self.record_fixture(root)
+            env = fixture_git.fixture_git_env(root)
+            run = self.fixture_run(inputs.run)
             with patch.object(inputs, "SOURCE_ROOT", source), patch.object(inputs, "run", side_effect=run):
-                inputs.record(args)
+                inputs.record(args, env=env)
                 receipt = inputs.verify(stage)
                 self.assertEqual(receipt["source"]["commit"], commit)
                 self.assertEqual(receipt["source"]["tree"], tree)
                 self.assertEqual(receipt["source"]["lockfiles"]["Cargo.lock"], inputs.digest(source / "Cargo.lock"))
                 (source / "Cargo.lock").write_text("changed\n")
                 with self.assertRaisesRegex(ValueError, "clean"):
-                    inputs.source_identity(commit, tree)
+                    inputs.source_identity(commit, tree, env=env)
                 git("checkout", "--", "Cargo.lock")
                 with self.assertRaisesRegex(ValueError, "identity changed"):
-                    inputs.source_identity("e" * 40, tree)
+                    inputs.source_identity("e" * 40, tree, env=env)
+
+    def test_record_ignores_the_callers_git_dir(self):
+        """A record reads the fixture checkout, not an exported GIT_DIR."""
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source, stage, args, commit, tree, git = self.record_fixture(root)
+            victim, pointed = fixture_git.victim_repo(root)
+            os.utime(victim / "tracked.txt", (1, 1))  # so a leaked status would rewrite its index
+            before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(source)
+            env = fixture_git.fixture_git_env(root)
+            run = self.fixture_run(inputs.run)
+            with patch.object(inputs, "SOURCE_ROOT", source), patch.object(inputs, "run", side_effect=run), \
+                    patch.dict(os.environ, pointed):
+                try:
+                    inputs.record(args, env=env)
+                except (ValueError, subprocess.CalledProcessError) as error:  # judged below, after the victim
+                    commit = f"no recorded source: {error}"
+            self.assertEqual(fixture_git.repo_state(victim), before, "a source read wrote to GIT_DIR's repo")
+            self.assertEqual(fixture_git.shared_config(source), config, "the fixture's shared git config changed")
+            receipt = stage / "platform-input.json"
+            bound = json.loads(receipt.read_text())["source"]["commit"] if receipt.is_file() else None
+            self.assertEqual(bound, commit, "a source read resolved GIT_DIR's repository, not the fixture")
+
+    def test_record_leaves_a_same_commit_git_dir_index_unchanged(self):
+        """GIT_DIR names a clone at the fixture's commit, so a leaked read passes the
+        identity check and reaches ``git status``, which would refresh the clone's index."""
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source, stage, args, commit, tree, git = self.record_fixture(root)
+            env = fixture_git.fixture_git_env(root)
+            victim = root / "victim"
+            subprocess.run(["git", "clone", "--quiet", str(source), str(victim)], env=env, check=True,
+                           capture_output=True)
+            for name in ("components.json", "Cargo.lock"):
+                os.utime(victim / name, (1, 1))  # stale index entries that a leaked status rewrites
+            index = (victim / ".git" / "index").read_bytes()
+            before = fixture_git.repo_state(victim)
+            checkouts = (source, victim, Path(__file__).resolve().parent)
+            configs = [fixture_git.shared_config(path) for path in checkouts]
+            pointed = {"GIT_DIR": str(victim / ".git"), "GIT_WORK_TREE": str(victim)}
+            run = self.fixture_run(inputs.run)
+            with patch.object(inputs, "SOURCE_ROOT", source), patch.object(inputs, "run", side_effect=run), \
+                    patch.dict(os.environ, pointed):
+                inputs.record(args, env=env)
+            self.assertEqual((victim / ".git" / "index").read_bytes(), index, "a git read rewrote GIT_DIR's index")
+            self.assertEqual(fixture_git.repo_state(victim), before, "a source read wrote to GIT_DIR's repo")
+            self.assertEqual([fixture_git.shared_config(path) for path in checkouts], configs,
+                             "the fixture's, GIT_DIR's or this checkout's shared git config changed")
+            self.assertEqual(inputs.verify(stage)["source"]["commit"], commit)
 
 
 
