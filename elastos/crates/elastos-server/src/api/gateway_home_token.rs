@@ -35,8 +35,9 @@ impl HomeLaunchTokenContext {
     }
 
     /// The root this context resolved before it existed. R1's issuer and
-    /// verifier read it here; the remaining G1 callers still use the
-    /// principal-id rule until R2-R4 switch them.
+    /// verifier read it here; R2 switched the G1 home_system, room and
+    /// presence surfaces to it, and the remaining G1 and G2 callers still use
+    /// the principal-id rule until R3-R4 switch them. R8 retires that rule.
     pub(in crate::api) fn root(&self) -> &crate::auth::ResolvedPrincipalRoot {
         &self.root
     }
@@ -45,9 +46,9 @@ impl HomeLaunchTokenContext {
 impl HomeLaunchTokenContext {
     /// Production builds a context through `resolved`, which stores a root its
     /// caller already resolved; this constructor neither resolves nor refuses.
-    /// The resolving callers are launch-token verification, the Wallet-link
-    /// reissue and the passkey authorize loops; `remote_context` builds the
-    /// model-provider context, whose root owns no localhost path.
+    /// Every production caller passes a root built by a `ResolvedPrincipalRoot`
+    /// constructor, and no caller re-derives a root from the principal id.
+    /// `remote_context` passes a remote root, which owns no localhost path.
     pub(in crate::api) fn resolved(
         root: crate::auth::ResolvedPrincipalRoot,
         principal_id: String,
