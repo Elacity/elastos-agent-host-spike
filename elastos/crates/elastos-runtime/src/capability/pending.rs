@@ -442,9 +442,10 @@ impl PendingRequestStore {
     /// every state, read-only, for the shell. Callers filter by state.
     ///
     /// These are the records held now, not a full history: `cleanup_old` and
-    /// the capacity guard drop resolved records, including a granted record
-    /// whose token is still live. Epoch, expiry and use count are checked by
-    /// `CapabilityManager` and `CapabilityStore`, not here.
+    /// the capacity guard drop old denied and expired records, and a granted
+    /// record once its token's expiry has passed; a granted record whose token
+    /// has not expired stays. Epoch, revocation and use count are checked by
+    /// `CapabilityManager::can_still_validate`, not here.
     pub async fn list_requests(&self) -> Vec<PendingCapabilityRequest> {
         let requests = self.requests.read().await;
         requests.values().cloned().collect()
