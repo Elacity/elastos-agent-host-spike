@@ -8,7 +8,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const REFUSAL: &str = "This command requires a running runtime.";
 
@@ -400,7 +400,16 @@ fn cleanup_census_refuses_each_leftover() {
     );
     println!("cleanup socket control: bound Unix socket omitted by root selection; holder refused as process leftover; Unix socket absence unmeasured");
 
-    let line = cleanup(&home, port).unwrap();
+    // A stopped child can still hold its capture while it exits, so wait on
+    // the clean census instead of judging one immediate snapshot.
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let line = loop {
+        match cleanup(&home, port) {
+            Ok(line) => break line,
+            Err(reason) if Instant::now() >= deadline => panic!("cleanup census: {reason}"),
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
     assert!(line.contains("processes:0 paths:[] API sockets:0 temp:0 paths:[]"));
     assert!(line.contains("excludes only test PID"));
     home.finish().unwrap();
