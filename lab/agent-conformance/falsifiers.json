@@ -1152,6 +1152,22 @@
       ]
     },
     {
+      "id": "F-cleanup-minted",
+      "title": "treat every live grant as the run's known AC-021 gap",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
+          "old": "    let foreign = ids.iter().any(|id| !minted.contains(id));",
+          "new": "    let foreign = false;"
+        }
+      ],
+      "tests": [
+        "grants::tests::live_grants_are_the_known_gap_only_when_this_run_minted_them"
+      ]
+    },
+    {
       "id": "F-cancel-retry",
       "title": "accept every request after cancellation",
       "command": "agent-conformance",
