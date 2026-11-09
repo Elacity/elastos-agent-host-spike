@@ -7735,6 +7735,95 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn recovery_kit_reassignment_uses_the_recovered_stored_root_and_kind() {
+        use crate::auth::{r4_fixture, PrincipalKind};
+        const HUMAN_ROOT: &str = r4_fixture::HUMAN_ROOT;
+        for (kind, root, remove_recovered, remove_actor, expected) in [
+            (
+                PrincipalKind::Agent,
+                r4_fixture::AGENT_ROOT,
+                false,
+                false,
+                "recovered recovery kit requires a human principal",
+            ),
+            (
+                PrincipalKind::Human,
+                HUMAN_ROOT,
+                false,
+                true,
+                "Home launch principal root unresolved",
+            ),
+            (PrincipalKind::Human, HUMAN_ROOT, true, false, "reassigned"),
+            (PrincipalKind::Human, HUMAN_ROOT, false, false, "reassigned"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = test_gateway_state(temp.path());
+            let credential = test_credential();
+            let origin = "https://elastos.elacitylabs.com";
+            seed_test_passkey_principal(
+                &state,
+                &credential,
+                origin,
+                crate::auth::RuntimePrincipalRole::Admin,
+            );
+            store_test_credential(temp.path(), credential.clone());
+            let grant = issue_passkey_session_grant(
+                &state,
+                "identity-test",
+                &credential,
+                origin,
+                true,
+                "recovery importer",
+            )
+            .unwrap();
+            let current =
+                crate::auth::load_principal_for_proof_binding(temp.path(), &grant.proof_binding_id)
+                    .unwrap();
+            r4_fixture::store(temp.path(), kind);
+            r4_fixture::set_kind(temp.path(), r4_fixture::ID, kind, root);
+            let kit = create_recovery_kit_for_principal(r4_fixture::ID, root, None, 1_800_000_000)
+                .unwrap();
+            if kind == PrincipalKind::Human && !remove_recovered && !remove_actor {
+                let archive = crate::auth::recovery_archive_from_kit(temp.path(), &kit).unwrap();
+                let protection = protection_from_recovery_kit(
+                    &kit,
+                    None,
+                    RecoveryKitDelivery::HandedToPerson,
+                    1_800_000_000,
+                    Some(archive),
+                )
+                .unwrap();
+                crate::auth::store_principal_root_protection(temp.path(), protection).unwrap();
+            }
+            if remove_recovered {
+                r4_fixture::remove(temp.path(), r4_fixture::ID);
+            }
+            if remove_actor {
+                r4_fixture::remove(temp.path(), &current.principal_id);
+            }
+            let result = recovery_kit_import_inner(
+                &state,
+                &home_token_headers(&grant.home_token),
+                RecoveryKitMaterialImport {
+                    principal_id: current.principal_id,
+                    localhost_root: current.localhost_root,
+                    reassign_to_current_principal: true,
+                    kit,
+                    did_recovery_proof: None,
+                },
+            )
+            .await;
+            if expected == "reassigned" {
+                let response = result.unwrap();
+                assert_eq!(response.status, expected);
+                assert_eq!(response.localhost_root, HUMAN_ROOT);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.to_string(), expected);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn recovery_kit_import_rejects_wrong_key_binding_without_mutation() {
