@@ -12,7 +12,7 @@ use probe::{build_probe, Effect};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // The repository build script writes one probe entrypoint. Keep builds and
 // native build preparation sequential even with RUST_TEST_THREADS=2.
@@ -1167,6 +1167,70 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
     }
 }
 
+/// Waits for the physical census to settle before judging it. A process that a
+/// stop just ended can still hold a handle while it exits, so one immediate
+/// snapshot can fail on a transient holder. The 12-second deadline permits a
+/// retry after the census tool's 5-second timeout. Return the last result for
+/// the caller to assert on (REVIEW-PATTERNS #9: wait on a condition).
+fn standin_a12_census_settles(
+    standin: &StandIn,
+    home: &ThrowawayHome,
+    port: u16,
+) -> Result<(), String> {
+    standin_a12_census_settles_with(|| standin_a12_census(standin, home, port))
+}
+
+fn standin_a12_census_settles_with(
+    mut census: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        let result = census();
+        if result.is_ok() || Instant::now() >= deadline {
+            return result;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn standin_a12_census_waits_for_transient_leftover() {
+    let home = tempfile::tempdir().expect("the stand-in transient run uses a temp directory");
+    let leftover = home.path().join("a12-transient-leftover");
+    std::fs::write(&leftover, b"transient").expect("the stand-in plants a transient temp file");
+    let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+    let removal_path = leftover.clone();
+    let remover = std::thread::spawn(move || {
+        seen_rx
+            .recv()
+            .expect("the stand-in sees the first dirty census");
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::remove_file(removal_path).expect("the stand-in clears the transient temp file");
+    });
+    let mut first = true;
+    assert!(
+        standin_a12_census_settles_with(|| {
+            let dirty = leftover.exists();
+            if first {
+                seen_tx
+                    .send(())
+                    .expect("the stand-in signals the first census");
+                first = false;
+            }
+            if dirty {
+                Err("temp leftover".into())
+            } else {
+                Ok(())
+            }
+        })
+        .is_ok(),
+        "the stand-in census settles after the transient temp file clears"
+    );
+    remover
+        .join()
+        .expect("the stand-in transient remover finishes");
+}
+
 #[test]
 fn standin_stopped_run_leaves_no_live_grant() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
@@ -1369,7 +1433,7 @@ fn standin_stopped_run_leaves_no_live_grant() {
         );
     }
     assert!(
-        standin_a12_census(&stopped_run, &home, port).is_ok(),
+        standin_a12_census_settles(&stopped_run, &home, port).is_ok(),
         "the stand-in leaves no live grant, live instance, pending request or physical leftover after both stops"
     );
     let leftover = home.temp().join("a12-temp-leftover");
@@ -1381,7 +1445,7 @@ fn standin_stopped_run_leaves_no_live_grant() {
     );
     std::fs::remove_file(&leftover).expect("the stand-in run removes its temp file");
     assert!(
-        standin_a12_census(&stopped_run, &home, port).is_ok(),
+        standin_a12_census_settles(&stopped_run, &home, port).is_ok(),
         "the stand-in returns to a clean physical census after the temp file is removed"
     );
     let mut fresh_run = StandIn::new();
@@ -1405,7 +1469,7 @@ fn standin_stopped_run_leaves_no_live_grant() {
         )
         .expect("the stand-in stops the third run's component-2");
     assert!(
-        standin_a12_census(&fresh_run, &home, port).is_ok(),
+        standin_a12_census_settles(&fresh_run, &home, port).is_ok(),
         "the stand-in's third run leaves no request after both stops"
     );
     // `standin_a12_census_catches_planted_leftovers` shows the pending loop
@@ -1794,7 +1858,7 @@ fn standin_cancel_survivor_reaches_running() {
         "the stand-in refuses the stopped survivor's presentation as revoked: {revoked:?}"
     );
     assert!(
-        standin_a12_census(&standin, &home, port).is_ok(),
+        standin_a12_census_settles(&standin, &home, port).is_ok(),
         "the stand-in's survivor run leaves no live grant, live instance, pending request or physical leftover after both ends"
     );
     home.finish()
@@ -2005,7 +2069,7 @@ fn standin_a12_census_catches_planted_leftovers() {
         "the stand-in keeps the stopped entry before the control run"
     );
     assert_eq!(
-        standin_a12_census(&standin, &home, port),
+        standin_a12_census_settles(&standin, &home, port),
         Ok(()),
         "the stand-in's stopped run is a clean census before anything is planted"
     );
@@ -2366,7 +2430,7 @@ fn standin_failed_survivor_reaches_running() {
         )
         .expect("the stand-in stops component-2");
     assert!(
-        standin_a12_census(&standin, &home, port).is_ok(),
+        standin_a12_census_settles(&standin, &home, port).is_ok(),
         "the stand-in's failed-survivor run passes the census after the survivor stop"
     );
     assert_eq!(
