@@ -8970,6 +8970,7 @@ mod tests {
     fn copy_and_move_writers_refuse_a_folder_added_after_the_tree_check() {
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-late-child";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
         let root = crate::auth::principal_localhost_root(principal_id);
         let rule = StartWalkRule::new(dir.path(), &root);
         let mut parent = format!("{root}/Documents");
@@ -9220,6 +9221,12 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-pax-sparse";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let archive_uri = format!("{root}/Documents/Pax.tar");
         write_library_file_bytes(
@@ -9322,6 +9329,12 @@ mod tests {
         use std::io::Write as _;
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-destination-race";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let archive_uri = format!("{root}/Documents/Pack.zip");
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -9698,6 +9711,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkAgentsAreaLibrary";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let journal = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
         let doc = format!("{root}/Documents/x.txt");
@@ -9772,6 +9791,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkAgentsAreaWhitespace";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let journal = rooted_localhost_fs_path(
             dir.path(),
@@ -9806,6 +9831,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyExisting";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -9870,6 +9901,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyConcurrent";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Concurrent.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -9963,6 +10000,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyIfRevision";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -9998,6 +10041,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkRevisionedWrite";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
