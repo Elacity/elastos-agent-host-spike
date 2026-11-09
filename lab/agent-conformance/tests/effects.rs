@@ -1141,15 +1141,9 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
         Ok(grants::GrantCensus::MissingScope) => {
             return Err("pending:0 grants:BLOCKED(AC-021-GRANTS)".to_owned())
         }
-        Ok(grants::GrantCensus::Live(ids, foreign)) => {
-            return Err(format!(
-                "live grant {}: {ids:?}",
-                if foreign {
-                    "is not this run's"
-                } else {
-                    "leftover"
-                }
-            ))
+        Ok(grants::GrantCensus::Live(_, false)) => return Err("live grant leftover".to_owned()),
+        Ok(grants::GrantCensus::Live(ids, true)) => {
+            return Err(format!("live grant is not this run's: {ids:?}"))
         }
         Err(reason) => return Err(reason.to_owned()),
     }
