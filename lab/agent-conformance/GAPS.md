@@ -688,7 +688,9 @@ from `resource_bridge.rs:851`, before the manifest check at `:1412`. This
 refusal also applies when the same resource is declared. The positive write
 and its missing-authority counterpart need a verified Agent principal. The new
 variants also undergo the existing two-build hash, import and
-feature-exclusivity checks.
+feature-exclusivity checks. F-ac2-write is retired under `UsersAI binding;
+AC-002-ARGS` with its exact mutation in `falsifiers.json`. Restore it and run
+the plant after the granted-write control and this refusal row are live.
 
 `no_policy_file_does_not_mean_allow` attempts one in-manifest read using the
 existing granted-read probe. `fixtures/no-policy.json` is absent in the
