@@ -9369,3 +9369,97 @@ mod home_events_pacing_tests {
     }
 }
 
+/// R2 rows: the Home state surfaces read the root the context resolved, and a
+/// principal with no stored record is refused instead of served from the
+/// principal-id rule.
+#[cfg(test)]
+mod stored_root_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn state_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        (temp, data_dir)
+    }
+
+    #[test]
+    fn an_unstored_principal_is_refused_instead_of_served_from_the_id_rule_root() {
+        let (_temp, data_dir) = state_dir();
+        let principal_id = "person:local:no-stored-record";
+        let context = HomeLaunchTokenContext::for_test(principal_id, "session", None, "grant");
+        assert!(
+            crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id)
+                .unwrap_err()
+                .to_string()
+                .contains("has no stored record"),
+            "the fixture principal has no stored record"
+        );
+        // The id rule names a root this Home accepts, so a served result would
+        // prove the surface fell back to it.
+        let id_rule_root = crate::auth::principal_localhost_root(principal_id);
+        assert!(
+            elastos_common::localhost::rooted_localhost_fs_path(
+                &data_dir,
+                &format!("{id_rule_root}/.AppData/ElastOS/Home/services-state.json"),
+            )
+            .is_some()
+        );
+        assert!(
+            home_services_selection_state_path(&data_dir, &context)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid Services state root")
+        );
+        assert!(home_services_requests_state_path(&data_dir, &context).is_err());
+        assert!(home_active_shell_state_path(&data_dir, &context).is_err());
+    }
+
+    #[test]
+    fn a_stored_principal_keeps_todays_services_state_results() {
+        let (_temp, data_dir) = state_dir();
+        let principal_id = "person:local:stored-home-state";
+        let record = crate::auth::store_test_human_principal(&data_dir, principal_id);
+        let _protection =
+            crate::auth::store_test_principal_root_protection(&data_dir, principal_id);
+        let context = stored_passkey_principal_context(&data_dir, &record).unwrap();
+        let expected_path = elastos_common::localhost::rooted_localhost_fs_path(
+            &data_dir,
+            &format!(
+                "{}/.AppData/ElastOS/Home/services-state.json",
+                record.localhost_root
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            home_services_selection_state_path(&data_dir, &context).unwrap(),
+            expected_path,
+            "today's path is under the principal's stored root"
+        );
+        let default_state = home_services_selection_state(&data_dir, &context).unwrap();
+        assert_eq!(default_state.principal_id, principal_id);
+        assert_eq!(default_state.localhost_root, record.localhost_root);
+        let mut state = default_state;
+        state.updated_at = 12_345;
+        state
+            .local_offer_ids
+            .insert(crate::api::gateway::MODEL_LOCAL_OFFER.to_string());
+        home_save_services_selection_state(&data_dir, &context, &state).unwrap();
+        let reloaded = home_services_selection_state(&data_dir, &context).unwrap();
+        assert_eq!(reloaded.updated_at, 12_345);
+        assert!(reloaded
+            .local_offer_ids
+            .contains(crate::api::gateway::MODEL_LOCAL_OFFER));
+        assert_eq!(reloaded.localhost_root, record.localhost_root);
+        assert!(home_active_shell_state(&data_dir, &context).unwrap().is_none());
+        assert_eq!(
+            home_services_requests_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            record.localhost_root
+        );
+    }
+}
