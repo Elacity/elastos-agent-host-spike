@@ -657,6 +657,7 @@ a separate Home supplies zero principal evidence.
 | `real_agent_host_gets_no_ungranted_authority` | UsersAI binding | A principal-scoped CLI launch lets the two journal requests reach the shell. |
 | `agent_cannot_read_other_agent_memory` | UsersAI binding; AC-002-ARGS | Launch agent-b with its verified context, request agent-a's exact memory path, and require a reason with zero returned bytes. F-ac2a then explicitly grants that read. |
 | `agent_can_read_human_space_with_grant` | UsersAI binding; AC-002-ARGS | Reuse `Controller` to seed the human object and grant the verified agent its exact read; compare the complete bytes inside the existing probe read path. |
+| `ungranted_memory_write_is_refused` | UsersAI binding; AC-002-ARGS | Run the same memory-write probe under a verified Agent principal. First declare its exact `UsersAI/self` resource and prove a granted write succeeds. Then omit that manifest authority and require the existing exact manifest-refusal assertion. `resource_bridge.rs:851` currently refuses both manifests before their authority is checked. |
 
 The two real agent-host rows remain BLOCKED until the verified launch binding
 lands. F-agent-host-grant is retired under `UsersAI binding` with its exact
@@ -680,10 +681,14 @@ while retired.
 requires the Runtime's principal-context refusal for `Users/self` through the
 003 read feature. This proves refusal for today's unbound CLI launch; the
 verified agent's refusal/positive-grant pair remains under both blockers above.
-`ungranted_memory_write_is_refused` requires a manifest-authority refusal from
-the memory-write Bus request. It proves the request cannot write without
-allowance, rather than proving principal-scoped storage. The new variants also
-undergo the existing two-build hash, import and feature-exclusivity checks.
+`ungranted_memory_write_is_refused` retains its manifest-authority expectation
+while ignored. The unbound CLI launch now gets
+`Internal("localhost://UsersAI/self requires a principal-scoped launch context")`
+from `resource_bridge.rs:851`, before the manifest check at `:1412`. This
+refusal also applies when the same resource is declared. The positive write
+and its missing-authority counterpart need a verified Agent principal. The new
+variants also undergo the existing two-build hash, import and
+feature-exclusivity checks.
 
 `no_policy_file_does_not_mean_allow` attempts one in-manifest read using the
 existing granted-read probe. `fixtures/no-policy.json` is absent in the
