@@ -40,7 +40,7 @@ function sha256Label(value) {
   return `sha256:${crypto.createHash("sha256").update(value).digest("hex")}`;
 }
 
-function transportRequest(egressPath, mediaPath) {
+function transportRequest(egressPath, mediaPath, turnPort = 49160) {
   const generation = sha256Label(Buffer.from("remote-wrapper-generation"));
   const expiresAtUnixMs = (Math.floor(Date.now() / 1000) + 300) * 1000;
   const username = `${expiresAtUnixMs / 1000}:remote-wrapper`;
@@ -65,7 +65,7 @@ function transportRequest(egressPath, mediaPath) {
     media: {
       schema: "elastos.browser.vz-transport-stream/v1",
       stream_id: "stream:remote-wrapper-media",
-      target: "tcp://127.0.0.1:49160",
+      target: `tcp://127.0.0.1:${turnPort}`,
       runtime_socket_path: mediaPath,
       vsock_port: 19094,
     },
@@ -75,7 +75,7 @@ function transportRequest(egressPath, mediaPath) {
       guest_host: "127.0.0.1",
       guest_port: 3478,
       listen_host: "127.0.0.1",
-      listen_port: 49160,
+      listen_port: turnPort,
       advertised_host: "127.0.0.1",
       relay_host: "127.0.0.1",
       relay_port_min: 55000,
@@ -161,6 +161,19 @@ async function listenUnix(socketPath) {
     server.listen(socketPath, resolve);
   });
   return server;
+}
+
+async function availableTcpPort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = server.address().port;
+  await new Promise((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
+  return port;
 }
 
 test("wrapper emits exact did_not_act only after complete identity validation", async () => {
@@ -593,11 +606,26 @@ test("remote VZ typed settlement parser preserves the exact request binding", ()
   );
 });
 
-test("one failed absence proof does not contaminate independent cleanup fields", () => {
+test("one failed absence proof does not contaminate independent cleanup fields", async (t) => {
+  // Plant: occupy the old shared port while the independent proof runs.
+  const blockedPort = process.env.ELASTOS_BROWSER_TEST_BLOCK_FIXED_TURN_PORT
+    ? net.createServer()
+    : null;
+  if (blockedPort) {
+    await new Promise((resolve, reject) => {
+      blockedPort.once("error", reject);
+      blockedPort.listen(49160, "127.0.0.1", resolve);
+    });
+    t.after(() => new Promise((resolve) => blockedPort.close(resolve)));
+  }
+  const turnPort = process.env.ELASTOS_BROWSER_TEST_USE_FIXED_TURN_PORT
+    ? 49160
+    : await availableTcpPort();
   const suffix = `${process.pid}-${Date.now().toString(36)}`;
   const request = transportRequest(
     `/tmp/evzfi-${suffix}-egress.sock`,
     `/tmp/evzfi-${suffix}-media.sock`,
+    turnPort,
   );
   request.profile = {
     schema: "elastos.browser.profile/v1",

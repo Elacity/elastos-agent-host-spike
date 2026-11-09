@@ -18,6 +18,9 @@ import unittest
 from unittest.mock import patch
 
 
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 SOURCE = Path(__file__).resolve().parent.parent
 # A synthetic platform-scoped helper exercises omission and lock admission.
 LINUX_ONLY = {"linux-fixture-helper"}
@@ -349,7 +352,7 @@ class PrepareWorkerTest(unittest.TestCase):
         (mock / "ldd").write_text('#!/bin/sh\necho "libc.so.6 => resolved"\n')
         for path in mock.iterdir():
             path.chmod(0o755)
-        self.env = {**os.environ, "PATH": str(mock) + os.pathsep + os.environ["PATH"],
+        self.env = {**fixture_git.fixture_git_env(self.root), "PATH": str(mock) + os.pathsep + os.environ["PATH"],
                     "CARGO_TARGET_DIR": str(self.root / "native-cache"), "CARGO_BUILD_JOBS": "4",
                     "MOCK_TARGET": str(self.root / "resolved-cache"),
                     "MOCK_LOG": str(self.root / "cargo.log"),
@@ -409,7 +412,7 @@ class PrepareWorkerTest(unittest.TestCase):
                              ("git", "config", "gc.autoDetach", "false")])
         commands.extend([("git", "add", "."), ("git", "commit", "-m", message)])
         for command in commands:
-            result = self.command(*command)
+            result = self.command(*command, env=fixture_git.fixture_git_env(self.root))
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def prepare(self, name="prepared", env=None, version="0.7.1", reuse_support=None):
@@ -419,6 +422,21 @@ class PrepareWorkerTest(unittest.TestCase):
                               "--version", version, "--output", str(output), *reuse, env=env)
         self.assertEqual(list(self.root.glob(".release-platform.*")), [], "temporary sibling leaked")
         return output, result
+
+    def test_prepare_ignores_the_callers_git_dir(self):
+        """The product script reads the fixture checkout, not an exported GIT_DIR."""
+        with tempfile.TemporaryDirectory() as scratch:
+            victim, pointed = fixture_git.victim_repo(scratch)
+            os.utime(victim / "tracked.txt", (1, 1))  # so a leaked status would rewrite its index
+            before = fixture_git.repo_state(victim)
+            with patch.dict(os.environ, pointed):
+                self.setUp()  # a second fixture, with the hostile variables in the process environment
+            config = fixture_git.shared_config(self.repo)
+            output, result = self.prepare()
+            self.assertEqual(fixture_git.repo_state(victim), before, "a prepare git command wrote to GIT_DIR's repo")
+            self.assertEqual(fixture_git.shared_config(self.repo), config, "the fixture's shared git config changed")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((output / "platform-input.json").is_file())
 
     def test_browser_image_is_required_before_build_and_reuse_retains_it(self):
         template_path = self.repo / "components.json"

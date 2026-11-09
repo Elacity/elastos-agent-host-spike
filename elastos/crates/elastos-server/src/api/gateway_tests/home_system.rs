@@ -13704,3 +13704,82 @@ async fn a_published_file_is_served_only_to_the_publishers_contacts() {
     crate::library::withdraw_cid_for_test(bob_dir.path(), &cid);
     assert!(!read(device(&alice), cid, Some(&network)).await);
 }
+
+/// A stored passkey principal, so `active_passkey_principals` lists one.
+fn store_carrier_passkey_principal(data_dir: &std::path::Path) -> String {
+    let now = crate::auth::now_ts();
+    let rp_id = "elastos.elacitylabs.com";
+    let credential_id = "carrier-unresolved-root";
+    let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+        elastos_runtime::auth::PasskeyWebAuthnBinding {
+            credential_id: credential_id.to_string(),
+            public_key: "carrier-unresolved-root-public-key".to_string(),
+            sign_count: 1,
+            user_verified: true,
+            origin: "https://elastos.elacitylabs.com".to_string(),
+            rp_id: rp_id.to_string(),
+            created_at: now,
+            last_used_at: now,
+            revoked_at: None,
+        },
+    );
+    let principal_id = crate::auth::passkey_credential_principal_id(rp_id, credential_id).unwrap();
+    crate::auth::upsert_principal_for_binding_as_role_named(
+        data_dir,
+        binding,
+        principal_id.clone(),
+        crate::auth::RuntimePrincipalRole::Admin,
+        Some("Carrier"),
+        now,
+    )
+    .unwrap();
+    principal_id
+}
+
+/// L1 from the R1 reviews: a listed principal whose stored root does not
+/// resolve is not a contact. The verified state is cached for the listing read,
+/// and the record read then finds a state that fails to load.
+#[test]
+fn an_unresolvable_principal_root_is_not_a_contact() {
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let principal_id = store_carrier_passkey_principal(dir.path());
+    let (trusted_key, _) = generate_keypair();
+    let network =
+        configured_discovery_network_profile_for_test(&trusted_key, "carrier-unresolved-root");
+    let (source_key, _) = generate_keypair();
+    let source = iroh::PublicKey::from_bytes(&source_key.verifying_key().to_bytes()).unwrap();
+    let principals = std::collections::BTreeSet::from([principal_id]);
+
+    // The record read must be the load that reuses the verified state.
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    let (hit_observed, resume) =
+        crate::auth::install_verified_auth_state_cache_hit_hook(dir.path());
+    let data_dir = dir.path().to_path_buf();
+    let loader = std::thread::spawn(move || {
+        crate::api::gateway::gateway_home_system::carrier_source_is_contact_of(
+            &data_dir,
+            &network,
+            &principals,
+            &source,
+        )
+    });
+    hit_observed
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the record read reused the verified state");
+    std::fs::write(
+        crate::auth::auth_state_path(dir.path()).unwrap(),
+        b"not auth state",
+    )
+    .unwrap();
+    resume.send(()).unwrap();
+    assert!(
+        !loader.join().unwrap(),
+        "a principal whose stored root does not resolve is not a contact"
+    );
+}

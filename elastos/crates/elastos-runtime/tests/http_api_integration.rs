@@ -903,9 +903,8 @@ async fn session_granted(
     store: &PendingRequestStore,
     session_id: &str,
 ) -> Vec<PendingCapabilityRequest> {
-    let granted = store.list_granted().await.into_iter();
-    granted
-        .filter(|r| r.session_id.to_string() == session_id)
+    let held = store.list_requests().await.into_iter();
+    held.filter(|r| r.is_granted() && r.session_id.to_string() == session_id)
         .collect()
 }
 

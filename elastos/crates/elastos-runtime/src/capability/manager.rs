@@ -581,6 +581,21 @@ impl CapabilityManager {
         Ok(token)
     }
 
+    /// Whether a token this Runtime issued could still validate: its epoch is
+    /// current, it is not revoked by id, it has uses left and it has not
+    /// expired. Read-only: no use is counted and nothing is audited. The
+    /// caller-, action- and resource-bound checks of `validate` are not here.
+    pub async fn can_still_validate(&self, token: &CapabilityToken) -> bool {
+        // An unlimited token is never counted, so it never reaches u32::MAX uses.
+        let max_uses = token.constraints.max_uses.unwrap_or(u32::MAX);
+        let spent = self.store.has_exceeded_uses(&token.id, max_uses).await;
+        let expired = token.expiry.is_some_and(|expiry| expiry.is_expired());
+        self.store.is_epoch_valid(token.constraints.epoch)
+            && !self.store.is_token_revoked(&token.id).await
+            && !spent
+            && !expired
+    }
+
     /// Revoke a specific token
     pub async fn revoke(&self, token_id: TokenId, reason: &str) {
         self.store.revoke_token(token_id).await;
@@ -925,6 +940,57 @@ mod tests {
             result,
             Err(ValidationError::UseLimitExceeded { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn can_still_validate_refuses_each_dead_token_and_counts_no_use() {
+        let manager = create_test_manager();
+        let resource = ResourceId::new("localhost://Users/self/Documents/test.txt");
+        let grant = |max_uses: Option<u32>, expiry: Option<SecureTimestamp>| {
+            let constraints = TokenConstraints::new(0, false, None, max_uses);
+            manager.grant(
+                "test-capsule",
+                resource.clone(),
+                Action::Read,
+                constraints,
+                expiry,
+            )
+        };
+        let old_epoch = grant(None, None);
+        manager.revoke_all("rotate");
+        let live = grant(None, None);
+        let once = grant(Some(1), None);
+        assert!(
+            manager.can_still_validate(&once).await,
+            "an unused once token"
+        );
+        assert!(
+            manager.can_still_validate(&once).await,
+            "asking counts no use"
+        );
+        let used = manager.validate(&once, "test-capsule", Action::Read, &resource, None);
+        used.await.unwrap();
+        let revoked = grant(None, None);
+        manager.revoke(revoked.id, "test").await;
+        let expired = grant(None, Some(SecureTimestamp::at(1)));
+
+        assert!(manager.can_still_validate(&live).await, "a live token");
+        assert!(
+            !manager.can_still_validate(&once).await,
+            "a spent once token"
+        );
+        assert!(
+            !manager.can_still_validate(&revoked).await,
+            "a token revoked by id"
+        );
+        assert!(
+            !manager.can_still_validate(&old_epoch).await,
+            "a token from an old epoch"
+        );
+        assert!(
+            !manager.can_still_validate(&expired).await,
+            "an expired token"
+        );
     }
 
     #[tokio::test]

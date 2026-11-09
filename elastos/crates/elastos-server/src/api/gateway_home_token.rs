@@ -35,16 +35,20 @@ impl HomeLaunchTokenContext {
     }
 
     /// The root this context resolved before it existed. R1's issuer and
-    /// verifier read it here; the remaining G1 callers still use the
-    /// principal-id rule until R2-R4 switch them.
+    /// verifier read it here; R2 switched the G1 home_system, room and
+    /// presence surfaces to it, and the remaining G1 and G2 callers still use
+    /// the principal-id rule until R3-R4 switch them. R8 retires that rule.
     pub(in crate::api) fn root(&self) -> &crate::auth::ResolvedPrincipalRoot {
         &self.root
     }
 }
 
 impl HomeLaunchTokenContext {
-    /// `resolved()` is the one production constructor: the root is resolved and
-    /// refuses before a context exists, and it is stored here.
+    /// Production builds a context through `resolved`, which stores a root its
+    /// caller already resolved; this constructor neither resolves nor refuses.
+    /// Every production caller passes a root built by a `ResolvedPrincipalRoot`
+    /// constructor, and no caller re-derives a root from the principal id.
+    /// `remote_context` passes a remote root, which owns no localhost path.
     pub(in crate::api) fn resolved(
         root: crate::auth::ResolvedPrincipalRoot,
         principal_id: String,
@@ -805,6 +809,26 @@ pub(in crate::api) fn require_carried_home_launch_token(
         allowed_apps,
         expected_did,
         &auth_data_dir,
+    )
+}
+
+/// Test-only entry to the one verifier below with the signer DID a subordinate
+/// gateway loads from its trusted-signer configuration. The verifier arm and
+/// its result stay the production ones.
+#[cfg(test)]
+pub(in crate::api) fn require_home_launch_token_value_from_expected_did_for_test(
+    data_dir: &std::path::Path,
+    token: &str,
+    allowed_apps: &[&str],
+    expected_did: String,
+    auth_data_dir: &std::path::Path,
+) -> anyhow::Result<RequiredHomeLaunchToken> {
+    require_home_launch_token_value_from_expected_did(
+        data_dir,
+        token,
+        allowed_apps,
+        expected_did,
+        auth_data_dir,
     )
 }
 

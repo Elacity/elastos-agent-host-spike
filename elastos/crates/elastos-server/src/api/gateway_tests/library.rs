@@ -8700,6 +8700,88 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
 }
 
 #[tokio::test]
+async fn r4_runtime_custody_buy_refuses_remote_context_at_root_lookup() {
+    const REMOTE: &str = "remote:6b1f0c9a2d4e7f3851a0b2c3d4e5f607";
+    let _guard = protected_content_gateway_mock_test_guard().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, wallet_provider) = wallet_chain_test_state_with_observer(dir.path()).await;
+    reset_mock_protected_content_chain_mode();
+    reset_mock_protected_content_purchase_fixture();
+    reset_mock_chain_raw_requests();
+    let seller = passkey_authority_with_profile(dir.path(), "seller");
+    let account_id = wallet_provider
+        .provider
+        .seed_managed_evm_account_for_principal(&seller.principal_id)
+        .await;
+    let uri = format!(
+        "{}/Documents/r4-remote-buy",
+        crate::auth::principal_localhost_root(&seller.principal_id)
+    );
+    let input = runtime_custody_creator_test_input(&seller.principal_id, &uri, 0x98, &account_id);
+    let facts = seed_completed_runtime_custody_mint(dir.path(), &input);
+    seed_runtime_custody_creator_listing_for_buy(
+        dir.path(),
+        &seller.principal_id,
+        &facts,
+        MOCK_MANAGED_EVM_ADDRESS,
+        false,
+    );
+    // The remote context as gateway_model_service builds it: empty-root sentinel.
+    let required = RequiredHomeLaunchToken {
+        launch_id: "r4-remote-launch".into(),
+        launch_context: HomeLaunchContext {
+            schema: "elastos.runtime.browser-launch/v1".into(),
+            selected_resource: LIBRARY_CAPSULE_ID.into(),
+            executable_actor: LIBRARY_CAPSULE_ID.into(),
+            authority_actor: LIBRARY_CAPSULE_ID.into(),
+        },
+        context: HomeLaunchTokenContext::resolved(
+            crate::auth::ResolvedPrincipalRoot::remote(REMOTE).unwrap(),
+            REMOTE.into(),
+            "r4-remote-grant".into(),
+            None,
+            "r4-remote-grant".into(),
+        ),
+    };
+    let authority = runtime_wallet_authority(dir.path(), &required).unwrap();
+    assert_eq!(authority.root.localhost_root(), "");
+    let error = crate::api::gateway::runtime_custody_buy_via_gateway(
+        &state,
+        &authority,
+        state.provider_registry.as_ref().unwrap().clone(),
+        crate::protected_content_runtime::RuntimeCustodyBuyInput {
+            principal_id: REMOTE.into(),
+            mint_id: hex::encode(facts.mint_id.as_bytes()),
+        },
+    )
+    .await
+    .unwrap_err();
+    let chain: Vec<String> = error.chain().map(ToString::to_string).collect();
+    assert_eq!(chain[0], "Runtime custody purchase is denied before buy");
+    assert_eq!(
+        chain.last().and_then(|cause| cause.lines().next()),
+        Some("Wallet authority principal root unresolved"),
+        "R4 buyer refuses the unstored remote principal at its root lookup: {chain:?}"
+    );
+    assert!(
+        crate::protected_content_runtime::load_runtime_custody_purchase(
+            dir.path(),
+            REMOTE,
+            facts.mint_id,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        wallet_provider
+            .provider
+            .latest_transaction_approval_request_id()
+            .await,
+        None
+    );
+}
+
+#[tokio::test]
 async fn test_runtime_custody_buy_native_terminal_replay_is_exact_and_listing_stays_immutable() {
     let _guard = protected_content_gateway_mock_test_guard().lock().await;
     let dir = tempfile::tempdir().unwrap();

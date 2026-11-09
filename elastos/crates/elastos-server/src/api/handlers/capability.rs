@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use elastos_common::localhost::{is_supported_resource_scheme, is_system_only_backend_resource};
 use elastos_runtime::capability::{
-    pending::{PendingCapabilityRequest, PendingRequestStore},
-    Action, CapabilityManager, GrantDuration, PolicyEvaluator, PolicyOutcome, ResourceId, Settler,
-    TokenConstraints,
+    pending::{PendingCapabilityRequest, PendingRequestStore, MAX_PENDING_REQUESTS},
+    Action, CapabilityManager, CapabilityStore, GrantDuration, PolicyEvaluator, PolicyOutcome,
+    RequestStatus, ResourceId, Settler, TokenConstraints,
 };
-use elastos_runtime::session::Session;
+use elastos_runtime::session::{Session, SessionId};
 
 use crate::provider_resource::ensure_generic_wallet_capability;
 
@@ -26,6 +26,8 @@ use crate::provider_resource::ensure_generic_wallet_capability;
 pub struct CapabilityState {
     pub pending_store: Arc<PendingRequestStore>,
     pub capability_manager: Arc<CapabilityManager>,
+    /// The same store `capability_manager` holds: revocations, use counts, epoch.
+    pub capability_store: Arc<CapabilityStore>,
     pub policy_evaluator: Arc<PolicyEvaluator>,
 }
 
@@ -120,10 +122,15 @@ pub async fn request_capability(
     // For now, all requests go to pending (no auto-grant policy yet)
     // Future: check if session already has this capability, or if policy allows auto-grant
 
-    let request = state
-        .pending_store
-        .create_request_with_reason(session.id.clone(), resource, action, input.reason)
-        .await;
+    let request = create_request_retiring(
+        &state.pending_store,
+        &state.capability_manager,
+        session.id.clone(),
+        resource,
+        action,
+        input.reason,
+    )
+    .await;
 
     // If pre-denied (e.g. rate limit), surface the denial immediately
     if request.is_denied() {
@@ -412,6 +419,9 @@ pub async fn deny_request(
 #[derive(Debug, Serialize)]
 pub struct CapabilityOutput {
     pub request_id: String,
+    /// The grant's session. Only the `all_sessions_live` view names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub resource: String,
     pub action: String,
     pub duration: String,
@@ -420,7 +430,107 @@ pub struct CapabilityOutput {
 
 #[derive(Debug, Serialize)]
 pub struct ListCapabilitiesOutput {
+    /// `all_sessions_live` on the scoped view; absent on the default view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<&'static str>,
     pub capabilities: Vec<CapabilityOutput>,
+}
+
+/// The one `?scope=` value: live grants across every session, shell only.
+const LIVE_SCOPE: &str = "all_sessions_live";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListCapabilitiesQuery {
+    pub scope: Option<String>,
+}
+
+fn capability_output(
+    r: &PendingCapabilityRequest,
+    session_id: Option<String>,
+) -> Option<CapabilityOutput> {
+    let RequestStatus::Granted { duration, .. } = &r.status else {
+        return None;
+    };
+    Some(CapabilityOutput {
+        request_id: r.id.to_string(),
+        session_id,
+        resource: r.resource.to_string(),
+        action: r.action.to_string(),
+        duration: duration.to_string(),
+        granted_at: r.requested_at.unix_secs, // Use requested_at as proxy for granted_at
+    })
+}
+
+/// A granted record whose token can still validate, by the Runtime's one
+/// rule (`CapabilityManager::can_still_validate`).
+async fn is_live(manager: &CapabilityManager, r: &PendingCapabilityRequest) -> bool {
+    match r.granted_token() {
+        Some(token) => manager.can_still_validate(token).await,
+        None => false,
+    }
+}
+
+/// The one way a server path creates a pending request: retire dead grants,
+/// then create. `POST /api/capability/request`, the resource bridge and
+/// Browser operator admission each call it with their own store and manager.
+pub async fn create_request_retiring(
+    store: &PendingRequestStore,
+    manager: &CapabilityManager,
+    session_id: SessionId,
+    resource: ResourceId,
+    action: Action,
+    reason: String,
+) -> PendingCapabilityRequest {
+    retire_dead_grants(store, manager).await;
+    let request = store.create_request_with_reason(session_id, resource, action, reason);
+    request.await
+}
+
+/// At capacity, settle each granted record whose token can no longer
+/// validate as denied by the Runtime, so the store's capacity cleanup can
+/// reclaim it. A grant that can still validate is left alone, and below
+/// capacity nothing changes. That cleanup drops only records older than
+/// one second, so a grant spent in the same second as the next request is
+/// retired but still holds its slot until the second turns.
+async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityManager) {
+    let held = store.list_requests().await;
+    if held.len() < MAX_PENDING_REQUESTS {
+        return;
+    }
+    for r in held {
+        let Some(token) = r.granted_token() else {
+            continue;
+        };
+        if !manager.can_still_validate(token).await {
+            let reason = "grant can no longer validate";
+            store
+                .revoke_request_by(r.id.as_str(), reason, Settler::Runtime)
+                .await;
+        }
+    }
+}
+
+/// Every session's live grants, sorted by session then request id.
+async fn live_capabilities(state: &CapabilityState) -> ListCapabilitiesOutput {
+    let mut live = Vec::new();
+    for r in state.pending_store.list_requests().await {
+        if is_live(&state.capability_manager, &r).await {
+            live.push(r);
+        }
+    }
+    live.sort_by(|a, b| {
+        let key = |r: &PendingCapabilityRequest| (r.session_id.to_string(), r.id.to_string());
+        key(a).cmp(&key(b))
+    });
+    let capabilities = live
+        .iter()
+        .filter_map(|r| capability_output(r, Some(r.session_id.to_string())))
+        .collect();
+    ListCapabilitiesOutput {
+        scope: Some(LIVE_SCOPE),
+        capabilities,
+    }
 }
 
 /// One session's granted requests, projected from the Runtime's global list.
@@ -428,42 +538,115 @@ async fn session_granted(
     store: &PendingRequestStore,
     session_id: &str,
 ) -> Vec<PendingCapabilityRequest> {
-    let granted = store.list_granted().await.into_iter();
-    granted
-        .filter(|r| r.session_id.to_string() == session_id)
+    let held = store.list_requests().await.into_iter();
+    held.filter(|r| r.is_granted() && r.session_id.to_string() == session_id)
         .collect()
 }
 
 /// GET /api/capability/list
 ///
-/// List active capabilities for the current session.
+/// List active capabilities for the current session. `?scope=all_sessions_live`
+/// lists live grants across every session, for a shell session only.
 pub async fn list_capabilities(
     State(state): State<CapabilityState>,
     Extension(session): Extension<Session>,
-) -> Json<ListCapabilitiesOutput> {
+    Query(query): Query<ListCapabilitiesQuery>,
+) -> Result<Json<ListCapabilitiesOutput>, (StatusCode, String)> {
+    if let Some(scope) = query.scope {
+        if scope != LIVE_SCOPE {
+            let reason = format!("unknown capability list scope: {scope}");
+            return Err((StatusCode::BAD_REQUEST, reason));
+        }
+        if !session.is_shell() {
+            let reason = "This endpoint requires shell privileges".to_string();
+            return Err((StatusCode::FORBIDDEN, reason));
+        }
+        return Ok(Json(live_capabilities(&state).await));
+    }
     // Get granted requests for this session
     let session_id = session.id.to_string();
     let granted_requests = session_granted(&state.pending_store, &session_id).await;
 
     let capabilities = granted_requests
-        .into_iter()
-        .filter_map(|r| {
-            if let elastos_runtime::capability::RequestStatus::Granted { duration, .. } = &r.status
-            {
-                Some(CapabilityOutput {
-                    request_id: r.id.to_string(),
-                    resource: r.resource.to_string(),
-                    action: r.action.to_string(),
-                    duration: duration.to_string(),
-                    granted_at: r.requested_at.unix_secs, // Use requested_at as proxy for granted_at
-                })
-            } else {
-                None
-            }
-        })
+        .iter()
+        .filter_map(|r| capability_output(r, None))
         .collect();
 
-    Json(ListCapabilitiesOutput { capabilities })
+    Ok(Json(ListCapabilitiesOutput {
+        scope: None,
+        capabilities,
+    }))
+}
+
+// === Session Request Records (Shell Only) ===
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRequestsQuery {
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RequestRecordOutput {
+    pub request_id: String,
+    pub session_id: String,
+    pub resource: String,
+    pub action: String,
+    pub reason: String,
+    /// `pending`, `granted`, `denied` (a revoked grant reads `denied`) or `expired`.
+    pub status: &'static str,
+    /// `shell` or `runtime` on a denied record, null otherwise: the core
+    /// records no settler for a pending, granted or expired record.
+    pub settled_by: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionRequestsOutput {
+    pub requests: Vec<RequestRecordOutput>,
+}
+
+fn request_record(r: &PendingCapabilityRequest) -> RequestRecordOutput {
+    let (status, settled_by) = match &r.status {
+        RequestStatus::Pending => ("pending", None),
+        RequestStatus::Granted { .. } => ("granted", None),
+        RequestStatus::Denied { settled_by, .. } => match settled_by {
+            Settler::Shell => ("denied", Some("shell")),
+            Settler::Runtime => ("denied", Some("runtime")),
+        },
+        // The core records no settler for `Expired`: the store's cleanup
+        // writes it, and so does a shell grant on a past-deadline request.
+        RequestStatus::Expired => ("expired", None),
+    };
+    RequestRecordOutput {
+        request_id: r.id.to_string(),
+        session_id: r.session_id.to_string(),
+        resource: r.resource.to_string(),
+        action: r.action.to_string(),
+        reason: r.reason.clone(),
+        status,
+        settled_by,
+    }
+}
+
+/// GET /api/capability/requests?session=
+///
+/// The request records the store still holds for one session, sorted by
+/// request id (shell only). The store drops resolved records by age and
+/// under load, so this is not a full history.
+pub async fn session_requests(
+    State(state): State<CapabilityState>,
+    Extension(_session): Extension<Session>, // Shell check done by middleware
+    Query(query): Query<SessionRequestsQuery>,
+) -> Result<Json<SessionRequestsOutput>, (StatusCode, String)> {
+    let Some(session) = query.session.filter(|session| !session.is_empty()) else {
+        let reason = "requests need a session".to_string();
+        return Err((StatusCode::BAD_REQUEST, reason));
+    };
+    let held = state.pending_store.list_requests().await.into_iter();
+    let mut held: Vec<_> = held.filter(|r| r.session_id.as_str() == session).collect();
+    held.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    let requests = held.iter().map(request_record).collect();
+    Ok(Json(SessionRequestsOutput { requests }))
 }
 
 // === Revoke Capability (Shell Only) ===
@@ -776,12 +959,16 @@ mod tests {
         let store = std::sync::Arc::new(elastos_runtime::capability::CapabilityStore::new());
         let metrics =
             std::sync::Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new());
-        let capability_manager =
-            std::sync::Arc::new(CapabilityManager::new(store, audit_log.clone(), metrics));
+        let capability_manager = std::sync::Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit_log.clone(),
+            metrics,
+        ));
 
         CapabilityState {
             pending_store: std::sync::Arc::new(PendingRequestStore::new(audit_log.clone())),
             capability_manager,
+            capability_store: store,
             policy_evaluator: std::sync::Arc::new(PolicyEvaluator::new(
                 Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
                 audit_log,
@@ -867,8 +1054,10 @@ mod tests {
                 .unwrap();
             ids.push(id);
         }
-        let listed = list_capabilities(State(state.clone()), Extension(a.clone())).await;
+        let query = Query(ListCapabilitiesQuery { scope: None });
+        let listed = list_capabilities(State(state.clone()), Extension(a.clone()), query).await;
         let listed: Vec<_> = listed
+            .unwrap()
             .0
             .capabilities
             .into_iter()
@@ -877,7 +1066,472 @@ mod tests {
         assert_eq!(listed, vec![ids[0].clone()]);
         let info = session_info(State(state.clone()), Extension(a)).await;
         assert_eq!(info.0.capabilities_count, 1);
-        assert_eq!(state.pending_store.list_granted().await.len(), 2);
+        assert_eq!(state.pending_store.list_requests().await.len(), 2);
+    }
+
+    /// Grants one write request in `session`; returns its request id and token.
+    async fn grant_in(
+        state: &CapabilityState,
+        session: &str,
+        max_uses: Option<u32>,
+        expiry: Option<elastos_common::SecureTimestamp>,
+    ) -> (String, elastos_runtime::capability::CapabilityToken) {
+        let resource = ResourceId::new("elastos://content/publish");
+        let session_id = elastos_runtime::session::SessionId::from_string(session);
+        let store = &state.pending_store;
+        let request = store.create_request(session_id, resource.clone(), Action::Write);
+        let id = request.await.id.to_string();
+        let constraints = TokenConstraints::new(0, false, None, max_uses);
+        let manager = &state.capability_manager;
+        let token = manager.grant(session, resource, Action::Write, constraints, expiry);
+        store
+            .grant_request(&id, token.clone(), GrantDuration::Session)
+            .await
+            .unwrap();
+        (id, token)
+    }
+
+    /// Lists `?scope=all_sessions_live` as the shell; returns the body and its request ids.
+    async fn live_view(state: &CapabilityState) -> (serde_json::Value, Vec<String>) {
+        let uri = "http://runtime/api/capability/list?scope=all_sessions_live";
+        let query = Query::try_from_uri(&uri.parse().unwrap()).unwrap();
+        let shell = Extension(Session::new_shell("shell-vm".to_string()));
+        let body = list_capabilities(State(state.clone()), shell, query).await;
+        let body = serde_json::to_value(body.unwrap().0).unwrap();
+        let ids = body["capabilities"].as_array().unwrap().iter();
+        let ids = ids.map(|c| c["request_id"].as_str().unwrap().to_owned());
+        let ids = ids.collect();
+        (body, ids)
+    }
+
+    #[tokio::test]
+    async fn live_scope_lists_only_live_grants_of_every_session() {
+        let start = elastos_common::SecureTimestamp::now().unix_secs;
+        let state = test_state();
+        let manager = state.capability_manager.clone();
+        let (old_epoch, _) = grant_in(&state, "session-a", None, None).await;
+        manager.revoke_all("key rotated"); // its record stays granted
+        let (live_a, _) = grant_in(&state, "session-a", None, None).await;
+        let (live_b, _) = grant_in(&state, "session-b", None, None).await;
+        let (revoked, token) = grant_in(&state, "session-a", None, None).await;
+        manager.revoke(*token.id(), "operator detached").await; // record stays granted
+        let (spent, token) = grant_in(&state, "session-b", Some(1), None).await;
+        let resource = ResourceId::new("elastos://content/publish");
+        let used = manager.validate(&token, "session-b", Action::Write, &resource, None);
+        used.await.expect("the once grant is used");
+        let past = Some(elastos_common::SecureTimestamp::at(1));
+        let (expired, _) = grant_in(&state, "session-b", None, past).await;
+        let held = state.pending_store.list_requests().await;
+        let granted = held.iter().filter(|r| r.is_granted()).count();
+        assert_eq!(
+            granted, 6,
+            "all six records are still granted, so only the live rule drops one"
+        );
+
+        let (mut body, ids) = live_view(&state).await;
+        assert!(
+            !ids.contains(&revoked),
+            "F-norevoke: a grant revoked by id is absent"
+        );
+        assert!(!ids.contains(&spent), "a spent once grant is absent");
+        assert!(
+            !ids.contains(&old_epoch),
+            "a grant from an old epoch is absent"
+        );
+        assert!(!ids.contains(&expired), "a grant past its expiry is absent");
+        let end = elastos_common::SecureTimestamp::now().unix_secs;
+        for entry in body["capabilities"].as_array_mut().unwrap() {
+            let granted_at = entry["granted_at"].as_u64().unwrap();
+            assert!(
+                (start..=end).contains(&granted_at),
+                "granted_at is the request time"
+            );
+            entry.as_object_mut().unwrap().remove("granted_at");
+        }
+        let entry = |id: &str, session: &str| {
+            json!({ "request_id": id, "session_id": session, "duration": "session",
+                    "resource": "elastos://content/publish", "action": "write" })
+        };
+        let expected = json!({ "scope": "all_sessions_live",
+            "capabilities": [entry(&live_a, "session-a"), entry(&live_b, "session-b")] });
+        assert_eq!(
+            body, expected,
+            "the live view is exactly the two live grants"
+        );
+    }
+
+    /// Waits on the clock (a condition with a deadline, no sleep) until every
+    /// held record is older than the capacity cleanup's 0 s retention.
+    async fn age_past_capacity_retention(store: &PendingRequestStore) {
+        let held = store.list_requests().await;
+        let newest = held.iter().map(|r| r.requested_at.unix_secs).max().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while elastos_common::SecureTimestamp::now().unix_secs <= newest {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the clock passed the newest second"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_grants_at_capacity_are_retired_and_a_new_request_is_admitted() {
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        let state = test_state();
+        let (store, manager) = (
+            state.pending_store.clone(),
+            state.capability_manager.clone(),
+        );
+        let resource = ResourceId::new("elastos://content/publish");
+        let (old_epoch, _) = grant_in(&state, "session-dead", None, None).await;
+        manager.revoke_all("key rotated");
+        let (live, _) = grant_in(&state, "session-live", None, None).await;
+        let (revoked, token) = grant_in(&state, "session-dead", None, None).await;
+        manager.revoke(*token.id(), "operator detached").await;
+        let mut spent = Vec::new();
+        for n in 0..MAX_PENDING_REQUESTS - 3 {
+            let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
+            let (id, token) = grant_in(&state, &session, Some(1), None).await;
+            let used = manager.validate(&token, &session, Action::Write, &resource, None);
+            used.await.expect("the once grant is used");
+            spent.push(id);
+        }
+        assert_eq!(store.list_requests().await.len(), MAX_PENDING_REQUESTS);
+        age_past_capacity_retention(&store).await;
+
+        let input = RequestCapabilityInput {
+            resource: "elastos://content/publish".to_string(),
+            action: "write".to_string(),
+            reason: String::new(),
+        };
+        let client = Extension(Session::new_capsule("vm-new".to_string()));
+        let reply = request_capability(State(state.clone()), client, Json(input)).await;
+        let held = store.list_requests().await;
+        let held: Vec<String> = held.iter().map(|r| r.id.to_string()).collect();
+        let retired = spent.iter().all(|id| !held.contains(id));
+        assert!(retired, "every spent once grant is retired");
+        assert!(!held.contains(&revoked), "a grant revoked by id is retired");
+        assert!(
+            !held.contains(&old_epoch),
+            "a grant from an old epoch is retired"
+        );
+        assert!(
+            held.contains(&live),
+            "a grant that can still validate stays"
+        );
+        let status = reply.unwrap().0.status;
+        assert_eq!(
+            status, "pending",
+            "the new request is admitted after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_cleanup_leaves_a_working_grant_in_the_live_view() {
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        use elastos_runtime::session::SessionId;
+        let state = test_state();
+        let store = state.pending_store.clone();
+        let (live, token) = grant_in(&state, "session-grant", None, None).await;
+        let granted_at = store
+            .get_request(&live)
+            .await
+            .unwrap()
+            .requested_at
+            .unix_secs;
+        // Capacity cleanup drops records older than 0 s. Wait on the clock
+        // (a condition with a deadline, no sleep) until this one is.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while elastos_common::SecureTimestamp::now().unix_secs <= granted_at {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the clock passed the grant's second"
+            );
+            tokio::task::yield_now().await;
+        }
+        let resource = ResourceId::new("elastos://content/publish");
+        for n in 0..MAX_PENDING_REQUESTS - 1 {
+            let session = SessionId::from_string(format!("fill-{}", n / MAX_PENDING_PER_SESSION));
+            store
+                .create_request(session, resource.clone(), Action::Write)
+                .await;
+        }
+        let extra = SessionId::from_string("session-extra");
+        let refused = store
+            .create_request(extra, resource.clone(), Action::Write)
+            .await;
+
+        let (_, ids) = live_view(&state).await;
+        let message = "the live view still lists a grant that validates, after capacity cleanup";
+        assert_eq!(ids, vec![live.clone()], "{message}");
+        let held = store.list_requests().await;
+        let listed = held.iter().any(|r| r.id.as_str() == live && r.is_granted());
+        assert!(listed, "list_requests still holds the grant's record");
+        let manager = &state.capability_manager;
+        let valid = manager.validate(&token, "session-grant", Action::Write, &resource, None);
+        valid.await.expect("the grant still validates");
+        assert!(
+            refused.is_denied(),
+            "the store, still full, refuses the extra request"
+        );
+    }
+
+    /// The lab stand-in's shell-only reason, written out independently.
+    const SHELL_REASON: &str = "This endpoint requires shell privileges";
+
+    #[tokio::test]
+    async fn default_scope_stays_the_callers_session_and_the_scope_is_shell_only() {
+        let state = test_state();
+        let client = Session::new_capsule("vm-a".to_string());
+        let shell = Session::new_shell("shell-vm".to_string());
+        let (own, _) = grant_in(&state, client.id.as_str(), None, None).await;
+        grant_in(&state, "session-b", None, None).await;
+        let list = |session: &Session, scope: Option<&str>| {
+            let query = Query(ListCapabilitiesQuery {
+                scope: scope.map(str::to_owned),
+            });
+            list_capabilities(State(state.clone()), Extension(session.clone()), query)
+        };
+        let body = list(&client, None).await.unwrap().0;
+        let mut body = serde_json::to_value(body).unwrap();
+        body["capabilities"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("granted_at");
+        let entry = json!({ "request_id": own, "duration": "session",
+            "resource": "elastos://content/publish", "action": "write" });
+        assert_eq!(
+            body,
+            json!({ "capabilities": [entry] }),
+            "the default view lists only the caller's session, with no scope or session_id"
+        );
+        let body = serde_json::to_value(list(&shell, None).await.unwrap().0).unwrap();
+        assert_eq!(
+            body,
+            json!({ "capabilities": [] }),
+            "the shell's default view is its own session, not every session"
+        );
+        let shell_only = (StatusCode::FORBIDDEN, SHELL_REASON.to_owned());
+        assert_eq!(
+            list(&client, Some("all_sessions_live")).await.err(),
+            Some(shell_only),
+            "a client is refused the all_sessions_live view"
+        );
+        let unknown = "unknown capability list scope: session".to_owned();
+        assert_eq!(
+            list(&shell, Some("session")).await.err(),
+            Some((StatusCode::BAD_REQUEST, unknown)),
+            "an unknown scope is refused"
+        );
+        assert_rejects_unknown_field::<ListCapabilitiesQuery>(json!({
+            "scope": "all_sessions_live",
+            "session": "session-b"
+        }));
+    }
+
+    type Records = std::collections::HashMap<String, serde_json::Value>;
+
+    /// Reads `?session=` back through the handler: the ids in order, and each record by id.
+    async fn records(state: &CapabilityState, session: &str) -> (Vec<String>, Records) {
+        let uri = format!("http://runtime/api/capability/requests?session={session}");
+        let query = Query::try_from_uri(&uri.parse().unwrap()).unwrap();
+        let shell = Extension(Session::new_shell("shell-vm".to_string()));
+        let body = session_requests(State(state.clone()), shell, query).await;
+        let body = serde_json::to_value(body.unwrap().0).unwrap();
+        let entries = body["requests"].as_array().unwrap().clone();
+        let id = |e: &serde_json::Value| e["request_id"].as_str().unwrap().to_owned();
+        let ids = entries.iter().map(id).collect();
+        (ids, entries.into_iter().map(|e| (id(&e), e)).collect())
+    }
+
+    fn record(
+        id: &str,
+        session: &str,
+        status: &str,
+        by: Option<&str>,
+    ) -> Option<serde_json::Value> {
+        Some(
+            json!({ "request_id": id, "session_id": session, "status": status,
+            "settled_by": by, "resource": "elastos://content/publish", "action": "write",
+            "reason": "" }),
+        )
+    }
+
+    #[tokio::test]
+    async fn session_requests_read_back_each_state_and_its_settler() {
+        let state = test_state();
+        let store = state.pending_store.clone();
+        let resource = ResourceId::new("elastos://content/publish");
+        let create = |session: &str| {
+            let session = elastos_runtime::session::SessionId::from_string(session);
+            store.create_request(session, resource.clone(), Action::Write)
+        };
+        let pending = create("session-a").await.id.to_string();
+        let by_shell = create("session-a").await.id.to_string();
+        let shell_deny = store.deny_request_by(&by_shell, "no", Settler::Shell);
+        shell_deny.await.unwrap();
+        let by_runtime = create("session-a").await.id.to_string();
+        let runtime_deny = store.deny_request_by(&by_runtime, "ended", Settler::Runtime);
+        runtime_deny.await.unwrap();
+        let (granted, _) = grant_in(&state, "session-a", None, None).await;
+        let (revoked, _) = grant_in(&state, "session-a", None, None).await;
+        store
+            .revoke_request_by(&revoked, "ended", Settler::Runtime)
+            .await;
+        create("session-b").await;
+
+        let (ids, by_id) = records(&state, "session-a").await;
+        let at = |id: &str| by_id.get(id).cloned();
+        let a = "session-a";
+        assert_eq!(
+            at(&pending),
+            record(&pending, a, "pending", None),
+            "a pending request"
+        );
+        let shell = record(&by_shell, a, "denied", Some("shell"));
+        assert_eq!(
+            at(&by_shell),
+            shell,
+            "a shell deny reads back denied, settled by the shell"
+        );
+        let runtime = record(&by_runtime, a, "denied", Some("runtime"));
+        assert_eq!(
+            at(&by_runtime),
+            runtime,
+            "a runtime deny reads back settled by the runtime"
+        );
+        assert_eq!(
+            at(&granted),
+            record(&granted, a, "granted", None),
+            "a granted request"
+        );
+        let revoke = record(&revoked, a, "denied", Some("runtime"));
+        assert_eq!(
+            at(&revoked),
+            revoke,
+            "a revoked grant reads back denied, by its revoker"
+        );
+        let mut want = vec![pending, by_shell, by_runtime, granted, revoked];
+        want.sort();
+        assert_eq!(
+            ids, want,
+            "exactly session-a's records, sorted by request id"
+        );
+
+        let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let pending_store = Arc::new(PendingRequestStore::with_timeout(audit, 0));
+        let expiring = CapabilityState {
+            pending_store,
+            ..test_state()
+        };
+        let session = elastos_runtime::session::SessionId::from_string("session-c");
+        let request = expiring
+            .pending_store
+            .create_request(session, resource, Action::Write);
+        let expired = request.await.id.to_string();
+        assert_eq!(
+            expiring.pending_store.cleanup_expired().await,
+            1,
+            "the request is due"
+        );
+        let (_, by_id) = records(&expiring, "session-c").await;
+        let want = record(&expired, "session-c", "expired", None);
+        assert_eq!(
+            by_id.get(&expired).cloned(),
+            want,
+            "an expired request names no settler"
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_route_is_shell_only() {
+        use axum::{body::Body, http::header::AUTHORIZATION, http::Request};
+        use elastos_runtime::session::{SessionRegistry, SessionType};
+        use tower::ServiceExt;
+        let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let session_registry = Arc::new(SessionRegistry::new(audit));
+        let shell = session_registry.create_session(SessionType::Shell, None);
+        let shell = shell.await;
+        let client = session_registry.create_session(SessionType::Capsule, None);
+        let client = client.await;
+        let api_state = crate::api::middleware::ApiState { session_registry };
+        let app = crate::api::server::shell_capability_routes(api_state, test_state());
+        let get = |token: &str, query: &str| {
+            let request = Request::get(format!("/api/capability/requests{query}"));
+            let request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+            app.clone().oneshot(request.body(Body::empty()).unwrap())
+        };
+        let read = |response: axum::response::Response| async move {
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX);
+            (
+                status,
+                String::from_utf8(body.await.unwrap().to_vec()).unwrap(),
+            )
+        };
+
+        let refused = read(get(&client.token, "?session=session-a").await.unwrap()).await;
+        let shell_only = (StatusCode::FORBIDDEN, SHELL_REASON.to_owned());
+        assert_eq!(
+            refused, shell_only,
+            "a client session is refused the requests view"
+        );
+        let listed = read(get(&shell.token, "?session=session-a").await.unwrap()).await;
+        let empty = (StatusCode::OK, r#"{"requests":[]}"#.to_owned());
+        assert_eq!(listed, empty, "a shell session reads the requests view");
+        let missing = read(get(&shell.token, "").await.unwrap()).await;
+        let need = (
+            StatusCode::BAD_REQUEST,
+            "requests need a session".to_owned(),
+        );
+        assert_eq!(missing, need, "a shell request with no session is refused");
+    }
+
+    #[tokio::test]
+    async fn a_grant_on_a_past_deadline_request_reads_expired_with_no_settler() {
+        use axum::{body::Body, http::header::AUTHORIZATION, http::Request};
+        use elastos_runtime::session::{SessionRegistry, SessionType};
+        use tower::ServiceExt;
+        let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let state = CapabilityState {
+            pending_store: Arc::new(PendingRequestStore::with_timeout(audit.clone(), 0)),
+            ..test_state()
+        };
+        let session = elastos_runtime::session::SessionId::from_string("session-d");
+        let resource = ResourceId::new("elastos://content/publish");
+        let store = state.pending_store.clone();
+        let request = store.create_request(session, resource.clone(), Action::Write);
+        let id = request.await.id.to_string();
+        let session_registry = Arc::new(SessionRegistry::new(audit));
+        let shell = session_registry.create_session(SessionType::Shell, None);
+        let token = shell.await.token;
+        let api_state = crate::api::middleware::ApiState { session_registry };
+        let app = crate::api::server::shell_capability_routes(api_state, state.clone());
+        let grant = Request::post("/api/capability/grant")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "request_id": id }).to_string()))
+            .unwrap();
+        let refused = app.oneshot(grant).await.unwrap();
+        let status = refused.status();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the shell grant route refuses it"
+        );
+        let manager = &state.capability_manager;
+        let constraints = TokenConstraints::default();
+        let minted = manager.grant("session-d", resource, Action::Write, constraints, None);
+        // The store's own grant, as the browser operator approval calls it.
+        let stored = store
+            .grant_request(&id, minted, GrantDuration::Session)
+            .await;
+        assert_eq!(stored, Err(format!("Request {id} has expired")));
+        let (_, by_id) = records(&state, "session-d").await;
+        let want = record(&id, "session-d", "expired", None);
+        let message = "a grant-written expiry reads expired with no settler";
+        assert_eq!(by_id.get(&id).cloned(), want, "{message}");
     }
 
     #[tokio::test]

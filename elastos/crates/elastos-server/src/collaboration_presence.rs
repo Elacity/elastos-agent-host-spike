@@ -1594,6 +1594,16 @@ mod tests {
         );
     }
 
+    /// Protected principal-root objects opened since `before` (the production
+    /// open path records each one per data root under cfg(test)).
+    fn r6_opens_since(data_root: &Path, before: usize) -> Vec<String> {
+        crate::auth::principal_root_object_opens(data_root)[before..].to_vec()
+    }
+
+    // The id-rule (Users) root's Profile, written independently of the code.
+    const R6_ID_RULE_PROFILE: &str =
+        "localhost://Users/5dca74bd48d800a148776e87/.AppData/ElastOS/Profile/profile-authority.json";
+
     #[tokio::test]
     async fn r6_retire_denied_current_presence_uses_stored_kind() {
         const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
@@ -1615,16 +1625,25 @@ mod tests {
         let (missing, port, profile, _) =
             r6_own_presence_case(crate::auth::PrincipalKind::Human).await;
         let profile_did = &profile.document().profile_did;
+        let before = crate::auth::principal_root_object_opens(missing.path()).len();
         assert!(
             port.retire_denied_current_presence(ID, profile_did, NOW)
                 .await
         );
+        // Live channel: the granted call reads this Human's id-rule Profile.
+        assert!(r6_opens_since(missing.path(), before).contains(&R6_ID_RULE_PROFILE.to_string()));
         crate::auth::r4_fixture::remove(missing.path(), ID);
         let (warnings, _guard) = r6_capture_warnings();
+        let before = crate::auth::principal_root_object_opens(missing.path()).len();
         assert!(
             !port
                 .retire_denied_current_presence(ID, profile_did, NOW)
                 .await
+        );
+        let opened = r6_opens_since(missing.path(), before);
+        assert!(
+            opened.is_empty(),
+            "unresolved presence must read no principal-root object, not the id-rule Profile: {opened:?}"
         );
         r6_assert_unresolved_warning(&warnings);
     }
@@ -1644,16 +1663,25 @@ mod tests {
         let (missing, port, profile, operation) =
             r6_own_presence_case(crate::auth::PrincipalKind::Human).await;
         let profile_did = &profile.document().profile_did;
+        let before = crate::auth::principal_root_object_opens(missing.path()).len();
         assert!(
             port.check_own_operation(&operation, profile_did, NOW, false)
                 .await
         );
+        // Live channel: the granted call reads this Human's id-rule Profile.
+        assert!(r6_opens_since(missing.path(), before).contains(&R6_ID_RULE_PROFILE.to_string()));
         crate::auth::r4_fixture::remove(missing.path(), &operation.principal);
         let (warnings, _guard) = r6_capture_warnings();
+        let before = crate::auth::principal_root_object_opens(missing.path()).len();
         assert!(
             !port
                 .check_own_operation(&operation, profile_did, NOW, false)
                 .await
+        );
+        let opened = r6_opens_since(missing.path(), before);
+        assert!(
+            opened.is_empty(),
+            "unresolved operation must read no principal-root object, not the id-rule Profile: {opened:?}"
         );
         r6_assert_unresolved_warning(&warnings);
     }

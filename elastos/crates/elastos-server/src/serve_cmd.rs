@@ -195,6 +195,7 @@ pub async fn run_serve(
                 let provider_registry = infra.provider_registry;
                 let namespace_store = infra.namespace_store;
                 let identity_state = infra.identity_state;
+                let capability_store = infra.capability_store;
                 let host_helpers = infra.host_helpers;
 
                 let api_handle = tokio::spawn({
@@ -208,6 +209,7 @@ pub async fn run_serve(
                                 runtime,
                                 session_registry,
                                 capability_manager,
+                                capability_store,
                                 pending_store,
                                 namespace_store: Some(namespace_store),
                                 provider_registry: Some(provider_registry),
@@ -455,6 +457,7 @@ pub async fn run_serve(
             runtime,
             session_registry: infra.session_registry,
             capability_manager: infra.capability_manager,
+            capability_store: infra.capability_store,
             pending_store: infra.pending_store,
             namespace_store: Some(infra.namespace_store),
             provider_registry: Some(infra.provider_registry),
