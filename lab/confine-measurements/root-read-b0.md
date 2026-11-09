@@ -4,10 +4,17 @@ Measurement only. This record changes no provider profile and no Runtime code.
 Base: `ea80c9ef` on `claude/confine-b0-rootread`. Host: macOS 26.5.2, arm64,
 Rust 1.91.0, `/usr/bin/sandbox-exec` present.
 
-The evidence is one receipt at `~/Sparks/office/evidence/confine-b0-fix/`,
-named `receipt-<head8>.log` for the head it pins, with its sha256 in the
-sibling `.sha256` file. The log prints the head, tree, toolchain and every
-command with its full output and exit.
+The evidence is one receipt,
+`~/Sparks/office/evidence/confine-b0-fix/receipt-6676d467.log`, which pins head
+`6676d467` and tree `d87a2130` (receipt line 3). Its sha256, recomputed with
+`shasum -a 256`, is
+`e49a33b6e1d1d30eedc3734b2b063a78b49dfa15675ffc417dbfed492917c608`. The sibling
+`receipt-6676d467.sha256` holds two lines because
+`~/Sparks/office/receipt-local.sh:32` appends the digest with `tee -a` while
+the log itself is overwritten; its second line is current and matches the
+recompute, and its first line (`1851b828...`) is an earlier write of the same
+path. The log prints the head, tree, toolchain and every command
+with its full output and exit.
 
 ## The committed forms
 
@@ -47,13 +54,21 @@ restores the profile with `cp -p` in its exit trap; `cmp` proves the bytes and
 `git diff --quiet` proves the tree.
 
 Control runs the whole confine suite per provider with `--no-fail-fast` on the
-unmodified tree: did 16 passed and 1 ignored, wallet 103 passed, model 39 passed.
+unmodified tree: did 16 passed and 1 ignored (33), wallet 103 passed (146),
+model 39 passed (195).
 
 The tool touches the restored profile after `cp -p`, because the wallet suite
 embeds its profile with `include_str!`; an older mtime would keep the planted
 copy inside the next test binary. The receipt also runs
 `root-read-b0-interrupt-test.sh`, which plants the wallet profile, sends SIGTERM
-while the suite is running, and proves the profile and the tree are restored.
+to the plant, and proves the profile and the tree are restored. The receipt's
+run printed `interrupted plant exit=143` (201), the status the plant's TERM trap
+sets. After the receipt's head the test also exits 7 unless the plant exits 143, so a
+plant that finishes and restores on the normal path no longer passes; the
+receipt's run meets that check but predates it. No line separates the SIGTERM
+line from the exit line (200-201), so the receipt does not show whether the
+plant's child-kill branch ran. The remove-restore falsifier fails at its `cmp`
+with `falsifier interrupt exit=5` (2223-2227).
 
 Each plant run records a result for every test in that provider's suite
 (receipt lines 244, 325, 409, 739, 1133, 1524, 1697, 1954, 2214; bare numbers
@@ -155,12 +170,19 @@ generator renders it is not measured for them.
 ## Limits
 
 - Measured on arm64 macOS 26.5.2 only; no x86-64 macOS host was available.
-- Each plant ran the whole suite, so every test in those suites has a result in
-  the receipt; no journey in them is unmeasured. The profile-text checks, such
-  as the six named above, fail when the plant changes the committed text, and
-  the receipt records the exact failing set for each candidate form. The
-  control suites ran the same tests on the unmodified tree, and they passed.
-- The measurement shows startup and every journey in the three suites. It does
-  not enumerate every file operation the loader performs, so it does not prove
-  the form will serve a future provider that reads the root directory
-  differently.
+- Each plant ran the whole suite, but the generated-profile starts ran on the
+  fixture row in every plant, so they are not results under a candidate form.
+- The six text checks named above all fail when the line is substituted:
+  under `data` at 446, 453, 457, 476, 505 and 585, under `metadata` at 797, 804,
+  808, 833, 862 and 1025. With the line deleted five fail (1190, 1198, 1220,
+  1252, 1352) and `every_did_and_wallet_allow_rule_has_a_registered_removal`
+  passes (1194); the `data` run's panic names the substituted line as the rule
+  no entry removes (452), and deletion leaves no such rule. The deletion run
+  also fails `profile_allow_table_check_refuses_each_bad_table` (`left: 4`,
+  `right: 5`, 1285-1289) and passes
+  `linux_contract_table_covers_every_committed_allow_form` (1279), which the
+  `metadata` run fails (864-866). The receipt lists each run's failing set.
+- The measurement covers startup and the journeys in the three suites that
+  load the committed `confine.sb`. It does not enumerate the file operations
+  the loader performs, so it does not prove the form will serve a future
+  provider that reads the root directory differently.
