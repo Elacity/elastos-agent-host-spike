@@ -11467,4 +11467,34 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    #[test]
+    fn library_target_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/Documents/a.txt");
+            let result = library_target(dir.path(), r4_fixture::ID, &uri);
+            assert!(
+                result.as_ref().is_ok_and(|target| target.uri == uri),
+                "{root}: {}",
+                result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default()
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let uri = format!("{}/Documents/a.txt", r4_fixture::HUMAN_ROOT);
+        let result = library_target(dir.path(), r4_fixture::ID, &uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "unstored Library target must refuse"
+        );
+    }
 }
