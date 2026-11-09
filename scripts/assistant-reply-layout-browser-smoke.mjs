@@ -580,7 +580,8 @@ try {
   seen.scrollbarMovedPx = await readerMovesUp("an overlay scrollbar drag", async (pushChunk) => {
     const box = await room.locator("#agent-harness-stream").boundingBox();
     assert.ok(box && box.width > 40 && box.height > 200, `the transcript can show a scrollbar: ${JSON.stringify(box)}`);
-    const x = Math.round(box.x + box.width - 2);
+    // The native overlay thumb is inset from the outer edge of the scrollport.
+    const x = Math.round(box.x + box.width - 6);
     // Start inside the thumb. Linux Chromium's bottom 8 px are outside
     // its draggable area, even when the scrollbar uses no layout gutter.
     const startY = Math.round(box.y + box.height - 20);
