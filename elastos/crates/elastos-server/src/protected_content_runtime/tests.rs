@@ -13557,3 +13557,103 @@ fn runtime_custody_profile_uses_the_stored_principal_root() {
         assert!(error.to_string().contains("unavailable"), "{error}");
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_custody_open_uses_the_stored_release_root() {
+    use crate::auth::{r4_fixture, PrincipalKind};
+    let policy = policy_body_for(
+        media_identity(0x41).encrypted_content().clone(),
+        content_access_id(0x41),
+        RightsActionV1::View,
+    );
+    for (kind, root) in [
+        (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+        (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+    ] {
+        let harness = runtime_custody_prebuy_availability_harness_with_policy(
+            0x61,
+            ContentAvailabilityTestConfig::accepted_now(),
+            Some(policy.policy_identity().unwrap()),
+        )
+        .await;
+        let data_dir = &harness.data_dir;
+        write_library_publish_test_composition(data_dir);
+        let proof = store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7-open");
+        r4_fixture::set_kind(data_dir, r4_fixture::ID, kind, root);
+        crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            data_dir,
+            r4_fixture::ID,
+            root,
+            &proof,
+            "R7 viewer",
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        let mint = runtime_mint_journal(data_dir)
+            .load(harness.mint_id)
+            .unwrap();
+        persist_runtime_custody_purchase_for_mint(
+            data_dir,
+            &mint,
+            r4_fixture::ID,
+            &profile.document().profile_did,
+            crate::auth::now_ts(),
+        );
+        let decrypt = PrepareOnlyCleanupDecryptProvider::with_expected_issuer_seed(0x61);
+        harness
+            .registry
+            .register_runtime_provider_target(PROTECTED_CONTENT_DECRYPT_PROVIDER_ID, decrypt)
+            .await
+            .unwrap();
+        harness
+            .registry
+            .register_sub_provider("wallet", Arc::new(LibraryReleaseWalletProvider))
+            .await
+            .unwrap();
+        let chain = RecordingProvider::new(
+            CHAIN_PROVIDER_ID,
+            ok_provider_response(json!({
+                "schema": CHAIN_PROTECTED_CONTENT_POLICY_SCHEMA_V1,
+                "policy_body": format!("0x{}", hex::encode(policy.canonical_bytes().unwrap())),
+            })),
+        );
+        harness
+            .registry
+            .register_sub_provider(CHAIN_PROVIDER_ID, chain)
+            .await
+            .unwrap();
+        let custody = RecordingProvider::new(CUSTODY_PROVIDER_ID, ok_provider_response(json!({})));
+        harness
+            .registry
+            .register_runtime_provider_target(CUSTODY_PROVIDER_ID, custody.clone())
+            .await
+            .unwrap();
+        let open_input = || super::RuntimeCustodyViewerOpenInput {
+            principal_id: r4_fixture::ID.to_string(),
+            mint_id: hex::encode(harness.mint_id.as_bytes()),
+            launch_id: Some(TEST_VIEWER_LAUNCH_ID.to_string()),
+            proof_binding_id: Some(proof.clone()),
+            session_id: Some("runtime-session:alpha".to_string()),
+            grant_id: Some("grant:alpha".to_string()),
+        };
+        let result =
+            super::open_runtime_custody_viewer(data_dir, harness.registry.clone(), open_input())
+                .await;
+        assert!(
+            result.is_err(),
+            "fixture custody provider refuses after assembly"
+        );
+        assert!(
+            !custody.requests().await.is_empty(),
+            "{root}: release assembly did not reach custody: {result:?}"
+        );
+        r4_fixture::remove(data_dir, r4_fixture::ID);
+        let missing =
+            super::open_runtime_custody_viewer(data_dir, harness.registry.clone(), open_input())
+                .await;
+        assert!(missing.unwrap_err().to_string().contains("unavailable"));
+    }
+}

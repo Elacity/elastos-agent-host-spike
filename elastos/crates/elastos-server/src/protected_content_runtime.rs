@@ -6342,7 +6342,9 @@ pub(crate) async fn open_runtime_custody_viewer(
             return Err(release_unavailable_missing!()());
         }
     };
-    let localhost_root = crate::auth::principal_localhost_root(&input.principal_id);
+    let localhost_root =
+        crate::auth::principal_stored_localhost_root(Some(data_dir), &input.principal_id)
+            .map_err(|_| release_unavailable_missing!()())?;
     let operation = match assemble_protected_content_runtime_release_operation(
         data_dir,
         &input.principal_id,
