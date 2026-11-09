@@ -804,20 +804,21 @@ The `run` client attaches shell and client sessions
 (`elastos/crates/elastos-server/src/runtime_control.rs:917`), then returns from
 `run_local` without a detach or grant-revoke call (`run_cmd.rs:264`). Thus client
 exit alone does not end its grants or prove their absence. The shell can see
-all pending requests (`api/handlers/capability.rs:244`), but the current list
-selects grants by the caller's session (`api/handlers/capability.rs:433`). Its
-rows describe granted requests; they are not a global inventory of remaining
-allowances. Audit events provide supporting history only.
+all pending requests (`api/handlers/capability.rs:244`). The plain list selects
+grants by the caller's session; the scoped view lists every session's live
+grants. A plain response is not a global inventory of remaining allowances.
+Audit events provide supporting history only.
 
-The Runtime change that flips this check is a shell-authorized view of every
-session's live grants, with exhausted, revoked and expired grants filtered by
-Runtime. The fixture expects the existing list response to identify that view
-with `scope: "all_sessions_live"` and `capabilities: []`. A session-local or
-unmarked response stays BLOCKED. A global nonempty list fails with `live grant
-leftover`. This is a future response contract, not a claim that Runtime exposes
-it today. Client callers retain their own-session view. This lane changes zero
-Runtime routes and performs zero revocations. F-cleanup-grant is deferred until
-this blocker closes; the synthetic scope falsifier tests honest grading only.
+The check uses the shell-authorized view of every session's live grants, with
+exhausted, revoked and expired grants filtered by Runtime. The fixture asks
+that view by `?scope=all_sessions_live` and expects the marker
+`scope: "all_sessions_live"` with an empty `capabilities` list. A session-local
+or unmarked response stays BLOCKED. A global nonempty list fails with `live
+grant leftover`. Client callers retain their own-session view. This lane changes
+zero Runtime routes; the fixture ends each grant it minted through the existing
+shell revoke route, so the census reads the live view of the cleaned run.
+F-cleanup-grant is deferred until this blocker closes; the synthetic scope
+falsifier tests honest grading only.
 
 Before tests, `run.sh` uses the existing report executable to check earlier
 `target/home-*` roots. It selects only those direct children (two-second limit)

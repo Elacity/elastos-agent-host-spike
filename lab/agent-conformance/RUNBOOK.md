@@ -504,10 +504,12 @@ the line names the retained `target/home-*`. Passing journeys remove their own
 Homes after capture, source and report checks. The census tool's scratch Home
 is removed after its captures join the existing credential-check inventory.
 
-The grant result is currently `BLOCKED(AC-021-GRANTS)`: the fixture shell sees
-its own grants. `run_leaves_no_live_grant` stays an ignored table row until
-Runtime supplies the global live-grant contract in GAPS.md. F-cleanup-grant
-waits for that contract. F-cleanup-temp and F-cleanup-process run the existing
+The grant result is `pending:0 grants:0` when the fixture ends its own grants.
+The census asks the shell-only live view (`?scope=all_sessions_live`); the
+controller ends each grant it minted through the existing shell revoke route
+before the final census, so the line reads the live view of the cleaned run.
+`run_leaves_no_live_grant` stays an ignored table row. F-cleanup-grant waits
+for that row. F-cleanup-temp and F-cleanup-process run the existing
 `granted_read_succeeds` test; both must fail for their planted reason, then
 pass after restoration. Other cleanup falsifiers exercise the port check,
 pending and scope grading, capture inventory, earlier-run detection and table
@@ -597,8 +599,9 @@ After collection, the controller checks pending requests while the operator
 is alive. Its shell-owned pending control proves the live census call can
 refuse a leftover and is then denied. The final empty-pending check precedes
 operator group stop, root census, API-port closure and the empty `tmp/` check.
-Cross-session live grants remain `BLOCKED(AC-021-GRANTS)` and give zero passing
-credit. Resident cancellation stays RT4; this row covers the pending-request
+The census asks the shell-only live view and the controller ends the grants it
+minted; an unrevoked cross-session grant still fails with `live grant
+leftover`. Resident cancellation stays RT4; this row covers the pending-request
 point only. GAPS.md defines the cleanup visibility limits.
 
 F-cancel-sibling cancels both first requests and must fail the sibling check.
@@ -631,7 +634,8 @@ empty. A further two-second quiet window polls the same list; five seconds is
 the maximum permitted window. The existing cleanup path then checks the
 operator and both client roots through its lsof implementation, checks the
 closed API port and empty `tmp/` directories, and checks captures for fixture
-credentials. Live grants remain `BLOCKED(AC-021-GRANTS)`.
+credentials. The cleanup path ends the grants the fixture minted before its
+live-grant census.
 
 Read the single checked `kill settlement:` line for both child statuses,
 signal, kill time, first barrier time, overlap, elapsed times, quiet duration,
