@@ -11086,4 +11086,33 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    #[test]
+    fn trash_record_remove_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            write_trash_record(dir.path(), r4_fixture::ID, &record).unwrap();
+            let uri = trash_record_uri(root, &record.trash_uri);
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            assert!(path.is_file(), "{uri}");
+            let result = remove_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+            assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = remove_trash_record(
+            dir.path(),
+            r4_fixture::ID,
+            &trash(r4_fixture::HUMAN_ROOT).trash_uri,
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
