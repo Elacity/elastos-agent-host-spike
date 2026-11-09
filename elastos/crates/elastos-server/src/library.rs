@@ -3700,7 +3700,7 @@ fn localhost_space_pointer_object(
     let uri = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
-    let target = library_target(data_dir, principal_id, &uri)?;
+    let target = library_target_from_root(data_dir, &uri, &uri)?;
     let metadata = fs::metadata(&target.path).ok();
     let modified_at = metadata
         .as_ref()
@@ -3883,14 +3883,22 @@ fn library_target(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Res
         crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
             .localhost_root()
             .to_string();
-    let uri = clean_library_uri(&localhost_root, uri)?;
+    library_target_from_root(data_dir, &localhost_root, uri)
+}
+
+fn library_target_from_root(
+    data_dir: &Path,
+    localhost_root: &str,
+    uri: &str,
+) -> anyhow::Result<LibraryTarget> {
+    let uri = clean_library_uri(localhost_root, uri)?;
     let rooted = uri
         .strip_prefix("localhost://")
         .ok_or_else(|| anyhow!("library object URI must be localhost://"))?;
     let path = rooted_localhost_fs_path(data_dir, rooted)
         .ok_or_else(|| anyhow!("invalid library object path"))?;
     Ok(LibraryTarget {
-        localhost_root,
+        localhost_root: localhost_root.to_string(),
         uri,
         path,
     })
