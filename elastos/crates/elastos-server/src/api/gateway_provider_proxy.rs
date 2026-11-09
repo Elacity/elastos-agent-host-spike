@@ -3448,7 +3448,8 @@ pub(crate) async fn runtime_custody_buy_via_gateway(
     if listing.mint_id != input.mint_id {
         return Err(purchase_denied_missing!()());
     }
-    let localhost_root = crate::auth::principal_localhost_root(&input.principal_id);
+    let localhost_root = runtime_custody_buyer_root(&state.data_dir, &input.principal_id)
+        .map_err(purchase_denied!())?;
     let profile = crate::collaboration_profile_authority::load_profile_authority(
         &state.data_dir,
         &input.principal_id,
@@ -3729,6 +3730,17 @@ pub(crate) async fn runtime_custody_buy_via_gateway(
     purchase.updated_at = crate::auth::now_ts();
     crate::protected_content_runtime::persist_runtime_custody_purchase(&state.data_dir, &purchase)?;
     Ok(runtime_custody_buy_terminal_response(&purchase))
+}
+
+fn runtime_custody_buyer_root(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<String> {
+    Ok(
+        super::gateway_home_token::wallet_principal_root(data_dir, principal_id)?
+            .localhost_root()
+            .to_string(),
+    )
 }
 
 async fn runtime_custody_publish_creator_tail_from_facts(
@@ -4370,6 +4382,31 @@ fn library_events_sse_event(payload: serde_json::Value) -> SseEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn r4_buyer_profile_uses_stored_root() {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        use crate::auth::PrincipalKind;
+        let missing = tempfile::tempdir().unwrap();
+        assert_eq!(
+            super::runtime_custody_buyer_root(missing.path(), ID)
+                .unwrap_err()
+                .to_string(),
+            "Wallet authority principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            store(dir.path(), kind);
+            assert_eq!(
+                super::runtime_custody_buyer_root(dir.path(), ID).unwrap(),
+                expected,
+                "R4 buyer profile root"
+            );
+        }
+    }
+
     #[test]
     fn fail_closed_macros_keep_the_stable_message_and_carry_the_cause() {
         let error = (creator_mint_unavailable!())("boom");
