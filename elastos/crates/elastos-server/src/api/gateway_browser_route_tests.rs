@@ -8364,6 +8364,7 @@ async fn test_browser_open_runtime_stream_socket_accepts_and_closes_fail_closed(
     let app = gateway_router(browser_engine_attached_test_state(dir.path()).await);
 
     let response = app
+        .clone()
         .oneshot(
             test_browser_request("localhost:61180", "null")
                 .method("POST")
@@ -8385,6 +8386,9 @@ async fn test_browser_open_runtime_stream_socket_accepts_and_closes_fail_closed(
 
     let stream_id = payload["stream_session"]["stream_id"].as_str().unwrap();
     let socket_path = browser_runtime_stream_socket_path(dir.path(), stream_id).unwrap();
+    // Keep the router's consent owner alive while the listener handles the stream.
+    // Give listener cancellation a turn before testing that it still accepts.
+    tokio::task::yield_now().await;
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
     let mut byte = [0_u8; 1];
     let read = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut byte))
