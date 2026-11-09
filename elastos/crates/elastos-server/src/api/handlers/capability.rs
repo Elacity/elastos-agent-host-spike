@@ -558,7 +558,8 @@ pub struct RequestRecordOutput {
     pub reason: String,
     /// `pending`, `granted`, `denied` (a revoked grant reads `denied`) or `expired`.
     pub status: &'static str,
-    /// `shell` or `runtime` on a denied or expired record, null otherwise.
+    /// `shell` or `runtime` on a denied record, null otherwise: the core
+    /// records no settler for a pending, granted or expired record.
     pub settled_by: Option<&'static str>,
 }
 
@@ -575,8 +576,9 @@ fn request_record(r: &PendingCapabilityRequest) -> RequestRecordOutput {
             Settler::Shell => ("denied", Some("shell")),
             Settler::Runtime => ("denied", Some("runtime")),
         },
-        // Only the Runtime's request timeout writes `Expired`.
-        RequestStatus::Expired => ("expired", Some("runtime")),
+        // The core records no settler for `Expired`: the store's cleanup
+        // writes it, and so does a shell grant on a past-deadline request.
+        RequestStatus::Expired => ("expired", None),
     };
     RequestRecordOutput {
         request_id: r.id.to_string(),
@@ -1280,11 +1282,11 @@ mod tests {
             "the request is due"
         );
         let (_, by_id) = records(&expiring, "session-c").await;
-        let want = record(&expired, "session-c", "expired", Some("runtime"));
+        let want = record(&expired, "session-c", "expired", None);
         assert_eq!(
             by_id.get(&expired).cloned(),
             want,
-            "an expired request, by the runtime"
+            "an expired request names no settler"
         );
     }
 
@@ -1330,6 +1332,52 @@ mod tests {
             "requests need a session".to_owned(),
         );
         assert_eq!(missing, need, "a shell request with no session is refused");
+    }
+
+    #[tokio::test]
+    async fn a_grant_on_a_past_deadline_request_reads_expired_with_no_settler() {
+        use axum::{body::Body, http::header::AUTHORIZATION, http::Request};
+        use elastos_runtime::session::{SessionRegistry, SessionType};
+        use tower::ServiceExt;
+        let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let state = CapabilityState {
+            pending_store: Arc::new(PendingRequestStore::with_timeout(audit.clone(), 0)),
+            ..test_state()
+        };
+        let session = elastos_runtime::session::SessionId::from_string("session-d");
+        let resource = ResourceId::new("elastos://content/publish");
+        let store = state.pending_store.clone();
+        let request = store.create_request(session, resource.clone(), Action::Write);
+        let id = request.await.id.to_string();
+        let session_registry = Arc::new(SessionRegistry::new(audit));
+        let shell = session_registry.create_session(SessionType::Shell, None);
+        let token = shell.await.token;
+        let api_state = crate::api::middleware::ApiState { session_registry };
+        let app = crate::api::server::shell_capability_routes(api_state, state.clone());
+        let grant = Request::post("/api/capability/grant")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "request_id": id }).to_string()))
+            .unwrap();
+        let refused = app.oneshot(grant).await.unwrap();
+        let status = refused.status();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the shell grant route refuses it"
+        );
+        let manager = &state.capability_manager;
+        let constraints = TokenConstraints::default();
+        let minted = manager.grant("session-d", resource, Action::Write, constraints, None);
+        // The store's own grant, as the browser operator approval calls it.
+        let stored = store
+            .grant_request(&id, minted, GrantDuration::Session)
+            .await;
+        assert_eq!(stored, Err(format!("Request {id} has expired")));
+        let (_, by_id) = records(&state, "session-d").await;
+        let want = record(&id, "session-d", "expired", None);
+        let message = "a grant-written expiry reads expired with no settler";
+        assert_eq!(by_id.get(&id).cloned(), want, "{message}");
     }
 
     #[tokio::test]
