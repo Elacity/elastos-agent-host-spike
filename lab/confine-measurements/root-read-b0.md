@@ -68,12 +68,22 @@ copy inside the next test binary. The receipt also runs
 `root-read-b0-interrupt-test.sh`, which plants the wallet profile, sends SIGTERM
 to the plant, and proves the profile and the tree are restored. The receipt's
 run printed `interrupted plant exit=143` (201), the status the plant's TERM trap
-sets. After the receipt's head the test also exits 7 unless the plant exits 143, so a
-plant that finishes and restores on the normal path no longer passes; the
-receipt's run meets that check but predates it. No line separates the SIGTERM
-line from the exit line (200-201), so the receipt does not show whether the
-plant's child-kill branch ran. The remove-restore falsifier fails at its `cmp`
-with `falsifier interrupt exit=5` (2223-2227).
+sets. That run predates the test's exit-143 check, added at `741c53da`. The
+remove-restore falsifier fails at its `cmp` with `falsifier interrupt exit=5`
+(2223-2227).
+
+A second receipt runs the test with that check:
+`~/Sparks/office/evidence/confine-b0-fix/receipt-af44019e-interrupt.log`,
+which pins head `af44019e` and tree `85c96eb9` (its line 3), sha256
+`42fc64737dc81ab2063900d4d42e7fdc974e06e8fbf4defba5ff7e6e0532940f`, recomputed
+with `shasum -a 256` and equal to the one line of its `.sha256` sidecar. In
+that log the test prints `interrupted plant exit=143` and exits 0 (its lines
+11-13). Its falsifier drops the test's `kill -TERM "$pid"` line, so the plant
+runs the whole wallet suite (97 passed, 6 failed, its line 338) and restores on
+the normal path; the test then prints `plant exit=101, not 143: the plant was
+not interrupted` and exits 7 (its lines 343-345). In both receipts no line
+separates the SIGTERM line from the exit-143 line (200-201 here, 11-12 there),
+so neither shows whether the plant's child-kill branch ran.
 
 Each plant run records a result for every test in that provider's suite
 (receipt lines 244, 325, 409, 739, 1133, 1524, 1697, 1954, 2214; bare numbers
