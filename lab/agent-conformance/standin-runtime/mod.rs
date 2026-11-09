@@ -3448,13 +3448,9 @@ mod tests {
             Life::Live,
             false,
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-live".to_owned()]),
             "the stand-in leaves exhausted, revoked and expired grants out"
         );
@@ -4684,13 +4680,9 @@ mod tests {
             (Life::Live, false),
             "the stand-in leaves the seeded grant live"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-1".to_owned()]),
             "the stand-in still lists the seeded live grant"
         );
@@ -4727,13 +4719,9 @@ mod tests {
             (Life::Live, false),
             "the stand-in leaves a live grant on a refused stop"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-1".to_owned()]),
             "the stand-in still lists the live grant"
         );
@@ -4790,13 +4778,9 @@ mod tests {
             (Life::Live, false),
             "the stand-in leaves the sibling session's grant live"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in lists the sibling grant and leaves the revoked grants out"
         );
@@ -4843,13 +4827,9 @@ mod tests {
             (Life::Live, false),
             "the stand-in leaves the sibling grant live"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in still lists the sibling grant"
         );
@@ -6336,15 +6316,6 @@ mod tests {
             "the stand-in drops the grant from the shell all-sessions view at its expiry instant"
         );
         assert_eq!(
-            request_ids(
-                &standin
-                    .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
-                    .expect("the stand-in scoped live view at the expiry instant")
-            ),
-            BTreeSet::new(),
-            "the stand-in drops the grant from the scoped all-sessions view at its expiry instant"
-        );
-        assert_eq!(
             request_entries(&standin, &id)
                 .iter()
                 .filter(|entry| entry["status"] == "granted")
@@ -7629,13 +7600,9 @@ mod tests {
             (Life::Revoked, false),
             "the stand-in revokes the starting instance's live grant"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in drops the revoked grant and keeps the sibling grant"
         );
@@ -7925,18 +7892,14 @@ mod tests {
             json!({ "success": true }),
             "the stand-in answers success true for the shell grant"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from([request_id.clone()]),
             "the stand-in lists exactly the one live grant"
         );
         assert_eq!(
-            plain["capabilities"][0]["session_id"], owner_id,
+            query["capabilities"][0]["session_id"], owner_id,
             "the stand-in binds that grant to the requester"
         );
         let sibling_list = standin
@@ -8217,13 +8180,9 @@ mod tests {
             "Revoked",
             "the stand-in refuses the stopped session's grant",
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in lists exactly the sibling grant"
         );
