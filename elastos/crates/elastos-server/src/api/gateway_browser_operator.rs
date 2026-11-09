@@ -78,6 +78,7 @@ impl BrowserOperatorService {
             .validate(token, session, Action::Write, &resource, None);
         (request, validated.await)
     }
+
 }
 
 pub(crate) fn register_browser_operator_sessions(
@@ -355,15 +356,15 @@ pub(in crate::api::gateway) async fn request_admission(
         return failure(StatusCode::TOO_MANY_REQUESTS, "operator_requests_busy");
     }
     service.pending.cleanup_old(60).await;
-    let pending = service
-        .pending
-        .create_request_with_reason(
-            session.id.clone(),
-            ResourceId::new(format!("elastos://browser/pages/{page_id}/input")),
-            Action::Write,
-            request.reason.clone(),
-        )
-        .await;
+    let pending = crate::api::handlers::capability::create_request_retiring(
+        &service.pending,
+        &service.capabilities,
+        session.id.clone(),
+        ResourceId::new(format!("elastos://browser/pages/{page_id}/input")),
+        Action::Write,
+        request.reason.clone(),
+    )
+    .await;
     if !pending.is_pending() {
         return failure(StatusCode::TOO_MANY_REQUESTS, "operator_requests_busy");
     }

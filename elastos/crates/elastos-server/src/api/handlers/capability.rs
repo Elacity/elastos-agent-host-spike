@@ -17,7 +17,7 @@ use elastos_runtime::capability::{
     Action, CapabilityManager, CapabilityStore, GrantDuration, PolicyEvaluator, PolicyOutcome,
     RequestStatus, ResourceId, Settler, TokenConstraints,
 };
-use elastos_runtime::session::Session;
+use elastos_runtime::session::{Session, SessionId};
 
 use crate::provider_resource::ensure_generic_wallet_capability;
 
@@ -122,11 +122,15 @@ pub async fn request_capability(
     // For now, all requests go to pending (no auto-grant policy yet)
     // Future: check if session already has this capability, or if policy allows auto-grant
 
-    retire_dead_grants(&state.pending_store, &state.capability_manager).await;
-    let request = state
-        .pending_store
-        .create_request_with_reason(session.id.clone(), resource, action, input.reason)
-        .await;
+    let request = create_request_retiring(
+        &state.pending_store,
+        &state.capability_manager,
+        session.id.clone(),
+        resource,
+        action,
+        input.reason,
+    )
+    .await;
 
     // If pre-denied (e.g. rate limit), surface the denial immediately
     if request.is_denied() {
@@ -467,11 +471,29 @@ async fn is_live(manager: &CapabilityManager, r: &PendingCapabilityRequest) -> b
     }
 }
 
+/// The one way a server path creates a pending request: retire dead grants,
+/// then create. `POST /api/capability/request`, the resource bridge and
+/// Browser operator admission each call it with their own store and manager.
+pub async fn create_request_retiring(
+    store: &PendingRequestStore,
+    manager: &CapabilityManager,
+    session_id: SessionId,
+    resource: ResourceId,
+    action: Action,
+    reason: String,
+) -> PendingCapabilityRequest {
+    retire_dead_grants(store, manager).await;
+    let request = store.create_request_with_reason(session_id, resource, action, reason);
+    request.await
+}
+
 /// At capacity, settle each granted record whose token can no longer
 /// validate as denied by the Runtime, so the store's capacity cleanup can
 /// reclaim it. A grant that can still validate is left alone, and below
-/// capacity nothing changes. Both request-creation paths call this first.
-pub async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityManager) {
+/// capacity nothing changes. That cleanup drops only records older than
+/// one second, so a grant spent in the same second as the next request is
+/// retired but still holds its slot until the second turns.
+async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityManager) {
     let held = store.list_requests().await;
     if held.len() < MAX_PENDING_REQUESTS {
         return;

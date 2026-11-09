@@ -443,9 +443,10 @@ impl PendingRequestStore {
     ///
     /// These are the records held now, not a full history: `cleanup_old` and
     /// the capacity guard drop old denied and expired records, and a granted
-    /// record once its token's expiry has passed; a granted record whose token
-    /// has not expired stays. Epoch, revocation and use count are checked by
-    /// `CapabilityManager::can_still_validate`, not here.
+    /// record once its token's expiry has passed. An unexpired granted record
+    /// stays unless its holder settles it first: the server, at capacity,
+    /// denies each grant that `CapabilityManager::can_still_validate` refuses
+    /// (spent, revoked by id, old epoch), and cleanup then drops it.
     pub async fn list_requests(&self) -> Vec<PendingCapabilityRequest> {
         let requests = self.requests.read().await;
         requests.values().cloned().collect()
