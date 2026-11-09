@@ -1751,7 +1751,7 @@ mod tests {
 
     #[test]
     fn documents_save_rejects_wrong_principal_without_changes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document = documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Private")).unwrap();
         let err = documents_save_local(
             dir.path(),
@@ -1774,7 +1774,7 @@ mod tests {
 
     #[test]
     fn documents_save_concurrent_revision_has_one_complete_winner() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let start = std::sync::Barrier::new(2);
@@ -1823,7 +1823,7 @@ mod tests {
 
     #[test]
     fn documents_save_detects_other_principal_root_body_writer() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         crate::auth::write_principal_root_object(
@@ -1854,7 +1854,7 @@ mod tests {
 
     #[test]
     fn documents_save_metadata_failure_reports_partial_outcome_until_read() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let metadata_path = documents_metadata_path(dir.path(), &document.doc_did).unwrap();
@@ -1992,7 +1992,7 @@ mod tests {
 
     #[test]
     fn documents_summary_is_read_only_on_empty_store() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
 
         let summary = documents_load_summary(dir.path(), TEST_PRINCIPAL).unwrap();
 
@@ -2003,7 +2003,7 @@ mod tests {
 
     #[test]
     fn documents_summary_lists_plain_folder_files_without_importing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         std::fs::create_dir_all(docs_root.join("Notes")).unwrap();
         std::fs::create_dir_all(docs_root.join(".hidden")).unwrap();
@@ -2038,7 +2038,7 @@ mod tests {
 
     #[test]
     fn documents_summary_folder_files_stay_within_depth_and_count() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         let mut deep = docs_root.clone();
         for level in 0..crate::auth::MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH {
@@ -2065,7 +2065,7 @@ mod tests {
 
     #[test]
     fn documents_summary_folder_scan_reads_a_bounded_number_of_entries() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = dir.path().join("Documents");
         std::fs::create_dir_all(docs_root.join("folder")).unwrap();
         // Folders and files Documents does not list count as well.
@@ -2092,7 +2092,7 @@ mod tests {
         std::fs::write(outside.path().join("Elsewhere.txt"), "x\n").unwrap();
 
         // The Documents folder itself is a link.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         std::fs::create_dir_all(docs_root.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(outside.path(), &docs_root).unwrap();
@@ -2100,7 +2100,7 @@ mod tests {
         assert!(summary.files.is_empty(), "{:?}", summary.files);
 
         // A folder on the way to it is a link.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         let principal_folder = docs_root.parent().unwrap();
         std::fs::create_dir_all(principal_folder.parent().unwrap()).unwrap();
@@ -2111,7 +2111,7 @@ mod tests {
         assert!(summary.files.is_empty(), "{:?}", summary.files);
 
         // A link inside it is skipped.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         std::fs::create_dir_all(&docs_root).unwrap();
         std::fs::write(docs_root.join("Own.md"), "x\n").unwrap();
@@ -2132,7 +2132,7 @@ mod tests {
 
     #[test]
     fn documents_create_explicitly_adds_summary_object() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
 
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Project Plan")).unwrap();
@@ -2153,7 +2153,7 @@ mod tests {
 
     #[test]
     fn documents_import_chat_attachment_is_idempotent_local_object() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
 
         let imported = documents_import_chat_attachment_local(
             dir.path(),
@@ -2210,7 +2210,7 @@ mod tests {
 
     #[test]
     fn documents_working_copy_is_encrypted_for_protected_principal_root() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let protection =
             crate::auth::store_test_principal_root_protection(dir.path(), TEST_PRINCIPAL);
 
@@ -2236,7 +2236,7 @@ mod tests {
 
     #[test]
     fn documents_publish_export_and_finish_records_revision() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Publish Me")).unwrap();
         let document = documents_save_local(
@@ -2331,7 +2331,7 @@ mod tests {
 
     #[test]
     fn documents_reject_cross_principal_document_access() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let owned =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Private Notes")).unwrap();
 
@@ -2356,7 +2356,7 @@ mod tests {
 
     #[test]
     fn documents_rejects_unsupported_metadata_schema() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Schema Test")).unwrap();
         let path = documents_metadata_path(dir.path(), &document.doc_did).unwrap();
@@ -2372,7 +2372,7 @@ mod tests {
 
     #[test]
     fn documents_summary_skips_incompatible_metadata_entries() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document = documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Current")).unwrap();
         let legacy_did = "did:key:z6Mklegacydoc";
         let legacy_dir = documents_metadata_root(dir.path())
@@ -2427,7 +2427,7 @@ mod tests {
 
     #[test]
     fn documents_rejects_doc_did_path_traversal() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         for doc_did in [
             "../did:key:z6Mkdoc",
             "did:key:../z6Mkdoc",
@@ -2445,7 +2445,7 @@ mod tests {
 
     #[tokio::test]
     async fn documents_publish_and_unpublish_use_provider_plane() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         install_test_documents_viewer(dir.path());
         let registry = Arc::new(ProviderRegistry::new());
         let content_provider = Arc::new(crate::content::ContentProvider::new(
@@ -2564,7 +2564,7 @@ mod tests {
             ipfs_data_dir.display()
         );
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         install_test_documents_viewer(dir.path());
         let registry = Arc::new(ProviderRegistry::new());
         let ipfs_config = elastos_runtime::provider::BridgeProviderConfig {
@@ -2631,7 +2631,7 @@ mod tests {
 
     #[tokio::test]
     async fn documents_publish_requires_content_provider() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         install_test_documents_viewer(dir.path());
         let registry = Arc::new(ProviderRegistry::new());
         registry
@@ -2649,7 +2649,7 @@ mod tests {
 
     #[test]
     fn documents_delete_removes_object_and_working_copy() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Delete Me")).unwrap();
         let body_path = documents_root(dir.path(), TEST_PRINCIPAL)
