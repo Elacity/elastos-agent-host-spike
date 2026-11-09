@@ -588,6 +588,9 @@ try {
     const endY = Math.round(box.y + Math.max(24, box.height * 0.12));
     await page.mouse.move(x, startY);
     await page.waitForTimeout(120);
+    // Paint the native thumb in headless Chromium before pointer hit-testing.
+    // DOM animation frames alone do not exercise this compositor surface.
+    await page.screenshot();
     await page.mouse.down();
     await page.mouse.move(x, endY, { steps: 14 });
     await page.mouse.up();
