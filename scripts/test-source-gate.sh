@@ -33,6 +33,7 @@ release() {
   python3 scripts/ci-download-cache-test.py
   python3 scripts/components-release-integrity-check.py --self-test
   python3 scripts/publish-platform-artifacts-test.py
+  python3 scripts/fixture-git-env-test.py
   python3 scripts/release-platform-input-test.py
   python3 scripts/prepare-release-platform-test.py
   python3 scripts/media-tools-build-test.py
