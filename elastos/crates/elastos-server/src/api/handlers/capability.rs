@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use elastos_common::localhost::{is_supported_resource_scheme, is_system_only_backend_resource};
 use elastos_runtime::capability::{
-    pending::{PendingCapabilityRequest, PendingRequestStore},
+    pending::{PendingCapabilityRequest, PendingRequestStore, MAX_PENDING_REQUESTS},
     Action, CapabilityManager, CapabilityStore, GrantDuration, PolicyEvaluator, PolicyOutcome,
     RequestStatus, ResourceId, Settler, TokenConstraints,
 };
-use elastos_runtime::session::Session;
+use elastos_runtime::session::{Session, SessionId};
 
 use crate::provider_resource::ensure_generic_wallet_capability;
 
@@ -122,10 +122,15 @@ pub async fn request_capability(
     // For now, all requests go to pending (no auto-grant policy yet)
     // Future: check if session already has this capability, or if policy allows auto-grant
 
-    let request = state
-        .pending_store
-        .create_request_with_reason(session.id.clone(), resource, action, input.reason)
-        .await;
+    let request = create_request_retiring(
+        &state.pending_store,
+        &state.capability_manager,
+        session.id.clone(),
+        resource,
+        action,
+        input.reason,
+    )
+    .await;
 
     // If pre-denied (e.g. rate limit), surface the denial immediately
     if request.is_denied() {
@@ -457,28 +462,60 @@ fn capability_output(
     })
 }
 
-/// A granted record whose token still authorises: not revoked by id, not
-/// spent, not past its expiry, and minted in the current epoch.
-async fn is_live(store: &CapabilityStore, r: &PendingCapabilityRequest) -> bool {
-    let Some(token) = r.granted_token() else {
-        return false;
-    };
-    let spent = match token.constraints().max_uses() {
-        Some(max_uses) => store.has_exceeded_uses(token.id(), max_uses).await,
+/// A granted record whose token can still validate, by the Runtime's one
+/// rule (`CapabilityManager::can_still_validate`).
+async fn is_live(manager: &CapabilityManager, r: &PendingCapabilityRequest) -> bool {
+    match r.granted_token() {
+        Some(token) => manager.can_still_validate(token).await,
         None => false,
-    };
-    let expired = token.expiry().is_some_and(|expiry| expiry.is_expired());
-    !store.is_token_revoked(token.id()).await
-        && !spent
-        && !expired
-        && store.is_epoch_valid(token.constraints().epoch())
+    }
+}
+
+/// The one way a server path creates a pending request: retire dead grants,
+/// then create. `POST /api/capability/request`, the resource bridge and
+/// Browser operator admission each call it with their own store and manager.
+pub async fn create_request_retiring(
+    store: &PendingRequestStore,
+    manager: &CapabilityManager,
+    session_id: SessionId,
+    resource: ResourceId,
+    action: Action,
+    reason: String,
+) -> PendingCapabilityRequest {
+    retire_dead_grants(store, manager).await;
+    let request = store.create_request_with_reason(session_id, resource, action, reason);
+    request.await
+}
+
+/// At capacity, settle each granted record whose token can no longer
+/// validate as denied by the Runtime, so the store's capacity cleanup can
+/// reclaim it. A grant that can still validate is left alone, and below
+/// capacity nothing changes. That cleanup drops only records older than
+/// one second, so a grant spent in the same second as the next request is
+/// retired but still holds its slot until the second turns.
+async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityManager) {
+    let held = store.list_requests().await;
+    if held.len() < MAX_PENDING_REQUESTS {
+        return;
+    }
+    for r in held {
+        let Some(token) = r.granted_token() else {
+            continue;
+        };
+        if !manager.can_still_validate(token).await {
+            let reason = "grant can no longer validate";
+            store
+                .revoke_request_by(r.id.as_str(), reason, Settler::Runtime)
+                .await;
+        }
+    }
 }
 
 /// Every session's live grants, sorted by session then request id.
 async fn live_capabilities(state: &CapabilityState) -> ListCapabilitiesOutput {
     let mut live = Vec::new();
     for r in state.pending_store.list_requests().await {
-        if is_live(&state.capability_store, &r).await {
+        if is_live(&state.capability_manager, &r).await {
             live.push(r);
         }
     }
@@ -1120,6 +1157,123 @@ mod tests {
         assert_eq!(
             body, expected,
             "the live view is exactly the two live grants"
+        );
+    }
+
+    /// Waits on the clock (a condition with a deadline, no sleep) until every
+    /// held record is older than the capacity cleanup's 0 s retention.
+    async fn age_past_capacity_retention(store: &PendingRequestStore) {
+        let held = store.list_requests().await;
+        let newest = held.iter().map(|r| r.requested_at.unix_secs).max().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while elastos_common::SecureTimestamp::now().unix_secs <= newest {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the clock passed the newest second"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_grants_at_capacity_are_retired_and_a_new_request_is_admitted() {
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        let state = test_state();
+        let (store, manager) = (
+            state.pending_store.clone(),
+            state.capability_manager.clone(),
+        );
+        let resource = ResourceId::new("elastos://content/publish");
+        let (old_epoch, _) = grant_in(&state, "session-dead", None, None).await;
+        manager.revoke_all("key rotated");
+        let (live, _) = grant_in(&state, "session-live", None, None).await;
+        let (revoked, token) = grant_in(&state, "session-dead", None, None).await;
+        manager.revoke(*token.id(), "operator detached").await;
+        let mut spent = Vec::new();
+        for n in 0..MAX_PENDING_REQUESTS - 3 {
+            let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
+            let (id, token) = grant_in(&state, &session, Some(1), None).await;
+            let used = manager.validate(&token, &session, Action::Write, &resource, None);
+            used.await.expect("the once grant is used");
+            spent.push(id);
+        }
+        assert_eq!(store.list_requests().await.len(), MAX_PENDING_REQUESTS);
+        age_past_capacity_retention(&store).await;
+
+        let input = RequestCapabilityInput {
+            resource: "elastos://content/publish".to_string(),
+            action: "write".to_string(),
+            reason: String::new(),
+        };
+        let client = Extension(Session::new_capsule("vm-new".to_string()));
+        let reply = request_capability(State(state.clone()), client, Json(input)).await;
+        let held = store.list_requests().await;
+        let held: Vec<String> = held.iter().map(|r| r.id.to_string()).collect();
+        let retired = spent.iter().all(|id| !held.contains(id));
+        assert!(retired, "every spent once grant is retired");
+        assert!(!held.contains(&revoked), "a grant revoked by id is retired");
+        assert!(
+            !held.contains(&old_epoch),
+            "a grant from an old epoch is retired"
+        );
+        assert!(
+            held.contains(&live),
+            "a grant that can still validate stays"
+        );
+        let status = reply.unwrap().0.status;
+        assert_eq!(
+            status, "pending",
+            "the new request is admitted after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_cleanup_leaves_a_working_grant_in_the_live_view() {
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        use elastos_runtime::session::SessionId;
+        let state = test_state();
+        let store = state.pending_store.clone();
+        let (live, token) = grant_in(&state, "session-grant", None, None).await;
+        let granted_at = store
+            .get_request(&live)
+            .await
+            .unwrap()
+            .requested_at
+            .unix_secs;
+        // Capacity cleanup drops records older than 0 s. Wait on the clock
+        // (a condition with a deadline, no sleep) until this one is.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while elastos_common::SecureTimestamp::now().unix_secs <= granted_at {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the clock passed the grant's second"
+            );
+            tokio::task::yield_now().await;
+        }
+        let resource = ResourceId::new("elastos://content/publish");
+        for n in 0..MAX_PENDING_REQUESTS - 1 {
+            let session = SessionId::from_string(format!("fill-{}", n / MAX_PENDING_PER_SESSION));
+            store
+                .create_request(session, resource.clone(), Action::Write)
+                .await;
+        }
+        let extra = SessionId::from_string("session-extra");
+        let refused = store
+            .create_request(extra, resource.clone(), Action::Write)
+            .await;
+
+        let (_, ids) = live_view(&state).await;
+        let message = "the live view still lists a grant that validates, after capacity cleanup";
+        assert_eq!(ids, vec![live.clone()], "{message}");
+        let held = store.list_requests().await;
+        let listed = held.iter().any(|r| r.id.as_str() == live && r.is_granted());
+        assert!(listed, "list_requests still holds the grant's record");
+        let manager = &state.capability_manager;
+        let valid = manager.validate(&token, "session-grant", Action::Write, &resource, None);
+        valid.await.expect("the grant still validates");
+        assert!(
+            refused.is_denied(),
+            "the store, still full, refuses the extra request"
         );
     }
 

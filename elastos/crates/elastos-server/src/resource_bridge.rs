@@ -1008,15 +1008,15 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
                 // Create a pending request — the shell decides whether to grant.
-                let pending = ctx
-                    .pending_store
-                    .create_request_with_reason(
-                        elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
-                        resource_id.clone(),
-                        action,
-                        reason,
-                    )
-                    .await;
+                let pending = crate::api::handlers::capability::create_request_retiring(
+                    &ctx.pending_store,
+                    &ctx.capability_manager,
+                    elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
+                    resource_id.clone(),
+                    action,
+                    reason,
+                )
+                .await;
                 let request_id = pending.id.to_string();
 
                 if pending.is_denied() {
@@ -2432,6 +2432,65 @@ mod tests {
         assert_eq!(response["id"], 10);
         assert_eq!(response["response"]["type"], "error");
         assert_eq!(response["response"]["code"], "not_capsule_kernel_abi");
+    }
+
+    #[tokio::test]
+    async fn bridge_request_at_capacity_retires_dead_grants_and_is_admitted() {
+        use elastos_runtime::capability::pending::{GrantDuration, Settler};
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        use elastos_runtime::capability::TokenConstraints;
+        let ctx = bridge_context();
+        let (store, manager) = (ctx.pending_store.clone(), ctx.capability_manager.clone());
+        let resource = ResourceId::new("localhost://Local/SharedByLocalUsersAndBots/Home/a.txt");
+        for n in 0..MAX_PENDING_REQUESTS {
+            let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
+            let id = elastos_runtime::session::SessionId::from_string(session.clone());
+            let request = store
+                .create_request(id, resource.clone(), Action::Read)
+                .await;
+            let once = TokenConstraints::new(0, false, None, Some(1));
+            let token = manager.grant(&session, resource.clone(), Action::Read, once, None);
+            let duration = GrantDuration::Session;
+            store
+                .grant_request(request.id.as_str(), token.clone(), duration)
+                .await
+                .unwrap();
+            let used = manager.validate(&token, &session, Action::Read, &resource, None);
+            used.await.expect("the once grant is used");
+        }
+        let newest = store
+            .list_requests()
+            .await
+            .iter()
+            .map(|r| r.requested_at.unix_secs)
+            .max();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while elastos_common::SecureTimestamp::now().unix_secs <= newest.unwrap() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the clock passed the newest second"
+            );
+            tokio::task::yield_now().await;
+        }
+        let line = r#"{"id":13,"request":{"type":"request_capability","resource":"localhost://Local/SharedByLocalUsersAndBots/Home/a.txt","action":"read"}}"#;
+        let task = tokio::spawn(async move { handle_request(line, &Some(ctx)).await });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let admitted = loop {
+            if let Some(request) = store.list_pending().await.first() {
+                break Some(request.id.to_string());
+            }
+            if task.is_finished() || std::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::task::yield_now().await;
+        };
+        let admitted = admitted.expect("the bridge admits a request once dead grants are retired");
+        store
+            .deny_request_by(&admitted, "test done", Settler::Shell)
+            .await
+            .unwrap();
+        let response = task.await.unwrap().expect("the bridge answers");
+        assert_eq!(response["response"]["message"], "test done");
     }
 
     #[tokio::test]

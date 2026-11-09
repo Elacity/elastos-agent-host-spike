@@ -3510,6 +3510,9 @@ fn require_active_passkey_principal_for_context(
     context: &super::gateway::HomeLaunchTokenContext,
 ) -> anyhow::Result<crate::auth::PrincipalRecord> {
     let principal = require_active_principal_for_context(state, context)?;
+    if principal.kind != crate::auth::PrincipalKind::Human {
+        anyhow::bail!("recovery kit operations require a human principal");
+    }
     if principal.proof_binding.passkey.is_none() {
         anyhow::bail!("passkey authority required for recovery kit operations");
     }

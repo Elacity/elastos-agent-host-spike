@@ -400,7 +400,7 @@ before claiming their M1 results.
 Task 004 adds the agent-memory rows to the same Cargo-derived table:
 
 - `agent_cannot_read_human_space_without_grant`: the existing read feature asks for `Users/self` and requires the Runtime's principal-context refusal. This is the current unbound CLI's refusal half.
-- `ungranted_memory_write_is_refused`: the new memory-write feature requests authority through the Bus and requires the Runtime's manifest refusal.
+- `ungranted_memory_write_is_refused`: BLOCKED (UsersAI binding; AC-002-ARGS). The memory-write probe retains its exact manifest-refusal assertion. Today's unbound CLI launch receives a principal-context refusal before the manifest check. A verified Agent launch must first prove a granted write, then prove the missing-authority refusal.
 - `no_policy_file_does_not_mean_allow`: one in-manifest read receives zero controller decisions when `fixtures/no-policy.json` is absent. The natural pending-request refusal must arrive within 40 seconds. A harness timeout fails.
 - `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
 - `real_agent_host_journal_under_usersai_principal`: BLOCKED (UsersAI binding), the P7 gap in the default table. Forced with `--ignored`, it reads the real manifest and requires every capability under `UsersAI/self`; agent-host moves its journal when the Runtime binding lands.
@@ -422,13 +422,15 @@ that exists only in `tests/agent_host.rs`, still reads `NOT RUN` from it.
 `fixtures/no-policy.json` stays absent. A build failure, unrelated error,
 SKIPPED or BLOCKED result cannot catch a falsifier.
 
-F-ac2-human and F-ac2-write change the respective probe activation to succeed
-without its Bus refusal. Each named refusal test must fail, then pass when the
-original probe bytes are restored. All mutations remain inside fixtures or the
-one probe. This list uses the `agent-conformance` command. An ignored test,
-or a test that exists only in `tests/agent_host.rs`, still reads `NOT RUN`
-from it. The existing report records every launched variant's
-component SHA-256 and complete bundle lab CID.
+F-ac2-human changes the human-read probe activation to succeed without its
+Bus refusal. Its named refusal test must fail, then pass when the original
+probe bytes are restored. F-ac2-write is retired under `UsersAI binding;
+AC-002-ARGS` until `ungranted_memory_write_is_refused` is live with a passing
+granted-write control. Its exact mutation is kept in `falsifiers.json`.
+Both mutations stay in the probe. The active list uses the
+`agent-conformance` command. An ignored test, or a test that exists only in
+`tests/agent_host.rs`, reads `NOT RUN` from it. The existing report records
+every launched variant's component SHA-256 and complete bundle lab CID.
 
 ## Fake host-file refusal (M1 A8)
 

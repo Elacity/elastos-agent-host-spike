@@ -47,6 +47,9 @@ mod gateway_assistant;
 mod gateway_assistant_workspace_v2;
 #[path = "gateway_browser.rs"]
 mod gateway_browser;
+#[cfg(test)]
+#[path = "gateway_r3_stored_root_tests.rs"]
+mod r3_stored_root_tests;
 pub(crate) use gateway_browser::gateway_browser_operator::{
     register_browser_operator_sessions, BrowserOperatorService,
 };
@@ -150,6 +153,8 @@ use gateway_home_terminal::*;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
+#[cfg(test)]
+pub(super) use gateway_home_token::launch_principal_root;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
 pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(super) use gateway_home_token::{

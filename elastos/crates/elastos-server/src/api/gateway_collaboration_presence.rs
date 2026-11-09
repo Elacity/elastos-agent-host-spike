@@ -548,8 +548,15 @@ async fn publish_runtime_owned_presence_pass(
     let mut published = 0usize;
     let mut nobody_granted = true;
     let scope = port.presence_scope();
+    let auth_data_dir = super::gateway_home_token::home_launch_auth_data_dir(data_dir);
     for principal in crate::auth::active_passkey_principals(data_dir)? {
-        let localhost_root = crate::auth::principal_localhost_root(&principal.principal_id);
+        if crate::auth::stored_principal_record(&auth_data_dir, &principal.principal_id)?.is_none()
+        {
+            tracing::warn!(principal_id = %principal.principal_id,
+                "Runtime presence skips principal missing from trusted auth store");
+            continue;
+        }
+        let localhost_root = runtime_presence_principal_root(data_dir, &principal.principal_id)?;
         let Some(profile) = crate::collaboration_profile_authority::load_profile_authority(
             data_dir,
             &principal.principal_id,
@@ -596,6 +603,17 @@ async fn publish_runtime_owned_presence_pass(
         published = published.saturating_add(1);
     }
     Ok((published, nobody_granted))
+}
+
+fn runtime_presence_principal_root(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<String> {
+    Ok(
+        super::gateway_home_token::wallet_principal_root(data_dir, principal_id)?
+            .localhost_root()
+            .to_string(),
+    )
 }
 
 /// The one question every publisher asks: may this publisher announce this
@@ -658,6 +676,221 @@ fn presence_heartbeat_request_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn r4_presence_pass_skips_missing_auth_record() {
+        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        let child = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        for dir in [child.path(), parent.path()] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(child.path()).unwrap();
+        let now = crate::auth::now_ts();
+        let mut agent = None;
+        for credential in ["r4-presence-missing", "r4-presence-agent"] {
+            let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+                elastos_runtime::auth::PasskeyWebAuthnBinding {
+                    credential_id: credential.into(),
+                    public_key: "r4-key".into(),
+                    sign_count: 1,
+                    user_verified: true,
+                    origin: "https://elastos.elacitylabs.com".into(),
+                    rp_id: "elastos.elacitylabs.com".into(),
+                    created_at: now,
+                    last_used_at: now,
+                    revoked_at: None,
+                },
+            );
+            let id =
+                crate::auth::passkey_credential_principal_id("elastos.elacitylabs.com", credential)
+                    .unwrap();
+            let record = crate::auth::upsert_principal_for_binding_as_role_named(
+                child.path(),
+                binding,
+                id,
+                crate::auth::RuntimePrincipalRole::Admin,
+                Some("R4 Agent"),
+                now,
+            )
+            .unwrap();
+            if credential == "r4-presence-agent" {
+                agent = Some(record);
+            }
+        }
+        let agent = agent.unwrap();
+        assert_eq!(agent.principal_id, ID);
+        let protection = crate::auth::store_test_principal_root_protection(child.path(), ID);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            child.path(),
+            ID,
+            &protection.localhost_root,
+            &agent.proof_binding_id,
+            "R4 Agent",
+            None,
+            now,
+        )
+        .unwrap();
+        elastos_identity::load_or_create_did(parent.path()).unwrap();
+        crate::auth::upsert_principal_for_binding_as_role_named(
+            parent.path(),
+            agent.proof_binding.clone(),
+            ID.into(),
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("R4 Agent"),
+            now,
+        )
+        .unwrap();
+        let _auth_dir =
+            super::super::gateway_home_token::set_test_home_launch_auth_data_dir(parent.path());
+        let chat = crate::collaboration_product::test_chat_product_port(
+            child.path(),
+            "r4-presence",
+            "community",
+        );
+        let authority = crate::collaboration_presence_grant::test_authority();
+        let port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            chat.test_core().clone(),
+        )
+        .unwrap()
+        .with_presence_authority(authority.clone());
+        crate::collaboration_presence_grant::set_presence_grant(
+            &authority,
+            child.path(),
+            ID,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            crate::collaboration_presence_grant::PresenceDecision::Always,
+            now,
+        )
+        .await
+        .unwrap();
+        let result = publish_runtime_owned_presence_pass(child.path(), &port, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.0, 1,
+            "R4 valid profile publishes after a missing auth record"
+        );
+        let pending = port.pending_outgoing_presences(now).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].sender_profile_did(),
+            profile.document().profile_did
+        );
+    }
+
+    #[tokio::test]
+    async fn r4_presence_pass_uses_agent_root() {
+        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        const AGENT_ROOT: &str = "localhost://UsersAI/5dca74bd48d800a148776e87";
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let now = crate::auth::now_ts();
+        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+            elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: "r4-presence-agent".into(),
+                public_key: "r4-key".into(),
+                sign_count: 1,
+                user_verified: true,
+                origin: "https://elastos.elacitylabs.com".into(),
+                rp_id: "elastos.elacitylabs.com".into(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+        );
+        crate::auth::upsert_principal_for_binding_as_role_named(
+            dir.path(),
+            binding,
+            ID.into(),
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("R4 Agent"),
+            now,
+        )
+        .unwrap();
+        crate::auth::r4_fixture::set_kind(
+            dir.path(),
+            ID,
+            crate::auth::PrincipalKind::Agent,
+            AGENT_ROOT,
+        );
+        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, AGENT_ROOT);
+        let record = crate::auth::stored_principal_record(dir.path(), ID)
+            .unwrap()
+            .unwrap();
+        let _profile = crate::collaboration_profile_authority::update_profile_authority(
+            dir.path(),
+            ID,
+            AGENT_ROOT,
+            &record.proof_binding_id,
+            "R4 Agent",
+            None,
+            now,
+        )
+        .unwrap();
+        assert!(
+            crate::collaboration_profile_authority::load_profile_authority(
+                dir.path(),
+                ID,
+                AGENT_ROOT,
+            )
+            .unwrap()
+            .is_some()
+        );
+        let path =
+            crate::collaboration_profile_authority::profile_authority_path(dir.path(), AGENT_ROOT)
+                .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let chat = crate::collaboration_product::test_chat_product_port(
+            dir.path(),
+            "r4-agent-root",
+            "community",
+        );
+        let port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            chat.test_core().clone(),
+        )
+        .unwrap();
+        let result = publish_runtime_owned_presence_pass(dir.path(), &port, now).await;
+        assert!(
+            matches!(&result, Err(error) if error.to_string() == "profile authority bundle must be a regular file"),
+            "R4 presence looked up the Agent profile under {AGENT_ROOT}: {result:?}"
+        );
+    }
+
+    #[test]
+    fn r4_runtime_presence_uses_stored_root() {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        use crate::auth::PrincipalKind;
+        let missing = tempfile::tempdir().unwrap();
+        assert_eq!(
+            runtime_presence_principal_root(missing.path(), ID)
+                .unwrap_err()
+                .to_string(),
+            "Wallet authority principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            store(dir.path(), kind);
+            assert_eq!(
+                runtime_presence_principal_root(dir.path(), ID).unwrap(),
+                expected,
+                "R4 runtime presence root"
+            );
+        }
+    }
+
     use crate::collaboration_profile_authority::signed_profile_document_for_test;
     use ed25519_dalek::SigningKey;
     use elastos_runtime::signature::generate_keypair;
