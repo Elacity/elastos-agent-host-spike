@@ -581,7 +581,9 @@ try {
     const box = await room.locator("#agent-harness-stream").boundingBox();
     assert.ok(box && box.width > 40 && box.height > 200, `the transcript can show a scrollbar: ${JSON.stringify(box)}`);
     const x = Math.round(box.x + box.width - 2);
-    const startY = Math.round(box.y + box.height - 8);
+    // Start inside the thumb. Linux Chromium's bottom 8 px are outside
+    // its draggable area, even when the scrollbar uses no layout gutter.
+    const startY = Math.round(box.y + box.height - 20);
     const endY = Math.round(box.y + Math.max(24, box.height * 0.12));
     await page.mouse.move(x, startY);
     await page.waitForTimeout(120);
