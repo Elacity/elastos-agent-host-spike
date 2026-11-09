@@ -1918,7 +1918,10 @@ mod denial_authority {
             "localhost://Users/{}",
             hex::encode(&Sha256::digest(principal.as_bytes())[..12])
         );
-        assert_eq!(verified.launch_context.executable_actor, SERVICES_CAPSULE_ID);
+        assert_eq!(
+            verified.launch_context.executable_actor,
+            SERVICES_CAPSULE_ID
+        );
         assert_eq!(context.principal_id(), principal);
         assert_eq!(context.proof_binding_id(), None);
         assert_eq!(context.root().localhost_root(), expected_root);
