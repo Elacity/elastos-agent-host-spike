@@ -5295,6 +5295,7 @@ pub fn store_principal_root_protection(
 ) -> anyhow::Result<()> {
     validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
     mutate_auth_state(data_dir, |state| {
+        ensure_users_ai_protection_owner(state, &protection)?;
         state.principal_root_protections.retain(|stored| {
             stored.principal_id != protection.principal_id
                 || stored.localhost_root != protection.localhost_root
@@ -5304,19 +5305,43 @@ pub fn store_principal_root_protection(
     })
 }
 
+fn ensure_users_ai_protection_owner(
+    state: &AuthState,
+    protection: &PrincipalRootProtectionV1,
+) -> anyhow::Result<()> {
+    if protection
+        .localhost_root
+        .starts_with("localhost://UsersAI/")
+    {
+        let owner = state
+            .principals
+            .iter()
+            .find(|record| record.principal_id == protection.principal_id);
+        anyhow::ensure!(
+            owner.is_some_and(|record| {
+                record.kind == PrincipalKind::Agent
+                    && record.localhost_root == protection.localhost_root
+            }),
+            "UsersAI protection requires its stored Agent root"
+        );
+    }
+    Ok(())
+}
+
 pub fn load_principal_root_protection(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
 ) -> anyhow::Result<Option<PrincipalRootProtectionV1>> {
     let state = load_auth_state(data_dir)?;
-    let Some(protection) = state.principal_root_protections.into_iter().find(|stored| {
+    let Some(protection) = state.principal_root_protections.iter().find(|stored| {
         stored.principal_id == principal_id && stored.localhost_root == localhost_root
     }) else {
         return Ok(None);
     };
-    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
-    Ok(Some(protection))
+    validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+    ensure_users_ai_protection_owner(&state, protection)?;
+    Ok(Some(protection.clone()))
 }
 
 pub(crate) fn mark_recovery_kit_handed_to_person(
@@ -11178,6 +11203,70 @@ mod scan_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn r4_users_ai_protection_requires_agent_record_kind() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let human = store_test_human_principal(data_dir.path(), "person:local:r4-kind");
+        let mut protection =
+            store_test_principal_root_protection(data_dir.path(), &human.principal_id);
+        let agent_root = principal_kind_localhost_root(&human.principal_id, PrincipalKind::Agent);
+        mutate_auth_state(data_dir.path(), |state| {
+            let record = state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == human.principal_id)
+                .unwrap();
+            record.localhost_root = agent_root.clone();
+            Ok(())
+        })
+        .unwrap();
+        protection.localhost_root = agent_root.clone();
+        let error = store_principal_root_protection(data_dir.path(), protection.clone())
+            .expect_err("a Human record cannot own a UsersAI protection");
+        assert_eq!(
+            error.to_string(),
+            "UsersAI protection requires its stored Agent root"
+        );
+        assert!(
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &agent_root)
+                .unwrap()
+                .is_none()
+        );
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == human.principal_id)
+                .unwrap()
+                .kind = PrincipalKind::Agent;
+            Ok(())
+        })
+        .unwrap();
+        store_principal_root_protection(data_dir.path(), protection.clone()).unwrap();
+        assert_eq!(
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &agent_root)
+                .unwrap(),
+            Some(protection)
+        );
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == human.principal_id)
+                .unwrap()
+                .kind = PrincipalKind::Human;
+            Ok(())
+        })
+        .unwrap();
+        let error =
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &agent_root)
+                .expect_err("a stored UsersAI protection requires the current Agent kind");
+        assert_eq!(
+            error.to_string(),
+            "UsersAI protection requires its stored Agent root"
+        );
+    }
 
     #[test]
     fn auth_state_lock_child_probe() {

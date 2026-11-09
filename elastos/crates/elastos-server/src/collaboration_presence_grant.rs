@@ -741,64 +741,91 @@ mod tests {
         dir
     }
 
-    fn r6_existing_grant_row() {
-        use crate::auth::r4_fixture::ID;
-        for kind in [
-            crate::auth::PrincipalKind::Agent,
-            crate::auth::PrincipalKind::Human,
-        ] {
-            let dir = r6_grant_home(kind, true);
-            assert!(
-                matches!(state(dir.path(), ID, &scope()), Ok(Some("requested"))),
-                "stored {kind:?} grant file must remain readable"
-            );
-        }
-        let missing = tempfile::tempdir().unwrap();
-        assert!(state(missing.path(), ID, &scope())
-            .unwrap_err()
-            .to_string()
-            .contains("has no stored record"));
-    }
-
-    fn r6_new_grant_row() {
+    #[test]
+    fn r6_grant_object_uri_uses_stored_kind() {
         use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
         for (kind, root) in [
             (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
             (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
         ] {
             let dir = r6_grant_home(kind, false);
-            let result = request(dir.path(), ID, &scope(), false, 7);
-            assert!(result.is_ok(), "stored {kind:?} grant write: {result:?}");
-            assert!(
-                matches!(state(dir.path(), ID, &scope()), Ok(Some("requested"))),
-                "stored {kind:?} grant request must remain readable"
+            assert_eq!(
+                object_uri(dir.path(), ID).unwrap(),
+                format!("{root}/{PRESENCE_GRANT_OBJECT}")
             );
-            assert!(object_path(dir.path(), ID)
-                .unwrap()
-                .starts_with(dir.path().join(root.strip_prefix("localhost://").unwrap())));
         }
-        let missing = tempfile::tempdir().unwrap();
-        assert!(request(missing.path(), ID, &scope(), false, 7)
+        let missing = r6_grant_home(crate::auth::PrincipalKind::Human, false);
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        assert!(object_uri(missing.path(), ID)
             .unwrap_err()
             .to_string()
             .contains("has no stored record"));
     }
-
-    #[test]
-    fn r6_grant_object_uri_uses_stored_kind() {
-        r6_existing_grant_row();
-    }
     #[test]
     fn r6_grant_empty_file_uses_stored_kind() {
-        r6_new_grant_row();
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_grant_home(kind, false);
+            let file = empty_file(dir.path(), ID).unwrap();
+            assert_eq!(file.localhost_root, root);
+            assert!(file.grants.is_empty() && file.requests.is_empty());
+        }
+        let missing = r6_grant_home(crate::auth::PrincipalKind::Human, false);
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        assert!(empty_file(missing.path(), ID)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
     }
     #[test]
     fn r6_grant_load_file_uses_stored_kind() {
-        r6_existing_grant_row();
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_grant_home(kind, true);
+            let file = load_file(dir.path(), ID).unwrap();
+            assert_eq!(file.localhost_root, root);
+            assert!(matches!(file.requests[0].status, PresenceStatus::Requested));
+        }
+        let missing = r6_grant_home(crate::auth::PrincipalKind::Human, true);
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        assert!(load_file(missing.path(), ID)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
     }
     #[test]
     fn r6_grant_save_file_uses_stored_kind() {
-        r6_new_grant_row();
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_grant_home(kind, false);
+            let mut file = empty_file(dir.path(), ID).unwrap();
+            file.requests.push(PresenceRequest {
+                scope: scope(),
+                status: PresenceStatus::Requested,
+                at: 7,
+            });
+            save_file(dir.path(), ID, &file).unwrap();
+            assert_eq!(load_file(dir.path(), ID).unwrap().localhost_root, root);
+            assert!(object_path(dir.path(), ID)
+                .unwrap()
+                .starts_with(dir.path().join(root.strip_prefix("localhost://").unwrap())));
+        }
+        let missing = r6_grant_home(crate::auth::PrincipalKind::Human, false);
+        let file = empty_file(missing.path(), ID).unwrap();
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        assert!(save_file(missing.path(), ID, &file)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
     }
 
     const ME: &str = "did:key:zMe";

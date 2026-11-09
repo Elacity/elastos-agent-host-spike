@@ -651,10 +651,10 @@ fn remote_engine_profile(data_dir: &FsPath, owner: &RemoteEngineOwner) -> Result
         .to_owned();
     Ok(json!({
         "schema":"elastos.browser.profile/v1", "scope":"active_principal",
-        "storage":"principal_owned_profile_disk",
-        "storage_posture":"principal_owned_reset_scoped_unprotected",
+        "storage":BROWSER_PROFILE_STORAGE,
+        "storage_posture":BROWSER_PROFILE_STORAGE_POSTURE,
         "protected_storage":false, "encrypted":false, "recoverable":false,
-        "recovery":"not_recovery_kit_packaged", "uri":uri,
+        "recovery":BROWSER_PROFILE_RECOVERY, "uri":uri,
         "public_uri":"localhost://Users/self/BrowserProfiles/default/profile.ext4",
         "profile_key":owner.profile_key, "disk_path":disk_path,
         "reset":"whole_profile"
@@ -2503,6 +2503,31 @@ mod tests {
                 "selection has no launch or transport effects"
             );
         }
+    }
+
+    #[test]
+    fn remote_engine_profile_uri_names_authenticated_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = RemoteEngineOwner {
+            requester_endpoint: "a87b8a99bd88a69686c994a80b629d8154871aa295540834c01d79f4f916502f"
+                .into(),
+            requester_principal_id: "consumer".into(),
+            grant_id: "grant:remote-engine".into(),
+            grant_revision: 1,
+            generation: "generation".into(),
+            page_id: "page".into(),
+            vm_id: "vm".into(),
+            profile_key: "profile".into(),
+            adapter_id: "adapter".into(),
+        };
+        let profile = remote_engine_profile(root.path(), &owner).unwrap();
+        assert_eq!(
+            profile["uri"],
+            "localhost://Users/remote-engine-594321e52caebd3b7afc9f03bf002e82d1006a3dfa8e8e96a8619224ad233861/BrowserProfiles/default/profile.ext4"
+        );
+        assert_eq!(profile["storage"], BROWSER_PROFILE_STORAGE);
+        assert_eq!(profile["storage_posture"], BROWSER_PROFILE_STORAGE_POSTURE);
+        assert_eq!(profile["recovery"], BROWSER_PROFILE_RECOVERY);
     }
 
     #[test]
