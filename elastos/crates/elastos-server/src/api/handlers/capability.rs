@@ -541,6 +541,75 @@ pub async fn list_capabilities(
     }))
 }
 
+// === Session Request Records (Shell Only) ===
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRequestsQuery {
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RequestRecordOutput {
+    pub request_id: String,
+    pub session_id: String,
+    pub resource: String,
+    pub action: String,
+    pub reason: String,
+    /// `pending`, `granted`, `denied` (a revoked grant reads `denied`) or `expired`.
+    pub status: &'static str,
+    /// `shell` or `runtime` on a denied or expired record, null otherwise.
+    pub settled_by: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionRequestsOutput {
+    pub requests: Vec<RequestRecordOutput>,
+}
+
+fn request_record(r: &PendingCapabilityRequest) -> RequestRecordOutput {
+    let (status, settled_by) = match &r.status {
+        RequestStatus::Pending => ("pending", None),
+        RequestStatus::Granted { .. } => ("granted", None),
+        RequestStatus::Denied { settled_by, .. } => match settled_by {
+            Settler::Shell => ("denied", Some("shell")),
+            Settler::Runtime => ("denied", Some("runtime")),
+        },
+        // Only the Runtime's request timeout writes `Expired`.
+        RequestStatus::Expired => ("expired", Some("runtime")),
+    };
+    RequestRecordOutput {
+        request_id: r.id.to_string(),
+        session_id: r.session_id.to_string(),
+        resource: r.resource.to_string(),
+        action: r.action.to_string(),
+        reason: r.reason.clone(),
+        status,
+        settled_by,
+    }
+}
+
+/// GET /api/capability/requests?session=
+///
+/// The request records the store still holds for one session, sorted by
+/// request id (shell only). The store drops resolved records by age and
+/// under load, so this is not a full history.
+pub async fn session_requests(
+    State(state): State<CapabilityState>,
+    Extension(_session): Extension<Session>, // Shell check done by middleware
+    Query(query): Query<SessionRequestsQuery>,
+) -> Result<Json<SessionRequestsOutput>, (StatusCode, String)> {
+    let Some(session) = query.session.filter(|session| !session.is_empty()) else {
+        let reason = "requests need a session".to_string();
+        return Err((StatusCode::BAD_REQUEST, reason));
+    };
+    let held = state.pending_store.list_requests().await.into_iter();
+    let mut held: Vec<_> = held.filter(|r| r.session_id.as_str() == session).collect();
+    held.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    let requests = held.iter().map(request_record).collect();
+    Ok(Json(SessionRequestsOutput { requests }))
+}
+
 // === Revoke Capability (Shell Only) ===
 
 #[derive(Debug, Serialize)]

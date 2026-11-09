@@ -126,6 +126,7 @@ pub(crate) fn shell_capability_routes(
 ) -> Router {
     Router::new()
         .route("/api/capability/pending", get(handlers::list_pending))
+        .route("/api/capability/requests", get(handlers::session_requests))
         .route("/api/capability/grant", post(handlers::grant_request))
         .route("/api/capability/deny", post(handlers::deny_request))
         // Revoke endpoints
