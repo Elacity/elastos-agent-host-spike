@@ -4,6 +4,7 @@ The tests call ``check.problems``. They do not compile a citation expression.
 """
 
 import contextlib
+import importlib.util
 import io
 import os
 import re
@@ -17,6 +18,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import check
+
+_GIT_ENV_SPEC = importlib.util.spec_from_file_location(
+    "fixture_git_env", Path(__file__).resolve().parents[3] / "scripts" / "fixture-git-env.py")
+fixture_git = importlib.util.module_from_spec(_GIT_ENV_SPEC)
+_GIT_ENV_SPEC.loader.exec_module(fixture_git)
 
 IDENTITY = {
     "GIT_AUTHOR_NAME": "citation-check",
@@ -2525,8 +2531,7 @@ class CitationCheckTests(unittest.TestCase):
             path.write_bytes(data)
 
     def _git(self, root, *args):
-        env = dict(os.environ)
-        env.update(IDENTITY)
+        env = fixture_git.fixture_git_env(root, IDENTITY)
         subprocess.run(
             ["git", "-C", str(root), *args],
             check=True,
@@ -2536,8 +2541,7 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def _git_output(self, root, *args):
-        env = dict(os.environ)
-        env.update(IDENTITY)
+        env = fixture_git.fixture_git_env(root, IDENTITY)
         return subprocess.run(
             ["git", "-C", str(root), *args],
             check=True,
@@ -2573,6 +2577,25 @@ class CitationCheckTests(unittest.TestCase):
         if commit:
             self._commit_all(root)
         return root
+
+    def test_fixture_commit_ignores_the_callers_git_dir(self):
+        """A hook or ``rebase --exec`` exports GIT_DIR. The fixture commit stays in its own repo."""
+        victim_root = self._temp_root()
+        victim, pointed = fixture_git.victim_repo(victim_root)
+        before = fixture_git.repo_state(victim)
+        config = fixture_git.shared_config(Path(__file__).parent)
+        root = self._temp_root()
+        self._write(root, "fixture\n", {})
+        with patch.dict(os.environ, pointed):
+            try:
+                sha = self._commit_all(root)
+            except subprocess.CalledProcessError as error:  # judged below, after the victim
+                sha = f"no fixture commit: {error}"
+        self.assertEqual(fixture_git.repo_state(victim), before, "a fixture git command wrote to GIT_DIR's repo")
+        log = subprocess.run(["git", "-C", str(root), "log", "--format=%H %s"], check=True, text=True,
+                             capture_output=True, env=fixture_git.fixture_git_env(root)).stdout
+        self.assertEqual(log, sha + " fixture\n", "the fixture repo lacks its one commit")
+        self.assertEqual(fixture_git.shared_config(Path(__file__).parent), config, "the checkout's shared git config changed")
 
     def _propose_line(self, group, call):
         """One complete propose line, named by its Name: field."""

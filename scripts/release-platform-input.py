@@ -64,8 +64,10 @@ browser_host = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(browser_host)
 
 
-def run(*args):
-    return subprocess.check_output(args, cwd=SOURCE_ROOT, text=True).strip()
+def run(*args, env=None):
+    """One command's output. ``env`` lets a test isolate the git reads; ``None``
+    keeps the production default of inheriting this process's environment."""
+    return subprocess.check_output(args, cwd=SOURCE_ROOT, text=True, env=env).strip()
 
 
 def digest(path):
@@ -742,25 +744,25 @@ def check_contents(root, platform, omissions):
     return manifest, template
 
 
-def source_identity(commit, tree):
+def source_identity(commit, tree, env=None):
     if not re.fullmatch(r"[0-9a-f]{40}", commit) or not re.fullmatch(r"[0-9a-f]{40}", tree):
         raise ValueError("source commit and tree must be full Git object names")
-    if run("git", "rev-parse", "HEAD") != commit or run("git", "rev-parse", "HEAD^{tree}") != tree:
+    if run("git", "rev-parse", "HEAD", env=env) != commit or run("git", "rev-parse", "HEAD^{tree}", env=env) != tree:
         raise ValueError("source identity changed during preparation")
-    if run("git", "status", "--porcelain", "--untracked-files=normal"):
+    if run("git", "status", "--porcelain", "--untracked-files=normal", env=env):
         raise ValueError("source checkout must be clean")
-    locks = [p for p in run("git", "ls-files").splitlines() if p.endswith("Cargo.lock")]
+    locks = [p for p in run("git", "ls-files", env=env).splitlines() if p.endswith("Cargo.lock")]
     return {"commit": commit, "tree": tree, "clean": True,
             "lockfiles": {p: digest(SOURCE_ROOT / p) for p in locks}}
 
 
-def record(args):
+def record(args, env=None):
     root = args.root.resolve()
     if (args.root.is_symlink() or not root.is_dir()
             or (root / "platform-input.json").exists()
             or (root / "platform-input.json").is_symlink()):
         raise ValueError("record requires a new, regular staging directory")
-    source = source_identity(args.source_commit, args.source_tree)
+    source = source_identity(args.source_commit, args.source_tree, env=env)
     if args.target != PLATFORMS[args.platform][1]:
         raise ValueError("native target does not match platform")
     check_version(args.version)
@@ -791,7 +793,7 @@ def record(args):
         paths.append(origin)
     files = {str(p.relative_to(root)): file_record(regular_file(root, str(p.relative_to(root))))
              for p in paths if not p.is_dir() or p.is_symlink()}
-    if source_identity(args.source_commit, args.source_tree) != source:
+    if source_identity(args.source_commit, args.source_tree, env=env) != source:
         raise ValueError("source inputs changed during preparation")
     receipt = {"schema": SCHEMA, "created_at": datetime.now(timezone.utc).isoformat(),
                "source": source, "version": args.version, "platform": args.platform,
