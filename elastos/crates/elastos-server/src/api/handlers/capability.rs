@@ -1052,6 +1052,59 @@ mod tests {
         );
     }
 
+    /// The lab stand-in's shell-only reason, written out independently.
+    const SHELL_REASON: &str = "This endpoint requires shell privileges";
+
+    #[tokio::test]
+    async fn default_scope_stays_the_callers_session_and_the_scope_is_shell_only() {
+        let state = test_state();
+        let client = Session::new_capsule("vm-a".to_string());
+        let shell = Session::new_shell("shell-vm".to_string());
+        let (own, _) = grant_in(&state, client.id.as_str(), None, None).await;
+        grant_in(&state, "session-b", None, None).await;
+        let list = |session: &Session, scope: Option<&str>| {
+            let query = Query(ListCapabilitiesQuery {
+                scope: scope.map(str::to_owned),
+            });
+            list_capabilities(State(state.clone()), Extension(session.clone()), query)
+        };
+        let body = list(&client, None).await.unwrap().0;
+        let mut body = serde_json::to_value(body).unwrap();
+        body["capabilities"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("granted_at");
+        let entry = json!({ "request_id": own, "duration": "session",
+            "resource": "elastos://content/publish", "action": "write" });
+        assert_eq!(
+            body,
+            json!({ "capabilities": [entry] }),
+            "the default view lists only the caller's session, with no scope or session_id"
+        );
+        let body = serde_json::to_value(list(&shell, None).await.unwrap().0).unwrap();
+        assert_eq!(
+            body,
+            json!({ "capabilities": [] }),
+            "the shell's default view is its own session, not every session"
+        );
+        let shell_only = (StatusCode::FORBIDDEN, SHELL_REASON.to_owned());
+        assert_eq!(
+            list(&client, Some("all_sessions_live")).await.err(),
+            Some(shell_only),
+            "a client is refused the all_sessions_live view"
+        );
+        let unknown = "unknown capability list scope: session".to_owned();
+        assert_eq!(
+            list(&shell, Some("session")).await.err(),
+            Some((StatusCode::BAD_REQUEST, unknown)),
+            "an unknown scope is refused"
+        );
+        assert_rejects_unknown_field::<ListCapabilitiesQuery>(json!({
+            "scope": "all_sessions_live",
+            "session": "session-b"
+        }));
+    }
+
     #[tokio::test]
     async fn test_request_capability_denies_ipfs_backend() {
         let output = request_capability(
