@@ -11115,4 +11115,45 @@ mod r5a_tests {
             "{result:?}"
         );
     }
+
+    fn published(root: &str) -> LibraryPublishRecord {
+        serde_json::from_value(json!({
+            "schema": "elastos.library.publish/v1", "object_uri": format!("{root}/Documents/p.txt"),
+            "cid": "cid-r5b", "published_at": 1, "unpublished_at": 2,
+            "receipt": {}, "availability": {},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn publish_record_read_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = published(root);
+            let uri = publish_record_uri(root, &record.object_uri);
+            write_runtime_json(dir.path(), r4_fixture::ID, &uri, &record).unwrap();
+            let result = read_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|value| value.object_uri == format!("{root}/Documents/p.txt")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_publish_record(
+            dir.path(),
+            r4_fixture::ID,
+            &published(r4_fixture::HUMAN_ROOT).object_uri,
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
 }
