@@ -1163,6 +1163,22 @@ fn runtime_custody_listing_record_for_test(
     published_at: u64,
 ) -> super::RuntimeCustodyListingRecord {
     let draft = mint_draft_for_composition_journal_test();
+    runtime_custody_listing_record_for_draft(
+        &draft,
+        mint_id,
+        publisher_principal_id,
+        display_name,
+        published_at,
+    )
+}
+
+fn runtime_custody_listing_record_for_draft(
+    draft: &RuntimeMintDraft,
+    mint_id: Digest32,
+    publisher_principal_id: &str,
+    display_name: &str,
+    published_at: u64,
+) -> super::RuntimeCustodyListingRecord {
     let publisher_profile_did = derived_device_key_for_seed(0x66).1;
     let content_id = super::runtime_protected_content_id(draft.encrypted_content()).unwrap();
     let package = super::RuntimePortableListingPackage {
@@ -1249,6 +1265,15 @@ async fn runtime_custody_prebuy_availability_harness(
     provider_seed: u8,
     provider_config: ContentAvailabilityTestConfig,
 ) -> RuntimeCustodyPrebuyAvailabilityHarness {
+    runtime_custody_prebuy_availability_harness_with_policy(provider_seed, provider_config, None)
+        .await
+}
+
+async fn runtime_custody_prebuy_availability_harness_with_policy(
+    provider_seed: u8,
+    provider_config: ContentAvailabilityTestConfig,
+    policy_identity: Option<elastos_protected_content_contracts::RightsPolicyIdentityV1>,
+) -> RuntimeCustodyPrebuyAvailabilityHarness {
     let temp = tempfile::tempdir().unwrap();
     let data_dir = temp.path().join("data");
     owner_only_dir(&data_dir);
@@ -1256,7 +1281,7 @@ async fn runtime_custody_prebuy_availability_harness(
     write_device_key(&data_dir, 0x61);
     write_library_publish_test_composition(&data_dir);
 
-    let mint_draft = mint_draft_for_composition_journal_test();
+    let mint_draft = mint_draft_for_composition_journal_test_with_policy(policy_identity);
     let fixture_now = crate::auth::now_ts();
     let mint_journal = runtime_mint_journal(&data_dir);
     mint_journal.persist_bound(&mint_draft).unwrap();
@@ -1317,7 +1342,8 @@ async fn runtime_custody_prebuy_availability_harness(
     assert_eq!(available.draft().mint_id(), mint_draft.mint_id());
     assert!(available.content_availability().is_some());
 
-    let listing = runtime_custody_listing_record_for_test(
+    let listing = runtime_custody_listing_record_for_draft(
+        &mint_draft,
         mint_draft.mint_id(),
         "person:local:creator",
         "protected-video.mp4",
@@ -4298,6 +4324,12 @@ fn assert_runtime_custody_transports(
 
 #[cfg(unix)]
 fn mint_draft_for_composition_journal_test() -> RuntimeMintDraft {
+    mint_draft_for_composition_journal_test_with_policy(None)
+}
+
+fn mint_draft_for_composition_journal_test_with_policy(
+    policy_identity: Option<elastos_protected_content_contracts::RightsPolicyIdentityV1>,
+) -> RuntimeMintDraft {
     let epoch = signed_custody_epoch();
     let envelope = custody_envelope_for_media_with_epoch(0x41, &epoch);
     let (init_segment, encrypted_segments) = media_components(0x41);
@@ -4324,7 +4356,7 @@ fn mint_draft_for_composition_journal_test() -> RuntimeMintDraft {
         MEDIA_CODECS_V1,
         content_access_id(0x41),
         envelope.key_envelope_identity().unwrap(),
-        policy_body().policy_identity().unwrap(),
+        policy_identity.unwrap_or_else(|| policy_body().policy_identity().unwrap()),
         envelope.manifest().content_key_commitment(),
         envelope.manifest().threshold(),
         mint_nodes,
