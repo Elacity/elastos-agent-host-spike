@@ -8,6 +8,7 @@ pub mod docs;
 pub mod identity;
 pub mod namespace;
 pub mod provider;
+pub mod settle;
 pub mod storage;
 
 pub use capability::{
