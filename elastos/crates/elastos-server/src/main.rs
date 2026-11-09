@@ -126,8 +126,8 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0:3000")]
         addr: String,
 
-        /// Storage directory
-        #[arg(long, default_value = "/tmp/elastos/storage")]
+        /// Storage directory (default: storage under the Home data directory)
+        #[arg(long, default_value_os_t = default_data_dir().join("storage"))]
         storage_path: PathBuf,
 
         /// Capsule directory to serve (web capsule or MicroVM)
@@ -2295,7 +2295,11 @@ pub(crate) fn open_browser(url: &str) {
 pub(crate) async fn create_runtime(
     storage_path: impl AsRef<std::path::Path>,
 ) -> anyhow::Result<Runtime> {
-    let storage = Arc::new(LocalFSProvider::new(storage_path.as_ref().to_path_buf()).await?);
+    let path = storage_path.as_ref();
+    let storage = LocalFSProvider::new(path.to_path_buf())
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot open storage {}: {e}", path.display()))?;
+    let storage = Arc::new(storage);
 
     // Components have a dedicated provider; host-specific VM providers remain
     // behind the same Runtime compute contract.

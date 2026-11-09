@@ -8,7 +8,7 @@ use elastos_common::browser_protocol::{BrowserOperatorRequest, BrowserRefInput};
 use elastos_runtime::capability::pending::PendingRequestStore;
 use elastos_runtime::capability::{
     Action, CapabilityManager, CapabilityStore, CapabilityToken, GrantDuration, ResourceId,
-    TokenConstraints,
+    Settler, TokenConstraints,
 };
 use elastos_runtime::primitives::{
     audit::AuditLog, metrics::MetricsManager, time::SecureTimestamp,
@@ -55,6 +55,29 @@ struct Admission {
     release_pending: bool,
     receipts: BTreeMap<String, serde_json::Value>,
     bindings: BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+impl BrowserOperatorService {
+    /// An admission's request record, and how its token validates now.
+    pub(crate) async fn admission_for_test(
+        &self,
+        id: &str,
+    ) -> (
+        elastos_runtime::capability::pending::PendingCapabilityRequest,
+        Result<(), elastos_runtime::capability::manager::ValidationError>,
+    ) {
+        let request = self.pending.get_request(id).await.unwrap();
+        let records = self.records.lock().await;
+        let record = &records[id];
+        let token = record.token.as_ref().unwrap();
+        let session = record.session.id.as_str();
+        let resource = resource(&record.page_id, id);
+        let validated = self
+            .capabilities
+            .validate(token, session, Action::Write, &resource, None);
+        (request, validated.await)
+    }
 }
 
 pub(crate) fn register_browser_operator_sessions(
@@ -610,7 +633,10 @@ pub(in crate::api::gateway) async fn revoke_admission(
                 .revoke(*token.id(), "Browser owner revoked admission")
                 .await;
         }
-        service.pending.revoke_request(&id).await;
+        service
+            .pending
+            .revoke_request_by(&id, "Revoked by user", Settler::Shell)
+            .await;
         record.release_pending
     };
     if !release_pending {
@@ -666,7 +692,10 @@ pub(in crate::api::gateway) async fn return_page_to_owner(
                 .capabilities
                 .revoke(*token.id(), "Browser owner reclaimed input")
                 .await;
-            service.pending.revoke_request(&id).await;
+            service
+                .pending
+                .revoke_request_by(&id, "Revoked by user", Settler::Shell)
+                .await;
         }
 
         engine_input(
@@ -807,7 +836,14 @@ pub(in crate::api::gateway) async fn operator_input(
                 .revoke(*token.id(), "Browser input outcome uncertain")
                 .await;
         }
-        service.pending.revoke_request(&input.admission_id).await;
+        service
+            .pending
+            .revoke_request_by(
+                &input.admission_id,
+                "Browser input outcome uncertain",
+                Settler::Runtime,
+            )
+            .await;
     }
     drop(records);
     if !accepted {

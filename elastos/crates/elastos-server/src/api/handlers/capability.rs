@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use elastos_common::localhost::{is_supported_resource_scheme, is_system_only_backend_resource};
 use elastos_runtime::capability::{
-    pending::PendingRequestStore, Action, CapabilityManager, GrantDuration, PolicyEvaluator,
-    PolicyOutcome, ResourceId, TokenConstraints,
+    pending::{PendingCapabilityRequest, PendingRequestStore},
+    Action, CapabilityManager, GrantDuration, PolicyEvaluator, PolicyOutcome, ResourceId, Settler,
+    TokenConstraints,
 };
 use elastos_runtime::session::Session;
 
@@ -205,7 +206,7 @@ pub async fn request_status(
                 reason: None,
             }))
         }
-        elastos_runtime::capability::RequestStatus::Denied { reason } => {
+        elastos_runtime::capability::RequestStatus::Denied { reason, .. } => {
             Ok(Json(RequestStatusOutput {
                 status: "denied".to_string(),
                 token: None,
@@ -396,7 +397,7 @@ pub async fn deny_request(
 
     state
         .pending_store
-        .deny_request(&input.request_id, &reason)
+        .deny_request_by(&input.request_id, &reason, Settler::Shell)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
@@ -422,6 +423,17 @@ pub struct ListCapabilitiesOutput {
     pub capabilities: Vec<CapabilityOutput>,
 }
 
+/// One session's granted requests, projected from the Runtime's global list.
+async fn session_granted(
+    store: &PendingRequestStore,
+    session_id: &str,
+) -> Vec<PendingCapabilityRequest> {
+    let granted = store.list_granted().await.into_iter();
+    granted
+        .filter(|r| r.session_id.to_string() == session_id)
+        .collect()
+}
+
 /// GET /api/capability/list
 ///
 /// List active capabilities for the current session.
@@ -431,7 +443,7 @@ pub async fn list_capabilities(
 ) -> Json<ListCapabilitiesOutput> {
     // Get granted requests for this session
     let session_id = session.id.to_string();
-    let granted_requests = state.pending_store.list_session_granted(&session_id).await;
+    let granted_requests = session_granted(&state.pending_store, &session_id).await;
 
     let capabilities = granted_requests
         .into_iter()
@@ -494,7 +506,10 @@ pub async fn revoke_capability(
                 .await;
 
             // Mark the request as revoked in the pending store
-            state.pending_store.revoke_request(&request_id).await;
+            state
+                .pending_store
+                .revoke_request_by(&request_id, "Revoked by user", Settler::Shell)
+                .await;
 
             Ok(Json(RevokeCapabilityOutput {
                 success: true,
@@ -571,9 +586,7 @@ pub async fn session_info(
     Extension(session): Extension<Session>,
 ) -> Json<SessionInfoOutput> {
     let session_id = session.id.to_string();
-    let capabilities_count = state
-        .pending_store
-        .list_session_granted(&session_id)
+    let capabilities_count = session_granted(&state.pending_store, &session_id)
         .await
         .len();
 
@@ -774,6 +787,97 @@ mod tests {
                 audit_log,
             )),
         }
+    }
+
+    async fn settler(state: &CapabilityState, id: &str) -> Settler {
+        match state.pending_store.get_request(id).await.unwrap().status {
+            elastos_runtime::capability::RequestStatus::Denied { settled_by, .. } => settled_by,
+            other => panic!("request {id} is not denied: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_deny_route_records_the_shell_as_settler() {
+        let state = test_state();
+        let session = elastos_runtime::session::SessionId::from_string("capsule-1");
+        let resource = ResourceId::new("elastos://content/publish");
+        let request = state
+            .pending_store
+            .create_request(session, resource, Action::Write)
+            .await;
+        let input = DenyRequestInput {
+            request_id: request.id.to_string(),
+            reason: None,
+        };
+        let shell = Extension(Session::new_shell("shell-vm".to_string()));
+        let output = deny_request(State(state.clone()), shell, Json(input)).await;
+        assert!(output.unwrap().0.success);
+        assert_eq!(settler(&state, request.id.as_str()).await, Settler::Shell);
+    }
+
+    #[tokio::test]
+    async fn shell_revoke_route_records_the_shell_as_settler() {
+        let state = test_state();
+        let session = elastos_runtime::session::SessionId::from_string("capsule-1");
+        let resource = ResourceId::new("elastos://content/publish");
+        let request = state
+            .pending_store
+            .create_request(session, resource.clone(), Action::Write)
+            .await;
+        let id = request.id.to_string();
+        let constraints = TokenConstraints::default();
+        let token =
+            state
+                .capability_manager
+                .grant("capsule-1", resource, Action::Write, constraints, None);
+        let store = &state.pending_store;
+        store
+            .grant_request(&id, token, GrantDuration::Session)
+            .await
+            .unwrap();
+        let shell = Extension(Session::new_shell("shell-vm".to_string()));
+        let output = revoke_capability(State(state.clone()), shell, Path(id.clone())).await;
+        assert!(output.unwrap().0.success);
+        assert_eq!(settler(&state, &id).await, Settler::Shell);
+    }
+
+    #[tokio::test]
+    async fn session_views_exclude_another_session_the_global_list_includes() {
+        let state = test_state();
+        let (a, b) = (
+            Session::new_capsule("vm-a".into()),
+            Session::new_capsule("vm-b".into()),
+        );
+        let mut ids = Vec::new();
+        for session in [&a, &b] {
+            let resource = ResourceId::new("elastos://content/publish");
+            let store = &state.pending_store;
+            let request = store.create_request(session.id.clone(), resource.clone(), Action::Write);
+            let id = request.await.id.to_string();
+            let token = state.capability_manager.grant(
+                session.id.as_str(),
+                resource,
+                Action::Write,
+                TokenConstraints::default(),
+                None,
+            );
+            store
+                .grant_request(&id, token, GrantDuration::Session)
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        let listed = list_capabilities(State(state.clone()), Extension(a.clone())).await;
+        let listed: Vec<_> = listed
+            .0
+            .capabilities
+            .into_iter()
+            .map(|c| c.request_id)
+            .collect();
+        assert_eq!(listed, vec![ids[0].clone()]);
+        let info = session_info(State(state.clone()), Extension(a)).await;
+        assert_eq!(info.0.capabilities_count, 1);
+        assert_eq!(state.pending_store.list_granted().await.len(), 2);
     }
 
     #[tokio::test]

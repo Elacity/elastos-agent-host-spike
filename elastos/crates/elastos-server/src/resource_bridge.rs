@@ -1051,6 +1051,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                                 }
                                 elastos_runtime::capability::pending::RequestStatus::Denied {
                                     reason,
+                                    ..
                                 } => {
                                     tracing::info!(
                                         "bridge: denied {} {} for capsule '{}': {}",

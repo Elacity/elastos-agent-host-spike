@@ -2216,6 +2216,7 @@ mod tests {
     use std::ffi::CString;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_os = "linux")]
     use std::process::Output;
     use std::sync::Mutex;
     use tempfile::TempDir;
