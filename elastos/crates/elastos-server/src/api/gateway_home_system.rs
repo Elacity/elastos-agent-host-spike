@@ -4232,11 +4232,9 @@ pub(crate) fn carrier_source_is_contact_of(
         .into_iter()
         .filter(|(principal, _)| principals.contains(&principal.principal_id))
         .any(|(principal, _)| {
-            let context = HomeLaunchTokenContext {
-                principal_id: principal.principal_id,
-                proof_binding_id: Some(principal.proof_binding_id),
-                session_id: String::new(),
-                grant_id: String::new(),
+            let Some(context) = ctx_or_warn(data_dir, &principal, "carrier_source_is_contact_of")
+            else {
+                return false;
             };
             accepted_contact_for_carrier_source(data_dir, network, &context, &local_did, source)
                 .is_ok_and(|contact| contact.is_some())

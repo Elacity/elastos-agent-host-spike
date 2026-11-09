@@ -570,12 +570,7 @@ mod tests {
 
     #[test]
     fn a_check_is_redeemed_once_and_only_by_its_home_session() {
-        let home = HomeLaunchTokenContext {
-            principal_id: "principal".into(),
-            proof_binding_id: None,
-            session_id: "session".into(),
-            grant_id: String::new(),
-        };
+        let home = HomeLaunchTokenContext::for_test("principal", "session", None, "");
         let check = |expires_at| SharedContentCheck {
             principal_id: "principal".into(),
             session_id: "session".into(),
@@ -591,10 +586,7 @@ mod tests {
         let id = remember_check(check(200), 100);
         assert_eq!(redeem_check(&id, &home, 150).unwrap().cid, V1);
         assert!(redeem_check(&id, &home, 150).is_none(), "single use");
-        let other = HomeLaunchTokenContext {
-            session_id: "other".into(),
-            ..home.clone()
-        };
+        let other = HomeLaunchTokenContext::for_test("principal", "other", None, "");
         let id = remember_check(check(200), 100);
         assert!(redeem_check(&id, &other, 150).is_none(), "another session");
         assert!(
