@@ -4487,16 +4487,6 @@ mod tests {
                 "version mismatch",
             ),
             (
-                "hung version probe",
-                b"#!/bin/sh\nexec sleep 60\n".as_slice(),
-                "version check timed out",
-            ),
-            (
-                "child retains version pipes",
-                b"#!/bin/sh\nsleep 60 &\nprintf 'elastos 0.7.1\\n'\nexit 0\n".as_slice(),
-                "version check timed out",
-            ),
-            (
                 "excessive version output",
                 b"#!/bin/sh\nprintf '%05000d' 0\n".as_slice(),
                 "output limit",
@@ -4928,6 +4918,107 @@ mod tests {
         verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(30))
             .await
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn recorded_pid(path: &std::path::Path) -> i32 {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn assert_process_gone(pid: i32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // SAFETY: signal 0 only checks whether the PID still exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process {pid} survived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_check_times_out_a_hung_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("hung-candidate");
+        std::fs::write(&bin, b"#!/bin/sh\nexec sleep 3600\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error =
+            verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(1))
+                .await
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("timed out after 1 seconds"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_check_times_out_when_a_child_retains_the_pipes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("child-pid");
+        let bin = dir.path().join("leaky-candidate");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nsleep 3600 &\nprintf '%s' \"$!\" > '{}'\nprintf 'elastos 0.1.0\\n'\nexit 0\n",
+                pid_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error =
+            verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(3))
+                .await
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("timed out after 3 seconds"),
+            "{error:#}"
+        );
+        assert_process_gone(recorded_pid(&pid_path));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn production_update_probe_uses_the_shipped_five_second_deadline() {
+        let components =
+            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+        let executable = b"#!/bin/sh\nexec sleep 3600\n";
+        for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
+            let label = match mode {
+                ApplyMode::Normal => "normal",
+                ApplyMode::FrozenOffline => "frozen offline",
+            };
+            let (_fixture, data, binary, source) = default_apply_fixture(components);
+            let old_binary = std::fs::read(&binary).unwrap();
+            let error =
+                apply_signed_fixture_with_mode(&data, &source, executable, components, mode)
+                    .await
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("timed out after 5 seconds"),
+                "{label}: {error:#}"
+            );
+            assert_eq!(std::fs::read(&binary).unwrap(), old_binary, "{label}");
+            assert!(
+                !InstallTransaction::has_pending_recovery(&binary),
+                "{label}: journal retained"
+            );
+        }
     }
 
     /// install.sh admission and recovery through the shared installation writer.
