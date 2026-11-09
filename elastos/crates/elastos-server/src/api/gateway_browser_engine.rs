@@ -85,6 +85,7 @@ where
     let mut candidates = inventory
         .adapters
         .iter()
+        .filter(|adapter| adapter.engine == "chromium_microvm")
         .filter(|adapter| adapter.supports(display_mode, guarantee_level))
         .filter(|adapter| requested_adapter.is_none_or(|id| adapter.id == id))
         .filter(|adapter| {
@@ -675,6 +676,38 @@ mod tests {
             .await
             .unwrap();
         (registry, calls)
+    }
+
+    #[tokio::test]
+    async fn browser_internet_refuses_every_non_vm_engine() {
+        for engine in [
+            "hosted_remote_browser",
+            "playwright",
+            "native_browser",
+            "diagnostic_playwright",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut adapter = image_adapter("candidate", "configured_provider", true);
+            adapter["engine"] = json!(engine);
+            let (registry, calls) =
+                image_registry("capsule-provider", vec![adapter], Duration::ZERO).await;
+            let result = resolve_browser_engine_adapter_with_preparation(
+                &registry,
+                dir.path(),
+                "darwin-arm64",
+                "person:test",
+                Some("candidate"),
+                BrowserDisplayMode::WebrtcRemoteDisplay,
+                BrowserGuaranteeLevel::MechanismMicrovm,
+                || async { panic!("non-VM adapter acquired an image") },
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "non-VM adapter {engine} reached Runtime admission"
+            );
+            assert_eq!(*calls.lock().unwrap(), ["status"]);
+        }
     }
 
     #[test]

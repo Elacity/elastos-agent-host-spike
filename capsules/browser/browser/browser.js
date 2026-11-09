@@ -3,11 +3,12 @@ import { createBrowserLocationController } from "./browser-location.js?v=browser
 import {
   DEFAULT_URL,
   createRuntimeApi,
+  browserInternetGranted,
   isBrowserErrorUrl,
   normalizeUrl,
   sameBrowserStreamTarget,
   visibleAddressForUrl,
-} from "./browser-runtime-api.js?v=browser-20261101d";
+} from "./browser-runtime-api.js?v=browser-20261109a";
 import {
   createBrowserClipboardBridge,
 } from "./browser-clipboard.js?v=browser-20261022d";
@@ -91,6 +92,7 @@ homeClipboard.start();
 
 const form = document.querySelector("#browser-form");
 const addressInput = document.querySelector("#browser-url");
+let browserInternetAllowed = false;
 const backButton = document.querySelector("#browser-back");
 const forwardButton = document.querySelector("#browser-forward");
 const refreshButton = document.querySelector("#browser-refresh");
@@ -166,6 +168,44 @@ let selectedBrowserEngineId = params.get("browser_engine_id") || params.get("ada
 let currentBrowserEngineId = "";
 let selectedRemoteExitId = params.get("remote_exit_id") || "";
 let currentRemoteExitId = "";
+
+function openInternetControl(target, query = {}) {
+  if (!homeParentOrigin || window.top === window) {
+    showStatus(`Open ${target === "inbox" ? "Inbox" : "System Security"} from Home to change Browser internet access.`, { sticky:true });
+    return;
+  }
+  window.top.postMessage({ type:"home:open-target", homeToken:launchToken, target, query }, homeParentOrigin);
+}
+
+function checkBrowserInternet() {
+  return browserInternetGranted(fetchJson, granted => {
+    browserInternetAllowed = granted;
+    setLoading(document.body.dataset.loading === "true");
+    const panel = document.querySelector("#browser-internet-request");
+    if (panel) panel.hidden = granted;
+    const choice = document.querySelector("#browser-internet");
+    if (choice) choice.value = granted ? "on" : "off";
+    if (!granted) {
+      setLoading(false);
+      showStatus("Browser needs the Home owner's permission. Review the request in Inbox, then open Browser after approval.", {sticky:true});
+    }
+  });
+}
+
+document.querySelector("#browser-internet-review")?.addEventListener("click", async () => {
+  try {
+    await fetchJson("/api/apps/browser/internet", {method:"POST",body:{action:"request"}});
+    openInternetControl("inbox");
+  } catch (error) { showStatus(friendlyOpenError(error), {sticky:true}); }
+});
+document.querySelector("#browser-internet-retry")?.addEventListener("click", () => {
+  checkBrowserInternet().then(granted => granted ? requestRuntimeOpen(addressInput.value) : null).catch(error => showStatus(friendlyOpenError(error), {sticky:true}));
+});
+document.querySelector("#browser-internet")?.addEventListener("change", async event => {
+  const turnOff = event.target.value === "off";
+  await checkBrowserInternet().catch(error => showStatus(friendlyOpenError(error), {sticky:true}));
+  openInternetControl(turnOff ? "system" : "inbox", turnOff ? {settings:"security"} : {});
+});
 
 function setSettingsOpen(open) {
   if (!settingsPanel || !settingsButton) {
@@ -403,7 +443,7 @@ function requestFreshRuntimeAuthority(error) {
 
 function setLoading(loading) {
   document.body.dataset.loading = loading ? "true" : "false";
-  addressInput.disabled = loading;
+  addressInput.disabled = loading || !browserInternetAllowed;
   if (engineSelect) {
     engineSelect.disabled = loading;
   }
@@ -846,8 +886,14 @@ function isHomeBrowserWindowCloseRequest(event) {
   );
 }
 
-function postHomeBrowserWindowCloseResult(message, owner, outcome, error = null) {
-  const terminal = outcome?.state === "terminal";
+async function postHomeBrowserWindowCloseResult(message, owner, outcome, error = null) {
+  let terminal = outcome?.state === "terminal";
+  if (terminal && !error) {
+    try {
+      await fetchJson("/api/apps/browser/internet", {method:"POST",body:{action:"end"}});
+      homeWindowTerminalCloseConfirmed = true;
+    } catch (failure) { terminal = false; error = failure; homeWindowTerminalCloseConfirmed = false; }
+  }
   const state = error ? "error" : terminal ? "terminal" : "pending";
   window.parent.postMessage(
     {
@@ -868,7 +914,7 @@ function postHomeBrowserWindowCloseResult(message, owner, outcome, error = null)
   );
 }
 
-function deliverPendingHomeBrowserWindowClose(owner, outcome) {
+async function deliverPendingHomeBrowserWindowClose(owner, outcome) {
   const delivery = pendingHomeWindowCloseDelivery;
   const currentOwner = currentRuntimePageOwner();
   if (
@@ -884,7 +930,7 @@ function deliverPendingHomeBrowserWindowClose(owner, outcome) {
   }
   pendingHomeWindowCloseDelivery = null;
   homeWindowTerminalCloseConfirmed = true;
-  postHomeBrowserWindowCloseResult(delivery.message, owner, outcome);
+  await postHomeBrowserWindowCloseResult(delivery.message, owner, outcome);
   return true;
 }
 
@@ -898,7 +944,7 @@ async function handleHomeBrowserWindowCloseRequest(event) {
     // close runs at once; a running close finishes first. The latest request gets
     // the result; Home shows "Closing…".
     deferredHomeWindowClose = message;
-    postHomeBrowserWindowCloseResult(message, null, {
+    await postHomeBrowserWindowCloseResult(message, null, {
       state: "pending",
       page_id: "",
       generation: 0,
@@ -940,14 +986,14 @@ async function closeHomeBrowserWindow(message) {
             { sticky: true },
           );
         }
-        postHomeBrowserWindowCloseResult(message, null, ownership);
+        await postHomeBrowserWindowCloseResult(message, null, ownership);
         return;
       }
       page = ownership.page;
       generation = 0;
       owner = runtimePageOwner(page, generation);
       if (!owner) {
-        postHomeBrowserWindowCloseResult(message, null, {
+        await postHomeBrowserWindowCloseResult(message, null, {
           state: "pending",
           page_id: String(page?.page_id || ""),
           generation: 0,
@@ -957,7 +1003,7 @@ async function closeHomeBrowserWindow(message) {
       }
     }
     if (owner) {
-      postHomeBrowserWindowCloseResult(message, owner, {
+      await postHomeBrowserWindowCloseResult(message, owner, {
         state: "pending",
         page_id: owner.page_id,
         generation: owner.generation,
@@ -987,7 +1033,7 @@ async function closeHomeBrowserWindow(message) {
         { sticky: true },
       );
     }
-    postHomeBrowserWindowCloseResult(message, owner, outcome);
+    await postHomeBrowserWindowCloseResult(message, owner, outcome);
   } catch (_error) {
     if (
       pendingHomeWindowCloseDelivery &&
@@ -999,7 +1045,7 @@ async function closeHomeBrowserWindow(message) {
       "Runtime cleanup could not be confirmed. Close Browser again to retry.",
       { sticky: true },
     );
-    postHomeBrowserWindowCloseResult(message, owner, null, _error);
+    await postHomeBrowserWindowCloseResult(message, owner, null, _error);
   } finally {
     homeWindowCloseInFlight = false;
     // A Close that arrived meanwhile runs next: it confirms absence, or retries a pending cleanup.
@@ -1202,7 +1248,7 @@ async function awaitRuntimeOwnershipForWindowClose(message) {
     if (Date.now() - noticeAt >= HOME_CLOSE_PENDING_NOTICE_MS) {
       noticeAt = Date.now();
       for (const request of new Set([message, deferredHomeWindowClose].filter(Boolean))) {
-        postHomeBrowserWindowCloseResult(request, null, ownership);
+        await postHomeBrowserWindowCloseResult(request, null, ownership);
       }
     }
     await wait(WINDOW_CLOSE_OPEN_POLL_MS);
@@ -3012,8 +3058,9 @@ const initialUrl = requestedStartupUrl || DEFAULT_URL;
 addressInput.value = initialUrl;
 setLoading(true);
 showStatus("Browser is checking its Engine. Wait, or reopen Browser from Home to retry.", { sticky: true });
-fetchBrowserSummary({ remoteServices: false })
+checkBrowserInternet().then(granted => granted ? fetchBrowserSummary({ remoteServices: false }) : null)
   .then(async (summary) => {
+    if (!summary) return;
     if (await restoreRuntimePageViewer(summary)) return;
     return requestRuntimeOpen(initialUrl, { history: "replace" });
   })

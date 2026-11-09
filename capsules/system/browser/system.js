@@ -386,6 +386,39 @@ function hasShellAccess() {
   return apiHomeToken.length > 0;
 }
 
+async function refreshBrowserInternet() {
+  const status = document.querySelector("#browser-internet-status");
+  const stop = document.querySelector("#browser-internet-stop");
+  if (!status || !stop) return;
+  try {
+    const consent = await fetchJson("/api/apps/browser/internet", {headers:shellHeaders()});
+    status.textContent = consent.stop_pending ? "Browser internet is stopping. Retry Stop to confirm cleanup." : consent.status === "granted" ? "Browser internet access is on." : "Browser internet access is off.";
+    stop.textContent = consent.stop_pending ? "Retry Stop" : "Stop Browser internet access";
+    stop.disabled = (!consent.stop_pending && consent.status !== "granted") || currentAccess.role !== "admin";
+  } catch (_error) {
+    status.textContent = "Permission could not be checked. Refresh System to try again.";
+    stop.disabled = true;
+  }
+}
+
+document.querySelector("#browser-internet-stop")?.addEventListener("click", async event => {
+  const status = document.querySelector("#browser-internet-status");
+  event.target.disabled = true;
+  try {
+    const consent = await fetchJson("/api/apps/browser/internet", {headers:shellHeaders()});
+    if (consent.status !== "granted" && !consent.stop_pending) { await refreshBrowserInternet(); return; }
+    status.textContent = consent.stop_pending ? "Confirming Browser internet has stopped..." : "Use your passkey to stop Browser internet access.";
+    const stepUpToken = consent.stop_pending ? undefined : await requestPasskeyStepUp("browser.internet.revoke", consent.request);
+    const result = await fetchJson("/api/apps/browser/internet", {method:"POST",headers:shellHeaders({"content-type":"application/json"}),
+      body:JSON.stringify({action:"revoke",step_up_token:stepUpToken})});
+    if (result.status !== "revoked") throw new Error("Stop was not confirmed. Try again.");
+    status.textContent = result.revoke_list === "persisted" ? "Browser internet access is off." : "Browser internet access is off. Runtime could not save its capability revoke list.";
+  } catch (_error) {
+    status.textContent = "Stop was not confirmed. Refresh System and try again.";
+    event.target.disabled = false;
+  }
+});
+
 async function refreshSystemSummary() {
   if (systemSummaryInFlight) return systemSummaryInFlight;
   systemSummaryInFlight = (async () => {
@@ -444,6 +477,7 @@ function renderSystemSummary(systemSummary) {
   setField("device-did", shortDid(identity.device_did), "", identity.device_did);
   syncDeviceDidCopy(identity.device_did);
   setAccessPolicy(access);
+  void refreshBrowserInternet();
   setPasskeyAuthority(authority);
   acceptAppearance(appearance);
   setRuntimeState(runtime);
@@ -813,6 +847,7 @@ async function onGuestRegistrationChange() {
       body: JSON.stringify({ enabled: guestRegistrationInput.checked }),
     });
     setAccessPolicy(access);
+  void refreshBrowserInternet();
     showGuestRegistrationStatus(access.guest_registration_enabled ? "Guest creation on." : "Guest creation off.", "success");
   } catch (error) {
     guestRegistrationInput.checked = currentAccess.guest_registration_enabled === true;

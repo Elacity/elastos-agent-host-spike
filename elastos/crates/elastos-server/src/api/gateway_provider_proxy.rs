@@ -1727,6 +1727,12 @@ pub(super) async fn gateway_provider_proxy(
     /* The verified capsule behind the launch token: model runs are bound and
     audited to it, never to a fixed name. */
     let launch_capsule_id = required.launch_context.executable_actor.clone();
+    if scheme == "net" && matches!(op.as_str(), "http" | "connect" | "resolve" | "stream") {
+        return (
+            StatusCode::GONE,
+            format!("legacy /api/provider/net/{op} is disabled; Browser streams must be opened through /api/apps/browser/open"),
+        ).into_response();
+    }
     let registry = match state.provider_registry.as_ref().cloned() {
         Some(registry) => registry,
         None => {
@@ -1901,16 +1907,6 @@ pub(super) async fn gateway_provider_proxy(
         }
     }
 
-    if scheme == "net" && op == "http" {
-        return gateway_browser::gateway_browser_net_http(registry.as_ref(), &request).await;
-    }
-    if scheme == "net" && op == "stream" {
-        return (
-            StatusCode::GONE,
-            "legacy /api/provider/net/stream is disabled; Browser streams must be opened through /api/apps/browser/open",
-        )
-            .into_response();
-    }
     if scheme == "inspect" && op == "request_act" {
         return gateway_inspect_action_request(&state, &context, &request).await;
     }

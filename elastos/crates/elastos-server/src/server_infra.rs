@@ -1612,6 +1612,7 @@ async fn setup_server_infrastructure_impl(
         .as_ref()
         .map(|service| service.gateway_context())
         .unwrap_or_default();
+    collaboration_context.capability_manager = Some(capability_manager.clone());
     collaboration_context.carrier_endpoint = carrier_service
         .as_ref()
         .and_then(|service| service.endpoint());

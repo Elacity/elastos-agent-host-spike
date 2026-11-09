@@ -47,11 +47,14 @@ mod gateway_assistant;
 mod gateway_assistant_workspace_v2;
 #[path = "gateway_browser.rs"]
 mod gateway_browser;
+#[path = "gateway_browser_internet.rs"]
+mod gateway_browser_internet;
 pub(crate) use gateway_browser::gateway_browser_operator::{
     register_browser_operator_sessions, BrowserOperatorService,
 };
 pub(crate) use gateway_browser::gateway_browser_remote::invoke as invoke_remote_browser_engine;
 pub(crate) use gateway_browser::gateway_browser_remote::provider_transport_ready as browser_remote_provider_transport_ready;
+pub(crate) use gateway_browser_internet::BrowserInternetService;
 #[path = "gateway_capsule_catalog.rs"]
 mod gateway_capsule_catalog;
 #[path = "gateway_collaboration_presence.rs"]
@@ -501,6 +504,7 @@ struct WalletPricePolicy {
 
 #[derive(Clone)]
 pub struct GatewayState {
+    pub(crate) browser_internet: Arc<BrowserInternetService>,
     pub(crate) carrier_endpoint: Option<iroh::Endpoint>,
     pub provider_registry: Option<Arc<ProviderRegistry>>,
     pub(crate) collaboration_chat_product_port:
@@ -579,6 +583,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
 
     Router::new()
         .merge(user_content)
+        .route(
+            "/api/apps/browser/internet",
+            get(gateway_browser_internet::summary).post(gateway_browser_internet::action),
+        )
         .route("/healthz", get(healthz))
         .route(
             "/api/auth/evm/challenge",

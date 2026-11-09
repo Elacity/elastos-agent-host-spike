@@ -104,6 +104,7 @@ export function makeSystemSummary(
 }
 
 export function inertSystemApiResponse(pathname) {
+  if (pathname === "/api/apps/browser/internet") return { status: "off" };
   if (pathname === "/api/apps/home/active-shell") {
     return {
       active: "home-gui",
