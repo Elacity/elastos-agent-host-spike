@@ -2121,7 +2121,8 @@ mod discovery_summary_tests {
             fixture.store.data_root(),
             fixture.store.principal_id(),
         );
-        let context = stored_passkey_principal_context(fixture.store.data_root(), &principal).unwrap();
+        let context =
+            stored_passkey_principal_context(fixture.store.data_root(), &principal).unwrap();
         let authority = ConfiguredContactAuthority {
             profile: fixture.local_profile.clone(),
             store: fixture.store.clone(),
@@ -9401,19 +9402,15 @@ mod stored_root_tests {
         // The id rule names a root this Home accepts, so a served result would
         // prove the surface fell back to it.
         let id_rule_root = crate::auth::principal_localhost_root(principal_id);
-        assert!(
-            elastos_common::localhost::rooted_localhost_fs_path(
-                &data_dir,
-                &format!("{id_rule_root}/.AppData/ElastOS/Home/services-state.json"),
-            )
-            .is_some()
-        );
-        assert!(
-            home_services_selection_state_path(&data_dir, &context)
-                .unwrap_err()
-                .to_string()
-                .contains("invalid Services state root")
-        );
+        assert!(elastos_common::localhost::rooted_localhost_fs_path(
+            &data_dir,
+            &format!("{id_rule_root}/.AppData/ElastOS/Home/services-state.json"),
+        )
+        .is_some());
+        assert!(home_services_selection_state_path(&data_dir, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid Services state root"));
         assert!(home_services_requests_state_path(&data_dir, &context).is_err());
         assert!(home_active_shell_state_path(&data_dir, &context).is_err());
     }
@@ -9454,7 +9451,9 @@ mod stored_root_tests {
             .local_offer_ids
             .contains(crate::api::gateway::MODEL_LOCAL_OFFER));
         assert_eq!(reloaded.localhost_root, record.localhost_root);
-        assert!(home_active_shell_state(&data_dir, &context).unwrap().is_none());
+        assert!(home_active_shell_state(&data_dir, &context)
+            .unwrap()
+            .is_none());
         assert_eq!(
             home_services_requests_state(&data_dir, &context)
                 .unwrap()

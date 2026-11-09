@@ -1182,8 +1182,7 @@ mod tests {
             Some(principal.proof_binding_id.clone()),
             "grant".to_string(),
         );
-        let Ok(presentation) =
-            authenticated_presence_presentation_for_context(&state, &context)
+        let Ok(presentation) = authenticated_presence_presentation_for_context(&state, &context)
         else {
             panic!("a stored principal must present its signed Profile");
         };

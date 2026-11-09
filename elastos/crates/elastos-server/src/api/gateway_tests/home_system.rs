@@ -13723,8 +13723,7 @@ fn store_carrier_passkey_principal(data_dir: &std::path::Path) -> String {
             revoked_at: None,
         },
     );
-    let principal_id =
-        crate::auth::passkey_credential_principal_id(rp_id, credential_id).unwrap();
+    let principal_id = crate::auth::passkey_credential_principal_id(rp_id, credential_id).unwrap();
     crate::auth::upsert_principal_for_binding_as_role_named(
         data_dir,
         binding,
@@ -13764,7 +13763,10 @@ fn an_unresolvable_principal_root_is_not_a_contact() {
     let data_dir = dir.path().to_path_buf();
     let loader = std::thread::spawn(move || {
         crate::api::gateway::gateway_home_system::carrier_source_is_contact_of(
-            &data_dir, &network, &principals, &source,
+            &data_dir,
+            &network,
+            &principals,
+            &source,
         )
     });
     hit_observed

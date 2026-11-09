@@ -2710,10 +2710,7 @@ pub(super) fn room_service_join_error_response(err: tokio::task::JoinError) -> R
 mod stored_root_tests {
     use super::*;
 
-    fn stored_context(
-        data_dir: &std::path::Path,
-        principal_id: &str,
-    ) -> HomeLaunchTokenContext {
+    fn stored_context(data_dir: &std::path::Path, principal_id: &str) -> HomeLaunchTokenContext {
         let root =
             crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).unwrap();
         HomeLaunchTokenContext::resolved(
