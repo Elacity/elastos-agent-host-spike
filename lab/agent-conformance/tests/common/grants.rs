@@ -857,7 +857,7 @@ impl Controller {
     pub fn cleanup_state(&self) -> Result<&'static str> {
         let pending = self.pending()?;
         require_empty_pending(&pending)?;
-        let grants = self.call("GET", "/api/capability/list", &Value::Null)?;
+        let grants = self.call("GET", "/api/capability/list?scope=all_sessions_live", &Value::Null)?;
         live_grant_state(&grants)
     }
 
