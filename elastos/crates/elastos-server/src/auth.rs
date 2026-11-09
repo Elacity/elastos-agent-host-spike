@@ -31,6 +31,58 @@ use sha2::{Digest, Sha256};
 
 use crate::host_lock::FileLock;
 
+/// Test-only record of principal-root object reads and writes, so a row can
+/// prove that an unresolved principal touches no path the id rule names.
+#[cfg(test)]
+pub(crate) mod principal_object_io {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Default)]
+    struct Ops {
+        reads: Vec<PathBuf>,
+        writes: Vec<PathBuf>,
+    }
+
+    static OPS: LazyLock<Mutex<HashMap<PathBuf, Ops>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn record(data_dir: &Path, path: &Path, write: bool) {
+        let mut ops = OPS.lock().unwrap();
+        let entry = ops.entry(data_dir.to_path_buf()).or_default();
+        if write {
+            entry.writes.push(path.to_path_buf());
+        } else {
+            entry.reads.push(path.to_path_buf());
+        }
+    }
+
+    pub(crate) fn record_read(data_dir: &Path, path: &Path) {
+        record(data_dir, path, false);
+    }
+
+    pub(crate) fn record_write(data_dir: &Path, path: &Path) {
+        record(data_dir, path, true);
+    }
+
+    pub(crate) fn reads(data_dir: &Path) -> Vec<PathBuf> {
+        OPS.lock()
+            .unwrap()
+            .get(data_dir)
+            .map(|ops| ops.reads.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn writes(data_dir: &Path) -> Vec<PathBuf> {
+        OPS.lock()
+            .unwrap()
+            .get(data_dir)
+            .map(|ops| ops.writes.clone())
+            .unwrap_or_default()
+    }
+}
+
 const AUTH_STATE_SCHEMA: &str = "elastos.auth.state/v1";
 pub(crate) const AUTH_SESSION_TTL_SECS: u64 = 12 * 60 * 60;
 const AUTH_STATE_ROOT: &str = "ElastOS/System/Auth";
@@ -5626,6 +5678,8 @@ pub fn read_principal_root_object(
     object_uri: &str,
     path: &Path,
 ) -> anyhow::Result<Vec<u8>> {
+    #[cfg(test)]
+    principal_object_io::record_read(data_dir, path);
     validate_principal_root_object_binding_in_state(
         data_dir,
         principal_id,
@@ -5923,6 +5977,8 @@ pub fn write_principal_root_object(
     path: &Path,
     plaintext: &[u8],
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    principal_object_io::record_write(data_dir, path);
     write_principal_root_object_inner(
         data_dir,
         principal_id,

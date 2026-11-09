@@ -10884,7 +10884,7 @@ mod publish_tests {
 #[cfg(test)]
 mod r5a_tests {
     use super::*;
-    use crate::auth::{r4_fixture, PrincipalKind};
+    use crate::auth::{principal_object_io, r4_fixture, PrincipalKind};
     use std::collections::HashMap;
     use std::sync::LazyLock;
     use std::sync::Mutex;
@@ -10919,6 +10919,15 @@ mod r5a_tests {
         };
         crate::auth::store_test_principal_root_protection_for(dir.path(), r4_fixture::ID, root);
         dir
+    }
+
+    /// Writes real data where the id rule for `r4_fixture::ID` points, so an
+    /// unresolved-principal fallback would have something to read or overwrite.
+    fn seed_id_rule_file(data_dir: &Path, uri: &str, bytes: &[u8]) -> PathBuf {
+        let path = rooted_localhost_fs_path(data_dir, uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        path
     }
 
     #[test]
@@ -11195,13 +11204,23 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
-        let result = write_trash_record(dir.path(), r4_fixture::ID, &trash(r4_fixture::HUMAN_ROOT));
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
+        let result = write_trash_record(dir.path(), r4_fixture::ID, &record);
         assert!(
             result
                 .as_ref()
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        // The id-rule location holds real data; nothing may be read, written
+        // or returned from it once the stored record is gone.
+        assert_eq!(
+            fs::read(&id_path).unwrap_or_default(),
+            b"id-rule trash record"
+        );
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11222,17 +11241,19 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
-        let result = read_trash_record(
-            dir.path(),
-            r4_fixture::ID,
-            &trash(r4_fixture::HUMAN_ROOT).trash_uri,
-        );
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
+        let result = read_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
         assert!(
             result
                 .as_ref()
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes);
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11251,16 +11272,19 @@ mod r5a_tests {
             assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
         }
         let dir = tempfile::tempdir().unwrap();
-        let result = remove_trash_record(
-            dir.path(),
-            r4_fixture::ID,
-            &trash(r4_fixture::HUMAN_ROOT).trash_uri,
-        );
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
+        let result = remove_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
         assert!(
             result
                 .as_ref()
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
+        );
+        assert_eq!(
+            fs::read(&id_path).unwrap_or_default(),
+            b"id-rule trash record"
         );
     }
 
