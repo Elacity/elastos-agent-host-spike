@@ -3052,7 +3052,7 @@ async fn recovery_kit_import_inner(
         );
     }
     let recovered = if input.reassign_to_current_principal {
-        match crate::auth::stored_principal_record(&state.data_dir, &kit.principal_id) {
+        match recovered_principal_record_for_import(&state.data_dir, &kit.principal_id) {
             Ok(record) => record,
             Err(_) => {
                 return fail_recovery_kit_request(
@@ -3178,10 +3178,15 @@ async fn recovery_kit_import_inner(
             &state.data_dir,
             crate::auth::RecoveryReassignmentTestFault::TokenPreparation,
         )?;
-        let root = crate::auth::ResolvedPrincipalRoot::verified_recovery_kit(
-            &kit.principal_id,
-            &kit.localhost_root,
-        )?;
+        let root = match recovered.as_ref() {
+            Some(record) => {
+                crate::auth::ResolvedPrincipalRoot::verified_stored_recovery_kit(record, &kit)?
+            }
+            None => crate::auth::ResolvedPrincipalRoot::verified_recovery_kit(
+                &kit.principal_id,
+                &kit.localhost_root,
+            )?,
+        };
         let home_token = issue_home_launch_token_for_verified_grant(
             &state.data_dir,
             HOME_CAPSULE_ID,
@@ -3268,6 +3273,26 @@ async fn recovery_kit_import_inner(
         home_token: None,
         system_token: None,
     })
+}
+
+#[cfg(test)]
+static RECOVERED_PRINCIPAL_LOOKUP_FAILURES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+fn recovered_principal_record_for_import(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<Option<crate::auth::PrincipalRecord>> {
+    #[cfg(test)]
+    if RECOVERED_PRINCIPAL_LOOKUP_FAILURES
+        .lock()
+        .expect("recovered principal lookup fault lock")
+        .remove(data_dir)
+    {
+        anyhow::bail!("injected recovered principal lookup failure");
+    }
+    crate::auth::stored_principal_record(data_dir, principal_id)
 }
 
 fn create_recovery_kit_for_principal(
