@@ -119,6 +119,32 @@ fn attach_public_capsule_data(app: Router, dir: Option<&Path>) -> Router {
     app.nest_service("/capsule-data", ServeDir::new(dir))
 }
 
+/// The shell-only capability and audit routes: session auth, then the shell check.
+pub(crate) fn shell_capability_routes(
+    api_state: ApiState,
+    capability_state: CapabilityState,
+) -> Router {
+    Router::new()
+        .route("/api/capability/pending", get(handlers::list_pending))
+        .route("/api/capability/grant", post(handlers::grant_request))
+        .route("/api/capability/deny", post(handlers::deny_request))
+        // Revoke endpoints
+        .route("/api/capability/:id", delete(handlers::revoke_capability))
+        .route(
+            "/api/capability/revoke-all",
+            post(handlers::revoke_all_capabilities),
+        )
+        // Audit log endpoints
+        .route("/api/audit", get(handlers::get_audit_log))
+        .route("/api/audit/types", get(handlers::get_audit_event_types))
+        .layer(axum_middleware::from_fn(shell_only_middleware))
+        .layer(axum_middleware::from_fn_with_state(
+            api_state,
+            auth_middleware,
+        ))
+        .with_state(capability_state)
+}
+
 /// Start the HTTP API server with full session and capability support
 ///
 /// This is the Phase 5+ server configuration that includes:
@@ -260,25 +286,7 @@ pub async fn start_server_with_sessions(config: ServerConfig) -> anyhow::Result<
         .with_state(capability_state.clone());
 
     // Shell-only routes (require shell session)
-    let shell_routes = Router::new()
-        .route("/api/capability/pending", get(handlers::list_pending))
-        .route("/api/capability/grant", post(handlers::grant_request))
-        .route("/api/capability/deny", post(handlers::deny_request))
-        // Revoke endpoints
-        .route("/api/capability/:id", delete(handlers::revoke_capability))
-        .route(
-            "/api/capability/revoke-all",
-            post(handlers::revoke_all_capabilities),
-        )
-        // Audit log endpoints
-        .route("/api/audit", get(handlers::get_audit_log))
-        .route("/api/audit/types", get(handlers::get_audit_event_types))
-        .layer(axum_middleware::from_fn(shell_only_middleware))
-        .layer(axum_middleware::from_fn_with_state(
-            api_state.clone(),
-            auth_middleware,
-        ))
-        .with_state(capability_state.clone());
+    let shell_routes = shell_capability_routes(api_state.clone(), capability_state.clone());
 
     // Orchestrator routes (shell-only — runtime coordination for attach flow)
     let orchestrator_state = handlers::orchestrator::OrchestratorState {
