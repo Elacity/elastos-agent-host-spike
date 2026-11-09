@@ -9461,4 +9461,41 @@ mod stored_root_tests {
             record.localhost_root
         );
     }
+
+    /// R2 M1: an Agent's stored `UsersAI/` root reaches the default Services
+    /// states. A Human control cannot see this, because a Human's stored root
+    /// equals the principal-id rule's root. The expected suffix is the SHA-256
+    /// prefix of the fixed test id, written as a literal.
+    #[test]
+    fn a_stored_agent_root_reaches_the_services_default_states() {
+        let (_temp, data_dir) = state_dir();
+        let principal_id = "person:local:stored-agent-home-state";
+        let expected_root = "localhost://UsersAI/e2ebe568bb792f09d6da1893";
+        crate::auth::store_test_human_principal(&data_dir, principal_id);
+        crate::auth::tests::mint_agent_record(&data_dir, principal_id, None);
+        assert_eq!(
+            crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id).unwrap(),
+            expected_root
+        );
+        let record = crate::auth::load_auth_state(&data_dir)
+            .unwrap()
+            .principals
+            .into_iter()
+            .find(|principal| principal.principal_id == principal_id)
+            .unwrap();
+        let context = stored_passkey_principal_context(&data_dir, &record).unwrap();
+        assert_eq!(context.root().localhost_root(), expected_root);
+        assert_eq!(
+            home_services_selection_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            expected_root
+        );
+        assert_eq!(
+            home_services_requests_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            expected_root
+        );
+    }
 }
