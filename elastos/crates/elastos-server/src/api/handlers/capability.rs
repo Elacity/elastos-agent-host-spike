@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use elastos_common::localhost::{is_supported_resource_scheme, is_system_only_backend_resource};
 use elastos_runtime::capability::{
     pending::{PendingCapabilityRequest, PendingRequestStore},
-    Action, CapabilityManager, GrantDuration, PolicyEvaluator, PolicyOutcome, ResourceId, Settler,
-    TokenConstraints,
+    Action, CapabilityManager, CapabilityStore, GrantDuration, PolicyEvaluator, PolicyOutcome,
+    ResourceId, Settler, TokenConstraints,
 };
 use elastos_runtime::session::Session;
 
@@ -26,6 +26,8 @@ use crate::provider_resource::ensure_generic_wallet_capability;
 pub struct CapabilityState {
     pub pending_store: Arc<PendingRequestStore>,
     pub capability_manager: Arc<CapabilityManager>,
+    /// The same store `capability_manager` holds: revocations, use counts, epoch.
+    pub capability_store: Arc<CapabilityStore>,
     pub policy_evaluator: Arc<PolicyEvaluator>,
 }
 
@@ -776,12 +778,16 @@ mod tests {
         let store = std::sync::Arc::new(elastos_runtime::capability::CapabilityStore::new());
         let metrics =
             std::sync::Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new());
-        let capability_manager =
-            std::sync::Arc::new(CapabilityManager::new(store, audit_log.clone(), metrics));
+        let capability_manager = std::sync::Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit_log.clone(),
+            metrics,
+        ));
 
         CapabilityState {
             pending_store: std::sync::Arc::new(PendingRequestStore::new(audit_log.clone())),
             capability_manager,
+            capability_store: store,
             policy_evaluator: std::sync::Arc::new(PolicyEvaluator::new(
                 Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
                 audit_log,

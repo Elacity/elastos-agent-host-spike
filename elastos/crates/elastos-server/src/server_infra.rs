@@ -28,6 +28,7 @@ pub(crate) struct ServerInfrastructure {
     pub(crate) audit_log: Arc<primitives::audit::AuditLog>,
     pub(crate) session_registry: Arc<session::SessionRegistry>,
     pub(crate) capability_manager: Arc<capability::CapabilityManager>,
+    pub(crate) capability_store: Arc<capability::CapabilityStore>,
     pub(crate) pending_store: Arc<capability::pending::PendingRequestStore>,
     pub(crate) provider_registry: Arc<provider::ProviderRegistry>,
     pub(crate) namespace_store: Arc<namespace::NamespaceStore>,
@@ -671,7 +672,7 @@ async fn setup_server_infrastructure_impl(
     let capability_store = serve_capability_store(&data_dir).await?;
     let capability_manager = Arc::new(capability::CapabilityManager::load_or_generate(
         &data_dir,
-        capability_store,
+        capability_store.clone(),
         audit_log.clone(),
         metrics.clone(),
     ));
@@ -1725,6 +1726,7 @@ async fn setup_server_infrastructure_impl(
         audit_log,
         session_registry,
         capability_manager,
+        capability_store,
         pending_store,
         provider_registry,
         namespace_store,

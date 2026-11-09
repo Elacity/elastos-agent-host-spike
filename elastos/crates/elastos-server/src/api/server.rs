@@ -59,6 +59,8 @@ pub struct ServerConfig {
     pub runtime: Arc<Runtime>,
     pub session_registry: Arc<SessionRegistry>,
     pub capability_manager: Arc<CapabilityManager>,
+    /// The store behind `capability_manager`, read by the live grant view.
+    pub capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
     pub pending_store: Arc<PendingRequestStore>,
     pub namespace_store: Option<Arc<NamespaceStore>>,
     pub provider_registry: Option<Arc<ProviderRegistry>>,
@@ -130,6 +132,7 @@ pub async fn start_server_with_sessions(config: ServerConfig) -> anyhow::Result<
         runtime,
         session_registry,
         capability_manager,
+        capability_store,
         pending_store,
         namespace_store,
         provider_registry,
@@ -200,6 +203,7 @@ pub async fn start_server_with_sessions(config: ServerConfig) -> anyhow::Result<
     let capability_state = CapabilityState {
         pending_store: pending_store.clone(),
         capability_manager: capability_manager.clone(),
+        capability_store,
         policy_evaluator,
     };
     let capsule_audit_log = audit_log
