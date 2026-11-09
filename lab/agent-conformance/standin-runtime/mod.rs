@@ -1210,7 +1210,8 @@ impl StandIn {
 
     /// The plain route's answer: the caller's own session, five fields per
     /// entry and no `scope` key. The shell caller answers for the shell
-    /// session, so it lists exactly the grants that session holds.
+    /// session and keeps every `Granted` record, like the real
+    /// `session_granted`; a client keeps its own live grants.
     fn render_own(&self, caller: Caller<'_>) -> Value {
         let own = match caller {
             Caller::Shell => Caller::Client {
@@ -1218,7 +1219,10 @@ impl StandIn {
             },
             Caller::Client { .. } => caller,
         };
-        let mut grants = self.kept(own);
+        let mut grants = match caller {
+            Caller::Shell => self.granted_kept(own),
+            Caller::Client { .. } => self.kept(own),
+        };
         grants.sort_by(|left, right| left.request_id.cmp(&right.request_id));
         let capabilities = grants
             .iter()
@@ -1230,7 +1234,7 @@ impl StandIn {
     /// The shell's `?scope=all_sessions_live` answer: every live grant, six
     /// fields per entry with its session, sorted by session then request.
     fn render_all_live(&self) -> Value {
-        let mut grants = self.kept_live(Caller::Shell);
+        let mut grants = self.kept(Caller::Shell);
         grants.sort_by(|left, right| {
             left.session_id
                 .cmp(&right.session_id)
@@ -2004,23 +2008,23 @@ impl StandIn {
             .unwrap_or(RESIDENT_WORLD)
     }
 
-    /// The plain filter, matching the real `session_granted`: every record
-    /// the store still reports `Granted` for that session. Only revocation
-    /// moves a grant off `Granted`; an exhausted or lifetime-expired grant
-    /// stays in this answer.
+    /// The live filter. A grant stays when its life is `Live`. An ended
+    /// session stays.
     fn kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
         self.grants
             .iter()
-            .filter(|grant| keep_granted(grant, caller))
+            .filter(|grant| keep_live(grant, caller, self.instant))
             .collect()
     }
 
-    /// The scoped filter. A grant stays when its life is `Live`. An ended
-    /// session stays.
-    fn kept_live(&self, caller: Caller<'_>) -> Vec<&Grant> {
+    /// The shell plain filter, matching the real `session_granted`: every
+    /// record the store still reports `Granted` for that session. Only
+    /// revocation moves a grant off `Granted`; an exhausted or
+    /// lifetime-expired grant stays in this answer.
+    fn granted_kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
         self.grants
             .iter()
-            .filter(|grant| keep_live(grant, caller, self.instant))
+            .filter(|grant| keep_granted(grant, caller))
             .collect()
     }
 }

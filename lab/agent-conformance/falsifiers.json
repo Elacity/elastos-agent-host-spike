@@ -1522,8 +1522,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
-          "old": "        let mut grants = self.kept(own);",
-          "new": "        let mut grants = self.kept(Caller::Shell);"
+          "old": "            Caller::Shell => self.granted_kept(own),",
+          "new": "            Caller::Shell => self.granted_kept(Caller::Shell),"
         }
       ],
       "tests": [
