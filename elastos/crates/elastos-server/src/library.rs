@@ -10983,20 +10983,19 @@ mod r5a_tests {
         let id_path = rooted_localhost_fs_path(agent.path(), &id_uri).unwrap();
         fs::create_dir_all(id_path.parent().unwrap()).unwrap();
         fs::write(&id_path, b"id-rule trash").unwrap();
-        // Until R5b fixes library_target, the stored Agent root refuses here.
-        // An id-rule swap removes the Users decoy before the later event refusal.
+        // The stored Agent root empties its own Trash; the id-rule decoy stays.
         let result = handle_library_request(
             agent.path(),
             ObjectProviderRequest::EmptyTrash {
                 principal_id: r4_fixture::ID.into(),
             },
         );
-        assert_eq!(fs::read(&agent_path).unwrap_or_default(), b"agent trash");
+        assert!(!agent_path.exists(), "agent Trash was not emptied");
         assert_eq!(fs::read(&id_path).unwrap_or_default(), b"id-rule trash");
         assert!(
             result
                 .as_ref()
-                .is_ok_and(|value| value["deleted_count"] == 0),
+                .is_ok_and(|value| value["deleted_count"] == 1),
             "{result:?}"
         );
         let events = read_library_events(agent.path(), r4_fixture::ID).unwrap();
