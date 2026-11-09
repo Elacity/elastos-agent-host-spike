@@ -1179,9 +1179,10 @@ impl StandIn {
     /// `GET /api/capability/list` for the plain route or `?scope=`.
     ///
     /// The plain route is the real default: the caller's own session, five
-    /// fields per entry and no `scope` key. A shell owns no grant, so its
-    /// plain answer is empty. `?scope=all_sessions_live` is the shell-only
-    /// all-sessions view, six fields per entry with the grant's session.
+    /// fields per entry and no `scope` key. The shell caller answers for the
+    /// shell session, so it lists exactly the grants that session holds.
+    /// `?scope=all_sessions_live` is the shell-only all-sessions view, six
+    /// fields per entry with the grant's session.
     pub fn get_capability_list(
         &self,
         caller: Caller<'_>,
@@ -1219,7 +1220,7 @@ impl StandIn {
     /// The shell's `?scope=all_sessions_live` answer: every live grant, six
     /// fields per entry with its session, sorted by session then request.
     fn render_all_live(&self) -> Value {
-        let mut grants = self.kept(Caller::Shell);
+        let mut grants = self.kept_live(Caller::Shell);
         grants.sort_by(|left, right| {
             left.session_id
                 .cmp(&right.session_id)
@@ -1993,22 +1994,40 @@ impl StandIn {
             .unwrap_or(RESIDENT_WORLD)
     }
 
-    /// One filter. A grant stays when its life is `Live`. An ended session stays.
+    /// The plain filter, matching the real `session_granted`: every record
+    /// the store still reports `Granted` for that session. Only revocation
+    /// moves a grant off `Granted`; an exhausted or lifetime-expired grant
+    /// stays in this answer.
     fn kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
         self.grants
             .iter()
-            .filter(|grant| keep(grant, caller, self.instant))
+            .filter(|grant| keep_granted(grant, caller))
+            .collect()
+    }
+
+    /// The scoped filter. A grant stays when its life is `Live`. An ended
+    /// session stays.
+    fn kept_live(&self, caller: Caller<'_>) -> Vec<&Grant> {
+        self.grants
+            .iter()
+            .filter(|grant| keep_live(grant, caller, self.instant))
             .collect()
     }
 }
 
-fn keep(grant: &Grant, caller: Caller<'_>, instant: u64) -> bool {
+fn keep_live(grant: &Grant, caller: Caller<'_>, instant: u64) -> bool {
     // Ending a session leaves a live grant in this view.
     let _ended = grant.session_ended;
     is_live(grant.life) && !is_due(grant, instant) && visible(grant, caller)
 }
 
-/// One expiry compare. `keep` and `authorise` use it with the stored instant.
+/// The real plain route's `session_granted`: status `Granted` and that
+/// session. A spent allowance or a past lifetime leaves the status `Granted`.
+fn keep_granted(grant: &Grant, caller: Caller<'_>) -> bool {
+    !matches!(grant.life, Life::Revoked) && visible(grant, caller)
+}
+
+/// One expiry compare. `keep_live` and `authorise` use it with the stored instant.
 /// A grant at or past its `expires_at` no longer authorises and leaves the view.
 fn is_due(grant: &Grant, instant: u64) -> bool {
     matches!(grant.expires_at, Some(expires_at) if instant >= expires_at)
@@ -3264,6 +3283,74 @@ mod tests {
                 }]
             }),
             "the shell's plain view lists only the shell session's grants"
+        );
+    }
+
+    #[test]
+    fn standin_shell_plain_matches_the_real_session_granted_filter() {
+        let mut standin = StandIn::new();
+        for (request_id, resource, duration, granted_at, life) in [
+            ("req-shell-live", "res-live", "session", 5, Life::Live),
+            (
+                "req-shell-exhausted",
+                "res-exhausted",
+                "once",
+                6,
+                Life::Exhausted,
+            ),
+            ("req-shell-due", "res-due", "once", 1, Life::Live),
+            ("req-shell-revoked", "res-revoked", "once", 2, Life::Revoked),
+        ] {
+            standin.seed_grant(
+                request_id,
+                SHELL_SESSION,
+                resource,
+                "read",
+                duration,
+                granted_at,
+                life,
+                false,
+            );
+        }
+        standin.seed_grant(
+            "req-other-live",
+            "s-other",
+            "res-other",
+            "read",
+            "session",
+            4,
+            Life::Live,
+            false,
+        );
+        standin.set_instant(3_601);
+        assert_eq!(
+            shell_plain(&standin),
+            json!({
+                "capabilities": [
+                    {
+                        "request_id": "req-shell-due",
+                        "resource": "res-due",
+                        "action": "read",
+                        "duration": "once",
+                        "granted_at": 1
+                    },
+                    {
+                        "request_id": "req-shell-exhausted",
+                        "resource": "res-exhausted",
+                        "action": "read",
+                        "duration": "once",
+                        "granted_at": 6
+                    },
+                    {
+                        "request_id": "req-shell-live",
+                        "resource": "res-live",
+                        "action": "read",
+                        "duration": "session",
+                        "granted_at": 5
+                    }
+                ]
+            }),
+            "the plain view is session_granted: this session's Granted records, spent or expired included"
         );
     }
 

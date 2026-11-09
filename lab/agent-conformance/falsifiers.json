@@ -1515,6 +1515,22 @@
       ]
     },
     {
+      "id": "F-standin-shell-granted",
+      "title": "widen the plain view to every session's granted records",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "        let mut grants = self.kept(own);",
+          "new": "        let mut grants = self.kept(Caller::Shell);"
+        }
+      ],
+      "tests": [
+        "standin_runtime::tests::standin_shell_plain_matches_the_real_session_granted_filter"
+      ]
+    },
+    {
       "id": "F-standin-m2-content",
       "title": "admit a content-role bundle instead of refusing it",
       "command": "agent-conformance",
