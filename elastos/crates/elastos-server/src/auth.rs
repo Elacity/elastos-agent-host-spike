@@ -11019,6 +11019,16 @@ pub(crate) mod r4_fixture {
         set_kind(data_dir, ID, kind, root);
     }
 
+    pub fn remove(data_dir: &Path, principal_id: &str) {
+        mutate_auth_state(data_dir, |state| {
+            state
+                .principals
+                .retain(|record| record.principal_id != principal_id);
+            Ok(())
+        })
+        .unwrap();
+    }
+
     pub fn set_kind(data_dir: &Path, principal_id: &str, kind: PrincipalKind, root: &str) {
         // As in the auth Agent tests: change the stored fixture under the lock.
         mutate_auth_state(data_dir, |state| {
