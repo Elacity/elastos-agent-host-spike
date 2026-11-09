@@ -80,14 +80,14 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === "OPTIONS") { res.writeHead(204, headers); res.end(); return; }
     if (url.pathname === "/") {
-      send(200, "text/html", `<!doctype html><style>html,body,iframe{width:100%;height:100%;margin:0;border:0}</style>
+      send(200, "text/html", `<!doctype html><style>html,body,iframe{width:100%;height:100%;margin:0;border:0}iframe{display:block}</style>
         <iframe title="Home GUI" sandbox="allow-scripts" src="/gui?home_origin=${encodeURIComponent(origin)}"></iframe>`);
       return;
     }
     if (url.pathname === "/gui") {
       // Home GUI: hosts the Assistant frame and raises its room once ready.
       const homeOrigin = url.searchParams.get("home_origin");
-      send(200, "text/html", `<!doctype html><style>html,body,iframe{width:100%;height:100%;margin:0;border:0}</style>
+      send(200, "text/html", `<!doctype html><style>html,body,iframe{width:100%;height:100%;margin:0;border:0}iframe{display:block}</style>
         <iframe title="Assistant" sandbox="allow-downloads allow-forms allow-modals allow-pointer-lock allow-scripts" allow="autoplay; fullscreen"
           src="/apps/assistant/?home_origin=${encodeURIComponent(homeOrigin)}#home_token=${homeToken}"></iframe>
         <script>addEventListener('message',event=>{if(event.data?.type==='home-agent:ready'){
@@ -202,10 +202,8 @@ let beforeClamp, launchScriptDir;
 const pageErrors = [];
 try {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
-  // Keep the native overlay thumb visible: this smoke tests dragging it,
-  // while Chromium's auto-hide animation can remove its pointer hit target.
   const launch = { headless: true, ignoreDefaultArgs: ["--hide-scrollbars"],
-    args: ["--enable-features=OverlayScrollbar", "--disable-features=ScrollbarAnimations"],
+    args: ["--enable-features=OverlayScrollbar"],
     ...productSmokeLaunchOptions() };
   if (process.platform === "darwin") {
     // Cocoa needs a separate value argument; Playwright only accepts switches.
@@ -230,6 +228,16 @@ try {
   const room = page.frameLocator("iframe").frameLocator("iframe");
   await room.locator(".agent-msg").nth(history.length - 1).waitFor({ state: "attached" });
   frame = page.frames().find(candidate => candidate.url().includes("/apps/assistant/"));
+
+  for (const [name, iframe] of [["Home", page.locator("iframe")],
+    ["GUI", page.frameLocator("iframe").locator("iframe")]]) {
+    const viewport = await iframe.evaluate(node => {
+      const scroller = node.ownerDocument.scrollingElement;
+      return { height: scroller.clientHeight, contentHeight: scroller.scrollHeight };
+    });
+    assert.equal(viewport.contentHeight, viewport.height,
+      `${name} fixture fills the viewport without an outer scrollbar: ${JSON.stringify(viewport)}`);
+  }
 
   await frame.evaluate(() => {
     const s = document.querySelector("#agent-harness-stream");
