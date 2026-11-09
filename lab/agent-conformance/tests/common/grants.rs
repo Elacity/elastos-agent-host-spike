@@ -865,8 +865,9 @@ impl Controller {
         match live_grant_state(&grants) {
             Ok(state) => Ok(state),
             // A run client's grants stay live after its exit. The real census
-            // reports them as the known AC-021 gap, so they earn zero credit.
-            Err("live grant leftover") => Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)"),
+            // reports them as the known AC-021 gap, so they earn zero credit;
+            // the missing-marker state stays distinct.
+            Err("live grant leftover") => Ok("pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)"),
             Err(reason) => Err(reason),
         }
     }

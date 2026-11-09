@@ -505,9 +505,9 @@ Homes after capture, source and report checks. The census tool's scratch Home
 is removed after its captures join the existing credential-check inventory.
 
 The grant result is `pending:0 grants:0` when the scoped view holds no live
-grant, and `pending:0 grants:BLOCKED(AC-021-GRANTS)` while a run's client
-grants stay live after client exit. The census asks the shell-only live view
-(`?scope=all_sessions_live`); this lane performs zero revocations, so the
+grant, and `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)` while a run's
+client grants stay live after client exit. The census asks the shell-only live
+view (`?scope=all_sessions_live`); this lane performs zero revocations, so the
 blocked line reports the real AC-021 gap rather than a cleaned fixture.
 `run_leaves_no_live_grant` stays an ignored table row. F-cleanup-grant waits
 for that row. F-cleanup-temp and F-cleanup-process run the existing
@@ -602,9 +602,9 @@ refuse a leftover and is then denied. The final empty-pending check precedes
 operator group stop, root census, API-port closure and the empty `tmp/` check.
 The census asks the shell-only live view. The controller performs no
 revocation, so a run's grants stay live and the line reports
-`BLOCKED(AC-021-GRANTS)`; an unmarked view reports the same BLOCKED state.
-Resident cancellation stays RT4; this row covers the pending-request
-point only. GAPS.md defines the cleanup visibility limits.
+`BLOCKED(AC-021-GRANTS:leftover)`; an unmarked view reports
+`BLOCKED(AC-021-GRANTS)`. Resident cancellation stays RT4; this row covers the
+pending-request point only. GAPS.md defines the cleanup visibility limits.
 
 F-cancel-sibling cancels both first requests and must fail the sibling check.
 F-cancel-reason changes the delivered reason. F-cancel-retry bypasses later
@@ -637,7 +637,8 @@ the maximum permitted window. The existing cleanup path then checks the
 operator and both client roots through its lsof implementation, checks the
 closed API port and empty `tmp/` directories, and checks captures for fixture
 credentials. The cleanup path performs no revocation and keeps the run's
-grants, so its live-grant census reports `BLOCKED(AC-021-GRANTS)`.
+grants, so its live-grant census reports
+`BLOCKED(AC-021-GRANTS:leftover)`.
 
 Read the single checked `kill settlement:` line for both child statuses,
 signal, kill time, first barrier time, overlap, elapsed times, quiet duration,

@@ -791,8 +791,8 @@ scope and the same invocation's VERSIONS.json keep these limits visible.
 `run_leaves_no_live_grant` is ignored with `blocked: AC-021-GRANTS`. When
 explicitly selected, it reuses the granted-read journey and requires an empty
 global live-grant result before the Home can pass. The normal journeys print
-`BLOCKED(AC-021-GRANTS)` while the scoped view holds a run's live grants, and
-`pending:0 grants:0` only when that view is empty.
+`BLOCKED(AC-021-GRANTS:leftover)` while the scoped view holds a run's live
+grants, and `pending:0 grants:0` only when that view is empty.
 
 Runtime owns the grant lifetime. A `once` approval sets `max_uses = 1`
 (`elastos/crates/elastos-server/src/api/handlers/capability.rs:335`). The first
@@ -813,10 +813,10 @@ Audit events provide supporting history only.
 The check uses the shell-authorized view of every session's live grants, with
 exhausted, revoked and expired grants filtered by Runtime. The fixture asks
 that view by `?scope=all_sessions_live` and requires the marker
-`scope: "all_sessions_live"`. A session-local or unmarked response stays
-BLOCKED, and so does a scoped list that holds the run's live grants: the
-census prints `pending:0 grants:BLOCKED(AC-021-GRANTS)`. Only an empty scoped
-list reports `pending:0 grants:0`, and only `run_leaves_no_live_grant`
+`scope: "all_sessions_live"`. An unmarked response stays
+`BLOCKED(AC-021-GRANTS)`; a scoped list that holds the run's live grants
+reports `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)`. Only an empty
+scoped list reports `pending:0 grants:0`, and only `run_leaves_no_live_grant`
 requires it. Client callers retain their own-session view. This lane changes
 zero Runtime routes and performs zero revocations. F-cleanup-grant is deferred
 until this blocker closes; the fixture's own grants are not evidence that

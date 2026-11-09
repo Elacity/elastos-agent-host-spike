@@ -487,7 +487,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         );
         assert_eq!(
             cleanup_state,
-            Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)"),
+            Ok("pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)"),
             "the run's session grants stay live after the clients exit: AC-021-GRANTS"
         );
         for client in client_homes {
