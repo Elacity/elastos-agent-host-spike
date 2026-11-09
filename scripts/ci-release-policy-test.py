@@ -2950,6 +2950,18 @@ class InstalledJourneyTests(unittest.TestCase):
             # Runtime output stays in its private log, even when it explains the exit.
             self.assertNotIn("gateway refused its provider config", message)
 
+    def test_signal_exit_reports_the_signal(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        with tempfile.TemporaryDirectory() as temp:
+            child = subprocess.Popen([sys.executable, "-c",
+                                      "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertEqual(child.wait(timeout=60), -signal.SIGKILL)
+            with self.assertRaises(AssertionError) as raised:
+                journey["wait_healthy"](child, "127.0.0.1:1", "Runtime",
+                                        evidence=Path(temp) / "installed-journeys.json")
+            self.assertIn("installed Runtime did not become healthy (signal 9)", str(raised.exception))
+
     def test_three_runs_use_distinct_fresh_state_and_continue_after_one_failed_run(self):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
         for first_fails in (False, True):
