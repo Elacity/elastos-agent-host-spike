@@ -332,9 +332,17 @@ impl Runtime {
         })?;
 
         // Load capsule
+        // A component is always compiled from the bytes checked above. The
+        // provider's own `load(path)` reads the file itself and checks nothing,
+        // so it is for capsules that are not components.
         let mut handle = match (admitted, &self.component_provider) {
             (Some(bytes), Some(component)) => component.load_admitted(bytes, manifest).await?,
-            _ => provider.load(path, manifest).await?,
+            (Some(_), None) => {
+                return Err(ElastosError::Compute(
+                    "No component compute provider is configured".to_string(),
+                ))
+            }
+            (None, _) => provider.load(path, manifest).await?,
         };
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.insert(

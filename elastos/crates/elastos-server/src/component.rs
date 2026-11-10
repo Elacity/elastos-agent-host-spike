@@ -16,6 +16,11 @@ const ALLOWED_BUS_IMPORTS: &[&str] = &[
 /// (agent-host) has 896 functions and a largest body of 88,523 bytes.
 const MAX_COMPONENT_FUNCTIONS: u32 = 20_000;
 const MAX_FUNCTION_BODY_BYTES: usize = 512 * 1024;
+/// The same component's largest function declares 35 locals, and it has 5
+/// canonical functions (the lifts and lowers between the component and its
+/// core module, each of which the engine compiles a trampoline for).
+const MAX_FUNCTION_LOCALS: u32 = 1_000;
+const MAX_CANONICAL_FUNCTIONS: u32 = 64;
 
 const FORBIDDEN_AUTHORITY_MARKERS: &[&str] = &[
     "wasi",
@@ -69,6 +74,7 @@ thread_local! {
 pub(crate) fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
     let mut saw_root_header = false;
     let mut functions: u32 = 0;
+    let mut canonical_functions: u32 = 0;
 
     for payload in Parser::new(0).parse_all(bytes) {
         match payload.map_err(|err| format!("failed to parse component entrypoint: {err}"))? {
@@ -128,6 +134,29 @@ pub(crate) fn validate_component_imports(bytes: &[u8]) -> std::result::Result<()
                 if len > MAX_FUNCTION_BODY_BYTES {
                     return Err(format!(
                         "component function body of {len} bytes is over the {MAX_FUNCTION_BODY_BYTES} byte limit"
+                    ));
+                }
+                let mut locals: u32 = 0;
+                let declared = body
+                    .get_locals_reader()
+                    .map_err(|err| format!("failed to parse component function locals: {err}"))?;
+                for local in declared {
+                    let (count, _) = local.map_err(|err| {
+                        format!("failed to parse component function locals: {err}")
+                    })?;
+                    locals = locals.saturating_add(count);
+                }
+                if locals > MAX_FUNCTION_LOCALS {
+                    return Err(format!(
+                        "component function declares {locals} locals, over the {MAX_FUNCTION_LOCALS} limit"
+                    ));
+                }
+            }
+            Payload::ComponentCanonicalSection(section) => {
+                canonical_functions = canonical_functions.saturating_add(section.count());
+                if canonical_functions > MAX_CANONICAL_FUNCTIONS {
+                    return Err(format!(
+                        "component has more than {MAX_CANONICAL_FUNCTIONS} canonical functions"
                     ));
                 }
             }
@@ -311,6 +340,60 @@ mod tests {
             err,
             "component function body of 524289 bytes is over the 524288 byte limit"
         );
+    }
+
+    /// A component with one core module of one function that declares its
+    /// locals in the given groups.
+    fn component_with_locals(groups: &[u32]) -> Vec<u8> {
+        let mut module = wasm_encoder::Module::new();
+        let mut types = wasm_encoder::TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut functions = wasm_encoder::FunctionSection::new();
+        functions.function(0);
+        module.section(&functions);
+        let mut body =
+            wasm_encoder::Function::new(groups.iter().map(|n| (*n, wasm_encoder::ValType::I32)));
+        body.instruction(&wasm_encoder::Instruction::End);
+        let mut code = wasm_encoder::CodeSection::new();
+        code.function(&body);
+        module.section(&code);
+        let mut component = Component::new();
+        component.section(&wasm_encoder::ModuleSection(&module));
+        component.finish()
+    }
+
+    #[test]
+    fn a_function_may_declare_a_thousand_locals_and_no_more() {
+        // The count is over all of a function's local groups together.
+        validate_component_imports(&component_with_locals(&[600, 400])).unwrap();
+        let err = validate_component_imports(&component_with_locals(&[600, 401])).unwrap_err();
+        assert_eq!(
+            err,
+            "component function declares 1001 locals, over the 1000 limit"
+        );
+    }
+
+    /// A component with canonical-function sections of the given sizes.
+    fn component_with_canonical_functions(sections: &[u32]) -> Vec<u8> {
+        let mut component = Component::new();
+        for count in sections {
+            let mut canonical = wasm_encoder::CanonicalFunctionSection::new();
+            for index in 0..*count {
+                canonical.lower(index, []);
+            }
+            component.section(&canonical);
+        }
+        component.finish()
+    }
+
+    #[test]
+    fn a_component_may_hold_sixty_four_canonical_functions_and_no_more() {
+        // The count is over every canonical section of the component together.
+        validate_component_imports(&component_with_canonical_functions(&[40, 24])).unwrap();
+        let err =
+            validate_component_imports(&component_with_canonical_functions(&[40, 25])).unwrap_err();
+        assert_eq!(err, "component has more than 64 canonical functions");
     }
 
     #[test]
