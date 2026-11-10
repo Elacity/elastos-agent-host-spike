@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use wasmtime::component::{bindgen, Component, HasSelf, Linker};
 use wasmtime::{
     Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline, WasmFeatures,
@@ -33,6 +33,8 @@ const COMPONENT_MEMORY_SIZE: usize = 128 * 1024 * 1024;
 /// The largest component file the Runtime reads or compiles. The largest
 /// component in this repository is under 1 MiB.
 pub const COMPONENT_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// How long a load waits for the one compile slot before it gives up.
+const COMPONENT_COMPILE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// One deadline tick. Wasmtime calls this the engine "epoch"; this code says
 /// "tick", because "epoch" already names the capability revocation epoch.
 const DEADLINE_TICK: Duration = Duration::from_millis(10);
@@ -73,6 +75,7 @@ pub struct ComponentProvider {
     instances: Arc<RwLock<HashMap<CapsuleId, ComponentActivation>>>,
     bus_hostcall: std::sync::RwLock<Option<BridgeHostcall>>,
     bridge_principals: Arc<RwLock<HashMap<CapsuleId, Option<String>>>>,
+    compile_slot: Arc<Semaphore>,
 }
 
 impl ComponentProvider {
@@ -81,6 +84,9 @@ impl ComponentProvider {
             instances: Arc::new(RwLock::new(HashMap::new())),
             bus_hostcall: std::sync::RwLock::new(None),
             bridge_principals: Arc::new(RwLock::new(HashMap::new())),
+            // One compile at a time: a burst of loads queues instead of
+            // starting competing compiler jobs.
+            compile_slot: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -167,10 +173,29 @@ impl ComponentProvider {
                 "component is larger than the {COMPONENT_MAX_BYTES} byte limit"
             )));
         }
-        let engine = Self::engine()?;
-        let component = Component::from_binary(&engine, &bytes).map_err(|err| {
-            ElastosError::Compute(format!("Failed to compile component capsule: {err}"))
-        })?;
+        // Compiling can take a long time, so it runs off the async workers and
+        // one at a time. The wait for the slot is bounded. The compile job owns
+        // its slot until it ends, also when its caller was cancelled.
+        let compile_permit = tokio::time::timeout(
+            COMPONENT_COMPILE_WAIT_TIMEOUT,
+            self.compile_slot.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| ElastosError::Compute("Timed out waiting for the component compiler".into()))?
+        .map_err(|_| ElastosError::Compute("Component compiler is unavailable".into()))?;
+        let (engine, component) =
+            tokio::task::spawn_blocking(move || -> Result<(Engine, Component)> {
+                let _compile_permit = compile_permit;
+                let engine = Self::engine()?;
+                let component = Component::from_binary(&engine, &bytes).map_err(|err| {
+                    ElastosError::Compute(format!("Failed to compile component capsule: {err}"))
+                })?;
+                Ok((engine, component))
+            })
+            .await
+            .map_err(|err| {
+                ElastosError::Compute(format!("Component load task join error: {err}"))
+            })??;
         let id = CapsuleId::new(format!("component-{}", uuid::Uuid::new_v4()));
 
         self.instances.write().await.insert(
@@ -728,6 +753,184 @@ mod tests {
             "Compute error: component is larger than the 8388608 byte limit"
         );
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    /// The fixture's component bytes and manifest, for loads that skip the file read.
+    fn admitted_fixture() -> (Vec<u8>, CapsuleManifest) {
+        let (path, manifest) = component_fixture();
+        (
+            std::fs::read(path.join(&manifest.entrypoint)).unwrap(),
+            manifest,
+        )
+    }
+
+    // The next four tests follow the tests of the open upstream change
+    // elastos/elastos-runtime #416, on `load_admitted` where they need the
+    // first poll to reach the compile slot.
+
+    #[test]
+    fn component_load_keeps_async_work_responsive() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            let _ = waiting.recv();
+        });
+        let provider = Arc::new(ComponentProvider::new());
+        let (bytes, manifest) = admitted_fixture();
+
+        runtime.block_on(async {
+            let (started, observing) = tokio::sync::oneshot::channel();
+            let loading_provider = provider.clone();
+            let loading = tokio::spawn(async move {
+                started.send(()).unwrap();
+                loading_provider.load_admitted(bytes, manifest).await
+            });
+            observing.await.unwrap();
+            tokio::task::yield_now().await;
+            let yielded_before_loading_finished = !loading.is_finished();
+
+            // Always release the worker before checking the result, including
+            // when a regression makes the compile run on the async executor.
+            release.send(()).unwrap();
+            let handle = loading.await.unwrap().unwrap();
+            blocker.await.unwrap();
+            assert_eq!(
+                provider.status(&handle).await.unwrap(),
+                CapsuleStatus::Loading
+            );
+            provider.stop(&handle).await.unwrap();
+            assert!(
+                yielded_before_loading_finished,
+                "component compilation prevented unrelated async work from running"
+            );
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn component_load_times_out_waiting_for_compile_slot() {
+        assert_eq!(COMPONENT_COMPILE_WAIT_TIMEOUT, Duration::from_secs(30));
+        let provider = Arc::new(ComponentProvider::new());
+        let held_permit = provider.compile_slot.clone().acquire_owned().await.unwrap();
+        let (bytes, manifest) = admitted_fixture();
+        let loading_provider = provider.clone();
+        let mut loading =
+            tokio::spawn(async move { loading_provider.load_admitted(bytes, manifest).await });
+
+        // The outer deadline makes a missing queue limit fail instead of hang.
+        // Paused Tokio time avoids relying on compilation or host speed.
+        let result = tokio::time::timeout(Duration::from_secs(31), &mut loading).await;
+        if result.is_err() {
+            loading.abort();
+            let _ = loading.await;
+        }
+        drop(held_permit);
+
+        assert!(
+            matches!(result, Ok(Ok(Err(ElastosError::Compute(message))))
+                if message == "Timed out waiting for the component compiler"),
+            "a queued component load must return its own timeout before the outer deadline"
+        );
+        assert!(provider.instances.read().await.is_empty());
+        assert_eq!(provider.compile_slot.available_permits(), 1);
+    }
+
+    #[test]
+    fn component_load_retains_compile_slot_after_cancellation() {
+        use std::future::Future;
+        use std::task::Poll;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let (blocked, observing_blocker) = tokio::sync::oneshot::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            blocked.send(()).unwrap();
+            let _ = waiting.recv();
+        });
+        let provider = Arc::new(ComponentProvider::new());
+        let (bytes, manifest) = admitted_fixture();
+
+        runtime.block_on(async {
+            observing_blocker.await.unwrap();
+            let (started, observing) = tokio::sync::oneshot::channel();
+            let loading_provider = provider.clone();
+            let (first_bytes, first_manifest) = (bytes.clone(), manifest.clone());
+            let loading = tokio::spawn(async move {
+                let mut load =
+                    Box::pin(loading_provider.load_admitted(first_bytes, first_manifest));
+                // Poll once, so the load takes the slot and queues its compile
+                // behind the gated worker, before acknowledging the caller.
+                let initial = std::future::poll_fn(|cx| Poll::Ready(load.as_mut().poll(cx))).await;
+                started.send(()).unwrap();
+                match initial {
+                    Poll::Ready(result) => result,
+                    Poll::Pending => load.await,
+                }
+            });
+            observing.await.unwrap();
+            loading.abort();
+            let cancelled = loading.await.unwrap_err().is_cancelled();
+
+            let result = {
+                let next_load = tokio::time::timeout(
+                    Duration::from_secs(31),
+                    provider.load_admitted(bytes.clone(), manifest.clone()),
+                );
+                tokio::pin!(next_load);
+                // Register the queue wait, then advance virtual time while the
+                // cancelled caller's compile still owns its slot.
+                match std::future::poll_fn(|cx| Poll::Ready(next_load.as_mut().poll(cx))).await {
+                    Poll::Ready(result) => result,
+                    Poll::Pending => {
+                        tokio::time::advance(Duration::from_secs(31)).await;
+                        next_load.await
+                    }
+                }
+            };
+
+            // Release and drain the blocking work before asserting, including
+            // when an early slot release admitted the second load to the worker.
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::resume();
+            let handle = provider.load_admitted(bytes, manifest).await.unwrap();
+            provider.stop(&handle).await.unwrap();
+
+            assert!(cancelled);
+            assert!(
+                matches!(result, Ok(Err(ElastosError::Compute(message)))
+                    if message == "Timed out waiting for the component compiler"),
+                "cancelling a load must keep later loads queued until its blocking compile finishes"
+            );
+            assert!(provider.instances.read().await.is_empty());
+        });
+    }
+
+    #[tokio::test]
+    async fn component_load_preserves_artifact_errors() {
+        let provider = ComponentProvider::new();
+        let (_, manifest) = component_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            provider.load(directory.path(), manifest.clone()).await,
+            Err(ElastosError::CapsuleNotFound(message))
+                if message.starts_with("component file not found: ")
+        ));
+        std::fs::write(directory.path().join(&manifest.entrypoint), b"invalid wasm").unwrap();
+        assert!(matches!(
+            provider.load(directory.path(), manifest).await,
+            Err(ElastosError::Compute(message))
+                if message.starts_with("Failed to compile component capsule: ")
+        ));
+        assert!(provider.instances.read().await.is_empty());
+        assert_eq!(provider.compile_slot.available_permits(), 1);
     }
 
     fn state_with_deadline(run_deadline: Duration) -> ComponentState {
