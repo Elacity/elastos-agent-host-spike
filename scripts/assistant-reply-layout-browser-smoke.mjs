@@ -536,7 +536,7 @@ try {
 
   assert.deepEqual(errors, []);
   assert.deepEqual(pageErrors, []);
-  console.log(`PASS Assistant reply layout: px above the composer, longest ms behind a streaming reply ${JSON.stringify(seen)}; list markers whole (${markers.map(list => `${list.items} items, ${list.worstRoomPx}px spare`).join("; ")})`);
+  console.log(`PASS Assistant reply layout: px above the composer, longest frame run behind a streaming reply ${JSON.stringify(seen)}; list markers whole (${markers.map(list => `${list.items} items, ${list.worstRoomPx}px spare`).join("; ")})`);
 } catch (error) {
   console.error(`Assistant reply layout smoke failed at ${stage}`);
   console.error(JSON.stringify({ errors, pageErrors }, null, 1));
