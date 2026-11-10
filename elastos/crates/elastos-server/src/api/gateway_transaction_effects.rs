@@ -2524,7 +2524,9 @@ fn transaction_effect_location(
     state: &GatewayState,
     principal_id: &str,
 ) -> Result<(String, String, PathBuf), (StatusCode, String)> {
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let root = super::gateway_home_token::wallet_principal_root(&state.data_dir, principal_id)
+        .map_err(internal_error)?;
+    let localhost_root = root.localhost_root().to_string();
     let uri = format!("{localhost_root}/{TRANSACTION_EFFECT_STORE_RELATIVE_PATH}");
     let path = rooted_localhost_fs_path(&state.data_dir, &uri).ok_or_else(|| {
         (
@@ -3419,6 +3421,14 @@ mod approved_request_resume_tests {
         root: &std::path::Path,
         provider_registry: Option<Arc<ProviderRegistry>>,
     ) -> GatewayState {
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        for principal_id in ["principal:test", "principal:other"] {
+            if crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id).is_err()
+            {
+                crate::auth::store_test_human_principal(&data_dir, principal_id);
+            }
+        }
         GatewayState {
             provider_registry,
             collaboration_chat_product_port: None,
@@ -3427,7 +3437,42 @@ mod approved_request_resume_tests {
             collaboration_discovery_service: None,
             identity_manager: Arc::new(OnceLock::new()),
             cache_dir: root.join("cache"),
-            data_dir: root.join("data"),
+            data_dir,
+        }
+    }
+
+    #[test]
+    fn r4_transaction_effect_location_uses_resolved_root() {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        use crate::auth::PrincipalKind;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_gateway_state(dir.path(), None);
+        assert_eq!(
+            load_transaction_effect_store(&state, ID).unwrap_err().1,
+            "Wallet authority principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = test_gateway_state(dir.path(), None);
+            std::fs::create_dir_all(&state.data_dir).unwrap();
+            store(&state.data_dir, kind);
+            let (actual, uri, path) = transaction_effect_location(&state, ID).unwrap();
+            assert_eq!(actual, expected, "R4 transaction effect root");
+            assert_eq!(
+                uri,
+                format!("{expected}/.AppData/ElastOS/Runtime/transaction-effects.json")
+            );
+            assert_eq!(
+                path,
+                rooted_localhost_fs_path(&state.data_dir, &uri).unwrap()
+            );
+            assert!(load_transaction_effect_store(&state, ID)
+                .unwrap()
+                .effects
+                .is_empty());
         }
     }
 
@@ -4334,22 +4379,6 @@ mod approved_request_resume_tests {
         let mut store = RuntimeTransactionEffectStore::empty("principal:test");
         store.effects.push(effect);
         save_transaction_effect_store(&state, &store).unwrap();
-
-        // The fixture principal is stored where the Home launch resolver reads
-        // (A5-P2a-ii-0b builds this authority's root from it).
-        crate::auth::upsert_principal_for_binding_as(
-            &state.data_dir,
-            elastos_runtime::auth::ProofBinding {
-                kind: elastos_runtime::auth::ProofBindingKind::DidKey,
-                subject: "did:key:z6MkresumeTestFixture".to_string(),
-                chain_id: None,
-                verified_at: crate::auth::now_ts(),
-                passkey: None,
-            },
-            "principal:test".to_string(),
-            crate::auth::now_ts(),
-        )
-        .unwrap();
 
         let completion = complete_runtime_transaction_effect(
             &state,

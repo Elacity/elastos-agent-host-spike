@@ -62,11 +62,21 @@ pub enum RequestStatus {
         duration: GrantDuration,
     },
 
-    /// User denied the request
-    Denied { reason: String },
+    /// Refused, or revoked after a grant; `settled_by` names who decided
+    Denied { reason: String, settled_by: Settler },
 
-    /// Request timed out without user response
+    /// Timed out with no decision
     Expired,
+}
+
+/// Who settled a denied request. Set by the store function that denies,
+/// never by a caller-supplied body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settler {
+    /// The person, through the shell
+    Shell,
+    /// The Runtime, on its own rule
+    Runtime,
 }
 
 /// Duration for which a capability is granted
@@ -276,6 +286,7 @@ impl PendingRequestStore {
                 );
                 request.status = RequestStatus::Denied {
                     reason: "Too many pending requests".to_string(),
+                    settled_by: Settler::Runtime,
                 };
                 return request;
             }
@@ -304,6 +315,7 @@ impl PendingRequestStore {
                     );
                     request.status = RequestStatus::Denied {
                         reason: "Too many pending requests for this session".to_string(),
+                        settled_by: Settler::Runtime,
                     };
                     return request;
                 }
@@ -382,8 +394,13 @@ impl PendingRequestStore {
         Ok(())
     }
 
-    /// Deny a pending request
-    pub async fn deny_request(&self, request_id: &str, reason: &str) -> Result<(), String> {
+    /// Deny a pending request, recording who settled it
+    pub async fn deny_request_by(
+        &self,
+        request_id: &str,
+        reason: &str,
+        settled_by: Settler,
+    ) -> Result<(), String> {
         let mut requests = self.requests.write().await;
 
         let request = requests
@@ -396,6 +413,7 @@ impl PendingRequestStore {
 
         request.status = RequestStatus::Denied {
             reason: reason.to_string(),
+            settled_by,
         };
 
         // Audit
@@ -418,6 +436,20 @@ impl PendingRequestStore {
             .filter(|r| r.is_pending())
             .cloned()
             .collect()
+    }
+
+    /// List the request records the store still holds, in every session and
+    /// every state, read-only, for the shell. Callers filter by state.
+    ///
+    /// These are the records held now, not a full history: `cleanup_old` and
+    /// the capacity guard drop old denied and expired records, and a granted
+    /// record once its token's expiry has passed. An unexpired granted record
+    /// stays unless its holder settles it first: the server, at capacity,
+    /// denies each grant that `CapabilityManager::can_still_validate` refuses
+    /// (spent, revoked by id, old epoch), and cleanup then drops it.
+    pub async fn list_requests(&self) -> Vec<PendingCapabilityRequest> {
+        let requests = self.requests.read().await;
+        requests.values().cloned().collect()
     }
 
     /// List pending requests for a specific session
@@ -468,7 +500,10 @@ impl PendingRequestStore {
 
     /// Remove old completed/expired requests
     ///
-    /// Keeps requests for `retention_secs` after they're resolved
+    /// Keeps requests for `retention_secs` after they're resolved. A granted
+    /// record whose token has not expired is kept at any age, so the shell's
+    /// views never lose a grant that can still validate; it leaves once it is
+    /// revoked (and so denied) or its token expires.
     pub async fn cleanup_old(&self, retention_secs: u64) -> usize {
         let now = SecureTimestamp::now();
         let mut removed = Vec::new();
@@ -479,6 +514,12 @@ impl PendingRequestStore {
                 // Keep pending requests
                 if matches!(request.status, RequestStatus::Pending) {
                     return true;
+                }
+                // Keep a grant whose token has not expired: it can still validate
+                if let Some(token) = request.granted_token() {
+                    if !token.expiry().is_some_and(|expiry| expiry.is_expired()) {
+                        return true;
+                    }
                 }
 
                 // Remove old resolved requests
@@ -509,25 +550,16 @@ impl PendingRequestStore {
         requests.values().filter(|r| r.is_pending()).count()
     }
 
-    /// List granted requests for a specific session
-    pub async fn list_session_granted(&self, session_id: &str) -> Vec<PendingCapabilityRequest> {
-        let requests = self.requests.read().await;
-        requests
-            .values()
-            .filter(|r| r.session_id.to_string() == session_id && r.is_granted())
-            .cloned()
-            .collect()
-    }
-
-    /// Mark a granted request as revoked
-    ///
-    /// This changes the status to Denied with reason "Revoked"
-    pub async fn revoke_request(&self, request_id: &str) {
+    /// Mark a granted request as revoked, recording who settled it. This
+    /// changes the request record only; `CapabilityManager::revoke` revokes
+    /// the token itself.
+    pub async fn revoke_request_by(&self, request_id: &str, reason: &str, settled_by: Settler) {
         let mut requests = self.requests.write().await;
         if let Some(request) = requests.get_mut(request_id) {
             if request.is_granted() {
                 request.status = RequestStatus::Denied {
-                    reason: "Revoked by user".to_string(),
+                    reason: reason.to_string(),
+                    settled_by,
                 };
 
                 // Audit
@@ -536,7 +568,7 @@ impl PendingRequestStore {
                         timestamp: SecureTimestamp::now(),
                         request_id: request_id.to_string(),
                         session_id: request.session_id.to_string(),
-                        reason: "Revoked by user".to_string(),
+                        reason: reason.to_string(),
                     });
             }
         }
@@ -553,6 +585,7 @@ impl PendingRequestStore {
             if request.is_granted() {
                 request.status = RequestStatus::Denied {
                     reason: "Epoch advanced - all capabilities revoked".to_string(),
+                    settled_by: Settler::Shell,
                 };
 
                 self.audit_log
@@ -573,6 +606,161 @@ mod tests {
 
     fn create_test_store() -> PendingRequestStore {
         PendingRequestStore::new(Arc::new(AuditLog::new()))
+    }
+
+    fn settler(request: &PendingCapabilityRequest) -> Option<Settler> {
+        match request.status {
+            RequestStatus::Denied { settled_by, .. } => Some(settled_by),
+            _ => None,
+        }
+    }
+
+    async fn granted_request(store: &PendingRequestStore, session: &str) -> String {
+        let resource = ResourceId::new("localhost://Users/self/Documents/test");
+        let session = SessionId::from_string(session);
+        let request = store
+            .create_request(session, resource.clone(), Action::Read)
+            .await;
+        let token = CapabilityToken::new(
+            "test-capsule".to_string(),
+            [0u8; 32],
+            resource,
+            Action::Read,
+            Default::default(),
+            SecureTimestamp::now(),
+            None,
+        );
+        let id = request.id.0;
+        store
+            .grant_request(&id, token, GrantDuration::Session)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn list_requests_lists_every_held_record_in_every_session() {
+        let store = create_test_store();
+        let first = granted_request(&store, "session-1").await;
+        let resource = ResourceId::new("localhost://Users/self/Documents/test");
+        let pending = store
+            .create_request(SessionId::from_string("session-2"), resource, Action::Read)
+            .await;
+        let revoked = granted_request(&store, "session-1").await;
+        store
+            .revoke_request_by(&revoked, "Revoked by user", Settler::Shell)
+            .await;
+        let other = granted_request(&store, "session-3").await;
+        let other_session = store.get_request(&other).await.unwrap().session_id;
+        assert_eq!(other_session.0, "session-3");
+        let mut ids: Vec<String> = store
+            .list_requests()
+            .await
+            .into_iter()
+            .map(|r| r.id.0)
+            .collect();
+        ids.sort();
+        let mut want = vec![first, pending.id.0.clone(), revoked, other];
+        want.sort();
+        assert_eq!(ids, want);
+        assert!(store
+            .get_request(pending.id.as_str())
+            .await
+            .unwrap()
+            .is_pending());
+    }
+
+    #[tokio::test]
+    async fn capacity_cleanup_keeps_an_old_grant_whose_token_has_not_expired() {
+        let store = create_test_store();
+        let live = granted_request(&store, "session-grant").await;
+        let resource = ResourceId::new("localhost://Users/self/Documents/test");
+        let session = SessionId::from_string("session-grant");
+        let request = store.create_request(session, resource.clone(), Action::Read);
+        let lapsed = request.await.id.0;
+        let past = Some(SecureTimestamp::at(1));
+        let token = CapabilityToken::new(
+            "test-capsule".to_string(),
+            [0u8; 32],
+            resource.clone(),
+            Action::Read,
+            Default::default(),
+            SecureTimestamp::now(),
+            past,
+        );
+        let session_grant = GrantDuration::Session;
+        store
+            .grant_request(&lapsed, token, session_grant)
+            .await
+            .unwrap();
+        // Age both records past any retention through their timestamps, not a wait.
+        for id in [&live, &lapsed] {
+            let mut requests = store.requests.write().await;
+            requests.get_mut(id).unwrap().requested_at = SecureTimestamp::at(1);
+        }
+        for n in 0..MAX_PENDING_REQUESTS - 2 {
+            let session = SessionId::from_string(format!("fill-{}", n / MAX_PENDING_PER_SESSION));
+            store
+                .create_request(session, resource.clone(), Action::Read)
+                .await;
+        }
+        assert_eq!(store.list_requests().await.len(), MAX_PENDING_REQUESTS);
+
+        let extra = SessionId::from_string("session-extra");
+        let first = store.create_request(extra.clone(), resource.clone(), Action::Read);
+        let first = first.await;
+        let held = store.list_requests().await;
+        let kept = held.iter().any(|r| r.id.0 == live && r.is_granted());
+        assert!(
+            kept,
+            "capacity cleanup keeps an aged grant whose token has not expired"
+        );
+        let dropped = held.iter().all(|r| r.id.0 != lapsed);
+        assert!(
+            dropped,
+            "capacity cleanup drops an aged grant whose token has expired"
+        );
+        assert!(
+            first.is_pending(),
+            "the room the lapsed grant left takes one request"
+        );
+        let second = store.create_request(extra, resource, Action::Read).await;
+        let full = matches!(&second.status, RequestStatus::Denied { reason, settled_by: Settler::Runtime }
+            if reason == "Too many pending requests");
+        assert!(
+            full,
+            "the store, still full of live records, refuses the next request"
+        );
+    }
+
+    #[tokio::test]
+    async fn revocations_record_their_settler() {
+        let store = create_test_store();
+        let by_runtime = granted_request(&store, "session-1").await;
+        let by_epoch = granted_request(&store, "session-1").await;
+        store
+            .revoke_request_by(&by_runtime, "instance ended", Settler::Runtime)
+            .await;
+        store.revoke_all_granted().await;
+        let runtime = store.get_request(&by_runtime).await.unwrap();
+        assert_eq!(settler(&runtime), Some(Settler::Runtime));
+        let epoch = store.get_request(&by_epoch).await.unwrap();
+        assert_eq!(settler(&epoch), Some(Settler::Shell));
+    }
+
+    #[tokio::test]
+    async fn deny_request_by_records_the_runtime_as_settler() {
+        let store = create_test_store();
+        let session = SessionId::from_string("session-1");
+        let resource = ResourceId::new("localhost://Users/self/Documents/test");
+        let request = store.create_request(session, resource, Action::Read).await;
+        let id = request.id.as_str();
+        store
+            .deny_request_by(id, "instance ended", Settler::Runtime)
+            .await
+            .unwrap();
+        let denied = store.get_request(id).await.unwrap();
+        assert_eq!(settler(&denied), Some(Settler::Runtime));
     }
 
     #[tokio::test]
@@ -645,7 +833,7 @@ mod tests {
 
         // Deny the request
         let result = store
-            .deny_request(request.id.as_str(), "User denied access")
+            .deny_request_by(request.id.as_str(), "User denied access", Settler::Shell)
             .await;
         assert!(result.is_ok());
 
@@ -819,6 +1007,7 @@ mod tests {
             )
             .await;
         assert!(rejected.is_denied());
+        assert_eq!(settler(&rejected), Some(Settler::Runtime));
 
         // But a different session should still be able to create requests
         let other = store
@@ -856,6 +1045,7 @@ mod tests {
             )
             .await;
         assert!(rejected.is_denied());
+        assert_eq!(settler(&rejected), Some(Settler::Runtime));
     }
 
     #[tokio::test]

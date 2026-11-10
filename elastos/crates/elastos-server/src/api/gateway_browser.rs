@@ -318,11 +318,14 @@ pub(super) async fn browser_app_profile_reset(
     ) {
         return (StatusCode::CONFLICT, error.to_string()).into_response();
     }
-    let (disk_path, _) =
-        match browser_profile_launch_descriptor(&state.data_dir, context.principal_id()) {
-            Ok(profile) => profile,
-            Err(err) => return gateway_provider_error_response("browser", err),
-        };
+    let (disk_path, _) = match browser_profile_launch_descriptor(
+        &state.data_dir,
+        context.principal_id(),
+        context.root(),
+    ) {
+        Ok(profile) => profile,
+        Err(err) => return gateway_provider_error_response("browser", err),
+    };
     let reset_guard = match crate::api::browser_profile_reset::acquire_profile_reset(
         state.data_dir.clone(),
         disk_path,
@@ -380,11 +383,12 @@ fn browser_profile_reset_error_response(
 fn browser_profile_launch_descriptor(
     data_dir: &FsPath,
     principal_id: &str,
+    root: &crate::auth::ResolvedPrincipalRoot,
 ) -> anyhow::Result<(PathBuf, serde_json::Value)> {
     let Some(profile_key) = elastos_common::browser_profile_key_from_value(principal_id) else {
         anyhow::bail!("Browser launch requires a principal profile key");
     };
-    let principal_root = crate::auth::principal_localhost_root(principal_id);
+    let principal_root = root.localhost_root();
     let profile_uri = format!("{principal_root}/BrowserProfiles/default/profile.ext4");
     let disk_path = rooted_localhost_fs_path(data_dir, &profile_uri)
         .ok_or_else(|| anyhow::anyhow!("invalid Browser profile disk path"))?;
@@ -692,11 +696,14 @@ async fn execute_browser_open(
             return Err(BrowserOpenFailure::json(StatusCode::BAD_REQUEST, body));
         }
     };
-    let (_, profile) =
-        match browser_profile_launch_descriptor(&state.data_dir, context.principal_id()) {
-            Ok(profile) => profile,
-            Err(err) => return Err(BrowserOpenFailure::provider("browser", err)),
-        };
+    let (_, profile) = match browser_profile_launch_descriptor(
+        &state.data_dir,
+        context.principal_id(),
+        context.root(),
+    ) {
+        Ok(profile) => profile,
+        Err(err) => return Err(BrowserOpenFailure::provider("browser", err)),
+    };
     let profile_key = profile
         .get("profile_key")
         .and_then(|value| value.as_str())
@@ -4669,5 +4676,41 @@ mod browser_open_outcome_tests {
             )),
             BrowserLaunchReconciliationDecision::DidNotAct
         ));
+    }
+}
+
+#[cfg(test)]
+mod r4_root_tests {
+    use super::*;
+    use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+    use crate::auth::PrincipalKind;
+
+    #[test]
+    fn r4_browser_profile_uses_resolved_root() {
+        let missing = tempfile::tempdir().unwrap();
+        let result = super::super::gateway_home_token::wallet_principal_root(missing.path(), ID)
+            .and_then(|root| browser_profile_launch_descriptor(missing.path(), ID, &root));
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Wallet authority principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            store(dir.path(), kind);
+            let root =
+                super::super::gateway_home_token::wallet_principal_root(dir.path(), ID).unwrap();
+            let (disk, descriptor) =
+                browser_profile_launch_descriptor(dir.path(), ID, &root).unwrap();
+            let uri = format!("{expected}/BrowserProfiles/default/profile.ext4");
+            assert_eq!(descriptor["uri"], uri, "R4 Browser profile root");
+            assert_eq!(disk, rooted_localhost_fs_path(dir.path(), &uri).unwrap());
+            assert_eq!(
+                descriptor["public_uri"],
+                "localhost://Users/self/BrowserProfiles/default/profile.ext4"
+            );
+        }
     }
 }

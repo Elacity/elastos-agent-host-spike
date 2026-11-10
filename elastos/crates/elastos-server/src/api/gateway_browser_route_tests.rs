@@ -8913,6 +8913,7 @@ struct OperatorTestProvider {
     inspection: InspectionTestProvider,
     inputs: tokio::sync::Mutex<Vec<serde_json::Value>>,
     delay: std::sync::atomic::AtomicBool,
+    mismatch: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
@@ -8946,7 +8947,7 @@ impl Provider for OperatorTestProvider {
         let result = if event["type"] == "operator_lease" {
             json!({"schema":"elastos.browser.input-result/v1","page_id":request["page_id"],"admission_id":event["admission_id"],"accepted":true,"writer_acquired":event["command"]=="acquire"})
         } else if event["type"] == "operator_ref" {
-            json!({"schema":"elastos.browser.ref-input-result/v1","page_id":request["page_id"],"request_id":event["request_id"],"admission_id":event["admission_id"],"document_generation":event["document_generation"],"accepted":true})
+            json!({"schema":"elastos.browser.ref-input-result/v1","page_id":request["page_id"],"request_id":if self.mismatch.load(std::sync::atomic::Ordering::SeqCst){json!("c".repeat(32))}else{event["request_id"].clone()},"admission_id":event["admission_id"],"document_generation":event["document_generation"],"accepted":true})
         } else {
             json!({"schema":"elastos.browser.input-result/v1","page_id":request["page_id"],"accepted":true})
         };
@@ -9331,6 +9332,122 @@ async fn test_browser_operator_admission_separate_session_quota_replay_and_hando
     }
     drop(replacement);
     assert_eq!(browser_page_session_count(dir.path()).await, 1);
+}
+
+/// Mismatched outcome ids are uncertain: the Runtime revokes, and says why.
+#[tokio::test]
+async fn test_browser_operator_uncertain_input_is_revoked_by_the_runtime() {
+    use elastos_runtime::capability::manager::ValidationError;
+    use elastos_runtime::capability::{RequestStatus, Settler};
+    use elastos_runtime::{primitives::audit::AuditLog, session::SessionRegistry};
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority_with_name(dir.path(), Some("operator-uncertain-owner"));
+    let owner = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let sessions = Arc::new(SessionRegistry::new(Arc::new(AuditLog::new())));
+    let service = register_browser_operator_sessions(dir.path(), sessions.clone());
+    let operator = sessions
+        .create_session(elastos_runtime::session::SessionType::Capsule, None)
+        .await;
+    let state = browser_engine_attached_test_state(dir.path()).await;
+    let provider = Arc::new(OperatorTestProvider::default());
+    let registry = state.provider_registry.as_ref().unwrap();
+    registry
+        .unregister_sub_provider("browser-engine")
+        .await
+        .unwrap();
+    registry
+        .register_sub_provider("browser-engine", provider.clone())
+        .await
+        .unwrap();
+    let app = gateway_router(state);
+    let opened = open_mock_browser_page_result(app.clone(), &owner, "operator uncertain").await;
+    let page = opened["engine_page"]["page_id"].as_str().unwrap();
+    let uri = format!("/api/apps/browser/pages/{page}/operator-requests");
+    let inspect = test_browser_request("localhost:61180", "null")
+        .method("POST")
+        .uri(format!("/api/apps/browser/pages/{page}/inspect"))
+        .header("x-elastos-home-token", &owner)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"schema":"elastos.browser.inspect-request/v1"}"#,
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(inspect).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let pending=operator_request(app.clone(),"POST",&uri,&operator.token,None,json!({"schema":"elastos.browser.operator-request/v1","document_generation":"a".repeat(32),"actions":["click"],"duration_ms":30000,"max_actions":1,"reason":"Click control"})).await.1;
+    let id = pending["request_id"].as_str().unwrap();
+    let decision = format!("{uri}/{id}");
+    let approved = owner_operator_request(app.clone(), "POST", &decision, &owner).await;
+    assert_eq!(approved, StatusCode::OK);
+    let grant = operator_request(
+        app.clone(),
+        "GET",
+        &decision,
+        &operator.token,
+        None,
+        json!({}),
+    );
+    let capability = grant.await.1["capability"].as_str().unwrap().to_string();
+    provider
+        .mismatch
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let input_uri = format!("/api/apps/browser/pages/{page}/input");
+    let event = json!({"schema":"elastos.browser.ref-input/v1","request_id":"b".repeat(32),"admission_id":id,"document_generation":"a".repeat(32),"ref":format!("{}:0","b".repeat(32)),"action":"click"});
+    let token = operator.token.clone();
+    let body = json!({ "event": event });
+    let result = operator_request(app, "POST", &input_uri, &token, Some(&capability), body).await;
+    assert_eq!(result.1["outcome"], "uncertain", "{result:?}");
+    let (request, validated) = service.admission_for_test(id).await;
+    match request.status {
+        RequestStatus::Denied { reason, settled_by } => {
+            assert_eq!(
+                (reason.as_str(), settled_by),
+                ("Browser input outcome uncertain", Settler::Runtime)
+            );
+        }
+        other => panic!("admission request is not denied: {other:?}"),
+    }
+    // Revocation is checked before the spent use, so this error names it.
+    assert!(
+        matches!(validated, Err(ValidationError::TokenRevoked)),
+        "{validated:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_browser_operator_admission_at_capacity_retires_spent_grants() {
+    use elastos_runtime::capability::pending::MAX_PENDING_REQUESTS;
+    use elastos_runtime::primitives::audit::AuditLog;
+    use elastos_runtime::session::{SessionRegistry, SessionType};
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = Arc::new(SessionRegistry::new(Arc::new(AuditLog::new())));
+    let service = register_browser_operator_sessions(dir.path(), sessions.clone());
+    let operator = sessions.create_session(SessionType::Capsule, None).await;
+    service
+        .seed_spent_grants_for_test(MAX_PENDING_REQUESTS)
+        .await;
+    // Capacity cleanup drops records older than 0 s. Wait on the clock (a
+    // condition with a deadline, no sleep) until the seeded ones are.
+    let seeded = elastos_common::SecureTimestamp::now().unix_secs;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while elastos_common::SecureTimestamp::now().unix_secs <= seeded {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the clock passed the seeded second"
+        );
+        tokio::task::yield_now().await;
+    }
+    let app = gateway_router(browser_engine_attached_test_state(dir.path()).await);
+    let uri = "/api/apps/browser/pages/page-1/operator-requests";
+    let request = json!({"schema":"elastos.browser.operator-request/v1","document_generation":"a".repeat(32),"actions":["click"],"duration_ms":30000,"max_actions":1,"reason":"Click control"});
+    let (status, body) = operator_request(app, "POST", uri, &operator.token, None, request).await;
+    assert_eq!(
+        (status, body["status"].clone()),
+        (StatusCode::OK, json!("pending")),
+        "operator admission retires spent grants at capacity and admits the request"
+    );
 }
 
 #[tokio::test]

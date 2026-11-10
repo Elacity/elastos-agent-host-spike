@@ -33,6 +33,9 @@ signer_spec.loader.exec_module(signer)
 provenance_spec = importlib.util.spec_from_file_location("release_provenance", Path(__file__).with_name("release-provenance.py"))
 provenance = importlib.util.module_from_spec(provenance_spec)
 provenance_spec.loader.exec_module(provenance)
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 
 
 def binary(platform):
@@ -161,6 +164,21 @@ class PlatformInputTest(unittest.TestCase):
         package.write_bytes(archive_bytes([(inputs.BROWSER_IMAGE + "/" + name, data, None)
                                           for name, data in payloads.items()]))
         return package
+
+    def test_macos_floor_refuses_a_binary_above_its_floor(self):
+        def load_commands(*commands):
+            return "binary:\n" + "".join(f"Load command {n}\n      cmd {c}\n  cmdsize 32\n {k} {v}\n"
+                                          for n, (c, k, v) in enumerate(commands))
+        rust = load_commands(("LC_SEGMENT_64", "segname", "__TEXT"), ("LC_BUILD_VERSION", "minos", "11.0"),
+                             ("LC_BUILD_VERSION", "sdk", "15.5"))
+        self.assertEqual(inputs.macos_minos(rust), (11, 0))
+        inputs.check_macos_floor(rust, "11.0", "elastos-aarch64-darwin")
+        helper = load_commands(("LC_BUILD_VERSION", "minos", "15.0"))
+        with self.assertRaisesRegex(ValueError, "turnserver: requires macOS 15.0, above its 14.0 floor"):
+            inputs.check_macos_floor(helper, "14.0", "turnserver")
+        inputs.check_macos_floor(load_commands(("LC_VERSION_MIN_MACOSX", "version", "12.0")), "12.0", "ffmpeg")
+        with self.assertRaisesRegex(ValueError, "no macOS minimum"):
+            inputs.macos_minos(load_commands(("LC_SEGMENT_64", "segname", "__TEXT")))
 
     def test_browser_scripts_require_reviewed_bytes_and_executable_mode(self):
         source = inputs.SOURCE_ROOT / "scripts/browser-vm-control-service.mjs"
@@ -561,9 +579,9 @@ class PlatformInputTest(unittest.TestCase):
         for args in (("init", "-q"), ("add", "."),
                      ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                       "commit", "-qm", "controlled publisher fixture")):
-            subprocess.run(["git", *args], cwd=source, check=True, capture_output=True)
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=source, text=True).strip()
+            subprocess.run(["git", *args], cwd=source, check=True, capture_output=True, env=fixture_git.fixture_git_env(self.root))
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True, env=fixture_git.fixture_git_env(self.root)).strip()
+        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=source, text=True, env=fixture_git.fixture_git_env(self.root)).strip()
         for root in self.bundles.values():
             receipt = json.loads((root / "platform-input.json").read_text())
             receipt["source"] = {"clean": True, "commit": commit, "tree": tree,
@@ -1733,6 +1751,122 @@ prepare_release_signing_input "$6/native-inputs" "$7" "$8"
         self.assertFalse(list(self.root.glob(".signing-input-*")))
 
 
+# Release-notes rules (#507). System shows every bullet of a release's Added,
+# Changed, Fixed, Removed and Security subsections, without its heading, to the
+# person deciding whether to update. Sections dated from NOTES_RULES_FROM on must
+# pass; older published sections keep the words they shipped with.
+NOTES_RULES_FROM = "2026-10-31"
+NOTES_SHOWN = {"added", "changed", "fixed", "removed", "security"}
+NOTES_HEADING = re.compile(r"\[(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\] - (\d{4}-\d{2}-\d{2})")
+NOTES_MARKUP = re.compile(r"`|\*\*|\[[^\]]*\]\([^)]*\)|<[A-Za-z/!][^>]*>| -- |[\u2192\u2014\u2013\u2018\u2019\u201c\u201d]")
+NOTES_BANNED_WORDS = re.compile(
+    r"\b(now|seamless|seamlessly|easily|simply|robust|additionally|crucial|enhance|leverage|ensure|ensures)\b", re.I)
+NOTES_INTERNAL_TERMS = re.compile(
+    r"\b(capsules?|gateways?|providers?|carrier|seeds?|origin|tls|principals?|operators?|sidecars?|endpoints?"
+    r"|cargo|canary)\b|\.(?:rs|py|js)\b", re.I)
+NOTES_LIMIT = re.compile(r"\b(known issue|not|cannot|can't|still)\b", re.I)
+
+
+def release_note_bullets(body):
+    """Shown bullets of one section as (text joined to one line, physical line count)."""
+    bullets, include, continuing = [], True, False
+    for line in body.split("\n"):
+        subsection = re.match(r"^###\s+(\S+)", line)
+        if subsection:
+            include, continuing = subsection[1].casefold() in NOTES_SHOWN, False
+            continue
+        bullet = re.match(r"^[-*] (.*)$", line)
+        if include and bullet:
+            bullets.append([bullet[1].strip(), 1])
+            continuing = True
+        elif include and continuing and line.startswith((" ", "\t")) and line.strip():
+            bullets[-1][0] += " " + line.strip()
+            bullets[-1][1] += 1
+        else:
+            continuing = False
+    return [tuple(bullet) for bullet in bullets]
+
+
+def release_notes_findings(text, rules_from=NOTES_RULES_FROM):
+    """(versions checked, [(rule number, message)]) for the CHANGELOG text."""
+    sections = [(heading.strip(), body) for heading, _, body in
+                (section.partition("\n") for section in re.split(r"(?m)^## ", text)[1:])
+                if heading.strip().strip("[]").casefold() != "unreleased"]
+    dates = [match[2] if (match := NOTES_HEADING.fullmatch(heading)) else None for heading, _ in sections]
+    checked, findings = [], []
+    for index, (heading, body) in enumerate(sections):
+        date = dates[index]
+        if date is None:
+            if index == 0:
+                findings.append((7, f"newest section '## {heading}' must read '## [X.Y.Z] - YYYY-MM-DD'"))
+            continue
+        if date < rules_from:
+            continue
+        version = NOTES_HEADING.fullmatch(heading)[1]
+        checked.append(version)
+        later = [older for older in dates[index + 1:] if older and older > date]
+        if later:
+            findings.append((7, f"[{version}] is dated {date}, earlier than an older section's {max(later)}"))
+        bullets = release_note_bullets(body)
+        total = sum(len(note.encode("utf-8")) for note, _ in bullets)
+        if len(bullets) > 32 or total > 8192:
+            findings.append((1, f"[{version}] has {len(bullets)} bullets and {total} bytes; at most 32 and 8192"))
+        for number, (note, lines) in enumerate(bullets, 1):
+            where = f"[{version}] bullet {number}"
+            if len(note.encode("utf-8")) > 500:
+                findings.append((1, f"{where} is over 500 bytes"))
+            if match := NOTES_MARKUP.search(note):
+                findings.append((2, f"{where} is not plain text: {match[0]!r}; menu paths use ' > '"))
+            if match := NOTES_BANNED_WORDS.search(note):
+                findings.append((3, f"{where} uses the banned word {match[0]!r}"))
+            if match := NOTES_INTERNAL_TERMS.search(note):
+                findings.append((4, f"{where} uses the internal term {match[0]!r}"))
+            if re.search(r"#\d+", note) and not NOTES_LIMIT.search(note):
+                findings.append((5, f"{where} names an issue but states no limit"))
+            if lines != 1 or not re.match(r"[A-Z]", note) or not note.endswith("."):
+                findings.append((6, f"{where} must be one line that starts with a capital letter and ends with '.'"))
+    return checked, findings
+
+
+class ReleaseNotesRulesTest(unittest.TestCase):
+    changelog = (Path(__file__).resolve().parents[1] / "elastos/CHANGELOG.md").read_text(encoding="utf-8")
+
+    def test_newest_release_notes_follow_the_rules(self):
+        checked, findings = release_notes_findings(self.changelog)
+        newest = NOTES_HEADING.search(self.changelog.split("\n## ", 2)[2].partition("\n")[0])
+        self.assertIn(newest[1], checked)
+        self.assertEqual(findings, [])
+
+    def test_notes_published_before_the_rules_break_them(self):
+        # 2.0.0-rc.1 shipped the earlier 2.0.0 wording, which these rules replace.
+        body = self.changelog.split("\n## [2.0.0-rc.1] - 2026-10-30\n", 1)[1].split("\n## ", 1)[0]
+        checked, findings = release_notes_findings("## [2.0.0-rc.1] - 2026-10-30\n" + body, rules_from="0000-00-00")
+        self.assertEqual(checked, ["2.0.0-rc.1"])
+        self.assertEqual({rule for rule, _ in findings}, {2, 4, 5})
+
+    def test_each_rule_refuses_its_case(self):
+        good = "Home shows plain notes."
+        cases = {
+            1: [["x" * 501 + "."], [good] * 33, ["y" * 300 + "."] * 28],
+            2: [["Open System \u2192 About."], ["Run `elastos update`."], ["See [docs](https://x)."], ["It is \u201cdone\u201d."]],
+            3: [["Home updates seamlessly."], ["It is now faster."]],
+            4: [["The capsule starts."], ["Carrier connects."], ["The seed node runs."], ["Reads main.rs."]],
+            5: [["Library is faster (#481)."]],
+            6: [["lowercase start."], ["No full stop"], ["Two lines\n  in the file."]],
+        }
+        for rule, examples in cases.items():
+            for bullets in examples:
+                with self.subTest(rule=rule, bullet=bullets[0][:40]):
+                    text = "## [Unreleased]\n\n## [9.0.0] - 2026-12-01\n\n### Fixed\n\n" + \
+                        "".join(f"- {bullet}\n" for bullet in bullets)
+                    self.assertIn(rule, {found for found, _ in release_notes_findings(text)[1]})
+        _, findings = release_notes_findings(
+            "## [Unreleased]\n\n## [9.0.0] - 2026-11-01\n- Known issue: Library can lose a save (#480).\n"
+            "\n### Developer detail\n- `elastos serve` uses the gateway (#1)\n\n## [8.0.0] - 2026-11-02\n- Old.\n")
+        self.assertEqual([rule for rule, _ in findings], [7])
+        self.assertEqual(release_notes_findings("## [Unreleased]\n\n## 9.0.0\n- " + good + "\n")[1][0][0], 7)
+
+
 class SourceRecordTest(unittest.TestCase):
     def test_installer_blob_uses_selected_commit_and_validates_inert_bytes(self):
         template = b"#!/bin/sh\n# public installer Git blob\n"
@@ -1761,48 +1895,109 @@ class SourceRecordTest(unittest.TestCase):
             self.assertFalse(outside.exists())
             self.assertTrue((stage / "platform-input.json").is_symlink())
 
+    def record_fixture(self, root):
+        """A committed source fixture and the staging directory that binds it."""
+        source = root / "source"
+        source.mkdir()
+        template = {"schema": "elastos.components/v1", "capsules": {},
+                    "profiles": {"home": {"components": []}}, "external": {}}
+        (source / "components.json").write_text(json.dumps(template))
+        (source / "Cargo.lock").write_text("version = 3\n")
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=source, text=True,
+                                           env=fixture_git.fixture_git_env(root)).strip()
+        git("init", "--quiet")
+        git("add", ".")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--quiet", "-m", "source fixture")
+        commit, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+        stage = root / "stage"
+        (stage / "artifacts").mkdir(parents=True)
+        (stage / "components.json").write_text(json.dumps(template))
+        runtime = stage / "artifacts/elastos-aarch64-darwin"
+        runtime.write_bytes(binary("aarch64-darwin"))
+        runtime.chmod(0o755)
+        omissions = root / "omissions.json"
+        omissions.write_text("[]")
+        args = SimpleNamespace(root=stage, version="0.7.1", platform="aarch64-darwin",
+                               target="aarch64-apple-darwin", source_commit=commit,
+                               source_tree=tree, omissions_json=omissions)
+        return source, stage, args, commit, tree, git
+
+    @staticmethod
+    def fixture_run(original):
+        def run(*args, **kwargs):
+            return "fixture-tool" if args[0] in ("rustc", "cargo") else original(*args, **kwargs)
+        return run
+
     def test_record_binds_real_git_source_and_rejects_changes(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
-            source = root / "source"
-            source.mkdir()
-            template = {"schema": "elastos.components/v1", "capsules": {},
-                        "profiles": {"home": {"components": []}}, "external": {}}
-            (source / "components.json").write_text(json.dumps(template))
-            (source / "Cargo.lock").write_text("version = 3\n")
-            def git(*args):
-                return subprocess.check_output(["git", *args], cwd=source, text=True).strip()
-            git("init", "--quiet")
-            git("add", ".")
-            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                "commit", "--quiet", "-m", "source fixture")
-            commit, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
-            stage = root / "stage"
-            (stage / "artifacts").mkdir(parents=True)
-            (stage / "components.json").write_text(json.dumps(template))
-            runtime = stage / "artifacts/elastos-aarch64-darwin"
-            runtime.write_bytes(binary("aarch64-darwin"))
-            runtime.chmod(0o755)
-            omissions = root / "omissions.json"
-            omissions.write_text("[]")
-            args = SimpleNamespace(root=stage, version="0.7.1", platform="aarch64-darwin",
-                                   target="aarch64-apple-darwin", source_commit=commit,
-                                   source_tree=tree, omissions_json=omissions)
-            original_run = inputs.run
-            def run(*args):
-                return "fixture-tool" if args[0] in ("rustc", "cargo") else original_run(*args)
+            source, stage, args, commit, tree, git = self.record_fixture(root)
+            env = fixture_git.fixture_git_env(root)
+            run = self.fixture_run(inputs.run)
             with patch.object(inputs, "SOURCE_ROOT", source), patch.object(inputs, "run", side_effect=run):
-                inputs.record(args)
+                inputs.record(args, env=env)
                 receipt = inputs.verify(stage)
                 self.assertEqual(receipt["source"]["commit"], commit)
                 self.assertEqual(receipt["source"]["tree"], tree)
                 self.assertEqual(receipt["source"]["lockfiles"]["Cargo.lock"], inputs.digest(source / "Cargo.lock"))
                 (source / "Cargo.lock").write_text("changed\n")
                 with self.assertRaisesRegex(ValueError, "clean"):
-                    inputs.source_identity(commit, tree)
+                    inputs.source_identity(commit, tree, env=env)
                 git("checkout", "--", "Cargo.lock")
                 with self.assertRaisesRegex(ValueError, "identity changed"):
-                    inputs.source_identity("e" * 40, tree)
+                    inputs.source_identity("e" * 40, tree, env=env)
+
+    def test_record_ignores_the_callers_git_dir(self):
+        """A record reads the fixture checkout, not an exported GIT_DIR."""
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source, stage, args, commit, tree, git = self.record_fixture(root)
+            victim, pointed = fixture_git.victim_repo(root)
+            os.utime(victim / "tracked.txt", (1, 1))  # so a leaked status would rewrite its index
+            before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(source)
+            env = fixture_git.fixture_git_env(root)
+            run = self.fixture_run(inputs.run)
+            with patch.object(inputs, "SOURCE_ROOT", source), patch.object(inputs, "run", side_effect=run), \
+                    patch.dict(os.environ, pointed):
+                try:
+                    inputs.record(args, env=env)
+                except (ValueError, subprocess.CalledProcessError) as error:  # judged below, after the victim
+                    commit = f"no recorded source: {error}"
+            self.assertEqual(fixture_git.repo_state(victim), before, "a source read wrote to GIT_DIR's repo")
+            self.assertEqual(fixture_git.shared_config(source), config, "the fixture's shared git config changed")
+            receipt = stage / "platform-input.json"
+            bound = json.loads(receipt.read_text())["source"]["commit"] if receipt.is_file() else None
+            self.assertEqual(bound, commit, "a source read resolved GIT_DIR's repository, not the fixture")
+
+    def test_record_leaves_a_same_commit_git_dir_index_unchanged(self):
+        """GIT_DIR names a clone at the fixture's commit, so a leaked read passes the
+        identity check and reaches ``git status``, which would refresh the clone's index."""
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source, stage, args, commit, tree, git = self.record_fixture(root)
+            env = fixture_git.fixture_git_env(root)
+            victim = root / "victim"
+            subprocess.run(["git", "clone", "--quiet", str(source), str(victim)], env=env, check=True,
+                           capture_output=True)
+            for name in ("components.json", "Cargo.lock"):
+                os.utime(victim / name, (1, 1))  # stale index entries that a leaked status rewrites
+            index = (victim / ".git" / "index").read_bytes()
+            before = fixture_git.repo_state(victim)
+            checkouts = (source, victim, Path(__file__).resolve().parent)
+            configs = [fixture_git.shared_config(path) for path in checkouts]
+            pointed = {"GIT_DIR": str(victim / ".git"), "GIT_WORK_TREE": str(victim)}
+            run = self.fixture_run(inputs.run)
+            with patch.object(inputs, "SOURCE_ROOT", source), patch.object(inputs, "run", side_effect=run), \
+                    patch.dict(os.environ, pointed):
+                inputs.record(args, env=env)
+            self.assertEqual((victim / ".git" / "index").read_bytes(), index, "a git read rewrote GIT_DIR's index")
+            self.assertEqual(fixture_git.repo_state(victim), before, "a source read wrote to GIT_DIR's repo")
+            self.assertEqual([fixture_git.shared_config(path) for path in checkouts], configs,
+                             "the fixture's, GIT_DIR's or this checkout's shared git config changed")
+            self.assertEqual(inputs.verify(stage)["source"]["commit"], commit)
 
 
 

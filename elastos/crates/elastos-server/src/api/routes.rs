@@ -95,20 +95,25 @@ pub async fn launch_capsule(
     )?;
 
     match runtime
-        .run_local_with_principal(path, vec![], principal_id)
+        .run_local_with_signer(path, vec![], principal_id)
         .await
     {
-        Ok(handle) => {
+        Ok((handle, signer)) => {
             let status = if handle.manifest.is_component_capsule() {
                 "completed"
             } else {
                 "launched"
+            };
+            let signer_did = match &signer {
+                crate::runtime::Signer::Key { did } => Some(did.as_str()),
+                _ => None,
             };
             audit_log.capsule_launch(
                 &handle.id.0,
                 &handle.manifest.name,
                 None,
                 TrustLevel::Untrusted,
+                signer_did,
             );
             Ok(Json(LaunchResponse {
                 id: handle.id.0,
@@ -351,5 +356,76 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("not authorized"));
+    }
+
+    /// S1: the audit for the real instance handle names the verified signer.
+    #[tokio::test]
+    async fn launch_audit_names_the_verified_signer_on_the_instance_handle() {
+        use crate::runtime::tests::test_runtime;
+        use elastos_runtime::primitives::audit::AuditEvent;
+        use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+
+        let (runtime, temp) = test_runtime().await;
+        let runtime = std::sync::Arc::new(runtime);
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp.path().join("signed-app");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        let entrypoint = b"microvm image";
+        std::fs::write(capsule_dir.join("rootfs.ext4"), entrypoint).unwrap();
+        let mut manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+            r#"{"schema":"elastos.capsule/v1","version":"0.1.0","name":"signed-app","role":"app","type":"microvm","entrypoint":"rootfs.ext4"}"#,
+        )
+        .unwrap();
+        sign_capsule(&key, &mut manifest, &hash_content(entrypoint)).unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let audit_log = std::sync::Arc::new(AuditLog::new());
+        let response = launch_capsule(
+            Extension(runtime),
+            Extension(audit_log.clone()),
+            Extension(None::<std::path::PathBuf>),
+            Json(LaunchRequest {
+                path: capsule_dir.to_string_lossy().into_owned(),
+                principal_id: None,
+                launch_grant: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let mut events = audit_log.recent_events(2);
+        assert_eq!(events.len(), 1, "one capsule_launch event");
+        let AuditEvent::CapsuleLaunch {
+            capsule_id,
+            signer_did,
+            cid,
+            ..
+        } = events.remove(0)
+        else {
+            unreachable!("the launch emits a capsule_launch event")
+        };
+        assert_eq!(
+            capsule_id, response.id,
+            "the audit names the real instance handle"
+        );
+        assert_eq!(
+            signer_did.as_deref(),
+            Some("did:key:z6MktwtqAzuD5F77tAMBMwNs1KybZeff61EehV9xB1ZpXQG7"),
+            "the audit names the verified signer"
+        );
+        assert_eq!(cid, None, "S1 records no CID");
     }
 }

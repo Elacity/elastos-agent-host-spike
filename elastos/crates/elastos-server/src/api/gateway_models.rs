@@ -185,6 +185,10 @@ struct HomePeopleContactSummary {
     /// realtime signature, like `last_seen_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reachable: Option<bool>,
+    /// Set on a waiting request by DID while the Community node refuses the
+    /// Profile-contact operations, so People says why it waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_detail: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -911,10 +915,6 @@ struct HomeLaunchRequest {
     target: String,
     #[serde(default)]
     query: BTreeMap<String, String>,
-    /// What the launch binds, when it is not the target itself. Runtime
-    /// accepts it only for Photos and only as Photos' playlist.
-    #[serde(default)]
-    selected_resource: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1070,6 +1070,13 @@ struct GatewayRoomPollView {
 #[derive(Debug, Clone, Serialize)]
 struct GatewayConversationObjectView {
     seq: u64,
+    /// Verified Community envelope id; absent on local-room rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+    /// The Community conversation a link from this row cites; absent on
+    /// local-room rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_id: Option<String>,
     sender: String,
     /// Runtime-only identity used to attach `sender_ref`; never serialized.
     #[serde(skip)]
@@ -1136,9 +1143,6 @@ struct GatewayParticipantCard {
 pub(super) struct ParticipantCardDirectory {
     pub(super) local_profile_did: Option<String>,
     pub(super) relationships: gateway_home_system::ContactRelationships,
-    /// Profile DIDs visible in Discovery right now, so a request can bind to
-    /// their signed advertisement.
-    pub(super) discoverable: std::collections::HashSet<String>,
     /// Unexpired Community presence by Profile DID: the signed Profile's
     /// display name and when the Home last announced it.
     pub(super) present: std::collections::HashMap<String, PresentMember>,
@@ -1172,7 +1176,7 @@ impl ParticipantCardDirectory {
             participant_ref,
             relationship,
             conversation_id,
-            can_add_contact: relationship == "none" && self.discoverable.contains(member_did),
+            can_add_contact: relationship == "none",
             active_now: self.present.contains_key(member_did),
         }
     }
@@ -1355,6 +1359,8 @@ impl From<crate::room_service::ConversationObjectView> for GatewayConversationOb
     fn from(view: crate::room_service::ConversationObjectView) -> Self {
         Self {
             seq: view.seq,
+            message_id: view.message_id,
+            conversation_id: view.conversation_id,
             sender: view.sender,
             sender_member_did: view.sender_member_did,
             sender_ref: None,

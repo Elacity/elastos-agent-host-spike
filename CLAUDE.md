@@ -1,12 +1,15 @@
-# Claude: photo viewer spike
+# Read this first
 
-Read `examples/photo-viewer/handoff/KICKOFF.md` first, then `ROADMAP.md`, then `PRINCIPLES.md` (all 19),
-`docs/CAPSULE_MODEL.md`, `docs/CAPSULE_AUTHORING.md` and `SECURITY.md`.
+This is a private copy of `Elacity/elastos-runtime` for one spike: the Agent Host.
 
-- Public fork (Elacity/elastos-agent-host-spike), run in parallel with the Runtime. Never push to Elacity/elastos-runtime. Never touch main.
-- One branch per slice (`claude/photo-<slice>`), draft PR into `spike/photo-viewer`, merge commits only. Sasha merges.
-- No rebase, amend, force-push or branch deletion.
-- No shipping Runtime change outside test modules without Sasha's yes.
-- Do not touch `examples/agent-host/`.
-- Before tests: `export RUST_TEST_THREADS=2`.
-- Commits end with `Co-authored-by: Claude <noreply@anthropic.com>`.
+Before any work, read `examples/agent-host/handoff/HANDOFF.md` in full. It has the rules, the roadmap, the checklist, the slice queue, the test commands, the report format, the list of principles and docs to read, and where the DeepSeek Harness reference is (`handoff/DEEPSEEK.md`).
+
+Hard rules, short form:
+
+- Never push to, open a PR on, comment on, or file an issue in any `Elacity/*` repo. That repo is public. Reading it is fine.
+- One slice per session. Own branch from `spike/agent-host`. Push it to this private repo, open a PR here with base `spike/agent-host`, do not merge. Then stop.
+- Author `SashaMIT <sash@ela.city>`, trailer `Co-authored-by: Claude <noreply@anthropic.com>`. Never rebase, amend, squash, or force-push.
+- No secrets and no large files in commits.
+- Every claim needs a falsifier: break it, show the test fail, revert.
+- DeepSeek Harness is a reference to learn from: clone it outside this repo, copy ideas, never code. `PRINCIPLES.md` wins over any DeepSeek pattern.
+- Simple English. Say what is next.

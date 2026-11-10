@@ -1,0 +1,148 @@
+# The model provider's final seccomp program on x86-64, one classic-BPF
+# instruction per line: code jt jf k, then a comment naming the syscall or the
+# argument check. seccomp_model_program_equals_its_golden_copy renders the program
+# through the one builder on every OS and requires it to equal these lines; on a
+# Linux x86-64 host model_syscall_lists_match_libc requires each `SYS_` comment's
+# number to be that libc constant. A change to the filter changes this file in the
+# same diff.
+0x0020 0  0 0x00000004  # load seccomp_data.arch
+0x0015 1  0 0xc000003e  # arch == AUDIT_ARCH_X86_64? skip the deny
+0x0006 0  0 0x0005000d  # deny: another audit architecture
+0x0020 0  0 0x00000000  # load seccomp_data.nr
+0x0035 0  1 0x40000000  # nr >= 0x40000000, the x32 space?
+0x0006 0  0 0x0005000d  # deny: an x32 number
+0x0015 0  1 0x0000009e  # SYS_arch_prctl
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000003  # SYS_close
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000123  # SYS_epoll_create1
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x000000e9  # SYS_epoll_ctl
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000119  # SYS_epoll_pwait
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x000000e8  # SYS_epoll_wait
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000122  # SYS_eventfd2
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000003b  # SYS_execve
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000142  # SYS_execveat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000003c  # SYS_exit
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x000000e7  # SYS_exit_group
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000010d  # SYS_faccessat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000005b  # SYS_fchmod
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000004b  # SYS_fdatasync
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000049  # SYS_flock
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000005  # SYS_fstat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000004a  # SYS_fsync
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000004d  # SYS_ftruncate
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x000000d9  # SYS_getdents64
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000006b  # SYS_geteuid
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000013e  # SYS_getrandom
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000109  # SYS_linkat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000008  # SYS_lseek
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000053  # SYS_mkdir
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000102  # SYS_mkdirat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000009  # SYS_mmap
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000000a  # SYS_mprotect
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000000b  # SYS_munmap
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000106  # SYS_newfstatat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000101  # SYS_openat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x000001b5  # SYS_openat2
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000007  # SYS_poll
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000010f  # SYS_ppoll
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000011  # SYS_pread64
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000012  # SYS_pwrite64
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000000  # SYS_read
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000010b  # SYS_readlinkat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000013  # SYS_readv
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000013c  # SYS_renameat2
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000014e  # SYS_rseq
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000000d  # SYS_rt_sigaction
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000014c  # SYS_statx
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000063  # SYS_sysinfo
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x0000003f  # SYS_uname
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000057  # SYS_unlink
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000107  # SYS_unlinkat
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000001  # SYS_write
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x00000014  # SYS_writev
+0x0006 0  0 0x7fff0000  # allow
+0x0015 0  1 0x000001b3  # SYS_clone3
+0x0006 0  0 0x00050026  # clone3 answers ENOSYS, so glibc falls back to clone
+0x0015 0  4 0x00000038  # SYS_clone
+0x0020 0  0 0x00000010  # arg0 (flags): load the low word
+0x0045 0  1 0x00010000  # arg0 has CLONE_THREAD?
+0x0006 0  0 0x7fff0000  # allow: a new thread
+0x0006 0  0 0x0005000d  # deny: a new process
+0x0015 0  4 0x00000035  # SYS_socketpair
+0x0020 0  0 0x00000010  # arg0 (domain): load the low word
+0x0015 0  1 0x00000001  # arg0 == AF_UNIX?
+0x0006 0  0 0x7fff0000  # allow: a Unix-domain pair
+0x0006 0  0 0x0005000d  # deny: every other family
+0x0015 0  5 0x00000048  # SYS_fcntl
+0x0020 0  0 0x00000018  # arg1 (cmd): load the low word
+0x0015 1  0 0x00000001  # arg1 == F_GETFD? jump to the allow
+0x0015 0  1 0x00000406  # arg1 == F_DUPFD_CLOEXEC?
+0x0006 0  0 0x7fff0000  # allow: F_GETFD or F_DUPFD_CLOEXEC
+0x0006 0  0 0x0005000d  # deny: every other command
+0x0015 0 10 0x0000012e  # SYS_prlimit64
+0x0020 0  0 0x00000010  # arg0 (pid): load the low word
+0x0015 0  7 0x00000000  # arg0 low word == 0?
+0x0020 0  0 0x00000014  # arg0 (pid): load the high word
+0x0015 0  5 0x00000000  # arg0 high word == 0? so pid 0, the caller
+0x0020 0  0 0x00000020  # arg2 (new limit): load the low word
+0x0015 0  3 0x00000000  # arg2 low word == 0?
+0x0020 0  0 0x00000024  # arg2 (new limit): load the high word
+0x0015 0  1 0x00000000  # arg2 high word == 0? so no new limit
+0x0006 0  0 0x7fff0000  # allow: read the caller's own limits
+0x0006 0  0 0x0005000d  # deny: another pid or a new limit
+0x0015 0  8 0x000000ca  # SYS_futex
+0x0020 0  0 0x00000018  # arg1 (op): load the low word
+0x0054 0  0 0xfffffe7f  # arg1 &= FUTEX_CMD_MASK, dropping PRIVATE and CLOCK_REALTIME
+0x0015 3  0 0x00000000  # arg1 == FUTEX_WAIT?
+0x0015 2  0 0x00000001  # arg1 == FUTEX_WAKE?
+0x0015 1  0 0x00000009  # arg1 == FUTEX_WAIT_BITSET?
+0x0015 0  1 0x0000000a  # arg1 == FUTEX_WAKE_BITSET?
+0x0006 0  0 0x7fff0000  # allow: wait or wake
+0x0006 0  0 0x0005000d  # deny: PI, requeue and every other op
+0x0006 0  0 0x0005000d  # deny: every call not named above

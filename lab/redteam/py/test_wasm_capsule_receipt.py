@@ -11,11 +11,13 @@ on HEAD 745fd6b27026beef6847f8f4facb95252b4a603b:
   tools/build                    5fc603e0fc8f5e29349c09c097d28738218f6ab5  PR #74 (wasm-capsule-lab/001)
   capsule/, rust-toolchain.toml  b719134ac2b5e40d653ed5efb6e7b1be40f6cf9a  PR #74
   Cargo.toml, Cargo.lock         938bc0c12f3cddceaa5fc35f73a886865df0f5a6  PR #105 (wasm-capsule-lab/007)
-007 re-checked the current HEAD. capsule/src/lib.rs is still
-b719134ac2b5e40d653ed5efb6e7b1be40f6cf9a (PR #74); `digest_impl` holds
-`0x9E37_79B9_7F4A_7C15` once. tools/build moved to
-13dd11fd21bd519ec82bfd97ad81ad9408771cc5 (wasm-capsule-lab/035). The snapshot
-prints that live `git log -1`, not the historical pin above.
+007 re-checked the then-current HEAD. Task 068
+(86952e7cbef42026647821ea981d8f3ed31f16e3) changed capsule/src/lib.rs to use
+`std` and export the world's `lifecycle.run`; `digest_impl` still holds
+`0x9E37_79B9_7F4A_7C15` once, so the plant anchors on the `digest` export.
+tools/build moved to 2c87951a29c6bc29c72cfa60af1e0feaa75b0ea2
+(wasm-capsule-lab/036). The snapshot prints that live `git log -1`, not the
+historical pin above.
 A failing check prints the commit it ran on, the sha256 of the tested bytes and
 the exact commands, so its message is the finding's evidence.
 
@@ -55,6 +57,7 @@ not carry those lines, so the probe prints this one.
 
 import contextlib
 import hashlib
+import importlib
 import io
 import os
 import shlex
@@ -71,6 +74,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 LANE_DIR = REPO_ROOT / "lab" / "wasm-capsule"
 TOOLS_BUILD = LANE_DIR / "tools" / "build"
 LOCKFILE = LANE_DIR / "Cargo.lock"
+_GIT_ENV_SPEC = importlib.util.spec_from_file_location(
+    "fixture_git_env", REPO_ROOT / "scripts" / "fixture-git-env.py")
+fixture_git = importlib.util.module_from_spec(_GIT_ENV_SPEC)
+_GIT_ENV_SPEC.loader.exec_module(fixture_git)
 
 FINDING_ID = "wasm-capsule-lab-001"
 CONTENT_FINDING_ID = "wasm-capsule-lab-002"
@@ -189,28 +196,39 @@ class Edit:
     old: str
     new: str
 
-    def apply(self, lane):
-        """Replace `old` with `new` in one file inside `lane`.
+    def resolve(self, lane):
+        """The target file inside `lane`, after `..` and symlinks.
 
-        The file must resolve inside `lane`. `..` and a symlink that leaves
-        the copy both resolve outside it, and both are refused with
-        PLANT_ESCAPE before any read or write.
+        A path that resolves outside `lane` is refused with PLANT_ESCAPE. An
+        absolute path replaces `lane` on join, so it fails here too.
         """
         root = Path(lane).resolve()
-        # One check: the resolved path, after `..` and symlinks, stays inside
-        # the copy. An absolute path replaces `root` on join, so it fails here too.
         resolved = (root / self.file).resolve()
         try:
             resolved.relative_to(root)
         except ValueError:
             raise ValueError(f"{PLANT_ESCAPE}: {self.file} resolves outside {root}") from None
-        text = resolved.read_text()
-        if text.count(self.old) != 1:
+        return resolved
+
+    def anchor_count(self, lane):
+        """How many copies of `old` the target holds in `lane`. A plant needs
+        exactly one, and the anchor check reads the committed file for it."""
+        return self.resolve(lane).read_text().count(self.old)
+
+    def apply(self, lane):
+        """Replace `old` with `new` in one file inside `lane`.
+
+        A file that does not hold exactly one copy of `old` is a stale plant
+        and is refused before anything is written.
+        """
+        resolved = self.resolve(lane)
+        count = self.anchor_count(lane)
+        if count != 1:
             raise ValueError(
-                f"stale plant: {self.file} holds {text.count(self.old)} copies of "
+                f"stale plant: {self.file} holds {count} copies of "
                 f"{self.old!r}, not exactly one"
             )
-        resolved.write_text(text.replace(self.old, self.new))
+        resolved.write_text(resolved.read_text().replace(self.old, self.new))
 
 
 # One byte of the constant compiled into `digest`. Only the third copy gets it,
@@ -358,14 +376,22 @@ def parse_receipt(text):
     return fields
 
 
-def git(*args):
-    """One line of git output from this repo, or why it is unknown."""
+def git(*args, root=REPO_ROOT):
+    """One line of git output from this repo, or why it is unknown.
+
+    An inherited GIT_DIR would redirect the read to another repository, and
+    an optional index lock would let ``status`` rewrite that repository's
+    index; both are cleared, so this reads ``root`` and writes nothing.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         proc = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), *args],
+            ["git", "-C", str(root), *args],
             capture_output=True,
             text=True,
             timeout=QUERY_TIMEOUT_S,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return f"unknown ({error})"
@@ -402,6 +428,42 @@ def snapshot():
             "lab/wasm-capsule/tools/build",
         ),
     )
+
+
+class SnapshotIsolationTest(unittest.TestCase):
+    """A read of this checkout leaves another repository and this index alone."""
+
+    @staticmethod
+    def stale_victim(scratch):
+        """A victim repository with a stale tracked file under the snapshot's
+        pathspec, so a status refresh would rewrite its index."""
+        victim, pointed = fixture_git.victim_repo(scratch, untracked=())
+        stale = victim / "lab/wasm-capsule/stale.txt"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("stale\n")
+        env = fixture_git.fixture_git_env(scratch, dict.fromkeys(fixture_git.IDENTITY, "victim"))
+        for args in (("add", "lab/wasm-capsule/stale.txt"), ("commit", "-q", "-m", "stale")):
+            subprocess.run(["git", "-C", str(victim), *args], env=env, check=True, capture_output=True)
+        os.utime(stale, (1, 1))  # the index's stat data no longer matches the file
+        return victim, pointed
+
+    def test_snapshot_leaves_a_caller_git_dir_repository_unchanged(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            victim, pointed = self.stale_victim(scratch)
+            before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(REPO_ROOT)
+            with mock.patch.dict(os.environ, pointed):
+                attribution = snapshot()
+            self.assertEqual(fixture_git.repo_state(victim), before, "a receipt read wrote to GIT_DIR's repo")
+            self.assertEqual(fixture_git.shared_config(REPO_ROOT), config, "the checkout's shared git config changed")
+            self.assertNotEqual(attribution.head, before[0], "the snapshot read GIT_DIR's repository")
+
+    def test_status_read_leaves_the_fixture_index_unchanged(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            victim, _ = self.stale_victim(scratch)
+            before = (victim / ".git" / "index").read_bytes()
+            git("status", "--porcelain", "--", "lab/wasm-capsule", root=victim)
+            self.assertEqual((victim / ".git" / "index").read_bytes(), before, "a status read rewrote the index")
 
 
 def evidence(builds, attribution, *, finding_id=FINDING_ID, heading=True):
@@ -796,15 +858,20 @@ F_LOCK_HASH = Falsifier(
     ("test_receipt_lockfile_sha256_matches_independent_sha256",),
     "the receipt does not name the committed lockfile",
 )
-NO_STD = '#![cfg_attr(target_arch = "wasm32", no_std)]\n'
+# The digest export, which appears once. The plant appends a `#[used]` static
+# after it so `env!("CARGO_MANIFEST_DIR")` is compiled into the wasm: the copy's
+# absolute path then differs between the two reproducibility copies.
+DIGEST_EXPORT = (
+    'pub extern "C" fn digest(n: u32) -> u64 {\n    digest_impl(n)\n}\n'
+)
 F_BUILD_PATH = Falsifier(
     "F-RT003-BUILD-PATH",
     "the capsule embeds its absolute source path (the bug the owner's F-WC1 plants)",
     (
         Edit(
             "capsule/src/lib.rs",
-            NO_STD,
-            NO_STD + '\n#[cfg(target_arch = "wasm32")]\n#[used]\n'
+            DIGEST_EXPORT,
+            DIGEST_EXPORT + '\n#[cfg(target_arch = "wasm32")]\n#[used]\n'
             'static BUILD_DIR: &str = env!("CARGO_MANIFEST_DIR");\n',
         ),
     ),
@@ -886,6 +953,39 @@ BUILD_FAILS = (
 )
 
 
+def module_plants():
+    """Every plant this module defines, by name: an Edit, a Falsifier's plant,
+    or a tuple of Edits. The anchor check walks this, not a hand list, so a new
+    plant is checked without being named here."""
+    for name, value in vars(sys.modules[__name__]).items():
+        if isinstance(value, Edit):
+            yield name, (value,)
+        elif isinstance(value, Falsifier):
+            yield name, value.plant
+        elif (
+            isinstance(value, tuple)
+            and value
+            and all(isinstance(edit, Edit) for edit in value)
+        ):
+            yield name, value
+
+
+# The plants module_plants must find. An allowlist: a plant that stops being a
+# module-level Edit, Falsifier or Edit tuple fails the anchor test instead of
+# dropping out of it silently.
+EXPECTED_PLANTS = (
+    "BUILD_FAILS",
+    "F_ARTIFACT_HASH",
+    "F_BUILD_PATH",
+    "F_CONSTANT_ARTIFACT",
+    "F_LOCK_HASH",
+    "F_REAL_TREE",
+    "F_THIRD_HASH",
+    "F_UNCHANGED_NAME",
+    "SOURCE_FLIP",
+)
+
+
 def as_recorded_finding(test):
     """A copy of a probe test marked the way guard b keeps a reproduced defect.
     A copy, so the probe's own test is never marked."""
@@ -946,8 +1046,27 @@ class WasmCapsuleReceiptProbeChecks(unittest.TestCase):
             "test_plant_does_not_write_the_real_trees",
             "test_invalid_copy_paths_are_refused_before_copying",
             "test_skip_reason_is_printed",
+            "test_every_plant_anchor_appears_exactly_once",
         ):
             self.skipTest(self.skip_reason)
+
+    def test_every_plant_anchor_appears_exactly_once(self):
+        # Reads each committed target file once and applies Edit's own
+        # stale-plant rule. No rustc and no target, so CI can run it, and a
+        # moved anchor fails here instead of in a build that never starts.
+        plants = dict(module_plants())
+        self.assertEqual(sorted(plants), sorted(EXPECTED_PLANTS))
+        for name, plant in plants.items():
+            self.assertTrue(plant, f"{name} defines no Edit")
+            for edit in plant:
+                with self.subTest(plant=name, file=edit.file):
+                    count = edit.anchor_count(LANE_DIR)
+                    self.assertEqual(
+                        count,
+                        1,
+                        f"{name}: {edit.file} holds {count} copies of "
+                        f"{edit.old!r}, not exactly one",
+                    )
 
     def assert_caught(self, falsifier):
         _, result = run_probe(falsifier.tests, plant=falsifier.plant)

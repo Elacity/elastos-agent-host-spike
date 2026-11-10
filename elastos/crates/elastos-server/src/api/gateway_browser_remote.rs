@@ -639,6 +639,28 @@ fn remote_wallet_consumer_mediation(
     })
 }
 
+// The serving Engine's profile is owned by its authenticated remote owner,
+// which is not a principal in this Runtime's auth store.
+fn remote_engine_profile(data_dir: &FsPath, owner: &RemoteEngineOwner) -> Result<Value> {
+    let storage = owner.storage_principal();
+    let uri = format!("localhost://Users/{storage}/BrowserProfiles/default/profile.ext4");
+    let disk_path = rooted_localhost_fs_path(data_dir, &uri)
+        .context("Remote Engine profile path invalid")?
+        .to_str()
+        .context("Remote Engine profile path must be UTF-8")?
+        .to_owned();
+    Ok(json!({
+        "schema":"elastos.browser.profile/v1", "scope":"active_principal",
+        "storage":BROWSER_PROFILE_STORAGE,
+        "storage_posture":BROWSER_PROFILE_STORAGE_POSTURE,
+        "protected_storage":false, "encrypted":false, "recoverable":false,
+        "recovery":BROWSER_PROFILE_RECOVERY, "uri":uri,
+        "public_uri":"localhost://Users/self/BrowserProfiles/default/profile.ext4",
+        "profile_key":owner.profile_key, "disk_path":disk_path,
+        "reset":"whole_profile"
+    }))
+}
+
 fn remote_wallet_consumer_request(
     mediation: &Value,
     operation: &str,
@@ -808,8 +830,7 @@ async fn prepare(page: &ServedPage) -> Result<Prepared> {
             egress_runtime_socket_path:stream["adapter_ipc"]["runtime_stream_path"].as_str().unwrap_or_default(),
         }).map_err(anyhow::Error::msg)?.context("Remote Engine transport preparation unsupported")?;
         bind_browser_vz_transport_authority(&gateway.data_dir, &reservation, stream_id, None, transport.authority.clone()).await.map_err(anyhow::Error::msg)?;
-        let (_, mut profile) = browser_profile_launch_descriptor(&gateway.data_dir, &principal)?;
-        profile["profile_key"] = json!(owner.profile_key);
+        let profile = remote_engine_profile(&gateway.data_dir, owner)?;
         let viewer = browser_vz_viewer_turn_capability(&transport.authority, &transport.secret).map_err(anyhow::Error::msg)?;
         crate::carrier::browser_engine_media::bind_target(&gateway.data_dir, owner.requester_endpoint.parse()?, &transport.authority, page.closing.clone()).await?;
         let wallet = remote_wallet_consumer_mediation(&owner.requester_endpoint, &owner.page_id, &owner.generation);
@@ -1638,8 +1659,11 @@ pub(super) async fn select(
     );
     // An existing local profile requires an approved transfer. Selecting
     // execution cannot silently fork its cookies onto another Runtime.
-    let (local_profile, _) =
-        browser_profile_launch_descriptor(&gateway.data_dir, context.principal_id())?;
+    let (local_profile, _) = browser_profile_launch_descriptor(
+        &gateway.data_dir,
+        context.principal_id(),
+        context.root(),
+    )?;
     ensure!(
         !local_profile.exists(),
         "This Browser profile requires an approved transfer before remote placement"
@@ -2479,6 +2503,31 @@ mod tests {
                 "selection has no launch or transport effects"
             );
         }
+    }
+
+    #[test]
+    fn remote_engine_profile_uri_names_authenticated_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = RemoteEngineOwner {
+            requester_endpoint: "a87b8a99bd88a69686c994a80b629d8154871aa295540834c01d79f4f916502f"
+                .into(),
+            requester_principal_id: "consumer".into(),
+            grant_id: "grant:remote-engine".into(),
+            grant_revision: 1,
+            generation: "generation".into(),
+            page_id: "page".into(),
+            vm_id: "vm".into(),
+            profile_key: "profile".into(),
+            adapter_id: "adapter".into(),
+        };
+        let profile = remote_engine_profile(root.path(), &owner).unwrap();
+        assert_eq!(
+            profile["uri"],
+            "localhost://Users/remote-engine-594321e52caebd3b7afc9f03bf002e82d1006a3dfa8e8e96a8619224ad233861/BrowserProfiles/default/profile.ext4"
+        );
+        assert_eq!(profile["storage"], BROWSER_PROFILE_STORAGE);
+        assert_eq!(profile["storage_posture"], BROWSER_PROFILE_STORAGE_POSTURE);
+        assert_eq!(profile["recovery"], BROWSER_PROFILE_RECOVERY);
     }
 
     #[test]

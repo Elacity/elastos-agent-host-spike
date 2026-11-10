@@ -25,6 +25,7 @@ sha2 = "0.10"
 sha3 = "0.10"
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3"
 
 [profile.release]
