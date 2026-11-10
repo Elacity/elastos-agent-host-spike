@@ -21,7 +21,8 @@ use elastos_common::localhost::rooted_localhost_fs_path;
 use elastos_runtime::auth::{
     validate_principal_root_protection, AuthChallengeV1, AuthSessionGrantV1, PrincipalId,
     PrincipalRootProtectionV1, PrincipalRootProtectorKind, PrincipalRootRecoveryArchiveV1,
-    ProofBinding, RecoveryKitV1, RuntimeAuditEventV1, DEFAULT_PRINCIPAL_ROOT_CIPHER,
+    ProofBinding, ProofBindingKind, RecoveryKitV1, RuntimeAuditEventV1,
+    DEFAULT_PRINCIPAL_ROOT_CIPHER,
 };
 use hkdf::Hkdf;
 use rand::RngCore;
@@ -5164,6 +5165,17 @@ pub fn upsert_principal_for_binding_as_role_named(
     mutate_auth_state(data_dir, |state| {
         normalize_principal_records(state);
         let proof_binding_id = binding.id();
+        // Kind Agent never changes: a sign-in cannot present the admission
+        // binding, and cannot take an Agent record's binding or principal id.
+        if binding.kind == ProofBindingKind::AgentAdmission
+            || state.principals.iter().any(|principal| {
+                principal.kind == PrincipalKind::Agent
+                    && (principal.proof_binding_id == proof_binding_id
+                        || principal.principal_id == principal_id)
+            })
+        {
+            anyhow::bail!("a sign-in cannot bind an agent principal");
+        }
         if let Some(existing) = state
             .principals
             .iter_mut()
@@ -7033,6 +7045,15 @@ fn ensure_recovered_root_reassignable_in_state(
     recovered_localhost_root: &str,
     recovered_data_key_id: &str,
 ) -> anyhow::Result<()> {
+    // Kind Agent never changes: recovery cannot move an Agent record, and a
+    // Kit cannot name an Agent's principal id to replace its record.
+    if state.principals.iter().any(|principal| {
+        principal.kind == PrincipalKind::Agent
+            && (principal.proof_binding_id == proof_binding_id
+                || principal.principal_id == recovered_principal_id)
+    }) {
+        anyhow::bail!("recovery cannot reassign an agent principal");
+    }
     let current = state
         .principals
         .iter()
@@ -7594,6 +7615,23 @@ fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> Str
             format!("localhost://UsersAI/{}", hex::encode(&digest[..12]))
         }
     }
+}
+
+/// An agent is the tuple (owner, signer DID, signed name). Its subject is that
+/// tuple under a domain label, each field prefixed with its byte length, so no
+/// two tuples share an encoding.
+fn agent_admission_subject(owner: &str, did: &str, name: &str) -> String {
+    ["elastos.agent-principal/v1", owner, did, name]
+        .iter()
+        .map(|field| format!("{}:{field},", field.len()))
+        .collect()
+}
+
+/// The agent's principal id: the full SHA-256 of its subject. The same digest
+/// names its `AgentAdmission` binding (`agent-admission:v1:<digest>`).
+pub fn agent_principal_id(owner: &str, did: &str, name: &str) -> String {
+    let digest = Sha256::digest(agent_admission_subject(owner, did, name).as_bytes());
+    format!("agent:v1:{}", hex::encode(digest))
 }
 
 /// The Users root for a signer whose DID was verified as this Runtime's device.
@@ -12691,6 +12729,231 @@ pub(crate) mod tests {
             "{error}"
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    const AGENT_OWNER: &str = "person:local:owner";
+    const AGENT_DID: &str = "did:key:z6MkAgentOne";
+    const AGENT_NAME: &str = "notes";
+    /// The subject of that tuple, written out by hand, and its SHA-256 as
+    /// computed outside this crate (`shasum -a 256`).
+    const AGENT_SUBJECT: &str =
+        "26:elastos.agent-principal/v1,18:person:local:owner,20:did:key:z6MkAgentOne,5:notes,";
+    const AGENT_DIGEST: &str = "f4841c1b546dfc16d838851ff4d812f2a6db4f5f6f5ed88a9e73ec01f7c848a6";
+    const AGENT_REFUSED_SIGN_IN: &str = "a sign-in cannot bind an agent principal";
+    const AGENT_REFUSED_RECOVERY: &str = "recovery cannot reassign an agent principal";
+
+    fn agent_admission_binding_fixture(subject: &str) -> ProofBinding {
+        ProofBinding {
+            kind: ProofBindingKind::AgentAdmission,
+            subject: subject.into(),
+            chain_id: None,
+            verified_at: 5,
+            passkey: None,
+        }
+    }
+
+    /// Stores the Agent record for the pinned tuple, written field by field so
+    /// the guard rows do not depend on any mint.
+    fn stored_agent_fixture(data_dir: &Path) -> PrincipalRecord {
+        let principal_id = format!("agent:v1:{AGENT_DIGEST}");
+        let binding = agent_admission_binding_fixture(AGENT_SUBJECT);
+        let record = PrincipalRecord {
+            localhost_root: principal_kind_localhost_root(&principal_id, PrincipalKind::Agent),
+            principal_id,
+            proof_binding_id: binding.id(),
+            proof_binding: binding,
+            display_name: String::new(),
+            initial_profile_display_name: None,
+            role: RuntimePrincipalRole::Guest,
+            kind: PrincipalKind::Agent,
+            created_at: 5,
+            updated_at: 5,
+        };
+        mutate_auth_state(data_dir, |state| {
+            state.principals.push(record.clone());
+            Ok(())
+        })
+        .unwrap();
+        record
+    }
+
+    /// ID-vectors: the encoding and both ids are pinned to values this crate
+    /// did not produce.
+    #[test]
+    fn agent_principal_id_matches_the_pinned_vector() {
+        assert_eq!(
+            agent_admission_subject(AGENT_OWNER, AGENT_DID, AGENT_NAME),
+            AGENT_SUBJECT
+        );
+        assert_eq!(
+            agent_principal_id(AGENT_OWNER, AGENT_DID, AGENT_NAME),
+            format!("agent:v1:{AGENT_DIGEST}")
+        );
+        let binding = agent_admission_binding_fixture(AGENT_SUBJECT);
+        assert_eq!(binding.id(), format!("agent-admission:v1:{AGENT_DIGEST}"));
+        assert_eq!(
+            serde_json::to_value(&binding.kind).unwrap(),
+            "agent_admission"
+        );
+    }
+
+    /// ID-ambig: where one field ends is part of the id. Each pair is one
+    /// string under plain concatenation or under a comma join.
+    #[test]
+    fn agent_principal_id_keeps_field_boundaries() {
+        for (left, right) in [
+            (("ab", "c", "n"), ("a", "bc", "n")),
+            (("o", "ab", "c"), ("o", "a", "bc")),
+            (("a,b", "c", "n"), ("a", "b,c", "n")),
+            (("o", "a,b", "c"), ("o", "a", "b,c")),
+        ] {
+            assert_ne!(
+                agent_principal_id(left.0, left.1, left.2),
+                agent_principal_id(right.0, right.1, right.2),
+                "{left:?} and {right:?} are different agents"
+            );
+        }
+    }
+
+    /// ID-owner, ID-did, ID-name: each field of the tuple separates two agents
+    /// and their roots.
+    #[test]
+    fn agent_principal_id_separates_owner_did_and_name() {
+        let root = |id: &str| principal_kind_localhost_root(id, PrincipalKind::Agent);
+        let base = agent_principal_id(AGENT_OWNER, AGENT_DID, AGENT_NAME);
+        for (field, other) in [
+            (
+                "owner",
+                agent_principal_id("person:local:other", AGENT_DID, AGENT_NAME),
+            ),
+            (
+                "did",
+                agent_principal_id(AGENT_OWNER, "did:key:z6MkAgentTwo", AGENT_NAME),
+            ),
+            ("name", agent_principal_id(AGENT_OWNER, AGENT_DID, "mail")),
+        ] {
+            assert_ne!(other, base, "the {field} must separate two agents");
+            assert_ne!(root(&other), root(&base), "{field}");
+        }
+    }
+
+    /// UPSERT-guard: the real sign-in upsert cannot rewrite an Agent record,
+    /// take an Agent's principal id, or present the admission binding. Each
+    /// refusal leaves the auth state byte-identical.
+    #[test]
+    fn sign_in_upsert_refuses_an_agent_record() {
+        for case in ["binding-id", "principal-id", "admission-kind"] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let agent = stored_agent_fixture(data_dir.path());
+            let mut binding = passkey_binding(1, 10, 10);
+            let mut principal_id = "person:local:signer".to_string();
+            match case {
+                // The Agent's binding id is planted as this passkey's id.
+                "binding-id" => mutate_auth_state(data_dir.path(), |state| {
+                    state.principals[0].proof_binding_id = binding.id();
+                    Ok(())
+                })
+                .unwrap(),
+                "principal-id" => principal_id = agent.principal_id.clone(),
+                // An admission binding no stored record holds.
+                "admission-kind" => {
+                    binding = agent_admission_binding_fixture(&agent_admission_subject(
+                        AGENT_OWNER,
+                        AGENT_DID,
+                        "mail",
+                    ))
+                }
+                _ => unreachable!(),
+            }
+            let path = auth_state_path(data_dir.path()).unwrap();
+            let before = std::fs::read(&path).unwrap();
+
+            let error = upsert_principal_for_binding_as_role_named(
+                data_dir.path(),
+                binding,
+                principal_id,
+                RuntimePrincipalRole::Guest,
+                None,
+                20,
+            )
+            .expect_err(case)
+            .to_string();
+
+            assert!(error.contains(AGENT_REFUSED_SIGN_IN), "{case}: {error}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
+        }
+    }
+
+    /// Control for UPSERT-guard: with an Agent stored, an ordinary sign-in
+    /// still mints its Human record and the Agent record is untouched.
+    #[test]
+    fn sign_in_upsert_beside_an_agent_record_still_mints_a_human() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let agent = stored_agent_fixture(data_dir.path());
+
+        let human = upsert_principal_for_binding_as_role_named(
+            data_dir.path(),
+            passkey_binding(1, 10, 10),
+            "person:local:signer".to_string(),
+            RuntimePrincipalRole::Guest,
+            None,
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(human.kind, PrincipalKind::Human);
+        let state = load_auth_state(data_dir.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&state.principals).unwrap(),
+            serde_json::to_value([agent, human]).unwrap()
+        );
+    }
+
+    /// Recovery cannot move an Agent record, and a Kit cannot name a principal
+    /// id an Agent record holds. Each refusal leaves the auth state
+    /// byte-identical.
+    #[test]
+    fn recovered_root_reassignment_refuses_an_agent_record() {
+        for case in ["current-is-agent", "kit-names-agent"] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let (reassignment, current, _) = recovered_root_reassignment_fixture(data_dir.path());
+            let recovered_principal_id = reassignment.recovered_principal_id.clone();
+            match case {
+                "current-is-agent" => mutate_auth_state(data_dir.path(), |state| {
+                    let stored = state
+                        .principals
+                        .iter_mut()
+                        .find(|principal| principal.proof_binding_id == current.proof_binding_id)
+                        .unwrap();
+                    stored.kind = PrincipalKind::Agent;
+                    Ok(())
+                })
+                .unwrap(),
+                "kit-names-agent" => {
+                    let agent = stored_agent_fixture(data_dir.path());
+                    mutate_auth_state(data_dir.path(), |state| {
+                        state
+                            .principals
+                            .iter_mut()
+                            .find(|principal| principal.proof_binding_id == agent.proof_binding_id)
+                            .unwrap()
+                            .principal_id = recovered_principal_id.clone();
+                        Ok(())
+                    })
+                    .unwrap()
+                }
+                _ => unreachable!(),
+            }
+            let path = auth_state_path(data_dir.path()).unwrap();
+            let before = std::fs::read(&path).unwrap();
+
+            let error = commit_recovered_root_reassignment(data_dir.path(), reassignment)
+                .expect_err(case)
+                .to_string();
+
+            assert!(error.contains(AGENT_REFUSED_RECOVERY), "{case}: {error}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
+        }
     }
 
     #[test]

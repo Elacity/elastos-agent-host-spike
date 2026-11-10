@@ -35,6 +35,9 @@ pub enum ProofBindingKind {
     DidKey,
     DidElastos,
     Essentials,
+    /// Minted by the Runtime when it admits an agent. Never a sign-in: its id
+    /// is outside the `proof:` namespace every sign-in binding uses.
+    AgentAdmission,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +114,10 @@ impl ProofBinding {
             ProofBindingKind::DidKey => format!("proof:{}", self.subject),
             ProofBindingKind::DidElastos => format!("proof:{}", self.subject),
             ProofBindingKind::Essentials => format!("proof:essentials:{}", self.subject),
+            ProofBindingKind::AgentAdmission => format!(
+                "agent-admission:v1:{}",
+                hex::encode(sha2::Sha256::digest(self.subject.as_bytes()))
+            ),
         }
     }
 }
