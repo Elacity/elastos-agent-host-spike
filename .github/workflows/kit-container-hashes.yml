@@ -12,8 +12,9 @@ permissions:
   contents: read
 
 env:
-  # The head of claude/m2-examples-landing (the examples-only landing) on 10 Nov 2026.
-  PINNED: 99f5ff388b5f0f1d27ba0b52f1197fefa45f6bd7
+  # The head of claude/m2-examples-landing (the examples-only landing) after its
+  # first review round, late on 10 Nov 2026.
+  PINNED: c012a96d134531fd625842a5cc572ac2df692b89
 
 jobs:
   build:
@@ -27,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: 99f5ff388b5f0f1d27ba0b52f1197fefa45f6bd7
+          ref: c012a96d134531fd625842a5cc572ac2df692b89
           persist-credentials: false
       - name: Show the pinned commit and a clean tree
         run: |
@@ -52,3 +53,41 @@ jobs:
           name: ${{ matrix.capsule }}-component-${{ matrix.machine }}
           path: examples/${{ matrix.capsule }}/${{ matrix.capsule }}.component.wasm
           if-no-files-found: error
+
+  # The three example pages in real Chromium, each framed as Home frames apps
+  # and served by the kit's stand-in server. No machine on our side had a
+  # browser when the gates were first run, so this is where the smokes run.
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: c012a96d134531fd625842a5cc572ac2df692b89
+          persist-credentials: false
+      - name: Show the pinned commit and a clean tree
+        run: |
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = "$PINNED"
+          test -z "$(git status --porcelain)"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '26'
+      - name: Install the repository's pinned Playwright and its Chromium
+        run: |
+          npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine
+          npx --prefix elastos/tools/browser-playwright-engine playwright install chromium --with-deps
+      - name: Page tests (no browser)
+        run: |
+          node --test examples/photo-viewer/surface/photos.test.mjs
+          node --test examples/docs-viewer/surface/reader.test.mjs
+          node --test examples/archive-viewer/surface/reader.test.mjs
+      - name: Browser smokes
+        run: |
+          node examples/photo-viewer/surface/photos-browser-smoke.mjs
+          node examples/docs-viewer/surface/reader-browser-smoke.mjs
+          node examples/archive-viewer/surface/reader-browser-smoke.mjs
+      - name: Show the source is unchanged
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain -- examples)"
