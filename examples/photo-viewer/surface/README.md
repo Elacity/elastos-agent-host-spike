@@ -1,6 +1,12 @@
 # Photos surface (`image-viewer`)
 
-The render-only page for the photo-viewer playlist (P3 design, section 2). Home shows it as **Photos**.
+The render-only page for the photo-viewer playlist (P3 design, section 2). On the line it was built on,
+Home showed it as **Photos**; on this branch nothing opens it from Home.
+
+> **What is and is not on this branch.** The examples landed without the Runtime and Home changes of the
+> line they were built on. The Photos seam (the Runtime routes `/api/viewers/image-viewer/...`, their test
+> `gateway_tests/photos.rs` in `elastos-server`, and `scripts/home-photos-launch.test.mjs`) is **not here**,
+> and Home has no Photos entry. Nothing below that names them can be run on this branch.
 
 | Path | What |
 |---|---|
@@ -15,7 +21,8 @@ The render-only page for the photo-viewer playlist (P3 design, section 2). Home 
 ## What the page can do
 
 It holds one thing: the launch token Runtime put in its fragment (`#home_token=`). It sends that token in
-`x-elastos-home-token` to the two Photos routes and nowhere else:
+`x-elastos-home-token` to the two Photos routes and nowhere else (the routes are the seam's; on this branch
+only the kit's stand-in server answers them):
 
 - `GET /api/viewers/image-viewer/playlist`
 - `GET /api/viewers/image-viewer/playlist/item/<position>`
@@ -31,15 +38,17 @@ policy (an opaque sandbox, `script-src 'self'`, `connect-src` the Home origin on
 ## Run
 
 ```bash
-node --test examples/photo-viewer/surface/photos.test.mjs          # also in `just verify`
+node --test examples/photo-viewer/surface/photos.test.mjs          # run by examples/photo-viewer/verify.sh
 node examples/photo-viewer/surface/photos-browser-smoke.mjs        # needs Playwright's Chromium
 python3 -I examples/photo-viewer/falsify-surface.py                # the page's rules, each broken once
 ```
 
-`cargo test -p elastos-server --lib gateway_tests::photos::runtime_serves_the_real_photos_surface_in_its_sandbox`
-installs these files as `image-viewer` and checks that Runtime serves them in its sandbox. It also checks
-that the front door answers the page's preflight and that the seam's answers are readable by the opaque
-frame.
+**Not on this branch:** on the line this page was built on, the server test
+`gateway_tests::photos::runtime_serves_the_real_photos_surface_in_its_sandbox` installed these files as
+`image-viewer` and checked that Runtime serves them in its sandbox, that the front door answers the page's
+preflight, and that the seam's answers are readable by the opaque frame. That test and the seam it tests
+return with the seam, under its own change. Here the page is checked by its own tests, its falsifiers and
+the browser smoke against the kit's stand-in server, which plays Runtime.
 
 ## Not here
 

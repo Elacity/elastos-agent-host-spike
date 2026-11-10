@@ -1,5 +1,11 @@
 # P3 seam report: Photos read-only Runtime routes
 
+> **What is and is not on this branch.** The examples landed without the Runtime and Home changes of the
+> line they were built on. The Photos seam (the Runtime routes `/api/viewers/image-viewer/...`, their test
+> `gateway_tests/photos.rs` in `elastos-server`, and `scripts/home-photos-launch.test.mjs`) is **not here**,
+> and Home has no Photos entry. Nothing below that names them can be run on this branch.
+> This report is kept as the record of that work, as it was written.
+
 Slice P3 code, part one: the Runtime seam only, as approved (review answers 1, 2, 4, 5). **It stops here for a
 review before anything builds on it.** The surface page is not written.
 

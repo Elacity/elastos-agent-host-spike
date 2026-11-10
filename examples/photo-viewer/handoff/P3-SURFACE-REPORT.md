@@ -1,5 +1,11 @@
 # P3 surface report: the render-only Photos page
 
+> **What is and is not on this branch.** The examples landed without the Runtime and Home changes of the
+> line they were built on. The Photos seam (the Runtime routes `/api/viewers/image-viewer/...`, their test
+> `gateway_tests/photos.rs` in `elastos-server`, and `scripts/home-photos-launch.test.mjs`) is **not here**,
+> and Home has no Photos entry. Nothing below that names them can be run on this branch.
+> This report is kept as the record of that work, as it was written.
+
 Slice P3 code, part two: the `image-viewer` surface page (P3 design section 6, item 1). It sits on the seam
 merged in #18 (`spike/photo-viewer` at `dee1aca6`). **It stops here for review.**
 
