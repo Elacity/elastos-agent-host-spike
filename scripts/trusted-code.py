@@ -10,12 +10,14 @@ import argparse
 import bisect
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from posixpath import normpath
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = "elastos/trusted-code.json"
+LOCK, COMPONENTS = "elastos/Cargo.lock", "components.json"
 KINDS = ("total", "tests", "comments", "blank", "code")
 
 _spec = importlib.util.spec_from_file_location("core_size", Path(__file__).with_name("core-size.py"))
@@ -114,13 +116,70 @@ def file_rows(root, manifest):
     return rows
 
 
+def lock_packages(text):
+    """(name, version) of every [[package]] in a Cargo.lock, read without tomllib."""
+    packages = []
+    for block in text.split("[[package]]")[1:]:
+        name = re.search(r'^name = "([^"]+)"$', block, re.M)
+        version = re.search(r'^version = "([^"]+)"$', block, re.M)
+        if name and version:
+            packages.append((name.group(1), version.group(1)))
+    return packages
+
+
+def library_rows(manifest, packages):
+    """One row per manifest library: an exact name or a prefix family, with the versions found and
+    the version the issue records, when it gives one."""
+    rows = []
+    for entry in manifest["libraries"]:
+        if "name" in entry:
+            versions = sorted({version for name, version in packages if name == entry["name"]})
+            row = {"entry": entry["name"], "packages": {entry["name"]: versions}, "found": bool(versions)}
+        else:
+            members = {}
+            for name, version in packages:
+                if name.startswith(entry["prefix"]):
+                    members.setdefault(name, set()).add(version)
+            row = {"entry": entry["prefix"] + "*", "found": bool(members),
+                   "packages": {name: sorted(members[name]) for name in sorted(members)}}
+        if "issue_version" in entry:
+            row["issue_version"] = entry["issue_version"]
+            row["version_matches"] = row["found"] and row["packages"][entry["name"]] == [entry["issue_version"]]
+        rows.append(row)
+    return rows
+
+
+def program_rows(manifest, external):
+    """One row per manifest host program from components.json's external set, and the native programs
+    that set holds but the manifest does not list."""
+    rows = []
+    for name in manifest["host_programs"]:
+        component = external.get(name)
+        row = {"name": name, "present": component is not None}
+        if component is not None:
+            row["install_path"] = component.get("install_path")
+            row["platforms"] = sorted(component.get("platforms", {}))
+            row["kind"] = ("native-provider" if (component.get("provider_runtime") or {}).get("substrate") == "native"
+                           else "native-host" if name == "shell" else "other")
+        rows.append(row)
+    native = {name for name, component in external.items()
+              if (component.get("provider_runtime") or {}).get("substrate") == "native"}
+    native.add("shell")  # the tree's trusted native-host helper: elastos-common/src/manifest.rs:893
+    return rows, sorted(native - set(manifest["host_programs"]))
+
+
 def measure(root, manifest):
     totals = core_size.count(core_size.worktree_files(root))
+    programs, unlisted = program_rows(manifest, json.loads((root / COMPONENTS).read_text(encoding="utf-8"))["external"])
     return {
         "root": str(root),
         "core": {"crate": core_size.CRATE, "code": totals["code"], "counts": totals,
                  "counter": "scripts/core-size.py:count"},
         "files": file_rows(root, manifest),
+        "absent_candidates": manifest.get("absent_candidates", []),
+        "libraries": library_rows(manifest, lock_packages((root / LOCK).read_text(encoding="utf-8"))),
+        "host_programs": programs,
+        "unlisted_native_programs": unlisted,
     }
 
 
@@ -138,6 +197,22 @@ def text(report):
         out.append(f"{row['path']} | {counts['code']} | {counts['total']} | {counts['tests']} |"
                    f" {counts['comments']} | {counts['blank']} | {note}")
     out.append(f"allow-listed code total: {sum(row['counts']['code'] for row in report['files'])} lines")
+    out.append("")
+    out.append("trusted libraries (elastos/Cargo.lock):")
+    out.append("entry | packages and versions | issue version")
+    out.append("--- | --- | ---")
+    for row in report["libraries"]:
+        versions = ", ".join(f"{name} {', '.join(found)}" for name, found in row["packages"].items()) or "missing"
+        out.append(f"{row['entry']} | {versions} | {row.get('issue_version', '')}")
+    out.append("")
+    out.append("host programs (components.json external):")
+    out.append("name | install path | platforms | kind | present")
+    out.append("--- | --- | --- | --- | ---:")
+    for row in report["host_programs"]:
+        out.append(f"{row['name']} | {row.get('install_path') or ''} |"
+                   f" {', '.join(row.get('platforms', []))} | {row.get('kind', '')} | {row['present']}")
+    out.append("unlisted native programs: " + (", ".join(report["unlisted_native_programs"]) or "none"))
+    out.append("issue candidates absent from this tree: " + (", ".join(report["absent_candidates"]) or "none"))
     return "\n".join(out)
 
 
@@ -155,7 +230,10 @@ def main(argv=None):
         print(f"trusted-code: refused: {error}", file=sys.stderr)
         return 2
     print(json.dumps(report, indent=2) if args.json else text(report))
-    return 1 if any("error" in row for row in report["files"]) else 0
+    missing = (any("error" in row for row in report["files"])
+               or not all(row["found"] for row in report["libraries"])
+               or not all(row["present"] for row in report["host_programs"]))
+    return 1 if missing else 0
 
 
 if __name__ == "__main__":
