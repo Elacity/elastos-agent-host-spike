@@ -726,14 +726,12 @@ fn issue_step_up_token(
         operation: pending.operation.clone(),
         request_sha256: pending.request_sha256.clone(),
         iat: issued_at,
-        exp: gateway_home_token::grant_bound_token_expiry(
+        exp: gateway_home_token::grant_bound_expiry(
             data_dir,
-            &HomeLaunchTokenContext {
-                principal_id: pending.principal_id.clone(),
-                session_id: pending.session_id.clone(),
-                proof_binding_id: Some(pending.proof_binding_id.clone()),
-                grant_id: pending.grant_id.clone(),
-            },
+            &pending.principal_id,
+            &pending.session_id,
+            Some(&pending.proof_binding_id),
+            &pending.grant_id,
             issued_at,
             PASSKEY_STEP_UP_TTL_SECS,
         )?,

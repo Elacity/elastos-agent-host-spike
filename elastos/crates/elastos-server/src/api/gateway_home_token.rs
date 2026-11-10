@@ -444,19 +444,42 @@ pub(super) fn grant_bound_token_expiry(
     issued_at: u64,
     ttl_secs: u64,
 ) -> anyhow::Result<u64> {
+    grant_bound_expiry(
+        data_dir,
+        context.principal_id(),
+        context.session_id(),
+        context.proof_binding_id(),
+        context.grant_id(),
+        issued_at,
+        ttl_secs,
+    )
+}
+
+/// The same bound for a caller that holds the authority fields but no launch
+/// context. A context exists only with a resolved root, and this rule reads no
+/// root, so it takes the fields.
+pub(super) fn grant_bound_expiry(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    session_id: &str,
+    proof_binding_id: Option<&str>,
+    grant_id: &str,
+    issued_at: u64,
+    ttl_secs: u64,
+) -> anyhow::Result<u64> {
     let expires_at = issued_at.saturating_add(ttl_secs);
-    let Some(proof_binding_id) = context.proof_binding_id.as_deref() else {
+    let Some(proof_binding_id) = proof_binding_id else {
         return Ok(expires_at);
     };
     let grant = crate::auth::load_active_session_grant(
         &home_launch_auth_data_dir(data_dir),
-        &context.session_id,
+        session_id,
         now_ts(),
     )
     .map_err(|_| anyhow::anyhow!("home launch token auth session is not active"))?;
-    if grant.principal_id != context.principal_id
+    if grant.principal_id != principal_id
         || grant.proof_binding_id != proof_binding_id
-        || grant.grant_id != context.grant_id
+        || grant.grant_id != grant_id
     {
         anyhow::bail!("home launch token authority context mismatch");
     }
