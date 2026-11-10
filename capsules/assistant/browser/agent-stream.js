@@ -2212,12 +2212,13 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   };
 
   const followAfterFlush = () => {
-    if (!stickToBottom || followRaf || selectionInStream()) {
+    // Plant: the room always follows, even a reader who moved up.
+    if (followRaf || selectionInStream()) {
       return;
     }
     followRaf = window.requestAnimationFrame(() => {
       followRaf = 0;
-      if (!stickToBottom || selectionInStream() || !scroller) {
+      if (selectionInStream() || !scroller) {
         return;
       }
       const t0 = performance.now();
