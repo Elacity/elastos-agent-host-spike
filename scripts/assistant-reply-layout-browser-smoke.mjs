@@ -178,6 +178,8 @@ function newestClearance(selector) {
     text: newest.textContent.trim().slice(-40),
     abovePx: Math.round(composer.getBoundingClientRect().top - newest.getBoundingClientRect().bottom),
     atEnd: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1,
+    follow: scroller.classList.contains("is-follow-bottom"),
+    jump: Boolean(document.querySelector("[data-agent-jump-latest]")?.hidden === false),
   };
 }
 
@@ -241,6 +243,19 @@ try {
     await waitForCondition("the composer returns to its resting height",
       (height) => document.querySelector(".taskbar.is-agent-face").getBoundingClientRect().height <= height + 1,
       composerRestHeight, 5000);
+  };
+  // The streaming reply's painted text. A reply grows in the DOM as its
+  // flushes paint; waiting for that growth makes each pushed group land on
+  // screen before the next is sent, so the reply grows across frames instead
+  // of arriving in one events poll.
+  const paintedChars = () => frame.evaluate(() =>
+    document.querySelector(".agent-msg-agent.is-streaming .agent-msg-body")?.textContent.length ?? 0);
+  const expectPaint = async (before, label) => {
+    await waitForCondition(`${label}: the reply paints the text just sent`, (chars) => {
+      const body = document.querySelector(".agent-msg-agent.is-streaming .agent-msg-body");
+      const now = body?.textContent.length ?? 0;
+      return now > chars ? true : { painted: now, before: chars };
+    }, before, 15000);
   };
   const seen = {};
 
@@ -329,10 +344,13 @@ try {
   const sent = fixture.runs.get("run-sent-1");
   assert.ok(sent, "the message started a run");
   const replyChunks = gardenReply.match(/[\s\S]{1,300}/g);
-  for (const [index, text] of replyChunks.entries()) {
-    sent.push({ sequence: index + 1, kind: "text_delta", data: { text } });
-    // Pacing: the reply must arrive over many frames, as a stream does.
-    await page.waitForTimeout(10);
+  let painted = 0;
+  for (let index = 0; index < replyChunks.length; index += 3) {
+    for (const text of replyChunks.slice(index, index + 3)) {
+      sent.push({ sequence: sent.length + 1, kind: "text_delta", data: { text } });
+    }
+    await expectPaint(painted, "a sent message's long reply");
+    painted = await paintedChars();
   }
   sent.push({ sequence: replyChunks.length + 1, kind: "completed", data: {} });
   await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').filter({ hasText: "the last line of the reply" })
@@ -424,13 +442,29 @@ try {
       if (sent >= chunks.length) return;
       run.push({ sequence: sent + 1, kind: "text_delta", data: { text: chunks[sent] } });
       sent += 1;
+      // Pacing between chunks of one group.
       await page.waitForTimeout(10);
     };
-    while (sent < 8) await pushChunk();
+    // Two groups, each painted before the next is sent, so the reply is on
+    // screen before the room's follow and the reader's first move are read.
+    let painted = 0;
+    const pushUntilPainted = async (target) => {
+      while (sent < target) await pushChunk();
+      await expectPaint(painted, `${label}: the reply paints the text just sent`);
+      painted = await paintedChars();
+    };
+    await pushUntilPainted(4);
+    await pushUntilPainted(8);
     await room.locator(".agent-msg-agent.is-streaming").filter({ hasText: chunks[sent - 1].trim().slice(-15) }).waitFor({ timeout: 5000 });
     // A new message makes the room shrink and grow again as its reply starts
     // (the scroll position clamps down): the room still follows to the end.
-    await atEnd().catch(async () => assert.fail(`${label}: the room follows the start of the reply: ${JSON.stringify(await scrollState())}`));
+    await waitForCondition(`${label}: the room follows the start of the reply to the end`, () => {
+      const scroller = document.querySelector("#agent-harness-stream");
+      const fromEnd = Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight);
+      return fromEnd <= 8 ? true : { fromEnd,
+        follow: scroller.classList.contains("is-follow-bottom"),
+        jump: Boolean(document.querySelector("[data-agent-jump-latest]")?.hidden === false) };
+    }, null, 10000);
     await prepare();
     const before = await scrollState();
     // From the first move on, every frame: the reader is never pulled back
