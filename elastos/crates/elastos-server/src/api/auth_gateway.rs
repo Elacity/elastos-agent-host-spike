@@ -7806,7 +7806,7 @@ mod tests {
             r4_fixture::set_kind(temp.path(), r4_fixture::ID, kind, root);
             let kit = create_recovery_kit_for_principal(r4_fixture::ID, root, None, 1_800_000_000)
                 .unwrap();
-            if !remove_recovered {
+            if !remove_recovered && kind == PrincipalKind::Human {
                 let archive = crate::auth::recovery_archive_from_kit(temp.path(), &kit).unwrap();
                 let protection = protection_from_recovery_kit(
                     &kit,

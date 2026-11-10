@@ -5577,6 +5577,23 @@ pub fn store_principal_root_protection(
     validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
     mutate_auth_state(data_dir, |state| {
         ensure_users_ai_protection_owner(state, &protection)?;
+        if state.principals.iter().any(|record| {
+            record.kind == PrincipalKind::Agent
+                && record.principal_id == protection.principal_id
+                && record.localhost_root != protection.localhost_root
+        }) {
+            anyhow::bail!("agent root protection cannot be replaced");
+        }
+        if protection
+            .localhost_root
+            .starts_with("localhost://UsersAI/")
+            && state.principal_root_protections.iter().any(|stored| {
+                stored.principal_id == protection.principal_id
+                    || stored.localhost_root == protection.localhost_root
+            })
+        {
+            anyhow::bail!("agent root protection cannot be replaced");
+        }
         state.principal_root_protections.retain(|stored| {
             stored.principal_id != protection.principal_id
                 || stored.localhost_root != protection.localhost_root
@@ -6003,6 +6020,13 @@ fn read_protected_principal_root_object_file(
     path: &Path,
     protection: &PrincipalRootProtectionV1,
 ) -> anyhow::Result<Vec<u8>> {
+    // An absent owner refuses before the agent object is opened.
+    let owner_root_key = protection
+        .protectors
+        .iter()
+        .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
+        .then(|| principal_root_data_key_from_protection(data_dir, protection))
+        .transpose()?;
     #[cfg(test)]
     PRINCIPAL_ROOT_OBJECT_OPENS
         .lock()
@@ -6043,7 +6067,10 @@ fn read_protected_principal_root_object_file(
     if principal_root_object_label_never_opens(&damage) {
         return Err(damaged(damage));
     }
-    let data_key = principal_root_data_key_from_protection(data_dir, protection)?;
+    let data_key = match owner_root_key {
+        Some(key) => key,
+        None => principal_root_data_key_from_protection(data_dir, protection)?,
+    };
     let bytes = read_principal_root_object_rest(&mut file, probe.prefix)
         .with_context(|| format!("failed to read {path:?}"))?;
     decrypt_principal_root_object_envelope_bytes(&data_key, &expected, &bytes)
@@ -6993,10 +7020,10 @@ pub fn commit_recovered_root_reassignment(
         signed_audit_event,
         updated_at,
     } = reassignment;
-    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
     if recovered_localhost_root.starts_with("localhost://UsersAI/") {
         anyhow::bail!("recovery kit requires a human root");
     }
+    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
     if protection.principal_id != recovered_principal_id
         || protection.localhost_root != recovered_localhost_root
         || protection.data_key_id != kit.data_key_id
@@ -7973,6 +8000,47 @@ fn principal_root_data_key_from_protection(
 ) -> anyhow::Result<[u8; 32]> {
     if protection.crypto.cipher != DEFAULT_PRINCIPAL_ROOT_CIPHER {
         anyhow::bail!("unsupported principal-root cipher");
+    }
+    if let Some(protector) = protection
+        .protectors
+        .iter()
+        .find(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
+    {
+        let owner = protector
+            .subject
+            .as_deref()
+            .ok_or_else(|| anyhow!("OwnerRoot owner subject is missing"))?;
+        let owner_record = stored_principal_record(data_dir, owner)?
+            .filter(|record| record.kind == PrincipalKind::Human)
+            .ok_or_else(|| anyhow!("OwnerRoot owner principal is missing"))?;
+        let owner_protection =
+            load_principal_root_protection(data_dir, owner, &owner_record.localhost_root)?
+                .ok_or_else(|| anyhow!("OwnerRoot owner protection is missing"))?;
+        let owner_key = principal_root_data_key_from_protection(data_dir, &owner_protection)?;
+        let envelope = protector
+            .envelope
+            .as_ref()
+            .ok_or_else(|| anyhow!("OwnerRoot envelope is missing"))?;
+        let salt = b64_url_decode(&envelope.salt)?;
+        let nonce = b64_url_decode(&envelope.nonce)?;
+        if salt.len() != 32 || nonce.len() != 12 {
+            anyhow::bail!("OwnerRoot envelope salt or nonce has invalid length");
+        }
+        let wrapping_key = owner_root_wrapping_key(
+            &owner_key,
+            &salt,
+            &protection.principal_id,
+            &protection.localhost_root,
+        )?;
+        let wrapped = b64_url_decode(&envelope.wrapped_data_key)?;
+        let plain = decrypt_aes256_gcm_bytes(&wrapping_key, &nonce, &wrapped)
+            .map_err(|_| anyhow!("OwnerRoot data key unwrap failed"))?;
+        if plain.len() != 32 || principal_data_key_id(&plain) != protection.data_key_id {
+            anyhow::bail!("OwnerRoot data key binding mismatch");
+        }
+        let mut key = [0; 32];
+        key.copy_from_slice(&plain);
+        return Ok(key);
     }
     let archive = protection
         .protectors
@@ -11469,6 +11537,11 @@ pub(crate) mod r4_fixture {
                 .unwrap();
             record.kind = kind;
             record.localhost_root = root.to_string();
+            if kind == PrincipalKind::Agent {
+                state.principal_root_protections.retain(|protection| {
+                    protection.principal_id != principal_id || protection.localhost_root == root
+                });
+            }
             Ok(())
         })
         .unwrap();
@@ -11538,19 +11611,43 @@ pub(crate) fn store_test_principal_root_protection_for(
         instructions: vec!["Test recovery kit.".to_string()],
     };
     verify_recovery_kit_material(&kit).unwrap();
-    let archive = recovery_archive_from_kit(data_dir, &kit).unwrap();
+    let agent_owner = localhost_root.starts_with("localhost://UsersAI/").then(|| {
+        let digest = Sha256::digest(principal_id.as_bytes());
+        let owner = format!("person:local:fixture-{}", hex::encode(&digest[..8]));
+        let owner_root = principal_localhost_root(&owner);
+        if load_principal_root_protection(data_dir, &owner, &owner_root)
+            .unwrap()
+            .is_none()
+        {
+            store_test_human_principal(data_dir, &owner);
+            store_test_principal_root_protection_for(data_dir, &owner, &owner_root);
+        }
+        let owner_protection = load_principal_root_protection(data_dir, &owner, &owner_root)
+            .unwrap()
+            .unwrap();
+        let owner_key =
+            principal_root_data_key_from_protection(data_dir, &owner_protection).unwrap();
+        (owner, owner_key)
+    });
+    let archive = agent_owner
+        .is_none()
+        .then(|| recovery_archive_from_kit(data_dir, &kit).unwrap());
     let protection = PrincipalRootProtectionV1 {
         schema: elastos_runtime::auth::PRINCIPAL_ROOT_PROTECTION_SCHEMA.to_string(),
         principal_id: principal_id.to_string(),
-        localhost_root,
+        localhost_root: localhost_root.clone(),
         data_key_id,
         crypto,
         protectors: vec![elastos_runtime::auth::PrincipalRootProtectorV1 {
             profile_coverage: None,
             protector_id: kit.protector_id,
-            kind: PrincipalRootProtectorKind::RecoveryKit,
+            kind: if agent_owner.is_some() {
+                PrincipalRootProtectorKind::OwnerRoot
+            } else {
+                PrincipalRootProtectorKind::RecoveryKit
+            },
             label: "Test Recovery Kit".to_string(),
-            subject: None,
+            subject: agent_owner.as_ref().map(|(owner, _)| owner.clone()),
             created_at,
             verified_at: Some(created_at),
             envelope: Some(elastos_runtime::auth::PrincipalRootProtectorEnvelopeV1 {
@@ -11558,9 +11655,19 @@ pub(crate) fn store_test_principal_root_protection_for(
                 kdf: "hkdf-sha256".to_string(),
                 salt: kit.salt,
                 nonce: kit.nonce,
-                wrapped_data_key: kit.wrapped_data_key,
+                wrapped_data_key: agent_owner
+                    .as_ref()
+                    .map_or(kit.wrapped_data_key, |(_, key)| {
+                        encrypt_aes256_gcm_bytes(
+                            &owner_root_wrapping_key(key, &salt, principal_id, &localhost_root)
+                                .unwrap(),
+                            &wrap_nonce,
+                            &data_key,
+                        )
+                        .unwrap()
+                    }),
             }),
-            archive: Some(archive),
+            archive,
         }],
         created_at,
         updated_at: created_at,
@@ -11572,6 +11679,10 @@ pub(crate) fn store_test_principal_root_protection_for(
 #[cfg(test)]
 #[path = "auth/object_class_tests.rs"]
 mod object_class_tests;
+
+#[cfg(test)]
+#[path = "auth/owner_root_tests.rs"]
+mod owner_root_tests;
 
 #[cfg(test)]
 #[path = "auth/scan_tests.rs"]
@@ -11599,6 +11710,9 @@ pub(crate) mod tests {
         })
         .unwrap();
         protection.localhost_root = agent_root.clone();
+        protection.protectors[0].kind = PrincipalRootProtectorKind::OwnerRoot;
+        protection.protectors[0].subject = Some("person:local:owner".into());
+        protection.protectors[0].archive = None;
         let error = store_principal_root_protection(data_dir.path(), protection.clone())
             .expect_err("a Human record cannot own a UsersAI protection");
         assert_eq!(
@@ -11617,6 +11731,7 @@ pub(crate) mod tests {
                 .find(|record| record.principal_id == human.principal_id)
                 .unwrap()
                 .kind = PrincipalKind::Agent;
+            state.principal_root_protections.clear();
             Ok(())
         })
         .unwrap();
@@ -17614,11 +17729,12 @@ pub(crate) mod tests {
                 .map(|_| ())
             }),
             ("auth.rs:5270 begin activation with candidate", |s| {
-                let mut candidate = store_test_principal_root_protection_for(
+                let mut candidate = load_principal_root_protection(
                     s.data_dir.path(),
                     &s.agent.principal_id,
                     &s.agent.localhost_root,
-                );
+                )?
+                .unwrap();
                 candidate.principal_id = s.agent.principal_id.clone();
                 candidate.localhost_root = s.agent.localhost_root.clone();
                 begin_declarative_principal_root_protection_activation_with_candidate(
