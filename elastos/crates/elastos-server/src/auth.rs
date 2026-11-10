@@ -5213,6 +5213,76 @@ pub fn upsert_principal_for_binding_as_role_named(
     })
 }
 
+/// Mints the Agent record for the tuple (owner, signer DID, signed name), or
+/// returns the record already minted for it. Admission will be the caller;
+/// until then nothing calls this.
+///
+/// Checked under the auth-state lock:
+/// - an id held by a record of another kind or binding refuses (its root
+///   needs no check: loading recomputes an Agent's root from its id);
+/// - a root held by another record refuses;
+/// - the same tuple again changes nothing.
+pub fn mint_agent_principal(
+    data_dir: &Path,
+    owner: &str,
+    did: &str,
+    name: &str,
+    now: u64,
+) -> anyhow::Result<PrincipalRecord> {
+    if [owner, did, name]
+        .iter()
+        .any(|field| field.is_empty() || field.chars().any(char::is_control))
+    {
+        anyhow::bail!("invalid agent identity");
+    }
+    let principal_id = agent_principal_id(owner, did, name);
+    let binding = ProofBinding {
+        kind: ProofBindingKind::AgentAdmission,
+        subject: agent_admission_subject(owner, did, name),
+        chain_id: None,
+        verified_at: now,
+        passkey: None,
+    };
+    let record = PrincipalRecord {
+        localhost_root: principal_kind_localhost_root(&principal_id, PrincipalKind::Agent),
+        principal_id,
+        proof_binding_id: binding.id(),
+        proof_binding: binding,
+        display_name: String::new(),
+        initial_profile_display_name: None,
+        role: RuntimePrincipalRole::Guest,
+        kind: PrincipalKind::Agent,
+        created_at: now,
+        updated_at: now,
+    };
+    mutate_auth_state(data_dir, |state| {
+        let mut minted = None;
+        for stored in &state.principals {
+            if stored.principal_id == record.principal_id
+                || stored.proof_binding_id == record.proof_binding_id
+            {
+                if minted.is_some()
+                    || stored.kind != PrincipalKind::Agent
+                    || stored.principal_id != record.principal_id
+                    || stored.proof_binding_id != record.proof_binding_id
+                    || stored.proof_binding.kind != ProofBindingKind::AgentAdmission
+                    || stored.proof_binding.subject != record.proof_binding.subject
+                {
+                    anyhow::bail!("agent principal id is held by a different record");
+                }
+                minted = Some(stored.clone());
+            } else if stored.localhost_root == record.localhost_root {
+                anyhow::bail!("agent root is held by another record");
+            }
+        }
+        if let Some(minted) = minted {
+            return Ok(minted);
+        }
+        state.principals.push(record.clone());
+        Ok(record)
+    })
+}
+
 fn normalize_principal_records(state: &mut AuthState) {
     for principal in &mut state.principals {
         if principal.localhost_root.trim().is_empty() || principal.kind == PrincipalKind::Agent {
@@ -12954,6 +13024,226 @@ pub(crate) mod tests {
             assert!(error.contains(AGENT_REFUSED_RECOVERY), "{case}: {error}");
             assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
         }
+    }
+
+    /// The root of the pinned tuple: sha256("agent:v1:<AGENT_DIGEST>")[..12],
+    /// computed outside this crate.
+    const AGENT_ROOT_PINNED: &str = "localhost://UsersAI/975e2ed8c59d9b9348f45d8b";
+    const AGENT_ID_HELD: &str = "agent principal id is held by a different record";
+
+    fn mint_pinned_agent(data_dir: &Path, now: u64) -> anyhow::Result<PrincipalRecord> {
+        mint_agent_principal(data_dir, AGENT_OWNER, AGENT_DID, AGENT_NAME, now)
+    }
+
+    fn principals_json(data_dir: &Path) -> serde_json::Value {
+        serde_json::to_value(&load_auth_state(data_dir).unwrap().principals).unwrap()
+    }
+
+    /// MINT-new: the mint stores an Agent record with pinned ids and root, the
+    /// least role, and the same fields the guard rows' fixture writes by hand.
+    #[test]
+    fn mint_agent_principal_stores_the_pinned_agent_record() {
+        let data_dir = tempfile::tempdir().unwrap();
+
+        let minted = mint_pinned_agent(data_dir.path(), 5).unwrap();
+
+        assert_eq!(minted.principal_id, format!("agent:v1:{AGENT_DIGEST}"));
+        assert_eq!(
+            minted.proof_binding_id,
+            format!("agent-admission:v1:{AGENT_DIGEST}")
+        );
+        assert_eq!(minted.proof_binding.subject, AGENT_SUBJECT);
+        assert_eq!(minted.localhost_root, AGENT_ROOT_PINNED);
+        assert_eq!(minted.kind, PrincipalKind::Agent);
+        assert_eq!(minted.role, RuntimePrincipalRole::Guest);
+        assert_eq!(
+            principal_stored_localhost_root(Some(data_dir.path()), &minted.principal_id).unwrap(),
+            AGENT_ROOT_PINNED
+        );
+        let by_hand = tempfile::tempdir().unwrap();
+        stored_agent_fixture(by_hand.path());
+        assert_eq!(
+            principals_json(data_dir.path()),
+            principals_json(by_hand.path())
+        );
+    }
+
+    /// MINT-idem: the same tuple again, at a later time, returns the stored
+    /// record and leaves the auth state byte-identical.
+    #[test]
+    fn mint_agent_principal_is_idempotent_for_the_same_tuple() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let first = mint_pinned_agent(data_dir.path(), 5).unwrap();
+        let path = auth_state_path(data_dir.path()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let second = mint_pinned_agent(data_dir.path(), 9).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(&second).unwrap(),
+            serde_json::to_value(&first).unwrap()
+        );
+        assert_eq!(second.created_at, 5);
+    }
+
+    /// MINT-collide and MINT-corrupt: an id held by a record that differs in
+    /// any bound field refuses, and the auth state stays byte-identical. Each
+    /// case changes one field of the stored record, or stores it twice.
+    #[test]
+    fn mint_agent_principal_refuses_an_id_held_by_a_different_record() {
+        for case in [
+            "stored-twice",
+            "human-kind",
+            "other-principal-id",
+            "other-binding-id",
+            "passkey-binding-kind",
+            "other-subject",
+        ] {
+            let data_dir = tempfile::tempdir().unwrap();
+            mint_pinned_agent(data_dir.path(), 5).unwrap();
+            mutate_auth_state(data_dir.path(), |state| {
+                let stored = &mut state.principals[0];
+                match case {
+                    "human-kind" => stored.kind = PrincipalKind::Human,
+                    "other-principal-id" => stored.principal_id = "agent:v1:other".into(),
+                    "other-binding-id" => {
+                        stored.proof_binding_id = "agent-admission:v1:other".into()
+                    }
+                    "passkey-binding-kind" => {
+                        stored.proof_binding.kind = ProofBindingKind::PasskeyWebAuthn
+                    }
+                    "other-subject" => stored.proof_binding.subject = "other".into(),
+                    "stored-twice" => {
+                        let twin = stored.clone();
+                        state.principals.push(twin);
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(())
+            })
+            .unwrap();
+            let path = auth_state_path(data_dir.path()).unwrap();
+            let before = std::fs::read(&path).unwrap();
+
+            let error = mint_pinned_agent(data_dir.path(), 9)
+                .expect_err(case)
+                .to_string();
+
+            assert!(error.contains(AGENT_ID_HELD), "{case}: {error}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
+        }
+    }
+
+    /// MINT-root: a root another record already holds refuses.
+    #[test]
+    fn mint_agent_principal_refuses_a_root_held_by_another_record() {
+        let data_dir = tempfile::tempdir().unwrap();
+        upsert_principal_for_binding_as_role(
+            data_dir.path(),
+            passkey_binding(1, 10, 10),
+            "person:local:signer".to_string(),
+            RuntimePrincipalRole::Guest,
+            10,
+        )
+        .unwrap();
+        mutate_auth_state(data_dir.path(), |state| {
+            state.principals[0].localhost_root = AGENT_ROOT_PINNED.into();
+            Ok(())
+        })
+        .unwrap();
+        let path = auth_state_path(data_dir.path()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let error = mint_pinned_agent(data_dir.path(), 20)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("agent root is held by another record"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// An empty or control-character field is not an agent identity.
+    #[test]
+    fn mint_agent_principal_refuses_an_invalid_identity() {
+        let data_dir = tempfile::tempdir().unwrap();
+        for (case, owner, did, name) in [
+            ("empty owner", "", AGENT_DID, AGENT_NAME),
+            ("empty did", AGENT_OWNER, "", AGENT_NAME),
+            ("empty name", AGENT_OWNER, AGENT_DID, ""),
+            (
+                "control in owner",
+                "person:local:\nowner",
+                AGENT_DID,
+                AGENT_NAME,
+            ),
+            ("control in did", AGENT_OWNER, "did:key:\u{0}", AGENT_NAME),
+            ("control in name", AGENT_OWNER, AGENT_DID, "no\ttes"),
+        ] {
+            let error = mint_agent_principal(data_dir.path(), owner, did, name, 5)
+                .expect_err(case)
+                .to_string();
+            assert!(error.contains("invalid agent identity"), "{case}: {error}");
+        }
+        assert!(!auth_state_path(data_dir.path()).unwrap().exists());
+    }
+
+    /// MINT-race: eight concurrent mints of one tuple store one record, and
+    /// a second agent of the same owner and name gets its own record and root.
+    #[test]
+    fn mint_agent_principal_races_to_one_record_per_tuple() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let minted: Vec<PrincipalRecord> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| mint_pinned_agent(data_dir.path(), 5).unwrap()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let other = mint_agent_principal(
+            data_dir.path(),
+            AGENT_OWNER,
+            "did:key:z6MkAgentTwo",
+            AGENT_NAME,
+            5,
+        )
+        .unwrap();
+
+        let state = load_auth_state(data_dir.path()).unwrap();
+        assert_eq!(state.principals.len(), 2);
+        for record in &minted {
+            assert_eq!(record.principal_id, format!("agent:v1:{AGENT_DIGEST}"));
+        }
+        assert_ne!(other.principal_id, minted[0].principal_id);
+        assert_ne!(other.localhost_root, minted[0].localhost_root);
+    }
+
+    /// The sign-in guard holds against a minted record, not only the fixture:
+    /// a sign-in that names the minted agent's id is refused.
+    #[test]
+    fn sign_in_upsert_refuses_a_minted_agents_principal_id() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let minted = mint_pinned_agent(data_dir.path(), 5).unwrap();
+        let path = auth_state_path(data_dir.path()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let error = upsert_principal_for_binding_as_role(
+            data_dir.path(),
+            passkey_binding(1, 10, 10),
+            minted.principal_id,
+            RuntimePrincipalRole::Admin,
+            20,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains(AGENT_REFUSED_SIGN_IN), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
