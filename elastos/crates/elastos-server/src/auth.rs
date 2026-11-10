@@ -7970,9 +7970,13 @@ fn validate_principal_root_object_binding_in_state(
     localhost_root: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
-    if principal_id.starts_with("device:") {
-        let resolved = ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?;
-        if resolved.localhost_root() != localhost_root
+    if let Some(did) = principal_id.strip_prefix("device:") {
+        // The launch token verifier resolved this root from the signer DID it
+        // verified. A subordinate gateway trusts its parent's DID without
+        // holding that key, so the same verified-device derivation binds the
+        // object, and no other id shape does.
+        if did.trim().is_empty()
+            || localhost_root != verified_device_localhost_root(did)
             || !object_uri_is_under_root(localhost_root, object_uri)
         {
             anyhow::bail!("principal localhost root must be the verified device root");
@@ -13600,9 +13604,44 @@ pub(crate) mod tests {
         assert_eq!(principal.role, RuntimePrincipalRole::Admin);
         assert_eq!(
             principal.localhost_root,
-            principal_localhost_root(&principal_id)
+            "localhost://Users/24182714fcf4f264a8c3dda2"
         );
         assert_eq!(active_passkey_principal_count(data_dir.path()).unwrap(), 1);
+    }
+
+    /// An existing stored Agent keeps its kind-derived UsersAI root when its
+    /// binding is upserted under a new id. The stored kind chooses the root.
+    #[test]
+    fn stored_agent_upsert_keeps_its_usersai_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let first =
+            upsert_principal_for_binding(data_dir.path(), passkey_binding(1, 10, 10), 10).unwrap();
+        let agent_id = "person:local:agent-upsert-literal";
+        mutate_auth_state(data_dir.path(), |state| {
+            let record = state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == first.principal_id)
+                .unwrap();
+            record.kind = PrincipalKind::Agent;
+            Ok(())
+        })
+        .unwrap();
+        let updated = upsert_principal_for_binding_as_role_named(
+            data_dir.path(),
+            passkey_binding(2, 20, 20),
+            agent_id.to_string(),
+            RuntimePrincipalRole::Admin,
+            None,
+            20,
+        )
+        .unwrap();
+        assert_eq!(updated.principal_id, agent_id);
+        assert_eq!(updated.kind, PrincipalKind::Agent);
+        assert_eq!(
+            updated.localhost_root,
+            "localhost://UsersAI/703019dc354b87caa4c035d3"
+        );
     }
 
     #[test]
@@ -17081,24 +17120,20 @@ pub(crate) mod tests {
     fn principal_root_binding_accepts_only_the_record_kind_root() {
         let human_id = "person:local:human-binding-check";
         let agent_id = "person:local:agent-binding-check";
-        let human_root = principal_localhost_root(human_id);
-        let agent_root = principal_kind_localhost_root(agent_id, PrincipalKind::Agent);
-        let human_sha = hex::encode(&Sha256::digest(human_id.as_bytes())[..12]);
-        let agent_sha = hex::encode(&Sha256::digest(agent_id.as_bytes())[..12]);
-        assert_eq!(human_root, format!("localhost://Users/{human_sha}"));
-        assert_eq!(agent_root, format!("localhost://UsersAI/{agent_sha}"));
+        let human_root = "localhost://Users/d81978bb3081a4adbfa39b2a";
+        let agent_root = "localhost://UsersAI/698ff91e2d284d5bccd4fd1e";
 
         // Each record's own root and a path under it are accepted.
         validate_principal_root_object_binding_for_kind(
             human_id,
-            &human_root,
-            &human_root,
+            human_root,
+            human_root,
             PrincipalKind::Human,
         )
         .unwrap();
         validate_principal_root_object_binding_for_kind(
             agent_id,
-            &agent_root,
+            agent_root,
             &format!("{agent_root}/notes.md"),
             PrincipalKind::Agent,
         )
@@ -17106,21 +17141,14 @@ pub(crate) mod tests {
 
         // An Agent record refuses the Users/ root of its own id, at the root
         // and under it: the sibling name is not an owned root.
-        let human_shaped_agent_root = principal_kind_localhost_root(agent_id, PrincipalKind::Human);
-        assert_eq!(
-            human_shaped_agent_root,
-            format!(
-                "localhost://Users/{}",
-                hex::encode(&Sha256::digest(agent_id.as_bytes())[..12])
-            )
-        );
+        let human_shaped_agent_root = "localhost://Users/698ff91e2d284d5bccd4fd1e";
         for uri in [
-            human_shaped_agent_root.clone(),
+            human_shaped_agent_root.to_string(),
             format!("{human_shaped_agent_root}/notes.md"),
         ] {
             let err = validate_principal_root_object_binding_for_kind(
                 agent_id,
-                &human_shaped_agent_root,
+                human_shaped_agent_root,
                 &uri,
                 PrincipalKind::Agent,
             )
@@ -17130,21 +17158,14 @@ pub(crate) mod tests {
         }
 
         // A Human record refuses the UsersAI/ root of its own id.
-        let agent_shaped_human_root = principal_kind_localhost_root(human_id, PrincipalKind::Agent);
-        assert_eq!(
-            agent_shaped_human_root,
-            format!(
-                "localhost://UsersAI/{}",
-                hex::encode(&Sha256::digest(human_id.as_bytes())[..12])
-            )
-        );
+        let agent_shaped_human_root = "localhost://UsersAI/d81978bb3081a4adbfa39b2a";
         for uri in [
-            agent_shaped_human_root.clone(),
+            agent_shaped_human_root.to_string(),
             format!("{agent_shaped_human_root}/notes.md"),
         ] {
             let err = validate_principal_root_object_binding_for_kind(
                 human_id,
-                &agent_shaped_human_root,
+                agent_shaped_human_root,
                 &uri,
                 PrincipalKind::Human,
             )
@@ -17156,8 +17177,8 @@ pub(crate) mod tests {
         // A declared Human is accepted. An unstored id has no resolvable kind.
         validate_principal_root_object_binding_for_kind(
             human_id,
-            &human_root,
-            &human_root,
+            human_root,
+            human_root,
             PrincipalKind::Human,
         )
         .unwrap();
@@ -17165,23 +17186,23 @@ pub(crate) mod tests {
         let error = validate_principal_root_object_binding_in_state(
             unstored.path(),
             human_id,
-            &human_root,
-            &human_root,
+            human_root,
+            human_root,
         )
         .unwrap_err()
         .to_string();
         assert!(error.contains("no stored record"), "{error}");
         assert!(validate_principal_root_object_binding_for_kind(
             agent_id,
-            &agent_shaped_human_root,
-            &agent_shaped_human_root,
+            agent_shaped_human_root,
+            agent_shaped_human_root,
             PrincipalKind::Human,
         )
         .is_err());
         // A sibling name that only shares the prefix is outside the root.
         assert!(validate_principal_root_object_binding_for_kind(
             agent_id,
-            &agent_root,
+            agent_root,
             &format!("{agent_root}x/notes.md"),
             PrincipalKind::Agent,
         )
@@ -17782,18 +17803,39 @@ pub(crate) mod tests {
     #[test]
     fn resolved_device_root_is_todays_users_root_never_usersai() {
         let data_dir = tempfile::tempdir().unwrap();
-        let (_key, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
-        let id = PrincipalId::device_did(&did);
+        let seed = [9u8; 32];
+        std::fs::create_dir_all(data_dir.path().join("identity")).unwrap();
+        std::fs::write(data_dir.path().join("identity").join("device.key"), seed).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                data_dir.path().join("identity"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                data_dir.path().join("identity").join("device.key"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        let did = "did:key:z6Mku6H97uqmW4aDLCyFLMN3PJMG6T5Jtr4cbqQWaKf4jtCD";
+        let id = PrincipalId::device_did(did);
         let resolved =
             ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), id.as_str()).unwrap();
-        let users_uri = format!("{}/Documents/a.txt", principal_localhost_root(id.as_str()));
+        assert_eq!(
+            resolved.localhost_root(),
+            "localhost://Users/06fcab9c268d5acbc1e543ba"
+        );
+        let users_uri = format!("{}/Documents/a.txt", resolved.localhost_root());
         assert!(resolved.owns_object_uri(&users_uri).is_ok());
-        let usersai = principal_kind_localhost_root(id.as_str(), PrincipalKind::Agent);
-        let usersai_uri = format!("{usersai}/Documents/a.txt");
-        assert!(resolved.owns_object_uri(&usersai_uri).is_err());
+        let usersai = "localhost://UsersAI/06fcab9c268d5acbc1e543ba";
+        assert!(resolved
+            .owns_object_uri(&format!("{usersai}/Documents/a.txt"))
+            .is_err());
         // A sibling principal under the same Users parent stays outside this root.
-        let sibling = principal_localhost_root("person:local:sibling-principal");
-        assert_ne!(sibling, principal_localhost_root(id.as_str()));
+        let sibling = "localhost://Users/f2e8516a13e55773d3c48361";
         let sibling_uri = format!("{sibling}/Documents/a.txt");
         assert!(resolved.owns_object_uri(&sibling_uri).is_err());
     }
@@ -17888,5 +17930,71 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string()
             .contains("has no stored record"));
+    }
+
+    /// A subordinate gateway trusts the parent DID that signed the launch
+    /// token. The writer binds that parent-signed device's object to the
+    /// exact root the verifier resolved for that DID, and to no other root.
+    #[test]
+    fn parent_signed_device_object_binding_uses_the_verified_device_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let principal = "device:did:key:z6MkParentSignedDevice";
+        let root = "localhost://Users/45c2b381a3e1d3ed5e2a5ede";
+        let uri = format!("{root}/.AppData/ElastOS/Home/services-requests.json");
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let written = write_principal_root_object(
+            data_dir.path(),
+            principal,
+            root,
+            &uri,
+            &path,
+            b"parent-signed denial",
+        );
+        assert!(
+            written.is_ok(),
+            "the verified parent device root must bind: {written:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"parent-signed denial");
+
+        // A device id with any other root is refused.
+        let other = "localhost://UsersAI/45c2b381a3e1d3ed5e2a5ede";
+        let other_uri = format!("{other}/notes.md");
+        let error = write_principal_root_object(
+            data_dir.path(),
+            principal,
+            other,
+            &other_uri,
+            &rooted_localhost_fs_path(data_dir.path(), &other_uri).unwrap(),
+            b"no",
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "principal localhost root must be the verified device root"
+        );
+
+        // An empty device id and a non-device id stay refused.
+        for (id, bad_root) in [
+            ("device:", "localhost://Users/8d950c4cf76dd90847563784"),
+            ("person:local:no-record", root),
+        ] {
+            let bad_uri = format!("{bad_root}/notes.md");
+            let error = write_principal_root_object(
+                data_dir.path(),
+                id,
+                bad_root,
+                &bad_uri,
+                &rooted_localhost_fs_path(data_dir.path(), &bad_uri).unwrap(),
+                b"no",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("verified device root") || error.contains("no stored record"),
+                "{id}: {error}"
+            );
+        }
     }
 }

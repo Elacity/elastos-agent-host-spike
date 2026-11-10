@@ -6877,6 +6877,15 @@ mod tests {
         let guest_principal =
             crate::auth::load_principal_for_proof_binding(temp.path(), &result.proof_binding_id)
                 .unwrap();
+        assert_eq!(
+            guest_principal.principal_id,
+            "person:local:2593f70e690c5fd60c68d97b92299963"
+        );
+        assert_eq!(
+            guest_principal.localhost_root,
+            "localhost://Users/562ca2c614da7e9c292e3f7f"
+        );
+        assert_eq!(guest_principal.kind, crate::auth::PrincipalKind::Human);
         assert_eq!(guest_principal.display_name, "Private guest label");
         assert_eq!(
             guest_principal.initial_profile_display_name.as_deref(),
