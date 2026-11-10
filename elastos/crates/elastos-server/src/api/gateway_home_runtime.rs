@@ -1911,6 +1911,8 @@ mod tests {
             expires_at: now_ts() + 300,
             apps: vec![HOME_CAPSULE_ID.into()],
         };
+        // The verifier reads the principal's stored root; give the fixture one.
+        crate::auth::store_test_human_principal(data.path(), context.principal_id());
         crate::auth::store_session_grant(data.path(), grant.clone()).unwrap();
         let token =
             issue_home_launch_token_with_context(data.path(), HOME_CAPSULE_ID, &context).unwrap();

@@ -1713,6 +1713,8 @@ mod tests {
             Some(grant.proof_binding_id.clone()),
             grant.grant_id.clone(),
         );
+        // The grant issuer reads the principal's stored root; give the fixture one.
+        crate::auth::store_test_human_principal(data.path(), &grant.principal_id);
         let direct =
             issue_home_launch_token_for_auth_grant(data.path(), HOME_CAPSULE_ID, &grant).unwrap();
         crate::auth::store_session_grant(data.path(), grant.clone()).unwrap();
