@@ -11158,6 +11158,110 @@ mod r5a_tests {
     }
 
     #[test]
+    fn empty_trash_refuses_a_published_item_and_removes_the_stored_trash_record() {
+        let kept_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.Trash/kept.txt";
+        let kept_record_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Trash/b605da9f2eae10055cf347d3ed96a4ba45473f0424162deada39c157593183ee.json";
+        let kept_publish_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Published/b605da9f2eae10055cf347d3ed96a4ba45473f0424162deada39c157593183ee.json";
+        let agent = home(PrincipalKind::Agent);
+        let kept_path = rooted_localhost_fs_path(agent.path(), kept_uri).unwrap();
+        fs::create_dir_all(kept_path.parent().unwrap()).unwrap();
+        fs::write(&kept_path, b"kept-published").unwrap();
+        write_trash_record(
+            agent.path(),
+            r4_fixture::ID,
+            &LibraryTrashRecord {
+                schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
+                trash_uri: kept_uri.into(),
+                original_uri: "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/kept.txt"
+                    .into(),
+                original_name: "kept.txt".into(),
+                trashed_at: 1,
+            },
+        )
+        .unwrap();
+        let kept_record_path = rooted_localhost_fs_path(agent.path(), kept_record_uri).unwrap();
+        assert!(
+            kept_record_path.is_file(),
+            "trash record was not seeded at the literal path"
+        );
+        write_runtime_json(
+            agent.path(),
+            r4_fixture::ID,
+            kept_publish_uri,
+            &json!({
+                "schema": "elastos.library.publish/v1",
+                "object_uri": kept_uri,
+                "cid": "cid-r5b-kept",
+                "published_at": 1,
+                "receipt": {},
+                "availability": {},
+            }),
+        )
+        .unwrap();
+        let refused = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(
+            refused.as_ref().is_err_and(|error| {
+                find_library_refusal(error)
+                    .is_some_and(|refusal| refusal.code == "published_withdraw_first")
+                    && error.to_string()
+                        == "This folder has published files. Unpublish them before deleting it."
+            }),
+            "EmptyTrash must refuse the published Trash item through published_withdraw_first: {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&kept_path).unwrap_or_default(),
+            b"kept-published"
+        );
+        assert!(
+            kept_record_path.is_file(),
+            "refused EmptyTrash removed the trash record"
+        );
+
+        let gone_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.Trash/gone.txt";
+        let gone_record_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Trash/0b1925bc2079697007485433e75b96a9b2edb8a01b43588e85beb67896710b80.json";
+        let clear = home(PrincipalKind::Agent);
+        let gone_path = rooted_localhost_fs_path(clear.path(), gone_uri).unwrap();
+        fs::create_dir_all(gone_path.parent().unwrap()).unwrap();
+        fs::write(&gone_path, b"gone-trash").unwrap();
+        write_trash_record(
+            clear.path(),
+            r4_fixture::ID,
+            &LibraryTrashRecord {
+                schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
+                trash_uri: gone_uri.into(),
+                original_uri: "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/gone.txt"
+                    .into(),
+                original_name: "gone.txt".into(),
+                trashed_at: 1,
+            },
+        )
+        .unwrap();
+        let gone_record_path = rooted_localhost_fs_path(clear.path(), gone_record_uri).unwrap();
+        assert!(
+            gone_record_path.is_file(),
+            "clear trash record was not seeded at the literal path"
+        );
+        let emptied = handle_library_request(
+            clear.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(emptied["deleted_count"], 1);
+        assert!(!gone_path.exists(), "unpublished Trash file stayed");
+        assert!(
+            !gone_record_path.exists(),
+            "stored trash record stayed under the Agent root"
+        );
+    }
+
+    #[test]
     fn runtime_json_write_uses_the_stored_root() {
         for (kind, root) in [
             (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
