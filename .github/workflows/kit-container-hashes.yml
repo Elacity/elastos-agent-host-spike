@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 env:
-  # The head of claude/photo-land (draft PR 1550) on 10 Nov 2026.
-  PINNED: 7332bacbf8803cd450d5234e6b1ad00004f2f45e
+  # The head of claude/m2-examples-landing (the examples-only landing) on 10 Nov 2026.
+  PINNED: 99f5ff388b5f0f1d27ba0b52f1197fefa45f6bd7
 
 jobs:
   build:
@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: 7332bacbf8803cd450d5234e6b1ad00004f2f45e
+          ref: 99f5ff388b5f0f1d27ba0b52f1197fefa45f6bd7
           persist-credentials: false
       - name: Show the pinned commit and a clean tree
         run: |
