@@ -5271,6 +5271,15 @@ pub fn mint_agent_principal(
     {
         anyhow::bail!("invalid agent identity");
     }
+    let owner_record = stored_principal_record(data_dir, owner)?
+        .filter(|record| record.kind == PrincipalKind::Human)
+        .ok_or_else(|| anyhow!("agent owner has no stored Human record"))?;
+    let owner_protection =
+        load_principal_root_protection(data_dir, owner, &owner_record.localhost_root)?
+            .ok_or_else(|| anyhow!("agent owner has no current protection"))?;
+    if principal_data_key_id(owner_data_key) != owner_protection.data_key_id {
+        anyhow::bail!("agent owner data key does not match current protection");
+    }
     let principal_id = agent_principal_id(owner, did, name);
     let binding = ProofBinding {
         kind: ProofBindingKind::AgentAdmission,
@@ -13279,12 +13288,34 @@ pub(crate) mod tests {
     const AGENT_ROOT_PINNED: &str = "localhost://UsersAI/975e2ed8c59d9b9348f45d8b";
     const AGENT_ID_HELD: &str = "agent principal id is held by a different record";
 
-    fn mint_pinned_agent(data_dir: &Path, now: u64) -> anyhow::Result<PrincipalRecord> {
-        mint_agent_principal(data_dir, AGENT_OWNER, AGENT_DID, AGENT_NAME, &[7; 32], now)
+    fn pinned_owner_key(data_dir: &Path) -> [u8; 32] {
+        if stored_principal_record(data_dir, AGENT_OWNER)
+            .unwrap()
+            .is_none()
+        {
+            store_test_human_principal(data_dir, AGENT_OWNER);
+            store_test_principal_root_protection(data_dir, AGENT_OWNER);
+        }
+        let owner = load_principal_root_protection(
+            data_dir,
+            AGENT_OWNER,
+            &principal_kind_localhost_root(AGENT_OWNER, PrincipalKind::Human),
+        )
+        .unwrap()
+        .unwrap();
+        principal_root_data_key_from_protection(data_dir, &owner).unwrap()
     }
 
-    fn principals_json(data_dir: &Path) -> serde_json::Value {
-        serde_json::to_value(&load_auth_state(data_dir).unwrap().principals).unwrap()
+    fn mint_pinned_agent(data_dir: &Path, now: u64) -> anyhow::Result<PrincipalRecord> {
+        let owner_key = pinned_owner_key(data_dir);
+        mint_agent_principal(
+            data_dir,
+            AGENT_OWNER,
+            AGENT_DID,
+            AGENT_NAME,
+            &owner_key,
+            now,
+        )
     }
 
     /// MINT-new: the mint stores an Agent record with pinned ids and root, the
@@ -13305,8 +13336,12 @@ pub(crate) mod tests {
         assert_eq!(minted.kind, PrincipalKind::Agent);
         assert_eq!(minted.role, RuntimePrincipalRole::Guest);
         let state = load_auth_state(data_dir.path()).unwrap();
-        assert_eq!(state.principal_root_protections.len(), 1);
-        let protection = &state.principal_root_protections[0];
+        assert_eq!(state.principal_root_protections.len(), 2);
+        let protection = state
+            .principal_root_protections
+            .iter()
+            .find(|p| p.principal_id == minted.principal_id)
+            .unwrap();
         assert_eq!(protection.principal_id, minted.principal_id);
         assert_eq!(protection.localhost_root, minted.localhost_root);
         assert_eq!(
@@ -13324,8 +13359,23 @@ pub(crate) mod tests {
         let by_hand = tempfile::tempdir().unwrap();
         stored_agent_fixture(by_hand.path());
         assert_eq!(
-            principals_json(data_dir.path()),
-            principals_json(by_hand.path())
+            serde_json::to_value(
+                state
+                    .principals
+                    .iter()
+                    .find(|p| p.principal_id == minted.principal_id)
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(
+                load_auth_state(by_hand.path())
+                    .unwrap()
+                    .principals
+                    .into_iter()
+                    .find(|p| p.principal_id == minted.principal_id)
+                    .unwrap()
+            )
+            .unwrap()
         );
     }
 
@@ -13357,6 +13407,70 @@ pub(crate) mod tests {
         assert_eq!(second.created_at, 5);
     }
 
+    #[test]
+    fn mint_agent_requires_the_stored_owners_current_data_key() {
+        for case in [
+            "missing record",
+            "owner not Human",
+            "missing protection",
+            "wrong key",
+        ] {
+            let data = tempfile::tempdir().unwrap();
+            let key = match case {
+                "missing record" => {
+                    store_test_human_principal(data.path(), "person:local:decoy");
+                    [7; 32]
+                }
+                _ => pinned_owner_key(data.path()),
+            };
+            if case == "owner not Human" {
+                mutate_auth_state(data.path(), |state| {
+                    state
+                        .principals
+                        .iter_mut()
+                        .find(|p| p.principal_id == AGENT_OWNER)
+                        .unwrap()
+                        .kind = PrincipalKind::Agent;
+                    Ok(())
+                })
+                .unwrap();
+            }
+            if case == "missing protection" {
+                store_test_human_principal(data.path(), "person:local:decoy");
+                store_test_principal_root_protection(data.path(), "person:local:decoy");
+                mutate_auth_state(data.path(), |state| {
+                    state
+                        .principal_root_protections
+                        .retain(|p| p.principal_id != AGENT_OWNER);
+                    Ok(())
+                })
+                .unwrap();
+            }
+            let passed = if case == "wrong key" { [8; 32] } else { key };
+            let path = auth_state_path(data.path()).unwrap();
+            let before = path.exists().then(|| std::fs::read(&path).unwrap());
+            let error =
+                mint_agent_principal(data.path(), AGENT_OWNER, AGENT_DID, AGENT_NAME, &passed, 5)
+                    .unwrap_err()
+                    .to_string();
+            let expected = match case {
+                "missing record" => "agent owner has no stored Human record",
+                "owner not Human" => "agent owner has no stored Human record",
+                "missing protection" => "agent owner has no current protection",
+                _ => "agent owner data key does not match current protection",
+            };
+            assert_eq!(error, expected, "{case}");
+            assert_eq!(
+                path.exists().then(|| std::fs::read(&path).unwrap()),
+                before,
+                "{case}"
+            );
+        }
+        let data = tempfile::tempdir().unwrap();
+        let minted = mint_pinned_agent(data.path(), 5).unwrap();
+        assert_eq!(minted.principal_id, format!("agent:v1:{AGENT_DIGEST}"));
+    }
+
     /// MINT-collide and MINT-corrupt: an id held by a record that differs in
     /// any bound field refuses, and the auth state stays byte-identical. Each
     /// case changes one field of the stored record, or stores it twice.
@@ -13376,7 +13490,11 @@ pub(crate) mod tests {
             let data_dir = tempfile::tempdir().unwrap();
             mint_pinned_agent(data_dir.path(), 5).unwrap();
             mutate_auth_state(data_dir.path(), |state| {
-                let stored = &mut state.principals[0];
+                let stored = state
+                    .principals
+                    .iter_mut()
+                    .find(|p| p.principal_id.starts_with("agent:v1:"))
+                    .unwrap();
                 match case {
                     "human-kind" => stored.kind = PrincipalKind::Human,
                     "other-principal-id" => stored.principal_id = "agent:v1:other".into(),
@@ -13430,6 +13548,7 @@ pub(crate) mod tests {
             Ok(())
         })
         .unwrap();
+        pinned_owner_key(data_dir.path());
         let path = auth_state_path(data_dir.path()).unwrap();
         let before = std::fs::read(&path).unwrap();
 
@@ -13474,6 +13593,7 @@ pub(crate) mod tests {
     #[test]
     fn mint_agent_principal_races_to_one_record_per_tuple() {
         let data_dir = tempfile::tempdir().unwrap();
+        pinned_owner_key(data_dir.path());
         let minted: Vec<PrincipalRecord> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
                 .map(|_| scope.spawn(|| mint_pinned_agent(data_dir.path(), 5).unwrap()))
@@ -13488,14 +13608,14 @@ pub(crate) mod tests {
             AGENT_OWNER,
             "did:key:z6MkAgentTwo",
             AGENT_NAME,
-            &[7; 32],
+            &pinned_owner_key(data_dir.path()),
             5,
         )
         .unwrap();
 
         let state = load_auth_state(data_dir.path()).unwrap();
-        assert_eq!(state.principals.len(), 2);
-        assert_eq!(state.principal_root_protections.len(), 2);
+        assert_eq!(state.principals.len(), 3);
+        assert_eq!(state.principal_root_protections.len(), 3);
         for record in &minted {
             assert_eq!(record.principal_id, format!("agent:v1:{AGENT_DIGEST}"));
         }
@@ -13510,11 +13630,18 @@ pub(crate) mod tests {
             mint_pinned_agent(data_dir.path(), 5).unwrap();
             mutate_auth_state(data_dir.path(), |state| {
                 if duplicate {
+                    state.principal_root_protections.push(
+                        state
+                            .principal_root_protections
+                            .iter()
+                            .find(|p| p.principal_id.starts_with("agent:v1:"))
+                            .unwrap()
+                            .clone(),
+                    );
+                } else {
                     state
                         .principal_root_protections
-                        .push(state.principal_root_protections[0].clone());
-                } else {
-                    state.principal_root_protections.clear();
+                        .retain(|p| p.principal_id == AGENT_OWNER);
                 }
                 Ok(())
             })
