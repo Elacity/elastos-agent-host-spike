@@ -2221,9 +2221,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         return;
       }
       const t0 = performance.now();
-      /* True bottom: the stream's bottom padding keeps the end above the
-         floating composer; scrollIntoView on an anchor left it underneath. */
-      scroller.scrollTop = scroller.scrollHeight;
+      /* Plant: the room closes only a third of the gap per frame. */
+      scroller.scrollTop += Math.max(0, Math.ceil((scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop) / 3));
       noteScrollPosition();
       const took = performance.now() - t0;
       perf.followMs += took;
