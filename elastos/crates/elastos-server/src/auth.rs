@@ -18584,6 +18584,54 @@ pub(crate) mod tests {
         );
     }
 
+    fn install_older_device_key(data_dir: &Path) {
+        let identity = data_dir.join("identity");
+        std::fs::create_dir_all(&identity).unwrap();
+        let path = identity.join("device.key");
+        std::fs::write(&path, [0x42u8; 32]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    fn person_record_bytes(state: &AuthState) -> Vec<Vec<u8>> {
+        state
+            .principals
+            .iter()
+            .filter(|record| record.kind == PrincipalKind::Human)
+            .map(|record| serde_json::to_vec(record).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn populated_older_auth_state_round_trips_person_records() {
+        let data_dir = tempfile::tempdir().unwrap();
+        install_older_device_key(data_dir.path());
+        let fixture = include_bytes!("../fixtures/auth-state-populated.json");
+        let stored: AuthState = serde_json::from_slice(fixture).unwrap();
+        let expected = person_record_bytes(&stored);
+        assert!(!expected.is_empty());
+        assert!(!stored.sessions.is_empty());
+        assert!(!stored.audit.is_empty());
+        assert!(stored.audit_chain_state.is_some());
+        let path = auth_state_path(data_dir.path()).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, fixture).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let loaded = load_auth_state(data_dir.path()).unwrap();
+        assert_eq!(person_record_bytes(&loaded), expected);
+        save_auth_state(data_dir.path(), &loaded, None).unwrap();
+        let reloaded = load_auth_state(data_dir.path()).unwrap();
+        assert_eq!(person_record_bytes(&reloaded), expected);
+    }
+
     #[test]
     fn auth_state_without_agent_records_is_unchanged() {
         const FIXTURE: &[u8] = include_bytes!("../fixtures/auth-state-no-agent.json");
