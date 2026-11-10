@@ -5613,8 +5613,8 @@ fn quarantine_malformed_agents(state: &mut AuthState) {
                 .map(|reason| (record.principal_id.clone(), reason))
         })
         .collect();
-    for (principal_id, reason) in &found {
-        note_quarantined_agent(principal_id, *reason);
+    for (principal_id, &reason) in &found {
+        note_quarantined_agent(principal_id, reason);
     }
     state.quarantined = found;
 }
@@ -18339,10 +18339,10 @@ pub(crate) mod tests {
         let id = TEST_AGENT_ID;
         let resolved =
             ResolvedPrincipalRoot::resolve(data_dir.path(), auth_dir.path(), id).unwrap();
-        let agent = principal_kind_localhost_root(&id, PrincipalKind::Agent);
+        let agent = principal_kind_localhost_root(id, PrincipalKind::Agent);
         let agent_uri = format!("{agent}/Documents/a.txt");
         assert!(resolved.owns_object_uri(&agent_uri).is_ok());
-        let users_uri = format!("{}/Documents/a.txt", principal_localhost_root(&id));
+        let users_uri = format!("{}/Documents/a.txt", principal_localhost_root(id));
         assert!(resolved.owns_object_uri(&users_uri).is_err());
         // A sibling agent under the same UsersAI parent stays outside this root.
         let sibling =
