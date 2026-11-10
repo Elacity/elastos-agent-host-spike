@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+#[cfg(not(test))]
 use std::fs;
 use std::io::{Cursor, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
@@ -22,6 +23,49 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use zip::{ZipArchive, ZipWriter};
+
+/// Test builds record every read through this facade, so a row sees a raw
+/// `fs::read`, `fs::read_dir`, `fs::metadata` or `fs::symlink_metadata`
+/// (including one a plant inserts before a refusal). Production builds keep
+/// `std::fs` and do not record.
+#[cfg(test)]
+mod fs {
+    use std::io;
+    use std::path::Path;
+
+    pub use std::fs::{
+        create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, write, Metadata,
+    };
+
+    fn note_read(path: &Path) {
+        crate::auth::principal_object_io::record_raw_read(path);
+    }
+
+    pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
+        note_read(path.as_ref());
+        std::fs::read(path)
+    }
+
+    pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
+        note_read(path.as_ref());
+        std::fs::read_to_string(path)
+    }
+
+    pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<std::fs::ReadDir> {
+        note_read(path.as_ref());
+        std::fs::read_dir(path)
+    }
+
+    pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<std::fs::Metadata> {
+        note_read(path.as_ref());
+        std::fs::metadata(path)
+    }
+
+    pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<std::fs::Metadata> {
+        note_read(path.as_ref());
+        std::fs::symlink_metadata(path)
+    }
+}
 
 const LIBRARY_OBJECT_SCHEMA: &str = "elastos.library.object/v1";
 const LIBRARY_ROOT_SCHEMA: &str = "elastos.library.root/v1";
@@ -8634,6 +8678,9 @@ fn read_library_events_with_root(
     let event_uri = library_event_log_uri(root);
     let event_path = rooted_localhost_fs_path(data_dir, &event_uri)
         .ok_or_else(|| anyhow!("invalid library event log path"))?;
+    // `Path::exists` is not an `fs::` read. Tests record the stat here.
+    #[cfg(test)]
+    crate::auth::principal_object_io::record_read(data_dir, &event_path);
     if !event_path.exists() {
         return Ok(Vec::new());
     }
@@ -10999,7 +11046,10 @@ mod r5a_tests {
             },
         );
         assert!(!agent_path.exists(), "agent Trash was not emptied");
-        assert_eq!(fs::read(&id_path).unwrap_or_default(), b"id-rule trash");
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule trash"
+        );
         assert!(
             result
                 .as_ref()
@@ -11224,7 +11274,7 @@ mod r5a_tests {
         // The id-rule location holds real data; nothing may be read, written
         // or returned from it once the stored record is gone.
         assert_eq!(
-            fs::read(&id_path).unwrap_or_default(),
+            std::fs::read(&id_path).unwrap_or_default(),
             b"id-rule trash record"
         );
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
@@ -11260,7 +11310,7 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
-        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes);
+        assert_eq!(std::fs::read(&id_path).unwrap_or_default(), bytes);
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
@@ -11292,7 +11342,7 @@ mod r5a_tests {
             "{result:?}"
         );
         assert_eq!(
-            fs::read(&id_path).unwrap_or_default(),
+            std::fs::read(&id_path).unwrap_or_default(),
             b"id-rule trash record"
         );
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
@@ -11338,7 +11388,7 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
-        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes);
+        assert_eq!(std::fs::read(&id_path).unwrap_or_default(), bytes);
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
@@ -11373,7 +11423,7 @@ mod r5a_tests {
             "{result:?}"
         );
         assert_eq!(
-            fs::read(&id_path).unwrap_or_default(),
+            std::fs::read(&id_path).unwrap_or_default(),
             b"id-rule publish record"
         );
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
@@ -11430,7 +11480,7 @@ mod r5a_tests {
             "{result:?}"
         );
         assert_eq!(
-            fs::read(&id_path).unwrap_or_default(),
+            std::fs::read(&id_path).unwrap_or_default(),
             b"id-rule publish record"
         );
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
@@ -11479,7 +11529,10 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
-        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes.as_bytes());
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            bytes.as_bytes()
+        );
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
@@ -11513,7 +11566,10 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
-        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes.as_bytes());
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            bytes.as_bytes()
+        );
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
@@ -11546,7 +11602,10 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
-        assert_eq!(fs::read(&id_path).unwrap_or_default(), b"id-rule event log");
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule event log"
+        );
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }

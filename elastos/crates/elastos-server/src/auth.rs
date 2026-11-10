@@ -31,7 +31,8 @@ use sha2::{Digest, Sha256};
 
 use crate::host_lock::FileLock;
 
-/// Test-only record of principal-root object reads and writes, so a row can
+/// Test-only record of principal-root object reads and writes, and of raw
+/// filesystem reads Library makes through its test `fs` facade, so a row can
 /// prove that an unresolved principal touches no path the id rule names.
 #[cfg(test)]
 pub(crate) mod principal_object_io {
@@ -47,6 +48,8 @@ pub(crate) mod principal_object_io {
 
     static OPS: LazyLock<Mutex<HashMap<PathBuf, Ops>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
+    /// Reads that have a path and no data directory, matched back by prefix.
+    static RAW_READS: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
     fn record(data_dir: &Path, path: &Path, write: bool) {
         let mut ops = OPS.lock().unwrap();
@@ -66,12 +69,28 @@ pub(crate) mod principal_object_io {
         record(data_dir, path, true);
     }
 
+    /// A `std::fs` read that does not know its data directory. `reads` reports
+    /// it for every data directory that is a prefix of `path`.
+    pub(crate) fn record_raw_read(path: &Path) {
+        RAW_READS.lock().unwrap().push(path.to_path_buf());
+    }
+
     pub(crate) fn reads(data_dir: &Path) -> Vec<PathBuf> {
-        OPS.lock()
+        let mut reads = OPS
+            .lock()
             .unwrap()
             .get(data_dir)
             .map(|ops| ops.reads.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        reads.extend(
+            RAW_READS
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.starts_with(data_dir))
+                .cloned(),
+        );
+        reads
     }
 
     pub(crate) fn writes(data_dir: &Path) -> Vec<PathBuf> {
@@ -6007,6 +6026,10 @@ pub(crate) fn create_principal_root_object(
     path: &Path,
     plaintext: &[u8],
 ) -> anyhow::Result<()> {
+    // Create does not read the existing bytes. Tests still record the write:
+    // this path does not go through `write_principal_root_object`.
+    #[cfg(test)]
+    principal_object_io::record_write(data_dir, path);
     write_principal_root_object_inner(
         data_dir,
         principal_id,
