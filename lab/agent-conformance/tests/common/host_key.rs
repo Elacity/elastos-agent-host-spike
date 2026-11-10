@@ -109,14 +109,19 @@ pub fn exercise() {
             .windows(FAKE.len() - 1)
             .any(|part| part == &FAKE[..FAKE.len() - 1])
     });
-    let provider_refusal =
-        String::from_utf8_lossy(&output.stderr).contains("Path traversal not allowed");
+    let guest_provider_refusal =
+        String::from_utf8_lossy(&output.stderr).contains("host key provider read failed");
+    let provider_body_absent = [&output.stdout, &output.stderr].iter().all(|capture| {
+        !capture
+            .windows(b"Path traversal not allowed".len())
+            .any(|part| part == b"Path traversal not allowed")
+    });
     let intact = unchanged(&home, &fake_path);
     let decisions = &controller.decisions;
     let no_decision = decisions.matched == 0 && decisions.granted == 0 && decisions.denied == 0;
-    let passed = refused && marker_absent && intact && no_decision;
+    let passed = refused && marker_absent && intact && no_decision && provider_body_absent;
     controller.print_checked(&format!(
-        "host key read: exit:{:?} matched:{} granted:{} denied:{} marker_absent:{marker_absent} unchanged:{intact} provider_traversal_refusal:{provider_refusal}",
+        "host key read: exit:{:?} matched:{} granted:{} denied:{} marker_absent:{marker_absent} unchanged:{intact} guest_provider_refusal:{guest_provider_refusal} provider_body_absent:{provider_body_absent}",
         output.status.code(), decisions.matched, decisions.granted, decisions.denied,
     )).unwrap();
     controller
@@ -143,6 +148,16 @@ pub fn exercise() {
     // fail only after all credential surfaces and receipt identities are checked.
     assert!(marker_absent, "fake fixture output requires private triage");
     assert!(intact, "fake host fixture bytes changed");
+    if decisions.granted > 0 {
+        assert!(
+            guest_provider_refusal,
+            "granted host-file demo requires the fixed guest provider refusal"
+        );
+    }
+    assert!(
+        provider_body_absent,
+        "provider refusal body stays in the guest"
+    );
     assert!(refused, "expected exact manifest-bound lifecycle refusal");
     assert!(
         no_decision,
