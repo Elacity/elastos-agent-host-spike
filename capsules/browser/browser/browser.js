@@ -186,6 +186,7 @@ let currentInternetConsent = null;
 let pendingInternetNavigation = null;
 let internetContinuationUrl = null;
 let internetRequestPromise = null;
+let internetRequestedUrl = "";
 
 function stopInternetPolling() {
   browserInternetPollingActive = false;
@@ -238,14 +239,15 @@ async function requestInternetNavigation(value) {
     return;
   }
   // The URL belongs only to this live window; Home persists no continuation.
-  const url = normalizeUrl(value);
+  internetRequestedUrl = normalizeUrl(value);
+  if (pendingInternetNavigation) pendingInternetNavigation.url = internetRequestedUrl;
   if (internetRequestPromise) return internetRequestPromise;
   internetRequestPromise = (async () => {
     const consent = await fetchJson("/api/apps/browser/internet", {method:"POST",body:{action:"request"}});
     if (!browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
     renderInternetConsent(consent);
     pendingInternetNavigation = {
-      url, requestId: consent.request_id || consent.request?.request_id,
+      url: internetRequestedUrl, requestId: consent.request_id || consent.request?.request_id,
       expiresAt: consent.request?.expires_at || 0,
     };
     if (consent.status !== "granted") showInternetRequest();
@@ -2688,6 +2690,7 @@ async function requestRuntimeOpen(value, { history = "push" } = {}) {
 }
 
 async function navigateAddress(value) {
+  if (!browserInternetAllowed) return requestInternetNavigation(value);
   const nextUrl = normalizeUrl(value);
   const currentUrl = currentBrowserUrl();
   const crossStreamTarget = !sameBrowserStreamTarget(currentUrl, nextUrl);
@@ -2757,15 +2760,13 @@ async function navigateBrowser(command) {
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   clearAddressDraft();
-  if (!browserInternetAllowed) {
-    requestInternetNavigation(addressInput.value).catch(error => {
+  navigateAddress(addressInput.value).catch(error => {
+    if (!browserInternetAllowed) {
       const hint = document.querySelector("#browser-internet-hint");
       hint.hidden = false;
       hint.textContent = friendlyOpenError(error);
-    });
-  } else {
-    navigateAddress(addressInput.value).catch(() => {});
-  }
+    }
+  });
 });
 
 addressInput.addEventListener("input", markAddressDraftEdited);

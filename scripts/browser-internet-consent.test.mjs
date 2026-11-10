@@ -39,10 +39,22 @@ async function fixture() {
   const state = {consent:"off", expired:false, grantedRequestId:"fixture", requests:0, reads:0, opens:[], actions:[]};
   const server=http.createServer(async (req,res) => {
     const url=new URL(req.url,"http://localhost");
+    res.setHeader("access-control-allow-origin","*");
+    res.setHeader("access-control-allow-headers","content-type,x-elastos-home-token");
+    res.setHeader("access-control-allow-methods","GET,POST,OPTIONS");
+    if(req.method==="OPTIONS") {res.writeHead(204).end();return;}
     const json=value=>{res.setHeader("content-type","application/json");res.end(JSON.stringify(value));};
     let input;
     if (req.method === "POST") {let body="";for await (const chunk of req) body+=chunk;input=JSON.parse(body);}
+    if(url.pathname === "/gui") {
+      res.setHeader("content-type","text/html");
+      res.end(`<iframe src="/apps/browser/?browser_restore=1&home_origin=http://127.0.0.1:${server.address().port}#home_token=fixture"></iframe>`);return;
+    }
     if (url.pathname === "/") {
+      if(url.searchParams.has("nested")) {
+        res.setHeader("content-type","text/html");
+        res.end(`<script>${hostScript}</script><iframe id="gui" sandbox="allow-scripts allow-forms" src="/gui"></iframe>`);return;
+      }
       const app=url.searchParams.get("app") || "browser";
       res.setHeader("content-type","text/html");
       res.end(`<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style><script>${hostScript}</script><iframe data-app="${app}" src="/apps/${app}/?browser_restore=${url.searchParams.get("restore") || "0"}&notification_id=browser-internet:permission&url=https%3A%2F%2Fexample.com%2Frequested&home_origin=http://127.0.0.1:${server.address().port}#home_token=fixture"></iframe>`);return;
@@ -51,7 +63,7 @@ async function fixture() {
       state.reads++;
       if(input?.action === "revoke") {assert.equal(input.step_up_token,"fixture-step-up");state.consent="revoked";}
       if (input?.action === "end") {json({status:"ended"});return;}
-      if (input?.action === "request") {state.requests++;state.consent="requested";state.expired=false;}
+      if (input?.action === "request") {state.requests++;state.consent="requested";state.expired=false;await state.requestBarrier;}
       json({status:state.consent,request_id:state.consent==="granted"?state.grantedRequestId:undefined,request:state.expired?null:{resource:"elastos://browser/internet",grant_id:"fixture-grant",request_id:"fixture",text:consentText,expires_at:Math.floor(Date.now()/1000)+3600}});return;
     }
     if (url.pathname === "/api/apps/inbox/summary") {
@@ -183,6 +195,23 @@ test("only an explicit Browser action continues once; restore, close, denial and
   } finally {await browser.close();await f.close();}
 });
 
+test("an explicit Home open in a restored Browser uses the same permission request path", async () => {
+  const f=await fixture();const browser=await chromium.launch({headless:true});
+  try {
+    const page=await browser.newPage();await page.goto(f.url+"?nested=1");
+    const gui=page.frameLocator("#gui");const frame=gui.frameLocator("iframe");
+    await frame.locator("#browser-internet-request").waitFor();assert.equal(f.state.requests,0);
+    await gui.locator("body").evaluate(()=>document.querySelector("iframe").contentWindow.postMessage({
+      type:"elastos.browser.navigate/v1",homeToken:"fixture",url:"https://example.com/from-home",
+    },"*"));
+    await page.waitForFunction(()=>messages.some(m=>m.target==="inbox" && m.query.notification_id==="browser-internet:permission"),null,{timeout:4000});
+    assert.equal(f.state.requests,1);assert.equal(f.state.opens.length,0);
+    f.state.consent="granted";await page.waitForResponse(r=>r.url().endsWith("/api/apps/browser/open"));
+    assert.equal(f.state.opens.length,1);assert.equal(f.state.opens[0].url,"https://example.com/from-home");
+    await page.close();
+  } finally {await browser.close();await f.close();}
+});
+
 test("a grant for a replacement request cannot resume an earlier denied request", async () => {
   const f=await fixture();const browser=await chromium.launch({headless:true});
   try {
@@ -249,13 +278,16 @@ test("first-run Go, Inbox Allow, passkey, automatic page; Manage reaches the rea
   const f=await fixture();const browser=await chromium.launch({headless:true});
   try {
     const page=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});
-    await page.goto(f.url+"?flow=1&restore=1");
+    let releaseRequest;
+    f.state.requestBarrier=new Promise(resolve=>{releaseRequest=resolve;});
+    await page.goto(f.url+"?flow=1");
     const browserFrame=page.frameLocator('iframe[data-app="browser"]');
     await browserFrame.locator("#browser-internet-request").waitFor();
     await browserFrame.getByRole("textbox",{name:"Web address"}).fill("https://example.com/first-run");
     await screen(page,"flow-1");
-    assert.equal(f.state.requests,0);
+    assert.equal(f.state.requests,1);
     await browserFrame.getByRole("textbox",{name:"Web address"}).press("Enter");
+    releaseRequest();
     const inbox=page.frameLocator('iframe[data-app="inbox"]');
     await inbox.getByRole("button",{name:"Allow",exact:true}).waitFor();
     await screen(page,"flow-2");
