@@ -5134,12 +5134,13 @@ mod tests {
         );
     }
 
-    /// The shipped deadline bounds the timer itself, not only the error text:
-    /// a hung candidate must return after the five-second bound, and the
-    /// thirty-second ceiling only detects a timer that never fires.
+    /// The shipped deadline reaches the error text, and the timer fires instead
+    /// of hanging. The thirty-second ceiling is only a hang guard for a loaded
+    /// machine: the five-second limit this row proves is the error text, not
+    /// the wall clock.
     #[cfg(unix)]
     #[tokio::test]
-    async fn shipped_probe_returns_within_the_five_second_bound() {
+    async fn shipped_probe_times_out_and_names_five_seconds() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -5157,7 +5158,7 @@ mod tests {
         );
         assert!(
             elapsed < std::time::Duration::from_secs(30),
-            "probe returned after {elapsed:?}"
+            "probe hung past the thirty-second hang guard: {elapsed:?}"
         );
     }
 
