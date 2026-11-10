@@ -56,43 +56,15 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/bundle-test/Cargo.toml" -- --
 
 # Surface: the render-only page, against a fake fetch, then in real Chromium
 # framed in Home's sandbox against a stand-in server (Playwright's Chromium).
-# Playwright and its browser live outside this checkout (node_modules is
-# ignored); when the runner has neither, install them so the smoke runs
-# instead of failing to load a module.
+# This gate installs nothing: no npm packages and no browser. Where
+# Playwright's Chromium is not already installed for the repository's browser
+# engine, the smoke is skipped with a clear line, as the photo and archive
+# gates do; the page tests still run.
 export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
-if ! node -e "require(process.env.PLAYWRIGHT_DIR + '/node_modules/playwright')" >/dev/null 2>&1; then
-    (cd "${PLAYWRIGHT_DIR}" && npm ci --no-audit --no-fund)
-fi
 has_chromium() {
     node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1
 }
-# Stops a process and everything it started.
-stop_tree() {
-    local child
-    for child in $(pgrep -P "$1" 2>/dev/null); do
-        stop_tree "${child}"
-    done
-    kill "$1" 2>/dev/null || true
-}
-if ! has_chromium; then
-    # A download that stalls must not hold the gate for ever (it did, for 34
-    # minutes, on a machine with a poor connection): the install gets five
-    # minutes, then the gate goes on without the browser and says so below.
-    (cd "${PLAYWRIGHT_DIR}" && npx playwright install chromium) &
-    install_pid=$!
-    for _ in $(seq 1 300); do
-        kill -0 "${install_pid}" 2>/dev/null || break
-        sleep 1
-    done
-    if kill -0 "${install_pid}" 2>/dev/null; then
-        stop_tree "${install_pid}"
-        echo "docs-viewer: the Chromium download did not finish in 300 s and was stopped"
-    fi
-    wait "${install_pid}" 2>/dev/null || true
-fi
 node --test "${VIEWER_DIR}/surface/reader.test.mjs"
-# A machine without Playwright's Chromium skips the smoke with a clear line,
-# as the archive viewer's gate does; the page tests above still run.
 if has_chromium; then
     node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
 else
