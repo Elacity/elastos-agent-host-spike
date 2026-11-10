@@ -1,0 +1,54 @@
+name: Kit container hashes
+
+# One side branch, for KT2 item A3: build each viewer core with the kit's
+# unmodified pinned container recipe at one exact commit, on native x86_64
+# runners, and print its sha256. Each core is built twice, on two fresh
+# runners, so the log shows whether two machines give the same bytes.
+on:
+  push:
+    branches: [claude/m2-kt2-hash-ci]
+
+permissions:
+  contents: read
+
+env:
+  # The head of claude/photo-land (draft PR 1550) on 10 Nov 2026.
+  PINNED: 7332bacbf8803cd450d5234e6b1ad00004f2f45e
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        capsule: [photo-viewer, docs-viewer, archive-viewer]
+        machine: [first, second]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: 7332bacbf8803cd450d5234e6b1ad00004f2f45e
+          persist-credentials: false
+      - name: Show the pinned commit and a clean tree
+        run: |
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = "$PINNED"
+          test -z "$(git status --porcelain)"
+          uname -m
+      - name: Build in the pinned container
+        run: examples/capsule-kit/repro/build-in-container.sh "examples/${{ matrix.capsule }}"
+      - name: Show the source is unchanged after the build
+        run: |
+          test "$(git rev-parse HEAD)" = "$PINNED"
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+      - name: Hash the artifact
+        run: |
+          sudo chown -R "$(id -u)" "examples/${{ matrix.capsule }}"
+          sha256sum "examples/${{ matrix.capsule }}/${{ matrix.capsule }}.component.wasm"
+          stat -c '%s bytes' "examples/${{ matrix.capsule }}/${{ matrix.capsule }}.component.wasm"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ${{ matrix.capsule }}-component-${{ matrix.machine }}
+          path: examples/${{ matrix.capsule }}/${{ matrix.capsule }}.component.wasm
+          if-no-files-found: error
