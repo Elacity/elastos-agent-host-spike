@@ -3381,12 +3381,20 @@ mod tests {
         force: bool,
     ) -> anyhow::Result<()> {
         apply_signed_fixture_with_version(
-            data_dir, executable, components, mode, "0.7.1", force, false,
+            data_dir,
+            executable,
+            components,
+            mode,
+            "0.7.1",
+            force,
+            false,
+            VERSION_CHECK_TIMEOUT,
         )
         .await
     }
 
     #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
     async fn apply_signed_fixture_with_version(
         data_dir: &Path,
         executable: &[u8],
@@ -3395,6 +3403,7 @@ mod tests {
         version: &str,
         repair_invalid_version: bool,
         rollback: bool,
+        probe_deadline: std::time::Duration,
     ) -> anyhow::Result<()> {
         apply_signed_fixture_serving(
             data_dir,
@@ -3405,6 +3414,7 @@ mod tests {
             repair_invalid_version,
             rollback,
             Vec::new(),
+            probe_deadline,
         )
         .await
     }
@@ -3421,6 +3431,7 @@ mod tests {
         repair_invalid_version: bool,
         rollback: bool,
         support: Vec<(String, Vec<u8>)>,
+        probe_deadline: std::time::Duration,
     ) -> anyhow::Result<()> {
         use sha2::Digest;
 
@@ -3473,7 +3484,7 @@ mod tests {
             repair_invalid_version,
             crate::setup::FirstPartyCarrierContext::Setup,
             mode,
-            VERSION_CHECK_TIMEOUT,
+            probe_deadline,
         )
         .await
     }
@@ -3604,6 +3615,7 @@ mod tests {
             false,
             false,
             vec![(b_cid, b.clone())],
+            VERSION_CHECK_TIMEOUT,
         )
         .await
         .unwrap();
@@ -3620,6 +3632,7 @@ mod tests {
             false,
             true,
             vec![(a_cid, a.clone())],
+            VERSION_CHECK_TIMEOUT,
         )
         .await
         .unwrap();
@@ -3636,6 +3649,7 @@ mod tests {
             false,
             true,
             Vec::new(),
+            VERSION_CHECK_TIMEOUT,
         )
         .await
         .unwrap();
@@ -3665,6 +3679,7 @@ mod tests {
             false,
             false,
             Vec::new(),
+            VERSION_CHECK_TIMEOUT,
         )
         .await
         .unwrap_err();
@@ -3685,6 +3700,7 @@ mod tests {
             false,
             false,
             vec![(cid, bytes.clone())],
+            VERSION_CHECK_TIMEOUT,
         )
         .await
         .unwrap();
@@ -3770,6 +3786,7 @@ mod tests {
                 false,
                 false,
                 vec![(catalogue_cid.clone(), catalogue.clone())],
+                VERSION_CHECK_TIMEOUT,
             )
             .await
             .unwrap();
@@ -4223,6 +4240,7 @@ mod tests {
                         version,
                         true,
                         false,
+                        VERSION_CHECK_TIMEOUT,
                     )
                     .await;
                     if version == "0.6.9" {
@@ -4276,7 +4294,14 @@ mod tests {
         for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
             let (_fixture, data, binary, _source) = default_apply_fixture(components);
             apply_signed_fixture_with_version(
-                &data, executable, components, mode, "0.6.9", false, true,
+                &data,
+                executable,
+                components,
+                mode,
+                "0.6.9",
+                false,
+                true,
+                VERSION_CHECK_TIMEOUT,
             )
             .await
             .unwrap();
@@ -4452,6 +4477,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn staged_executable_refusals_preserve_installation_and_allow_corrected_retry() {
+        // The two timeout rows take a short explicit deadline so the suite does
+        // not spend the shipped five seconds twice per mode; they still time out.
+        const SHORT_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
         let correct = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n";
         let components = b"{\"schema\":\"elastos.components/v1\",\"external\":{},\"profiles\":{},\"capsules\":{}}\n";
         let cases = [
@@ -4459,46 +4487,66 @@ mod tests {
                 "wrong version",
                 b"#!/bin/sh\nprintf 'elastos 0.7.0\\n'\n".as_slice(),
                 "version mismatch",
+                VERSION_CHECK_TIMEOUT,
             ),
             (
                 "version substring",
                 b"#!/bin/sh\nprintf 'elastos 0.7.10\\n'\n".as_slice(),
                 "version mismatch",
+                VERSION_CHECK_TIMEOUT,
             ),
             (
                 "prefixed version",
                 b"#!/bin/sh\nprintf 'prefix elastos 0.7.1\\n'\n".as_slice(),
                 "version mismatch",
+                VERSION_CHECK_TIMEOUT,
             ),
             (
                 "stderr-only version",
                 b"#!/bin/sh\nprintf 'elastos 0.7.1\\n' >&2\n".as_slice(),
                 "version mismatch",
+                VERSION_CHECK_TIMEOUT,
             ),
             (
                 "nonzero exit with matching stdout",
                 b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\nexit 23\n".as_slice(),
                 "version check failed",
+                VERSION_CHECK_TIMEOUT,
             ),
             (
                 "loader refusal",
                 b"#!/nonexistent-elastos-fixture-interpreter\n".as_slice(),
                 "failed to run installed binary",
+                VERSION_CHECK_TIMEOUT,
             ),
             (
                 "success with stderr",
                 b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\nprintf 'unexpected diagnostic\\n' >&2\n"
                     .as_slice(),
                 "version mismatch",
+                VERSION_CHECK_TIMEOUT,
+            ),
+            (
+                "hung version probe",
+                b"#!/bin/sh\nexec sleep 60\n".as_slice(),
+                "version check timed out",
+                SHORT_PROBE_DEADLINE,
+            ),
+            (
+                "child retains version pipes",
+                b"#!/bin/sh\nsleep 60 &\nprintf 'elastos 0.7.1\\n'\nexit 0\n".as_slice(),
+                "version check timed out",
+                SHORT_PROBE_DEADLINE,
             ),
             (
                 "excessive version output",
                 b"#!/bin/sh\nprintf '%05000d' 0\n".as_slice(),
                 "output limit",
+                VERSION_CHECK_TIMEOUT,
             ),
         ];
         for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
-            for (name, executable, error_marker) in cases {
+            for (name, executable, error_marker, probe_deadline) in cases {
                 let name = format!(
                     "{}/{name}",
                     match mode {
@@ -4586,10 +4634,18 @@ mod tests {
                     std::fs::write(data.join(path), bytes).unwrap();
                 }
 
-                let error =
-                    apply_signed_fixture_with_mode(&data, &source, executable, components, mode)
-                        .await
-                        .unwrap_err();
+                let error = apply_signed_fixture_with_version(
+                    &data,
+                    executable,
+                    components,
+                    mode,
+                    "0.7.1",
+                    false,
+                    false,
+                    probe_deadline,
+                )
+                .await
+                .unwrap_err();
                 assert!(
                     error.to_string().contains(error_marker),
                     "{name}: {error:#}"
@@ -4623,9 +4679,18 @@ mod tests {
                     );
                 }
 
-                apply_signed_fixture_with_mode(&data, &source, correct, components, mode)
-                    .await
-                    .unwrap_or_else(|error| panic!("{name}: corrected retry failed: {error:#}"));
+                apply_signed_fixture_with_version(
+                    &data,
+                    correct,
+                    components,
+                    mode,
+                    "0.7.1",
+                    false,
+                    false,
+                    probe_deadline,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{name}: corrected retry failed: {error:#}"));
                 assert_eq!(std::fs::read(&binary).unwrap(), correct, "{name}");
                 assert_eq!(
                     std::fs::read(data.join("components.json")).unwrap(),
