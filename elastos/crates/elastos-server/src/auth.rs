@@ -160,8 +160,10 @@ const MAX_PRINCIPAL_ROOT_SCAN_PROBE_BYTES: u64 =
     MAX_MIGRATION_TOTAL_BYTES + MAX_MIGRATION_OBJECT_BYTES;
 
 static AUTH_STATE_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static AUDIT_CHAIN_ACTIVATION_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static PRINCIPAL_ROOT_OBJECT_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static AUDIT_CHAIN_ACTIVATION_LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> =
+    OnceLock::new();
+static PRINCIPAL_ROOT_OBJECT_LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> =
+    OnceLock::new();
 static VERIFIED_AUTH_STATE_CACHE: OnceLock<Mutex<HashMap<PathBuf, VerifiedAuthStateCacheEntry>>> =
     OnceLock::new();
 
@@ -424,12 +426,101 @@ fn auth_state_mutation_lock() -> &'static Mutex<()> {
     AUTH_STATE_MUTATION_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn audit_chain_activation_mutation_lock() -> &'static Mutex<()> {
-    AUDIT_CHAIN_ACTIVATION_MUTATION_LOCK.get_or_init(|| Mutex::new(()))
+/// One mutex per Home. The mutex is leaked so a held guard can be `'static`.
+/// The process keeps one entry for each data directory it opens.
+fn home_mutex(
+    locks: &'static OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>>,
+    data_dir: &Path,
+) -> &'static Mutex<()> {
+    let key = auth_state_cache_key(data_dir);
+    let mut locks = locks
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(mutex) = locks.get(&key).copied() {
+        return mutex;
+    }
+    let mutex: &'static Mutex<()> = Box::leak(Box::new(Mutex::new(())));
+    locks.insert(key, mutex);
+    mutex
 }
 
-fn principal_root_object_mutation_lock() -> &'static Mutex<()> {
-    PRINCIPAL_ROOT_OBJECT_MUTATION_LOCK.get_or_init(|| Mutex::new(()))
+fn audit_chain_activation_mutex(data_dir: &Path) -> &'static Mutex<()> {
+    home_mutex(&AUDIT_CHAIN_ACTIVATION_LOCKS, data_dir)
+}
+
+#[cfg(test)]
+fn hold_static_mutex_until_release(
+    mutex: &'static std::sync::Mutex<()>,
+    ready: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    cleanup_after: std::time::Duration,
+) {
+    let _guard = mutex.lock().expect("lock");
+    ready.send(()).expect("lock holder is ready");
+    release
+        .recv_timeout(cleanup_after)
+        .expect("lock release signal");
+}
+
+#[cfg(test)]
+pub(crate) fn hold_audit_activation_lock_for_test(
+    data_dir: &Path,
+    ready: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) {
+    hold_static_mutex_until_release(
+        audit_chain_activation_mutex(data_dir),
+        ready,
+        release,
+        std::time::Duration::from_secs(20),
+    );
+}
+
+fn principal_root_object_mutation_lock(data_dir: &Path) -> &'static Mutex<()> {
+    home_mutex(&PRINCIPAL_ROOT_OBJECT_LOCKS, data_dir)
+}
+
+#[cfg(test)]
+pub(crate) fn hold_principal_root_lock_for_test(
+    data_dir: &Path,
+    ready: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) {
+    hold_static_mutex_until_release(
+        principal_root_object_mutation_lock(data_dir),
+        ready,
+        release,
+        std::time::Duration::from_secs(20),
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn a_lock_holder_fails_without_the_release_signal() {
+    static FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (_release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        hold_static_mutex_until_release(
+            &FIXTURE,
+            ready_tx,
+            release_rx,
+            std::time::Duration::from_millis(50),
+        );
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("holder acquired the lock");
+    let err = holder
+        .join()
+        .expect_err("missing release signal must fail the holder");
+    let message = err
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| err.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(message.contains("release signal"), "panic text: {message}");
 }
 
 fn verified_auth_state_cache() -> &'static Mutex<HashMap<PathBuf, VerifiedAuthStateCacheEntry>> {
@@ -4705,7 +4796,7 @@ fn with_audit_chain_activation_lock<T>(
     data_dir: &Path,
     operation: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    let _guard = audit_chain_activation_mutation_lock()
+    let _guard = audit_chain_activation_mutex(data_dir)
         .lock()
         .map_err(|_| anyhow!("audit activation lock poisoned"))?;
     let lock = lock_auth_state_file(open_audit_chain_activation_lock(data_dir)?)?;
@@ -5547,7 +5638,7 @@ pub fn begin_declarative_principal_root_protection_activation(
         localhost_root,
         localhost_root,
     )?;
-    let guard = principal_root_object_mutation_lock()
+    let guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let lifecycle = lock_principal_root_lifecycle(data_dir)?;
@@ -5598,7 +5689,7 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_migrating_p
         localhost_root,
         localhost_root,
     )?;
-    let guard = principal_root_object_mutation_lock()
+    let guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let lifecycle = lock_principal_root_lifecycle(data_dir)?;
@@ -5685,7 +5776,7 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_with_candid
     if principal_data_key_id(data_key) != candidate.data_key_id {
         anyhow::bail!("candidate principal-root protection data key binding mismatch");
     }
-    let guard = principal_root_object_mutation_lock()
+    let guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let lifecycle = lock_principal_root_lifecycle(data_dir)?;
@@ -5725,7 +5816,7 @@ pub(crate) fn inspect_declarative_principal_root_protection(
         localhost_root,
         localhost_root,
     )?;
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let protection = load_principal_root_protection(data_dir, principal_id, localhost_root)?;
@@ -5768,7 +5859,7 @@ pub fn read_principal_root_object(
         localhost_root,
         object_uri,
     )?;
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     read_principal_root_object_locked(data_dir, principal_id, localhost_root, object_uri, path)
@@ -5784,7 +5875,7 @@ pub(crate) fn read_principal_root_object_resolved(
     principal_object_io::record_read(data_dir, path);
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     read_principal_root_object_locked(data_dir, principal_id, root, object_uri, path)
@@ -5805,7 +5896,7 @@ pub(crate) fn read_protected_principal_root_object(
         localhost_root,
         object_uri,
     )?;
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let Some(protection) = load_principal_root_protection(data_dir, principal_id, localhost_root)?
@@ -6103,7 +6194,7 @@ pub(crate) fn write_principal_root_object_resolved(
     principal_object_io::record_write(data_dir, path);
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     write_principal_root_object_locked_unchecked(
@@ -6182,7 +6273,7 @@ pub(crate) fn write_protected_principal_root_object_resolved(
     principal_object_io::record_write(data_dir, path);
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     write_principal_root_object_locked_unchecked(
@@ -6266,7 +6357,7 @@ pub(crate) fn write_principal_root_object_if_revision_resolved(
     principal_object_io::record_write(data_dir, path);
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     write_principal_root_object_locked_unchecked(
@@ -6300,7 +6391,7 @@ impl<'a> PrincipalRootObjectMutation<'a> {
     pub(crate) fn acquire(data_dir: &'a Path) -> anyhow::Result<Self> {
         Ok(Self {
             data_dir,
-            _guard: principal_root_object_mutation_lock()
+            _guard: principal_root_object_mutation_lock(data_dir)
                 .lock()
                 .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?,
         })
@@ -6377,7 +6468,7 @@ fn write_principal_root_object_inner(
         object_uri,
     )?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     write_principal_root_object_locked(
@@ -9268,7 +9359,7 @@ pub fn migrate_principal_root_objects_offline(
         "principal-root-migration",
         "offline",
     )?;
-    let _object_guard = principal_root_object_mutation_lock()
+    let _object_guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
@@ -9558,7 +9649,7 @@ pub fn verify_declared_principal_roots_ready(
     data_dir: &Path,
     declarations: &[PrincipalRootUpgradeDeclarationV1],
 ) -> anyhow::Result<Vec<String>> {
-    let _object_guard = principal_root_object_mutation_lock()
+    let _object_guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
@@ -9628,7 +9719,7 @@ where
             "offline",
         )?,
     };
-    let _object_guard = principal_root_object_mutation_lock()
+    let _object_guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
@@ -10459,7 +10550,7 @@ pub(crate) fn reconcile_legacy_principal_root_migration(
     if crate::install_transaction::InstallTransaction::has_pending_recovery(binary) {
         anyhow::bail!("retain migration backups until release recovery finishes");
     }
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
@@ -10536,7 +10627,7 @@ pub(crate) fn finalize_declared_principal_root_migrations(
     if crate::install_transaction::InstallTransaction::has_pending_recovery(binary) {
         anyhow::bail!("retain migration backups until release recovery and Home acceptance finish");
     }
-    let _guard = principal_root_object_mutation_lock()
+    let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let _lifecycle = lock_principal_root_lifecycle(data_dir)?;

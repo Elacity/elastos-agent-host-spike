@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { browserInternetGranted } from "../capsules/browser/browser/browser-runtime-api.js";
 
 const source = readFileSync(new URL("../capsules/browser/browser/browser.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../capsules/browser/browser/index.html", import.meta.url), "utf8");
@@ -19,6 +20,7 @@ function start({ expired = false, params = new URLSearchParams() } = {}) {
   const readiness = { loading: false };
   const setLoading = loading => { readiness.loading = loading; address.disabled = loading; };
   const settled = vm.runInNewContext(startup, {
+    checkBrowserInternet: () => browserInternetGranted(async () => ({status:"granted"})),
     unloadCleanupStarted: false, homeWindowCloseInFlight: false, homeWindowTerminalCloseConfirmed: false,
     params, DEFAULT_URL: "https://ela.city/", addressInput: address,
     updateNavState() {}, setLoading, fetchBrowserSummary: () => summary.promise,
