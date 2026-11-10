@@ -8138,7 +8138,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
         let read_err =
             crate::auth::read_principal_root_object(temp.path(), principal_id, &root, &uri, &path)
-                .unwrap_err();
+                .expect_err("record-less string read must be refused");
         assert!(read_err
             .to_string()
             .contains("principal has no stored record"));
@@ -8150,7 +8150,7 @@ mod tests {
             &path,
             b"replacement",
         )
-        .unwrap_err();
+        .expect_err("record-less string write must be refused");
         assert!(write_err
             .to_string()
             .contains("principal has no stored record"));
@@ -8173,7 +8173,8 @@ mod tests {
             .principals
             .retain(|record| record.principal_id != principal_id);
         crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
-        let error = verify_configured_principal_roots_ready(temp.path()).unwrap_err();
+        let error = verify_configured_principal_roots_ready(temp.path())
+            .expect_err("record-less UsersAI protection must be refused");
         assert!(
             error
                 .to_string()

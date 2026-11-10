@@ -17566,7 +17566,11 @@ pub(crate) mod tests {
         let resolved =
             ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &principal_id)
                 .unwrap();
-        assert_eq!(resolved.localhost_root(), expected_root);
+        assert_eq!(
+            resolved.localhost_root(),
+            expected_root,
+            "stored own-device record must win before the device arm"
+        );
     }
 
     #[test]
@@ -17600,7 +17604,7 @@ pub(crate) mod tests {
             &path,
             b"stored root",
         )
-        .unwrap();
+        .expect("stored noncanonical Human root must accept string write");
         assert_eq!(
             read_principal_root_object(data_dir.path(), principal_id, root, &uri, &path).unwrap(),
             b"stored root"
@@ -17627,7 +17631,7 @@ pub(crate) mod tests {
         let path = rooted_localhost_fs_path(data_dir.path(), uri).unwrap();
         let error =
             write_principal_root_object_resolved(data_dir.path(), &root, uri, &path, b"foreign")
-                .unwrap_err();
+                .expect_err("foreign URI must be refused before typed write");
         assert_eq!(
             error.to_string(),
             "principal-root object URI is outside the resolved root"
@@ -17660,7 +17664,7 @@ pub(crate) mod tests {
             &wrong_path,
             b"wrong path",
         )
-        .unwrap_err();
+        .expect_err("wrong canonical path must be refused before typed write");
         assert_eq!(
             error.to_string(),
             "principal-root object path does not match its canonical URI path"
@@ -17710,7 +17714,7 @@ pub(crate) mod tests {
             &path,
             b"wrong",
         )
-        .unwrap_err();
+        .expect_err("wrong local device root must be refused");
         assert_eq!(
             error.to_string(),
             "principal localhost root must be the verified device root"
@@ -17738,7 +17742,7 @@ pub(crate) mod tests {
             &path,
             b"wrong",
         )
-        .unwrap_err();
+        .expect_err("out-of-root URI for local device must be refused");
         assert_eq!(
             error.to_string(),
             "principal localhost root must be the verified device root"

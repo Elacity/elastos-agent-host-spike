@@ -1313,7 +1313,11 @@ mod tests {
             "localhost://UsersAI/{}",
             hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12])
         );
-        assert_eq!(verified.context.root().localhost_root(), expected_root);
+        assert_eq!(
+            verified.context.root().localhost_root(),
+            expected_root,
+            "stored device record must win before witness root"
+        );
     }
 
     #[test]

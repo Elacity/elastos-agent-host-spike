@@ -46,7 +46,8 @@ mod tests {
             "payload": payload, "signature": signature, "signer_did": did,
         });
         let bytes = serde_json::to_vec(&envelope).unwrap();
-        let error = VerifiedLaunchTokenSigner::verify(&bytes, &[]).unwrap_err();
+        let error = VerifiedLaunchTokenSigner::verify(&bytes, &[])
+            .expect_err("empty expected signer list must be refused");
         assert_eq!(
             error.to_string(),
             "home launch token has no expected signer"
