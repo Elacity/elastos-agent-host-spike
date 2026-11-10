@@ -4990,13 +4990,23 @@ mod tests {
             .unwrap();
     }
 
+    /// Waits for the candidate shell to publish its grandchild PID. A starved
+    /// machine may not have run the script before the probe returned.
     #[cfg(unix)]
-    fn recorded_pid(path: &std::path::Path) -> i32 {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap()
+    fn recorded_pid(path: &std::path::Path, limit: std::time::Duration) -> i32 {
+        let until = std::time::Instant::now() + limit;
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(pid) = text.trim().parse() {
+                    return pid;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "candidate did not record its child PID within {limit:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]
@@ -5085,7 +5095,7 @@ mod tests {
             error.to_string().contains("timed out after 3 seconds"),
             "{error:#}"
         );
-        assert_process_gone(recorded_pid(&pid_path));
+        assert_process_gone(recorded_pid(&pid_path, std::time::Duration::from_secs(5)));
     }
 
     #[cfg(unix)]
