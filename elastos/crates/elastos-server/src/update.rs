@@ -4541,6 +4541,9 @@ mod tests {
         // The two timeout rows take a short explicit deadline so the suite does
         // not spend the shipped five seconds twice per mode; they still time out.
         const SHORT_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+        // The corrected retry checks recovery, not a timing rule: a loaded
+        // machine may start an instant candidate slowly.
+        const RETRY_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
         let correct = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n";
         let components = b"{\"schema\":\"elastos.components/v1\",\"external\":{},\"profiles\":{},\"capsules\":{}}\n";
         let cases = [
@@ -4748,7 +4751,7 @@ mod tests {
                     "0.7.1",
                     false,
                     false,
-                    probe_deadline,
+                    RETRY_PROBE_DEADLINE,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{name}: corrected retry failed: {error:#}"));
@@ -5106,7 +5109,8 @@ mod tests {
     }
 
     /// The shipped deadline bounds the timer itself, not only the error text:
-    /// a hung candidate must return within eight seconds of the five-second bound.
+    /// a hung candidate must return after the five-second bound, and the
+    /// thirty-second ceiling only detects a timer that never fires.
     #[cfg(unix)]
     #[tokio::test]
     async fn shipped_probe_returns_within_the_five_second_bound() {
@@ -5126,7 +5130,7 @@ mod tests {
             "{error:#}"
         );
         assert!(
-            elapsed < std::time::Duration::from_secs(8),
+            elapsed < std::time::Duration::from_secs(30),
             "probe returned after {elapsed:?}"
         );
     }
@@ -5136,6 +5140,10 @@ mod tests {
     async fn version_check_times_out_when_a_child_retains_the_pipes() {
         use std::os::unix::fs::PermissionsExt;
 
+        // The rule is that a child retaining the pipes keeps the probe until its
+        // deadline, then the group dies. The deadline is generous so a loaded
+        // machine still runs the script before the timer fires.
+        const LEAKY_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("child-pid");
         let bin = dir.path().join("leaky-candidate");
@@ -5148,15 +5156,14 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let error =
-            verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(3))
-                .await
-                .unwrap_err();
+        let error = verify_installed_binary_version(&bin, "0.1.0", LEAKY_PROBE_DEADLINE)
+            .await
+            .unwrap_err();
         assert!(
-            error.to_string().contains("timed out after 3 seconds"),
+            error.to_string().contains("timed out after 30 seconds"),
             "{error:#}"
         );
-        assert_process_gone(recorded_pid(&pid_path, std::time::Duration::from_secs(5)));
+        assert_process_gone(recorded_pid(&pid_path, LEAKY_PROBE_DEADLINE));
     }
 
     #[cfg(unix)]

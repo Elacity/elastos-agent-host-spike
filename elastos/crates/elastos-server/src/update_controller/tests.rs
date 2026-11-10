@@ -3431,7 +3431,7 @@ async fn restarting_update_uses_the_explicit_controller_probe_deadline() {
         "{error:#}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < TEST_PROBE_DEADLINE,
         "probe waited {:?}",
         started.elapsed()
     );
@@ -3635,7 +3635,13 @@ async fn real_controller_restart_failure(failure: &str, previous_delay: u64) {
             _ => "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\nprintf 'candidate start evidence\\n' >&2\nexec /bin/sleep 60\n".into(),
         },
         previous_delay,
-        Some(Duration::from_secs(3)),
+        // The hung row proves the three-second readiness timeout; the loader,
+        // crash and rollback rows only need the candidate to start.
+        Some(if failure == "hung" {
+            Duration::from_secs(3)
+        } else {
+            TEST_READY_BUDGET
+        }),
     )
     .await;
     let interpreter = fixture.data.join("candidate-interpreter");
@@ -3971,7 +3977,7 @@ async fn unspawnable_rollback_start_is_started_by_the_next_run() {
     } = restart_scenario(
         |_| "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\n/bin/rm previous-interpreter\nexit 7\n".into(),
         0,
-        Some(Duration::from_secs(3)),
+        Some(TEST_READY_BUDGET),
     )
     .await;
     let result = crate::update::run_restarting_update_with_deadline(
