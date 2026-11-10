@@ -10,7 +10,7 @@ elastos-common = { path = "../elastos-common" }
 elastos-guest = { path = "../elastos-guest" }
 async-trait = "0.1"
 serde_json = "1"
-tokio = { version = "1.0", features = ["sync", "rt-multi-thread", "time"] }
+tokio = { version = "1.0", features = ["sync", "rt-multi-thread", "time", "fs", "io-util"] }
 # The RA1 feature set: the synchronous elastos.component/v1 host only. No `async` or
 # `component-model-async` (RA2 adds them), no `gc`, `threads` or `stack-switching` (those
 # proposals are compiled out), no `parallel-compilation` (unmeasured), no `cache`.

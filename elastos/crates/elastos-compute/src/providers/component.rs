@@ -30,6 +30,9 @@ bindgen!({
 
 const COMPONENT_FUEL: u64 = 100_000_000;
 const COMPONENT_MEMORY_SIZE: usize = 128 * 1024 * 1024;
+/// The largest component file the Runtime reads or compiles. The largest
+/// component in this repository is under 1 MiB.
+pub const COMPONENT_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// One deadline tick. Wasmtime calls this the engine "epoch"; this code says
 /// "tick", because "epoch" already names the capability revocation epoch.
 const DEADLINE_TICK: Duration = Duration::from_millis(10);
@@ -133,6 +136,69 @@ impl ComponentProvider {
             })
     }
 
+    /// Reads a component file once, and never more than one byte past the cap.
+    pub async fn read_component(path: &Path) -> std::io::Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        let file = tokio::fs::File::open(path).await?;
+        file.take(COMPONENT_MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() > COMPONENT_MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("component file is larger than the {COMPONENT_MAX_BYTES} byte limit"),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Compiles the bytes the caller already checked. The Runtime passes the
+    /// same buffer its signature and import checks read, so a file replaced
+    /// after those checks cannot change what runs.
+    pub async fn load_admitted(
+        &self,
+        bytes: Vec<u8>,
+        manifest: CapsuleManifest,
+    ) -> Result<CapsuleHandle> {
+        Self::require_component_manifest(&manifest)?;
+        if bytes.len() > COMPONENT_MAX_BYTES {
+            return Err(ElastosError::Compute(format!(
+                "component is larger than the {COMPONENT_MAX_BYTES} byte limit"
+            )));
+        }
+        let engine = Self::engine()?;
+        let component = Component::from_binary(&engine, &bytes).map_err(|err| {
+            ElastosError::Compute(format!("Failed to compile component capsule: {err}"))
+        })?;
+        let id = CapsuleId::new(format!("component-{}", uuid::Uuid::new_v4()));
+
+        self.instances.write().await.insert(
+            id.clone(),
+            ComponentActivation {
+                engine,
+                component,
+                status: CapsuleStatus::Loading,
+                manifest: manifest.clone(),
+            },
+        );
+
+        Ok(CapsuleHandle {
+            id,
+            manifest,
+            args: Vec::new(),
+        })
+    }
+
+    fn require_component_manifest(manifest: &CapsuleManifest) -> Result<()> {
+        if manifest.validate().is_err() || !Self::is_component_manifest(manifest) {
+            return Err(ElastosError::Compute(
+                "ComponentProvider only accepts elastos.component/v1 manifests".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn store_limits() -> StoreLimits {
         StoreLimitsBuilder::new()
             .memory_size(COMPONENT_MEMORY_SIZE)
@@ -203,41 +269,19 @@ impl Default for ComponentProvider {
 #[async_trait]
 impl ComputeProvider for ComponentProvider {
     async fn load(&self, path: &Path, manifest: CapsuleManifest) -> Result<CapsuleHandle> {
-        if manifest.validate().is_err() || !Self::is_component_manifest(&manifest) {
-            return Err(ElastosError::Compute(
-                "ComponentProvider only accepts elastos.component/v1 manifests".into(),
-            ));
-        }
-
+        Self::require_component_manifest(&manifest)?;
         let component_path = path.join(&manifest.entrypoint);
-        if !component_path.exists() {
-            return Err(ElastosError::CapsuleNotFound(format!(
-                "component file not found: {}",
-                component_path.display()
-            )));
-        }
-
-        let engine = Self::engine()?;
-        let component = Component::from_file(&engine, &component_path).map_err(|err| {
-            ElastosError::Compute(format!("Failed to compile component capsule: {err}"))
-        })?;
-        let id = CapsuleId::new(format!("component-{}", uuid::Uuid::new_v4()));
-
-        self.instances.write().await.insert(
-            id.clone(),
-            ComponentActivation {
-                engine,
-                component,
-                status: CapsuleStatus::Loading,
-                manifest: manifest.clone(),
-            },
-        );
-
-        Ok(CapsuleHandle {
-            id,
-            manifest,
-            args: Vec::new(),
-        })
+        let bytes =
+            Self::read_component(&component_path)
+                .await
+                .map_err(|err| match err.kind() {
+                    std::io::ErrorKind::NotFound => ElastosError::CapsuleNotFound(format!(
+                        "component file not found: {}",
+                        component_path.display()
+                    )),
+                    _ => ElastosError::Compute(format!("Failed to read component capsule: {err}")),
+                })?;
+        self.load_admitted(bytes, manifest).await
     }
 
     async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
@@ -596,6 +640,96 @@ mod tests {
 
     /// An activation with the given time limit and fuel that never runs out,
     /// so that only the deadline can end a loop.
+    /// The committed Bus v1 conformance capsule: its folder and its manifest.
+    fn component_fixture() -> (std::path::PathBuf, CapsuleManifest) {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/components/bus-v1");
+        let manifest =
+            serde_json::from_slice(&std::fs::read(path.join("capsule.json")).unwrap()).unwrap();
+        (path, manifest)
+    }
+
+    /// A file of `len` zero bytes named as the fixture manifest's entrypoint.
+    fn capsule_dir_with_entrypoint_of(len: u64) -> (tempfile::TempDir, CapsuleManifest) {
+        let (_, manifest) = component_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(dir.path().join(&manifest.entrypoint)).unwrap();
+        file.set_len(len).unwrap();
+        (dir, manifest)
+    }
+
+    #[tokio::test]
+    async fn a_component_file_is_read_up_to_the_cap_and_refused_one_byte_over() {
+        assert_eq!(COMPONENT_MAX_BYTES, 8 * 1024 * 1024);
+        let (dir, manifest) = capsule_dir_with_entrypoint_of(8 * 1024 * 1024);
+        let path = dir.path().join(&manifest.entrypoint);
+        let bytes = ComponentProvider::read_component(&path).await.unwrap();
+        assert_eq!(bytes.len(), 8 * 1024 * 1024);
+
+        let (dir, manifest) = capsule_dir_with_entrypoint_of(8 * 1024 * 1024 + 1);
+        let path = dir.path().join(&manifest.entrypoint);
+        let err = ComponentProvider::read_component(&path).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "component file is larger than the 8388608 byte limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_refuses_a_file_over_the_cap_and_names_a_missing_one() {
+        let provider = ComponentProvider::new();
+        let (dir, manifest) = capsule_dir_with_entrypoint_of(8 * 1024 * 1024 + 1);
+        let err = provider
+            .load(dir.path(), manifest.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Compute error: Failed to read component capsule: \
+             component file is larger than the 8388608 byte limit"
+        );
+        let empty = tempfile::tempdir().unwrap();
+        let err = provider.load(empty.path(), manifest).await.unwrap_err();
+        assert!(matches!(err, ElastosError::CapsuleNotFound(_)), "{err}");
+        assert!(provider.instances.read().await.is_empty());
+    }
+
+    /// The fixture component with a custom section appended: still a valid
+    /// component, of `total` bytes.
+    fn fixture_component_padded_to(total: usize) -> Vec<u8> {
+        let (path, manifest) = component_fixture();
+        let mut bytes = std::fs::read(path.join(&manifest.entrypoint)).unwrap();
+        let payload = total - bytes.len() - 6 - 4; // section id, 5-byte size, 1-byte name length, "pad"
+        let size = (payload + 4) as u32;
+        bytes.push(0);
+        bytes.extend(
+            (0..5).map(|i| ((size >> (7 * i)) & 0x7f) as u8 | if i < 4 { 0x80 } else { 0 }),
+        );
+        bytes.extend([3, b'p', b'a', b'd']);
+        bytes.resize(total, 0);
+        bytes
+    }
+
+    #[tokio::test]
+    async fn admitted_bytes_over_the_cap_are_refused_before_the_compiler() {
+        let provider = ComponentProvider::new();
+        let (_, manifest) = component_fixture();
+        // At the cap the padded component compiles, so the refusal one byte over is the size.
+        let at_cap = fixture_component_padded_to(8 * 1024 * 1024);
+        let handle = provider
+            .load_admitted(at_cap, manifest.clone())
+            .await
+            .expect("a valid component of exactly the cap loads");
+        provider.stop(&handle).await.unwrap();
+        let over = fixture_component_padded_to(8 * 1024 * 1024 + 1);
+        let err = provider.load_admitted(over, manifest).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Compute error: component is larger than the 8388608 byte limit"
+        );
+        assert!(provider.instances.read().await.is_empty());
+    }
+
     fn state_with_deadline(run_deadline: Duration) -> ComponentState {
         ComponentState {
             fuel: u64::MAX,
