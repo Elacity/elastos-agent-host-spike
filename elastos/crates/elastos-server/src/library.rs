@@ -11446,8 +11446,9 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
-        // The id-rule location holds real data; nothing may be read, written
-        // or returned from it once the stored record is gone.
+        // The id-rule bytes stay put. The recorder sees an exact-path
+        // `fs::read`, `fs::read_to_string`, `fs::read_dir`, `fs::metadata`
+        // or `fs::symlink_metadata`, and a principal-object read or write.
         assert_eq!(
             std::fs::read(&id_path).unwrap_or_default(),
             b"id-rule trash record"
