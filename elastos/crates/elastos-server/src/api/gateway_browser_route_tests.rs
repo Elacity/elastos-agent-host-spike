@@ -10752,30 +10752,28 @@ async fn internet_stop(app: &Router, dir: &std::path::Path, system: &str) {
     assert_eq!(result["status"], "revoked");
 }
 
-async fn internet_home_launch_token(app: &Router, home: &str, target: &str) -> String {
-    let response = app
-        .clone()
-        .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .method("POST")
-                .uri("/api/apps/home/launch")
-                .header("x-elastos-home-token", home)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({"target": target}).to_string()))
-                .unwrap(),
-        )
-        .await
+async fn internet_home_launch_token(
+    state: &GatewayState,
+    home: &str,
+    target: &str,
+    platform: &str,
+) -> String {
+    let request = test_browser_request("localhost:61180", "http://localhost:61180")
+        .header("x-elastos-home-token", home)
+        .body(Body::empty())
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "Home launch failed");
-    let bytes = axum::body::to_bytes(response.into_body(), 65536)
-        .await
-        .unwrap();
-    let launch: Value = serde_json::from_slice(&bytes).unwrap();
-    let route = url::Url::parse(&format!(
-        "http://localhost:61180{}",
-        launch["route"].as_str().unwrap()
-    ))
-    .unwrap();
+    let Json(launch) = home_launch(
+        State(state.clone()),
+        request.headers().clone(),
+        Json(HomeLaunchRequest {
+            target: target.to_string(),
+            query: BTreeMap::new(),
+        }),
+        platform,
+    )
+    .await
+    .unwrap_or_else(|(status, error)| panic!("Home launch failed: {status} {}", error.0["error"]));
+    let route = url::Url::parse(&format!("http://localhost:61180{}", launch.route)).unwrap();
     form_urlencoded::parse(route.fragment().unwrap().as_bytes())
         .find(|(key, _)| key == "home_token")
         .unwrap()
@@ -10806,11 +10804,12 @@ async fn browser_internet_end_accepts_only_its_home_launched_browser_frame() {
         std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
     let app = gateway_router(state.clone());
-    let browser = internet_home_launch_token(&app, &home, BROWSER_CAPSULE_ID).await;
-    let second = internet_home_launch_token(&app, &home, BROWSER_CAPSULE_ID).await;
-    let system = internet_home_launch_token(&app, &home, SYSTEM_CAPSULE_ID).await;
+    let browser =
+        internet_home_launch_token(&state, &home, BROWSER_CAPSULE_ID, "darwin-arm64").await;
+    let second = internet_home_launch_token(&state, &home, BROWSER_CAPSULE_ID, "linux-arm64").await;
+    let system = internet_home_launch_token(&state, &home, SYSTEM_CAPSULE_ID, "darwin-arm64").await;
     let direct_system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &owner);
-    let assistant = internet_home_launch_token(&app, &home, "assistant").await;
+    let assistant = internet_home_launch_token(&state, &home, "assistant", "darwin-arm64").await;
     let launch =
         require_carried_home_launch_token(dir.path(), &browser, &[BROWSER_CAPSULE_ID]).unwrap();
     assert_eq!(launch.launch_context.authority_actor, HOME_CAPSULE_ID);
