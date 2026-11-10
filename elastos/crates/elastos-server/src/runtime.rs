@@ -93,16 +93,14 @@ fn bridge_hostcall(
     handle: tokio::runtime::Handle,
 ) -> BridgeHostcall {
     Arc::new(move |line, capsule_id, _principal_id| {
-        let admission = admitted(&admissions, capsule_id)?;
-        let ctx = crate::resource_bridge::BridgeContext {
-            provider_registry: registry.clone(),
-            capability_manager: capability_manager.clone(),
-            pending_store: pending_store.clone(),
-            capsule_id: capsule_id.to_string(),
-            principal_id: admission.actor,
-            manifest_capabilities: admission.manifest_bounds,
-            data_dir: Some(data_dir.clone()),
-        };
+        let ctx = crate::resource_bridge::BridgeContext::admitted(
+            registry.clone(),
+            capability_manager.clone(),
+            pending_store.clone(),
+            capsule_id,
+            admitted(&admissions, capsule_id)?,
+            data_dir.clone(),
+        );
         let response = handle
             .block_on(crate::resource_bridge::handle_component_resource_request(
                 line, ctx,

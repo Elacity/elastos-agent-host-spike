@@ -47,6 +47,28 @@ pub struct BridgeContext {
     pub data_dir: Option<PathBuf>,
 }
 
+impl BridgeContext {
+    /// The one place a bridge context is built: from an admission decision.
+    pub(crate) fn admitted(
+        provider_registry: Arc<ProviderRegistry>,
+        capability_manager: Arc<CapabilityManager>,
+        pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        capsule_id: &str,
+        admission: crate::runtime::AdmissionContext,
+        data_dir: PathBuf,
+    ) -> Self {
+        Self {
+            provider_registry,
+            capability_manager,
+            pending_store,
+            capsule_id: capsule_id.to_string(),
+            principal_id: admission.actor,
+            manifest_capabilities: admission.manifest_bounds,
+            data_dir: Some(data_dir),
+        }
+    }
+}
+
 /// Spawn a resource bridge handler for a microVM capsule.
 ///
 /// Listens on a Unix socket that crosvm serial port 2 connects to.

@@ -1169,15 +1169,19 @@ impl Supervisor {
             // When None (gateway/infrastructure path), the bridge denies capability
             // requests — infrastructure capsules run under service authority.
             let bridge_ctx = match (&self.capability_manager, &self.pending_store) {
-                (Some(cap_mgr), Some(pending)) => Some(crate::resource_bridge::BridgeContext {
-                    provider_registry: registry.clone(),
-                    capability_manager: cap_mgr.clone(),
-                    pending_store: pending.clone(),
-                    capsule_id: format!("vm-{}", name),
-                    principal_id: principal_id.clone(),
-                    manifest_capabilities: manifest.resource_authority_bounds(),
-                    data_dir: Some(self.data_dir.clone()),
-                }),
+                (Some(cap_mgr), Some(pending)) => {
+                    Some(crate::resource_bridge::BridgeContext::admitted(
+                        registry.clone(),
+                        cap_mgr.clone(),
+                        pending.clone(),
+                        &format!("vm-{}", name),
+                        crate::runtime::AdmissionContext {
+                            actor: principal_id.clone(),
+                            manifest_bounds: manifest.resource_authority_bounds(),
+                        },
+                        self.data_dir.clone(),
+                    ))
+                }
                 _ => None,
             };
             if let Err(e) = crate::resource_bridge::spawn_resource_bridge(
