@@ -8169,7 +8169,9 @@ mod tests {
             &record.localhost_root,
         );
         let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
-        state.principals.retain(|record| record.principal_id != principal_id);
+        state
+            .principals
+            .retain(|record| record.principal_id != principal_id);
         crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
         let error = verify_configured_principal_roots_ready(temp.path()).unwrap_err();
         assert!(

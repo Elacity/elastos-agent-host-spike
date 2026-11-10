@@ -2949,10 +2949,9 @@ fn home_services_selection_state(
     if !path.is_file() {
         return Ok(default_state);
     };
-    let raw = match crate::auth::read_principal_root_object(
+    let raw = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &default_state.principal_id,
-        &default_state.localhost_root,
+        context.root(),
         &home_services_selection_state_uri(context),
         &path,
     ) {
@@ -3016,10 +3015,9 @@ fn home_save_services_selection_state(
     if raw.len() > HOME_SERVICES_STATE_MAX_BYTES {
         anyhow::bail!("Services state is too large");
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &state.principal_id,
-        &state.localhost_root,
+        context.root(),
         &home_services_selection_state_uri(context),
         &path,
         &raw,
@@ -9402,6 +9400,53 @@ mod stored_root_tests {
         fs::create_dir_all(&data_dir).unwrap();
         fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
         (temp, data_dir)
+    }
+
+    fn verified_parent_device_context(
+        data_dir: &std::path::Path,
+    ) -> (HomeLaunchTokenContext, String) {
+        let parent = tempfile::tempdir().unwrap();
+        let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let parent_context =
+            super::super::gateway_home_token::local_home_launch_token_context(parent.path())
+                .unwrap();
+        let token = super::super::gateway_home_token::issue_home_launch_token_with_context(
+            parent.path(),
+            SERVICES_CAPSULE_ID,
+            &parent_context,
+        )
+        .unwrap();
+        let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+            data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did.clone(), parent.path(),
+        ).unwrap();
+        (verified.context, parent_did)
+    }
+
+    #[test]
+    fn parent_signed_services_selection_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir);
+        let parent_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{parent_did}").as_bytes())[..12])
+        );
+        assert_eq!(context.root().localhost_root(), parent_root);
+        let mut state = home_services_default_selection_state(&context);
+        state.local_offer_ids.insert("parent-offer".to_string());
+        home_save_services_selection_state(&data_dir, &context, &state).unwrap();
+        let read = home_services_selection_state(&data_dir, &context).unwrap();
+        assert!(read.local_offer_ids.contains("parent-offer"));
+        let parent_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/services-state.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
     }
 
     #[test]
