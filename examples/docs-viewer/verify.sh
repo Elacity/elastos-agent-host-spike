@@ -63,11 +63,41 @@ export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
 if ! node -e "require(process.env.PLAYWRIGHT_DIR + '/node_modules/playwright')" >/dev/null 2>&1; then
     (cd "${PLAYWRIGHT_DIR}" && npm ci --no-audit --no-fund)
 fi
-if ! node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1; then
-    (cd "${PLAYWRIGHT_DIR}" && npx playwright install chromium)
+has_chromium() {
+    node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1
+}
+# Stops a process and everything it started.
+stop_tree() {
+    local child
+    for child in $(pgrep -P "$1" 2>/dev/null); do
+        stop_tree "${child}"
+    done
+    kill "$1" 2>/dev/null || true
+}
+if ! has_chromium; then
+    # A download that stalls must not hold the gate for ever (it did, for 34
+    # minutes, on a machine with a poor connection): the install gets five
+    # minutes, then the gate goes on without the browser and says so below.
+    (cd "${PLAYWRIGHT_DIR}" && npx playwright install chromium) &
+    install_pid=$!
+    for _ in $(seq 1 300); do
+        kill -0 "${install_pid}" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "${install_pid}" 2>/dev/null; then
+        stop_tree "${install_pid}"
+        echo "docs-viewer: the Chromium download did not finish in 300 s and was stopped"
+    fi
+    wait "${install_pid}" 2>/dev/null || true
 fi
 node --test "${VIEWER_DIR}/surface/reader.test.mjs"
-node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
+# A machine without Playwright's Chromium skips the smoke with a clear line,
+# as the archive viewer's gate does; the page tests above still run.
+if has_chromium; then
+    node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
+else
+    echo "docs-viewer: Chromium smoke skipped: no Playwright Chromium at ${PLAYWRIGHT_DIR}"
+fi
 
 # Bus v2: the resident reader in the Bus v2 proof's stub host, with the
 # proof's own test helpers and busy guest. Each part is built from its own
