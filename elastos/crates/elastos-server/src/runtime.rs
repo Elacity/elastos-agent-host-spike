@@ -1017,13 +1017,13 @@ pub(crate) mod tests {
         )
     }
 
-    /// The entrypoint is a FIFO whose writer hands out a good component on the
-    /// first open and bytes that are no component on the second. It stands in
-    /// for a file that is replaced after the Runtime checked it: the launch
-    /// must open it once, and run what it checked.
-    #[cfg(unix)]
+    /// The file is replaced right after the Runtime's one read of it (a test
+    /// hook runs at that point). The capsule is signed and the Home enforces
+    /// signatures, so the signature check, the import check and the compiler
+    /// all take part: any of them reading the file again meets the
+    /// replacement, and the launch fails.
     #[tokio::test]
-    async fn a_component_file_that_changes_after_its_first_read_runs_the_bytes_that_were_checked() {
+    async fn a_component_file_replaced_after_it_was_read_runs_the_bytes_that_were_checked() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
             LocalFSProvider::new(temp_dir.path().to_path_buf())
@@ -1035,43 +1035,53 @@ pub(crate) mod tests {
             Vec::new(),
             Some(Arc::new(ComponentProvider::new())),
         );
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[71; 32]);
         runtime
-            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
             .await
             .unwrap();
         let capsule_dir = temp_dir.path().join("capsule");
         std::fs::create_dir_all(&capsule_dir).unwrap();
+        let component = quiet_component();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("replaced-component")).unwrap();
+        elastos_runtime::signature::sign_capsule(&key, &mut manifest, &hash_content(&component))
+            .unwrap();
         std::fs::write(
             capsule_dir.join("capsule.json"),
-            component_manifest_json("changing-component"),
+            serde_json::to_string(&manifest).unwrap(),
         )
         .unwrap();
-        let fifo = capsule_dir.join("app.component.wasm");
-        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
-        assert!(made.unwrap().success(), "mkfifo");
-        let opens = Arc::new(AtomicUsize::new(0));
-        let (served, writer_fifo) = (opens.clone(), fifo.clone());
-        std::thread::spawn(move || {
-            for bytes in [quiet_component(), b"replaced after the check".to_vec()] {
-                // Blocks until a reader opens the FIFO.
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&writer_fifo)
-                    .unwrap();
-                served.fetch_add(1, Ordering::SeqCst);
-                std::io::Write::write_all(&mut file, &bytes).unwrap();
-            }
-        });
+        let entrypoint = capsule_dir.join("app.component.wasm");
+        std::fs::write(&entrypoint, &component).unwrap();
 
-        runtime
-            .run_local_with_principal(&capsule_dir, Vec::new(), None)
-            .await
-            .expect("the bytes that were checked are the bytes that run");
+        let replacement: &[u8] = b"replaced after the check";
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        crate::component::AFTER_ENTRYPOINT_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |path| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::fs::write(path, replacement).unwrap();
+            }));
+        });
+        let launched = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await;
+        crate::component::AFTER_ENTRYPOINT_READ.with(|hook| *hook.borrow_mut() = None);
+
         assert_eq!(
-            opens.load(Ordering::SeqCst),
+            reads.load(Ordering::SeqCst),
             1,
-            "the entrypoint was opened again after it was checked"
+            "one read of the entrypoint"
         );
+        assert_eq!(std::fs::read(&entrypoint).unwrap(), replacement);
+        let (_, signer) = launched.expect("the bytes that were checked are the bytes that run");
+        let did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
+        assert_eq!(signer, Signer::Key { did });
     }
 
     /// A component file one byte over the cap is refused at launch, before the

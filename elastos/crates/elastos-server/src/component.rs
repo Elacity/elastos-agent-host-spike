@@ -42,14 +42,28 @@ pub(crate) async fn read_admitted_entrypoint(
     manifest: &CapsuleManifest,
 ) -> Result<Vec<u8>> {
     let entrypoint = capsule_dir.join(&manifest.entrypoint);
-    elastos_compute::providers::ComponentProvider::read_component(&entrypoint)
+    let bytes = elastos_compute::providers::ComponentProvider::read_component(&entrypoint)
         .await
         .map_err(|err| {
             ElastosError::InvalidManifest(format!(
                 "failed to read component entrypoint {}: {}",
                 manifest.entrypoint, err
             ))
-        })
+        })?;
+    #[cfg(test)]
+    AFTER_ENTRYPOINT_READ.with(|hook| hook.borrow().iter().for_each(|hook| hook(&entrypoint)));
+    Ok(bytes)
+}
+
+#[cfg(test)]
+type EntrypointHook = Option<Box<dyn Fn(&Path)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: runs right after the one read of a component entrypoint, so a
+    /// test can replace the file and show that nothing reads it again.
+    pub(crate) static AFTER_ENTRYPOINT_READ: std::cell::RefCell<EntrypointHook> =
+        const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {

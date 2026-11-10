@@ -248,6 +248,9 @@ impl ComponentProvider {
         let (fuel, first_ticks) = (state.fuel, deadline_ticks(state.run_deadline));
         let mut store = Store::new(engine, state);
         store.limiter(|state| &mut state.limits);
+        // With the callback below the limit holds without this line too (an
+        // unset deadline calls the callback at the first tick check); setting
+        // it spares that first call.
         store.set_epoch_deadline(first_ticks);
         store.epoch_deadline_callback(|context| Ok(context.data().deadline_update()));
         store
@@ -1001,6 +1004,11 @@ mod tests {
             lasted >= Duration::from_secs(1),
             "the run was ended after {lasted:?}, before its Bus time was used up"
         );
+        // And not much later: Bus time is taken off once, not more than once.
+        assert!(
+            lasted < Duration::from_secs(10),
+            "the run went on for {lasted:?} with 1.2 s allowed"
+        );
     }
 
     #[test]
@@ -1017,6 +1025,7 @@ mod tests {
             ..ComponentState::new(None, "capsule-1".into(), None)
         };
         assert_eq!(state.in_bus, Duration::ZERO);
+        let asked = Instant::now();
         elastos::bus::capabilities::Host::request(
             &mut state,
             elastos::bus::types::CapabilityRequest {
@@ -1026,9 +1035,10 @@ mod tests {
             },
         )
         .expect("the grant");
+        let wall = asked.elapsed();
         assert!(
-            state.in_bus >= Duration::from_millis(50),
-            "the 50 ms Bus call was counted as {:?}",
+            state.in_bus >= Duration::from_millis(50) && state.in_bus <= wall,
+            "the 50 ms Bus call took {wall:?} and was counted as {:?}",
             state.in_bus
         );
     }
