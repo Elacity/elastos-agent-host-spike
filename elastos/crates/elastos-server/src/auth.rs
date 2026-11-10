@@ -5761,6 +5761,8 @@ pub(crate) fn read_principal_root_object_resolved(
     object_uri: &str,
     path: &Path,
 ) -> anyhow::Result<Vec<u8>> {
+    #[cfg(test)]
+    principal_object_io::record_read(data_dir, path);
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock()
@@ -6078,6 +6080,8 @@ pub(crate) fn write_principal_root_object_resolved(
     path: &Path,
     plaintext: &[u8],
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    principal_object_io::record_write(data_dir, path);
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock()
@@ -17651,5 +17655,83 @@ pub(crate) mod tests {
         )
         .unwrap()
         .exists());
+    }
+
+    #[test]
+    fn typed_io_refuses_foreign_uri_with_its_correct_path() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let principal_id = format!("device:{did}");
+        let root = ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &principal_id)
+            .unwrap();
+        let uri = "localhost://Users/foreign-root/notes.md";
+        let path = rooted_localhost_fs_path(data_dir.path(), uri).unwrap();
+        let error =
+            write_principal_root_object_resolved(data_dir.path(), &root, uri, &path, b"foreign")
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "principal-root object URI is outside the resolved root"
+        );
+        let read_error =
+            read_principal_root_object_resolved(data_dir.path(), &root, uri, &path).unwrap_err();
+        assert_eq!(
+            read_error.to_string(),
+            "principal-root object URI is outside the resolved root"
+        );
+        assert!(!path.exists());
+        assert!(principal_object_io::writes(data_dir.path()).contains(&path));
+        assert!(principal_object_io::reads(data_dir.path()).contains(&path));
+    }
+
+    #[test]
+    fn typed_io_refuses_in_root_uri_with_wrong_path() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let principal_id = format!("device:{did}");
+        let root = ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &principal_id)
+            .unwrap();
+        let uri = format!("{}/notes.md", root.localhost_root());
+        let wrong_uri = format!("{}/other.md", root.localhost_root());
+        let wrong_path = rooted_localhost_fs_path(data_dir.path(), &wrong_uri).unwrap();
+        let error = write_principal_root_object_resolved(
+            data_dir.path(),
+            &root,
+            &uri,
+            &wrong_path,
+            b"wrong path",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "principal-root object path does not match its canonical URI path"
+        );
+        let read_error =
+            read_principal_root_object_resolved(data_dir.path(), &root, &uri, &wrong_path)
+                .unwrap_err();
+        assert_eq!(
+            read_error.to_string(),
+            "principal-root object path does not match its canonical URI path"
+        );
+        assert!(!wrong_path.exists());
+        assert!(principal_object_io::writes(data_dir.path()).contains(&wrong_path));
+        assert!(principal_object_io::reads(data_dir.path()).contains(&wrong_path));
+    }
+
+    #[test]
+    fn typed_io_refuses_remote_root_even_with_canonical_local_path() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let root =
+            ResolvedPrincipalRoot::remote("remote:0123456789abcdef0123456789abcdef").unwrap();
+        let uri = "localhost://Users/foreign-root/notes.md";
+        let path = rooted_localhost_fs_path(data_dir.path(), uri).unwrap();
+        let error =
+            write_principal_root_object_resolved(data_dir.path(), &root, uri, &path, b"remote")
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "principal-root object URI is outside the resolved root"
+        );
+        assert!(!path.exists());
     }
 }

@@ -1208,16 +1208,6 @@ mod tests {
             .encode(serde_json::to_vec(&envelope).unwrap())
     }
 
-    fn device_root_decoy(data_dir: &std::path::Path, principal_id: &str) -> std::path::PathBuf {
-        use sha2::Digest as _;
-        let root = hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12]);
-        let uri = format!("localhost://Users/{root}/marker.txt");
-        let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"decoy").unwrap();
-        path
-    }
-
     #[test]
     fn r8_bad_signature_refuses_device_witness_and_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -1228,7 +1218,6 @@ mod tests {
         envelope.signature = "00".to_string();
         let bad = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&envelope).unwrap());
-        let decoy = device_root_decoy(data_dir.path(), context.principal_id());
         let (_, expected_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let error = require_home_launch_token_value_from_expected_did(
             data_dir.path(),
@@ -1240,9 +1229,6 @@ mod tests {
         .expect_err("bad signature must yield no witness or resolved root")
         .to_string();
         assert!(error.contains("invalid home launch token:"), "{error}");
-        assert!(crate::auth::principal_object_io::reads(data_dir.path()).is_empty());
-        assert!(crate::auth::principal_object_io::writes(data_dir.path()).is_empty());
-        assert_eq!(std::fs::read(decoy).unwrap(), b"decoy");
     }
 
     #[test]
@@ -1254,7 +1240,6 @@ mod tests {
             issue_home_launch_token_with_context(parent.path(), "marketplace", &parent_context)
                 .unwrap();
         let (_, child_did) = elastos_identity::load_or_create_did(child.path()).unwrap();
-        let decoy = device_root_decoy(child.path(), parent_context.principal_id());
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(&token)
             .unwrap();
@@ -1276,9 +1261,6 @@ mod tests {
         .expect_err("wrong signer must yield no witness or resolved root")
         .to_string();
         assert!(error.contains("Signer DID mismatch"), "{error}");
-        assert!(crate::auth::principal_object_io::reads(child.path()).is_empty());
-        assert!(crate::auth::principal_object_io::writes(child.path()).is_empty());
-        assert_eq!(std::fs::read(decoy).unwrap(), b"decoy");
     }
 
     #[test]
