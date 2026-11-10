@@ -1330,7 +1330,14 @@ impl Controller {
             .await?;
             self.previous_version = source.installed_version.clone();
             let data_dir = self.receipt.data_dir.clone();
-            crate::update::run_restarting_update(&data_dir, &fetch, request.head_cid, self).await
+            crate::update::run_restarting_update(
+                &data_dir,
+                &fetch,
+                request.head_cid,
+                self,
+                crate::update::VERSION_CHECK_TIMEOUT,
+            )
+            .await
         }
         .await;
         let closed = self.close_carrier().await;

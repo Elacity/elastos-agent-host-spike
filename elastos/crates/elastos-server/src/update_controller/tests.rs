@@ -10,6 +10,11 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 type SnapshotEntry = (u32, Option<Vec<u8>>, Option<PathBuf>);
 type Snapshot = std::collections::BTreeMap<PathBuf, SnapshotEntry>;
 
+/// Controller tests drive the production restart path under heavy parallel load,
+/// so a candidate's version probe gets far more than the shipped five seconds.
+/// The production controller passes [`crate::update::VERSION_CHECK_TIMEOUT`].
+const TEST_PROBE_DEADLINE: Duration = Duration::from_secs(60);
+
 struct PrivateFixture {
     _root: tempfile::TempDir,
     data: PathBuf,
@@ -3591,9 +3596,14 @@ async fn real_controller_restart_failure(failure: &str, previous_delay: u64) {
     .await;
     let interpreter = fixture.data.join("candidate-interpreter");
     let started = std::time::Instant::now();
-    let result =
-        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
-            .await;
+    let result = crate::update::run_restarting_update(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
     assert!(started.elapsed() >= Duration::from_secs(previous_delay));
     owner.controller.publish_apply_result(&result).unwrap();
     let error = format!("{:#}", result.unwrap_err());
@@ -3763,9 +3773,14 @@ async fn real_controller_accepts_a_new_home_ready_after_45_seconds() {
     )
     .await;
     let started = std::time::Instant::now();
-    let result =
-        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
-            .await;
+    let result = crate::update::run_restarting_update(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
     owner.controller.publish_apply_result(&result).unwrap();
     result.unwrap();
     assert!(started.elapsed() >= Duration::from_secs(45));
@@ -3803,9 +3818,14 @@ async fn dead_previous_start() -> (PrivateFixture, Vec<(PathBuf, Vec<u8>)>) {
         old,
     } = restart_scenario(crash_candidate, 0, Some(Duration::from_secs(3))).await;
     fixture.file(&fixture.data.join("previous-fail"), b"", 0o600);
-    let result =
-        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
-            .await;
+    let result = crate::update::run_restarting_update(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
     owner.controller.publish_apply_result(&result).unwrap();
     let error = format!("{:#}", result.unwrap_err());
     assert!(
@@ -3910,9 +3930,14 @@ async fn unspawnable_rollback_start_is_started_by_the_next_run() {
         Some(Duration::from_secs(3)),
     )
     .await;
-    let result =
-        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
-            .await;
+    let result = crate::update::run_restarting_update(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
     let error = format!("{:#}", result.unwrap_err());
     assert!(
         error.contains("previous Home did not become ready; retain recovery journal")
@@ -5061,6 +5086,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             &fetch,
             request.head_cid,
             &mut owner,
+            TEST_PROBE_DEADLINE,
         )
         .await;
         owner.controller.publish_apply_result(&result).unwrap();
@@ -5364,6 +5390,7 @@ async fn system_update_fetches_the_pinned_network_before_stop_and_joins_after_ac
             &fetch,
             request.head_cid,
             &mut owner,
+            TEST_PROBE_DEADLINE,
         )
         .await;
         owner.controller.publish_apply_result(&result).unwrap();

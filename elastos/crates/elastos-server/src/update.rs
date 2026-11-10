@@ -353,7 +353,7 @@ async fn verify_candidate_before_migration(
 
 /// Hard limit for an untrusted candidate's `--version` probe. Every build
 /// ships this value; callers that need another deadline pass it explicitly.
-const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const _: () = assert!(VERSION_CHECK_TIMEOUT.as_secs() == 5);
 
 async fn verify_installed_binary_version(
@@ -671,6 +671,7 @@ pub(crate) async fn run_update_for_data_dir_in_context(
         repair_invalid_version,
         carrier_context,
         ApplyMode::Normal,
+        VERSION_CHECK_TIMEOUT,
     )
     .await
 }
@@ -702,6 +703,7 @@ pub async fn run_frozen_update_for_data_dir(
         false,
         crate::setup::FirstPartyCarrierContext::Setup,
         ApplyMode::FrozenOffline,
+        VERSION_CHECK_TIMEOUT,
     )
     .await
 }
@@ -832,11 +834,15 @@ pub(crate) trait RestartOwner: Send {
     fn stop<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 }
 
+/// Runs the frozen offline update owned by a Home restart controller. The
+/// controller passes the deadline for the untrusted candidate's version probe:
+/// production passes [`VERSION_CHECK_TIMEOUT`]; tests may pass a generous one.
 pub(crate) async fn run_restarting_update(
     data_dir: &Path,
     fetch_fn: &FetchFn,
     head_cid: String,
     owner: &mut dyn RestartOwner,
+    probe_deadline: std::time::Duration,
 ) -> anyhow::Result<()> {
     run_update_with_restart(
         data_dir,
@@ -851,6 +857,7 @@ pub(crate) async fn run_restarting_update(
         crate::setup::FirstPartyCarrierContext::Setup,
         ApplyMode::FrozenOffline,
         Some(owner),
+        probe_deadline,
     )
     .await
 }
@@ -868,6 +875,7 @@ async fn run_update_for_data_dir_with_mode(
     repair_invalid_version: bool,
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
+    probe_deadline: std::time::Duration,
 ) -> anyhow::Result<()> {
     on_heap(|| {
         run_update_with_restart(
@@ -883,6 +891,7 @@ async fn run_update_for_data_dir_with_mode(
             carrier_context,
             apply_mode,
             None,
+            probe_deadline,
         )
     })
     .await
@@ -902,6 +911,7 @@ async fn run_update_with_restart(
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
     restart_owner: Option<&mut dyn RestartOwner>,
+    probe_deadline: std::time::Duration,
 ) -> anyhow::Result<()> {
     if !check_only {
         recover_pending_installation(data_dir)?;
@@ -1034,6 +1044,7 @@ async fn run_update_with_restart(
             carrier_context,
             apply_mode,
             restart_owner,
+            probe_deadline,
         )
     })
     .await
@@ -1167,6 +1178,7 @@ async fn run_upgrade_from_head(
         carrier_context,
         apply_mode,
         None,
+        VERSION_CHECK_TIMEOUT,
     )
     .await
 }
@@ -1191,6 +1203,7 @@ async fn run_upgrade_with_restart(
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
     mut restart_owner: Option<&mut dyn RestartOwner>,
+    probe_deadline: std::time::Duration,
 ) -> anyhow::Result<()> {
     // Admit the exact signed publication before check-only/version success or artifacts.
     if release_cid.is_empty() {
@@ -1590,12 +1603,7 @@ async fn run_upgrade_with_restart(
         ];
         transaction.preflight_prepare(&files, &previous.head, &previous.release)?;
         on_heap(|| {
-            verify_candidate_before_migration(
-                &transaction,
-                &binary_data,
-                version,
-                VERSION_CHECK_TIMEOUT,
-            )
+            verify_candidate_before_migration(&transaction, &binary_data, version, probe_deadline)
         })
         .await?;
         crate::installed_release::load_or_migrate_for_update(
@@ -1810,12 +1818,7 @@ async fn run_upgrade_with_restart(
     ];
     transaction.preflight_prepare(&files, &previous.head, &previous.release)?;
     on_heap(|| {
-        verify_candidate_before_migration(
-            &transaction,
-            &binary_data,
-            version,
-            VERSION_CHECK_TIMEOUT,
-        )
+        verify_candidate_before_migration(&transaction, &binary_data, version, probe_deadline)
     })
     .await?;
     crate::installed_release::load_or_migrate_for_update(
@@ -3470,6 +3473,7 @@ mod tests {
             repair_invalid_version,
             crate::setup::FirstPartyCarrierContext::Setup,
             mode,
+            VERSION_CHECK_TIMEOUT,
         )
         .await
     }
@@ -3996,6 +4000,7 @@ mod tests {
                     false,
                     crate::setup::FirstPartyCarrierContext::Setup,
                     mode,
+                    VERSION_CHECK_TIMEOUT,
                 )
                 .await
                 .unwrap_err();
