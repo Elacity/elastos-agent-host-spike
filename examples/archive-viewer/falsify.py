@@ -822,9 +822,11 @@ def check_runtime_isolation(args, host_tests, guest_tests):
                 code, summaries, results = host_suite()
             finally:
                 path.write_bytes(saved)
-                kit.restored([path])
                 if restore_extra is not None:
                     restore_extra()
+                # After every file is back: this rebuilds the component and
+                # requires the restored crate to be compiled.
+                kit.restored([path])
             executed.append(name)
             named = set(tests)
             failed = {test for test, state in results.items() if state == "FAILED"}
@@ -916,8 +918,8 @@ def measure_variants():
             shares = fuel_run()
         finally:
             zip_path.write_bytes(saved)
-            kit.restored([zip_path])
             restore_copy_mutant()
+            kit.restored([zip_path if reader else HERE / PREVIEW])
         print(f"{label}:", flush=True)
         for archive, fuel, share in shares:
             print(f"  {archive}: {fuel} fuel ({share}%)", flush=True)

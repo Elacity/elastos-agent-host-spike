@@ -318,10 +318,6 @@ CASES = [
 ]
 
 
-def run(args):
-    return kit.run(args, ROOT)
-
-
 def build(relative):
     # kit.build stops the run unless Cargo compiled the crate of the mutant in place.
     if relative.startswith("guests/"):
@@ -331,13 +327,10 @@ def build(relative):
 
 
 def tests_fail(tests):
-    for target, name in tests:
-        result = run(["cargo", "test", "--locked", "-p", "bus2-host", "--test", target, "--", "--exact", name])
-        if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
-            raise SystemExit(f"no test {target}::{name}\n{result.stdout[-1500:]}{result.stderr[-1500:]}")
-        if result.returncode == 0:
-            return False
-    return True
+    # Every named test is run, and each must fail by its own result line
+    # (kit.cargo_test_fails reads that line, not Cargo's exit code).
+    results = [kit.cargo_test_fails(ROOT, ["-p", "bus2-host", "--test", target], name) for target, name in tests]
+    return all(results)
 
 
 def main():
@@ -365,9 +358,9 @@ def main():
             caught = tests_fail(tests)
         finally:
             path.write_bytes(saved)
+            # Rebuilds what the mutant was built with and requires the restored
+            # crate to be compiled: no case starts from the previous mutant.
             kit.restored([path])
-            if relative.startswith("guests/"):
-                build(relative)
         print(f"{'caught' if caught else 'MISSED'}: {name}", flush=True)
         if not caught:
             missed.append(name)
