@@ -3144,7 +3144,10 @@ mod owner_recovery_tests {
         let recovered =
             load_principal_for_proof_binding(home.root.path(), &grant.proof_binding_id).unwrap();
         assert_eq!(recovered.principal_id, home.admin.principal_id);
-        assert_eq!(recovered.localhost_root, home.admin.localhost_root);
+        assert_eq!(
+            recovered.localhost_root,
+            "localhost://Users/8872484176d4e15e206171c8"
+        );
         assert_eq!(recovered.role, RuntimePrincipalRole::Admin);
         assert!(
             load_principal_for_proof_binding(home.root.path(), &home.admin.proof_binding_id)
@@ -3677,6 +3680,10 @@ mod owner_enrollment_tests {
         .unwrap()
         .unwrap();
         let auth = load_auth_state(root.path()).unwrap();
+        assert_eq!(
+            auth.principals[0].localhost_root,
+            "localhost://Users/8872484176d4e15e206171c8"
+        );
         assert_eq!(auth.principals[0].display_name, "Private label");
         assert!(auth.principals[0].initial_profile_display_name.is_none());
         let OwnerEnrollmentPhase::Consumed { verification, .. } =
