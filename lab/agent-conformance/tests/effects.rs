@@ -1136,9 +1136,15 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
     let view = standin
         .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
         .map_err(|(_, reason)| reason)?;
-    match grants::live_grant_state(&view) {
-        Ok("pending:0 grants:0") => {}
-        Ok(state) => return Err(state.to_owned()),
+    match grants::live_grant_state(&view, &standin.minted_grant_ids()) {
+        Ok(grants::GrantCensus::Empty) => {}
+        Ok(grants::GrantCensus::MissingScope) => {
+            return Err("pending:0 grants:BLOCKED(AC-021-GRANTS)".to_owned())
+        }
+        Ok(grants::GrantCensus::Live(_, false)) => return Err("live grant leftover".to_owned()),
+        Ok(grants::GrantCensus::Live(ids, true)) => {
+            return Err(format!("live grant is not this run's: {ids:?}"))
+        }
         Err(reason) => return Err(reason.to_owned()),
     }
     let listed = standin
@@ -1363,9 +1369,10 @@ fn standin_stopped_run_leaves_no_live_grant() {
         "the stand-in lists exactly the two seeded grants"
     );
     let census = standin_a12_census(&stopped_run, &home, port);
-    assert!(
-        matches!(&census, Err(reason) if reason.contains("live grant leftover")),
-        "the stand-in keeps the seeded grants live before the stops: {census:?}"
+    assert_eq!(
+        census,
+        Err("live grant is not this run's: {\"req-1\", \"req-2\"}".to_owned()),
+        "the seeded grants were not minted by this run, so the census reports them as foreign"
     );
     let mut running_run = StandIn::new();
     assert_eq!(
@@ -1445,6 +1452,26 @@ fn standin_stopped_run_leaves_no_live_grant() {
         standin_a12_census_settles(&stopped_run, &home, port).is_ok(),
         "the stand-in leaves no live grant, live instance, pending request or physical leftover after both stops"
     );
+    stopped_run
+        .seed_request(
+            "req-late",
+            "component-1",
+            "localhost://Public/resident-instances/shared.txt",
+            "read",
+            "read after the stop",
+        )
+        .expect("the stand-in stores one pending request after the stop");
+    let census = standin_a12_census(&stopped_run, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason == "pending request leftover"),
+        "the stand-in refuses a pending request after the stop: {census:?}"
+    );
+    stopped_run
+        .post_capability_deny(
+            StandInCaller::Shell,
+            &json!({ "request_id": "req-late", "reason": "settle the late request" }),
+        )
+        .expect("the stand-in denies the late request");
     let leftover = home.temp().join("a12-temp-leftover");
     std::fs::write(&leftover, b"leftover").expect("the stand-in run plants one temp file");
     let census = standin_a12_census(&stopped_run, &home, port);
@@ -1511,6 +1538,44 @@ fn standin_stopped_run_leaves_no_live_grant() {
     );
     home.finish()
         .expect("the stand-in run removes its throwaway home");
+}
+
+/// M1 check A12. A live grant this run did not mint is a foreign or stale
+/// grant and fails the census; it never folds into the known AC-021 leftover.
+#[test]
+fn standin_a12_census_refuses_a_foreign_seeded_grant() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("the stand-in foreign-grant run binds one loopback port");
+    let port = listener
+        .local_addr()
+        .expect("the stand-in foreign-grant run reads its port")
+        .port();
+    drop(listener);
+    let home =
+        ThrowawayHome::new().expect("the stand-in foreign-grant run uses one throwaway home");
+    let mut standin = StandIn::new();
+    assert_eq!(
+        standin_a12_census(&standin, &home, port),
+        Ok(()),
+        "the empty store is a clean census before the foreign grant is seeded"
+    );
+    standin.seed_grant(
+        "req-foreign",
+        "component-1",
+        STANDIN_RESOURCE,
+        "read",
+        "session",
+        0,
+        Life::Live,
+        false,
+    );
+    assert_eq!(
+        standin_a12_census(&standin, &home, port),
+        Err("live grant is not this run's: {\"req-foreign\"}".to_owned()),
+        "a seeded grant this run did not mint is foreign, not the AC-021 leftover"
+    );
+    home.finish()
+        .expect("the stand-in foreign-grant run removes its throwaway home");
 }
 
 const STANDIN_SHARED_NAME: &str = SHARED_NAME;

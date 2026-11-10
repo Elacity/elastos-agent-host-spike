@@ -507,10 +507,12 @@ Homes after capture, source and report checks. The census tool's scratch Home
 is removed after its captures join the existing credential-check inventory.
 
 The grant result is `pending:0 grants:0` when the scoped view holds no live
-grant, and `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)` while a run's
-client grants stay live after client exit. The census asks the shell-only live
-view (`?scope=all_sessions_live`); this lane performs zero revocations, so the
-blocked line reports the real AC-021 gap rather than a cleaned fixture.
+grant, and `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)` while live grants
+that this run's fixture minted stay after client exit. The census asks the
+shell-only live view (`?scope=all_sessions_live`) and compares each live id with
+the fixture's own minted set; a live id the run did not mint fails as a foreign
+or stale grant. This lane performs zero revocations, so the blocked line
+reports the real AC-021 gap rather than a cleaned fixture.
 `run_leaves_no_live_grant` stays an ignored table row. F-cleanup-grant waits
 for that row. F-cleanup-temp and F-cleanup-process run the existing
 `granted_read_succeeds` test; both must fail for their planted reason, then

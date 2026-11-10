@@ -432,6 +432,8 @@ pub struct Controller {
     pub decisions: Decisions,
     overlap: Option<Overlap>,
     requests: Vec<Value>,
+    /// Request ids this run's fixture minted; the census compares live ids with it.
+    minted: BTreeSet<String>,
 }
 
 /// One attached client session on the run client's attach route.
@@ -498,6 +500,7 @@ impl Controller {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+            minted: BTreeSet::new(),
         })
     }
 
@@ -803,6 +806,7 @@ impl Controller {
                     }),
                 )?;
                 require_success(&response)?;
+                self.minted.insert(field(request, "request_id")?.to_owned());
                 self.credentials.push(field(&response, "token")?.to_owned());
                 self.used.insert(index);
                 self.decisions.granted += 1;
@@ -852,8 +856,7 @@ impl Controller {
         Ok(())
     }
 
-    /// Shell pending is global. The current grant list is session-local, so
-    /// it supplies zero proof about a collected run client's live grants.
+    /// Shell pending is global. Scoped live ids are compared with this run's grants.
     pub fn cleanup_state(&self) -> Result<&'static str> {
         let pending = self.pending()?;
         require_empty_pending(&pending)?;
@@ -862,13 +865,13 @@ impl Controller {
             "/api/capability/list?scope=all_sessions_live",
             &Value::Null,
         )?;
-        match live_grant_state(&grants) {
-            Ok(state) => Ok(state),
-            // A run client's grants stay live after its exit. The real census
-            // reports them as the known AC-021 gap, so they earn zero credit;
-            // the missing-marker state stays distinct.
-            Err("live grant leftover") => Ok("pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)"),
-            Err(reason) => Err(reason),
+        match live_grant_state(&grants, &self.minted)? {
+            GrantCensus::MissingScope => Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)"),
+            GrantCensus::Empty => Ok("pending:0 grants:0"),
+            GrantCensus::Live(_, false) => Ok("pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)"),
+            GrantCensus::Live(_, true) => {
+                Err("live grant is not this run's: foreign or stale grant")
+            }
         }
     }
 
@@ -974,6 +977,7 @@ impl Controller {
             }),
         )?;
         require_success(&granted)?;
+        self.minted.insert(request_id.to_owned());
         self.remember(field(&granted, "token")?)?;
         let status = self.exchange(
             session.bearer_index,
@@ -1521,6 +1525,7 @@ pub fn assert_memory_surfaces() {
         decisions: Decisions::default(),
         overlap: None,
         requests: Vec::new(),
+        minted: BTreeSet::new(),
     };
     let home = ThrowawayHome::new().unwrap();
     assert_eq!(
@@ -1640,22 +1645,37 @@ fn require_empty_pending(response: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn live_grant_state(response: &Value) -> Result<&'static str> {
+/// One shell `?scope=all_sessions_live` answer: its live ids and whether any
+/// id this run did not mint is present.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum GrantCensus {
+    MissingScope,
+    Empty,
+    Live(BTreeSet<String>, bool),
+}
+
+/// The scoped route (`list_capabilities`, `live_capabilities` in
+/// `api/handlers/capability.rs`) filters exhausted, revoked and expired grants.
+pub(super) fn live_grant_state(response: &Value, minted: &BTreeSet<String>) -> Result<GrantCensus> {
     let grants = response["capabilities"]
         .as_array()
         .ok_or("cleanup grant response requires a capability list")?;
-    // The scoped route exists today: `GET /api/capability/list?scope=all_sessions_live`
-    // in `elastos/crates/elastos-server/src/api/handlers/capability.rs`
-    // (`list_capabilities`, `live_capabilities`), which filters exhausted,
-    // revoked and expired grants. A local empty list and audit events cannot
-    // substitute for that evidence.
     if response["scope"] != "all_sessions_live" {
-        return Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)");
+        return Ok(GrantCensus::MissingScope);
     }
-    if !grants.is_empty() {
-        return Err("live grant leftover");
+    if grants.is_empty() {
+        return Ok(GrantCensus::Empty);
     }
-    Ok("pending:0 grants:0")
+    let mut ids = BTreeSet::new();
+    for grant in grants {
+        let id = grant["request_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("live grant entry requires a request id")?;
+        ids.insert(id.to_owned());
+    }
+    let foreign = ids.iter().any(|id| !minted.contains(id));
+    Ok(GrantCensus::Live(ids, foreign))
 }
 
 fn attach_secret(bytes: &[u8]) -> Result<String> {
@@ -2183,20 +2203,51 @@ mod tests {
             Err("pending request leftover")
         );
         assert!(require_empty_pending(&json!({})).is_err());
-        assert!(live_grant_state(&json!({})).is_err());
+        assert!(live_grant_state(&json!({}), &BTreeSet::new()).is_err());
         for capabilities in [json!([]), json!([{}])] {
             assert_eq!(
-                live_grant_state(&json!({"capabilities": capabilities})),
-                Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)")
+                live_grant_state(&json!({"capabilities": capabilities}), &BTreeSet::new()),
+                Ok(GrantCensus::MissingScope)
             );
         }
         assert_eq!(
-            live_grant_state(&json!({"scope":"all_sessions_live", "capabilities": []})),
-            Ok("pending:0 grants:0")
+            live_grant_state(
+                &json!({"scope":"all_sessions_live", "capabilities": []}),
+                &BTreeSet::new()
+            ),
+            Ok(GrantCensus::Empty)
         );
         assert_eq!(
-            live_grant_state(&json!({"scope":"all_sessions_live", "capabilities": [{}]})),
-            Err("live grant leftover")
+            live_grant_state(
+                &json!({"scope":"all_sessions_live", "capabilities": [{}]}),
+                &BTreeSet::new()
+            ),
+            Err("live grant entry requires a request id")
+        );
+    }
+
+    #[test]
+    fn live_grants_are_the_known_gap_only_when_this_run_minted_them() {
+        let minted = BTreeSet::from(["req-run-a".to_owned()]);
+        let view = |ids: &[&str]| {
+            json!({"scope": "all_sessions_live", "capabilities": ids
+                .iter().map(|id| json!({"request_id": id})).collect::<Vec<_>>()})
+        };
+        assert_eq!(
+            live_grant_state(&view(&["req-run-a"]), &minted),
+            Ok(GrantCensus::Live(
+                BTreeSet::from(["req-run-a".into()]),
+                false
+            )),
+            "a live grant this run minted is the known AC-021 gap"
+        );
+        assert_eq!(
+            live_grant_state(&view(&["req-run-a", "req-foreign"]), &minted),
+            Ok(GrantCensus::Live(
+                BTreeSet::from(["req-run-a".into(), "req-foreign".into()]),
+                true
+            )),
+            "a live grant this run did not mint is never the known AC-021 gap"
         );
     }
 
@@ -2381,6 +2432,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+            minted: BTreeSet::new(),
         }
     }
 
@@ -2565,6 +2617,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+            minted: BTreeSet::new(),
         };
         assert_eq!(
             controller.remember_client_bearer(
@@ -2911,6 +2964,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: Some(overlap),
             requests: Vec::new(),
+            minted: BTreeSet::new(),
         };
         let completions: Vec<_> = [9, 0]
             .into_iter()
@@ -3030,6 +3084,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: Some(overlap),
             requests: Vec::new(),
+            minted: BTreeSet::new(),
         };
         let mut running = RunningInstances::start(&[], None).unwrap();
         let result = controller.poll(&mut running);
@@ -3129,6 +3184,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: Some(Overlap::new()),
             requests: Vec::new(),
+            minted: BTreeSet::new(),
         };
         let lines = [
             "instance overlap: synthetic",
@@ -3200,6 +3256,7 @@ mod tests {
             decisions: Decisions::default(),
             overlap: None,
             requests: Vec::new(),
+            minted: BTreeSet::new(),
         };
         assert!(controller
             .check_bytes(b"ordinary output", Surface::Stdout)
