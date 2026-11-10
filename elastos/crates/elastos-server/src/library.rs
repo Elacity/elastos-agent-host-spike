@@ -2449,6 +2449,9 @@ fn record_publication_id(record: &LibraryPublishRecord) -> String {
 fn remove_runtime_file(data_dir: &Path, uri: &str) -> anyhow::Result<()> {
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
+    // A removal mutates the path, so tests record it as a write.
+    #[cfg(test)]
+    crate::auth::principal_object_io::record_write(data_dir, &path);
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -8202,6 +8205,9 @@ fn remove_trash_record(data_dir: &Path, principal_id: &str, trash_uri: &str) -> 
     let record_uri = trash_record_uri(&root, trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
+    // A removal mutates the path, so tests record it as a write.
+    #[cfg(test)]
+    crate::auth::principal_object_io::record_write(data_dir, &record_path);
     match fs::remove_file(record_path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -11219,6 +11225,7 @@ mod r5a_tests {
             fs::read(&id_path).unwrap_or_default(),
             b"id-rule trash record"
         );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
@@ -11253,6 +11260,7 @@ mod r5a_tests {
         );
         assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes);
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11285,6 +11293,8 @@ mod r5a_tests {
             fs::read(&id_path).unwrap_or_default(),
             b"id-rule trash record"
         );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     fn published(root: &str) -> LibraryPublishRecord {
@@ -11328,6 +11338,7 @@ mod r5a_tests {
         );
         assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes);
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11363,6 +11374,7 @@ mod r5a_tests {
             fs::read(&id_path).unwrap_or_default(),
             b"id-rule publish record"
         );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
@@ -11396,6 +11408,8 @@ mod r5a_tests {
             fs::read(&id_path).unwrap_or_default(),
             b"id-rule publish record"
         );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     fn event(root: &str) -> LibraryEvent {
@@ -11442,6 +11456,7 @@ mod r5a_tests {
         );
         assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes.as_bytes());
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11475,6 +11490,7 @@ mod r5a_tests {
         );
         assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes.as_bytes());
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
     #[test]
@@ -11506,6 +11522,7 @@ mod r5a_tests {
             "{result:?}"
         );
         assert_eq!(fs::read(&id_path).unwrap_or_default(), b"id-rule event log");
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
