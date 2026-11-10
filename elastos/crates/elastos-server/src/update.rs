@@ -321,12 +321,45 @@ pub fn evict_changed_capsule_cache(data_dir: &std::path::Path, changed_capsules:
     cleared
 }
 
+/// The probe deadline is a value only its own module can construct. Production
+/// code names none other than [`probe_deadline::shipped`]; tests use the
+/// `cfg(test)` constructor.
+mod probe_deadline {
+    use std::time::Duration;
+
+    /// Hard limit for an untrusted candidate's `--version` probe. Production
+    /// entries always use this value.
+    pub(super) const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+    const _: () = assert!(VERSION_CHECK_TIMEOUT.as_nanos() == 5_000_000_000);
+
+    #[derive(Clone, Copy)]
+    pub(super) struct ProbeDeadline(Duration);
+
+    /// The only constructor that production code can call.
+    pub(super) fn shipped() -> ProbeDeadline {
+        ProbeDeadline(VERSION_CHECK_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(duration: Duration) -> ProbeDeadline {
+        ProbeDeadline(duration)
+    }
+
+    impl ProbeDeadline {
+        pub(super) fn duration(self) -> Duration {
+            self.0
+        }
+    }
+}
+
+use probe_deadline::ProbeDeadline;
+
 /// The owned probe lives beside the installed binary and closes before migration.
 async fn verify_candidate_before_migration(
     transaction: &InstallTransaction,
     bytes: &[u8],
     version: &str,
-    deadline: std::time::Duration,
+    deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -351,16 +384,10 @@ async fn verify_candidate_before_migration(
     verify_installed_binary_version(&path, version, deadline).await
 }
 
-/// Hard limit for an untrusted candidate's `--version` probe. Production
-/// entries always use this value; only the `#[cfg(test)]` siblings take a
-/// caller-chosen deadline.
-pub(crate) const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const _: () = assert!(VERSION_CHECK_TIMEOUT.as_nanos() == 5_000_000_000);
-
 async fn verify_installed_binary_version(
     bin_path: &Path,
     expected_version: &str,
-    deadline: std::time::Duration,
+    deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     use tokio::io::AsyncReadExt;
@@ -385,7 +412,7 @@ async fn verify_installed_binary_version(
     let mut stderr = child.stderr.take().unwrap().take(4097);
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let result = tokio::time::timeout(deadline, async {
+    let result = tokio::time::timeout(deadline.duration(), async {
         // Keep the leader unreaped until pipe admission has finished. Its PID
         // then anchors the owned process group throughout any timeout cleanup.
         tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
@@ -409,7 +436,7 @@ async fn verify_installed_binary_version(
             match failure {
                 Err(_) => anyhow::bail!(
                     "installed binary version check timed out after {} seconds",
-                    deadline.as_secs()
+                    deadline.duration().as_secs()
                 ),
                 Ok(Err(error)) => return Err(error.into()),
                 _ => unreachable!(),
@@ -834,7 +861,8 @@ pub(crate) trait RestartOwner: Send {
 }
 
 /// Runs the frozen offline update owned by a Home restart controller. The
-/// untrusted candidate's version probe always uses [`VERSION_CHECK_TIMEOUT`];
+/// untrusted candidate's version probe always uses
+/// [`probe_deadline::VERSION_CHECK_TIMEOUT`];
 /// the entry has no deadline parameter, so a production caller cannot name
 /// another value. Controller tests use the `#[cfg(test)]` sibling.
 pub(crate) async fn run_restarting_update(
@@ -856,7 +884,7 @@ pub(crate) async fn run_restarting_update(
         crate::setup::FirstPartyCarrierContext::Setup,
         ApplyMode::FrozenOffline,
         Some(owner),
-        VERSION_CHECK_TIMEOUT,
+        probe_deadline::shipped(),
     )
     .await
 }
@@ -883,7 +911,7 @@ pub(crate) async fn run_restarting_update_with_deadline(
         crate::setup::FirstPartyCarrierContext::Setup,
         ApplyMode::FrozenOffline,
         Some(owner),
-        probe_deadline,
+        probe_deadline::for_test(probe_deadline),
     )
     .await
 }
@@ -916,7 +944,7 @@ async fn run_update_for_data_dir_with_mode(
             carrier_context,
             apply_mode,
             None,
-            VERSION_CHECK_TIMEOUT,
+            probe_deadline::shipped(),
         )
     })
     .await
@@ -953,7 +981,7 @@ async fn run_update_for_data_dir_with_mode_with_deadline(
             carrier_context,
             apply_mode,
             None,
-            probe_deadline,
+            probe_deadline::for_test(probe_deadline),
         )
     })
     .await
@@ -973,7 +1001,7 @@ async fn run_update_with_restart(
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
     restart_owner: Option<&mut dyn RestartOwner>,
-    probe_deadline: std::time::Duration,
+    probe_deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     if !check_only {
         recover_pending_installation(data_dir)?;
@@ -1240,7 +1268,7 @@ async fn run_upgrade_from_head(
         carrier_context,
         apply_mode,
         None,
-        VERSION_CHECK_TIMEOUT,
+        probe_deadline::shipped(),
     )
     .await
 }
@@ -1265,7 +1293,7 @@ async fn run_upgrade_with_restart(
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
     mut restart_owner: Option<&mut dyn RestartOwner>,
-    probe_deadline: std::time::Duration,
+    probe_deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     // Admit the exact signed publication before check-only/version success or artifacts.
     if release_cid.is_empty() {
@@ -2295,6 +2323,7 @@ fn optional_release_object_cid(head: &serde_json::Value) -> anyhow::Result<Optio
 mod tests {
     use super::*;
     use crate::sources::save_trusted_sources;
+    use probe_deadline::VERSION_CHECK_TIMEOUT;
 
     #[test]
     fn home_stopped_line_names_the_installed_binary() {
@@ -5045,9 +5074,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (bin, release) =
             crate::install_transaction::tests::briefly_busy_binary(dir.path(), "0.1.0");
-        verify_installed_binary_version(&bin, "0.1.0", VERSION_CHECK_TIMEOUT)
-            .await
-            .unwrap();
+        verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            probe_deadline::for_test(VERSION_CHECK_TIMEOUT),
+        )
+        .await
+        .unwrap();
         release.join().unwrap();
         assert!(
             crate::install_transaction::TEXT_FILE_BUSY_SEEN.get() >= 1,
@@ -5069,9 +5102,13 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         // Six seconds is slower than the shipped bound, so a loaded harness
         // needs an explicit generous deadline instead of the production one.
-        verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(30))
-            .await
-            .unwrap();
+        verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            probe_deadline::for_test(std::time::Duration::from_secs(30)),
+        )
+        .await
+        .unwrap();
     }
 
     /// Waits for the candidate shell to publish its grandchild PID. A starved
@@ -5124,10 +5161,13 @@ mod tests {
         let bin = dir.path().join("hung-candidate");
         std::fs::write(&bin, b"#!/bin/sh\nexec sleep 3600\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let error =
-            verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(1))
-                .await
-                .unwrap_err();
+        let error = verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            probe_deadline::for_test(std::time::Duration::from_secs(1)),
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.to_string().contains("timed out after 1 seconds"),
             "{error:#}"
@@ -5148,7 +5188,7 @@ mod tests {
         std::fs::write(&bin, b"#!/bin/sh\nexec sleep 3600\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         let started = std::time::Instant::now();
-        let error = verify_installed_binary_version(&bin, "0.1.0", VERSION_CHECK_TIMEOUT)
+        let error = verify_installed_binary_version(&bin, "0.1.0", probe_deadline::shipped())
             .await
             .unwrap_err();
         let elapsed = started.elapsed();
@@ -5189,7 +5229,7 @@ mod tests {
         let mut probe = Box::pin(verify_installed_binary_version(
             &bin,
             "0.1.0",
-            LEAKY_PROBE_DEADLINE,
+            probe_deadline::for_test(LEAKY_PROBE_DEADLINE),
         ));
         // Run both to completion, so the probe's group clean-up finishes before
         // any assertion. A panic inside the old select! could drop the pending
