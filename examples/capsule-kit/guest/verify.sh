@@ -17,6 +17,8 @@ cargo fmt --manifest-path "${KIT_DIR}/../v1-host-test/Cargo.toml" -- --check
 cargo test --locked --manifest-path "${KIT_DIR}/../v1-host-test/Cargo.toml"
 python3 -I "${KIT_DIR}/../v1-host-test/falsify.py"
 python3 -I "${KIT_DIR}/../falsify/test_falsify_kit.py"
+# The runner's own rules, each broken in a temporary copy: its test must fail.
+python3 -I "${KIT_DIR}/../falsify/plant_falsify_kit.py"
 python3 -I "${KIT_DIR}/falsify.py"
 
 echo "capsule kit guest crate verification: OK"

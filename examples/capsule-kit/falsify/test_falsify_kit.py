@@ -30,6 +30,15 @@ class Runner(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
+    def goes_on(self, work):
+        """Runs `work`, which must not stop the run. A stop is a failed
+        assertion here, not an error: a plant that makes the runner stop
+        where it should go on must turn the test red, not crash it."""
+        try:
+            return work()
+        except SystemExit as stop:
+            self.fail(f"the run stopped where it should have gone on: {stop}")
+
     def run_case(self, outcomes):
         """One case whose named tests fail or pass as `outcomes` says."""
         case = ("the cap is not checked", self.file, [("if size > cap {", "if false {")], list(outcomes))
@@ -165,9 +174,11 @@ class Runner(unittest.TestCase):
 
         case = ("the cap is not checked", self.file, self.CASE, ["a"])
         with self.clock(lambda: 2_000_000.0, run):
-            missed = kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: True)
+            missed = self.goes_on(
+                lambda: kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: True)
+            )
         self.assertEqual(missed, [])
-        self.assertEqual(len(builds), 2, "one more build after the one that rebuilt nothing")
+        self.assertEqual(len(builds), 3, "one more build after the one that rebuilt nothing, then the restore's")
         self.assertEqual(builds[1] - builds[0], 60.0, "the mutant was stamped 60 s ahead before it")
 
     def test_a_mutant_no_build_compiled_stops_the_run_and_is_not_scored(self):
@@ -197,6 +208,22 @@ class Runner(unittest.TestCase):
                 kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: True)
         self.assertIn("did not compile guest with a mutant in", str(stop.exception))
 
+    def test_a_mutant_in_a_file_that_is_not_rust_cannot_be_built_and_scored(self):
+        # A build prints "Compiling <crate>" for Rust sources only. A mutant in
+        # another kind of file, given to a build step, is refused: nothing in
+        # the build's output could show that it was taken in.
+        other = pathlib.Path(self.dir.name) / "settings.toml"
+        other.write_text("cap = 10\n")
+        loud = lambda cmd, cwd: subprocess.CompletedProcess(cmd, 0, "", "   Compiling guest v0.1.0\n")  # noqa: E731
+        case = ("the cap is raised", other, [("cap = 10", "cap = 99")], ["a"])
+        scored = []
+        with self.clock(lambda: 2_000_000.0, loud):
+            with self.assertRaises(SystemExit) as stop:
+                kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: scored.append(name) or True)
+        self.assertIn("not a Rust file", str(stop.exception))
+        self.assertEqual(scored, [])
+        self.assertEqual(other.read_text(), "cap = 10\n")
+
     def test_a_rust_file_in_no_cargo_package_cannot_be_scored(self):
         (pathlib.Path(self.dir.name) / "Cargo.toml").unlink()
         loud = lambda cmd, cwd: subprocess.CompletedProcess(cmd, 0, "", "   Compiling guest v0.1.0\n")  # noqa: E731
@@ -206,46 +233,127 @@ class Runner(unittest.TestCase):
                 kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: True)
         self.assertIn("is in no Cargo package", str(stop.exception))
 
+    FAILED_A = "test a ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out\n"
+
+    def named(self, cmd):
+        """Cargo's output for `-- --exact <name>`: that test's own FAILED line."""
+        return self.FAILED_A.replace("test a ", f"test {cmd[-1]} ")
+
     def test_a_named_test_is_not_run_before_a_build_compiled_the_mutant(self):
         # A group with no build step: the first named test makes the checked
-        # build itself, and a second named test does not build again.
+        # build itself, a second named test does not build again, and the
+        # restore is followed by that same build once more.
         commands = []
 
-        def run(cmd, cwd):
+        def build_then_fail(cmd, cwd):
             commands.append(cmd)
-            return subprocess.CompletedProcess(cmd, 101, "test result: FAILED. 0 passed; 1 failed", "   Compiling guest v0.1.0\n")
-
-        def build_then_pass(cmd, cwd):
-            commands.append(cmd)
-            code = 0 if "--no-run" in cmd else 101
-            return subprocess.CompletedProcess(cmd, code, "test result: FAILED. 0 passed; 1 failed", "   Compiling guest v0.1.0\n")
+            if "--no-run" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", "   Compiling guest v0.1.0\n")
+            return subprocess.CompletedProcess(cmd, 101, self.named(cmd), "   Compiling guest v0.1.0\n")
 
         case = ("the cap is not checked", self.file, self.CASE, ["a", "b"])
-        with self.clock(lambda: 2_000_000.0, build_then_pass):
+        with self.clock(lambda: 2_000_000.0, build_then_fail):
             missed = kit.falsify([case], None, lambda name: kit.cargo_test_fails(self.dir.name, ["--lib"], name))
         self.assertEqual(missed, [])
-        self.assertEqual([("--no-run" in cmd) for cmd in commands], [True, False, False])
+        self.assertEqual([("--no-run" in cmd) for cmd in commands], [True, False, False, True])
+
+    def test_a_restored_file_cargo_did_not_rebuild_stops_the_run(self):
+        # The mutant is built and compiled. After the restore the same build
+        # compiles nothing, twice: the next case would be scored against this
+        # mutant, so the run stops.
+        builds = []
+
+        def run(cmd, cwd):
+            builds.append(self.file.read_text())
+            stderr = "   Compiling guest v0.1.0\n" if len(builds) == 1 else "    Finished `test` profile\n"
+            return subprocess.CompletedProcess(cmd, 0, "", stderr)
+
+        before = self.file.read_text()
+        case = ("the cap is not checked", self.file, self.CASE, ["a"])
+        with self.clock(lambda: 2_000_000.0, run):
+            with self.assertRaises(SystemExit) as stop:
+                kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: True)
+        self.assertIn("did not compile guest with a mutant in", str(stop.exception))
+        self.assertEqual(len(builds), 3, "the mutant's build, the restore's build and its one retry")
+        self.assertNotEqual(builds[0], before, "the first build saw the mutant")
+        self.assertEqual(builds[1:], [before, before], "the builds after the restore saw the original bytes")
+
+    def test_a_build_that_had_to_be_made_again_says_so(self):
+        out = io.StringIO()
+        seen = []
+
+        def run(cmd, cwd):
+            seen.append(cmd)
+            stderr = "    Finished\n" if len(seen) == 1 else "   Compiling guest v0.1.0\n"
+            return subprocess.CompletedProcess(cmd, 0, "", stderr)
+
+        case = ("the cap is not checked", self.file, self.CASE, ["a"])
+        with self.clock(lambda: 2_000_000.0, run):
+            with contextlib.redirect_stdout(out):
+                kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: True)
+        self.assertEqual(out.getvalue().count("built again, stamped ahead: the first build did not compile guest"), 1)
+
+    def test_a_named_test_failed_only_if_its_own_line_says_failed(self):
+        def result(code, stdout):
+            return lambda cmd, cwd: subprocess.CompletedProcess(cmd, code, stdout, "")
+
+        ok = "test a ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out\n"
+        with self.clock(lambda: 2_000_000.0, result(101, self.FAILED_A)):
+            self.assertTrue(kit.cargo_test_fails(self.dir.name, [], "a"))
+        # Cargo exits non-zero (a doc-test or another test binary failed) while
+        # the named test itself passed: that is not a catch.
+        other = ok + "\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        with self.clock(lambda: 2_000_000.0, result(101, other)):
+            self.assertFalse(kit.cargo_test_fails(self.dir.name, [], "a"))
+        # A should-panic test's line.
+        panics = self.FAILED_A.replace("test a ...", "test a - should panic ...")
+        with self.clock(lambda: 2_000_000.0, result(101, panics)):
+            self.assertTrue(kit.cargo_test_fails(self.dir.name, [], "a"))
+        # No line for the named test: "11 passed" or a longer name must not do.
+        for stdout in (
+            "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            "test ab ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored\n",
+            self.FAILED_A + self.FAILED_A,
+        ):
+            with self.clock(lambda: 2_000_000.0, result(101, stdout)):
+                with self.assertRaises(SystemExit) as stop:
+                    kit.cargo_test_fails(self.dir.name, [], "a")
+            self.assertIn("not once", str(stop.exception))
+        # The line says FAILED but no binary's summary agrees.
+        with self.clock(lambda: 2_000_000.0, result(101, "test a ... FAILED\n\ntest result: FAILED. 3 passed; 2 failed;\n")):
+            with self.assertRaises(SystemExit) as stop:
+                kit.cargo_test_fails(self.dir.name, [], "a")
+        self.assertIn("no test binary reports", str(stop.exception))
+
+    def test_a_named_test_is_run_without_q_so_that_its_line_is_printed(self):
+        seen = []
+        run = lambda cmd, cwd: (seen.append(cmd), subprocess.CompletedProcess(cmd, 101, self.FAILED_A, ""))[1]  # noqa: E731
+        with self.clock(lambda: 2_000_000.0, run):
+            kit.cargo_test_fails(self.dir.name, ["-q", "--lib"], "a")
+        self.assertEqual(seen, [["cargo", "test", "--locked", "--lib", "--", "--exact", "a"]])
 
     def test_a_named_test_stops_the_run_when_its_own_build_compiled_nothing(self):
-        quiet = lambda cmd, cwd: subprocess.CompletedProcess(cmd, 0, "test result: ok. 1 passed", "    Finished\n")  # noqa: E731
+        quiet = lambda cmd, cwd: subprocess.CompletedProcess(cmd, 0, "test a ... ok\n\ntest result: ok. 1 passed; 0 failed;\n", "    Finished\n")  # noqa: E731
         case = ("the cap is not checked", self.file, self.CASE, ["a"])
         with self.clock(lambda: 2_000_000.0, quiet):
             with self.assertRaises(SystemExit) as stop:
                 kit.falsify([case], None, lambda name: kit.cargo_test_fails(self.dir.name, ["--lib"], name))
         self.assertIn("did not compile guest with a mutant in", str(stop.exception))
 
-    def test_a_mutant_cargo_rebuilt_is_built_once_and_cargo_is_not_told_to_be_quiet(self):
+    def test_a_mutant_is_built_once_and_its_restore_once_and_cargo_is_not_told_to_be_quiet(self):
         builds = []
         run = lambda cmd, cwd: (builds.append(cmd), subprocess.CompletedProcess(cmd, 0, "", "   Compiling guest v0.1.0\n"))[1]  # noqa: E731
         case = ("the cap is not checked", self.file, self.CASE, ["a"])
         with self.clock(lambda: 2_000_000.0, run):
-            kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, ["-q", "--lib"]), lambda name: True)
-        self.assertEqual(builds, [["cargo", "test", "--locked", "--lib", "--no-run"]])
+            self.goes_on(
+                lambda: kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, ["-q", "--lib"]), lambda name: True)
+            )
+        self.assertEqual(builds, [["cargo", "test", "--locked", "--lib", "--no-run"]] * 2)
 
     def test_a_build_with_no_mutant_in_place_only_has_to_pass(self):
         quiet = lambda cmd, cwd: subprocess.CompletedProcess(cmd, 0, "", "    Finished\n")  # noqa: E731
         with self.clock(lambda: 2_000_000.0, quiet):
-            kit.build(["./build.sh"], self.dir.name)
+            self.goes_on(lambda: kit.build(["./build.sh"], self.dir.name))
 
     def test_main_stops_with_the_survivors(self):
         case = ("the cap is not checked", self.file, [("if size > cap {", "if false {")], ["a", "b"])

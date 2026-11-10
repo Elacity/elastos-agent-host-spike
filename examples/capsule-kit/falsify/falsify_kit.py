@@ -38,10 +38,15 @@ import time
 # 2. No test is scored until a build is known to have compiled the mutant:
 #    Cargo printed "Compiling <crate>" for the crate of every Rust file the
 #    mutant changed. A build that did not is tried once more with the files
-#    stamped a minute ahead; if that does not either, the run stops.
+#    stamped a minute ahead (and says so in one printed line); if that does
+#    not either, the run stops.
+# 3. The same holds on the way out: after the original bytes are written back,
+#    the same build is made again and must compile the restored crate, so the
+#    next case cannot be scored against the previous mutant.
 _latest_seen = 0.0
 _planted = []
 _compiled = False
+_last_build = None
 _started = (time.time(), time.monotonic())
 
 
@@ -78,11 +83,21 @@ def planted(paths):
 
 
 def restored(paths):
-    """Says the original bytes have just been written back to `paths`."""
-    global _compiled
-    _planted.clear()
-    _compiled = False
+    """Says the original bytes have just been written back to `paths`, and
+    makes the build this mutant was checked with once more: it must now
+    compile the restored crate, or the run stops (rule 3)."""
+    global _compiled, _last_build
+    paths = [pathlib.Path(path) for path in paths]
     _stamp_after_latest(paths, 1)
+    again, _last_build = _last_build, None
+    try:
+        if again is not None:
+            _planted[:] = paths
+            build(*again)
+    finally:
+        _planted.clear()
+        _compiled = False
+        _last_build = None
 
 
 def env():
@@ -116,7 +131,12 @@ def _crate(path):
 
 
 def _not_compiled(stderr):
-    """The crates of the planted Rust files that this build did not compile."""
+    """The crates of the planted Rust files that this build did not compile.
+    A planted file that is not Rust stops the run: a build's output cannot
+    show that such a file was taken in."""
+    other = [str(path) for path in _planted if not str(path).endswith(".rs")]
+    if other:
+        raise SystemExit(f"a build cannot show that it took in a mutant in {', '.join(other)}: not a Rust file")
     crates = sorted({_crate(path) for path in _planted if str(path).endswith(".rs")})
     return [crate for crate in crates if not re.search(rf"^\s*Compiling {re.escape(crate)} v", stderr, re.M)]
 
@@ -126,9 +146,13 @@ def build(cmd, cwd, failure="a falsifier does not compile"):
     --quiet) that must compile the mutant in place, and stops the run if it
     fails or did not compile the mutant's crate. With no mutant in place it
     only has to pass."""
-    global _compiled
+    global _compiled, _last_build
     result = run(cmd, cwd)
     if result.returncode == 0 and _not_compiled(result.stderr):
+        print(
+            f"built again, stamped ahead: the first build did not compile {', '.join(_not_compiled(result.stderr))}",
+            flush=True,
+        )
         _stamp_after_latest(_planted, 60)
         result = run(cmd, cwd)
         if result.returncode == 0 and _not_compiled(result.stderr):
@@ -141,6 +165,8 @@ def build(cmd, cwd, failure="a falsifier does not compile"):
         print(result.stderr[-3000:])
         raise SystemExit(failure)
     _compiled = bool(_planted)
+    if _planted:
+        _last_build = (cmd, cwd, failure)
     return result
 
 
@@ -219,14 +245,33 @@ def cargo_compiles(cwd, args):
 
 
 def cargo_test_fails(cwd, args, name):
-    """Runs one test by its exact name; it must exist. If no build has
+    """Runs one test by its exact name and says whether THAT test failed.
+
+    The answer is read from the test's own result line and from the summary
+    of the binary that ran it, never from Cargo's exit code: a non-zero exit
+    can come from another test binary, a doc-test or a link step while the
+    named test passed. The named test must have run exactly once. -q is
+    dropped, because a quiet run prints no result line. If no build has
     compiled the Rust mutant in place yet, one is made and checked first."""
     if not _compiled and any(str(path).endswith(".rs") for path in _planted):
         cargo_compiles(cwd, args)
-    result = run(["cargo", "test", "--locked", *args, "--", "--exact", name], cwd)
-    if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
-        raise SystemExit(f"no test {name} in {cwd}\n{result.stdout[-1500:]}{result.stderr[-1500:]}")
-    return result.returncode != 0
+    loud = [arg for arg in args if arg not in ("-q", "--quiet")]
+    result = run(["cargo", "test", "--locked", *loud, "--", "--exact", name], cwd)
+    lines = result.stdout.splitlines()
+    marks = [
+        mark.group(1)
+        for mark in (re.match(rf"^test {re.escape(name)}(?: - should panic)? \.\.\. (ok|FAILED)$", line) for line in lines)
+        if mark
+    ]
+    if len(marks) != 1:
+        raise SystemExit(
+            f"test {name} in {cwd} ran {len(marks)} times, not once\n{result.stdout[-1500:]}{result.stderr[-1500:]}"
+        )
+    failed = marks[0] == "FAILED"
+    summary = "0 passed; 1 failed;" if failed else "1 passed; 0 failed;"
+    if not any(line.startswith("test result:") and summary in line for line in lines):
+        raise SystemExit(f"test {name} in {cwd}: no test binary reports '{summary}'\n{result.stdout[-1500:]}")
+    return failed
 
 
 def node_test_fails(test_file, name):
