@@ -871,32 +871,24 @@ pub(crate) async fn run_restarting_update(
     head_cid: String,
     owner: &mut dyn RestartOwner,
 ) -> anyhow::Result<()> {
-    run_update_with_restart(
+    run_restarting_update_inner(
         data_dir,
         fetch_fn,
-        None,
-        false,
-        Some(head_cid),
-        env!("ELASTOS_VERSION"),
-        true,
-        false,
-        false,
-        crate::setup::FirstPartyCarrierContext::Setup,
-        ApplyMode::FrozenOffline,
-        Some(owner),
+        head_cid,
+        owner,
         probe_deadline::shipped(),
     )
     .await
 }
 
-/// Test-only sibling of [`run_restarting_update`] with a caller-chosen deadline.
-#[cfg(test)]
-pub(crate) async fn run_restarting_update_with_deadline(
+/// Holds the restarting update's production argument list once. The production
+/// entry supplies the shipped deadline; the test sibling supplies its own.
+async fn run_restarting_update_inner(
     data_dir: &Path,
     fetch_fn: &FetchFn,
     head_cid: String,
     owner: &mut dyn RestartOwner,
-    probe_deadline: std::time::Duration,
+    probe_deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     run_update_with_restart(
         data_dir,
@@ -911,6 +903,25 @@ pub(crate) async fn run_restarting_update_with_deadline(
         crate::setup::FirstPartyCarrierContext::Setup,
         ApplyMode::FrozenOffline,
         Some(owner),
+        probe_deadline,
+    )
+    .await
+}
+
+/// Test-only sibling of [`run_restarting_update`] with a caller-chosen deadline.
+#[cfg(test)]
+pub(crate) async fn run_restarting_update_with_deadline(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    head_cid: String,
+    owner: &mut dyn RestartOwner,
+    probe_deadline: std::time::Duration,
+) -> anyhow::Result<()> {
+    run_restarting_update_inner(
+        data_dir,
+        fetch_fn,
+        head_cid,
+        owner,
         probe_deadline::for_test(probe_deadline),
     )
     .await
@@ -930,6 +941,40 @@ async fn run_update_for_data_dir_with_mode(
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
 ) -> anyhow::Result<()> {
+    run_update_for_data_dir_with_mode_inner(
+        data_dir,
+        fetch_fn,
+        try_p2p_fn,
+        check_only,
+        head_cid_override,
+        version,
+        auto_confirm,
+        force,
+        repair_invalid_version,
+        carrier_context,
+        apply_mode,
+        probe_deadline::shipped(),
+    )
+    .await
+}
+
+/// Holds the apply entry's production argument list once. The production entry
+/// supplies the shipped deadline; the test sibling supplies its own.
+#[allow(clippy::too_many_arguments)]
+async fn run_update_for_data_dir_with_mode_inner(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    try_p2p_fn: Option<&TryP2pFn>,
+    check_only: bool,
+    head_cid_override: Option<String>,
+    version: &str,
+    auto_confirm: bool,
+    force: bool,
+    repair_invalid_version: bool,
+    carrier_context: crate::setup::FirstPartyCarrierContext,
+    apply_mode: ApplyMode,
+    probe_deadline: ProbeDeadline,
+) -> anyhow::Result<()> {
     on_heap(|| {
         run_update_with_restart(
             data_dir,
@@ -944,7 +989,7 @@ async fn run_update_for_data_dir_with_mode(
             carrier_context,
             apply_mode,
             None,
-            probe_deadline::shipped(),
+            probe_deadline,
         )
     })
     .await
@@ -967,23 +1012,20 @@ async fn run_update_for_data_dir_with_mode_with_deadline(
     apply_mode: ApplyMode,
     probe_deadline: std::time::Duration,
 ) -> anyhow::Result<()> {
-    on_heap(|| {
-        run_update_with_restart(
-            data_dir,
-            fetch_fn,
-            try_p2p_fn,
-            check_only,
-            head_cid_override,
-            version,
-            auto_confirm,
-            force,
-            repair_invalid_version,
-            carrier_context,
-            apply_mode,
-            None,
-            probe_deadline::for_test(probe_deadline),
-        )
-    })
+    run_update_for_data_dir_with_mode_inner(
+        data_dir,
+        fetch_fn,
+        try_p2p_fn,
+        check_only,
+        head_cid_override,
+        version,
+        auto_confirm,
+        force,
+        repair_invalid_version,
+        carrier_context,
+        apply_mode,
+        probe_deadline::for_test(probe_deadline),
+    )
     .await
 }
 
