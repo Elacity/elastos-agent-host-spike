@@ -643,7 +643,7 @@ pub(in crate::api::gateway) async fn ensure_exact_runtime_transaction_approval(
         }
         true
     } else {
-        let mut intent = prepare_chain_transaction(state, &request).await?;
+        let mut intent = prepare_chain_transaction(state, &request, authority).await?;
         bind_transaction_intent_runtime_context(&mut intent, &request, authority, true)
             .map_err(internal_error)?;
         let mut effect = RuntimeTransactionEffect {
@@ -805,7 +805,7 @@ pub(in crate::api::gateway) async fn ensure_runtime_transaction_approval(
         }
         index
     } else {
-        let mut intent = prepare_chain_transaction(state, &request).await?;
+        let mut intent = prepare_chain_transaction(state, &request, authority).await?;
         bind_transaction_intent_runtime_context(&mut intent, &request, authority, true)
             .map_err(internal_error)?;
         let approval_request_id = wallet_request_id(&request.effect_id, "approval");
@@ -1178,8 +1178,9 @@ pub(in crate::api::gateway) async fn complete_runtime_transaction_effect(
             store.effects[effect_index].state = TransactionEffectState::BroadcastInFlight;
             store.effects[effect_index].updated_at = now_ts();
             save_transaction_effect_store(state, &store)?;
-            let receipt = wallet_chain_provider_data(
+            let receipt = transaction_chain_data(
                 state,
+                &store.effects[effect_index].authority,
                 json!({
                     "op": "broadcast_transaction",
                     "network": network,
@@ -1369,8 +1370,9 @@ async fn reconcile_transaction_effect(
     };
     let mut lookup_errors = Vec::new();
     for op in lookup_operations {
-        match wallet_chain_provider_data(
+        match transaction_chain_data(
             state,
+            &store.effects[effect_index].authority,
             json!({
                 "op": op,
                 "network": network,
@@ -1575,9 +1577,50 @@ async fn wallet_approval(
         })
 }
 
+// Completion can be driven by Inbox or Wallet. Keep network authority bound to
+// the Browser launch which requested this effect, including after a restart.
+async fn transaction_chain_data(
+    state: &GatewayState,
+    authority: &TransactionAuthorityBinding,
+    request: Value,
+) -> Result<Value, (StatusCode, String)> {
+    if authority.actor != BROWSER_CAPSULE_ID {
+        return wallet_chain_provider_data(state, request).await;
+    }
+    let root =
+        super::gateway_home_token::wallet_principal_root(&state.data_dir, &authority.principal_id)
+            .map_err(|err| (StatusCode::FORBIDDEN, err.to_string()))?;
+    let context = HomeLaunchTokenContext::resolved(
+        root,
+        authority.principal_id.clone(),
+        authority.session_id.clone(),
+        authority.proof_binding_id.clone(),
+        authority.grant_id.clone(),
+    );
+    let internet = gateway_browser_internet::effect(
+        state,
+        &context,
+        &authority.actor,
+        &authority.launch_id,
+        false,
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::FORBIDDEN,
+            "Browser internet permission is required".into(),
+        )
+    })?;
+    internet
+        .fence
+        .scope(wallet_chain_provider_data(state, request))
+        .await
+}
+
 async fn prepare_chain_transaction(
     state: &GatewayState,
     request: &RuntimeTransactionRequest,
+    authority: &RuntimeWalletAuthority,
 ) -> Result<Value, (StatusCode, String)> {
     let expected_chain_id = request
         .chain_namespace
@@ -1589,8 +1632,9 @@ async fn prepare_chain_transaction(
                 "transaction request has an invalid EVM namespace".to_string(),
             )
         })?;
-    let intent = wallet_chain_provider_data(
+    let intent = transaction_chain_data(
         state,
+        &transaction_authority(authority),
         json!({
             "op": "prepare_transaction",
             "network": request.network,
@@ -2524,7 +2568,9 @@ fn transaction_effect_location(
     state: &GatewayState,
     principal_id: &str,
 ) -> Result<(String, String, PathBuf), (StatusCode, String)> {
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let root = super::gateway_home_token::wallet_principal_root(&state.data_dir, principal_id)
+        .map_err(internal_error)?;
+    let localhost_root = root.localhost_root().to_string();
     let uri = format!("{localhost_root}/{TRANSACTION_EFFECT_STORE_RELATIVE_PATH}");
     let path = rooted_localhost_fs_path(&state.data_dir, &uri).ok_or_else(|| {
         (
@@ -3419,16 +3465,95 @@ mod approved_request_resume_tests {
         root: &std::path::Path,
         provider_registry: Option<Arc<ProviderRegistry>>,
     ) -> GatewayState {
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        for principal_id in ["principal:test", "principal:other"] {
+            if crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id).is_err()
+            {
+                crate::auth::store_test_human_principal(&data_dir, principal_id);
+            }
+        }
         GatewayState {
             provider_registry,
             collaboration_chat_product_port: None,
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(OnceLock::new()),
             cache_dir: root.join("cache"),
-            data_dir: root.join("data"),
+            data_dir,
         }
+    }
+
+    #[test]
+    fn r4_transaction_effect_location_uses_resolved_root() {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        use crate::auth::PrincipalKind;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_gateway_state(dir.path(), None);
+        assert_eq!(
+            load_transaction_effect_store(&state, ID).unwrap_err().1,
+            "Wallet authority principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = test_gateway_state(dir.path(), None);
+            std::fs::create_dir_all(&state.data_dir).unwrap();
+            store(&state.data_dir, kind);
+            let (actual, uri, path) = transaction_effect_location(&state, ID).unwrap();
+            assert_eq!(actual, expected, "R4 transaction effect root");
+            assert_eq!(
+                uri,
+                format!("{expected}/.AppData/ElastOS/Runtime/transaction-effects.json")
+            );
+            assert_eq!(
+                path,
+                rooted_localhost_fs_path(&state.data_dir, &uri).unwrap()
+            );
+            assert!(load_transaction_effect_store(&state, ID)
+                .unwrap()
+                .effects
+                .is_empty());
+        }
+    }
+
+    /// A persisted Browser transaction authority reaches the Browser internet
+    /// check only with its principal's stored root. With no stored record it
+    /// is refused first: the reason names the root, not the internet
+    /// permission, and nothing under the id-rule folder is read or written.
+    #[tokio::test]
+    async fn a_browser_transaction_authority_with_no_stored_root_is_refused_first() {
+        use crate::auth::r4_fixture::{HUMAN_ROOT, ID};
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_gateway_state(dir.path(), Some(Arc::new(ProviderRegistry::new())));
+        // Real bytes where the principal-id rule would point.
+        let decoy = rooted_localhost_fs_path(
+            &state.data_dir,
+            &format!("{HUMAN_ROOT}/.AppData/ElastOS/Runtime/transaction-effects.json"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+        std::fs::write(&decoy, b"decoy").unwrap();
+        let authority = TransactionAuthorityBinding {
+            principal_id: ID.to_string(),
+            session_id: "auth:r4".to_string(),
+            proof_binding_id: Some("proof:r4".to_string()),
+            grant_id: "grant:r4".to_string(),
+            actor: BROWSER_CAPSULE_ID.to_string(),
+            launch_id: "launch:r4".to_string(),
+        };
+        let (status, reason) = transaction_chain_data(&state, &authority, json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(reason, "Wallet authority principal root unresolved");
+        assert!(crate::auth::principal_object_io::reads(&state.data_dir).is_empty());
+        assert!(crate::auth::principal_object_io::writes(&state.data_dir).is_empty());
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy");
     }
 
     fn test_authority(
@@ -4334,22 +4459,6 @@ mod approved_request_resume_tests {
         let mut store = RuntimeTransactionEffectStore::empty("principal:test");
         store.effects.push(effect);
         save_transaction_effect_store(&state, &store).unwrap();
-
-        // The fixture principal is stored where the Home launch resolver reads
-        // (A5-P2a-ii-0b builds this authority's root from it).
-        crate::auth::upsert_principal_for_binding_as(
-            &state.data_dir,
-            elastos_runtime::auth::ProofBinding {
-                kind: elastos_runtime::auth::ProofBindingKind::DidKey,
-                subject: "did:key:z6MkresumeTestFixture".to_string(),
-                chain_id: None,
-                verified_at: crate::auth::now_ts(),
-                passkey: None,
-            },
-            "principal:test".to_string(),
-            crate::auth::now_ts(),
-        )
-        .unwrap();
 
         let completion = complete_runtime_transaction_effect(
             &state,

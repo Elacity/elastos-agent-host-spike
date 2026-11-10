@@ -736,9 +736,13 @@ fn documents_validate_principal_id(principal_id: &str) -> anyhow::Result<&str> {
     Ok(principal_id)
 }
 
-fn documents_principal_root_uri(principal_id: &str) -> anyhow::Result<String> {
+fn documents_principal_root_uri(data_dir: &Path, principal_id: &str) -> anyhow::Result<String> {
     documents_validate_principal_id(principal_id)?;
-    Ok(crate::auth::principal_localhost_root(principal_id))
+    Ok(
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+            .localhost_root()
+            .to_string(),
+    )
 }
 
 pub(crate) fn principal_root_protected_object_inventory(
@@ -752,7 +756,7 @@ pub(crate) fn principal_root_protected_object_inventory(
 }
 
 fn documents_root(data_dir: &Path, principal_id: &str) -> anyhow::Result<PathBuf> {
-    let root_uri = documents_principal_root_uri(principal_id)?;
+    let root_uri = documents_principal_root_uri(data_dir, principal_id)?;
     let rooted_path = root_uri
         .strip_prefix("localhost://")
         .ok_or_else(|| anyhow!("invalid documents root"))?;
@@ -772,10 +776,14 @@ fn documents_metadata_path(data_dir: &Path, doc_did: &str) -> anyhow::Result<Pat
         .join("document.json"))
 }
 
-fn documents_working_copy_uri(principal_id: &str, file_name: &str) -> anyhow::Result<String> {
+fn documents_working_copy_uri(
+    data_dir: &Path,
+    principal_id: &str,
+    file_name: &str,
+) -> anyhow::Result<String> {
     Ok(format!(
         "{}/Documents/{file_name}",
-        documents_principal_root_uri(principal_id)?
+        documents_principal_root_uri(data_dir, principal_id)?
     ))
 }
 
@@ -980,7 +988,7 @@ fn documents_load_body(
     let body = objects
         .read(
             principal_id,
-            &crate::auth::principal_localhost_root(principal_id),
+            &documents_principal_root_uri(data_dir, principal_id)?,
             &metadata.working_copy_uri,
             &documents_body_path(data_dir, principal_id, &metadata.file_name)?,
         )
@@ -1003,10 +1011,10 @@ fn documents_write_body(
     body: &str,
 ) -> anyhow::Result<()> {
     let data_dir = objects.data_dir();
-    let working_copy_uri = documents_working_copy_uri(principal_id, file_name)?;
+    let working_copy_uri = documents_working_copy_uri(data_dir, principal_id, file_name)?;
     objects.write(
         principal_id,
-        &crate::auth::principal_localhost_root(principal_id),
+        &documents_principal_root_uri(data_dir, principal_id)?,
         &working_copy_uri,
         &documents_body_path(data_dir, principal_id, file_name)?,
         body.as_bytes(),
@@ -1115,7 +1123,7 @@ fn documents_load_summary(data_dir: &Path, principal_id: &str) -> anyhow::Result
             .iter()
             .map(|metadata| metadata.file_name.as_str())
             .collect(),
-        base_uri: documents_working_copy_uri(principal_id, "")?,
+        base_uri: documents_working_copy_uri(data_dir, principal_id, "")?,
         visited: 0,
         files: Vec::new(),
     };
@@ -1247,7 +1255,7 @@ fn documents_create_local(
         owner_did,
         title,
         file_name: file_name.clone(),
-        working_copy_uri: documents_working_copy_uri(principal_id, &file_name)?,
+        working_copy_uri: documents_working_copy_uri(data_dir, principal_id, &file_name)?,
         created_at: ts,
         updated_at: ts,
         latest_published_cid: None,
@@ -1335,7 +1343,7 @@ pub fn documents_save_as_local(
         owner_did,
         title,
         file_name: file_name.clone(),
-        working_copy_uri: documents_working_copy_uri(principal_id, &file_name)?,
+        working_copy_uri: documents_working_copy_uri(data_dir, principal_id, &file_name)?,
         created_at: ts,
         updated_at: ts,
         latest_published_cid: None,
@@ -1386,7 +1394,7 @@ pub fn documents_import_chat_attachment_local(
         owner_did,
         title,
         file_name: file_name.clone(),
-        working_copy_uri: documents_working_copy_uri(principal_id, &file_name)?,
+        working_copy_uri: documents_working_copy_uri(data_dir, principal_id, &file_name)?,
         created_at: ts,
         updated_at: ts,
         latest_published_cid: None,
@@ -1521,25 +1529,116 @@ fn remove_file_if_exists(path: PathBuf) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// A5-S3c-0b, documents: a stored Agent's Documents root sits under its
-    /// own UsersAI root. Expected-fail: the id rule. Flipped by A5-S3c-3b.
+    /// A5-S3c-0b: Documents resolves the Agent root from the stored record.
     #[test]
-    #[ignore = "expected-fail until A5-S3c-3b"]
     fn a_stored_agents_documents_root_is_under_its_usersai_root() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let id = "person:local:s3c-agent-documents";
-        crate::auth::store_test_human_principal(data_dir.path(), id);
-        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
-        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
-        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
-        let rooted = format!("{}/Documents", root.strip_prefix("localhost://").unwrap());
+        use crate::auth::r4_fixture::{AGENT_ROOT, ID};
+        let data_dir = r6_document_home(crate::auth::PrincipalKind::Agent);
+        let rooted = format!(
+            "{}/Documents",
+            AGENT_ROOT.strip_prefix("localhost://").unwrap()
+        );
         let want = rooted_localhost_fs_path(data_dir.path(), &rooted).unwrap();
-        assert_eq!(documents_root(data_dir.path(), id).unwrap(), want);
+        assert_eq!(documents_root(data_dir.path(), ID).unwrap(), want);
+    }
+
+    fn r6_document_home(kind: crate::auth::PrincipalKind) -> tempfile::TempDir {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), kind);
+        let root = if kind == crate::auth::PrincipalKind::Agent {
+            AGENT_ROOT
+        } else {
+            HUMAN_ROOT
+        };
+        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, root);
+        dir
+    }
+
+    #[test]
+    fn r6_documents_root_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_document_home(kind);
+            let result = documents_root(dir.path(), ID).unwrap();
+            assert_eq!(
+                result,
+                rooted_localhost_fs_path(
+                    dir.path(),
+                    &format!("{}/Documents", root.strip_prefix("localhost://").unwrap())
+                )
+                .unwrap()
+            );
+        }
+        let missing = tempfile::tempdir().unwrap();
+        assert!(documents_root(missing.path(), ID)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+
+    #[test]
+    fn r6_documents_write_body_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_document_home(kind);
+            let result = documents_create_local(dir.path(), ID, Some("R6"));
+            assert!(result.is_ok(), "stored {kind:?} body write: {result:?}");
+            assert_eq!(
+                result.unwrap().working_copy_uri,
+                format!("{root}/Documents/r6.md")
+            );
+        }
+        let missing = tempfile::tempdir().unwrap();
+        assert!(documents_create_local(missing.path(), ID, Some("R6"))
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+
+    #[test]
+    fn r6_documents_load_body_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_document_home(kind);
+            let created = documents_create_local(dir.path(), ID, Some("R6")).unwrap();
+            let result = documents_load_document(dir.path(), ID, &created.doc_did);
+            assert!(result.is_ok(), "stored {kind:?} body read: {result:?}");
+            assert_eq!(
+                result.unwrap().working_copy_uri,
+                format!("{root}/Documents/r6.md")
+            );
+        }
+        let missing = r6_document_home(crate::auth::PrincipalKind::Human);
+        let created = documents_create_local(missing.path(), ID, Some("R6")).unwrap();
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        let result = documents_load_document(missing.path(), ID, &created.doc_did);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
     }
 
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
     const TEST_PRINCIPAL: &str = "person:local:test-documents";
     const OTHER_PRINCIPAL: &str = "person:local:other-documents";
+
+    fn test_home() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for principal in [TEST_PRINCIPAL, OTHER_PRINCIPAL] {
+            crate::auth::store_test_human_principal(dir.path(), principal);
+        }
+        dir
+    }
 
     fn save_request(
         document: &DocumentsDocumentView,
@@ -1555,7 +1654,7 @@ mod tests {
 
     #[tokio::test]
     async fn documents_save_requires_revision_before_any_write() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let registry = Arc::new(ProviderRegistry::new());
@@ -1587,7 +1686,7 @@ mod tests {
 
     #[test]
     fn documents_save_revision_covers_title_and_body_changes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let original =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let title_only = documents_save_local(
@@ -1630,7 +1729,7 @@ mod tests {
 
     #[test]
     fn documents_save_revision_binds_principal_document_and_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let objects = crate::auth::PrincipalRootObjectMutation::acquire(dir.path()).unwrap();
@@ -1652,7 +1751,7 @@ mod tests {
 
     #[test]
     fn documents_save_rejects_wrong_principal_without_changes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document = documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Private")).unwrap();
         let err = documents_save_local(
             dir.path(),
@@ -1675,7 +1774,7 @@ mod tests {
 
     #[test]
     fn documents_save_concurrent_revision_has_one_complete_winner() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let start = std::sync::Barrier::new(2);
@@ -1724,7 +1823,7 @@ mod tests {
 
     #[test]
     fn documents_save_detects_other_principal_root_body_writer() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         crate::auth::write_principal_root_object(
@@ -1755,7 +1854,7 @@ mod tests {
 
     #[test]
     fn documents_save_metadata_failure_reports_partial_outcome_until_read() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Original")).unwrap();
         let metadata_path = documents_metadata_path(dir.path(), &document.doc_did).unwrap();
@@ -1893,7 +1992,7 @@ mod tests {
 
     #[test]
     fn documents_summary_is_read_only_on_empty_store() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
 
         let summary = documents_load_summary(dir.path(), TEST_PRINCIPAL).unwrap();
 
@@ -1904,7 +2003,7 @@ mod tests {
 
     #[test]
     fn documents_summary_lists_plain_folder_files_without_importing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         std::fs::create_dir_all(docs_root.join("Notes")).unwrap();
         std::fs::create_dir_all(docs_root.join(".hidden")).unwrap();
@@ -1939,7 +2038,7 @@ mod tests {
 
     #[test]
     fn documents_summary_folder_files_stay_within_depth_and_count() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         let mut deep = docs_root.clone();
         for level in 0..crate::auth::MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH {
@@ -1966,7 +2065,7 @@ mod tests {
 
     #[test]
     fn documents_summary_folder_scan_reads_a_bounded_number_of_entries() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = dir.path().join("Documents");
         std::fs::create_dir_all(docs_root.join("folder")).unwrap();
         // Folders and files Documents does not list count as well.
@@ -1993,7 +2092,7 @@ mod tests {
         std::fs::write(outside.path().join("Elsewhere.txt"), "x\n").unwrap();
 
         // The Documents folder itself is a link.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         std::fs::create_dir_all(docs_root.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(outside.path(), &docs_root).unwrap();
@@ -2001,7 +2100,7 @@ mod tests {
         assert!(summary.files.is_empty(), "{:?}", summary.files);
 
         // A folder on the way to it is a link.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         let principal_folder = docs_root.parent().unwrap();
         std::fs::create_dir_all(principal_folder.parent().unwrap()).unwrap();
@@ -2012,7 +2111,7 @@ mod tests {
         assert!(summary.files.is_empty(), "{:?}", summary.files);
 
         // A link inside it is skipped.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let docs_root = documents_root(dir.path(), TEST_PRINCIPAL).unwrap();
         std::fs::create_dir_all(&docs_root).unwrap();
         std::fs::write(docs_root.join("Own.md"), "x\n").unwrap();
@@ -2033,7 +2132,7 @@ mod tests {
 
     #[test]
     fn documents_create_explicitly_adds_summary_object() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
 
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Project Plan")).unwrap();
@@ -2054,7 +2153,7 @@ mod tests {
 
     #[test]
     fn documents_import_chat_attachment_is_idempotent_local_object() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
 
         let imported = documents_import_chat_attachment_local(
             dir.path(),
@@ -2111,7 +2210,7 @@ mod tests {
 
     #[test]
     fn documents_working_copy_is_encrypted_for_protected_principal_root() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let protection =
             crate::auth::store_test_principal_root_protection(dir.path(), TEST_PRINCIPAL);
 
@@ -2137,7 +2236,7 @@ mod tests {
 
     #[test]
     fn documents_publish_export_and_finish_records_revision() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Publish Me")).unwrap();
         let document = documents_save_local(
@@ -2232,7 +2331,7 @@ mod tests {
 
     #[test]
     fn documents_reject_cross_principal_document_access() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let owned =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Private Notes")).unwrap();
 
@@ -2257,7 +2356,7 @@ mod tests {
 
     #[test]
     fn documents_rejects_unsupported_metadata_schema() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Schema Test")).unwrap();
         let path = documents_metadata_path(dir.path(), &document.doc_did).unwrap();
@@ -2273,7 +2372,7 @@ mod tests {
 
     #[test]
     fn documents_summary_skips_incompatible_metadata_entries() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document = documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Current")).unwrap();
         let legacy_did = "did:key:z6Mklegacydoc";
         let legacy_dir = documents_metadata_root(dir.path())
@@ -2328,7 +2427,7 @@ mod tests {
 
     #[test]
     fn documents_rejects_doc_did_path_traversal() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         for doc_did in [
             "../did:key:z6Mkdoc",
             "did:key:../z6Mkdoc",
@@ -2346,7 +2445,7 @@ mod tests {
 
     #[tokio::test]
     async fn documents_publish_and_unpublish_use_provider_plane() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         install_test_documents_viewer(dir.path());
         let registry = Arc::new(ProviderRegistry::new());
         let content_provider = Arc::new(crate::content::ContentProvider::new(
@@ -2465,7 +2564,7 @@ mod tests {
             ipfs_data_dir.display()
         );
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         install_test_documents_viewer(dir.path());
         let registry = Arc::new(ProviderRegistry::new());
         let ipfs_config = elastos_runtime::provider::BridgeProviderConfig {
@@ -2532,7 +2631,7 @@ mod tests {
 
     #[tokio::test]
     async fn documents_publish_requires_content_provider() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         install_test_documents_viewer(dir.path());
         let registry = Arc::new(ProviderRegistry::new());
         registry
@@ -2550,7 +2649,7 @@ mod tests {
 
     #[test]
     fn documents_delete_removes_object_and_working_copy() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_home();
         let document =
             documents_create_local(dir.path(), TEST_PRINCIPAL, Some("Delete Me")).unwrap();
         let body_path = documents_root(dir.path(), TEST_PRINCIPAL)

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+#[cfg(not(test))]
 use std::fs;
 use std::io::{Cursor, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
@@ -22,6 +23,49 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use zip::{ZipArchive, ZipWriter};
+
+/// Test builds record every read through this facade, so a row sees a raw
+/// `fs::read`, `fs::read_dir`, `fs::metadata` or `fs::symlink_metadata`
+/// (including one a plant inserts before a refusal). Production builds keep
+/// `std::fs` and do not record.
+#[cfg(test)]
+mod fs {
+    use std::io;
+    use std::path::Path;
+
+    pub use std::fs::{
+        create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, write, Metadata,
+    };
+
+    fn note_read(path: &Path) {
+        crate::auth::principal_object_io::record_raw_read(path);
+    }
+
+    pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
+        note_read(path.as_ref());
+        std::fs::read(path)
+    }
+
+    pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
+        note_read(path.as_ref());
+        std::fs::read_to_string(path)
+    }
+
+    pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<std::fs::ReadDir> {
+        note_read(path.as_ref());
+        std::fs::read_dir(path)
+    }
+
+    pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<std::fs::Metadata> {
+        note_read(path.as_ref());
+        std::fs::metadata(path)
+    }
+
+    pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<std::fs::Metadata> {
+        note_read(path.as_ref());
+        std::fs::symlink_metadata(path)
+    }
+}
 
 const LIBRARY_OBJECT_SCHEMA: &str = "elastos.library.object/v1";
 const LIBRARY_ROOT_SCHEMA: &str = "elastos.library.root/v1";
@@ -1283,12 +1327,16 @@ fn handle_library_request(
 ) -> anyhow::Result<Value> {
     match request {
         ObjectProviderRequest::Roots { principal_id } => {
-            Ok(json!({ "roots": library_roots(data_dir, &principal_id) }))
+            Ok(json!({ "roots": library_roots(data_dir, &principal_id)? }))
         }
         ObjectProviderRequest::List { principal_id, uri } => {
-            let root = crate::auth::principal_localhost_root(&principal_id);
+            let root =
+                crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?
+                    .localhost_root()
+                    .to_string();
             let uri = uri.unwrap_or_else(|| root.clone());
-            let target = library_target(data_dir, &principal_id, &uri)?;
+            let target = library_target_from_root(data_dir, &root, &uri)
+                .with_context(|| format!("Library list at {uri}"))?;
             if !target.path.exists() {
                 return Ok(json!({ "uri": target.uri, "objects": [] }));
             }
@@ -1305,7 +1353,12 @@ fn handle_library_request(
                     continue;
                 }
                 let child_uri = format!("{}/{}", target.uri.trim_end_matches('/'), name);
-                objects.push(library_object(data_dir, &principal_id, &child_uri)?);
+                objects.push(library_object_from_root(
+                    data_dir,
+                    &principal_id,
+                    &root,
+                    &child_uri,
+                )?);
             }
             objects.sort_by(|a, b| {
                 a.kind
@@ -1709,10 +1762,14 @@ fn handle_library_request(
             Ok(json!({ "deleted_uri": target.uri }))
         }
         ObjectProviderRequest::EmptyTrash { principal_id } => {
-            let root = crate::auth::principal_localhost_root(&principal_id);
+            let root =
+                crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?
+                    .localhost_root()
+                    .to_string();
             let trash_root = format!("{root}/.Trash");
-            let target = library_target(data_dir, &principal_id, &trash_root)?;
-            refuse_deleting_published(data_dir, &principal_id, &target.uri)?;
+            let target = library_target_from_root(data_dir, &root, &trash_root)
+                .with_context(|| format!("Library empty Trash at {trash_root}"))?;
+            refuse_deleting_published_with_root(data_dir, &principal_id, &root, &target.uri)?;
             let mut deleted_uris = Vec::new();
             if target.path.exists() {
                 if !target.path.is_dir() {
@@ -1724,20 +1781,21 @@ fn handle_library_request(
                     let entry = entry?;
                     let name = entry.file_name().to_string_lossy().to_string();
                     let child_uri = format!("{}/{}", target.uri, name);
-                    let child = library_target(data_dir, &principal_id, &child_uri)?;
+                    let child = library_target_from_root(data_dir, &root, &child_uri)?;
                     if child.path.is_dir() {
                         fs::remove_dir_all(&child.path)?;
                     } else {
                         fs::remove_file(&child.path)?;
                     }
-                    remove_trash_record(data_dir, &principal_id, &child.uri)?;
+                    remove_trash_record_with_root(data_dir, &principal_id, &root, &child.uri)?;
                     deleted_uris.push(child.uri);
                 }
             }
             let deleted_count = deleted_uris.len();
-            append_library_event(
+            append_library_event_with_root(
                 data_dir,
                 &principal_id,
+                &root,
                 "empty_trash",
                 &target.uri,
                 json!({
@@ -2441,6 +2499,9 @@ fn record_publication_id(record: &LibraryPublishRecord) -> String {
 fn remove_runtime_file(data_dir: &Path, uri: &str) -> anyhow::Result<()> {
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
+    // A removal mutates the path, so tests record it as a write.
+    #[cfg(test)]
+    crate::auth::principal_object_io::record_write(data_dir, &path);
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -2454,7 +2515,19 @@ fn write_runtime_json(
     uri: &str,
     value: &impl Serialize,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    write_runtime_json_with_root(data_dir, principal_id, &root, uri, value)
+}
+
+fn write_runtime_json_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    uri: &str,
+    value: &impl Serialize,
+) -> anyhow::Result<()> {
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
     if let Some(parent) = path.parent() {
@@ -2463,7 +2536,7 @@ fn write_runtime_json(
     crate::auth::write_principal_root_object(
         data_dir,
         principal_id,
-        &root,
+        root,
         uri,
         &path,
         &serde_json::to_vec_pretty(value)?,
@@ -2475,10 +2548,21 @@ fn read_runtime_json<T: serde::de::DeserializeOwned>(
     principal_id: &str,
     uri: &str,
 ) -> anyhow::Result<T> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    read_runtime_json_with_root(data_dir, principal_id, &root, uri)
+}
+
+fn read_runtime_json_with_root<T: serde::de::DeserializeOwned>(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    uri: &str,
+) -> anyhow::Result<T> {
     let path =
         rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
-    let bytes = crate::auth::read_principal_root_object(data_dir, principal_id, &root, uri, &path)?;
+    let bytes = crate::auth::read_principal_root_object(data_dir, principal_id, root, uri, &path)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -2486,6 +2570,7 @@ fn read_runtime_json<T: serde::de::DeserializeOwned>(
 fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
     data_dir: &Path,
     principal_id: &str,
+    root: &str,
     dir_uri: &str,
 ) -> Vec<T> {
     let Some(dir) = rooted_localhost_fs_path(data_dir, dir_uri) else {
@@ -2494,22 +2579,40 @@ fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
+    #[cfg(test)]
+    r5a_tests::record_runtime_json_dir_read(data_dir, dir_uri);
     entries
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().to_string())
         .filter(|name| name.ends_with(".json"))
         .filter_map(|name| {
-            read_runtime_json(data_dir, principal_id, &format!("{dir_uri}/{name}")).ok()
+            read_runtime_json_with_root(data_dir, principal_id, root, &format!("{dir_uri}/{name}"))
+                .ok()
         })
         .collect()
 }
 
 /// Every publish record of this person, active or not.
 fn publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRecord> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = match crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id) {
+        Ok(root) => root.localhost_root().to_string(),
+        Err(error) => {
+            tracing::warn!(%error, "library: skipping unresolved publish-record principal");
+            return Vec::new();
+        }
+    };
+    publish_records_with_root(data_dir, principal_id, &root)
+}
+
+fn publish_records_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+) -> Vec<LibraryPublishRecord> {
     read_runtime_json_dir::<LibraryPublishRecord>(
         data_dir,
         principal_id,
+        root,
         &format!("{root}/{LIBRARY_RUNTIME_DIR}/Published"),
     )
 }
@@ -2517,6 +2620,17 @@ fn publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRec
 /// Every plain (not protected) publish record of this person, active or not.
 fn plain_publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRecord> {
     publish_records(data_dir, principal_id)
+        .into_iter()
+        .filter(|record| !record_is_runtime_custody(record))
+        .collect()
+}
+
+fn plain_publish_records_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+) -> Vec<LibraryPublishRecord> {
+    publish_records_with_root(data_dir, principal_id, root)
         .into_iter()
         .filter(|record| !record_is_runtime_custody(record))
         .collect()
@@ -2540,10 +2654,18 @@ struct ChatAttachBinding {
     size_bytes: Option<u64>,
 }
 
-fn chat_attach_binding_uri(principal_id: &str, request_id: &str) -> String {
-    let root = crate::auth::principal_localhost_root(principal_id);
+fn chat_attach_binding_uri(
+    data_dir: &Path,
+    principal_id: &str,
+    request_id: &str,
+) -> anyhow::Result<String> {
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let digest = hex::encode(Sha256::digest(request_id.as_bytes()));
-    format!("{root}/{LIBRARY_RUNTIME_DIR}/ChatAttach/{digest}.json")
+    Ok(format!(
+        "{root}/{LIBRARY_RUNTIME_DIR}/ChatAttach/{digest}.json"
+    ))
 }
 
 /// The publication for one Chat attach request, under the publications lock
@@ -2567,7 +2689,7 @@ pub(crate) async fn chat_attach_publication(
 ) -> anyhow::Result<LibraryFilePublication> {
     let _serialized = PUBLICATIONS.lock().await;
     let uri = uri.trim();
-    let binding_uri = chat_attach_binding_uri(principal_id, request_id);
+    let binding_uri = chat_attach_binding_uri(data_dir, principal_id, request_id)?;
     let saved = read_runtime_json::<ChatAttachBinding>(data_dir, principal_id, &binding_uri).ok();
     if let Some(mut binding) = saved {
         if binding.uri != uri || binding.if_revision.as_deref() != if_revision {
@@ -3669,8 +3791,10 @@ fn localhost_space_pointer_object(
     data_dir: &Path,
     principal_id: &str,
 ) -> anyhow::Result<LibraryObject> {
-    let uri = crate::auth::principal_localhost_root(principal_id);
-    let target = library_target(data_dir, principal_id, &uri)?;
+    let uri = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    let target = library_target_from_root(data_dir, &uri, &uri)?;
     let metadata = fs::metadata(&target.path).ok();
     let modified_at = metadata
         .as_ref()
@@ -3849,15 +3973,26 @@ fn inferred_webspace_target_uri(uri: &str) -> Option<String> {
 }
 
 fn library_target(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<LibraryTarget> {
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
-    let uri = clean_library_uri(&localhost_root, uri)?;
+    let localhost_root =
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+            .localhost_root()
+            .to_string();
+    library_target_from_root(data_dir, &localhost_root, uri)
+}
+
+fn library_target_from_root(
+    data_dir: &Path,
+    localhost_root: &str,
+    uri: &str,
+) -> anyhow::Result<LibraryTarget> {
+    let uri = clean_library_uri(localhost_root, uri)?;
     let rooted = uri
         .strip_prefix("localhost://")
         .ok_or_else(|| anyhow!("library object URI must be localhost://"))?;
     let path = rooted_localhost_fs_path(data_dir, rooted)
         .ok_or_else(|| anyhow!("invalid library object path"))?;
     Ok(LibraryTarget {
-        localhost_root,
+        localhost_root: localhost_root.to_string(),
         uri,
         path,
     })
@@ -4049,18 +4184,32 @@ fn library_request_touches_webspace(request: &ObjectProviderRequest) -> bool {
 }
 
 fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<LibraryObject> {
-    let target = library_target(data_dir, principal_id, uri)?;
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    library_object_from_root(data_dir, principal_id, &root, uri)
+}
+
+fn library_object_from_root(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    uri: &str,
+) -> anyhow::Result<LibraryObject> {
+    let target = library_target_from_root(data_dir, localhost_root, uri)?;
     // A place with no directory yet is the empty folder `list` already shows;
     // its times are unknown (0).
     let metadata = match fs::metadata(&target.path) {
         Ok(metadata) => Some(metadata),
-        Err(err)
-            if err.kind() == std::io::ErrorKind::NotFound
-                && library_roots(data_dir, principal_id)
-                    .iter()
-                    .any(|root| root.uri == target.uri) =>
-        {
-            None
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if library_roots(data_dir, principal_id)?
+                .iter()
+                .any(|root| root.uri == target.uri)
+            {
+                None
+            } else {
+                return Err(err.into());
+            }
         }
         Err(err) => return Err(err.into()),
     };
@@ -7739,8 +7888,10 @@ fn shared_access_open_contract(
     })
 }
 
-fn library_roots(data_dir: &Path, principal_id: &str) -> Vec<LibraryRoot> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+fn library_roots(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryRoot>> {
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let mut roots: Vec<_> = [
         ("home", "Home", root.clone(), "principal-root"),
         ("desktop", "Desktop", format!("{root}/Desktop"), "directory"),
@@ -7807,7 +7958,7 @@ fn library_roots(data_dir: &Path, principal_id: &str) -> Vec<LibraryRoot> {
             "item_count": item_count,
         })),
     });
-    roots
+    Ok(roots)
 }
 
 fn root_item_state(data_dir: &Path, principal_id: &str, uri: &str) -> (bool, usize) {
@@ -8090,7 +8241,9 @@ fn read_trash_record(
     principal_id: &str,
     trash_uri: &str,
 ) -> anyhow::Result<LibraryTrashRecord> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let record_uri = trash_record_uri(&root, trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
@@ -8109,7 +8262,9 @@ fn write_trash_record(
     principal_id: &str,
     record: &LibraryTrashRecord,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let record_uri = trash_record_uri(&root, &record.trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
@@ -8128,10 +8283,24 @@ fn write_trash_record(
 }
 
 fn remove_trash_record(data_dir: &Path, principal_id: &str, trash_uri: &str) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
-    let record_uri = trash_record_uri(&root, trash_uri);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    remove_trash_record_with_root(data_dir, principal_id, &root, trash_uri)
+}
+
+fn remove_trash_record_with_root(
+    data_dir: &Path,
+    _principal_id: &str,
+    root: &str,
+    trash_uri: &str,
+) -> anyhow::Result<()> {
+    let record_uri = trash_record_uri(root, trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
+    // A removal mutates the path, so tests record it as a write.
+    #[cfg(test)]
+    crate::auth::principal_object_io::record_write(data_dir, &record_path);
     match fs::remove_file(record_path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -8149,10 +8318,13 @@ fn read_publish_record(
     principal_id: &str,
     object_uri: &str,
 ) -> anyhow::Result<LibraryPublishRecord> {
-    let root = crate::auth::principal_localhost_root(principal_id);
-    read_runtime_json(
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    read_runtime_json_with_root(
         data_dir,
         principal_id,
+        &root,
         &publish_record_uri(&root, object_uri),
     )
 }
@@ -8162,17 +8334,22 @@ fn write_publish_record(
     principal_id: &str,
     record: &LibraryPublishRecord,
 ) -> anyhow::Result<()> {
-    // Serving follows the index. A publication that ends leaves the index
-    // before its record changes, and one that starts joins it after: a crash
+    // No public Library operation calls this for an unstored principal;
+    // each one resolves first, so this order is not what decides serving
+    // for that principal. A publication that ends leaves the index before
+    // its record changes, and one that starts joins it after, so a crash
     // in between serves less, never more.
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let active = record_is_published(record);
     if !active {
         set_published_index_entry(data_dir, principal_id, record, false)?;
     }
-    let root = crate::auth::principal_localhost_root(principal_id);
-    write_runtime_json(
+    write_runtime_json_with_root(
         data_dir,
         principal_id,
+        &root,
         &publish_record_uri(&root, &record.object_uri),
         record,
     )?;
@@ -8428,7 +8605,9 @@ fn remove_publish_record(
     principal_id: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     remove_runtime_file(data_dir, &publish_record_uri(&root, object_uri))
 }
 
@@ -8457,9 +8636,25 @@ fn move_publish_record(
 /// Refuses to delete `uri` (a file, or a folder and everything in it) while it
 /// holds an active plain publication: Unpublish withdraws it first.
 fn refuse_deleting_published(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<()> {
+    refuse_published_records(uri, &plain_publish_records(data_dir, principal_id))
+}
+
+fn refuse_deleting_published_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    uri: &str,
+) -> anyhow::Result<()> {
+    refuse_published_records(
+        uri,
+        &plain_publish_records_with_root(data_dir, principal_id, root),
+    )
+}
+
+fn refuse_published_records(uri: &str, records: &[LibraryPublishRecord]) -> anyhow::Result<()> {
     let folder = format!("{uri}/");
-    for record in plain_publish_records(data_dir, principal_id) {
-        if !record_is_published(&record) {
+    for record in records {
+        if !record_is_published(record) {
             continue;
         }
         if record.object_uri == uri {
@@ -8485,12 +8680,14 @@ fn library_events(
     since: Option<u64>,
     limit: Option<usize>,
 ) -> anyhow::Result<Vec<LibraryEvent>> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let uri_filter = uri_filter
         .map(|uri| clean_library_uri(&root, uri))
         .transpose()?;
     let limit = limit.unwrap_or(64).clamp(1, MAX_LIBRARY_EVENTS);
-    let mut events = read_library_events(data_dir, principal_id)?;
+    let mut events = read_library_events_with_root(data_dir, principal_id, &root)?;
     events.retain(|event| {
         since.map(|since| event.at > since).unwrap_or(true)
             && uri_filter
@@ -8512,7 +8709,21 @@ fn append_library_event(
     uri: &str,
     details: Value,
 ) -> anyhow::Result<LibraryEvent> {
-    let mut events = read_library_events(data_dir, principal_id)?;
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    append_library_event_with_root(data_dir, principal_id, &root, op, uri, details)
+}
+
+fn append_library_event_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    op: &str,
+    uri: &str,
+    details: Value,
+) -> anyhow::Result<LibraryEvent> {
+    let mut events = read_library_events_with_root(data_dir, principal_id, root)?;
     let event = LibraryEvent {
         schema: LIBRARY_EVENT_SCHEMA.to_string(),
         event_id: library_event_id(op, uri, &details),
@@ -8526,23 +8737,29 @@ fn append_library_event(
         let keep_from = events.len() - MAX_LIBRARY_EVENTS;
         events.drain(0..keep_from);
     }
-    write_library_events(data_dir, principal_id, &events)?;
+    write_library_events_with_root(data_dir, principal_id, root, &events)?;
     library_event_notifier().notify_waiters();
     Ok(event)
 }
 
-fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryEvent>> {
-    let root = crate::auth::principal_localhost_root(principal_id);
-    let event_uri = library_event_log_uri(&root);
+fn read_library_events_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+) -> anyhow::Result<Vec<LibraryEvent>> {
+    let event_uri = library_event_log_uri(root);
     let event_path = rooted_localhost_fs_path(data_dir, &event_uri)
         .ok_or_else(|| anyhow!("invalid library event log path"))?;
+    // `Path::exists` is not an `fs::` read. Tests record the stat here.
+    #[cfg(test)]
+    crate::auth::principal_object_io::record_read(data_dir, &event_path);
     if !event_path.exists() {
         return Ok(Vec::new());
     }
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
         principal_id,
-        &root,
+        root,
         &event_uri,
         &event_path,
     )?;
@@ -8553,13 +8770,13 @@ fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Ve
         .collect()
 }
 
-fn write_library_events(
+fn write_library_events_with_root(
     data_dir: &Path,
     principal_id: &str,
+    root: &str,
     events: &[LibraryEvent],
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
-    let event_uri = library_event_log_uri(&root);
+    let event_uri = library_event_log_uri(root);
     let event_path = rooted_localhost_fs_path(data_dir, &event_uri)
         .ok_or_else(|| anyhow!("invalid library event log path"))?;
     if let Some(parent) = event_path.parent() {
@@ -8573,7 +8790,7 @@ fn write_library_events(
     crate::auth::write_principal_root_object(
         data_dir,
         principal_id,
-        &root,
+        root,
         &event_uri,
         &event_path,
         &bytes,
@@ -8807,27 +9024,46 @@ mod tests {
         assert!(parsed.is_err(), "{parsed:?}");
     }
 
-    /// A5-S3c-0a, library: a stored Agent's Library roots sit under its own
-    /// UsersAI root. Expected-fail: library_roots still applies the id rule.
-    /// Flipped by A5-S3c-2b.
+    /// A5-S3c-0a: the Roots handler returns this stored Agent's UsersAI root.
     #[test]
-    #[ignore = "expected-fail until A5-S3c-2b"]
     fn a_stored_agents_library_roots_are_under_its_usersai_root() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let id = "person:local:s3c-agent-library";
-        crate::auth::store_test_human_principal(data_dir.path(), id);
-        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
-        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
-        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
-        let principal_id = id.to_string();
-        let request = super::ObjectProviderRequest::Roots { principal_id };
-        let roots = super::handle_library_request(data_dir.path(), request).unwrap();
-        let roots = roots["roots"].as_array().unwrap();
-        assert!(roots.len() > 1, "{roots:?}");
-        for entry in roots.iter().filter(|r| r["kind"] != "webspace-root") {
-            let uri = entry["uri"].as_str().unwrap();
-            assert!(uri == root || uri.starts_with(&format!("{root}/")), "{uri}");
+        use crate::auth::{r4_fixture, PrincipalKind};
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            r4_fixture::store(dir.path(), kind);
+            let request = super::ObjectProviderRequest::Roots {
+                principal_id: r4_fixture::ID.into(),
+            };
+            let roots = super::handle_library_request(dir.path(), request).unwrap();
+            let roots = roots["roots"].as_array().unwrap();
+            assert!(roots.len() > 1, "{roots:?}");
+            for entry in roots.iter().filter(|r| r["kind"] != "webspace-root") {
+                let uri = entry["uri"].as_str().unwrap();
+                assert!(uri == root || uri.starts_with(&format!("{root}/")), "{uri}");
+            }
         }
+        let absent = tempfile::tempdir().unwrap();
+        let decoy = super::r5a_tests::id_rule_decoy(
+            absent.path(),
+            "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/id-rule.txt",
+            b"id-rule roots",
+        );
+        let result = super::handle_library_request(
+            absent.path(),
+            super::ObjectProviderRequest::Roots {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        decoy.untouched();
     }
 
     #[test]
@@ -8902,6 +9138,7 @@ mod tests {
     fn copy_and_move_writers_refuse_a_folder_added_after_the_tree_check() {
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-late-child";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
         let root = crate::auth::principal_localhost_root(principal_id);
         let rule = StartWalkRule::new(dir.path(), &root);
         let mut parent = format!("{root}/Documents");
@@ -9152,6 +9389,12 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-pax-sparse";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let archive_uri = format!("{root}/Documents/Pax.tar");
         write_library_file_bytes(
@@ -9254,6 +9497,12 @@ mod tests {
         use std::io::Write as _;
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-destination-race";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let archive_uri = format!("{root}/Documents/Pack.zip");
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -9630,6 +9879,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkAgentsAreaLibrary";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let journal = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
         let doc = format!("{root}/Documents/x.txt");
@@ -9704,6 +9959,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkAgentsAreaWhitespace";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let journal = rooted_localhost_fs_path(
             dir.path(),
@@ -9738,6 +9999,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyExisting";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -9802,6 +10069,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyConcurrent";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Concurrent.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -9895,6 +10168,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyIfRevision";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -9930,6 +10209,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkRevisionedWrite";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -10056,12 +10341,16 @@ mod publish_tests {
             .register_sub_provider("content", content.clone())
             .await
             .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::auth::principal_localhost_root(principal);
+        crate::auth::store_test_human_principal(dir.path(), principal);
+        crate::auth::store_test_principal_root_protection_for(dir.path(), principal, &root);
         Home {
-            dir: tempfile::tempdir().unwrap(),
+            dir,
             registry,
             content,
             principal,
-            root: crate::auth::principal_localhost_root(principal),
+            root,
         }
     }
 
@@ -10456,6 +10745,12 @@ mod publish_tests {
             "{}/Documents/same.txt",
             crate::auth::principal_localhost_root(bruno_id)
         );
+        crate::auth::store_test_human_principal(alma.dir.path(), bruno_id);
+        crate::auth::store_test_principal_root_protection_for(
+            alma.dir.path(),
+            bruno_id,
+            &crate::auth::principal_localhost_root(bruno_id),
+        );
         let as_bruno = |op: &str, mut body: Value| {
             body["op"] = json!(op);
             body["principal_id"] = json!(bruno_id);
@@ -10562,7 +10857,7 @@ mod publish_tests {
             write_runtime_json(
                 home.dir.path(),
                 home.principal,
-                &chat_attach_binding_uri(home.principal, request_id),
+                &chat_attach_binding_uri(home.dir.path(), home.principal, request_id).unwrap(),
                 &ChatAttachBinding {
                     schema: "elastos.library.chat-attach/v1".to_string(),
                     request_id: request_id.to_string(),
@@ -10714,5 +11009,1182 @@ mod publish_tests {
             .call("trash", json!({ "uri": home.uri("Documents/Moved") }))
             .await;
         assert_eq!(trash["status"], "ok", "{trash}");
+    }
+}
+
+#[cfg(test)]
+mod r5a_tests {
+    use super::*;
+    use crate::auth::{principal_object_io, r4_fixture, PrincipalKind};
+    use std::collections::HashMap;
+    use std::sync::LazyLock;
+    use std::sync::Mutex;
+
+    static RUNTIME_JSON_DIR_READS: LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(super) fn record_runtime_json_dir_read(data_dir: &Path, uri: &str) {
+        RUNTIME_JSON_DIR_READS
+            .lock()
+            .unwrap()
+            .entry(data_dir.to_path_buf())
+            .or_default()
+            .push(uri.to_string());
+    }
+
+    fn runtime_json_dir_reads(data_dir: &Path) -> Vec<String> {
+        RUNTIME_JSON_DIR_READS
+            .lock()
+            .unwrap()
+            .get(data_dir)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn home(kind: PrincipalKind) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        r4_fixture::store(dir.path(), kind);
+        let root = match kind {
+            PrincipalKind::Agent => r4_fixture::AGENT_ROOT,
+            PrincipalKind::Human => r4_fixture::HUMAN_ROOT,
+        };
+        crate::auth::store_test_principal_root_protection_for(dir.path(), r4_fixture::ID, root);
+        dir
+    }
+
+    /// Writes real data where the id rule for `r4_fixture::ID` points, so an
+    /// unresolved-principal fallback would have something to read or overwrite.
+    fn seed_id_rule_file(data_dir: &Path, uri: &str, bytes: &[u8]) -> PathBuf {
+        let path = rooted_localhost_fs_path(data_dir, uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    pub(super) struct IdRuleDecoy<'a> {
+        dir: &'a Path,
+        path: PathBuf,
+        bytes: &'a [u8],
+    }
+
+    impl IdRuleDecoy<'_> {
+        pub(super) fn untouched(&self) {
+            assert_eq!(
+                std::fs::read(&self.path).unwrap_or_default(),
+                self.bytes,
+                "decoy bytes"
+            );
+            assert!(
+                !principal_object_io::reads(self.dir).contains(&self.path),
+                "decoy read"
+            );
+            assert!(
+                !principal_object_io::writes(self.dir).contains(&self.path),
+                "decoy write"
+            );
+        }
+    }
+
+    pub(super) fn id_rule_decoy<'a>(dir: &'a Path, uri: &str, bytes: &'a [u8]) -> IdRuleDecoy<'a> {
+        IdRuleDecoy {
+            dir,
+            path: seed_id_rule_file(dir, uri, bytes),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn list_uses_the_stored_agent_root_end_to_end() {
+        let agent = home(PrincipalKind::Agent);
+        let result = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        );
+        assert!(
+            result.as_ref().is_ok_and(
+                |value| value["uri"] == r4_fixture::AGENT_ROOT && value["objects"] == json!([])
+            ),
+            "{result:?}"
+        );
+        let human = home(PrincipalKind::Human);
+        let listed = handle_library_request(
+            human.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(listed["uri"], r4_fixture::HUMAN_ROOT);
+        let absent = tempfile::tempdir().unwrap();
+        let decoy = id_rule_decoy(
+            absent.path(),
+            "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/id-rule.txt",
+            b"id-rule list",
+        );
+        let result = handle_library_request(
+            absent.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        decoy.untouched();
+    }
+
+    #[test]
+    fn empty_trash_uses_the_stored_agent_root_end_to_end() {
+        let agent = home(PrincipalKind::Agent);
+        let agent_uri = format!("{}/.Trash/agent.txt", r4_fixture::AGENT_ROOT);
+        let agent_path = rooted_localhost_fs_path(agent.path(), &agent_uri).unwrap();
+        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        fs::write(&agent_path, b"agent trash").unwrap();
+        let id_uri = format!("{}/.Trash/id-rule.txt", r4_fixture::HUMAN_ROOT);
+        let id_path = rooted_localhost_fs_path(agent.path(), &id_uri).unwrap();
+        fs::create_dir_all(id_path.parent().unwrap()).unwrap();
+        fs::write(&id_path, b"id-rule trash").unwrap();
+        // The stored Agent root empties its own Trash; the id-rule decoy stays.
+        let result = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(!agent_path.exists(), "agent Trash was not emptied");
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule trash"
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_ok_and(|value| value["deleted_count"] == 1),
+            "{result:?}"
+        );
+        let events =
+            read_library_events_with_root(agent.path(), r4_fixture::ID, r4_fixture::AGENT_ROOT)
+                .unwrap();
+        assert_eq!(
+            events.last().unwrap().uri,
+            format!("{}/.Trash", r4_fixture::AGENT_ROOT)
+        );
+        let human = home(PrincipalKind::Human);
+        let emptied = handle_library_request(
+            human.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(emptied["deleted_count"], 0);
+        let absent = tempfile::tempdir().unwrap();
+        let decoy = id_rule_decoy(
+            absent.path(),
+            "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.Trash/id-rule.txt",
+            b"id-rule trash",
+        );
+        let result = handle_library_request(
+            absent.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        decoy.untouched();
+    }
+
+    #[test]
+    fn empty_trash_refuses_a_published_item_and_removes_the_stored_trash_record() {
+        let kept_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.Trash/kept.txt";
+        let kept_record_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Trash/b605da9f2eae10055cf347d3ed96a4ba45473f0424162deada39c157593183ee.json";
+        let kept_publish_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Published/b605da9f2eae10055cf347d3ed96a4ba45473f0424162deada39c157593183ee.json";
+        let agent = home(PrincipalKind::Agent);
+        let kept_path = rooted_localhost_fs_path(agent.path(), kept_uri).unwrap();
+        fs::create_dir_all(kept_path.parent().unwrap()).unwrap();
+        fs::write(&kept_path, b"kept-published").unwrap();
+        write_trash_record(
+            agent.path(),
+            r4_fixture::ID,
+            &LibraryTrashRecord {
+                schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
+                trash_uri: kept_uri.into(),
+                original_uri: "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/kept.txt"
+                    .into(),
+                original_name: "kept.txt".into(),
+                trashed_at: 1,
+            },
+        )
+        .unwrap();
+        let kept_record_path = rooted_localhost_fs_path(agent.path(), kept_record_uri).unwrap();
+        assert!(
+            kept_record_path.is_file(),
+            "trash record was not seeded at the literal path"
+        );
+        write_runtime_json(
+            agent.path(),
+            r4_fixture::ID,
+            kept_publish_uri,
+            &json!({
+                "schema": "elastos.library.publish/v1",
+                "object_uri": kept_uri,
+                "cid": "cid-r5b-kept",
+                "published_at": 1,
+                "receipt": {},
+                "availability": {},
+            }),
+        )
+        .unwrap();
+        let refused = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(
+            refused.as_ref().is_err_and(|error| {
+                find_library_refusal(error)
+                    .is_some_and(|refusal| refusal.code == "published_withdraw_first")
+                    && error.to_string()
+                        == "This folder has published files. Unpublish them before deleting it."
+            }),
+            "EmptyTrash must refuse the published Trash item through published_withdraw_first: {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&kept_path).unwrap_or_default(),
+            b"kept-published"
+        );
+        assert!(
+            kept_record_path.is_file(),
+            "refused EmptyTrash removed the trash record"
+        );
+
+        let gone_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.Trash/gone.txt";
+        let gone_record_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Trash/0b1925bc2079697007485433e75b96a9b2edb8a01b43588e85beb67896710b80.json";
+        let clear = home(PrincipalKind::Agent);
+        let gone_path = rooted_localhost_fs_path(clear.path(), gone_uri).unwrap();
+        fs::create_dir_all(gone_path.parent().unwrap()).unwrap();
+        fs::write(&gone_path, b"gone-trash").unwrap();
+        write_trash_record(
+            clear.path(),
+            r4_fixture::ID,
+            &LibraryTrashRecord {
+                schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
+                trash_uri: gone_uri.into(),
+                original_uri: "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/gone.txt"
+                    .into(),
+                original_name: "gone.txt".into(),
+                trashed_at: 1,
+            },
+        )
+        .unwrap();
+        let gone_record_path = rooted_localhost_fs_path(clear.path(), gone_record_uri).unwrap();
+        assert!(
+            gone_record_path.is_file(),
+            "clear trash record was not seeded at the literal path"
+        );
+        let emptied = handle_library_request(
+            clear.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(emptied["deleted_count"], 1);
+        assert!(!gone_path.exists(), "unpublished Trash file stayed");
+        assert!(
+            !gone_record_path.exists(),
+            "stored trash record stayed under the Agent root"
+        );
+    }
+
+    #[test]
+    fn runtime_json_write_uses_the_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/write.json");
+            let result = write_runtime_json(dir.path(), r4_fixture::ID, &uri, &json!({"site": 3}));
+            assert!(result.is_ok(), "{root}: {result:?}");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            assert!(path.is_file(), "{uri}");
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let uri = format!("{}/R5a/write.json", r4_fixture::HUMAN_ROOT);
+        let decoy = id_rule_decoy(absent.path(), &uri, b"id-rule json");
+        let result = write_runtime_json(absent.path(), r4_fixture::ID, &uri, &json!({}));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        decoy.untouched();
+    }
+
+    #[test]
+    fn runtime_json_read_uses_the_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/read.json");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            crate::auth::write_principal_root_object(
+                dir.path(),
+                r4_fixture::ID,
+                root,
+                &uri,
+                &path,
+                br#"{"site":4}"#,
+            )
+            .unwrap();
+            let result: anyhow::Result<Value> = read_runtime_json(dir.path(), r4_fixture::ID, &uri);
+            assert!(
+                result.as_ref().is_ok_and(|value| value["site"] == 4),
+                "{uri}: {result:?}"
+            );
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let uri = format!("{}/R5a/read.json", r4_fixture::HUMAN_ROOT);
+        let decoy = id_rule_decoy(absent.path(), &uri, br#"{"site":4}"#);
+        let result = read_runtime_json::<Value>(absent.path(), r4_fixture::ID, &uri);
+        assert!(
+            result.is_err(),
+            "read an unstored principal's JSON: {result:?}"
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        decoy.untouched();
+    }
+
+    #[derive(Clone)]
+    struct WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for WarningWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn publish_records_uses_stored_root_and_skips_unresolved_principals() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/{LIBRARY_RUNTIME_DIR}/Published/r5a.json");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let object_uri = format!("{root}/Documents/r5a.txt");
+            let record = json!({
+                "schema": "elastos.library.publish/v1", "object_uri": object_uri,
+                "cid": "cid-r5a", "published_at": 1, "receipt": {},
+                "availability": {},
+            });
+            crate::auth::write_principal_root_object(
+                dir.path(),
+                r4_fixture::ID,
+                root,
+                &uri,
+                &path,
+                &serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            let records = publish_records(dir.path(), r4_fixture::ID);
+            assert_eq!(records.len(), 1, "{root}");
+            assert_eq!(records[0].object_uri, format!("{root}/Documents/r5a.txt"));
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let dir_uri = format!("{}/{LIBRARY_RUNTIME_DIR}/Published", r4_fixture::HUMAN_ROOT);
+        let uri = format!("{dir_uri}/r5a.json");
+        let bytes = serde_json::to_vec(&json!({
+            "schema": "elastos.library.publish/v1",
+            "object_uri": format!("{}/Documents/r5a.txt", r4_fixture::HUMAN_ROOT),
+            "cid": "cid-r5a", "published_at": 1,
+            "receipt": {}, "availability": {},
+        }))
+        .unwrap();
+        let decoy = id_rule_decoy(absent.path(), &uri, &bytes);
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let writer = WarningWriter(warnings.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(publish_records(absent.path(), r4_fixture::ID).is_empty());
+        });
+        // An unresolved principal returns before this directory is read.
+        assert!(!runtime_json_dir_reads(absent.path()).contains(&dir_uri));
+        let warning = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
+        assert!(
+            warning.contains("skipping unresolved publish-record principal")
+                && warning.contains("has no stored record"),
+            "{warning}"
+        );
+        decoy.untouched();
+    }
+
+    fn trash(root: &str) -> LibraryTrashRecord {
+        LibraryTrashRecord {
+            schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
+            trash_uri: format!("{root}/.Trash/t.txt"),
+            original_uri: format!("{root}/Documents/t.txt"),
+            original_name: "t.txt".into(),
+            trashed_at: 1,
+        }
+    }
+
+    #[test]
+    fn trash_record_write_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            let result = write_trash_record(dir.path(), r4_fixture::ID, &record);
+            let uri = trash_record_uri(root, &record.trash_uri);
+            assert!(
+                result.is_ok()
+                    && rooted_localhost_fs_path(dir.path(), &uri)
+                        .unwrap()
+                        .is_file(),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
+        let result = write_trash_record(dir.path(), r4_fixture::ID, &record);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        // The id-rule bytes stay put. The recorder sees an exact-path
+        // `fs::read`, `fs::read_to_string`, `fs::read_dir`, `fs::metadata`
+        // or `fs::symlink_metadata`, and a principal-object read or write.
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule trash record"
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn trash_record_read_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            write_trash_record(dir.path(), r4_fixture::ID, &record).unwrap();
+            let result = read_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|value| value.original_uri == format!("{root}/Documents/t.txt")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
+        let result = read_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read(&id_path).unwrap_or_default(), bytes);
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn trash_record_remove_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            write_trash_record(dir.path(), r4_fixture::ID, &record).unwrap();
+            let uri = trash_record_uri(root, &record.trash_uri);
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            assert!(path.is_file(), "{uri}");
+            let result = remove_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+            assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
+        let result = remove_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule trash record"
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    fn published(root: &str) -> LibraryPublishRecord {
+        serde_json::from_value(json!({
+            "schema": "elastos.library.publish/v1", "object_uri": format!("{root}/Documents/p.txt"),
+            "cid": "cid-r5b", "published_at": 1, "unpublished_at": 2,
+            "receipt": {}, "availability": {},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn publish_record_read_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = published(root);
+            let uri = publish_record_uri(root, &record.object_uri);
+            write_runtime_json(dir.path(), r4_fixture::ID, &uri, &record).unwrap();
+            let result = read_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|value| value.object_uri == format!("{root}/Documents/p.txt")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
+        let result = read_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read(&id_path).unwrap_or_default(), bytes);
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn publish_record_write_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = published(root);
+            let uri = publish_record_uri(root, &record.object_uri);
+            let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+            assert!(
+                result.is_ok()
+                    && rooted_localhost_fs_path(dir.path(), &uri)
+                        .unwrap()
+                        .is_file(),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
+        let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule publish record"
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn publish_record_write_leaves_an_unstored_principals_index_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = published_index_path(dir.path());
+        fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        // Compact on purpose: a rewrite through to_vec_pretty is not these bytes.
+        let before = br#"{"schema":"elastos.library.published-cids/v1","publications":{}}"#;
+        fs::write(&index_path, before).unwrap();
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            fs::read(&index_path).unwrap_or_default(),
+            before,
+            "unstored publish withdrawal changed the shared index"
+        );
+    }
+
+    #[test]
+    fn publish_record_remove_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = published(root);
+            let uri = publish_record_uri(root, &record.object_uri);
+            write_runtime_json(dir.path(), r4_fixture::ID, &uri, &record).unwrap();
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            assert!(path.is_file(), "{uri}");
+            let result = remove_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+            assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
+        let result = remove_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule publish record"
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    fn event(root: &str) -> LibraryEvent {
+        LibraryEvent {
+            schema: LIBRARY_EVENT_SCHEMA.into(),
+            event_id: "r5b-event".into(),
+            op: "write".into(),
+            uri: format!("{root}/Documents/e.txt"),
+            at: 1,
+            details: json!({}),
+        }
+    }
+
+    #[test]
+    fn library_event_filter_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            write_library_events_with_root(dir.path(), r4_fixture::ID, root, &[event(root)])
+                .unwrap();
+            let filter = format!("{root}/Documents/e.txt");
+            let result = library_events(dir.path(), r4_fixture::ID, Some(&filter), None, None);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|values| values.len() == 1 && values[0].uri == filter),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
+        let bytes = format!(
+            "{}\n",
+            serde_json::to_string(&event(r4_fixture::HUMAN_ROOT)).unwrap()
+        );
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, bytes.as_bytes());
+        let result = library_events(dir.path(), r4_fixture::ID, None, None, None);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            bytes.as_bytes()
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn append_library_event_uses_the_stored_agent_root() {
+        let agent = home(PrincipalKind::Agent);
+        let doc_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/e.txt";
+        let log_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/events.jsonl";
+        let result = append_library_event(
+            agent.path(),
+            r4_fixture::ID,
+            "note",
+            doc_uri,
+            json!({ "marker": "r5b-append" }),
+        );
+        let log_path = rooted_localhost_fs_path(agent.path(), log_uri).unwrap();
+        let logged = crate::auth::read_principal_root_object(
+            agent.path(),
+            r4_fixture::ID,
+            "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478",
+            log_uri,
+            &log_path,
+        );
+        let text = logged
+            .as_ref()
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            .unwrap_or_default();
+        let id_root =
+            rooted_localhost_fs_path(agent.path(), "localhost://Users/b2caa01d2e3d5fb2ec0d1478")
+                .unwrap();
+        assert!(
+            result.is_ok() && text.contains(doc_uri) && text.contains("\"op\":\"note\"") && !id_root.exists(),
+            "stored Agent append must land in the UsersAI event log and leave the id-rule path absent: result={result:?} id_rule_exists={} log={text}",
+            id_root.exists()
+        );
+
+        let absent = tempfile::tempdir().unwrap();
+        let id_log_uri = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/events.jsonl";
+        let id_path = seed_id_rule_file(absent.path(), id_log_uri, b"id-rule event log");
+        let refused = append_library_event(
+            absent.path(),
+            r4_fixture::ID,
+            "note",
+            doc_uri,
+            json!({ "marker": "r5b-append" }),
+        );
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule event log"
+        );
+        assert!(!principal_object_io::reads(absent.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(absent.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn library_object_uses_the_stored_agent_root() {
+        let agent = home(PrincipalKind::Agent);
+        let dir_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents";
+        let child_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/child.txt";
+        let child_path = rooted_localhost_fs_path(agent.path(), child_uri).unwrap();
+        fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        crate::auth::write_principal_root_object(
+            agent.path(),
+            r4_fixture::ID,
+            "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478",
+            child_uri,
+            &child_path,
+            b"stored child",
+        )
+        .unwrap();
+        let listed = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: Some(dir_uri.into()),
+            },
+        )
+        .unwrap();
+        let objects = listed["objects"].as_array().unwrap();
+        assert_eq!(objects.len(), 1, "{listed}");
+        assert_eq!(objects[0]["uri"], child_uri);
+        let stated = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::Stat {
+                principal_id: r4_fixture::ID.into(),
+                uri: child_uri.into(),
+            },
+        );
+        assert!(
+            stated
+                .as_ref()
+                .is_ok_and(|value| value["object"]["uri"] == child_uri),
+            "library_object must name the stored Agent root: {stated:?}"
+        );
+
+        let absent = tempfile::tempdir().unwrap();
+        let id_uri = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/child.txt";
+        let id_path = seed_id_rule_file(absent.path(), id_uri, b"id-rule child");
+        let refused = handle_library_request(
+            absent.path(),
+            ObjectProviderRequest::Stat {
+                principal_id: r4_fixture::ID.into(),
+                uri: id_uri.into(),
+            },
+        );
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule child"
+        );
+        assert!(!principal_object_io::reads(absent.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(absent.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn chat_attach_binding_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
+            assert!(
+                result.as_ref().is_ok_and(|uri| uri.starts_with(&format!(
+                    "{root}/.AppData/LocalHost/.Runtime/Library/ChatAttach/"
+                )) && uri.ends_with(".json")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let decoy = id_rule_decoy(
+            dir.path(),
+            "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/ChatAttach/8fef004934571f09cf782aad202bffc7b697cb5556927323270becfd7073c080.json",
+            b"id-rule attach",
+        );
+        let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        decoy.untouched();
+    }
+
+    #[test]
+    fn localhost_spaces_pointer_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
+            assert!(
+                result.as_ref().is_ok_and(|object| object.uri == root),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let decoy = id_rule_decoy(dir.path(), r4_fixture::HUMAN_ROOT, b"id-rule space");
+        let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        decoy.untouched();
+    }
+
+    #[test]
+    fn library_target_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/Documents/a.txt");
+            let result = library_target(dir.path(), r4_fixture::ID, &uri);
+            assert!(
+                result.as_ref().is_ok_and(|target| target.uri == uri),
+                "{root}: {}",
+                result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default()
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let uri = format!("{}/Documents/a.txt", r4_fixture::HUMAN_ROOT);
+        let decoy = id_rule_decoy(dir.path(), &uri, b"id-rule target");
+        let result = library_target(dir.path(), r4_fixture::ID, &uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "unstored Library target must refuse"
+        );
+        decoy.untouched();
+    }
+
+    const UNSTORED_INDEX: &[u8] = br#"{"schema":"elastos.library.published-cids/v1","publications":{"k":{"any_peer":true,"cids":["bafy-r5b-unstored"],"principal_id":"person:local:r4"}}}"#;
+    const UNSTORED_REFUSAL: &str =
+        "principal 'person:local:r4' has no stored record; its root cannot be chosen";
+
+    fn block<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// An unstored principal, with a publish-index entry seeded as literal
+    /// bytes. The call must refuse by the resolve's own sentence, those
+    /// bytes must stay, and `published_cid_audience` must still report the
+    /// seeded audience.
+    fn unstored_index_stays(op: &str, run: impl FnOnce(&Path) -> anyhow::Result<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let index = published_index_path(dir.path());
+        fs::create_dir_all(index.parent().unwrap()).unwrap();
+        fs::write(&index, UNSTORED_INDEX).unwrap();
+        assert_unstored_audience(dir.path(), op);
+        let result = run(dir.path());
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string() == UNSTORED_REFUSAL),
+            "{op} must refuse an unstored principal by name: {result:?}"
+        );
+        assert_eq!(
+            fs::read(&index).unwrap_or_default(),
+            UNSTORED_INDEX,
+            "{op} changed the shared index"
+        );
+        assert_unstored_audience(dir.path(), op);
+    }
+
+    fn assert_unstored_audience(dir: &Path, op: &str) {
+        let audience = published_cid_audience(dir, "bafy-r5b-unstored").unwrap();
+        assert!(audience.any_peer, "{op}");
+        assert_eq!(
+            audience.principals,
+            BTreeSet::from(["person:local:r4".to_string()]),
+            "{op}"
+        );
+    }
+
+    fn principal() -> String {
+        r4_fixture::ID.to_string()
+    }
+
+    fn unstored_publish_op(op: &str, dir: &Path) -> anyhow::Result<()> {
+        let file = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/p.txt";
+        let trash = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.Trash/p.txt";
+        let parent = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Pictures";
+        match op {
+            "publish" => block(library_publish(
+                dir,
+                Arc::new(ProviderRegistry::new()),
+                r4_fixture::ID,
+                file,
+                None,
+                None,
+                None,
+            ))
+            .map(|_| ()),
+            "unpublish" => block(library_unpublish(
+                dir,
+                Arc::new(ProviderRegistry::new()),
+                r4_fixture::ID,
+                file,
+                None,
+            ))
+            .map(|_| ()),
+            "repair" => block(library_repair(
+                dir,
+                Arc::new(ProviderRegistry::new()),
+                r4_fixture::ID,
+                file,
+            ))
+            .map(|_| ()),
+            "chat_attach" => {
+                let registry = ProviderRegistry::new();
+                block(chat_attach_publication(
+                    dir,
+                    &registry,
+                    r4_fixture::ID,
+                    "r5b-unstored",
+                    file,
+                    None,
+                    || Ok(()),
+                ))
+                .map(|_| ())
+            }
+            "share" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Share {
+                    principal_id: principal(),
+                    uri: file.into(),
+                    recipients: Vec::new(),
+                    policy: None,
+                    key_release_policy: None,
+                },
+            )
+            .map(|_| ()),
+            "rename" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Rename {
+                    principal_id: principal(),
+                    uri: file.into(),
+                    name: "q.txt".into(),
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "move" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Move {
+                    principal_id: principal(),
+                    uri: file.into(),
+                    target_parent_uri: parent.into(),
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "trash" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Trash {
+                    principal_id: principal(),
+                    uri: file.into(),
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "restore" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Restore {
+                    principal_id: principal(),
+                    uri: trash.into(),
+                    target_uri: None,
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "delete_permanently" => handle_library_request(
+                dir,
+                ObjectProviderRequest::DeletePermanently {
+                    principal_id: principal(),
+                    uri: trash.into(),
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "empty_trash" => handle_library_request(
+                dir,
+                ObjectProviderRequest::EmptyTrash {
+                    principal_id: principal(),
+                },
+            )
+            .map(|_| ()),
+            _ => unreachable!("{op}"),
+        }
+    }
+
+    fn unstored_publish_row(op: &'static str) {
+        unstored_index_stays(op, |dir| unstored_publish_op(op, dir));
+    }
+
+    #[test]
+    fn publish_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("publish");
+    }
+
+    #[test]
+    fn unpublish_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("unpublish");
+    }
+
+    #[test]
+    fn repair_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("repair");
+    }
+
+    #[test]
+    fn share_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("share");
+    }
+    #[test]
+    fn chat_attach_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("chat_attach");
+    }
+    #[test]
+    fn rename_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("rename");
+    }
+    #[test]
+    fn move_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("move");
+    }
+    #[test]
+    fn trash_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("trash");
+    }
+    #[test]
+    fn restore_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("restore");
+    }
+    #[test]
+    fn delete_permanently_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("delete_permanently");
+    }
+    #[test]
+    fn empty_trash_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("empty_trash");
     }
 }

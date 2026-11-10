@@ -21,15 +21,15 @@ const TEST_PROBE_DEADLINE: Duration = Duration::from_secs(60);
 /// not be mistaken for a hung one.
 const TEST_READY_BUDGET: Duration = Duration::from_secs(30);
 
-struct PrivateFixture {
+pub(crate) struct PrivateFixture {
     _root: tempfile::TempDir,
-    data: PathBuf,
+    pub(crate) data: PathBuf,
     directory: PathBuf,
-    binary: PathBuf,
+    pub(crate) binary: PathBuf,
 }
 
 impl PrivateFixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let data = fs::canonicalize(root.path()).unwrap();
         let directory = controller_directory(&data).unwrap();
@@ -72,7 +72,22 @@ impl PrivateFixture {
 
     /// `extra` adds top-level release payload fields, such as `capsule_records`.
     fn publish_installed_release_listing(&self, components: &[u8], extra: Value) -> TrustedSource {
-        self.file(&self.data.join("components.json"), components, 0o600);
+        self.publish_installed_release_on_channel(components, extra, "stable", "0.7.0")
+    }
+
+    pub(crate) fn publish_installed_release_on_channel(
+        &self,
+        components: &[u8],
+        extra: Value,
+        channel: &str,
+        version: &str,
+    ) -> TrustedSource {
+        let components_path = self.data.join("components.json");
+        if components_path.exists() {
+            assert_eq!(fs::read(&components_path).unwrap(), components);
+        } else {
+            self.file(&components_path, components, 0o600);
+        }
         let binary = fs::read(&self.binary).unwrap();
         let descriptor = |bytes: &[u8]| {
             json!({
@@ -80,7 +95,7 @@ impl PrivateFixture {
             })
         };
         let mut payload = json!({
-            "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
+            "schema":"elastos.release/v1", "version":version, "channel":channel,
             "platforms": {(crate::update::detect_release_platform()): {
                 "binary": descriptor(&binary), "components": descriptor(components)
             }}
@@ -92,13 +107,15 @@ impl PrivateFixture {
         let release = signed(payload, "elastos.release.v1");
         let head = signed(
             json!({
-                "schema":"elastos.release.head/v1", "version":"0.7.0", "channel":"stable",
+                "schema":"elastos.release.head/v1", "version":version, "channel":channel,
                 "latest_release_cid": raw_cid(&release), "release_sha256":digest(&release)
             }),
             "elastos.release.head.v1",
         );
         let mut config = source_config(&self.binary);
         config.sources[0].head_cid = raw_cid(&head);
+        config.sources[0].channel = channel.into();
+        config.sources[0].installed_version = version.into();
         // Bootstrap refusal tests snapshot after the same persisted writer lock exists.
         drop(
             crate::install_transaction::InstallationGuard::acquire(self.binary.parent().unwrap())
@@ -116,6 +133,23 @@ impl PrivateFixture {
             0o600,
         );
         config.sources.remove(0)
+    }
+
+    pub(crate) fn assert_home_start(&self, source: &TrustedSource) {
+        let bootstrap = bootstrap_controller(
+            &self.data,
+            &self.binary,
+            source,
+            controller_directory,
+            acquire_lease,
+            crate::install_transaction::InstallationGuard::acquire,
+        )
+        .unwrap()
+        .expect("Home controller bootstrap");
+        assert_eq!(
+            admit_release_digest(&bootstrap.signed, source).unwrap(),
+            bootstrap.expected
+        );
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -714,14 +748,16 @@ fn installed_controller_admission_binds_signature_channel_version_platform_and_b
         admit_installed_release(&envelope, &source, &fixture.binary).unwrap(),
         expected
     );
-    let canary = TrustedSource {
-        channel: "canary".into(),
-        ..source.clone()
-    };
-    assert_eq!(
-        admit_installed_release(&envelope, &canary, &fixture.binary).unwrap(),
-        expected
-    );
+    for channel in ["stable", "canary", "jetson-test"] {
+        let subscription = TrustedSource {
+            channel: channel.into(),
+            ..source.clone()
+        };
+        assert_eq!(
+            admit_installed_release(&envelope, &subscription, &fixture.binary).unwrap(),
+            expected
+        );
+    }
     for refusal in [
         "binary",
         "version",
@@ -743,8 +779,8 @@ fn installed_controller_admission_binds_signature_channel_version_platform_and_b
                 envelope.clone()
             }
             "channel" => {
-                source.channel = "jetson-test".into();
-                envelope.clone()
+                value["payload"]["channel"] = json!("unknown");
+                signed(value["payload"].clone(), "elastos.release.v1")
             }
             "publisher" => {
                 source.publisher_dids = vec![crate::crypto::encode_signing_key_did(

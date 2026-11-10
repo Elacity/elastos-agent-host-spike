@@ -1,6 +1,32 @@
 use agent_conformance::report::table;
 
 #[test]
+fn memory_write_ignore_matches_real_gap_row() {
+    let source = include_str!("effects.rs");
+    let before_test = source
+        .split_once("fn ungranted_memory_write_is_refused()")
+        .expect("memory-write test exists")
+        .0;
+    let reason = before_test
+        .rsplit_once("#[ignore = \"")
+        .expect("memory-write test has an ignore reason")
+        .1
+        .split_once("\"]")
+        .expect("ignore reason closes")
+        .0;
+    let output = format!("test ungranted_memory_write_is_refused ... ignored, {reason}\n");
+    let (graded, passed) = table(
+        "ungranted_memory_write_is_refused: test\n",
+        &output,
+        true,
+        Some(include_str!("../GAPS.md")),
+    );
+    assert!(passed, "{graded}");
+    assert!(graded
+        .contains("ungranted_memory_write_is_refused | BLOCKED (UsersAI binding; AC-002-ARGS)\n"));
+}
+
+#[test]
 fn run_table_requires_cargo_results() {
     let listed = "works: test\nblocked: test\n";
     let output = "test works ... ok\ntest blocked ... ignored, blocked: RT3 model grant\n";

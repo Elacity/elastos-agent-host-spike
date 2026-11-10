@@ -7,6 +7,7 @@ import {
   isAuthoritySessionError,
   runtimeOpenOutcome,
 } from "./browser-status.js";
+import { createRuntimeApi } from "./browser-runtime-api.js";
 
 test("destination policy denial preserves Browser authority and close ownership", () => {
   const error = openError("terminal_pre_effect_failure");
@@ -32,6 +33,41 @@ test("authentication failures still request Home authority renewal", () => {
   }
 });
 
+test("exact front-door launch refusal bytes tell Browser to reopen from Home", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    for (const body of [
+      "home launch token expired",
+      "home launch token auth session is not active",
+    ]) {
+      globalThis.fetch = async () => new Response(body, { status: 403 });
+      const error = await createRuntimeApi({}).fetchJson("/api/apps/browser/open").then(
+        () => {
+          throw new Error("expected the launch token refusal");
+        },
+        (failure) => failure,
+      );
+      assert.equal(error.status, 403);
+      assert.equal(error.message, body);
+      assert.equal(isAuthoritySessionError(error), true);
+      assert.equal(friendlyOpenError(error), "Browser session expired. Reopening from Home...");
+    }
+    const generic = "Gateway request requires an admitted host and caller";
+    globalThis.fetch = async () => new Response(generic, { status: 403 });
+    const refused = await createRuntimeApi({}).fetchJson("/api/apps/browser/open").then(
+      () => {
+        throw new Error("expected the generic refusal");
+      },
+      (failure) => failure,
+    );
+    assert.equal(refused.message, generic);
+    assert.equal(isAuthoritySessionError(refused), false);
+    assert.equal(friendlyOpenError(refused), "This page was blocked by your Exit Node settings.");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 function openError(state, effects) {
   const error = new Error("browser-vz-engine-supervisor exited");
   error.status = 503;
@@ -50,6 +86,42 @@ function openError(state, effects) {
   };
   return error;
 }
+
+test("space refusal reports required and available decimal GB after safe cleanup", () => {
+  for (const state of ["terminal_pre_effect_failure", "terminal_post_effect_cleanup"]) {
+    const error = openError(state);
+    error.payload.refusal = {
+      code: "insufficient_free_space", required_bytes: 8589934592, available_bytes: 8589934591,
+    };
+    error.payload.message = "private engine error text";
+    assert.equal(friendlyOpenError(error), "Browser needs 8.6 GB free on this computer to open; 8.5 GB are free. Free some space, then open Browser again.");
+  }
+});
+
+test("invalid, unknown and pending refusals keep the generic failure", () => {
+  const error = openError("terminal_post_effect_cleanup");
+  const generic = friendlyOpenError(error);
+  error.message = "Browser needs 8.6 GB free on this computer to open; 8.5 GB are free. Free some space, then open Browser again.";
+  assert.equal(friendlyOpenError(error), generic, "message text grants no refusal code");
+  for (const refusal of [
+    undefined,
+    { code: "unknown", required_bytes: 20, available_bytes: 10 },
+    { code: "insufficient_free_space", required_bytes: "20", available_bytes: 10 },
+    { code: "insufficient_free_space", required_bytes: 10, available_bytes: 20 },
+    { code: "insufficient_free_space", required_bytes: 20, available_bytes: -1 },
+    { code: "insufficient_free_space", required_bytes: 2 ** 53, available_bytes: 10 },
+    { code: "insufficient_free_space", required_bytes: 20, available_bytes: 10, message: "private" },
+  ]) {
+    error.payload.refusal = refusal;
+    assert.equal(friendlyOpenError(error), generic);
+  }
+  error.payload.refusal = { code: "insufficient_free_space", required_bytes: 20, available_bytes: 10 };
+  error.payload.outcome.state = "cleanup_pending";
+  assert.match(friendlyOpenError(error), /finishing cleanup/);
+  error.payload.outcome.state = "terminal_post_effect_cleanup";
+  error.payload.outcome.effects.vm_acquired = true;
+  assert.equal(friendlyOpenError(error), generic);
+});
 
 test("pre-effect open failure never claims a missing terminal close", () => {
   const error = openError("terminal_pre_effect_failure");
@@ -258,6 +330,20 @@ test("readiness failures explain the repair while cleanup retains priority", () 
     error.payload.outcome.state = "cleanup_pending";
     assert.doesNotMatch(friendlyOpenError(error), message);
   }
+});
+
+test("Linux host setup guidance names the opt-in command", () => {
+  const error = openError("terminal_pre_effect_failure");
+  Object.assign(error.payload, {
+    stage: "engine_readiness",
+    code: "browser_host_setup_required",
+    message: "Browser is available on this computer. To turn it on, run: elastos setup --browser. Then close Home and start it again with elastos home --browser.",
+  });
+  assert.equal(friendlyOpenError(error), error.payload.message);
+  error.payload.message = "Browser needs KVM on this computer. After KVM is available, run: elastos setup --browser. Then close Home and start it again with elastos home --browser.";
+  assert.equal(friendlyOpenError(error), error.payload.message);
+  error.payload.outcome.state = "cleanup_pending";
+  assert.doesNotMatch(friendlyOpenError(error), /elastos setup --browser/);
 });
 
 test("one-page capacity refusal says only one Browser window can be open", () => {

@@ -381,6 +381,7 @@ impl CollaborationRuntimeService {
 
     pub fn gateway_context(&self) -> crate::api::gateway::GatewayCollaborationContext {
         crate::api::gateway::GatewayCollaborationContext {
+            capability_manager: None,
             carrier_endpoint: None,
             chat_product_port: Some(self.chat_product_port()),
             presence_product_port: Some(self.presence_product_port()),
@@ -1138,6 +1139,12 @@ mod tests {
         use crate::collaboration_presence_grant::{
             set_presence_grant, store_test_profile, PresenceDecision,
         };
+        if crate::auth::stored_principal_record(data_dir, principal)
+            .unwrap()
+            .is_none()
+        {
+            crate::auth::store_test_human_principal(data_dir, principal);
+        }
         crate::auth::store_test_principal_root_protection(data_dir, principal);
         let (key, _) = generate_keypair();
         let profile = crate::collaboration_profile_authority::signed_profile_document_for_test(
@@ -1656,6 +1663,7 @@ mod tests {
             collaboration_presence_product_port: gateway_context.presence_product_port.clone(),
             collaboration_discovery_service: gateway_context.discovery_service.clone(),
             carrier_endpoint: gateway_context.carrier_endpoint.clone(),
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: temp.path().join("gateway-cache"),
             data_dir: temp.path().to_path_buf(),
@@ -1677,6 +1685,7 @@ mod tests {
         let mut supervisor = crate::supervisor::Supervisor::new(
             temp.path().to_path_buf(),
             crate::setup::ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -1838,6 +1847,7 @@ mod tests {
             collaboration_presence_product_port: Some(presence_port.clone()),
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: temp.path().join("gateway-cache"),
             data_dir: temp.path().to_path_buf(),
