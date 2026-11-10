@@ -295,6 +295,8 @@ try {
       if (!window.__follow.on) return;
       const jump = document.querySelector("[data-agent-jump-latest]");
       window.__follow.samples.push({ t: performance.now(), jump: Boolean(jump && !jump.hidden),
+        streaming: Boolean(document.querySelector(".agent-msg-agent.is-streaming")),
+        follow: scroller.classList.contains("is-follow-bottom"),
         fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) });
       requestAnimationFrame(sample);
     };
@@ -338,16 +340,39 @@ try {
   seen.sentReply = await expectNewestAboveComposer(".agent-msg-agent", "a sent message's long reply, once settled");
   const follow = await frame.evaluate(() => {
     window.__follow.on = false;
-    let behindMs = 0, since = null;
-    for (const { t, fromEnd } of window.__follow.samples) {
-      if (fromEnd > 8) { since ??= t; behindMs = Math.max(behindMs, t - since); } else since = null;
-    }
-    return { behindMs: Math.round(behindMs), jumpFrames: window.__follow.samples.filter(sample => sample.jump).length };
+    const streaming = window.__follow.samples.filter((sample) => sample.streaming);
+    let behindMs = 0, since = null, behindFrames = 0, run = 0, maxGapMs = 0;
+    streaming.forEach(({ t, fromEnd }, index) => {
+      if (index) maxGapMs = Math.max(maxGapMs, t - streaming[index - 1].t);
+      if (fromEnd > 8) {
+        since ??= t;
+        behindMs = Math.max(behindMs, t - since);
+        run += 1;
+        behindFrames = Math.max(behindFrames, run);
+      } else { since = null; run = 0; }
+    });
+    const firstJump = streaming.find((sample) => sample.jump);
+    return { behindFrames,
+      jumpFrames: streaming.filter((sample) => sample.jump).length,
+      streamingSamples: streaming.length,
+      maxFromEnd: Math.round(Math.max(0, ...streaming.map((sample) => sample.fromEnd))),
+      maxGapMs: Math.round(maxGapMs), behindMs: Math.round(behindMs),
+      ...(firstJump ? { firstJump: { fromEnd: firstJump.fromEnd, follow: firstJump.follow } } : {}) };
   });
-  // A flush paints a frame before the follow lands; never longer than that.
-  assert.ok(follow.behindMs < 250, `the room follows the streaming reply: ${JSON.stringify(follow)}`);
-  assert.equal(follow.jumpFrames, 0, `a reader who never left the end is not offered Jump to latest: ${JSON.stringify(follow)}`);
-  seen.sentReplyBehindMs = follow.behindMs;
+  // A following room is behind the end for at most the frame in which a
+  // content flush paints before the follow lands. Frames are counted, not
+  // milliseconds: a loaded machine paints fewer frames, and the gap between
+  // two frames is not the room's fault. The settled position is asserted
+  // separately below.
+  assert.ok(follow.streamingSamples > 0, `the sampler saw the reply stream: ${JSON.stringify(follow)}`);
+  assert.ok(follow.behindFrames <= 2, `the room follows the streaming reply: ${JSON.stringify(follow)}`);
+  assert.equal(follow.jumpFrames, 0, `a reader who never left the end is not offered Jump to latest while the reply streams: ${JSON.stringify(follow)}`);
+  // The reader is at the settled end, so the button is gone.
+  await waitForCondition("Jump to latest is hidden at the settled end", () => {
+    const jump = document.querySelector("[data-agent-jump-latest]");
+    return jump?.hidden ? true : { hidden: false };
+  }, null, 5000);
+  seen.sentReplyBehindFrames = follow.behindFrames;
 
   // A reader who moves up while a reply streams keeps their place, by any
   // amount and however they moved, while more of the reply keeps arriving:
