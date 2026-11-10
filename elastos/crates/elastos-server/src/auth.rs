@@ -5613,7 +5613,7 @@ fn quarantine_malformed_agents(state: &mut AuthState) {
                 .map(|reason| (record.principal_id.clone(), reason))
         })
         .collect();
-    for (principal_id, &reason) in &found {
+    for (principal_id, reason) in &found {
         note_quarantined_agent(principal_id, reason);
     }
     state.quarantined = found;
