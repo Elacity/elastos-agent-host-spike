@@ -13560,6 +13560,7 @@ pub(crate) mod tests {
     fn principal_root_object_stays_plaintext_without_protection() {
         let data_dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:plain-root";
+        store_test_human_principal(data_dir.path(), principal_id);
         let localhost_root = principal_localhost_root(principal_id);
         let object_uri = format!("{localhost_root}/Documents/plain.md");
         let path = rooted_localhost_fs_path(data_dir.path(), &object_uri).unwrap();
@@ -13659,6 +13660,7 @@ pub(crate) mod tests {
         }
         let data = root.path();
         let principal = "person:local:required-protected-read";
+        store_test_human_principal(data, principal);
         let localhost_root = principal_localhost_root(principal);
         let uri = format!("{localhost_root}/Documents/example.txt");
         let path = rooted_localhost_fs_path(data, &uri).unwrap();
@@ -13943,6 +13945,7 @@ pub(crate) mod tests {
     fn principal_root_conditional_write_serializes_same_revision_and_first_create() {
         let data = tempfile::tempdir().unwrap();
         let principal = "person:local:save-race";
+        store_test_human_principal(data.path(), principal);
         let root = principal_localhost_root(principal);
         let uri = format!("{root}/.AppData/LocalHost/GBA/game.sav");
         let path = rooted_localhost_fs_path(data.path(), &uri).unwrap();
@@ -14243,6 +14246,7 @@ pub(crate) mod tests {
     fn root_protection_activation_rejects_untouched_declared_plaintext_without_mutation() {
         let data_dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:gba-transition";
+        store_test_human_principal(data_dir.path(), principal_id);
         let localhost_root = principal_localhost_root(principal_id);
         let object_uri = format!("{localhost_root}/.AppData/LocalHost/GBA/ucity/rom-id.sav");
         let path = rooted_localhost_fs_path(data_dir.path(), &object_uri).unwrap();
@@ -14287,6 +14291,7 @@ pub(crate) mod tests {
     fn recovery_activation_migrates_first_run_plaintext_under_new_protection() {
         let data_dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:first-run-shell-state";
+        store_test_human_principal(data_dir.path(), principal_id);
         let localhost_root = principal_localhost_root(principal_id);
         // The shell persists Home browser state before a person can reach
         // Recovery — the exact object that used to deadlock first-run
@@ -14549,6 +14554,7 @@ pub(crate) mod tests {
     fn fresh_root_protection_rejects_preexisting_envelope_shaped_data() {
         let data_dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:fresh-envelope";
+        store_test_human_principal(data_dir.path(), principal_id);
         let localhost_root = principal_localhost_root(principal_id);
         let other_data_dir = tempfile::tempdir().unwrap();
         let other_protection =
@@ -14962,6 +14968,7 @@ pub(crate) mod tests {
     fn online_migration_capacity_refuses_before_new_protection() {
         let data_dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:capacity-first-activation";
+        store_test_human_principal(data_dir.path(), principal_id);
         let root = principal_localhost_root(principal_id);
         let uri = format!("{root}/.AppData/LocalHost/GBA/ucity/save.sav");
         let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
@@ -15037,6 +15044,7 @@ pub(crate) mod tests {
             write_principal_root_migration_cleanup(fixture.data_dir.path(), &retained).unwrap();
         }
         let principal_id = "person:local:capacity-after-pending-commit";
+        store_test_human_principal(fixture.data_dir.path(), principal_id);
         let root = principal_localhost_root(principal_id);
         let uri = format!("{root}/.AppData/LocalHost/GBA/ucity/save.sav");
         let path = rooted_localhost_fs_path(fixture.data_dir.path(), &uri).unwrap();
@@ -16199,6 +16207,7 @@ pub(crate) mod tests {
 
         let data_dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:inventory-symlink";
+        store_test_human_principal(data_dir.path(), principal_id);
         let localhost_root = principal_localhost_root(principal_id);
         let root_uri = format!("{localhost_root}/.AppData/LocalHost/GBA");
         let root_path = rooted_localhost_fs_path(data_dir.path(), &root_uri).unwrap();
@@ -16236,6 +16245,7 @@ pub(crate) mod tests {
     fn declarative_inventory_and_migration_plans_are_bounded() {
         let data_dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:inventory-bound";
+        store_test_human_principal(data_dir.path(), principal_id);
         let localhost_root = principal_localhost_root(principal_id);
         let inventory = (0..=MAX_PRINCIPAL_ROOT_INVENTORY_DECLARATIONS)
             .map(|index| {
