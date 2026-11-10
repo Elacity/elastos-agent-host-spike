@@ -5750,6 +5750,20 @@ pub fn read_principal_root_object(
     read_principal_root_object_locked(data_dir, principal_id, localhost_root, object_uri, path)
 }
 
+pub(crate) fn read_principal_root_object_resolved(
+    data_dir: &Path,
+    resolved: &ResolvedPrincipalRoot,
+    object_uri: &str,
+    path: &Path,
+) -> anyhow::Result<Vec<u8>> {
+    let (principal_id, root) = resolved.local_binding(object_uri)?;
+    validate_principal_root_object_path(data_dir, object_uri, path)?;
+    let _guard = principal_root_object_mutation_lock()
+        .lock()
+        .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    read_principal_root_object_locked(data_dir, principal_id, root, object_uri, path)
+}
+
 /// Reads only under current principal-root protection. Missing protection
 /// returns None before object bytes are read; each call loads fresh authority.
 pub(crate) fn read_protected_principal_root_object(
@@ -6052,6 +6066,33 @@ pub fn write_principal_root_object(
     )
 }
 
+pub(crate) fn write_principal_root_object_resolved(
+    data_dir: &Path,
+    resolved: &ResolvedPrincipalRoot,
+    object_uri: &str,
+    path: &Path,
+    plaintext: &[u8],
+) -> anyhow::Result<()> {
+    let (principal_id, root) = resolved.local_binding(object_uri)?;
+    validate_principal_root_object_path(data_dir, object_uri, path)?;
+    let _guard = principal_root_object_mutation_lock()
+        .lock()
+        .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    write_principal_root_object_locked_unchecked(
+        data_dir,
+        principal_id,
+        root,
+        object_uri,
+        path,
+        plaintext,
+        PrincipalRootObjectWriteOptions {
+            require_protection: false,
+            create_only: false,
+            precondition: None,
+        },
+    )
+}
+
 pub(crate) fn create_principal_root_object(
     data_dir: &Path,
     principal_id: &str,
@@ -6275,6 +6316,26 @@ fn write_principal_root_object_locked(
         object_uri,
     )?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
+    write_principal_root_object_locked_unchecked(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+        path,
+        plaintext,
+        options,
+    )
+}
+
+fn write_principal_root_object_locked_unchecked(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    object_uri: &str,
+    path: &Path,
+    plaintext: &[u8],
+    options: PrincipalRootObjectWriteOptions<'_>,
+) -> anyhow::Result<()> {
     if let Some(precondition) = options.precondition {
         let exists = match std::fs::symlink_metadata(path) {
             Ok(_) => true,

@@ -3074,10 +3074,9 @@ fn home_services_requests_state(
     if !path.is_file() {
         return Ok(default_state);
     }
-    let raw = match crate::auth::read_principal_root_object(
+    let raw = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &default_state.principal_id,
-        &default_state.localhost_root,
+        context.root(),
         &home_services_requests_state_uri(context),
         &path,
     ) {
@@ -3118,10 +3117,9 @@ fn home_save_services_requests_state(
     if raw.len() > HOME_SERVICES_REQUESTS_MAX_BYTES {
         anyhow::bail!("Services requests state is too large");
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &state.principal_id,
-        &state.localhost_root,
+        context.root(),
         &home_services_requests_state_uri(context),
         &path,
         &raw,
@@ -7193,6 +7191,25 @@ fn write_home_state_object(
         path,
         bytes,
     )
+}
+
+fn write_home_state_object_resolved(
+    data_dir: &std::path::Path,
+    resolved: &crate::auth::ResolvedPrincipalRoot,
+    object_uri: &str,
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    if path.is_file() {
+        if let Err(err) =
+            crate::auth::read_principal_root_object_resolved(data_dir, resolved, object_uri, path)
+        {
+            if is_damaged_home_state(&err) {
+                return Err(err);
+            }
+        }
+    }
+    crate::auth::write_principal_root_object_resolved(data_dir, resolved, object_uri, path, bytes)
 }
 
 fn home_save_browser_state(
