@@ -5262,6 +5262,7 @@ pub fn mint_agent_principal(
     owner: &str,
     did: &str,
     name: &str,
+    owner_data_key: &[u8; 32],
     now: u64,
 ) -> anyhow::Result<PrincipalRecord> {
     if [owner, did, name]
@@ -5290,6 +5291,45 @@ pub fn mint_agent_principal(
         created_at: now,
         updated_at: now,
     };
+    let mut agent_data_key = [0u8; 32];
+    let mut salt = [0u8; 32];
+    let mut nonce = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut agent_data_key);
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let wrapping_key = owner_root_wrapping_key(
+        owner_data_key,
+        &salt,
+        &record.principal_id,
+        &record.localhost_root,
+    )?;
+    let protection = PrincipalRootProtectionV1 {
+        schema: elastos_runtime::auth::PRINCIPAL_ROOT_PROTECTION_SCHEMA.into(),
+        principal_id: record.principal_id.clone(),
+        localhost_root: record.localhost_root.clone(),
+        data_key_id: principal_data_key_id(&agent_data_key),
+        crypto: elastos_runtime::auth::PrincipalRootCryptoProfileV1::default(),
+        protectors: vec![elastos_runtime::auth::PrincipalRootProtectorV1 {
+            protector_id: format!("protector:owner-root:{}", record.principal_id),
+            kind: PrincipalRootProtectorKind::OwnerRoot,
+            label: "Owner root".into(),
+            subject: Some(owner.into()),
+            created_at: now,
+            verified_at: Some(now),
+            envelope: Some(elastos_runtime::auth::PrincipalRootProtectorEnvelopeV1 {
+                cipher: DEFAULT_PRINCIPAL_ROOT_CIPHER.into(),
+                kdf: "hkdf-sha256".into(),
+                salt: b64_url(&salt),
+                nonce: b64_url(&nonce),
+                wrapped_data_key: encrypt_aes256_gcm_bytes(&wrapping_key, &nonce, &agent_data_key)?,
+            }),
+            archive: None,
+            profile_coverage: None,
+        }],
+        created_at: now,
+        updated_at: now,
+    };
+    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
     mutate_auth_state(data_dir, |state| {
         let mut minted = None;
         for stored in &state.principals {
@@ -5313,10 +5353,32 @@ pub fn mint_agent_principal(
                 anyhow::bail!("agent root is held by another record");
             }
         }
+        let protections = state
+            .principal_root_protections
+            .iter()
+            .filter(|stored| {
+                stored.principal_id == record.principal_id
+                    || stored.localhost_root == record.localhost_root
+            })
+            .collect::<Vec<_>>();
         if let Some(minted) = minted {
+            if protections.len() != 1
+                || protections[0].principal_id != record.principal_id
+                || protections[0].localhost_root != record.localhost_root
+                || protections[0].protectors.len() != 1
+                || protections[0].protectors[0].kind != PrincipalRootProtectorKind::OwnerRoot
+                || protections[0].protectors[0].subject.as_deref() != Some(owner)
+            {
+                anyhow::bail!("agent principal has no unique OwnerRoot protection");
+            }
             return Ok(minted);
         }
+        if !protections.is_empty() {
+            anyhow::bail!("agent root protection is held by another record");
+        }
         state.principals.push(record.clone());
+        ensure_users_ai_protection_owner(state, &protection)?;
+        state.principal_root_protections.push(protection);
         Ok(record)
     })
 }
@@ -6551,6 +6613,20 @@ pub(crate) fn derive_recovery_wrapping_key(
     let info = format!("elastos:root-recovery:v1:{principal_id}:{localhost_root}");
     hk.expand(info.as_bytes(), &mut key)
         .map_err(|_| anyhow!("recovery key derivation failed"))?;
+    Ok(key)
+}
+
+fn owner_root_wrapping_key(
+    owner_data_key: &[u8; 32],
+    salt: &[u8],
+    agent_id: &str,
+    agent_root: &str,
+) -> anyhow::Result<[u8; 32]> {
+    let hk = Hkdf::<Sha256>::new(Some(salt), owner_data_key);
+    let info = format!("elastos/usersai-owner-root/v1\0{agent_id}\0{agent_root}");
+    let mut key = [0u8; 32];
+    hk.expand(info.as_bytes(), &mut key)
+        .map_err(|_| anyhow!("OwnerRoot key derivation failed"))?;
     Ok(key)
 }
 
@@ -13085,7 +13161,7 @@ pub(crate) mod tests {
     const AGENT_ID_HELD: &str = "agent principal id is held by a different record";
 
     fn mint_pinned_agent(data_dir: &Path, now: u64) -> anyhow::Result<PrincipalRecord> {
-        mint_agent_principal(data_dir, AGENT_OWNER, AGENT_DID, AGENT_NAME, now)
+        mint_agent_principal(data_dir, AGENT_OWNER, AGENT_DID, AGENT_NAME, &[7; 32], now)
     }
 
     fn principals_json(data_dir: &Path) -> serde_json::Value {
@@ -13109,6 +13185,19 @@ pub(crate) mod tests {
         assert_eq!(minted.localhost_root, AGENT_ROOT_PINNED);
         assert_eq!(minted.kind, PrincipalKind::Agent);
         assert_eq!(minted.role, RuntimePrincipalRole::Guest);
+        let state = load_auth_state(data_dir.path()).unwrap();
+        assert_eq!(state.principal_root_protections.len(), 1);
+        let protection = &state.principal_root_protections[0];
+        assert_eq!(protection.principal_id, minted.principal_id);
+        assert_eq!(protection.localhost_root, minted.localhost_root);
+        assert_eq!(
+            protection.protectors[0].kind,
+            PrincipalRootProtectorKind::OwnerRoot
+        );
+        assert_eq!(
+            protection.protectors[0].subject.as_deref(),
+            Some(AGENT_OWNER)
+        );
         assert_eq!(
             principal_stored_localhost_root(Some(data_dir.path()), &minted.principal_id).unwrap(),
             AGENT_ROOT_PINNED
@@ -13129,10 +13218,19 @@ pub(crate) mod tests {
         let first = mint_pinned_agent(data_dir.path(), 5).unwrap();
         let path = auth_state_path(data_dir.path()).unwrap();
         let before = std::fs::read(&path).unwrap();
+        let protection_before = load_auth_state(data_dir.path())
+            .unwrap()
+            .principal_root_protections;
 
         let second = mint_pinned_agent(data_dir.path(), 9).unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            load_auth_state(data_dir.path())
+                .unwrap()
+                .principal_root_protections,
+            protection_before
+        );
         assert_eq!(
             serde_json::to_value(&second).unwrap(),
             serde_json::to_value(&first).unwrap()
@@ -13244,7 +13342,7 @@ pub(crate) mod tests {
             ("control in did", AGENT_OWNER, "did:key:\u{0}", AGENT_NAME),
             ("control in name", AGENT_OWNER, AGENT_DID, "no\ttes"),
         ] {
-            let error = mint_agent_principal(data_dir.path(), owner, did, name, 5)
+            let error = mint_agent_principal(data_dir.path(), owner, did, name, &[7; 32], 5)
                 .expect_err(case)
                 .to_string();
             assert!(error.contains("invalid agent identity"), "{case}: {error}");
@@ -13271,17 +13369,45 @@ pub(crate) mod tests {
             AGENT_OWNER,
             "did:key:z6MkAgentTwo",
             AGENT_NAME,
+            &[7; 32],
             5,
         )
         .unwrap();
 
         let state = load_auth_state(data_dir.path()).unwrap();
         assert_eq!(state.principals.len(), 2);
+        assert_eq!(state.principal_root_protections.len(), 2);
         for record in &minted {
             assert_eq!(record.principal_id, format!("agent:v1:{AGENT_DIGEST}"));
         }
         assert_ne!(other.principal_id, minted[0].principal_id);
         assert_ne!(other.localhost_root, minted[0].localhost_root);
+    }
+
+    #[test]
+    fn mint_agent_refuses_missing_or_duplicate_protection_without_a_write() {
+        for duplicate in [false, true] {
+            let data_dir = tempfile::tempdir().unwrap();
+            mint_pinned_agent(data_dir.path(), 5).unwrap();
+            mutate_auth_state(data_dir.path(), |state| {
+                if duplicate {
+                    state
+                        .principal_root_protections
+                        .push(state.principal_root_protections[0].clone());
+                } else {
+                    state.principal_root_protections.clear();
+                }
+                Ok(())
+            })
+            .unwrap();
+            let path = auth_state_path(data_dir.path()).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let error = mint_pinned_agent(data_dir.path(), 9)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("no unique OwnerRoot protection"), "{error}");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
     }
 
     /// The sign-in guard holds against a minted record, not only the fixture:
