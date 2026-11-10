@@ -11167,6 +11167,12 @@ pub(crate) fn store_test_principal_root_protection(
     data_dir: &Path,
     principal_id: &str,
 ) -> PrincipalRootProtectionV1 {
+    if stored_principal_record(data_dir, principal_id)
+        .unwrap()
+        .is_none()
+    {
+        store_test_human_principal(data_dir, principal_id);
+    }
     let localhost_root = principal_localhost_root(principal_id);
     store_test_principal_root_protection_for(data_dir, principal_id, &localhost_root)
 }
@@ -12498,7 +12504,10 @@ pub(crate) mod tests {
         store_session_grant(data_dir, current_grant.clone()).unwrap();
 
         let recovered_principal_id = "person:local:recovered-signature-test".to_string();
-        let protection = store_test_principal_root_protection(data_dir, &recovered_principal_id);
+        // This fixture models a Kit from another Home, with no local record.
+        let root = principal_localhost_root(&recovered_principal_id);
+        let protection =
+            store_test_principal_root_protection_for(data_dir, &recovered_principal_id, &root);
         let replacement_grant = AuthSessionGrantV1 {
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: "grant:recovered-signature-test".to_string(),
