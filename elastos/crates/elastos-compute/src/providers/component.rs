@@ -40,6 +40,9 @@ const COMPONENT_COMPILE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEADLINE_TICK: Duration = Duration::from_millis(10);
 /// How long one activation's own code may run. Time inside Bus calls is not
 /// counted, so a run that waits on the Runtime is not ended for waiting.
+/// Two things this is not: it is not exact (a ticker thread that is starved
+/// makes the limit late, never early by more than one tick), and it cannot
+/// stop a Bus call that never returns, because host code has no tick checks.
 /// Fuel counts instructions, and how long an instruction takes depends on the
 /// instruction and the machine; this bounds the time itself.
 const COMPONENT_RUN_DEADLINE: Duration = Duration::from_secs(10);
@@ -76,6 +79,10 @@ pub struct ComponentProvider {
     bus_hostcall: std::sync::RwLock<Option<BridgeHostcall>>,
     bridge_principals: Arc<RwLock<HashMap<CapsuleId, Option<String>>>>,
     compile_slot: Arc<Semaphore>,
+    /// Test only: holds the next compile job just after its worker has taken
+    /// the compile slot, so a test can act while a compile is in progress.
+    #[cfg(test)]
+    worker_gate: std::sync::Mutex<Option<tests::WorkerGate>>,
 }
 
 impl ComponentProvider {
@@ -87,6 +94,8 @@ impl ComponentProvider {
             // One compile at a time: a burst of loads queues instead of
             // starting competing compiler jobs.
             compile_slot: Arc::new(Semaphore::new(1)),
+            #[cfg(test)]
+            worker_gate: std::sync::Mutex::new(None),
         }
     }
 
@@ -183,9 +192,15 @@ impl ComponentProvider {
         .await
         .map_err(|_| ElastosError::Compute("Timed out waiting for the component compiler".into()))?
         .map_err(|_| ElastosError::Compute("Component compiler is unavailable".into()))?;
+        #[cfg(test)]
+        let worker_gate = self.worker_gate.lock().unwrap().take();
         let (engine, component) =
             tokio::task::spawn_blocking(move || -> Result<(Engine, Component)> {
                 let _compile_permit = compile_permit;
+                #[cfg(test)]
+                if let Some(gate) = worker_gate {
+                    gate.hold();
+                }
                 let engine = Self::engine()?;
                 let component = Component::from_binary(&engine, &bytes).map_err(|err| {
                     ElastosError::Compute(format!("Failed to compile component capsule: {err}"))
@@ -764,6 +779,85 @@ mod tests {
             "Compute error: component is larger than the 8388608 byte limit"
         );
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    /// Lets a test hold one compile job at the point where its worker has
+    /// started and taken the compile slot. `hold` reports that point, then
+    /// waits to be released.
+    pub(super) struct WorkerGate {
+        started: tokio::sync::mpsc::UnboundedSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl WorkerGate {
+        pub(super) fn hold(self) {
+            let _ = self.started.send(());
+            let _ = self.release.recv();
+        }
+    }
+
+    /// A compile job whose caller was cancelled while its worker was already
+    /// compiling keeps the slot until that worker ends: a later load waits,
+    /// and gets its own queue timeout, instead of compiling beside it. (The
+    /// test above gates the job before its worker starts; this one gates it
+    /// after, which is the case upstream issue #440 asks for.)
+    #[tokio::test(start_paused = true)]
+    async fn component_load_keeps_its_slot_while_its_cancelled_worker_is_still_compiling() {
+        use std::future::Future;
+        use std::task::Poll;
+        let provider = Arc::new(ComponentProvider::new());
+        let (bytes, manifest) = admitted_fixture();
+        let (started, mut worker_started) = tokio::sync::mpsc::unbounded_channel();
+        let (release, held) = std::sync::mpsc::channel();
+        *provider.worker_gate.lock().unwrap() = Some(WorkerGate {
+            started,
+            release: held,
+        });
+
+        let loading_provider = provider.clone();
+        let (first_bytes, first_manifest) = (bytes.clone(), manifest.clone());
+        let loading = tokio::spawn(async move {
+            loading_provider
+                .load_admitted(first_bytes, first_manifest)
+                .await
+        });
+        worker_started.recv().await.expect("the worker starts");
+        assert_eq!(
+            provider.compile_slot.available_permits(),
+            0,
+            "the started worker holds the slot"
+        );
+        loading.abort();
+        let cancelled = loading.await.unwrap_err().is_cancelled();
+
+        let result = {
+            let next_load = tokio::time::timeout(
+                Duration::from_secs(31),
+                provider.load_admitted(bytes.clone(), manifest.clone()),
+            );
+            tokio::pin!(next_load);
+            match std::future::poll_fn(|cx| Poll::Ready(next_load.as_mut().poll(cx))).await {
+                Poll::Ready(result) => result,
+                Poll::Pending => {
+                    tokio::time::advance(Duration::from_secs(31)).await;
+                    next_load.await
+                }
+            }
+        };
+
+        // Let the held worker finish, then show the slot comes back.
+        release.send(()).unwrap();
+        tokio::time::resume();
+        let handle = provider.load_admitted(bytes, manifest).await.unwrap();
+        provider.stop(&handle).await.unwrap();
+
+        assert!(cancelled);
+        assert!(
+            matches!(result, Ok(Err(ElastosError::Compute(message)))
+                if message == "Timed out waiting for the component compiler"),
+            "a load must wait for a cancelled caller's compile that is still running"
+        );
+        assert_eq!(provider.compile_slot.available_permits(), 1);
     }
 
     /// The fixture's component bytes and manifest, for loads that skip the file read.
