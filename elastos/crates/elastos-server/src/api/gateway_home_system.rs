@@ -6744,10 +6744,9 @@ fn home_active_shell_state(
     }
     let principal_id = home_browser_principal_id(context);
     let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_active_shell_state_uri(context),
         &path,
     ) {
@@ -6811,10 +6810,9 @@ fn home_save_active_shell(
     if let Some(parent) = path.parent() {
         crate::auth::create_owner_only_dir_all(data_dir, parent)?;
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_active_shell_state_uri(context),
         &path,
         &bytes,
@@ -9404,6 +9402,7 @@ mod stored_root_tests {
 
     fn verified_parent_device_context(
         data_dir: &std::path::Path,
+        app: &str,
     ) -> (HomeLaunchTokenContext, String) {
         let parent = tempfile::tempdir().unwrap();
         let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
@@ -9412,12 +9411,12 @@ mod stored_root_tests {
                 .unwrap();
         let token = super::super::gateway_home_token::issue_home_launch_token_with_context(
             parent.path(),
-            SERVICES_CAPSULE_ID,
+            app,
             &parent_context,
         )
         .unwrap();
         let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
-            data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did.clone(), parent.path(),
+            data_dir, &token, &[app], parent_did.clone(), parent.path(),
         ).unwrap();
         (verified.context, parent_did)
     }
@@ -9426,7 +9425,7 @@ mod stored_root_tests {
     fn parent_signed_services_selection_stays_under_parent_device_root() {
         let (_temp, data_dir) = state_dir();
         let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
-        let (context, parent_did) = verified_parent_device_context(&data_dir);
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SERVICES_CAPSULE_ID);
         let parent_root = format!(
             "localhost://Users/{}",
             hex::encode(&Sha256::digest(format!("device:{parent_did}").as_bytes())[..12])
@@ -9447,6 +9446,115 @@ mod stored_root_tests {
         let child_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
         assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_active_shell_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        let capsule_dir = data_dir.join("capsules/home-gui");
+        fs::create_dir_all(capsule_dir.join("browser")).unwrap();
+        fs::write(
+            capsule_dir.join("capsule.json"),
+            include_str!("../../../../../capsules/home-gui/capsule.json"),
+        )
+        .unwrap();
+        fs::write(capsule_dir.join("browser/index.html"), "Home fixture").unwrap();
+        fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({"external": {
+                "home-gui": {"install_path": "capsules/home-gui", "platforms": {}}
+            }, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+        home_save_active_shell(&data_dir, &context, HOME_GUI_SHELL_ID).unwrap();
+        assert_eq!(
+            home_active_shell_state(&data_dir, &context)
+                .unwrap()
+                .unwrap()
+                .active,
+            HOME_GUI_SHELL_ID
+        );
+        assert!(home_active_shell_state_path(&data_dir, &context)
+            .unwrap()
+            .is_file());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        assert_ne!(context.root().localhost_root(), child_root);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/active-shell.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_auth_store_person_services_selection_uses_stored_root_in_child() {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+
+        let (_temp, data_dir) = state_dir();
+        let parent = tempfile::tempdir().unwrap();
+        let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let mut record = crate::auth::store_test_human_principal(
+            parent.path(),
+            "person:local:parent-store-services",
+        );
+        record.localhost_root = "localhost://Users/parent-stored-root".to_string();
+        let mut auth_state = crate::auth::load_auth_state(parent.path()).unwrap();
+        auth_state.principals[0].localhost_root = record.localhost_root.clone();
+        crate::auth::save_auth_state(parent.path(), &auth_state, None).unwrap();
+        let now = crate::auth::now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:parent-store-services".to_string(),
+            session_id: "auth:parent-store-services".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec![SERVICES_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(parent.path(), grant.clone()).unwrap();
+        let token = super::super::gateway_home_token::issue_home_launch_token_for_auth_grant(
+            parent.path(),
+            SERVICES_CAPSULE_ID,
+            &grant,
+        )
+        .unwrap();
+        let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+            &data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did, parent.path(),
+        ).unwrap();
+        let context = verified.context;
+        assert_eq!(
+            context.root().localhost_root(),
+            "localhost://Users/parent-stored-root"
+        );
+        assert!(
+            crate::auth::stored_principal_record(&data_dir, &record.principal_id)
+                .unwrap()
+                .is_none()
+        );
+        let mut selection = home_services_default_selection_state(&context);
+        selection
+            .local_offer_ids
+            .insert("parent-person-offer".to_string());
+        home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
+        assert!(home_services_selection_state(&data_dir, &context)
+            .unwrap()
+            .local_offer_ids
+            .contains("parent-person-offer"));
+        assert!(home_services_selection_state_path(&data_dir, &context)
+            .unwrap()
+            .is_file());
+        let formula_root = crate::auth::principal_localhost_root(&record.principal_id);
+        let formula_uri = format!("{formula_root}/.AppData/ElastOS/Home/services-state.json");
+        let formula_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &formula_uri).unwrap();
+        assert!(!formula_path.exists());
     }
 
     #[test]
