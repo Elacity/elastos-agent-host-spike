@@ -609,10 +609,7 @@ copy_mutant_saved = None
 
 def build_component():
     """A mutant must reach the built component: rebuild it for the case."""
-    build = kit.run([str(HERE / "build.sh")], HERE)
-    if build.returncode != 0:
-        print(build.stderr[-2000:])
-        raise SystemExit("component build failed under a falsifier")
+    kit.build([str(HERE / "build.sh")], HERE, "component build failed under a falsifier")
 
 
 def apply_copy_mutant():
@@ -628,6 +625,7 @@ def apply_copy_mutant():
         )
     copy_mutant_saved = path.read_bytes()
     path.write_text(source.replace(COPY_WINDOW, COPY_BYTES))
+    kit.stamp([path])
 
 
 def restore_copy_mutant():
@@ -635,6 +633,7 @@ def restore_copy_mutant():
     global copy_mutant_saved
     if copy_mutant_saved is not None:
         (HERE / PREVIEW).write_bytes(copy_mutant_saved)
+        kit.stamp([HERE / PREVIEW])
         copy_mutant_saved = None
 
 
@@ -817,11 +816,13 @@ def check_runtime_isolation(args, host_tests, guest_tests):
                 path.write_text(text)
                 if apply_extra is not None:
                     apply_extra()
+                kit.planted([path])
                 build_component()
                 guest_code, guest_summaries, guest_results = suite()
                 code, summaries, results = host_suite()
             finally:
                 path.write_bytes(saved)
+                kit.restored([path])
                 if restore_extra is not None:
                     restore_extra()
             executed.append(name)
@@ -910,10 +911,12 @@ def measure_variants():
                 zip_path.write_text(saved.decode().replace(F36[2], F36[3]))
             if inflate:
                 apply_copy_mutant()
+            kit.planted([zip_path if reader else HERE / PREVIEW])
             build_component()
             shares = fuel_run()
         finally:
             zip_path.write_bytes(saved)
+            kit.restored([zip_path])
             restore_copy_mutant()
         print(f"{label}:", flush=True)
         for archive, fuel, share in shares:

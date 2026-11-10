@@ -4,17 +4,19 @@
 Usage: python3 -I falsify.py [--check] [name-part ...]
 
 Each falsifier replaces exact text in one file (each piece must occur once),
-rebuilds what it touched (a mutant that does not compile stops the run), runs
+rebuilds what it touched (a mutant that does not compile, or whose crate Cargo
+did not compile, stops the run: the capsule kit's runner checks that), runs
 the named tests and requires them to FAIL. The file is restored from its saved
 bytes afterwards, also on error or Ctrl-C. --check only confirms the anchors.
 Name parts run only the falsifiers whose name contains one of them.
 """
-import os
 import pathlib
-import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
+
 GUESTS = ["-p", "bus2-photo-guest", "-p", "bus2-resident-guest", "-p", "bus2-busy-guest", "-p", "bus2-start-loop-guest"]
 
 # (name, file, [(old, new)], [(test target, test name)])
@@ -317,19 +319,15 @@ CASES = [
 
 
 def run(args):
-    environment = dict(os.environ)
-    environment.setdefault("RUST_TEST_THREADS", "2")
-    return subprocess.run(args, cwd=ROOT, env=environment, capture_output=True, text=True)
+    return kit.run(args, ROOT)
 
 
 def build(relative):
+    # kit.build stops the run unless Cargo compiled the crate of the mutant in place.
     if relative.startswith("guests/"):
-        result = run(["cargo", "build", "--locked", "--release", "--target", "wasm32-unknown-unknown", *GUESTS])
+        kit.build(["cargo", "build", "--locked", "--release", "--target", "wasm32-unknown-unknown", *GUESTS], ROOT)
     else:
-        result = run(["cargo", "test", "--locked", "-p", "bus2-host", "--no-run"])
-    if result.returncode != 0:
-        print(result.stderr[-3000:])
-        raise SystemExit("a falsifier does not compile")
+        kit.build(["cargo", "test", "--locked", "-p", "bus2-host", "--no-run"], ROOT)
 
 
 def tests_fail(tests):
@@ -362,10 +360,12 @@ def main():
             for old, new in replacements:
                 text = text.replace(old, new)
             path.write_text(text)
+            kit.planted([path])
             build(relative)
             caught = tests_fail(tests)
         finally:
             path.write_bytes(saved)
+            kit.restored([path])
             if relative.startswith("guests/"):
                 build(relative)
         print(f"{'caught' if caught else 'MISSED'}: {name}", flush=True)

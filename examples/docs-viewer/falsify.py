@@ -369,10 +369,7 @@ def guest_test_fails(test):
 
 
 def build_component():
-    build = kit.run([str(HERE / "build.sh")], HERE)
-    if build.returncode != 0:
-        print(build.stderr[-2000:])
-        raise SystemExit("component build failed under a falsifier")
+    kit.build([str(HERE / "build.sh")], HERE, "component build failed under a falsifier")
 
 
 def runtime_test_fails(name):
@@ -383,19 +380,16 @@ def bundle_test_fails(name):
     return kit.cargo_test_fails(HERE / "bundle-test", ["--test", "bundle"], name)
 
 
+BUS2_BUILD = ["cargo", "build", "--locked", "--release", "--target", "wasm32-unknown-unknown", *BUS2_GUESTS]
+
+
 def build_bus2_guests():
     # From bus2/, so rustup picks its toolchain (Rust 1.95.0).
-    return kit.run(
-        ["cargo", "build", "--locked", "--release", "--target", "wasm32-unknown-unknown", *BUS2_GUESTS],
-        HERE / "bus2",
-    )
+    return kit.run(BUS2_BUILD, HERE / "bus2")
 
 
 def build_bus2():
-    build = build_bus2_guests()
-    if build.returncode != 0:
-        print(build.stderr[-2000:])
-        raise SystemExit("a Bus v2 falsifier does not compile")
+    kit.build(BUS2_BUILD, HERE / "bus2", "a Bus v2 falsifier does not compile")
 
 
 def bus2_test_fails(name):

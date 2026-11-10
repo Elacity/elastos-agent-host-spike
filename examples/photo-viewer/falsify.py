@@ -200,10 +200,7 @@ def guest_test_fails(name):
 
 
 def build_component():
-    build = kit.run([str(HERE / "build.sh")], HERE)
-    if build.returncode != 0:
-        print(build.stderr[-2000:])
-        raise SystemExit("component build failed under a falsifier")
+    kit.build([str(HERE / "build.sh")], HERE, "component build failed under a falsifier")
 
 
 def runtime_test_fails(name):
