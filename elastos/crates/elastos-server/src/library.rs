@@ -8291,7 +8291,7 @@ fn remove_trash_record(data_dir: &Path, principal_id: &str, trash_uri: &str) -> 
 
 fn remove_trash_record_with_root(
     data_dir: &Path,
-    principal_id: &str,
+    _principal_id: &str,
     root: &str,
     trash_uri: &str,
 ) -> anyhow::Result<()> {
