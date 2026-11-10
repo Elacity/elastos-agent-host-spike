@@ -70,17 +70,21 @@ jobs:
           git rev-parse HEAD
           test "$(git rev-parse HEAD)" = "$PINNED"
           test -z "$(git status --porcelain)"
+      # The browser is installed under Node 24 and the tests then run under
+      # Node 26, exactly as the repository's own CI does it. Under Node 26
+      # Playwright's installer downloaded the whole archive and then never
+      # returned, twice (the full Chrome build, then the headless shell).
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '26'
-      # The headless shell only, as the repository's own CI installs it. The
-      # full Chrome download stalled on the first run of this job and held it
-      # to its time limit.
+          node-version: '24'
       - name: Install the repository's pinned Playwright and its headless Chromium
         timeout-minutes: 8
         run: |
           npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine
           npx --prefix elastos/tools/browser-playwright-engine playwright install chromium --with-deps --only-shell
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '26'
       - name: Page tests (no browser)
         run: |
           node --test examples/photo-viewer/surface/photos.test.mjs
