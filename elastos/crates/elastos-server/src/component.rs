@@ -405,6 +405,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_forbidden_import_inside_a_nested_component() {
+        // The walk must reach a component nested inside the one being checked.
+        let inner = component_with_imports(&[(
+            "wasi:filesystem/types@0.2.0",
+            EncodedComponentTypeRef::Instance(0),
+        )]);
+        let mut outer = Component::new();
+        outer.section(&wasm_encoder::RawSection {
+            id: wasm_encoder::ComponentSectionId::Component.into(),
+            data: &inner,
+        });
+        let err = validate_component_imports(&outer.finish()).unwrap_err();
+        assert!(err.contains("not allowed"), "{err}");
+        assert!(err.contains("wasi:filesystem/types@0.2.0"), "{err}");
+    }
+
+    #[test]
     fn rejects_allowed_name_with_wrong_import_kind() {
         let mut types = ComponentTypeSection::new();
         types

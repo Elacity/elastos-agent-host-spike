@@ -1076,10 +1076,17 @@ pub(crate) mod tests {
                 std::fs::write(path, replacement).unwrap();
             }));
         });
+        // The hook is taken away again however this test ends.
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                crate::component::AFTER_ENTRYPOINT_READ.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let _reset = ResetHook;
         let launched = runtime
             .run_local_with_signer(&capsule_dir, Vec::new(), None)
             .await;
-        crate::component::AFTER_ENTRYPOINT_READ.with(|hook| *hook.borrow_mut() = None);
 
         assert_eq!(
             reads.load(Ordering::SeqCst),
