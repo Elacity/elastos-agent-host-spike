@@ -31,6 +31,11 @@ use sha2::{Digest, Sha256};
 
 use crate::host_lock::FileLock;
 
+mod verified_launch_token_signer;
+pub(crate) use verified_launch_token_signer::{
+    VerifiedLaunchTokenSigner, HOME_LAUNCH_TOKEN_DOMAIN,
+};
+
 /// Test-only record of principal-root object reads and writes, so a row can
 /// prove that an unresolved principal touches no path the id rule names.
 #[cfg(test)]
@@ -7695,27 +7700,6 @@ pub(crate) struct ResolvedPrincipalRoot {
     arm: RootArm,
 }
 
-pub(crate) const HOME_LAUNCH_TOKEN_DOMAIN: &str = "elastos.home.launch.v4";
-
-/// A signer admitted by the launch token's domain-separated signature check.
-pub(crate) struct VerifiedLaunchTokenSigner {
-    did: String,
-}
-
-impl VerifiedLaunchTokenSigner {
-    pub(crate) fn verify(bytes: &[u8], expected_dids: &[String]) -> anyhow::Result<Self> {
-        if expected_dids.is_empty() {
-            anyhow::bail!("home launch token has no expected signer");
-        }
-        let (_, did) = crate::crypto::verify_signed_json_envelope_against_dids(
-            bytes,
-            HOME_LAUNCH_TOKEN_DOMAIN,
-            expected_dids,
-        )?;
-        Ok(Self { did })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RootArm {
     Local(String),
@@ -7772,10 +7756,11 @@ impl ResolvedPrincipalRoot {
     }
 
     /// The device arm for a launch token whose signature verified against an
-    /// expected signer. The witness binds this root to that verified signer.
+    /// expected signer. Only the witness module can build that signer, after
+    /// the signature check accepts its DID.
     /// A subordinate Runtime can trust its parent's DID without holding its key.
     pub(crate) fn verified_device_signer(signer: &VerifiedLaunchTokenSigner) -> Self {
-        let did = &signer.did;
+        let did = signer.did();
         Self {
             principal_id: PrincipalId::device_did(did).as_str().to_string(),
             arm: RootArm::Local(verified_device_localhost_root(did)),
@@ -11490,12 +11475,6 @@ mod scan_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
-    fn test_launch_token_signer_fixture(did: &str) -> VerifiedLaunchTokenSigner {
-        VerifiedLaunchTokenSigner {
-            did: did.to_string(),
-        }
-    }
 
     #[test]
     fn r4_users_ai_protection_requires_agent_record_kind() {
@@ -17376,7 +17355,8 @@ pub(crate) mod tests {
     #[test]
     fn r8_verified_device_signer_uses_the_device_root() {
         // Constructor row: this fixture tests the root mapping, not token proof.
-        let signer = test_launch_token_signer_fixture("did:key:z6MkR8Device");
+        let signer =
+            verified_launch_token_signer::fixture_unverified_for_tests("did:key:z6MkR8Device");
         let resolved = ResolvedPrincipalRoot::verified_device_signer(&signer);
         assert_eq!(
             resolved.localhost_root(),
@@ -17535,7 +17515,9 @@ pub(crate) mod tests {
     fn verified_device_object_binding_uses_typed_root() {
         let data_dir = tempfile::tempdir().unwrap();
         // Constructor row: the real token proof is in remote_model.
-        let signer = test_launch_token_signer_fixture("did:key:z6MkParentSignedDevice");
+        let signer = verified_launch_token_signer::fixture_unverified_for_tests(
+            "did:key:z6MkParentSignedDevice",
+        );
         let resolved = ResolvedPrincipalRoot::verified_device_signer(&signer);
         let root = "localhost://Users/45c2b381a3e1d3ed5e2a5ede";
         assert_eq!(resolved.localhost_root(), root);
