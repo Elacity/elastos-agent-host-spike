@@ -125,10 +125,20 @@ def measure(root, manifest):
 
 
 def text(report):
-    core = report["core"]
-    return (f"core crate {core['crate']}: {core['code']} code lines"
-            f" ({core['counts']['tests']} tests, {core['counts']['comments']} comments,"
-            f" {core['counts']['blank']} blank; {core['counter']})")
+    core, out = report["core"], []
+    out.append(f"core crate {core['crate']}: {core['code']} code lines"
+               f" ({core['counts']['tests']} tests, {core['counts']['comments']} comments,"
+               f" {core['counts']['blank']} blank; {core['counter']})")
+    out.append(f"allow-listed files ({len(report['files'])}; code lines under docs/TRUSTED-CODE.md):")
+    out.append("file | code | total | tests | comments | blank | note")
+    out.append("--- | ---: | ---: | ---: | ---: | ---: | ---")
+    for row in report["files"]:
+        counts = row["counts"]
+        note = row.get("error") or ("test file" if row.get("test_file") else "")
+        out.append(f"{row['path']} | {counts['code']} | {counts['total']} | {counts['tests']} |"
+                   f" {counts['comments']} | {counts['blank']} | {note}")
+    out.append(f"allow-listed code total: {sum(row['counts']['code'] for row in report['files'])} lines")
+    return "\n".join(out)
 
 
 def main(argv=None):
