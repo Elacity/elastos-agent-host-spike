@@ -1832,6 +1832,7 @@ dependencies = [
  "url",
  "wasm-encoder 0.254.2",
  "wasmparser 0.254.2",
+ "wat",
  "x-wing",
  "zeroize",
  "zip",

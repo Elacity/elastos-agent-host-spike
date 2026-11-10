@@ -29,25 +29,24 @@ const FORBIDDEN_AUTHORITY_MARKERS: &[&str] = &[
     "_carrier",
 ];
 
-pub(crate) async fn validate_component_capsule(
+/// Reads a component capsule's entrypoint once, under the size cap. The
+/// signature check, the import check and the compiler all use these bytes.
+pub(crate) async fn read_admitted_entrypoint(
     capsule_dir: &Path,
     manifest: &CapsuleManifest,
-) -> Result<()> {
-    if !manifest.is_component_capsule() {
-        return Ok(());
-    }
-
+) -> Result<Vec<u8>> {
     let entrypoint = capsule_dir.join(&manifest.entrypoint);
-    let bytes = tokio::fs::read(&entrypoint).await.map_err(|err| {
-        ElastosError::InvalidManifest(format!(
-            "failed to read component entrypoint {}: {}",
-            manifest.entrypoint, err
-        ))
-    })?;
-    validate_component_imports(&bytes).map_err(ElastosError::InvalidManifest)
+    elastos_compute::providers::ComponentProvider::read_component(&entrypoint)
+        .await
+        .map_err(|err| {
+            ElastosError::InvalidManifest(format!(
+                "failed to read component entrypoint {}: {}",
+                manifest.entrypoint, err
+            ))
+        })
 }
 
-fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
+pub(crate) fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
     let mut saw_root_header = false;
 
     for payload in Parser::new(0).parse_all(bytes) {
