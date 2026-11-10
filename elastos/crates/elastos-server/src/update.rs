@@ -5056,21 +5056,22 @@ mod tests {
     }
 
     /// Waits for the candidate shell to publish its grandchild PID. A starved
-    /// machine may not have run the script before the probe returned.
+    /// machine may not have run the script before the probe returned. The wait
+    /// is async so a test can run it beside the probe future.
     #[cfg(unix)]
-    fn recorded_pid(path: &std::path::Path, limit: std::time::Duration) -> i32 {
-        let until = std::time::Instant::now() + limit;
+    async fn recorded_pid(path: &std::path::Path, limit: std::time::Duration) -> i32 {
+        let until = tokio::time::Instant::now() + limit;
         loop {
-            if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(text) = tokio::fs::read_to_string(path).await {
                 if let Ok(pid) = text.trim().parse() {
                     return pid;
                 }
             }
             assert!(
-                std::time::Instant::now() < until,
+                tokio::time::Instant::now() < until,
                 "candidate did not record its child PID within {limit:?}"
             );
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -5142,9 +5143,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         // The rule is that a child retaining the pipes keeps the probe until its
-        // deadline, then the group dies. The deadline is generous so a loaded
-        // machine still runs the script before the timer fires.
+        // deadline, then the group dies. The probe and the PID wait run
+        // together, and the PID wait has its own, smaller budget: a starved
+        // shell fails that wait while the probe is still running, so the
+        // probe's deadline is never the reason the file is missing.
         const LEAKY_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+        const PID_RECORD_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("child-pid");
         let bin = dir.path().join("leaky-candidate");
@@ -5157,14 +5161,23 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let error = verify_installed_binary_version(&bin, "0.1.0", LEAKY_PROBE_DEADLINE)
-            .await
-            .unwrap_err();
+        let mut probe = Box::pin(verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            LEAKY_PROBE_DEADLINE,
+        ));
+        let pid = tokio::select! {
+            pid = recorded_pid(&pid_path, PID_RECORD_BUDGET) => pid,
+            result = probe.as_mut() => panic!(
+                "probe returned before the candidate recorded its PID within {PID_RECORD_BUDGET:?}: {result:?}"
+            ),
+        };
+        let error = probe.await.unwrap_err();
         assert!(
             error.to_string().contains("timed out after 30 seconds"),
             "{error:#}"
         );
-        assert_process_gone(recorded_pid(&pid_path, LEAKY_PROBE_DEADLINE));
+        assert_process_gone(pid);
     }
 
     #[cfg(unix)]
