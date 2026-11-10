@@ -35,10 +35,13 @@ import time
 #    time plus the time that has really passed, whichever is later), reads it
 #    around every command, and stamps every mutant and every restored file
 #    after it. Each stamp is later than the one before.
-# 2. A build of a mutant in which Cargo printed no "Compiling" is made once
-#    more, with the files stamped a minute ahead.
+# 2. No test is scored until a build is known to have compiled the mutant:
+#    Cargo printed "Compiling <crate>" for the crate of every Rust file the
+#    mutant changed. A build that did not is tried once more with the files
+#    stamped a minute ahead; if that does not either, the run stops.
 _latest_seen = 0.0
 _planted = []
+_compiled = False
 _started = (time.time(), time.monotonic())
 
 
@@ -66,14 +69,19 @@ def stamp(paths):
 
 def planted(paths):
     """Says a mutant has just been written to `paths`. `falsify` calls it; a
-    script with a loop of its own calls it after writing."""
+    script with a loop of its own calls it after writing, so that `build` and
+    `cargo_test_fails` hold that loop to the same rule."""
+    global _compiled
     _planted[:] = [pathlib.Path(path) for path in paths]
+    _compiled = False
     _stamp_after_latest(_planted, 1)
 
 
 def restored(paths):
     """Says the original bytes have just been written back to `paths`."""
+    global _compiled
     _planted.clear()
+    _compiled = False
     _stamp_after_latest(paths, 1)
 
 
@@ -87,6 +95,52 @@ def run(cmd, cwd):
     _note_time()
     result = subprocess.run(cmd, cwd=cwd, env=env(), capture_output=True, text=True)
     _note_time()
+    return result
+
+
+def _crate(path):
+    """The Cargo package a source file belongs to: the name in the nearest
+    Cargo.toml above it that has a [package] table."""
+    for folder in pathlib.Path(path).resolve().parents:
+        manifest = folder / "Cargo.toml"
+        if not manifest.is_file():
+            continue
+        in_package = False
+        for line in manifest.read_text().splitlines():
+            if line.startswith("["):
+                in_package = line.strip() == "[package]"
+            name = re.match(r'name\s*=\s*"([^"]+)"', line)
+            if in_package and name:
+                return name.group(1)
+    raise SystemExit(f"{path} is in no Cargo package: a mutant there cannot be shown to be compiled")
+
+
+def _not_compiled(stderr):
+    """The crates of the planted Rust files that this build did not compile."""
+    crates = sorted({_crate(path) for path in _planted if str(path).endswith(".rs")})
+    return [crate for crate in crates if not re.search(rf"^\s*Compiling {re.escape(crate)} v", stderr, re.M)]
+
+
+def build(cmd, cwd, failure="a falsifier does not compile"):
+    """Runs a build command (Cargo, or a script that runs Cargo without
+    --quiet) that must compile the mutant in place, and stops the run if it
+    fails or did not compile the mutant's crate. With no mutant in place it
+    only has to pass."""
+    global _compiled
+    result = run(cmd, cwd)
+    if result.returncode == 0 and _not_compiled(result.stderr):
+        _stamp_after_latest(_planted, 60)
+        result = run(cmd, cwd)
+        if result.returncode == 0 and _not_compiled(result.stderr):
+            names = ", ".join(str(path) for path in _planted)
+            raise SystemExit(
+                f"the build did not compile {', '.join(_not_compiled(result.stderr))} "
+                f"with a mutant in {names}: no test can be scored"
+            )
+    if result.returncode != 0:
+        print(result.stderr[-3000:])
+        raise SystemExit(failure)
+    _compiled = bool(_planted)
     return result
 
 
@@ -157,20 +211,18 @@ def falsify(cases, prepare, test_fails, parts=(), show_tests=False, failing_test
 
 
 def cargo_compiles(cwd, args):
-    """A mutant that does not compile proves nothing: stop the run."""
-    build = run(["cargo", "test", "--locked", *args, "--no-run"], cwd)
-    if build.returncode == 0 and _planted and "Compiling" not in build.stderr:
-        # Cargo rebuilt nothing, so it did not see the mutant. Stamp the changed
-        # files well ahead and build once more.
-        _stamp_after_latest(_planted, 60)
-        build = run(["cargo", "test", "--locked", *args, "--no-run"], cwd)
-    if build.returncode != 0:
-        print(build.stderr[-3000:])
-        raise SystemExit("a falsifier does not compile")
+    """A mutant that does not compile, or whose crate Cargo did not compile,
+    proves nothing: stop the run. Cargo must say what it compiles, so -q is
+    dropped."""
+    loud = [arg for arg in args if arg not in ("-q", "--quiet")]
+    build(["cargo", "test", "--locked", *loud, "--no-run"], cwd)
 
 
 def cargo_test_fails(cwd, args, name):
-    """Runs one test by its exact name; it must exist."""
+    """Runs one test by its exact name; it must exist. If no build has
+    compiled the Rust mutant in place yet, one is made and checked first."""
+    if not _compiled and any(str(path).endswith(".rs") for path in _planted):
+        cargo_compiles(cwd, args)
     result = run(["cargo", "test", "--locked", *args, "--", "--exact", name], cwd)
     if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
         raise SystemExit(f"no test {name} in {cwd}\n{result.stdout[-1500:]}{result.stderr[-1500:]}")
