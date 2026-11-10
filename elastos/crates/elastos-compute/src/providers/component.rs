@@ -40,6 +40,8 @@ const DEADLINE_TICK: Duration = Duration::from_millis(10);
 const COMPONENT_RUN_DEADLINE: Duration = Duration::from_secs(10);
 /// The named ending of a run that the deadline stopped.
 const ENDING_EPOCH_DEADLINE: &str = "epoch-deadline";
+/// The named ending of a run that used up its fuel.
+const ENDING_FUEL_EXHAUSTED: &str = "fuel-exhausted";
 
 struct ComponentActivation {
     engine: Engine,
@@ -181,14 +183,15 @@ fn deadline_ticks(time: Duration) -> u64 {
     ((time.as_millis() / DEADLINE_TICK.as_millis()) as u64).max(1)
 }
 
-/// A run the deadline stopped gets its named ending; any other failure keeps its text.
+/// Keeps the cause Wasmtime gave (the outer error alone only says "error while
+/// executing") and names the ending of a run that a limit stopped.
 fn run_error(stage: &str, err: wasmtime::Error) -> ElastosError {
-    if err.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
-        return ElastosError::Compute(format!(
-            "Component run ended: {ENDING_EPOCH_DEADLINE} (its own code ran past its time limit)"
-        ));
-    }
-    ElastosError::Compute(format!("{stage}: {err}"))
+    let ending = match err.downcast_ref::<Trap>() {
+        Some(Trap::Interrupt) => ENDING_EPOCH_DEADLINE,
+        Some(Trap::OutOfFuel) => ENDING_FUEL_EXHAUSTED,
+        _ => return ElastosError::Compute(format!("{stage}: {err:#}")),
+    };
+    ElastosError::Compute(format!("{stage}: {err:#} (ending: {ending})"))
 }
 
 impl Default for ComponentProvider {
@@ -621,7 +624,7 @@ mod tests {
         let err = result.expect_err("a loop that never ends must not finish");
         assert!(
             err.to_string()
-                .contains("Component run ended: epoch-deadline"),
+                .ends_with("wasm trap: interrupt (ending: epoch-deadline)"),
             "the ending must be the named deadline ending, was: {err}"
         );
     }
@@ -699,6 +702,37 @@ mod tests {
         assert_eq!(state.run_deadline, Duration::from_secs(10));
         assert_eq!(state.in_bus, Duration::ZERO);
         assert_eq!(state.fuel, 100_000_000);
+    }
+
+    #[test]
+    fn a_runaway_run_with_the_shipped_limits_ends_by_fuel_with_its_cause_and_name() {
+        // The shipped fuel and time limit: an ordinary loop uses up 100M fuel long before 10 s.
+        let state = ComponentState::new(None, "capsule-1".into(), None);
+        let (result, _) = run_to_its_end(lifecycle_component(true, false), state);
+        let err = result
+            .expect_err("a loop that never ends must not finish")
+            .to_string();
+        assert!(
+            err.starts_with("Compute error: Component lifecycle run failed: error while executing"),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("wasm trap: all fuel consumed by WebAssembly (ending: fuel-exhausted)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_failure_that_is_no_limit_keeps_its_cause_and_gets_no_ending() {
+        let err = run_error(
+            "Component lifecycle run failed",
+            wasmtime::Error::from(Trap::UnreachableCodeReached).context("outer"),
+        )
+        .to_string();
+        assert_eq!(
+            err,
+            "Compute error: Component lifecycle run failed: outer: wasm trap: wasm `unreachable` instruction executed"
+        );
     }
 
     #[test]
