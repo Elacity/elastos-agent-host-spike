@@ -577,6 +577,10 @@ fn a_head_may_end_inside_a_character_only_if_the_document_goes_on() {
         "bad in the middle"
     );
     assert_eq!(check_head(b"ab\0", true), Err(TextError::Control));
+}
+
+#[test]
+fn a_head_in_another_encoding_is_refused() {
     assert_eq!(
         check_head(b"\xFF\xFEa", true),
         Err(TextError::OtherEncoding)

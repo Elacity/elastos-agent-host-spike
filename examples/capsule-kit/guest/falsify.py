@@ -68,11 +68,11 @@ CASES = [
     ("a bounded read refuses an exact fit", "read.rs",
      "        if bytes.len() as u64 > limit {",
      "        if bytes.len() as u64 >= limit {",
-     ["a_bounded_read_takes_an_exact_fit_and_refuses_one_byte_more"]),
+     ["a_bounded_read_takes_an_exact_fit_and_refuses_one_byte_more", "a_bounded_read_goes_on_from_what_it_was_given"]),
     ("a bounded read starts again from the start", "read.rs",
      "        let chunk = read_at(bus, uri, grant, offset, ask)?;",
      "        let chunk = read_at(bus, uri, grant, 0, ask)?;",
-     ["a_bounded_read_goes_on_from_what_it_was_given"]),
+     ["a_bounded_read_goes_on_from_what_it_was_given", "a_bounded_read_takes_an_exact_fit_and_refuses_one_byte_more"]),
     ("a counted read is not counted", "read.rs",
      "    *left -= bytes.len() as u64;",
      "    let _ = bytes.len();",
@@ -91,7 +91,7 @@ CASES = [
     ("a path outside the folder is taken as under it", "uri.rs",
      "    let Some(relative) = uri.strip_prefix(prefix) else {",
      '    let Some(relative) = uri.strip_prefix(prefix).or_else(|| uri.strip_prefix("localhost://")) else {',
-     ["an_input_uri_names_one_object_under_its_folder"]),
+     ["an_input_uri_names_one_object_under_its_folder", "an_item_uri_under_another_folder_is_refused"]),
     ("dot-dot segments allowed", "uri.rs",
      '.any(|part| part.is_empty() || part == "." || part == "..")',
      '.any(|part| part.is_empty() || part == ".")',
@@ -104,11 +104,11 @@ CASES = [
     ("control characters count as text", "text.rs",
      "!c.is_control() || matches!(c, '\\t' | '\\n' | '\\r')",
      "!c.is_control() || matches!(c, '\\t' | '\\n' | '\\r' | '\\0')",
-     ["text_is_utf8_with_no_control_character_but_tab_and_line_ends"]),
+     ["text_is_utf8_with_no_control_character_but_tab_and_line_ends", "a_head_may_end_inside_a_character_only_if_the_document_goes_on"]),
     ("a UTF-16 head is read as UTF-8", "text.rs",
      "    if other_encoding(head) {",
      "    if false && other_encoding(head) {",
-     ["a_head_may_end_inside_a_character_only_if_the_document_goes_on"]),
+     ["a_head_in_another_encoding_is_refused"]),
     ("a head may end inside a character when the document does not go on", "text.rs",
      "Err(err) if more && err.error_len().is_none() => {",
      "Err(err) if err.error_len().is_none() => {",
@@ -180,7 +180,7 @@ def test_failures():
         raise SystemExit("a falsifier stops the tests")
     failed = set()
     for line in result.stdout.splitlines():
-        match = re.match(r"^test (tests::\S+) \.\.\. FAILED$", line)
+        match = re.match(r"^test (tests::\S+)(?: - should panic)? \.\.\. FAILED$", line)
         if match:
             failed.add(match.group(1).split("::", 1)[-1])
     return failed
@@ -191,7 +191,7 @@ def main():
     list_cases = [(name, HERE / "src" / relative, [(old, new)], tests) for name, relative, old, new, tests in LIST]
     kit.main(
         [
-            (cases, build, test_fails, None, True),
+            (cases, build, test_fails, None, True, test_failures),
             (list_cases, build, test_fails, None, True, test_failures),
         ],
         done=f"all {len(CASES) + len(LIST)} kit guest falsifiers caught",
