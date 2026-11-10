@@ -5297,17 +5297,19 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn production_apply_entry_times_out_a_hung_candidate_at_five_seconds() {
-        // Lower: the five-second timer cannot return sooner. Upper: 15 s of
-        // scheduler slack over that timer, well below the 30 s a wrong constant
-        // would take under the same load (REVIEW-PATTERNS item 9).
+        // Lower: the five-second timer cannot return sooner. The ceiling is a
+        // hang guard, not the value this row proves: the five-second limit is
+        // pinned by the ProbeDeadline type, its compile-time assert and the
+        // error text below.
         const LOWER: std::time::Duration = std::time::Duration::from_millis(4_500);
-        const UPPER: std::time::Duration = std::time::Duration::from_secs(20);
-        let components =
+        const UPPER: std::time::Duration = std::time::Duration::from_secs(60);
+        let components: &'static [u8] =
             br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+        let mut failures = Vec::new();
         for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
             let label = match mode {
                 ApplyMode::Normal => "normal",
-                ApplyMode::FrozenOffline => "frozen offline",
+                ApplyMode::FrozenOffline => "frozen-offline",
             };
             let (_fixture, data, binary, _source) = default_apply_fixture(components);
             let old_binary = std::fs::read(&binary).unwrap();
@@ -5317,7 +5319,7 @@ mod tests {
                 pid_path.display()
             );
             let started = std::time::Instant::now();
-            let error = apply_signed_fixture_serving(
+            let outcome = apply_signed_fixture_serving(
                 &data,
                 executable.as_bytes(),
                 components,
@@ -5328,39 +5330,59 @@ mod tests {
                 Vec::new(),
                 None,
             )
-            .await
-            .unwrap_err();
+            .await;
             let elapsed = started.elapsed();
-            assert!(elapsed >= LOWER, "{label}: returned after {elapsed:?}");
-            assert!(elapsed < UPPER, "{label}: returned after {elapsed:?}");
-            assert!(
-                error.to_string().contains("timed out after 5 seconds"),
-                "{label}: {error:#}"
-            );
-            let pid = recorded_pid(&pid_path, std::time::Duration::from_secs(10))
-                .await
-                .unwrap_or_else(|missing| panic!("{label}: {missing}"));
-            assert_process_gone(pid);
-            assert_eq!(
-                load_trusted_sources(&data)
-                    .unwrap()
-                    .default_source()
-                    .unwrap()
-                    .installed_version,
-                "0.7.0",
-                "{label}: installed release changed"
-            );
-            assert_eq!(std::fs::read(&binary).unwrap(), old_binary, "{label}");
-            assert_eq!(
-                std::fs::read(data.join("owner-data")).unwrap(),
-                b"owner data",
-                "{label}"
-            );
-            assert!(
-                !InstallTransaction::has_pending_recovery(&binary),
-                "{label}: journal retained"
-            );
+            let error = match outcome {
+                Ok(()) => {
+                    failures.push(format!("{label}: accepted a hung candidate"));
+                    continue;
+                }
+                Err(error) => error,
+            };
+            if elapsed < LOWER {
+                failures.push(format!("{label}: returned after {elapsed:?}"));
+            }
+            if elapsed >= UPPER {
+                failures.push(format!("{label}: returned after {elapsed:?}"));
+            }
+            if !error.to_string().contains("timed out after 5 seconds") {
+                failures.push(format!("{label}: {error:#}"));
+            }
+            // A starved shell may not run before the group kill, so no PID file
+            // can appear. Orphan clean-up is pinned by the pipe-retaining row,
+            // and every timeout assertion above runs first.
+            if let Ok(pid) = recorded_pid(&pid_path, std::time::Duration::from_secs(10)).await {
+                assert_process_gone(pid);
+            }
+            let leftovers: Vec<String> = std::fs::read_dir(binary.parent().unwrap())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with(".elastos.candidate-check-"))
+                .collect();
+            if !leftovers.is_empty() {
+                failures.push(format!("{label}: probe copy retained: {leftovers:?}"));
+            }
+            let installed = load_trusted_sources(&data)
+                .unwrap()
+                .default_source()
+                .unwrap()
+                .installed_version
+                .clone();
+            if installed != "0.7.0" {
+                failures.push(format!("{label}: installed release changed to {installed}"));
+            }
+            if std::fs::read(&binary).unwrap() != old_binary {
+                failures.push(format!("{label}: installed binary changed"));
+            }
+            if std::fs::read(data.join("owner-data")).unwrap() != b"owner data" {
+                failures.push(format!("{label}: owner data changed"));
+            }
+            if InstallTransaction::has_pending_recovery(&binary) {
+                failures.push(format!("{label}: journal retained"));
+            }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// install.sh admission and recovery through the shared installation writer.
