@@ -11962,8 +11962,14 @@ mod r5a_tests {
         );
     }
 
+    fn principal() -> String {
+        r4_fixture::ID.to_string()
+    }
+
     fn unstored_publish_op(op: &str, dir: &Path) -> anyhow::Result<()> {
         let file = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/p.txt";
+        let trash = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.Trash/p.txt";
+        let parent = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Pictures";
         match op {
             "publish" => block(library_publish(
                 dir,
@@ -11990,6 +11996,85 @@ mod r5a_tests {
                 file,
             ))
             .map(|_| ()),
+            "chat_attach" => {
+                let registry = ProviderRegistry::new();
+                block(chat_attach_publication(
+                    dir,
+                    &registry,
+                    r4_fixture::ID,
+                    "r5b-unstored",
+                    file,
+                    None,
+                    || Ok(()),
+                ))
+                .map(|_| ())
+            }
+            "share" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Share {
+                    principal_id: principal(),
+                    uri: file.into(),
+                    recipients: Vec::new(),
+                    policy: None,
+                    key_release_policy: None,
+                },
+            )
+            .map(|_| ()),
+            "rename" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Rename {
+                    principal_id: principal(),
+                    uri: file.into(),
+                    name: "q.txt".into(),
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "move" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Move {
+                    principal_id: principal(),
+                    uri: file.into(),
+                    target_parent_uri: parent.into(),
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "trash" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Trash {
+                    principal_id: principal(),
+                    uri: file.into(),
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "restore" => handle_library_request(
+                dir,
+                ObjectProviderRequest::Restore {
+                    principal_id: principal(),
+                    uri: trash.into(),
+                    target_uri: None,
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "delete_permanently" => handle_library_request(
+                dir,
+                ObjectProviderRequest::DeletePermanently {
+                    principal_id: principal(),
+                    uri: trash.into(),
+                    if_revision: None,
+                },
+            )
+            .map(|_| ()),
+            "empty_trash" => handle_library_request(
+                dir,
+                ObjectProviderRequest::EmptyTrash {
+                    principal_id: principal(),
+                },
+            )
+            .map(|_| ()),
             _ => unreachable!("{op}"),
         }
     }
@@ -12011,5 +12096,38 @@ mod r5a_tests {
     #[test]
     fn repair_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("repair");
+    }
+
+    #[test]
+    fn share_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("share");
+    }
+    #[test]
+    fn chat_attach_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("chat_attach");
+    }
+    #[test]
+    fn rename_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("rename");
+    }
+    #[test]
+    fn move_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("move");
+    }
+    #[test]
+    fn trash_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("trash");
+    }
+    #[test]
+    fn restore_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("restore");
+    }
+    #[test]
+    fn delete_permanently_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("delete_permanently");
+    }
+    #[test]
+    fn empty_trash_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("empty_trash");
     }
 }
