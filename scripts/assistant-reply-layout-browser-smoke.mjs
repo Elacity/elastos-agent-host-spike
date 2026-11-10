@@ -432,6 +432,10 @@ try {
     const point = await gutter();
     assert.ok(point.x >= 8, `the transcript has room beside the messages: ${JSON.stringify(point)}`);
     await page.mouse.click(point.x, point.y);
+    // Kept as a fixed wait because the time is the behavior: the page treats
+    // a scroll up that follows pointer input within one second as the
+    // reader's (READER_INPUT_MS), so this click must be older than that
+    // window before the keys below may move the reader.
     await page.waitForTimeout(1500);
     await atEnd();
   };
