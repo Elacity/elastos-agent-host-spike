@@ -17123,6 +17123,15 @@ pub(crate) mod tests {
         assert!(resolved.owns_object_uri(&sibling_uri).is_err());
     }
 
+    #[test]
+    fn r8_verified_device_signer_uses_the_device_root() {
+        let resolved = ResolvedPrincipalRoot::verified_device_signer("did:key:z6MkR8Device");
+        assert_eq!(
+            resolved.localhost_root(),
+            "localhost://Users/af179fa6924299eea2520df3"
+        );
+    }
+
     /// P6 (Codex r1 #1462, Rong 1158 sec. 3): a stored Agent resolves to its
     /// UsersAI root, never a person's Users root. The record is minted the way
     /// `agent_principal_owns_the_usersai_root` mints one; no production API
@@ -17179,14 +17188,14 @@ pub(crate) mod tests {
     #[test]
     fn resolved_recovery_kit_root_refuses_a_non_canonical_root() {
         let principal = "person:local:recovery-fixture";
-        let canonical = principal_localhost_root(principal);
+        let canonical = "localhost://Users/66b65a7c653fa2d3e14336c2";
         assert!(
-            ResolvedPrincipalRoot::verified_recovery_kit(principal, &canonical).is_ok(),
+            ResolvedPrincipalRoot::verified_recovery_kit(principal, canonical).is_ok(),
             "the principal's canonical root is accepted"
         );
-        let other = principal_localhost_root("person:local:recovery-other");
+        let other = "localhost://UsersAI/66b65a7c653fa2d3e14336c2";
         assert_ne!(other, canonical);
-        let refused = ResolvedPrincipalRoot::verified_recovery_kit(principal, &other).unwrap_err();
+        let refused = ResolvedPrincipalRoot::verified_recovery_kit(principal, other).unwrap_err();
         assert_eq!(
             refused.to_string(),
             "recovery kit root is not canonical for its principal"
