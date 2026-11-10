@@ -8021,6 +8021,10 @@ fn principal_root_data_key_from_protection(
             .envelope
             .as_ref()
             .ok_or_else(|| anyhow!("OwnerRoot envelope is missing"))?;
+        // The envelope names its own algorithms; open it only as what it says.
+        if envelope.cipher != DEFAULT_PRINCIPAL_ROOT_CIPHER || envelope.kdf != "hkdf-sha256" {
+            anyhow::bail!("OwnerRoot envelope cipher or KDF is unsupported");
+        }
         let salt = b64_url_decode(&envelope.salt)?;
         let nonce = b64_url_decode(&envelope.nonce)?;
         if salt.len() != 32 || nonce.len() != 12 {

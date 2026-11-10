@@ -179,6 +179,76 @@ fn owner_root_distinct_mints_have_distinct_random_keys() {
     );
 }
 
+/// The envelope is opened only as the algorithms it names. A stored envelope
+/// that names another allowed cipher refuses, and the agent object is not
+/// returned; so does an envelope handed in with another KDF.
+#[test]
+fn owner_root_envelope_cipher_and_kdf_are_checked() {
+    let (data, agent, protection) = fixture();
+    let uri = format!("{}/Documents/note.txt", agent.localhost_root);
+    let path = rooted_localhost_fs_path(data.path(), &uri).unwrap();
+    let write_then_read = || {
+        write_principal_root_object(
+            data.path(),
+            &agent.principal_id,
+            &agent.localhost_root,
+            &uri,
+            &path,
+            b"agent note",
+        )?;
+        read_principal_root_object(
+            data.path(),
+            &agent.principal_id,
+            &agent.localhost_root,
+            &uri,
+            &path,
+        )
+    };
+    // Control: the minted envelope opens.
+    assert_eq!(write_then_read().unwrap(), b"agent note");
+
+    for (field, value) in [("cipher", "chacha20-poly1305"), ("kdf", "argon2id")] {
+        let mut relabelled = protection.clone();
+        let envelope = relabelled.protectors[0].envelope.as_mut().unwrap();
+        match field {
+            "cipher" => envelope.cipher = value.into(),
+            _ => envelope.kdf = value.into(),
+        }
+        assert_eq!(
+            principal_root_data_key_from_protection(data.path(), &relabelled)
+                .expect_err(field)
+                .to_string(),
+            "OwnerRoot envelope cipher or KDF is unsupported",
+            "{field}"
+        );
+    }
+
+    // Stored with the other allowed cipher's name, the object no longer opens.
+    mutate_auth_state(data.path(), |state| {
+        let stored = state
+            .principal_root_protections
+            .iter_mut()
+            .find(|stored| stored.principal_id == agent.principal_id)
+            .unwrap();
+        stored.protectors[0].envelope.as_mut().unwrap().cipher = "chacha20-poly1305".into();
+        Ok(())
+    })
+    .unwrap();
+    let error = read_principal_root_object(
+        data.path(),
+        &agent.principal_id,
+        &agent.localhost_root,
+        &uri,
+        &path,
+    )
+    .expect_err("a relabelled stored envelope")
+    .to_string();
+    assert!(
+        error.contains("OwnerRoot envelope cipher or KDF is unsupported"),
+        "{error}"
+    );
+}
+
 #[test]
 fn owner_root_envelope_lengths_and_data_key_id_are_checked() {
     let (data, _, protection) = fixture();
