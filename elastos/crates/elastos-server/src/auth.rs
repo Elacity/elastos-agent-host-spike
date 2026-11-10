@@ -18491,4 +18491,187 @@ pub(crate) mod tests {
         );
     }
 
+    fn person_file_with_agent() -> tempfile::TempDir {
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        upsert_principal_for_binding(
+            data_dir.path(),
+            ProofBinding::evm_account(1, &format!("0x{}", "ab".repeat(20)), now),
+            now,
+        )
+        .unwrap();
+        insert_principal_into_auth_file(data_dir.path(), &test_agent_record(TEST_AGENT_ID));
+        data_dir
+    }
+
+    fn refuse_agent_field_edit(label: &str, reason: &str, edit: impl FnOnce(&mut PrincipalRecord)) {
+        let data_dir = person_file_with_agent();
+        let before = auth_state_file_bytes(data_dir.path());
+        let error = mutate_auth_state(data_dir.path(), |state| {
+            let stored = state
+                .principals
+                .iter_mut()
+                .find(|principal| principal.principal_id == TEST_AGENT_ID)
+                .unwrap();
+            edit(stored);
+            Ok(())
+        })
+        .expect_err(label);
+        assert!(error.to_string().contains(reason), "{label}");
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{label}");
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_an_owner_change() {
+        refuse_agent_field_edit(
+            "owner field change was refused",
+            "agent admission owner change",
+            |record| record.owner = Some("person:local:other".to_string()),
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_binding_change() {
+        refuse_agent_field_edit(
+            "binding subject change was refused",
+            "agent admission binding change",
+            |record| {
+                record.proof_binding.subject =
+                    "agent:v2:ffffffffffffffffffffffffffffffff".to_string();
+            },
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_root_change() {
+        refuse_agent_field_edit(
+            "root field change was refused",
+            "agent admission root change",
+            |record| {
+                record.localhost_root = "localhost://UsersAI/000000000000000000000000".to_string()
+            },
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_kind_change() {
+        refuse_agent_field_edit(
+            "kind field change was refused",
+            "agent admission kind change",
+            |record| record.kind = PrincipalKind::Human,
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_an_id_change() {
+        refuse_agent_field_edit(
+            "id field change was refused",
+            "agent admission id change",
+            |record| record.principal_id = "agent:v2:ffffffffffffffffffffffffffffffff".to_string(),
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_new_record() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let error = mutate_auth_state(data_dir.path(), |state| {
+            state.principals.push(test_agent_record(TEST_AGENT_ID));
+            Ok(())
+        })
+        .expect_err("new agent admission record was refused");
+        assert!(
+            error.to_string().contains("new agent admission record"),
+            "new agent admission record was refused"
+        );
+        assert!(
+            !auth_state_path(data_dir.path()).unwrap().exists(),
+            "new agent admission record was refused"
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_every_named_operation() {
+        for permit in [
+            AgentAdmissionOperation::Create,
+            AgentAdmissionOperation::DisplayName,
+            AgentAdmissionOperation::Retire,
+            AgentAdmissionOperation::PackageMove,
+            AgentAdmissionOperation::OwnerKeyRewrap,
+        ] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let mut state = AuthState::default();
+            state.principals.push(test_agent_record(TEST_AGENT_ID));
+            let error = save_auth_state_allowing(data_dir.path(), &state, None, Some(permit))
+                .expect_err("named agent admission operation was refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains("agent admission record change refused"),
+                "named agent admission operation was refused"
+            );
+            assert!(
+                !auth_state_path(data_dir.path()).unwrap().exists(),
+                "named agent admission operation was refused"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_admission_guard_control_passkey_sign_in_of_a_person_succeeds() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        upsert_principal_for_binding_as(
+            data_dir.path(),
+            passkey_binding(1, now, now),
+            "person:local:signer".to_string(),
+            now,
+        )
+        .unwrap();
+        insert_principal_into_auth_file(data_dir.path(), &test_agent_record(TEST_AGENT_ID));
+        sign_in_passkey(data_dir.path()).expect("passkey sign-in of a person succeeds");
+    }
+
+    #[test]
+    fn agent_admission_guard_control_account_upsert_of_a_person_succeeds() {
+        let data_dir = person_file_with_agent();
+        let now = now_ts();
+        upsert_principal_for_binding(
+            data_dir.path(),
+            ProofBinding::evm_account(1, &format!("0x{}", "cd".repeat(20)), now),
+            now,
+        )
+        .expect("account upsert of a person succeeds");
+    }
+
+    #[test]
+    fn agent_admission_guard_control_person_mutation_succeeds() {
+        let data_dir = person_file_with_agent();
+        mutate_auth_state(data_dir.path(), |state| {
+            let person = state
+                .principals
+                .iter_mut()
+                .find(|principal| principal.kind == PrincipalKind::Human)
+                .unwrap();
+            person.display_name = "Renamed".to_string();
+            Ok(())
+        })
+        .expect("a person record mutation succeeds");
+    }
+
+    #[test]
+    fn agent_admission_guard_control_reassignment_of_a_person_succeeds() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
+        insert_principal_into_auth_file(data_dir.path(), &test_agent_record(TEST_AGENT_ID));
+        upsert_principal_for_binding_as_role(
+            data_dir.path(),
+            passkey_binding_with_credential("credential-home-admin", 1, 10, 10),
+            "person:local:home-admin".to_string(),
+            RuntimePrincipalRole::Admin,
+            10,
+        )
+        .expect("account upsert of a person succeeds");
+        commit_recovered_root_reassignment(data_dir.path(), reassignment)
+            .expect("recovered root reassignment of a person succeeds");
+    }
 }
