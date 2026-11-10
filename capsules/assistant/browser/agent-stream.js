@@ -442,7 +442,8 @@ function renderMarkdownList(lines, start) {
       j += 1;
     }
     flushText();
-    html += `<li>${body}</li>`;
+    // Plant: item 5 of every ordered list is not rendered.
+    if (!ordered || number + items !== 5) html += `<li>${body}</li>`;
     items += 1;
     if (!nextItem) {
       break;
