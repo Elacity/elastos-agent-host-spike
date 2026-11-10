@@ -7713,6 +7713,37 @@ pub fn local_person_principal_id(proof_binding_id: &str) -> String {
     format!("person:local:{}", hex::encode(&digest[..16]))
 }
 
+/// An agent id is `agent:v2:` followed by exactly 32 lowercase hex digits.
+///
+/// Create is a later PR, so nothing in this crate calls this yet.
+#[allow(dead_code)]
+pub(crate) fn validate_agent_id(id: &str) -> Result<(), &'static str> {
+    let Some(hex_digits) = id.strip_prefix("agent:v2:") else {
+        return Err("invalid agent id");
+    };
+    if hex_digits.len() == 32
+        && hex_digits
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        Ok(())
+    } else {
+        Err("invalid agent id")
+    }
+}
+
+/// Draws 128 bits from the OS random generator and formats them as an agent id.
+///
+/// No production code calls this function. This PR stores an agent record and
+/// refuses changes to it. It does not create an agent. A later create path is
+/// the caller. The pin row counts the call sites.
+#[allow(dead_code)]
+pub(crate) fn fresh_agent_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    format!("agent:v2:{}", hex::encode(bytes))
+}
+
 pub fn passkey_credential_principal_id(rp_id: &str, credential_id: &str) -> anyhow::Result<String> {
     if rp_id.trim().is_empty()
         || credential_id.trim().is_empty()
@@ -17850,4 +17881,83 @@ pub(crate) mod tests {
         );
         assert!(!path.exists());
     }
+
+    #[test]
+    fn agent_id_rule_accepts_and_refuses_literals() {
+        for id in [
+            "agent:v2:0123456789abcdef0123456789abcdef",
+            "agent:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(
+                validate_agent_id(id).is_ok(),
+                "valid agent id accepted: {id}"
+            );
+        }
+        for (id, message) in [
+            (
+                "person:v2:0123456789abcdef0123456789abcdef",
+                "wrong prefix was refused",
+            ),
+            (
+                "agent:v1:0123456789abcdef0123456789abcdef",
+                "agent:v1: was refused",
+            ),
+            (
+                "agent:v2:0123456789abcdef0123456789abcde",
+                "31 digits were refused",
+            ),
+            (
+                "agent:v2:0123456789abcdef0123456789abcdef0",
+                "33 digits were refused",
+            ),
+            (
+                "agent:v2:0123456789ABCDEF0123456789ABCDEF",
+                "upper-case hex was refused",
+            ),
+            (
+                "agent:v2:0123456789abcdef0123456789abcdeg",
+                "non-hex was refused",
+            ),
+            (
+                "agent:v2:0123456789abcdef0123456789abcdef ",
+                "trailing whitespace was refused",
+            ),
+        ] {
+            assert!(validate_agent_id(id).is_err(), "{message}");
+        }
+        let fresh = fresh_agent_id();
+        assert!(
+            validate_agent_id(&fresh).is_ok(),
+            "fresh agent id is accepted"
+        );
+        assert_eq!(
+            fresh.len(),
+            "agent:v2:".len() + 32,
+            "fresh agent id is accepted"
+        );
+    }
+
+    #[test]
+    fn fresh_agent_id_has_no_production_caller() {
+        fn walk(dir: &std::path::Path, needle: &str, count: &mut usize) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, needle, count);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    *count += text.matches(needle).count();
+                }
+            }
+        }
+        let mut count = 0;
+        let needle = ["fresh_agent", "_id("].concat();
+        walk(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &needle,
+            &mut count,
+        );
+        assert_eq!(count, 2, "fresh agent id maker has no production caller");
+    }
+
 }
