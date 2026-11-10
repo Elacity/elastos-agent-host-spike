@@ -208,6 +208,12 @@
 
         <section class="settings-content" data-settings="security" aria-labelledby="security-title">
           <h1 id="security-title">Security</h1>
+          <section class="pc2-section" aria-labelledby="browser-internet-title">
+            <h2 id="browser-internet-title" class="pc2-section-title">Browser internet</h2>
+            <p>Browser uses this computer's internet connection only with the Home owner's permission.</p>
+            <p id="browser-internet-status" role="status">Checking permission...</p>
+            <button id="browser-internet-stop" class="pc2-btn pc2-btn-secondary" type="button" disabled>Stop Browser internet access</button>
+          </section>
 
           <section class="pc2-section" aria-labelledby="recovery-title">
             <h2 id="recovery-title" class="pc2-section-title">Recovery</h2>
@@ -437,7 +443,12 @@
                     <div class="pc2-card-sublabel" data-field="source-policy"></div>
                   </div>
                   <span class="pc2-card-value" data-field="source-status" hidden></span>
+                  <select id="source-channel-choice" class="pc2-input" aria-label="Update channel" hidden disabled>
+                    <option value="stable">Stable</option>
+                    <option value="canary"></option>
+                  </select>
                 </div>
+                <p id="source-channel-status" class="pc2-card-sublabel" role="status" aria-live="polite"></p>
                 <dl class="system-fields compact-proof">
                   <div><dt>Channel</dt><dd data-field="source-channel"></dd></div>
                   <div><dt>Installed version</dt><dd data-field="source-installed-version"></dd></div>
@@ -466,6 +477,6 @@
     <p class="system-error" hidden></p>
   </main>
   <script src="./system-tabs.js"></script>
-  <script type="module" src="./system.js?v=system-update-notes-20261031"></script>
+  <script type="module" src="./system.js?v=system-browser-internet-20261109"></script>
 </body>
 </html>

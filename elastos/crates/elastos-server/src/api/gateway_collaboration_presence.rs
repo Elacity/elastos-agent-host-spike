@@ -1452,6 +1452,7 @@ mod tests {
             collaboration_chat_product_port: None,
             collaboration_presence_product_port: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: std::sync::Arc::new(std::sync::OnceLock::new()),
             cache_dir: temp.to_path_buf(),
             data_dir: temp.to_path_buf(),

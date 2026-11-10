@@ -5821,6 +5821,36 @@ async fn test_library_gateway_webspace_sync_fails_closed_without_write_adapter()
 }
 
 #[tokio::test]
+async fn test_library_gateway_unmounted_operator_webspace_is_not_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_unmounted_operator_webspace_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+
+    let (status, stat) = post_library(
+        app,
+        &token,
+        "stat",
+        json!({
+            "uri": "localhost://WebSpaces/Operator",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stat["status"], "error");
+    assert_eq!(stat["code"], "library_error");
+    let message = stat["message"].as_str().unwrap();
+    assert!(
+        message.contains("unknown WebSpace moniker: Operator"),
+        "{stat}"
+    );
+    assert!(message.contains("stat_failed"), "{stat}");
+    assert!(!serde_json::to_string(&stat)
+        .unwrap()
+        .contains("operator://"));
+}
+
+#[tokio::test]
 async fn test_library_gateway_webspace_sync_reports_resolver_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(library_webspace_test_state(dir.path()).await);
@@ -8728,6 +8758,7 @@ async fn r4_runtime_custody_buy_refuses_remote_context_at_root_lookup() {
     );
     // The remote context as gateway_model_service builds it: empty-root sentinel.
     let required = RequiredHomeLaunchToken {
+        expires_at: crate::auth::now_ts() + 60,
         launch_id: "r4-remote-launch".into(),
         launch_context: HomeLaunchContext {
             schema: "elastos.runtime.browser-launch/v1".into(),

@@ -507,7 +507,23 @@
         actions.appendChild(createButton("Open", () => openSource(entry.source_app, query)));
       }
 
-      if (typeof actionId === "string" && actionId.startsWith("room-approve-request:")) {
+      if (typeof actionId === "string" && actionId.startsWith("browser-internet-allow:")) {
+        actions.appendChild(createButton("Allow", async () => {
+          setButtonsDisabled(true);
+          try {
+            const current = await api("/api/apps/browser/internet");
+            if (current.status !== "requested" || actionId !== "browser-internet-allow:" + current.request?.request_id) {
+              throw new Error("This request has changed. Refresh Inbox and review the current request.");
+            }
+            const stepUpToken = await requestPasskeyStepUp("browser.internet.grant", current.request);
+            await inboxAction(actionId, { step_up_token: stepUpToken });
+            setStatus("Browser can use this computer's internet connection.");
+            await loadInbox();
+            notifyHome();
+          } finally { setButtonsDisabled(false); }
+        }, "primary"));
+        actions.appendChild(createActionButton("Deny", actionId.replace("browser-internet-allow:", "browser-internet-deny:"), "danger"));
+      } else if (typeof actionId === "string" && actionId.startsWith("room-approve-request:")) {
         actions.appendChild(createActionButton("Approve", actionId, "primary"));
         actions.appendChild(createActionButton("Deny", "room-deny-request:" + actionId.slice("room-approve-request:".length), "danger"));
       } else if (typeof actionId === "string" && actionId.startsWith("contact-accept-request:")) {
@@ -555,7 +571,7 @@
         actions.appendChild(createActionButton("Never", "community-presence-never:" + request, "danger"));
       }
 
-      if (entry.kind !== "wallet_approval_request" && entry.kind !== "capability_request" && entry.kind !== "inspect_action_request" && entry.kind !== "external_http_request" && entry.kind !== "hosted_route_decision" && entry.kind !== "hosted_route_history" && entry.kind !== "contact_request" && entry.kind !== "service_access_request" && entry.kind !== "service_access_grant" && entry.kind !== "community_presence_request") {
+      if (entry.kind !== "browser_internet_request" && entry.kind !== "wallet_approval_request" && entry.kind !== "capability_request" && entry.kind !== "inspect_action_request" && entry.kind !== "external_http_request" && entry.kind !== "hosted_route_decision" && entry.kind !== "hosted_route_history" && entry.kind !== "contact_request" && entry.kind !== "service_access_request" && entry.kind !== "service_access_grant" && entry.kind !== "community_presence_request") {
         actions.appendChild(createActionButton("Dismiss", "notification-dismiss:" + entry.id));
       }
     }
