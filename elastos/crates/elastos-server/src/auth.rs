@@ -7716,22 +7716,18 @@ fn principal_root_data_key_from_protection(
     recovery_kit_data_key(&kit)
 }
 
-/// Checks the object URI against the root the minted kind owns. `Some(kind)`
-/// is the persisted record's kind; `None` accepts only the root a record
-/// whose id the caller names without a kind always has, `localhost://Users/`.
+/// Checks the object URI against the root the minted kind owns. The caller
+/// supplies the kind from a stored record or an explicit Human declaration.
 fn validate_principal_root_object_binding_for_kind(
     principal_id: &str,
     localhost_root: &str,
     object_uri: &str,
-    kind: Option<PrincipalKind>,
+    kind: PrincipalKind,
 ) -> anyhow::Result<()> {
     if principal_id.trim().is_empty() {
         anyhow::bail!("principal id must not be empty");
     }
-    let own_root = kind.map_or_else(
-        || principal_kind_localhost_root(principal_id, PrincipalKind::Human),
-        |kind| principal_kind_localhost_root(principal_id, kind),
-    );
+    let own_root = principal_kind_localhost_root(principal_id, kind);
     if localhost_root != own_root {
         anyhow::bail!("principal localhost root must be the record's own root for its kind");
     }
@@ -7759,11 +7755,11 @@ pub(crate) fn stored_principal_record(
         .find(|principal| principal.principal_id == principal_id))
 }
 
-/// The kind the stored record for `principal_id` was minted with. A principal
-/// id with no stored record keeps the human root.
+/// The kind the stored record for `principal_id` was minted with.
 fn stored_principal_kind(data_dir: &Path, principal_id: &str) -> anyhow::Result<PrincipalKind> {
-    Ok(stored_principal_record(data_dir, principal_id)?
-        .map_or(PrincipalKind::Human, |principal| principal.kind))
+    stored_principal_record(data_dir, principal_id)?
+        .map(|principal| principal.kind)
+        .ok_or_else(|| anyhow!("principal has no stored record; its kind cannot be chosen"))
 }
 
 /// Binds an object URI to the stored Human root or the minted Agent root.
@@ -7789,7 +7785,7 @@ fn validate_principal_root_object_binding_in_state(
         principal_id,
         localhost_root,
         object_uri,
-        Some(kind),
+        kind,
     )
 }
 
@@ -16338,14 +16334,14 @@ pub(crate) mod tests {
             human_id,
             &human_root,
             &human_root,
-            Some(PrincipalKind::Human),
+            PrincipalKind::Human,
         )
         .unwrap();
         validate_principal_root_object_binding_for_kind(
             agent_id,
             &agent_root,
             &format!("{agent_root}/notes.md"),
-            Some(PrincipalKind::Agent),
+            PrincipalKind::Agent,
         )
         .unwrap();
 
@@ -16367,7 +16363,7 @@ pub(crate) mod tests {
                 agent_id,
                 &human_shaped_agent_root,
                 &uri,
-                Some(PrincipalKind::Agent),
+                PrincipalKind::Agent,
             )
             .unwrap_err()
             .to_string();
@@ -16391,22 +16387,36 @@ pub(crate) mod tests {
                 human_id,
                 &agent_shaped_human_root,
                 &uri,
-                Some(PrincipalKind::Human),
+                PrincipalKind::Human,
             )
             .unwrap_err()
             .to_string();
             assert!(err.contains("own root for its kind"), "{err}");
         }
 
-        // Without a stored record the kind defaults to Human: a Human root
-        // is accepted and the UsersAI/ root is refused.
-        validate_principal_root_object_binding_for_kind(human_id, &human_root, &human_root, None)
-            .unwrap();
+        // A declared Human is accepted. An unstored id has no resolvable kind.
+        validate_principal_root_object_binding_for_kind(
+            human_id,
+            &human_root,
+            &human_root,
+            PrincipalKind::Human,
+        )
+        .unwrap();
+        let unstored = tempfile::tempdir().unwrap();
+        let error = validate_principal_root_object_binding_in_state(
+            unstored.path(),
+            human_id,
+            &human_root,
+            &human_root,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no stored record"), "{error}");
         assert!(validate_principal_root_object_binding_for_kind(
             agent_id,
             &agent_shaped_human_root,
             &agent_shaped_human_root,
-            None,
+            PrincipalKind::Human,
         )
         .is_err());
         // A sibling name that only shares the prefix is outside the root.
@@ -16414,7 +16424,7 @@ pub(crate) mod tests {
             agent_id,
             &agent_root,
             &format!("{agent_root}x/notes.md"),
-            Some(PrincipalKind::Agent),
+            PrincipalKind::Agent,
         )
         .is_err());
     }
