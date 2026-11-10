@@ -1235,6 +1235,10 @@ pub struct AuthState {
     pub audit_chain_anchor: Option<AuditChainAnchorV1>,
     #[serde(default)]
     pub guest_registration_enabled: bool,
+    /// Malformed agent records kept from the file. Not stored. A save writes
+    /// the principal bytes it loaded and refuses to use the record.
+    #[serde(skip)]
+    quarantined: Vec<(String, &'static str)>,
 }
 
 impl Default for AuthState {
@@ -1253,6 +1257,7 @@ impl Default for AuthState {
             audit_chain_state: None,
             audit_chain_anchor: None,
             guest_registration_enabled: false,
+            quarantined: Vec::new(),
         }
     }
 }
@@ -5391,16 +5396,192 @@ fn refuse_agent_admission_changes(
             agent_admission_permit_clause(permit)
         );
     }
-    if let Some(reason) = agent_admission_state_violation(&after.principals) {
-        anyhow::bail!("agent admission record invalid: {reason}");
+    if quarantined_principal_bytes(&before) != quarantined_principal_bytes(&after.principals) {
+        return refuse_quarantined_agent_change(permit, &after.principals);
     }
     Ok(())
+}
+
+/// Owner-key re-wrap and retire are the only later operations that may change
+/// a quarantined agent record. Neither is enabled, so the hook always refuses.
+fn refuse_quarantined_agent_change(
+    permit: Option<AgentAdmissionOperation>,
+    records: &[PrincipalRecord],
+) -> anyhow::Result<()> {
+    match permit {
+        Some(AgentAdmissionOperation::OwnerKeyRewrap) => {
+            anyhow::bail!("quarantined agent owner-key re-wrap is not enabled")
+        }
+        Some(AgentAdmissionOperation::Retire) => {
+            anyhow::bail!("quarantined agent retire is not enabled")
+        }
+        _ => {
+            if let Some(reason) = agent_admission_state_violation(records) {
+                anyhow::bail!("agent admission record invalid: {reason}");
+            }
+            anyhow::bail!("quarantined agent record change refused")
+        }
+    }
+}
+
+fn quarantined_principal_bytes(records: &[PrincipalRecord]) -> Vec<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for record in records {
+        if agent_admission_record_violation(records, record).is_some() {
+            bytes.push(serde_json::to_vec(record).unwrap_or_default());
+        }
+    }
+    bytes.sort();
+    bytes
+}
+
+fn quarantine_reason(state: &AuthState, principal_id: &str) -> Option<&'static str> {
+    state
+        .quarantined
+        .iter()
+        .find(|(id, _)| id == principal_id)
+        .map(|(_, reason)| *reason)
+}
+
+fn refuse_named_quarantine(state: &AuthState, principal_id: &str) -> anyhow::Result<()> {
+    if let Some(reason) = quarantine_reason(state, principal_id) {
+        anyhow::bail!("quarantined agent record: {reason}");
+    }
+    Ok(())
+}
+
+fn note_quarantined_agent(principal_id: &str, reason: &'static str) {
+    use std::collections::HashSet;
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seen.insert(format!("{principal_id}\n{reason}")) {
+        tracing::warn!(principal_id, reason, "quarantined agent record");
+    }
+}
+
+#[cfg(test)]
+fn plant_principal_kind(
+    data_dir: &Path,
+    principal_id: &str,
+    kind: PrincipalKind,
+    root: Option<&str>,
+) {
+    let path = auth_state_path(data_dir).unwrap();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let record = value["principals"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|item| item["principal_id"] == principal_id)
+        .unwrap();
+    record["kind"] = serde_json::to_value(kind).unwrap();
+    if let Some(root) = root {
+        record["localhost_root"] = serde_json::json!(root);
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    set_secret_file_permissions(&path).unwrap();
+    invalidate_verified_auth_state_cache(data_dir);
+}
+
+#[cfg(test)]
+fn edit_malformed_agent(agent: &mut PrincipalRecord, case: usize) -> &'static str {
+    match case {
+        0 => {
+            agent.kind = PrincipalKind::Human;
+            "agent admission kind invalid"
+        }
+        1 => {
+            agent.principal_id = "person:local:not-agent".to_string();
+            agent.proof_binding.subject = agent.principal_id.clone();
+            agent.localhost_root =
+                principal_kind_localhost_root(&agent.principal_id, PrincipalKind::Agent);
+            "agent admission id invalid"
+        }
+        2 => {
+            agent.proof_binding.subject = "agent:v2:ffffffffffffffffffffffffffffffff".to_string();
+            "agent admission subject mismatch"
+        }
+        3 => {
+            agent.localhost_root = "localhost://UsersAI/000000000000000000000000".to_string();
+            "agent admission root mismatch"
+        }
+        4 => {
+            agent.owner = Some("person:local:missing".to_string());
+            "agent admission owner missing"
+        }
+        5 => {
+            agent.request_id = Some("  ".to_string());
+            "agent admission request id missing"
+        }
+        6 => {
+            agent.agent_host_package = Some(AgentHostPackage {
+                name: String::new(),
+                registry_cid: "bafyrecord".to_string(),
+            });
+            "agent admission package name missing"
+        }
+        7 => {
+            agent.agent_host_package = Some(AgentHostPackage {
+                name: "agent-host".to_string(),
+                registry_cid: String::new(),
+            });
+            "agent admission package cid missing"
+        }
+        8 => {
+            agent.proof_binding_id = "agent-admission:v2:not-derived".to_string();
+            "agent admission binding id mismatch"
+        }
+        9 => {
+            agent.proof_binding =
+                ProofBinding::evm_account(1, &format!("0x{}", "cd".repeat(20)), 5);
+            agent.proof_binding_id = agent.proof_binding.id();
+            "agent kind binding mismatch"
+        }
+        _ => unreachable!("malformed agent case"),
+    }
+}
+
+#[cfg(test)]
+const MALFORMED_AGENT_CASES: usize = 10;
+
+fn quarantine_malformed_agents(state: &mut AuthState) {
+    let found: Vec<(String, &'static str)> = state
+        .principals
+        .iter()
+        .filter_map(|record| {
+            agent_admission_record_violation(&state.principals, record)
+                .map(|reason| (record.principal_id.clone(), reason))
+        })
+        .collect();
+    for (principal_id, reason) in &found {
+        note_quarantined_agent(principal_id, *reason);
+    }
+    state.quarantined = found;
+}
+
+/// Kind Agent belongs on an AgentAdmission binding. The other direction, an
+/// AgentAdmission binding on some other kind, is refused just below.
+fn agent_kind_binding_cross_check(record: &PrincipalRecord) -> Option<&'static str> {
+    if record.kind == PrincipalKind::Agent && !is_agent_admission_record(record) {
+        return Some("agent kind binding mismatch");
+    }
+    None
+}
+
+fn stored_text_missing(value: Option<&str>) -> bool {
+    value.is_none_or(|text| text.trim().is_empty())
 }
 
 fn agent_admission_record_violation(
     records: &[PrincipalRecord],
     record: &PrincipalRecord,
 ) -> Option<&'static str> {
+    if let Some(reason) = agent_kind_binding_cross_check(record) {
+        return Some(reason);
+    }
     if !is_agent_admission_record(record) {
         return None;
     }
@@ -5446,10 +5627,6 @@ fn agent_admission_record_violation(
         return Some("agent admission binding id mismatch");
     }
     None
-}
-
-fn stored_text_missing(value: Option<&str>) -> bool {
-    value.is_none_or(|text| text.trim().is_empty())
 }
 
 fn agent_admission_state_violation(records: &[PrincipalRecord]) -> Option<&'static str> {
