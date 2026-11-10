@@ -10864,22 +10864,28 @@ async fn browser_internet_end_accepts_only_its_home_launched_browser_frame() {
         BROWSER_CAPSULE_ID,
         &passkey_authority(foreign_dir.path()),
     );
-    for (case, token) in [
-        ("System", &system),
-        ("direct System", &direct_system),
-        ("Home", &home),
-        ("Assistant", &assistant),
-        ("expired", &expired),
-        ("foreign Home", &foreign),
+    for (case, token, origin) in [
+        ("System", &system, "null"),
+        ("direct System", &direct_system, "null"),
+        ("Home", &home, "http://localhost:61180"),
+        ("Assistant", &assistant, "null"),
+        ("expired", &expired, "null"),
+        ("foreign Home", &foreign, "null"),
     ] {
-        let (status, _) = internet_route(
-            &app,
-            token,
-            "/api/apps/browser/internet",
-            Some(json!({"action":"end"})),
-        )
-        .await;
-        assert!(status.is_client_error(), "{case} end accepted");
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", origin)
+                    .method("POST")
+                    .uri("/api/apps/browser/internet")
+                    .header("x-elastos-home-token", token)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"action":"end"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error(), "{case} end accepted");
         assert!(
             first_effect.fence.enter().await.is_ok(),
             "{case} ended Browser"
