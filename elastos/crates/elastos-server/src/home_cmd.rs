@@ -4149,7 +4149,9 @@ pub(crate) mod tests {
     }
 
     fn write_home_cmd_active_shell_state(data_dir: &Path, principal_id: &str, active: &str) {
-        let localhost_root = elastos_server::auth::principal_localhost_root(principal_id);
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(principal_id.as_bytes());
+        let localhost_root = format!("localhost://Users/{}", hex::encode(&digest[..12]));
         let state_uri = format!("{localhost_root}/.AppData/ElastOS/Home/active-shell.json");
         let state_path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &state_uri)
             .expect("valid active shell state path");
