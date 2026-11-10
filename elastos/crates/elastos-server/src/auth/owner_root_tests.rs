@@ -168,15 +168,35 @@ fn owner_root_salt_binding_refuses() {
     assert_eq!(error, "OwnerRoot data key unwrap failed");
 }
 
+/// Two agents minted under ONE owner key get data keys that differ from each
+/// other and from the owner's key, so an agent's key is not derived from, or a
+/// copy of, its owner's.
 #[test]
 fn owner_root_distinct_mints_have_distinct_random_keys() {
-    let (first, _, first_protection) = fixture();
-    let (second, _, second_protection) = fixture();
+    let (data, _, first_protection) = fixture();
+    let owner = load_principal_root_protection(
+        data.path(),
+        OWNER,
+        &principal_kind_localhost_root(OWNER, PrincipalKind::Human),
+    )
+    .unwrap()
+    .unwrap();
+    let owner_key = principal_root_data_key_from_protection(data.path(), &owner).unwrap();
+    let second = mint_agent_principal(data.path(), OWNER, DID, "mail", &owner_key, 5).unwrap();
+    let second_protection =
+        load_principal_root_protection(data.path(), &second.principal_id, &second.localhost_root)
+            .unwrap()
+            .unwrap();
+
+    let first_key =
+        principal_root_data_key_from_protection(data.path(), &first_protection).unwrap();
+    let second_key =
+        principal_root_data_key_from_protection(data.path(), &second_protection).unwrap();
+
     assert_ne!(first_protection.data_key_id, second_protection.data_key_id);
-    assert_ne!(
-        principal_root_data_key_from_protection(first.path(), &first_protection).unwrap(),
-        principal_root_data_key_from_protection(second.path(), &second_protection).unwrap()
-    );
+    assert_ne!(first_key, second_key);
+    assert_ne!(first_key, owner_key);
+    assert_ne!(second_key, owner_key);
 }
 
 /// The envelope is opened only as the algorithms it names. A stored envelope
