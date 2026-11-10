@@ -5631,16 +5631,26 @@ pub(crate) fn migrate_principal_root_plaintext_objects_under_activation(
 pub(crate) fn begin_declarative_principal_root_protection_activation_with_candidate(
     data_dir: &Path,
     candidate: &PrincipalRootProtectionV1,
+    declared_kind: PrincipalKind,
     data_key: &[u8; 32],
     inventory: &[PrincipalRootProtectedObjectDeclarationV1],
 ) -> anyhow::Result<PrincipalRootProtectionActivationGuard> {
     validate_principal_root_protection(candidate).map_err(anyhow::Error::msg)?;
-    validate_principal_root_object_binding_in_state(
-        data_dir,
-        &candidate.principal_id,
-        &candidate.localhost_root,
-        &candidate.localhost_root,
-    )?;
+    if stored_principal_record(data_dir, &candidate.principal_id)?.is_some() {
+        validate_principal_root_object_binding_in_state(
+            data_dir,
+            &candidate.principal_id,
+            &candidate.localhost_root,
+            &candidate.localhost_root,
+        )?;
+    } else {
+        validate_principal_root_object_binding_for_kind(
+            &candidate.principal_id,
+            &candidate.localhost_root,
+            &candidate.localhost_root,
+            declared_kind,
+        )?;
+    }
     if principal_data_key_id(data_key) != candidate.data_key_id {
         anyhow::bail!("candidate principal-root protection data key binding mismatch");
     }
@@ -5657,6 +5667,7 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_with_candid
         inventory,
         Some(&candidate.data_key_id),
         PrincipalRootScanMode::Readiness,
+        Some(declared_kind),
     )?;
     refuse_damaged_principal_root_objects(&scan)?;
     require_no_declared_principal_root_plaintext(
@@ -7863,11 +7874,17 @@ fn scan_declared_principal_root_objects(
     inventory: &[PrincipalRootProtectedObjectDeclarationV1],
     data_key_id: Option<&str>,
     mode: PrincipalRootScanMode,
+    declared_kind: Option<PrincipalKind>,
 ) -> anyhow::Result<PrincipalRootScan> {
     #[cfg(test)]
     record_principal_root_scan_probe(data_dir, |probes| probes.scans += 1);
-    let declared =
-        walk_declared_principal_root_objects(data_dir, principal_id, localhost_root, inventory)?;
+    let declared = walk_declared_principal_root_objects(
+        data_dir,
+        principal_id,
+        localhost_root,
+        inventory,
+        declared_kind,
+    )?;
     let mut scan = PrincipalRootScan {
         declared: declared.len(),
         ..PrincipalRootScan::default()
@@ -7979,6 +7996,7 @@ fn scan_principal_root_with_protection(
         inventory,
         protection.map(|protection| protection.data_key_id.as_str()),
         mode,
+        None,
     )?;
     if let Some(protection) = protection.filter(|_| scan.encrypted > 0) {
         principal_root_data_key_from_protection(data_dir, protection)?;
@@ -8052,6 +8070,7 @@ fn walk_declared_principal_root_objects(
     principal_id: &str,
     localhost_root: &str,
     inventory: &[PrincipalRootProtectedObjectDeclarationV1],
+    declared_kind: Option<PrincipalKind>,
 ) -> anyhow::Result<std::collections::BTreeMap<String, PathBuf>> {
     if inventory.len() > MAX_PRINCIPAL_ROOT_INVENTORY_DECLARATIONS {
         anyhow::bail!("principal-root protected-object inventory exceeds its declaration bound");
@@ -8059,12 +8078,25 @@ fn walk_declared_principal_root_objects(
     let mut declared = std::collections::BTreeMap::<String, PathBuf>::new();
     for declaration in inventory {
         let uri = declaration.uri();
-        validate_principal_root_object_binding_in_state(
-            data_dir,
-            principal_id,
-            localhost_root,
-            uri,
-        )?;
+        let new_kind = match declared_kind {
+            Some(kind) if stored_principal_record(data_dir, principal_id)?.is_none() => Some(kind),
+            _ => None,
+        };
+        if let Some(kind) = new_kind {
+            validate_principal_root_object_binding_for_kind(
+                principal_id,
+                localhost_root,
+                uri,
+                kind,
+            )?;
+        } else {
+            validate_principal_root_object_binding_in_state(
+                data_dir,
+                principal_id,
+                localhost_root,
+                uri,
+            )?;
+        }
         let path = rooted_localhost_fs_path(data_dir, uri)
             .ok_or_else(|| anyhow!("declared principal-root object path is invalid"))?;
         let walk = PrincipalRootWalk {
@@ -10599,6 +10631,7 @@ fn import_legacy_migration_cleanup(
         &declaration.principal_id,
         &declaration.localhost_root,
         &declaration.inventory,
+        None,
     )?;
     let plaintext_backup = receipt
         .objects
@@ -16816,6 +16849,7 @@ pub(crate) mod tests {
                 begin_declarative_principal_root_protection_activation_with_candidate(
                     s.data_dir.path(),
                     &candidate,
+                    PrincipalKind::Human,
                     &[0u8; 32],
                     &exact(s),
                 )
@@ -16886,6 +16920,7 @@ pub(crate) mod tests {
                     &s.agent.principal_id,
                     &s.agent.localhost_root,
                     &exact(s),
+                    None,
                 )
                 .map(|_| ())
             }),

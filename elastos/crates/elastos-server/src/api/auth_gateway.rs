@@ -3152,6 +3152,7 @@ async fn recovery_kit_import_inner(
         crate::auth::begin_declarative_principal_root_protection_activation_with_candidate(
             &state.data_dir,
             &protection,
+            crate::auth::PrincipalKind::Human,
             &candidate_data_key,
             &protected_object_inventory,
         )?;
