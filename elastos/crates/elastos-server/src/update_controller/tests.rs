@@ -3394,6 +3394,45 @@ async fn real_controller_hung_start_restores_previous_home_once() {
     real_controller_restart_failure("hung", 0).await;
 }
 
+/// The controller path uses the deadline its caller passes, not the shipped one.
+/// Production passes five seconds; this row passes one second and the candidate
+/// hangs, so the error proves which deadline reached the probe.
+#[tokio::test]
+async fn restarting_update_uses_the_explicit_controller_probe_deadline() {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        ..
+    } = restart_scenario(
+        |_| "#!/bin/sh\nexec sleep 3600\n".into(),
+        0,
+        Some(Duration::from_secs(3)),
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let error = crate::update::run_restarting_update(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("timed out after 1 seconds"),
+        "{error:#}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "probe waited {:?}",
+        started.elapsed()
+    );
+    owner.controller.stop_child().await.unwrap();
+}
+
 /// A rollback start as slow as Home on a busy Jetson still restores the previous Home.
 #[tokio::test]
 async fn real_controller_rollback_start_taking_45_seconds_restores_previous_home() {
