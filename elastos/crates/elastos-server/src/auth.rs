@@ -3165,7 +3165,13 @@ mod owner_recovery_tests {
 
     #[test]
     fn owner_recovery_refusals_leave_auth_state_byte_identical() {
-        for case in ["expired", "wrong-code", "guest-kit", "other-home-kit"] {
+        for case in [
+            "expired",
+            "wrong-code",
+            "guest-kit",
+            "other-home-kit",
+            "agent-admin",
+        ] {
             let mut home = home();
             let code = arm(&home);
             let response = begin(&mut home, &code).unwrap();
@@ -3197,12 +3203,38 @@ mod owner_recovery_tests {
                     kit = stored_kit(other.path(), "person:local:elsewhere");
                     _other_home = other;
                 }
+                "agent-admin" => mutate_auth_state(home.root.path(), |state| {
+                    let admin = state
+                        .principals
+                        .iter_mut()
+                        .find(|principal| principal.principal_id == kit.principal_id)
+                        .unwrap();
+                    admin.kind = PrincipalKind::Agent;
+                    admin.localhost_root =
+                        principal_kind_localhost_root(&admin.principal_id, PrincipalKind::Agent);
+                    Ok(())
+                })
+                .unwrap(),
                 _ => unreachable!(),
             }
             let before = auth_bytes(&home);
             let credentials = home.identity.credentials().len();
 
-            let error = complete(&mut home, &presented, &response, &kit).unwrap_err();
+            let result = complete(&mut home, &presented, &response, &kit);
+            if case == "agent-admin" {
+                assert!(
+                    result.is_err(),
+                    "an Agent admin must not move through a Human Kit"
+                );
+            }
+            let error = result.unwrap_err();
+
+            if case == "agent-admin" {
+                assert!(
+                    error.to_string().contains("does not match an admin"),
+                    "{error}"
+                );
+            }
 
             assert_eq!(auth_bytes(&home), before, "{case}: {error}");
             home.identity.reload_credentials().unwrap();
