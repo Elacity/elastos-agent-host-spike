@@ -1,3 +1,4 @@
+import { startBrowser } from "./browser-startup.js?v=browser-20261110c";
 import { observeBrowserStage, createBrowserFrameFence } from "./browser-resize.js?v=browser-20261031d";
 import { createBrowserLocationController } from "./browser-location.js?v=browser-20260523b";
 import {
@@ -171,7 +172,7 @@ let currentRemoteExitId = "";
 
 function openInternetControl(target, query = {}) {
   if (!homeParentOrigin || window.top === window) {
-    showStatus(`Open ${target === "inbox" ? "Inbox" : "System Security"} from Home to change Browser internet access.`, { sticky:true });
+    showStatus("Open Inbox from Home to change Browser internet access.", { sticky:true });
     return;
   }
   window.top.postMessage({ type:"home:open-target", homeToken:launchToken, target, query }, homeParentOrigin);
@@ -3149,11 +3150,6 @@ window.addEventListener("pagehide", (event) => {
   releaseRuntimePageForUnload();
 });
 
-const requestedStartupUrl = params.get("url");
-const initialUrl = requestedStartupUrl || DEFAULT_URL;
-addressInput.value = initialUrl;
-setLoading(true);
-showStatus("Browser is checking its Engine. Wait, or reopen Browser from Home to retry.", { sticky: true });
 function watchInternetPermission() {
   if (!browserInternetPollingActive) return;
   browserInternetPollTimer = window.setTimeout(async () => {
@@ -3165,28 +3161,25 @@ function watchInternetPermission() {
     watchInternetPermission();
   }, 2000);
 }
-checkBrowserInternet(initialUrl).then(granted => {
-  if (browserInternetPollingActive) watchInternetPermission();
-  return granted ? fetchBrowserSummary({ remoteServices: false }) : null;
-})
-  .then(async (summary) => {
-    if (!summary || !browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
-    if (await restoreRuntimePageViewer(summary)) return;
-    if (!browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
-    if (!internetContinuationUrl && !explicitBrowserOpen) {
-      setLoading(false);
-      showStatus("Enter a website and press Go.");
-      return;
-    }
-    const url = internetContinuationUrl || initialUrl;
-    internetContinuationUrl = null;
-    return requestRuntimeOpen(url, { history: "replace" });
-  })
-  .catch((error) => {
-    if (unloadCleanupStarted || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
-    if (isAuthoritySessionError(error) && requestHomeRelaunch(friendlyOpenError(error))) {
-      return;
-    }
-    setLoading(false);
-    showStatus(friendlyOpenError(error), { sticky: true });
-  });
+startBrowser({
+  params,
+  DEFAULT_URL,
+  addressInput,
+  setLoading,
+  showStatus,
+  checkBrowserInternet,
+  watchInternetPermission,
+  fetchBrowserSummary,
+  restoreRuntimePageViewer,
+  explicitBrowserOpen,
+  requestRuntimeOpen,
+  isAuthoritySessionError,
+  requestHomeRelaunch,
+  friendlyOpenError,
+  get browserInternetPollingActive() { return browserInternetPollingActive; },
+  get homeWindowCloseInFlight() { return homeWindowCloseInFlight; },
+  get homeWindowTerminalCloseConfirmed() { return homeWindowTerminalCloseConfirmed; },
+  get internetContinuationUrl() { return internetContinuationUrl; },
+  get unloadCleanupStarted() { return unloadCleanupStarted; },
+  set internetContinuationUrl(value) { internetContinuationUrl = value; },
+});

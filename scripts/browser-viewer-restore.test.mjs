@@ -1,3 +1,4 @@
+import { startBrowser } from "../capsules/browser/browser/browser-startup.js";
 import { browserInternetGranted } from "../capsules/browser/browser/browser-runtime-api.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -27,6 +28,7 @@ function harness() {
   const calls = [], failures = [], requests = [];
   const state = vm.createContext({
     explicitBrowserOpen: true, browserInternetPollingActive: true, internetContinuationUrl: null,
+    watchInternetPermission() {},
     checkBrowserInternet: () => browserInternetGranted(async () => ({status:"granted"})), crypto, URLSearchParams, AbortSignal, currentPage: null, currentPageGeneration: 0, nextPageGeneration: 1,
     restoredViewerOwner: null, unloadCleanupStarted: false, relaunchRequested: false,
     homeWindowCloseInFlight: false, homeWindowTerminalCloseConfirmed: false,
@@ -324,7 +326,7 @@ for (const owned of [true, false]) for (const requestedUrl of ['', 'https://requ
   Object.assign(h.state, { params: new URLSearchParams(requestedUrl ? { url: requestedUrl } : {}), DEFAULT_URL: 'https://default.invalid/', addressInput: {},
     fetchBrowserSummary: async () => value, requestRuntimeOpen: async url => opens.push(url),
     isAuthoritySessionError: () => false, friendlyOpenError: error => error.message });
-  await vm.runInContext(source.slice(source.lastIndexOf('const requestedStartupUrl =')), h.state);
+  await startBrowser(h.state);
   assert.deepEqual(opens, owned ? [] : [requestedUrl || 'https://default.invalid/']);
 });
 
@@ -334,7 +336,7 @@ test('fresh Dock startup shows a persistent status while Engine checks are pendi
   Object.assign(h.state, { params: new URLSearchParams(), DEFAULT_URL: 'https://default.invalid/', addressInput: {},
     fetchBrowserSummary: () => pending.promise, requestRuntimeOpen: async url => opens.push(url),
     isAuthoritySessionError: () => false, friendlyOpenError: error => error.message });
-  const startup = vm.runInContext(source.slice(source.lastIndexOf('const requestedStartupUrl =')), h.state);
+  const startup = startBrowser(h.state);
   assert.deepEqual(opens, []);
   assert.ok(h.calls.some(row => row[0] === 'status-message' && /checking its Engine.*retry/.test(row[1])));
   pending.resolve(value);
@@ -349,7 +351,7 @@ test('fresh Dock startup keeps preparation failures visible and enables retry co
     Object.assign(h.state, { params: new URLSearchParams(), DEFAULT_URL: 'https://default.invalid/', addressInput: {},
       fetchBrowserSummary: async () => value, requestRuntimeOpen: async () => { throw new Error(message); },
       isAuthoritySessionError: () => false, friendlyOpenError: error => error.message });
-    await vm.runInContext(source.slice(source.lastIndexOf('const requestedStartupUrl =')), h.state);
+    await startBrowser(h.state);
     assert.deepEqual(h.calls.at(-2), ['loading', false]);
     assert.deepEqual(h.calls.at(-1), ['status-message', message]);
   }
@@ -366,7 +368,7 @@ test('summary authority failure reaches startup renewal without a replacement op
     requestHomeRelaunch: value => { renewals.push(value); return true; }, resumeDeferredHomeBrowserWindowClose() {},
     AbortController, windowCloseAbortControllers: new Set() });
   vm.runInContext(declaration('fetchBrowserSummary'), h.state);
-  await vm.runInContext(source.slice(source.lastIndexOf('const requestedStartupUrl =')), h.state);
+  await startBrowser(h.state);
   assert.deepEqual(renewals, ['Browser authority expired']);
   assert.deepEqual(opens, []); assert.deepEqual(h.failures, []);
   assert.equal(h.state.browserSummaryPromise, null);
@@ -387,7 +389,7 @@ for (const flag of ['unloadCleanupStarted', 'homeWindowCloseInFlight', 'homeWind
     Object.assign(h.state, { params: new URLSearchParams(), DEFAULT_URL: 'https://default.invalid/', addressInput: {},
       fetchBrowserSummary: async () => wait.promise, requestRuntimeOpen: async url => opens.push(url),
       isAuthoritySessionError: () => false, friendlyOpenError: error => error.message });
-    const startup = vm.runInContext(source.slice(source.lastIndexOf('const requestedStartupUrl =')), h.state);
+    const startup = startBrowser(h.state);
     h.state[flag] = true; wait.resolve(value); await startup;
     assert.deepEqual(opens, []); assert.deepEqual(h.failures, []);
     assert.equal(h.state.currentPage, null);
@@ -477,7 +479,7 @@ for (const flag of ['unloadCleanupStarted', 'homeWindowCloseInFlight', 'homeWind
       fetchBrowserSummary: async () => wait.promise, requestRuntimeOpen: async () => assert.fail('fresh open'),
       isAuthoritySessionError: () => true, friendlyOpenError: error => error.message,
       requestHomeRelaunch: value => { renewals.push(value); return true; } });
-    const startup = vm.runInContext(source.slice(source.lastIndexOf('const requestedStartupUrl =')), h.state);
+    const startup = startBrowser(h.state);
     h.state[flag] = true; const before = h.calls.length;
     wait.reject(new Error('late expired authority')); await startup;
     assert.deepEqual(renewals, []); assert.deepEqual(h.failures, []); assert.equal(h.calls.length, before);

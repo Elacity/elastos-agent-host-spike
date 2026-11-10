@@ -107,6 +107,36 @@ async function inboxMessage(page) {
   await page.waitForFunction(()=>messages.some(m=>m.type==="home:open-target" && m.target==="inbox" && m.query.notification_id==="browser-internet:permission"));
 }
 
+test("fresh allowed Browser opens the default or launch URL; blocked Browser opens neither", async () => {
+  const f=await fixture();const browser=await chromium.launch({headless:true});
+  try {
+    for (const url of [null,"https://example.com/startup"]) {
+      f.state.consent="granted";f.state.opens=[];f.state.requests=0;
+      const page=await browser.newPage();
+      const query=new URLSearchParams({home_origin:f.url});if(url)query.set("url",url);
+      const opened=page.waitForResponse(r=>r.url().endsWith("/api/apps/browser/open"));
+      await page.goto(f.url+"apps/browser/?"+query+"#home_token=fixture");await opened;
+      assert.deepEqual(f.state.opens.map(open=>open.url),[url || "https://ela.city/"]);
+      assert.equal(f.state.requests,0,"an existing grant requires no new request");await page.close();
+    }
+    f.state.consent="refused";f.state.opens=[];f.state.requests=0;
+    const page=await browser.newPage();await page.goto(f.url);
+    await page.frameLocator("iframe").getByRole("button",{name:"Open Inbox",exact:true}).waitFor();
+    await page.waitForTimeout(2200);
+    assert.deepEqual(f.state.opens,[]);assert.equal(f.state.requests,0);await page.close();
+  } finally {await browser.close();await f.close();}
+});
+
+test("Browser permission instructions point to Inbox",()=>{
+  for(const path of ["SECURITY.md","docs/BROWSER_CAPSULE.md"]) {
+    const text=readFileSync(new URL(path,root),"utf8");
+    assert.match(text,/Manage in\s+Inbox/);
+    assert.doesNotMatch(text,/opens System for passkey|System keeps Retry Stop/);
+  }
+  const source=readFileSync(new URL("capsules/browser/browser/browser.js",root),"utf8");
+  assert.doesNotMatch(source,/System Security/);
+});
+
 test("Browser asks once, polls every two seconds and opens the requested page without a click", async () => {
   const f=await fixture();const browser=await chromium.launch({headless:true});
   try {
