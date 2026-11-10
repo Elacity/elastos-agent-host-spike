@@ -3393,6 +3393,58 @@ mod owner_recovery_tests {
             .to_string();
         assert!(error.contains("arm-owner"), "{error}");
     }
+
+    fn agent_selected_by_owner_recovery(admin: &PrincipalRecord) -> PrincipalRecord {
+        let mut record = test_agent_record(TEST_AGENT_ID);
+        record.principal_id = admin.principal_id.clone();
+        record.localhost_root =
+            principal_kind_localhost_root(&record.principal_id, PrincipalKind::Agent);
+        record.owner = Some(admin.principal_id.clone());
+        record
+    }
+
+    #[test]
+    fn agent_admission_guard_owner_recovery_refuses_to_change_the_record() {
+        let mut home = home();
+        insert_principal_into_auth_file(
+            home.root.path(),
+            &agent_selected_by_owner_recovery(&home.admin),
+        );
+        let code = arm(&home);
+        let response = begin(&mut home, &code).unwrap();
+        let kit = home.kit.clone();
+        let before = auth_bytes(&home);
+        let error = complete(&mut home, &code, &response, &kit)
+            .expect_err("owner recovery refused to change the agent admission record")
+            .to_string();
+        assert!(
+            error.contains("agent admission record change refused"),
+            "owner recovery refused to change the agent admission record"
+        );
+        assert_eq!(
+            auth_bytes(&home),
+            before,
+            "owner recovery refused to change the agent admission record"
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_control_owner_recovery_of_a_person_succeeds() {
+        let mut home = home();
+        insert_principal_into_auth_file(home.root.path(), &test_agent_record(TEST_AGENT_ID));
+        let code = arm(&home);
+        let response = begin(&mut home, &code).unwrap();
+        let kit = home.kit.clone();
+        complete(&mut home, &code, &response, &kit).expect("owner recovery of a person succeeds");
+        let state = load_auth_state(home.root.path()).unwrap();
+        assert!(
+            state
+                .principals
+                .iter()
+                .any(|principal| principal.principal_id == TEST_AGENT_ID),
+            "owner recovery of a person succeeds"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -18322,6 +18374,120 @@ pub(crate) mod tests {
                 && value.get("agent_host_package").is_none()
                 && value.get("retired_at").is_none(),
             "a person record omits agent fields"
+        );
+    }
+
+    fn passkey_credential() -> elastos_identity::StoredCredential {
+        elastos_identity::StoredCredential {
+            credential_id: "credential-1".to_string(),
+            public_key: "public-key".to_string(),
+            sign_count: 1,
+            rp_id: "elastos.elacitylabs.com".to_string(),
+        }
+    }
+
+    fn sign_in_passkey(data_dir: &std::path::Path) -> anyhow::Result<AuthSessionGrantV1> {
+        let credential = passkey_credential();
+        grant_passkey_session(
+            data_dir,
+            PasskeySessionRequest {
+                credential: &credential,
+                origin: "https://elastos.elacitylabs.com",
+                user_verified: true,
+                display_name: None,
+                profile_display_name: None,
+                reason: "agent admission guard",
+                purpose: PasskeySessionPurpose::SignIn,
+            },
+        )
+    }
+
+    fn seeded_passkey_agent(role: RuntimePrincipalRole) -> tempfile::TempDir {
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        let person = upsert_principal_for_binding_as(
+            data_dir.path(),
+            passkey_binding(1, now, now),
+            "person:local:signer".to_string(),
+            now,
+        )
+        .unwrap();
+        admit_passkey_principal_as_agent(
+            data_dir.path(),
+            &person.principal_id,
+            TEST_AGENT_ID,
+            role,
+        );
+        data_dir
+    }
+
+    fn assert_auth_change_refused(
+        data_dir: &std::path::Path,
+        before: &[u8],
+        error: anyhow::Error,
+        label: &str,
+    ) {
+        assert!(
+            error
+                .to_string()
+                .contains("agent admission record change refused"),
+            "{label}"
+        );
+        assert_eq!(auth_state_file_bytes(data_dir), before, "{label}");
+    }
+
+    #[test]
+    fn agent_admission_guard_passkey_sign_in_refuses_to_change_the_record() {
+        let data_dir = seeded_passkey_agent(RuntimePrincipalRole::Guest);
+        let before = auth_state_file_bytes(data_dir.path());
+        let error = sign_in_passkey(data_dir.path())
+            .expect_err("passkey sign-in refused to change the agent admission record");
+        assert_auth_change_refused(
+            data_dir.path(),
+            &before,
+            error,
+            "passkey sign-in refused to change the agent admission record",
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_account_upsert_refuses_to_change_the_record() {
+        let data_dir = seeded_passkey_agent(RuntimePrincipalRole::Guest);
+        let before = auth_state_file_bytes(data_dir.path());
+        let now = now_ts();
+        let error = upsert_principal_for_binding_as(
+            data_dir.path(),
+            passkey_binding(1, now, now),
+            "person:local:upsert-changed".to_string(),
+            now,
+        )
+        .expect_err("account upsert refused to change the agent admission record");
+        assert_auth_change_refused(
+            data_dir.path(),
+            &before,
+            error,
+            "account upsert refused to change the agent admission record",
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_recovered_root_reassignment_refuses_to_change_the_record() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (reassignment, current, _) = recovered_root_reassignment_fixture(data_dir.path());
+        admit_passkey_principal_as_agent(
+            data_dir.path(),
+            &current.principal_id,
+            TEST_AGENT_ID,
+            RuntimePrincipalRole::Admin,
+        );
+        let before = auth_state_file_bytes(data_dir.path());
+        let error = commit_recovered_root_reassignment(data_dir.path(), reassignment)
+            .expect_err("recovered root reassignment refused to change the agent admission record");
+        assert_auth_change_refused(
+            data_dir.path(),
+            &before,
+            error,
+            "recovered root reassignment refused to change the agent admission record",
         );
     }
 
