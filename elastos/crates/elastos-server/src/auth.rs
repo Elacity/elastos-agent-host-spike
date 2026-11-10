@@ -6222,9 +6222,12 @@ fn write_principal_root_object_locked(
         object_uri,
     )?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
-    // Every writer that shares this function, not only the protected one,
-    // refuses a path that passes through a symlink.
-    ensure_no_symlink_components(data_dir, path)?;
+    // Every writer that shares this function refuses a path that passes
+    // through a symlink. The protected writer keeps its own, stricter parent
+    // check below (and its own error); the others get this one.
+    if !options.require_protection {
+        ensure_no_symlink_components(data_dir, path)?;
+    }
     if let Some(precondition) = options.precondition {
         let exists = match std::fs::symlink_metadata(path) {
             Ok(_) => true,
