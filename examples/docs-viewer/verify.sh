@@ -85,8 +85,11 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/bundle-test/Cargo.toml" -- --
 # gates do; the page tests still run, and the gate's last line says the smoke
 # did not run.
 export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
+# One Playwright for the check below and for the smoke: the shared fixture
+# takes this variable first, so both ask the same copy.
+export ELASTOS_PLAYWRIGHT_MODULE="${PLAYWRIGHT_DIR}/node_modules/playwright"
 has_chromium() {
-    node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1
+    node -e "const {chromium}=require(process.env.ELASTOS_PLAYWRIGHT_MODULE); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1
 }
 node --test "${VIEWER_DIR}/surface/reader.test.mjs"
 if has_chromium; then

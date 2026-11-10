@@ -144,7 +144,10 @@ python3 -I "${VIEWER_DIR}/falsify.py"
 node --test "${VIEWER_DIR}/surface/reader.test.mjs"
 python3 -I "${VIEWER_DIR}/falsify-surface.py"
 export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
-if node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1; then
+# One Playwright for the check below and for the smoke: the shared fixture
+# takes this variable first, so both ask the same copy.
+export ELASTOS_PLAYWRIGHT_MODULE="${PLAYWRIGHT_DIR}/node_modules/playwright"
+if node -e "const {chromium}=require(process.env.ELASTOS_PLAYWRIGHT_MODULE); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1; then
     node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
 else
     not_run "the browser smoke" "no Playwright Chromium at ${PLAYWRIGHT_DIR}"
