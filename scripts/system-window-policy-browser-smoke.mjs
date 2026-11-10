@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
+import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
 import { extname } from "node:path";
 import test from "node:test";
 
-const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
-const { chromium } = require(process.env.ELASTOS_PLAYWRIGHT_MODULE || "playwright");
+const { chromium } = await importProductSmokePlaywright();
 const origin = "https://system-window.test";
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const template = await read("capsules/home-gui/browser/home-gui-template.html");
@@ -63,7 +62,7 @@ window.fixture = {
 </script>`;
 
 const browser = await chromium.launch({
-  executablePath: process.env.BRAVE_BIN || "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+  ...productSmokeLaunchOptions(),
   headless: true,
 });
 try {
@@ -116,6 +115,7 @@ try {
         else if (url.pathname === "/api/capsules/interfaces") body = {interfaces:[]};
         else if (url.pathname === "/api/provider/chain/networks") body = {status:'ok', data:{networks:[]}};
         else if (url.pathname === "/api/apps/system/ai-provider") body = {connections:[]};
+        else if (url.pathname === "/api/apps/browser/internet") body = {status:'off'};
         // An unconfigured Home: gateway_home_system.rs system_community_membership_summary
         // and gateway_collaboration_presence.rs community_presence_response.
         else if (url.pathname === "/api/apps/system/community") body = {schema:'elastos.community-membership/v1',
