@@ -1808,7 +1808,9 @@ pub(crate) fn complete_owner_recovery(
     }
     let binding = owner_recovery_binding(client)?;
     verify_recovery_kit_material(kit)?;
-    if kit.localhost_root != principal_localhost_root(&kit.principal_id) {
+    if kit.localhost_root
+        != principal_kind_localhost_root(&kit.principal_id, PrincipalKind::Human)
+    {
         anyhow::bail!("recovery kit root does not match its principal");
     }
     mutate_auth_state(data_dir, |state| {
@@ -1826,7 +1828,10 @@ pub(crate) fn complete_owner_recovery(
             .collect::<Vec<_>>();
         if !replaced
             .iter()
-            .any(|principal| principal.role == RuntimePrincipalRole::Admin)
+            .any(|principal| {
+                principal.kind == PrincipalKind::Human
+                    && principal.role == RuntimePrincipalRole::Admin
+            })
         {
             anyhow::bail!("recovery kit does not match an admin of this Home");
         }
@@ -2480,7 +2485,7 @@ pub(crate) fn complete_owner_enrollment_with_intent(
             },
         )?;
         state.principals.push(PrincipalRecord {
-            localhost_root: principal_localhost_root(&principal_id),
+            localhost_root: principal_kind_localhost_root(&principal_id, PrincipalKind::Human),
             principal_id,
             proof_binding_id: binding.id(),
             proof_binding: binding,
@@ -4283,7 +4288,7 @@ fn grant_passkey_session_in_state(
                 let principal_id =
                     passkey_credential_principal_id(&credential.rp_id, &credential.credential_id)?;
                 let principal = PrincipalRecord {
-                    localhost_root: principal_localhost_root(&principal_id),
+                    localhost_root: principal_kind_localhost_root(&principal_id, PrincipalKind::Human),
                     principal_id,
                     proof_binding_id: binding.id(),
                     proof_binding: binding,
@@ -5139,7 +5144,7 @@ pub fn upsert_principal_for_binding_as_role_named(
             return Ok(existing.clone());
         }
 
-        let localhost_root = principal_localhost_root(&principal_id);
+        let localhost_root = principal_kind_localhost_root(&principal_id, PrincipalKind::Human);
         let record = PrincipalRecord {
             principal_id,
             proof_binding_id,
@@ -7519,9 +7524,9 @@ pub fn passkey_credential_principal_id(rp_id: &str, credential_id: &str) -> anyh
     Ok(format!("person:local:{}", hex::encode(&digest[..16])))
 }
 
+#[cfg(test)]
 pub fn principal_localhost_root(principal_id: &str) -> String {
-    let digest = Sha256::digest(principal_id.as_bytes());
-    format!("localhost://Users/{}", hex::encode(&digest[..12]))
+    principal_kind_localhost_root(principal_id, PrincipalKind::Human)
 }
 
 /// The record's root, chosen by the kind the Runtime minted: an agent owns
@@ -7529,12 +7534,22 @@ pub fn principal_localhost_root(principal_id: &str) -> String {
 /// `localhost://Users/<sha256 of the same principal id>`.
 fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> String {
     match kind {
-        PrincipalKind::Human => principal_localhost_root(principal_id),
+        PrincipalKind::Human => {
+            let digest = Sha256::digest(principal_id.as_bytes());
+            format!("localhost://Users/{}", hex::encode(&digest[..12]))
+        }
         PrincipalKind::Agent => {
             let digest = Sha256::digest(principal_id.as_bytes());
             format!("localhost://UsersAI/{}", hex::encode(&digest[..12]))
         }
     }
+}
+
+/// The Users root for a signer whose DID was verified as this Runtime's device.
+fn verified_device_localhost_root(did: &str) -> String {
+    let device_id = PrincipalId::device_did(did);
+    let digest = Sha256::digest(device_id.as_str().as_bytes());
+    format!("localhost://Users/{}", hex::encode(&digest[..12]))
 }
 
 /// The root a principal owns. Human records retain their stored root, including
@@ -7582,9 +7597,9 @@ impl ResolvedPrincipalRoot {
         principal_id: &str,
     ) -> anyhow::Result<Self> {
         let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
-        if device.is_some_and(|did| PrincipalId::device_did(&did).as_str() == principal_id) {
+        if let Some(did) = device.filter(|did| PrincipalId::device_did(did).as_str() == principal_id) {
             // Today's device root: the one Users rule, applied to `device:<did>`.
-            return Ok(Self(RootArm::Local(principal_localhost_root(principal_id))));
+            return Ok(Self(RootArm::Local(verified_device_localhost_root(&did))));
         }
         principal_stored_localhost_root(Some(auth_data_dir), principal_id)
             .map(|root| Self(RootArm::Local(root)))
@@ -7606,9 +7621,7 @@ impl ResolvedPrincipalRoot {
     /// trusts its parent's DID without holding that device key, so this takes
     /// the device root directly and MUST NOT call `resolve`.
     pub(crate) fn verified_device_signer(did: &str) -> Self {
-        Self(RootArm::Local(principal_localhost_root(
-            PrincipalId::device_did(did).as_str(),
-        )))
+        Self(RootArm::Local(verified_device_localhost_root(did)))
     }
 
     /// The root that verified Recovery Kit material proves for its principal.
@@ -7621,7 +7634,7 @@ impl ResolvedPrincipalRoot {
         principal_id: &str,
         localhost_root: &str,
     ) -> anyhow::Result<Self> {
-        if localhost_root != principal_localhost_root(principal_id) {
+        if localhost_root != principal_kind_localhost_root(principal_id, PrincipalKind::Human) {
             anyhow::bail!("recovery kit root is not canonical for its principal");
         }
         Ok(Self(RootArm::Local(localhost_root.to_string())))
@@ -7716,7 +7729,7 @@ fn validate_principal_root_object_binding_for_kind(
         anyhow::bail!("principal id must not be empty");
     }
     let own_root = kind.map_or_else(
-        || principal_localhost_root(principal_id),
+        || principal_kind_localhost_root(principal_id, PrincipalKind::Human),
         |kind| principal_kind_localhost_root(principal_id, kind),
     );
     if localhost_root != own_root {
