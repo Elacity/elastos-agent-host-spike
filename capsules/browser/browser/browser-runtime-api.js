@@ -182,6 +182,6 @@ export function createRuntimeApi({ launchToken }) {
 export async function browserInternetGranted(fetchJson, showDecision = () => {}) {
   const consent = await fetchJson("/api/apps/browser/internet");
   const granted = consent?.status === "granted";
-  showDecision(granted);
+  showDecision(granted, consent);
   return granted;
 }

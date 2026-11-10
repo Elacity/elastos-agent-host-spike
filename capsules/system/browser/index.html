@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="./model-management.css">
 <script src="./elastos-accent-picker.js"></script>
 <link rel="stylesheet" href="./elastos-ui.css">
-<link rel="stylesheet" href="./style.css?v=system-update-notes-20261031">
+<link rel="stylesheet" href="./style.css?v=system-browser-internet-20261110">
 </head>
 <body>
   <section id="system-locked" class="system-locked" hidden>
@@ -209,10 +209,29 @@
         <section class="settings-content" data-settings="security" aria-labelledby="security-title">
           <h1 id="security-title">Security</h1>
           <section class="pc2-section" aria-labelledby="browser-internet-title">
-            <h2 id="browser-internet-title" class="pc2-section-title">Browser internet</h2>
-            <p>Browser uses this computer's internet connection only with the Home owner's permission.</p>
-            <p id="browser-internet-status" role="status">Checking permission...</p>
-            <button id="browser-internet-stop" class="pc2-btn pc2-btn-secondary" type="button" disabled>Stop Browser internet access</button>
+            <h2 id="browser-internet-title" class="pc2-section-title">Permissions</h2>
+            <div class="pc2-group">
+              <div class="pc2-group-row pc2-card-row">
+                <div>
+                  <div class="pc2-card-label">Browser can use the internet</div>
+                  <div class="pc2-card-sublabel">Websites can see the address of the connection Browser uses.</div>
+                </div>
+                <label class="system-switch">
+                  <input id="browser-internet-switch" type="checkbox" role="switch" aria-label="Browser can use the internet" aria-describedby="browser-internet-error" disabled>
+                  <span class="system-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
+            <p id="browser-internet-error" class="pc2-card-sublabel" role="status" hidden></p>
+            <dialog id="browser-internet-confirm" aria-labelledby="browser-internet-question">
+              <form method="dialog">
+                <p id="browser-internet-question">Turn off internet access for Browser? Open Browser windows stop loading pages.</p>
+                <div class="system-inline-row">
+                  <button class="pc2-btn pc2-btn-secondary" value="cancel" autofocus>Cancel</button>
+                  <button class="pc2-btn pc2-btn-secondary" value="off">Turn Off</button>
+                </div>
+              </form>
+            </dialog>
           </section>
 
           <section class="pc2-section" aria-labelledby="recovery-title">
@@ -477,6 +496,6 @@
     <p class="system-error" hidden></p>
   </main>
   <script src="./system-tabs.js"></script>
-  <script type="module" src="./system.js?v=system-browser-internet-20261109"></script>
+  <script type="module" src="./system.js?v=system-browser-internet-20261110"></script>
 </body>
 </html>

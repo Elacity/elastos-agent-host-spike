@@ -538,3 +538,5 @@ body[data-loading="true"] .browser-address {
 }
 #browser-internet-request h2 { margin-top: 0; }
 #browser-internet-request .browser-settings-action { min-height: 44px; }
+
+.browser-status[hidden] { display: none; }

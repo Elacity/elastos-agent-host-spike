@@ -11,7 +11,7 @@ pub(super) const RESOURCE: &str = "elastos://browser/internet";
 pub(super) const GRANT_OPERATION: &str = "browser.internet.grant";
 pub(super) const REVOKE_OPERATION: &str = "browser.internet.revoke";
 pub(super) const CONSENT_TEXT: &str =
-    "Allow Browser to use this computer's internet connection; turn it off in Browser Settings.";
+    "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. Turn this off any time in System, Security.";
 const RECORD: &str = "browser-internet.json";
 const TOKEN: &str = "browser-internet-token.json";
 const REQUEST_TTL: u64 = 1800;
@@ -313,7 +313,7 @@ pub(super) async fn answer(
                 at: now_ts(),
             },
         )?;
-        return Ok("Browser internet access is off.".into());
+        return Ok("Not allowed.".into());
     }
     let manager = state
         .browser_internet
@@ -356,7 +356,7 @@ pub(super) async fn answer(
             at: now_ts(),
         },
     )?;
-    Ok("Browser can use this computer's internet connection.".into())
+    Ok("Browser can use the internet. Allowed with your passkey.".into())
 }
 
 pub(super) fn notification(
@@ -365,23 +365,41 @@ pub(super) fn notification(
 ) -> Option<HomeNotificationEntrySummary> {
     ensure_admin_context(&state.data_dir, context).ok()?;
     let record = load(&state.data_dir).ok()??;
-    let request = grant_request(&record).ok()?;
-    let Consent::Requested { request_id, at, .. } = record else {
-        return None;
+    let (at, body) = match &record {
+        Consent::Requested { request_id, at, .. } => {
+            let request = grant_request(&record).ok()?;
+            return Some(HomeNotificationEntrySummary {
+                id: "browser-internet:permission".into(),
+                source_app: BROWSER_CAPSULE_ID.into(),
+                kind: "browser_internet_request".into(),
+                title: "Allow Browser to use the internet?".into(),
+                body: request["text"].as_str()?.into(),
+                severity: "attention".into(),
+                read: false,
+                created_at: *at,
+                action_ref: Some(HomeNotificationActionSummary {
+                    app: INBOX_CAPSULE_ID.into(),
+                    action_id: format!("browser-internet-allow:{request_id}"),
+                }),
+            });
+        }
+        Consent::Granted { at, .. } => (
+            *at,
+            "Browser can use the internet. Allowed with your passkey.",
+        ),
+        Consent::Refused { at, .. } => (*at, "Not allowed."),
+        Consent::Revoked { at, .. } => (*at, "Turned off."),
     };
     Some(HomeNotificationEntrySummary {
-        id: format!("browser-internet:{request_id}"),
+        id: "browser-internet:permission".into(),
         source_app: BROWSER_CAPSULE_ID.into(),
-        kind: "browser_internet_request".into(),
-        title: "Browser internet".into(),
-        body: request["text"].as_str()?.into(),
-        severity: "attention".into(),
-        read: false,
+        kind: "browser_internet_decision".into(),
+        title: "Browser internet access".into(),
+        body: body.into(),
+        severity: "info".into(),
+        read: true,
         created_at: at,
-        action_ref: Some(HomeNotificationActionSummary {
-            app: INBOX_CAPSULE_ID.into(),
-            action_id: format!("browser-internet-allow:{request_id}"),
-        }),
+        action_ref: None,
     })
 }
 

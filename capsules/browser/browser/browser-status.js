@@ -61,7 +61,7 @@ export function runtimeOpenOutcome(error) {
 
 export function friendlyOpenError(error) {
   if (error?.payload?.code === "browser_internet_grant_required") {
-    return "Browser needs the Home owner's permission. Review the request in Inbox, then open Browser after approval.";
+    return "Browser can't open websites yet. Allow internet access in Inbox.";
   }
   const text = sanitizedErrorText(error);
   if (isAuthoritySessionError(error)) {

@@ -11600,3 +11600,92 @@ async fn review559_legacy_net_routes_are_gone_with_or_without_a_grant() {
         }
     }
 }
+
+#[tokio::test]
+async fn browser_internet_decisions_stay_in_inbox_as_read_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &authority);
+    let app = gateway_router(internet_test_state(dir.path()));
+    let (_, pending) = internet_route(
+        &app,
+        &browser,
+        "/api/apps/browser/internet",
+        Some(json!({"action":"request"})),
+    )
+    .await;
+    let (_, summary) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+    let entry = summary["notifications"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "browser_internet_request")
+        .unwrap();
+    let notification_id = entry["id"].clone();
+    assert_eq!(entry["title"], "Allow Browser to use the internet?");
+    assert_eq!(entry["body"], "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. Turn this off any time in System, Security.");
+    assert_eq!(summary["notifications"]["unread_count"], 1);
+    let action = format!(
+        "browser-internet-deny:{}",
+        pending["request"]["request_id"].as_str().unwrap()
+    );
+    let (status, _) = internet_route(
+        &app,
+        &inbox,
+        "/api/apps/inbox/actions",
+        Some(json!({"action_id":action})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for expected in ["refused", "granted", "revoked"] {
+        if expected == "granted" {
+            internet_allow(&app, dir.path(), &browser, &inbox).await;
+        }
+        if expected == "revoked" {
+            let (status, _) = internet_route(
+                &app,
+                &system,
+                "/api/apps/browser/internet",
+                Some(json!({"action":"revoke"})),
+            )
+            .await;
+            assert_ne!(status, StatusCode::OK);
+            internet_stop(&app, dir.path(), &system).await;
+        }
+        let record: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("browser-internet.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["status"], expected);
+        let (_, summary) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+        let entries = summary["notifications"]["entries"].as_array().unwrap();
+        let entry = entries
+            .iter()
+            .find(|e| e["kind"] == "browser_internet_decision")
+            .expect("decided Browser permission stays in Inbox");
+        assert_eq!(
+            entry["id"], notification_id,
+            "the selected request keeps its identity after the answer"
+        );
+        assert_eq!(entry["read"], true);
+        assert_eq!(entry["severity"], "info");
+        assert_eq!(entry["created_at"], record["at"]);
+        assert_eq!(entry["action_ref"], Value::Null);
+        let body = entry["body"].as_str().unwrap();
+        assert_eq!(
+            body,
+            match expected {
+                "granted" => "Browser can use the internet. Allowed with your passkey.",
+                "refused" => "Not allowed.",
+                _ => "Turned off.",
+            }
+        );
+        assert_eq!(summary["notifications"]["unread_count"], 0);
+        assert_eq!(summary["notifications"]["attention_count"], 0);
+        assert!(!entries
+            .iter()
+            .any(|e| e["kind"] == "browser_internet_request"));
+    }
+}

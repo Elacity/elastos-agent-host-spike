@@ -115,6 +115,10 @@
 
     function inboxEntryText(entry, field, fallback) {
       const text = String(entry[field] || "").trim();
+      if (entry.kind === "browser_internet_decision" && field === "body") {
+        const date = new Date(entry.created_at * 1000).toLocaleString();
+        return `${text.replace(/\.$/, "")} on ${date}.`;
+      }
       // Contact and service copy contains names chosen by people, which can
       // include words used in technical messages. Render those names as text.
       const namedRequest = entry.kind === "contact_request"
@@ -383,7 +387,7 @@
     }
 
     function pendingRequestEntries() {
-      return state.entries.filter((entry) => entry && entry.kind !== "service_access_grant" && entry.kind !== "hosted_route_history");
+      return state.entries.filter((entry) => entry && entry.kind !== "service_access_grant" && entry.kind !== "hosted_route_history" && entry.kind !== "browser_internet_decision");
     }
 
     function renderInbox() {
@@ -499,8 +503,12 @@
 
     function fillEntryActions(actions, entry) {
       const actionId = entry.action_ref && entry.action_ref.action_id;
+      if (entry.kind === "browser_internet_decision") {
+        actions.appendChild(createButton("Change in Settings", () => openSource("system", {settings:"security"})));
+        return;
+      }
       // A request Inbox decides itself has no other app to open.
-      if (typeof entry.source_app === "string" && entry.source_app.trim() && entry.source_app.trim() !== "inbox") {
+      if (entry.kind !== "browser_internet_request" && typeof entry.source_app === "string" && entry.source_app.trim() && entry.source_app.trim() !== "inbox") {
         // A direct-message notice opens its own conversation in Chat.
         const query = typeof actionId === "string" && actionId.startsWith("chat-open-direct:")
           ? { conversation_id: actionId.slice("chat-open-direct:".length) } : {};
@@ -508,6 +516,7 @@
       }
 
       if (typeof actionId === "string" && actionId.startsWith("browser-internet-allow:")) {
+        actions.appendChild(createActionButton("Don't Allow", actionId.replace("browser-internet-allow:", "browser-internet-deny:")));
         actions.appendChild(createButton("Allow", async () => {
           setButtonsDisabled(true);
           try {
@@ -517,12 +526,11 @@
             }
             const stepUpToken = await requestPasskeyStepUp("browser.internet.grant", current.request);
             await inboxAction(actionId, { step_up_token: stepUpToken });
-            setStatus("Browser can use this computer's internet connection.");
+            setStatus("Browser can use the internet.");
             await loadInbox();
             notifyHome();
           } finally { setButtonsDisabled(false); }
         }, "primary"));
-        actions.appendChild(createActionButton("Deny", actionId.replace("browser-internet-allow:", "browser-internet-deny:"), "danger"));
       } else if (typeof actionId === "string" && actionId.startsWith("room-approve-request:")) {
         actions.appendChild(createActionButton("Approve", actionId, "primary"));
         actions.appendChild(createActionButton("Deny", "room-deny-request:" + actionId.slice("room-approve-request:".length), "danger"));
@@ -855,6 +863,7 @@
       const unreadIds = state.entries
         .filter((entry) => entry && entry.id && !entry.read
           && entry.kind !== "wallet_approval_request"
+          && entry.kind !== "browser_internet_request"
           && entry.kind !== "contact_request" && entry.kind !== "service_access_request")
         .map((entry) => entry.id);
       if (unreadIds.length === 0) {

@@ -1875,3 +1875,16 @@ input[type="file"].visually-hidden {
 :root[data-el-form-factor="phone"] [data-settings="models"] summary {
   line-height: var(--el-touch-target);
 }
+
+#browser-internet-confirm {
+  max-width: min(440px, calc(100% - 32px));
+  padding: 24px;
+  border: 1px solid var(--el-hairline);
+  border-radius: 16px;
+  background: var(--el-surface);
+  color: var(--el-text);
+  box-shadow: var(--el-shadow-3);
+}
+#browser-internet-confirm::backdrop { background: color-mix(in srgb, var(--el-bg) 65%, transparent); }
+#browser-internet-confirm p { margin: 0 0 20px; }
+#browser-internet-confirm .system-inline-row { justify-content: flex-end; }

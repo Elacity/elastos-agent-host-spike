@@ -1852,6 +1852,13 @@ def release_notes_findings(text, rules_from=NOTES_RULES_FROM):
 class ReleaseNotesRulesTest(unittest.TestCase):
     changelog = (Path(__file__).resolve().parents[1] / "elastos/CHANGELOG.md").read_text(encoding="utf-8")
 
+    def test_browser_permission_notes_name_the_permission_and_settings(self):
+        note = "Browser opens websites only after you allow internet access with your passkey in Inbox. Turn it off in System, Security."
+        for version in ("2.0.1", "2.0.1-rc.2"):
+            body = self.changelog.split(f"## [{version}] - ", 1)[1].split("\n## ", 1)[0]
+            security = body.split("### Security\n", 1)[1].split("\n### ", 1)[0]
+            self.assertIn("- " + note, security)
+
     def test_newest_release_notes_follow_the_rules(self):
         checked, findings = release_notes_findings(self.changelog)
         newest = NOTES_HEADING.search(self.changelog.split("\n## ", 2)[2].partition("\n")[0])

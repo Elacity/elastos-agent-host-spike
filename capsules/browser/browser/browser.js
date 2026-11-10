@@ -8,7 +8,7 @@ import {
   normalizeUrl,
   sameBrowserStreamTarget,
   visibleAddressForUrl,
-} from "./browser-runtime-api.js?v=browser-20261109a";
+} from "./browser-runtime-api.js?v=browser-20261110a";
 import {
   createBrowserClipboardBridge,
 } from "./browser-clipboard.js?v=browser-20261022d";
@@ -28,7 +28,7 @@ import {
   isAuthoritySessionError,
   isMissingRuntimePageError,
   requestedDisplayMode,
-} from "./browser-status.js?v=browser-20261101d";
+} from "./browser-status.js?v=browser-20261110a";
 import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261101d";
 import { engineChoiceHidden, renderServiceSelection } from "./browser-service-selection.js?v=browser-20261015a";
 
@@ -177,34 +177,70 @@ function openInternetControl(target, query = {}) {
   window.top.postMessage({ type:"home:open-target", homeToken:launchToken, target, query }, homeParentOrigin);
 }
 
-function checkBrowserInternet() {
-  return browserInternetGranted(fetchJson, granted => {
-    browserInternetAllowed = granted;
-    setLoading(document.body.dataset.loading === "true");
-    const panel = document.querySelector("#browser-internet-request");
-    if (panel) panel.hidden = granted;
-    const choice = document.querySelector("#browser-internet");
-    if (choice) choice.value = granted ? "on" : "off";
-    if (!granted) {
-      setLoading(false);
-      showStatus("Browser needs the Home owner's permission. Review the request in Inbox, then open Browser after approval.", {sticky:true});
-    }
-  });
+let browserInternetPollingActive = true;
+let browserInternetPollTimer = 0;
+let finishInternetPollWait = null;
+let internetRequestOpened = false;
+
+function stopInternetPolling() {
+  browserInternetPollingActive = false;
+  window.clearTimeout(browserInternetPollTimer);
+  finishInternetPollWait?.();
+}
+window.addEventListener("pagehide", stopInternetPolling);
+window.addEventListener("beforeunload", stopInternetPolling);
+
+async function checkBrowserInternet() {
+  while (browserInternetPollingActive && !homeWindowCloseInFlight && !homeWindowTerminalCloseConfirmed) {
+    const granted = await browserInternetGranted(fetchJson, (allowed, consent) => {
+      if (!browserInternetPollingActive) return;
+      browserInternetAllowed = allowed;
+      statusNode.hidden = !allowed;
+      setLoading(allowed && document.body.dataset.loading === "true");
+      document.querySelector("#browser-internet-request").hidden = allowed;
+      document.querySelector("#browser-internet-value").textContent = `Internet access: ${allowed ? "Allowed" : "Off"}`;
+      if (allowed) return;
+      window.clearTimeout(statusTimer);
+      statusNode.dataset.visible = "false";
+      const off = consent?.status === "refused" || consent?.status === "revoked";
+      document.querySelector("#browser-internet-heading").textContent = off
+        ? "Internet access is off for Browser." : "Browser can't open websites yet";
+      const hint = document.querySelector("#browser-internet-hint");
+      hint.hidden = off;
+      hint.textContent = internetRequestOpened ? "Waiting for your answer in Inbox." : "Allow internet access in Inbox.";
+      const button = document.querySelector("#browser-internet-review");
+      button.textContent = off ? "Open Settings" : "Ask in Inbox";
+      button.dataset.off = String(off);
+    });
+    if (!browserInternetPollingActive) return false;
+    if (granted) return true;
+    await new Promise(resolve => {
+      finishInternetPollWait = resolve;
+      browserInternetPollTimer = window.setTimeout(resolve, 2000);
+    });
+    finishInternetPollWait = null;
+  }
+  return false;
 }
 
-document.querySelector("#browser-internet-review")?.addEventListener("click", async () => {
+document.querySelector("#browser-internet-review")?.addEventListener("click", async event => {
+  if (event.currentTarget.dataset.off === "true") {
+    openInternetControl("system", {settings:"security"});
+    return;
+  }
+  const button = event.currentTarget;
+  button.disabled = true;
   try {
     await fetchJson("/api/apps/browser/internet", {method:"POST",body:{action:"request"}});
+    internetRequestOpened = true;
+    document.querySelector("#browser-internet-hint").textContent = "Waiting for your answer in Inbox.";
     openInternetControl("inbox");
-  } catch (error) { showStatus(friendlyOpenError(error), {sticky:true}); }
+  } catch (error) {
+    document.querySelector("#browser-internet-hint").textContent = friendlyOpenError(error);
+  } finally { button.disabled = false; }
 });
-document.querySelector("#browser-internet-retry")?.addEventListener("click", () => {
-  checkBrowserInternet().then(granted => granted ? requestRuntimeOpen(addressInput.value) : null).catch(error => showStatus(friendlyOpenError(error), {sticky:true}));
-});
-document.querySelector("#browser-internet")?.addEventListener("change", async event => {
-  const turnOff = event.target.value === "off";
-  await checkBrowserInternet().catch(error => showStatus(friendlyOpenError(error), {sticky:true}));
-  openInternetControl(turnOff ? "system" : "inbox", turnOff ? {settings:"security"} : {});
+document.querySelector("#browser-internet-settings")?.addEventListener("click", () => {
+  openInternetControl("system", {settings:"security"});
 });
 
 function setSettingsOpen(open) {
@@ -2713,7 +2749,12 @@ settingsButton?.addEventListener("click", (event) => {
   const willOpen = Boolean(settingsPanel?.hidden);
   setSettingsOpen(willOpen);
   if (willOpen) {
-    void fetchBrowserSummary().catch((error) => {
+    void Promise.all([
+      fetchBrowserSummary(),
+      browserInternetGranted(fetchJson, granted => {
+        document.querySelector("#browser-internet-value").textContent = `Internet access: ${granted ? "Allowed" : "Off"}`;
+      }),
+    ]).catch((error) => {
       showStatus(friendlyOpenError(error), { sticky: true });
     });
   }
