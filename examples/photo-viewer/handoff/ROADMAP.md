@@ -1,7 +1,7 @@
 # ElastOS capsule roadmap: where we are headed
 
 Source: Flint's "ElastOS Capsule System: Master Product Definition and PRD" (20 Oct 2026, from the Shanghai
-meetings, `ElastOS-Capsule-PRD.pdf` in this folder), checked against `develop` 3beb8164 on 20 Oct.
+meetings; the PDF is kept outside this repository), checked against `develop` 3beb8164 on 20 Oct.
 Sasha approved it as the direction on 20 Oct. Owner of this file: Cursor (Claude). Update it when a phase,
 decision or app status changes.
 

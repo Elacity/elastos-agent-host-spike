@@ -25,6 +25,10 @@ The client imports `cut` from the sibling `docs-render.js`. The document list an
 the page. The archive build copies `page-client.js` to `surface/browser/page-client.js`, and
 `the shipped client matches the kit owner` compares the bytes.
 
+The next paragraph describes the Photos seam in Runtime. The seam and its test are not on this branch
+(the examples landed without the Runtime changes of the line they were built on), so
+`photo-viewer/falsify-seam.py` cannot run here and no gate runs it.
+
 The Photos page keeps its client copy until Runtime's four-file gateway test allows a fifth file.
 That test (`elastos-server` `gateway_tests/photos.rs`, `install_photos_surface`) installs `index.html`,
 `main.js`, `photos.js` and `photos.css`. The Photos page draws images and keeps its own renderer.

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Break each check of the Photos seam, see its test fail, restore it.
 
+NOT A GATE ON THIS TREE, AND IT CANNOT RUN HERE. The Photos seam (the code in
+elastos-server that this script mutates, its tests in gateway_tests/photos.rs
+and scripts/home-photos-launch.test.mjs) is not on this branch: the examples
+landed without the Runtime changes of the line they were built on. Here
+`--check` stops at the first anchor. The script is kept so that it returns to
+use, unchanged, in the change that brings the seam itself.
+
 Usage: RUST_TEST_THREADS=2 python3 -I falsify-seam.py [--check] [name-part ...]
 
 --check only confirms every anchor occurs once. Name parts run only the
