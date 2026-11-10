@@ -5,7 +5,7 @@ import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
 import path from "node:path";
-import { assertPhoneDrawer, DRAWER_SETTLE_MS, PHONE_VIEWPORT, setPhoneFormFactor } from "./lib/phone-drawer-assert.mjs";
+import { assertPhoneDrawer, PHONE_VIEWPORT, setPhoneFormFactor } from "./lib/phone-drawer-assert.mjs";
 
 const PHONE_SCREENSHOT = "/tmp/documents-phone-390x844.png";
 const PHONE_DRAWER_SCREENSHOT = "/tmp/documents-phone-drawer-390x844.png";
@@ -47,6 +47,17 @@ async function waitForCondition(predicate, timeoutMs, label) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(label);
+}
+
+// A page condition checked on a timer, not on animation frames: a loaded
+// renderer can go without a frame for longer than a condition stays true.
+// A miss names the state the page never reached.
+async function waitForPage(target, predicate, condition, timeoutMs = 10000, arg = null) {
+  try {
+    await target.waitForFunction(predicate, arg, { timeout: timeoutMs, polling: 50 });
+  } catch {
+    throw new Error(`The page did not reach this state within ${timeoutMs} ms: ${condition}`);
+  }
 }
 
 function createDocument(docDid, title, fileName, body, cid) {
@@ -765,7 +776,13 @@ async function run() {
 
     await page.locator("#mode-write").click();
     await setPhoneFormFactor(page);
-    await page.waitForTimeout(DRAWER_SETTLE_MS);
+    // The form-factor switch is a layout change, not a timed animation: wait
+    // for the phone geometry the following checks read.
+    await waitForPage(page, () => document.documentElement.dataset.elFormFactor === "phone" &&
+      document.getElementById("documents-sidebar").getBoundingClientRect().right <= 0 &&
+      getComputedStyle(document.getElementById("documents-list")).display !== "none" &&
+      getComputedStyle(document.querySelector(".sidebar-search")).display !== "none",
+    "the phone layout puts the closed list off screen with its list and search ready", 5000);
     await assertNoHorizontalOverflow(page, "phone");
     const phoneList = await page.evaluate(() => ({
       collapsed: document.querySelector(".documents-shell")?.dataset.sidebarCollapsed || "",
@@ -937,6 +954,8 @@ async function run() {
         switchView.height === switchView.toolbarHeight,
         `Autosave must be a labeled switch as tall as the toolbar controls. Got ${JSON.stringify(switchView)}`);
       await manualPage.locator("#editor").fill("# Beta\n\nFirst manual edit.");
+      // The wait is the behaviour under test: the 900 ms autosave must send
+      // nothing here, so a longer quiet window proves the negative.
       await manualPage.waitForTimeout(1500);
       assert(saveCalls.length === 0, `With Save automatically off nothing may save without an action. Got ${JSON.stringify(saveCalls)}`);
       const unsavedDot = manualPage.locator('.document-list-item[data-doc-did="doc-beta"] .document-list-unsaved');
@@ -944,7 +963,10 @@ async function run() {
         "The list must mark unsaved changes.");
       // Clicking the open document's own row keeps the editor and its edits.
       await manualPage.locator('.document-list-item[data-doc-did="doc-beta"]').click();
-      await manualPage.waitForTimeout(300);
+      await waitForPage(manualPage, () => !document.querySelector("#confirm-modal.open") &&
+        document.getElementById("editor")?.value === "# Beta\n\nFirst manual edit." &&
+        !document.getElementById("save-button")?.disabled,
+      "clicking the open document keeps its edits, offers Save and asks nothing");
       assert(!(await manualPage.locator("#confirm-modal.open").count()) &&
         await manualPage.locator("#editor").inputValue() === "# Beta\n\nFirst manual edit." &&
         await manualPage.getByRole("button", { name: "Save", exact: true }).isEnabled(),
@@ -986,11 +1008,15 @@ async function run() {
       assert((await saveMark()).unsaved, "Beta's Save shows its unsaved changes again.");
       assert(await unsavedMark('.document-list-item[data-doc-did="doc-alpha"]'), "The list must mark Alpha unsaved.");
       const freshItem = manualPage.locator(".document-list-item[data-draft-key]");
-      await manualPage.waitForFunction(() => {
+      // The switch keeps the new document, so the list must show it once with
+      // its title and mark. The bound stays at the 5 s the old animation-frame
+      // poll used: that poll can miss a state that only holds between frames,
+      // and a timer poll checks the same 5 s of page work at a fixed interval.
+      await waitForPage(manualPage, () => {
         const drafts = document.querySelectorAll(".document-list-item[data-draft-key]");
         return drafts.length === 1 && drafts[0].querySelector(".document-list-title")?.textContent === "Fresh" &&
           drafts[0].querySelector(".document-list-unsaved")?.getAttribute("aria-label") === "Unsaved changes";
-      }, null, { timeout: 5000 });
+      }, "the new document is listed once with the title Fresh and its unsaved mark", 5000);
       assert(await freshItem.count() === 1 && (await freshItem.locator(".document-list-title").textContent()) === "Fresh" &&
         await unsavedMark(".document-list-item[data-draft-key]"),
         "An unsaved new document must be listed with its unsaved mark.");
@@ -1124,7 +1150,16 @@ async function run() {
       const top = () => frame.evaluate((target) => document.getElementById(target).getBoundingClientRect().top, id);
       const before = await top();
       await activate();
-      await frame.page().waitForTimeout(200);
+      // The link scrolls smoothly; wait for the heading to arrive rather than
+      // for a fixed 200 ms of animation.
+      try {
+        await frame.waitForFunction((target) => {
+          const rect = document.getElementById(target).getBoundingClientRect();
+          return rect.top >= 0 && rect.top < window.innerHeight;
+        }, id, { timeout: 10000, polling: 50 });
+      } catch {
+        throw new Error(`The link to #${id} did not scroll to its heading within 10000 ms.`);
+      }
       const after = await top();
       const viewportHeight = await frame.evaluate(() => window.innerHeight);
       assert(before > viewportHeight && after >= 0 && after < viewportHeight,
@@ -1178,7 +1213,17 @@ async function run() {
         await link.focus();
         await linkPage.keyboard.press("Enter");
         await linkPage.keyboard.press("Space");
-        await linkPage.waitForTimeout(200);
+        // One click, Enter and Space ask Home; wait for those three requests
+        // (or, without the bridge, for the refusal the frame shows).
+        if (withoutOrigin) {
+          await waitForPage(frame, () => document.getElementById("status-text")?.textContent ===
+            "Open Documents from Home to open web links.",
+          "without the Home bridge a web link says why it did not open", 5000);
+        } else {
+          await waitForPage(linkPage, (count) => window.homeMessages
+            .filter((message) => message?.type === "home:open-external").length >= count,
+          "a web link by click, Enter and Space asked Home three times", 5000, 3);
+        }
         await assertHomeFrameInvariant(frame, launch, "web link");
         if (withoutOrigin) {
           assert(await frame.locator("#status-text").textContent() === "Open Documents from Home to open web links.",
@@ -1197,7 +1242,11 @@ async function run() {
         await frame.waitForFunction(() => document.querySelectorAll("#preview a[data-open-external]").length === 2, null, { timeout: 5000 });
         await assertHomeFrameInvariant(frame, launch, "re-render");
         await frame.getByText("Same", { exact: true }).click();
-        await linkPage.waitForTimeout(300);
+        if (!withoutOrigin) {
+          await waitForPage(linkPage, (count) => window.homeMessages
+            .filter((message) => message?.type === "home:open-external").length >= count,
+          "the same-origin web link asked Home", 5000, 4);
+        }
         await assertHomeFrameInvariant(frame, launch, "same-origin link");
         const request = (url) => ({ type: "home:open-external", url, homeToken: "documents-link-token" });
         const expected = withoutOrigin ? [] : [request(webLink), request(webLink), request(webLink), request(sameOriginLink)];
@@ -1272,7 +1321,9 @@ async function run() {
       await controls.nth(0).click();
       await controls.nth(1).focus();
       await publishedPage.keyboard.press("Enter");
-      await publishedPage.waitForTimeout(200);
+      await waitForPage(publishedPage, (count) => window.homeMessages
+        .filter((message) => message?.type === "home:open-external").length >= count,
+      "a shared preview web link by click and Enter asked Home twice", 5000, 2);
       await assertHomeFrameInvariant(frame, launch, "shared web links");
       await scrollsTo(frame, "notes-2", () => frame.locator("#preview").getByText("Jump", { exact: true }).click());
       await assertHomeFrameInvariant(frame, launch, "shared follow fragment");
@@ -1515,6 +1566,9 @@ async function run() {
       await racePage.locator('.document-list-item[data-doc-did="doc-beta"]').click();
       await racePage.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
       await racePage.locator("#editor").fill(betaSavedBody);
+      // Beta's 900 ms autosave timer must fire while Alpha's save is held and
+      // queue; the page exposes no signal for a queued save, so the interval
+      // is the only observable.
       await racePage.waitForTimeout(1200);
       delayedSave.release();
       await waitForCondition(
@@ -1572,7 +1626,8 @@ async function run() {
       // Even with Save automatically on, a conflict pauses automatic writes.
       await windows[0].locator("#autosave-toggle").click();
       await windows[0].locator("#editor").fill("Newer losing draft");
-      // Observe beyond the actual 900 ms autosave interval after another edit.
+      // The wait is the behaviour under test: past the 900 ms autosave
+      // interval, a paused autosave must still have sent nothing.
       await windows[0].waitForTimeout(1200);
       assert(saveCalls.length === 2, "Conflict must pause automatic writes after further edits.");
       assert(documents.get("doc-alpha").body === "Winning body", "Paused draft changed the stored winner.");
