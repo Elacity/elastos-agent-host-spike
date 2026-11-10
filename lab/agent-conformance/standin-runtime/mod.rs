@@ -64,6 +64,7 @@ use grant_binding::{
     AdmitRefuse, BudgetAsk, GuestRequest, Handle, InstanceId, Refuse, Rights, Verifier,
 };
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -287,6 +288,10 @@ pub struct StandIn {
     /// kept as its error, so every later storage call answers with it.
     home_fd: Option<Result<OwnedFd, (u16, String)>>,
     grants: Vec<Grant>,
+    /// Request ids this stand-in's grant route minted, in mint order. A
+    /// `seed_grant` entry does not join it: that grant is present in the store
+    /// but was not minted by this run, so the A12 census treats it as foreign.
+    minted: BTreeSet<String>,
     requests: Vec<Request>,
     admitted: Vec<Admitted>,
     instances: Vec<Instance>,
@@ -320,6 +325,7 @@ impl StandIn {
             home: None,
             home_fd: None,
             grants: Vec::new(),
+            minted: BTreeSet::new(),
             requests: Vec::new(),
             admitted: Vec::new(),
             instances: Vec::new(),
@@ -750,6 +756,13 @@ impl StandIn {
         });
     }
 
+    /// Lab test seam, not a route: the request ids this stand-in's grant
+    /// route minted. The A12 census compares its live view with this set, so a
+    /// grant the run did not mint (a `seed_grant` entry) stays foreign.
+    pub fn minted_grant_ids(&self) -> BTreeSet<String> {
+        self.minted.clone()
+    }
+
     /// Lab test seam, not a route.
     ///
     /// Stores one `Live` grant exactly as `seed_grant` does, then binds it
@@ -834,12 +847,14 @@ impl StandIn {
         Ok(())
     }
 
-    /// Lab test seam, not a route. Private to this module.
+    /// Lab test seam, not a route. Fixtures use it to store a request record
+    /// the routes do not reach, such as one that is still pending after its
+    /// session stopped.
     ///
     /// Stores one pending request at the current instant. This method reads no
     /// clock and no disk. Its route caller `post_capability_request` runs
     /// `declared_ask` first, so an id it stores carries a declared ask.
-    pub(crate) fn seed_request(
+    pub fn seed_request(
         &mut self,
         request_id: &str,
         session_id: &str,
@@ -1135,6 +1150,7 @@ impl StandIn {
             .expect("the grant route just stored this request's grant")
             .plan = minted;
         self.bind_stored_grant(&request_id)?;
+        self.minted.insert(request_id.clone());
         Ok(json!({ "success": true }))
     }
 
@@ -1179,9 +1195,10 @@ impl StandIn {
     /// `GET /api/capability/list` for the plain route or `?scope=`.
     ///
     /// The plain route is the real default: the caller's own session, five
-    /// fields per entry and no `scope` key. A shell owns no grant, so its
-    /// plain answer is empty. `?scope=all_sessions_live` is the shell-only
-    /// all-sessions view, six fields per entry with the grant's session.
+    /// fields per entry and no `scope` key. The shell caller answers for the
+    /// shell session, so it lists exactly the grants that session holds.
+    /// `?scope=all_sessions_live` is the shell-only all-sessions view, six
+    /// fields per entry with the grant's session.
     pub fn get_capability_list(
         &self,
         caller: Caller<'_>,
@@ -1199,7 +1216,8 @@ impl StandIn {
 
     /// The plain route's answer: the caller's own session, five fields per
     /// entry and no `scope` key. The shell caller answers for the shell
-    /// session, so it lists exactly the grants that session holds.
+    /// session and keeps every `Granted` record, like the real
+    /// `session_granted`; a client keeps its own live grants.
     fn render_own(&self, caller: Caller<'_>) -> Value {
         let own = match caller {
             Caller::Shell => Caller::Client {
@@ -1207,7 +1225,10 @@ impl StandIn {
             },
             Caller::Client { .. } => caller,
         };
-        let mut grants = self.kept(own);
+        let mut grants = match caller {
+            Caller::Shell => self.granted_kept(own),
+            Caller::Client { .. } => self.kept(own),
+        };
         grants.sort_by(|left, right| left.request_id.cmp(&right.request_id));
         let capabilities = grants
             .iter()
@@ -1993,22 +2014,40 @@ impl StandIn {
             .unwrap_or(RESIDENT_WORLD)
     }
 
-    /// One filter. A grant stays when its life is `Live`. An ended session stays.
+    /// The live filter. A grant stays when its life is `Live`. An ended
+    /// session stays.
     fn kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
         self.grants
             .iter()
-            .filter(|grant| keep(grant, caller, self.instant))
+            .filter(|grant| keep_live(grant, caller, self.instant))
+            .collect()
+    }
+
+    /// The shell plain filter, matching the real `session_granted`: every
+    /// record the store still reports `Granted` for that session. Only
+    /// revocation moves a grant off `Granted`; an exhausted or
+    /// lifetime-expired grant stays in this answer.
+    fn granted_kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
+        self.grants
+            .iter()
+            .filter(|grant| keep_granted(grant, caller))
             .collect()
     }
 }
 
-fn keep(grant: &Grant, caller: Caller<'_>, instant: u64) -> bool {
+fn keep_live(grant: &Grant, caller: Caller<'_>, instant: u64) -> bool {
     // Ending a session leaves a live grant in this view.
     let _ended = grant.session_ended;
     is_live(grant.life) && !is_due(grant, instant) && visible(grant, caller)
 }
 
-/// One expiry compare. `keep` and `authorise` use it with the stored instant.
+/// The real plain route's `session_granted`: status `Granted` and that
+/// session. A spent allowance or a past lifetime leaves the status `Granted`.
+fn keep_granted(grant: &Grant, caller: Caller<'_>) -> bool {
+    !matches!(grant.life, Life::Revoked) && visible(grant, caller)
+}
+
+/// One expiry compare. `keep_live` and `authorise` use it with the stored instant.
 /// A grant at or past its `expires_at` no longer authorises and leaves the view.
 fn is_due(grant: &Grant, instant: u64) -> bool {
     matches!(grant.expires_at, Some(expires_at) if instant >= expires_at)
@@ -3264,6 +3303,74 @@ mod tests {
                 }]
             }),
             "the shell's plain view lists only the shell session's grants"
+        );
+    }
+
+    #[test]
+    fn standin_shell_plain_matches_the_real_session_granted_filter() {
+        let mut standin = StandIn::new();
+        for (request_id, resource, duration, granted_at, life) in [
+            ("req-shell-live", "res-live", "session", 5, Life::Live),
+            (
+                "req-shell-exhausted",
+                "res-exhausted",
+                "once",
+                6,
+                Life::Exhausted,
+            ),
+            ("req-shell-due", "res-due", "once", 1, Life::Live),
+            ("req-shell-revoked", "res-revoked", "once", 2, Life::Revoked),
+        ] {
+            standin.seed_grant(
+                request_id,
+                SHELL_SESSION,
+                resource,
+                "read",
+                duration,
+                granted_at,
+                life,
+                false,
+            );
+        }
+        standin.seed_grant(
+            "req-other-live",
+            "s-other",
+            "res-other",
+            "read",
+            "session",
+            4,
+            Life::Live,
+            false,
+        );
+        standin.set_instant(3_601);
+        assert_eq!(
+            shell_plain(&standin),
+            json!({
+                "capabilities": [
+                    {
+                        "request_id": "req-shell-due",
+                        "resource": "res-due",
+                        "action": "read",
+                        "duration": "once",
+                        "granted_at": 1
+                    },
+                    {
+                        "request_id": "req-shell-exhausted",
+                        "resource": "res-exhausted",
+                        "action": "read",
+                        "duration": "once",
+                        "granted_at": 6
+                    },
+                    {
+                        "request_id": "req-shell-live",
+                        "resource": "res-live",
+                        "action": "read",
+                        "duration": "session",
+                        "granted_at": 5
+                    }
+                ]
+            }),
+            "the plain view is session_granted: this session's Granted records, spent or expired included"
         );
     }
 

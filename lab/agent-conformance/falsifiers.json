@@ -1143,12 +1143,28 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "controller.check_cleanup_wiring(|controller| controller.cleanup_state())",
-          "new": "controller.check_cleanup_wiring(|_controller| Ok(\"pending:0 grants:BLOCKED(AC-021-GRANTS)\"))"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    let cleanup_state = controller.check_cleanup_wiring(|_controller| Ok(\"pending:0 grants:BLOCKED(AC-021-GRANTS)\"));\n    let mut finished = operator.finish_check(sampled);"
         }
       ],
       "tests": [
         "granted_read_succeeds"
+      ]
+    },
+    {
+      "id": "F-cleanup-minted",
+      "title": "treat every live grant as the run's known AC-021 gap",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
+          "old": "    let foreign = ids.iter().any(|id| !minted.contains(id));",
+          "new": "    let foreign = false;"
+        }
+      ],
+      "tests": [
+        "grants::tests::live_grants_are_the_known_gap_only_when_this_run_minted_them"
       ]
     },
     {
@@ -1496,6 +1512,38 @@
       ],
       "tests": [
         "standin_stopped_run_leaves_no_live_grant"
+      ]
+    },
+    {
+      "id": "F-standin-a12-foreign",
+      "title": "treat every stored grant id as one this run minted",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "        self.minted.clone()",
+          "new": "        self.grants\n            .iter()\n            .map(|grant| grant.request_id.clone())\n            .collect()"
+        }
+      ],
+      "tests": [
+        "standin_a12_census_refuses_a_foreign_seeded_grant"
+      ]
+    },
+    {
+      "id": "F-standin-shell-granted",
+      "title": "widen the plain view to every session's granted records",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "            Caller::Shell => self.granted_kept(own),",
+          "new": "            Caller::Shell => self.granted_kept(Caller::Shell),"
+        }
+      ],
+      "tests": [
+        "standin_runtime::tests::standin_shell_plain_matches_the_real_session_granted_filter"
       ]
     },
     {
