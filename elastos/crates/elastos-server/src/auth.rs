@@ -5429,7 +5429,27 @@ fn agent_admission_record_violation(
     if !owner_is_person {
         return Some("agent admission owner missing");
     }
+    if stored_text_missing(record.request_id.as_deref()) {
+        return Some("agent admission request id missing");
+    }
+    match record.agent_host_package.as_ref() {
+        Some(package) if stored_text_missing(Some(&package.name)) => {
+            return Some("agent admission package name missing");
+        }
+        Some(package) if stored_text_missing(Some(&package.registry_cid)) => {
+            return Some("agent admission package cid missing");
+        }
+        None => return Some("agent admission package name missing"),
+        Some(_) => {}
+    }
+    if record.proof_binding_id != record.proof_binding.id() {
+        return Some("agent admission binding id mismatch");
+    }
     None
+}
+
+fn stored_text_missing(value: Option<&str>) -> bool {
+    value.is_none_or(|text| text.trim().is_empty())
 }
 
 fn agent_admission_state_violation(records: &[PrincipalRecord]) -> Option<&'static str> {
@@ -18968,6 +18988,24 @@ pub(crate) mod tests {
         });
         assert_invalid_agent_refused("agent admission owner missing", |agent| {
             agent.owner = Some("person:local:missing".to_string());
+        });
+        assert_invalid_agent_refused("agent admission request id missing", |agent| {
+            agent.request_id = Some("  ".to_string());
+        });
+        assert_invalid_agent_refused("agent admission package name missing", |agent| {
+            agent.agent_host_package = Some(AgentHostPackage {
+                name: String::new(),
+                registry_cid: "bafyrecord".to_string(),
+            });
+        });
+        assert_invalid_agent_refused("agent admission package cid missing", |agent| {
+            agent.agent_host_package = Some(AgentHostPackage {
+                name: "agent-host".to_string(),
+                registry_cid: String::new(),
+            });
+        });
+        assert_invalid_agent_refused("agent admission binding id mismatch", |agent| {
+            agent.proof_binding_id = "agent-admission:v2:not-derived".to_string();
         });
     }
 
