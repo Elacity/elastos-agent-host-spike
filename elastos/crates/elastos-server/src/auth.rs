@@ -6171,6 +6171,35 @@ pub(crate) fn write_protected_principal_root_object(
     )
 }
 
+pub(crate) fn write_protected_principal_root_object_resolved(
+    data_dir: &Path,
+    resolved: &ResolvedPrincipalRoot,
+    object_uri: &str,
+    path: &Path,
+    plaintext: &[u8],
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    principal_object_io::record_write(data_dir, path);
+    let (principal_id, root) = resolved.local_binding(object_uri)?;
+    validate_principal_root_object_path(data_dir, object_uri, path)?;
+    let _guard = principal_root_object_mutation_lock()
+        .lock()
+        .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    write_principal_root_object_locked_unchecked(
+        data_dir,
+        principal_id,
+        root,
+        object_uri,
+        path,
+        plaintext,
+        PrincipalRootObjectWriteOptions {
+            require_protection: true,
+            create_only: false,
+            precondition: None,
+        },
+    )
+}
+
 pub(crate) enum PrincipalRootObjectPrecondition<'a> {
     Absent,
     Revision(&'a str),

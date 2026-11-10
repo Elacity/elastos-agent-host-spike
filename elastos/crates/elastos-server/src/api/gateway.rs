@@ -49,7 +49,7 @@ mod gateway_assistant_workspace_v2;
 mod gateway_browser;
 #[cfg(test)]
 #[path = "gateway_r3_stored_root_tests.rs"]
-mod r3_stored_root_tests;
+pub(in crate::api) mod r3_stored_root_tests;
 pub(crate) use gateway_browser::gateway_browser_operator::{
     register_browser_operator_sessions, BrowserOperatorService,
 };
