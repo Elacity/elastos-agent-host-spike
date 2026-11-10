@@ -308,11 +308,16 @@ try {
     window.__follow = { on: true, samples: [] };
     const sample = () => {
       if (!window.__follow.on) return;
-      const jump = document.querySelector("[data-agent-jump-latest]");
-      window.__follow.samples.push({ t: performance.now(), jump: Boolean(jump && !jump.hidden),
-        streaming: Boolean(document.querySelector(".agent-msg-agent.is-streaming")),
-        follow: scroller.classList.contains("is-follow-bottom"),
-        fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) });
+      try {
+        const jump = document.querySelector("[data-agent-jump-latest]");
+        window.__follow.samples.push({ t: performance.now(), jump: Boolean(jump && !jump.hidden),
+          streaming: Boolean(document.querySelector(".agent-msg-agent.is-streaming")),
+          follow: scroller.classList.contains("is-follow-bottom"),
+          fromEnd: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) });
+      } catch (error) {
+        window.__follow.error = String(error);
+        return;
+      }
       requestAnimationFrame(sample);
     };
     requestAnimationFrame(sample);
@@ -372,6 +377,8 @@ try {
     const firstJump = streaming.find((sample) => sample.jump);
     return { behindFrames,
       jumpFrames: streaming.filter((sample) => sample.jump).length,
+      samples: window.__follow.samples.length,
+      ...(window.__follow.error ? { samplerError: window.__follow.error } : {}),
       streamingSamples: streaming.length,
       maxFromEnd: Math.round(Math.max(0, ...streaming.map((sample) => sample.fromEnd))),
       maxGapMs: Math.round(maxGapMs), behindMs: Math.round(behindMs),
