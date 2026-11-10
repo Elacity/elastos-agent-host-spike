@@ -25,6 +25,25 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
+
+# Cargo decides what to rebuild by comparing file times with the time of its
+# last build. On a machine whose clock steps backwards (seen on WSL), a file
+# written now can look older than that build: nothing is rebuilt, and the
+# previous mutant's test binary is run again. The runner therefore remembers
+# the latest time it has seen, stamps a restored file just after it, and
+# checks that a mutant was really rebuilt before any test is scored.
+_latest_seen = 0.0
+_planted = []
+
+
+def _stamp_after_latest(paths, margin):
+    """Gives each file a modification time `margin` seconds after the latest
+    time this run has seen, whatever the clock says now."""
+    global _latest_seen
+    _latest_seen = max(_latest_seen, time.time())
+    for path in paths:
+        os.utime(path, (_latest_seen + margin, _latest_seen + margin))
 
 
 def env():
@@ -75,13 +94,16 @@ def falsify(cases, prepare, test_fails, parts=(), show_tests=False, failing_test
             for other, extra in appends:
                 other = pathlib.Path(other)
                 other.write_text(other.read_text() + extra)
+            _planted[:] = touched
             if prepare is not None:
                 prepare()
             results = [(test, test_fails(test)) for test in tests]
             actual = set(map(str, failing_tests())) if failing_tests is not None else None
         finally:
+            _planted.clear()
             for each, data in saved.items():
                 each.write_bytes(data)
+            _stamp_after_latest(saved, 1)
         survivors = [test for test, failed in results if not failed]
         declared = set(map(str, tests))
         unexpected = sorted(actual - declared) if actual is not None else []
@@ -104,6 +126,11 @@ def falsify(cases, prepare, test_fails, parts=(), show_tests=False, failing_test
 def cargo_compiles(cwd, args):
     """A mutant that does not compile proves nothing: stop the run."""
     build = run(["cargo", "test", "--locked", *args, "--no-run"], cwd)
+    if build.returncode == 0 and _planted and "Compiling" not in build.stderr:
+        # Cargo rebuilt nothing, so it did not see the mutant. Stamp the changed
+        # files well ahead and build once more.
+        _stamp_after_latest(_planted, 60)
+        build = run(["cargo", "test", "--locked", *args, "--no-run"], cwd)
     if build.returncode != 0:
         print(build.stderr[-3000:])
         raise SystemExit("a falsifier does not compile")

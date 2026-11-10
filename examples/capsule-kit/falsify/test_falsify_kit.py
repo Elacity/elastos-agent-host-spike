@@ -7,6 +7,7 @@ Run: python3 -I examples/capsule-kit/falsify/test_falsify_kit.py
 import contextlib
 import io
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -92,6 +93,60 @@ class Runner(unittest.TestCase):
         before = self.file.read_bytes()
         self.run_case({"first": True, "second": False})
         self.assertEqual(self.file.read_bytes(), before)
+
+    def test_a_restored_file_is_stamped_after_the_latest_time_seen_when_the_clock_steps_back(self):
+        # The clock reads 1,000,000 while the mutant is tested, then steps back
+        # 500 s before the restore. The restored file must still be newer than
+        # anything built at the earlier reading.
+        readings = iter([1_000_000.0])
+        real_time = kit.time.time
+        kit._latest_seen = 0.0
+        kit.time.time = lambda: next(readings, 999_500.0)
+        try:
+            case = ("the cap is not checked", self.file, [("if size > cap {", "if false {")], ["a"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                kit._stamp_after_latest([], 0)  # the runner sees 1,000,000 here
+                kit.falsify([case], None, lambda name: True)
+        finally:
+            kit.time.time = real_time
+            kit._latest_seen = 0.0
+        self.assertEqual(self.file.stat().st_mtime, 1_000_001.0)
+
+    def test_a_mutant_cargo_did_not_rebuild_is_stamped_ahead_and_built_again(self):
+        builds = []
+        real_run, real_time = kit.run, kit.time.time
+        kit._latest_seen = 0.0
+        kit.time.time = lambda: 2_000_000.0
+
+        def run(cmd, cwd):
+            # The first build prints no "Compiling": Cargo took the mutant for unchanged.
+            builds.append(self.file.stat().st_mtime)
+            stderr = "    Finished `test` profile\n" if len(builds) == 1 else "   Compiling guest v0.1.0\n"
+            return subprocess.CompletedProcess(cmd, 0, "", stderr)
+
+        kit.run = run
+        try:
+            case = ("the cap is not checked", self.file, [("if size > cap {", "if false {")], ["a"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                missed = kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: True)
+        finally:
+            kit.run, kit.time.time = real_run, real_time
+            kit._latest_seen = 0.0
+        self.assertEqual(missed, [])
+        self.assertEqual(len(builds), 2, "one more build after the one that rebuilt nothing")
+        self.assertEqual(builds[1], 2_000_060.0, "the mutant was stamped 60 s ahead before it")
+
+    def test_a_mutant_cargo_rebuilt_is_built_once(self):
+        builds = []
+        real_run = kit.run
+        kit.run = lambda cmd, cwd: (builds.append(cmd), subprocess.CompletedProcess(cmd, 0, "", "   Compiling guest v0.1.0\n"))[1]
+        try:
+            case = ("the cap is not checked", self.file, [("if size > cap {", "if false {")], ["a"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                kit.falsify([case], lambda: kit.cargo_compiles(self.dir.name, []), lambda name: True)
+        finally:
+            kit.run = real_run
+        self.assertEqual(len(builds), 1)
 
     def test_main_stops_with_the_survivors(self):
         case = ("the cap is not checked", self.file, [("if size > cap {", "if false {")], ["a", "b"])
