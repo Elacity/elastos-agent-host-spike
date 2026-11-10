@@ -351,6 +351,19 @@ fn owner_root_cas_stale_create_race_and_alias() {
             .collect::<Vec<_>>()
     });
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    // The one writer that returned Ok is the one whose bytes are stored.
+    let winner: &[u8] = if results[0].is_ok() { b"one" } else { b"two" };
+    assert_eq!(
+        read_principal_root_object(
+            data.path(),
+            &agent.principal_id,
+            &agent.localhost_root,
+            &uri,
+            &path,
+        )
+        .unwrap(),
+        winner
+    );
     assert!(results
         .iter()
         .find(|result| result.is_err())
