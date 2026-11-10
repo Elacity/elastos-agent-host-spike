@@ -1587,12 +1587,16 @@ async fn transaction_chain_data(
     if authority.actor != BROWSER_CAPSULE_ID {
         return wallet_chain_provider_data(state, request).await;
     }
-    let context = HomeLaunchTokenContext {
-        principal_id: authority.principal_id.clone(),
-        session_id: authority.session_id.clone(),
-        proof_binding_id: authority.proof_binding_id.clone(),
-        grant_id: authority.grant_id.clone(),
-    };
+    let root =
+        super::gateway_home_token::wallet_principal_root(&state.data_dir, &authority.principal_id)
+            .map_err(|err| (StatusCode::FORBIDDEN, err.to_string()))?;
+    let context = HomeLaunchTokenContext::resolved(
+        root,
+        authority.principal_id.clone(),
+        authority.session_id.clone(),
+        authority.proof_binding_id.clone(),
+        authority.grant_id.clone(),
+    );
     let internet = gateway_browser_internet::effect(
         state,
         &context,
