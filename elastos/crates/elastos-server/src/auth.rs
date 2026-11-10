@@ -989,7 +989,16 @@ pub struct StoredAuthChallenge {
     pub consumed_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The installed Agent Host package an agent record is bound to.
+/// Both strings are the release-signed components entry: the package name
+/// and the registry CID that entry carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHostPackage {
+    pub name: String,
+    pub registry_cid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrincipalRecord {
     pub principal_id: String,
     pub proof_binding_id: String,
@@ -1008,6 +1017,18 @@ pub struct PrincipalRecord {
     pub kind: PrincipalKind,
     pub created_at: u64,
     pub updated_at: u64,
+    /// The stored person who owns this agent. Absent on a person record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The create request that made this agent. Absent on a person record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The Agent Host package this agent is bound to. Absent on a person record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_host_package: Option<AgentHostPackage>,
+    /// Set when the agent is retired. Absent until then, and on a person record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_at: Option<u64>,
 }
 
 /// The two principals a Home can mint. Each kind owns one rooted space:
@@ -1954,6 +1975,10 @@ pub(crate) fn complete_owner_recovery(
             kind: PrincipalKind::Human,
             created_at: now,
             updated_at: now,
+            owner: None,
+            request_id: None,
+            agent_host_package: None,
+            retired_at: None,
         });
         state.sessions.push(StoredAuthSession {
             grant: grant.clone(),
@@ -2111,6 +2136,10 @@ pub(crate) fn complete_passkey_add(
             kind: signer.kind,
             created_at: now,
             updated_at: now,
+            owner: None,
+            request_id: None,
+            agent_host_package: None,
+            retired_at: None,
         };
         state.principals.push(record.clone());
         push_audit_event(data_dir, state, event)?;
@@ -2514,6 +2543,10 @@ pub(crate) fn complete_owner_enrollment_with_intent(
             kind: PrincipalKind::Human,
             created_at: now,
             updated_at: now,
+            owner: None,
+            request_id: None,
+            agent_host_package: None,
+            retired_at: None,
         });
         state.sessions.push(StoredAuthSession {
             grant: grant.clone(),
@@ -4359,6 +4392,10 @@ fn grant_passkey_session_in_state(
                     kind: PrincipalKind::Human,
                     created_at: now,
                     updated_at: now,
+                    owner: None,
+                    request_id: None,
+                    agent_host_package: None,
+                    retired_at: None,
                 };
                 state.principals.push(principal.clone());
                 principal
@@ -5219,6 +5256,10 @@ pub fn upsert_principal_for_binding_as_role_named(
             localhost_root,
             created_at: now,
             updated_at: now,
+            owner: None,
+            request_id: None,
+            agent_host_package: None,
+            retired_at: None,
         };
         state.principals.push(record.clone());
         Ok(record)
@@ -11443,6 +11484,10 @@ pub(crate) fn store_test_human_principal(data_dir: &Path, principal_id: &str) ->
         kind: PrincipalKind::Human,
         created_at: now,
         updated_at: now,
+        owner: None,
+        request_id: None,
+        agent_host_package: None,
+        retired_at: None,
     };
     mutate_auth_state(data_dir, |state| {
         state.principals.push(record.clone());
