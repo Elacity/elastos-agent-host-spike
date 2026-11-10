@@ -47,9 +47,43 @@
   window.addEventListener("error", event => result.failures.push(event.message));
   window.addEventListener("unhandledrejection", event => result.failures.push(String(event.reason)));
   const frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-  const settle = async () => { await frames(); await new Promise(resolve => setTimeout(resolve, 180)); };
   const snap = () => ({ top: s.scrollTop, fromEnd: s.scrollHeight - s.clientHeight - s.scrollTop,
     follow: s.classList.contains("is-follow-bottom"), jump: !viewport.querySelector("[data-agent-jump-latest]").hidden });
+  // Wait for the state the next assertion needs, instead of a fixed pause. A
+  // loaded page reaches that state late; a page with the behaviour removed
+  // never does, and the deadline records the condition that never held.
+  const waitFor = async (label, test, timeoutMs = 15000) => {
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      const value = test();
+      if (value) return value;
+      if (performance.now() > deadline) {
+        (result.waitTimeouts ||= []).push(label);
+        return null;
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  };
+  // The module settles a reader gesture 150 ms after its last movement. Wait
+  // until the scroll, the follow pin and the Jump button have all stopped
+  // changing for longer than that, so every assertion reads a settled page.
+  const settle = async (label = "the transcript stopped changing") => {
+    const state = () => [s.scrollTop, s.scrollHeight, s.clientHeight, c.offsetHeight,
+      s.classList.contains("is-follow-bottom"), !viewport.querySelector("[data-agent-jump-latest]").hidden].join(":");
+    let last = state();
+    let changedAt = performance.now();
+    const deadline = changedAt + 15000;
+    for (;;) {
+      await frames();
+      const now = state();
+      if (now !== last) { last = now; changedAt = performance.now(); }
+      else if (performance.now() - changedAt >= 200) return;
+      if (performance.now() > deadline) {
+        (result.waitTimeouts ||= []).push(`${label}: never stopped changing`);
+        return;
+      }
+    }
+  };
   const expect = (ok, label) => {
     result.checks ||= {};
     result.checks[label] = Boolean(ok);
@@ -116,20 +150,35 @@
     document.activeElement.blur();
     s.style.height = "400px";
     c.style.height = "2600px";
-    jump(); await frames();
+    jump();
+    await waitFor("the reset put the room back at the end", () => {
+      const state = snap();
+      return state.follow && state.fromEnd <= 8 ? state : null;
+    });
   };
-  const grow = async () => { c.style.height = `${c.offsetHeight + 100}px`; await flush(); await settle(); return snap(); };
+  const grow = async label => {
+    const target = c.offsetHeight + 100;
+    c.style.height = `${target}px`;
+    await flush();
+    await waitFor(`${label}: the 100 px growth was laid out`, () => c.offsetHeight === target);
+    await settle(`${label}: the growth settled`);
+    return snap();
+  };
   const heldGrowth = async label => {
-    await settle();
-    const held = snap();
-    const after = await grow();
+    const held = await waitFor(`${label}: a reader above the end keeps their place`, () => {
+      const state = snap();
+      return state.fromEnd > 8 && !state.follow && state.jump ? state : null;
+    }) || snap();
+    const after = await grow(label);
     result.cases[label] = { held, after };
     expect(held.fromEnd > 8 && !held.follow && held.jump && after.top === held.top, label);
   };
   const followingGrowth = async label => {
-    await settle();
-    const held = snap();
-    const after = await grow();
+    const held = await waitFor(`${label}: a following room rests at the end`, () => {
+      const state = snap();
+      return state.follow && !state.jump && state.fromEnd <= 8 ? state : null;
+    }) || snap();
+    const after = await grow(label);
     result.cases[label] = { held, after };
     expect(held.follow && !held.jump && after.follow && !after.jump && after.fromEnd <= 8, label);
   };
@@ -141,7 +190,7 @@
     document.body.append(control);
     control.scrollTop = control.scrollHeight;
     content.style.height = "2700px";
-    await settle();
+    await waitFor("the unpinned control received the growth", () => control.scrollHeight === 2700);
     result.controlGap = control.scrollHeight - control.clientHeight - control.scrollTop;
     expect(result.controlGap === 100, "control without pin stays 100px short");
     control.remove();
@@ -160,8 +209,10 @@
       resize();
       // Deliver a queued pin's scroll notification before ResizeObserver can pin.
       s.dispatchEvent(new Event("scroll"));
-      await settle();
-      const after = snap();
+      const after = await waitFor(`${label}: the room stayed at the end`, () => {
+        const state = snap();
+        return state.follow && !state.jump && state.fromEnd <= 8 ? state : null;
+      }) || snap();
       result.cases[label] = { before, after };
       expect(before.follow && after.follow && !after.jump && after.fromEnd <= 8, label);
     }
@@ -179,12 +230,21 @@
       });
       expect(trusted, `native ${phase} driver available`);
       window.__input = null;
-      // WKWebView dispatches native events after the script-message handler returns.
-      // Allow the key animation and its 150 ms quiet period to finish.
-      await delay(extra.waitMs ?? 650);
+      // Wait for the input the following assertion needs to reach the page.
+      // WKWebView dispatches native events after the script-message handler
+      // returns, and a loaded engine delivers them late.
+      const keyName = extra.key === "Shift+Space" ? " " : extra.key;
+      const arrived = () => {
+        const received = events.slice(firstEvent);
+        if (phase === "key") return received.some(event => event.type === "keyup" && event.key === keyName);
+        if (phase === "wheel") return received.some(event => event.type === "wheel" && event.trusted);
+        if (phase === "hold") return received.some(event => event.type === "pointerdown" && event.trusted);
+        if (phase === "select") return getSelection().toString().length > 0;
+        return received.some(event => event.type === "pointerup" && event.trusted);
+      };
+      await waitFor(`native ${phase} input reached the page`, arrived);
       const received = events.slice(firstEvent);
       if (phase === "key") {
-        const keyName = extra.key === "Shift+Space" ? " " : extra.key;
         expect(received.some(e => e.type === "keydown" && e.trusted && e.key === keyName
           && e.shift === (extra.key === "Shift+Space") && !e.ctrl && !e.meta && !e.alt),
           `trusted ${extra.key} with requested modifiers received`);
@@ -254,10 +314,14 @@
 
     // A late scroll after a quiet gap must leave follow again. Native wheels
     // can coalesce, so control the two positions and keep actual scroll events.
+    // The 150 ms reader quiet period is the page's own timer; wait for the
+    // follow it restores instead of holding a fixed 220 ms.
     await reset(); key(document.querySelector("#message"), "PageUp");
     s.scrollBy(0, -1); s.dispatchEvent(new Event("scrollend"));
-    await new Promise(resolve => setTimeout(resolve, 220));
-    const quietGap = snap();
+    const quietGap = await waitFor("the 1 px reader position returned to the end", () => {
+      const state = snap();
+      return state.follow && state.fromEnd <= 8 ? state : null;
+    }) || snap();
     result.cases["quiet gap within 8px"] = quietGap;
     s.scrollBy(0, -80);
     await heldGrowth("1px then 220ms quiet then 80px and growth");
@@ -265,18 +329,22 @@
     await reset();
     events.length = 0;
     const holdTop = s.scrollTop;
-    await native("hold", { waitMs: 250 });
+    await native("hold");
     const duringHold = snap();
     c.style.height = "2750px";
-    await frames();
+    await waitFor("the 150 px growth was laid out", () => c.offsetHeight === 2750);
     const duringHoldGrowth = snap();
-    await native("release", { waitMs: 450 });
-    result.cases["stationary scrollbar hold with 150px growth"] = { duringHold, duringHoldGrowth, after: snap(), events: events.slice() };
+    await native("release");
+    const heldSettled = await waitFor("the stationary press restored the end", () => {
+      const state = snap();
+      return state.fromEnd === 0 && state.follow && !state.jump ? state : null;
+    }) || snap();
+    result.cases["stationary scrollbar hold with 150px growth"] = { duringHold, duringHoldGrowth, after: heldSettled, events: events.slice() };
     expect(duringHold.top === holdTop && duringHoldGrowth.top === holdTop,
       "stationary hold has no scroll movement before release");
     expect(events.some(e => e.type === "pointerdown" && e.trusted) && events.some(e => e.type === "pointerup" && e.trusted),
       "trusted stationary scrollbar press received");
-    expect(snap().fromEnd === 0 && snap().follow && !snap().jump,
+    expect(heldSettled.fromEnd === 0 && heldSettled.follow && !heldSettled.jump,
       "stationary scrollbar hold with 150px growth");
 
     await reset();
@@ -391,7 +459,7 @@
       await heldGrowth("native wheel gap already far from end");
       await reset(); s.scrollBy(0, -400);
       await heldGrowth("scroll without an input event then growth");
-      await reset(); wheel(-1); s.scrollBy(0, -1); await delay(220);
+      await reset(); wheel(-1); s.scrollBy(0, -1);
       await followingGrowth("1px then quiet and growth without a second scroll");
       await reset();
       c.style.height = "2300px"; s.scrollTop; c.style.height = "2400px";
@@ -406,8 +474,9 @@
       await reset(); await native("wheel", { deltas: [-500] });
       const finishTop = s.scrollTop;
       // Hold in the content, so the scrollbar track cannot page as a side effect.
-      await native("hold", { content: true, waitMs: 250 });
+      await native("hold", { content: true });
       c.style.height = "2780px"; await flush();
+      await waitFor("the 180 px growth was laid out", () => c.offsetHeight === 2780);
       expect(s.scrollTop === finishTop && !snap().follow, "finish while reader holds away preserves position");
       await native("release", { content: true });
       await heldGrowth("finish while reader holds away");
