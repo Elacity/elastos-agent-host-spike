@@ -294,6 +294,7 @@ pub enum PrincipalRootProtectorKind {
     RecoveryKit,
     WebAuthnPrf,
     DidRecovery,
+    OwnerRoot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +502,16 @@ pub fn validate_principal_root_protection(
     if protection.protectors.is_empty() {
         return Err("principal root protection requires at least one protector".to_string());
     }
+    let agent_root = protection
+        .localhost_root
+        .starts_with("localhost://UsersAI/");
+    if protection
+        .protectors
+        .iter()
+        .any(|protector| (protector.kind == PrincipalRootProtectorKind::OwnerRoot) != agent_root)
+    {
+        return Err("UsersAI roots require OwnerRoot; Users roots refuse it".to_string());
+    }
     let mut seen = std::collections::BTreeSet::new();
     for protector in &protection.protectors {
         validate_auth_token_like_id(&protector.protector_id, "protector_id")?;
@@ -622,6 +633,9 @@ fn validate_principal_root_protector_kind_envelope(
     if protector.kind == PrincipalRootProtectorKind::DidRecovery && envelope.kdf != "hkdf-sha256" {
         return Err("DID recovery protector envelope must use hkdf-sha256".to_string());
     }
+    if protector.kind == PrincipalRootProtectorKind::OwnerRoot && envelope.kdf != "hkdf-sha256" {
+        return Err("OwnerRoot protector envelope must use hkdf-sha256".to_string());
+    }
     Ok(())
 }
 
@@ -646,6 +660,15 @@ fn validate_principal_root_protector_subject(
             return Err(
                 "DID recovery protector requires an encrypted data-key envelope".to_string(),
             );
+        }
+    }
+    if protector.kind == PrincipalRootProtectorKind::OwnerRoot {
+        let subject = protector.subject.as_deref().unwrap_or_default();
+        if !subject.starts_with("person:local:") || subject == "person:local:" {
+            return Err("OwnerRoot protector requires a Human owner subject".to_string());
+        }
+        if protector.envelope.is_none() {
+            return Err("OwnerRoot protector requires an encrypted data-key envelope".to_string());
         }
     }
     Ok(())
@@ -1514,11 +1537,61 @@ mod tests {
     fn principal_root_protection_accepts_agent_root() {
         let mut protection = principal_root_protection();
         protection.localhost_root = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478".into();
+        protection.protectors[0].kind = PrincipalRootProtectorKind::OwnerRoot;
+        protection.protectors[0].subject = Some("person:local:owner".into());
         validate_principal_root_protection(&protection).unwrap();
         protection.localhost_root.push_str("/Documents");
         assert!(validate_principal_root_protection(&protection).is_err());
         protection.localhost_root = "localhost://UsersAI/self".into();
         assert!(validate_principal_root_protection(&protection).is_err());
+    }
+
+    #[test]
+    fn owner_root_protector_is_bound_to_agent_root_owner_and_kdf() {
+        let mut valid = principal_root_protection();
+        valid.localhost_root = "localhost://UsersAI/agent-root".into();
+        valid.protectors[0].kind = PrincipalRootProtectorKind::OwnerRoot;
+        valid.protectors[0].subject = Some("person:local:owner".into());
+        validate_principal_root_protection(&valid).expect("OwnerRoot agent root");
+
+        let mut wrong_kind = valid.clone();
+        wrong_kind.protectors[0].kind = PrincipalRootProtectorKind::RecoveryKit;
+        assert!(validate_principal_root_protection(&wrong_kind)
+            .unwrap_err()
+            .contains("UsersAI roots require OwnerRoot"));
+
+        let mut human_root = valid.clone();
+        human_root.localhost_root = "localhost://Users/human-root".into();
+        assert!(validate_principal_root_protection(&human_root)
+            .unwrap_err()
+            .contains("Users roots refuse it"));
+
+        let mut wrong_kdf = valid.clone();
+        wrong_kdf.protectors[0].envelope.as_mut().unwrap().kdf = "argon2id".into();
+        assert!(validate_principal_root_protection(&wrong_kdf)
+            .unwrap_err()
+            .contains("OwnerRoot protector envelope must use hkdf-sha256"));
+
+        for subject in [
+            None,
+            Some(""),
+            Some("person:local:"),
+            Some("person:local:/bad"),
+        ] {
+            let mut bad_subject = valid.clone();
+            bad_subject.protectors[0].subject = subject.map(str::to_string);
+            assert!(
+                validate_principal_root_protection(&bad_subject).is_err(),
+                "{subject:?}"
+            );
+        }
+
+        let mut missing_envelope = valid;
+        missing_envelope.protectors[0].envelope = None;
+        missing_envelope.protectors[0].verified_at = None;
+        assert!(validate_principal_root_protection(&missing_envelope)
+            .unwrap_err()
+            .contains("OwnerRoot protector requires an encrypted data-key envelope"));
     }
 
     #[test]
