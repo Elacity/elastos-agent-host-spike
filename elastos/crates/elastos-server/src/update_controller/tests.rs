@@ -3466,6 +3466,20 @@ async fn production_restarting_update_times_out_a_hung_candidate_at_five_seconds
         None,
     )
     .await;
+    // The frozen-offline path stages changed support through the owner before
+    // the probe; the normal path fetches it only after the probe. This marker
+    // therefore shows which apply mode the production entry used.
+    let staged_support = fixture.data.join("support-staged-before-probe");
+    let fetch: crate::update::FetchFn = {
+        let inner = fetch;
+        let staged_support = staged_support.clone();
+        Box::new(move |cid| {
+            if cid == raw_cid(b"new support") {
+                fs::write(&staged_support, b"1").unwrap();
+            }
+            inner(cid)
+        })
+    };
     let started = std::time::Instant::now();
     let error =
         crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
@@ -3482,13 +3496,9 @@ async fn production_restarting_update_times_out_a_hung_candidate_at_five_seconds
         assert_eq!(fs::read(&path).unwrap(), bytes, "{}", path.display());
     }
     assert_no_recovery_files(&fixture);
-    // The restart entry stages support on the frozen-offline path before the
-    // probe, and that path publishes this owner progress. The normal path does
-    // not publish before the probe, so a changed apply mode names itself here.
-    let projected = status(&fixture.data).unwrap().unwrap();
-    assert_eq!(
-        projected.phase, "verifying",
-        "the restart entry did not stage support through the frozen-offline path"
+    assert!(
+        staged_support.exists(),
+        "the restart entry did not stage support before the probe (wrong apply mode)"
     );
     // A starved shell may not run before the probe's group kill, so no PID file
     // can appear. Orphan clean-up is pinned by the pipe-retaining row, and
