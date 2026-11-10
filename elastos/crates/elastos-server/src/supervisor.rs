@@ -966,6 +966,9 @@ impl Supervisor {
         principal_id: Option<String>,
     ) -> Result<(String, u32)> {
         let (capsule_dir, manifest) = self.load_capsule_manifest(name).await?;
+        if manifest.agent.is_some() {
+            bail!("Agent '{name}' is refused: an agent must be a component capsule");
+        }
         if principal_id.is_some() && !manifest.role.is_shell_launchable() {
             bail!("principal launch grants are only valid for shell-launchable capsules");
         }
@@ -1668,6 +1671,61 @@ mod tests {
             SupervisorRequest::LaunchCapsule { name, .. } => assert_eq!(name, "chat"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    /// The supervisor launches microVM and host-process capsules. An agent is
+    /// neither, so a manifest that declares one is refused here.
+    #[tokio::test]
+    async fn launch_capsule_refuses_a_declared_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let capsule_dir = temp.path().join("capsules/vm-agent");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-vm-agent\n").unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "vm-agent",
+                "version": "0.1.0",
+                "role": "app",
+                "type": "microvm",
+                "entrypoint": "rootfs.ext4",
+                "agent": { "kind": "agent" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "vm-agent".to_string(),
+            CapsuleEntry {
+                cid: "bafy-vm-agent".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            temp.path().to_path_buf(),
+            ComponentsManifest {
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+
+        let err = supervisor
+            .launch_capsule("vm-agent", serde_json::json!({}), None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Agent 'vm-agent' is refused: an agent must be a component capsule"
+        );
     }
 
     #[tokio::test]

@@ -5383,6 +5383,23 @@ pub fn mint_agent_principal(
     })
 }
 
+/// Admission's step for an agent. Its launcher must be a stored Human with
+/// current protection; the agent is minted under that Human's root key.
+pub(crate) fn admit_agent_principal(
+    data_dir: &Path,
+    launcher: &str,
+    did: &str,
+    name: &str,
+) -> anyhow::Result<PrincipalRecord> {
+    let owner = stored_principal_record(data_dir, launcher)?
+        .filter(|record| record.kind == PrincipalKind::Human)
+        .ok_or_else(|| anyhow!("its launcher is not a stored human"))?;
+    let protection = load_principal_root_protection(data_dir, launcher, &owner.localhost_root)?
+        .ok_or_else(|| anyhow!("its launcher has no current protection"))?;
+    let owner_key = principal_root_data_key_from_protection(data_dir, &protection)?;
+    mint_agent_principal(data_dir, launcher, did, name, &owner_key, now_ts())
+}
+
 fn normalize_principal_records(state: &mut AuthState) {
     for principal in &mut state.principals {
         if principal.localhost_root.trim().is_empty() || principal.kind == PrincipalKind::Agent {

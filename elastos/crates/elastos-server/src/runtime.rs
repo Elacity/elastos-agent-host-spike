@@ -68,6 +68,8 @@ pub struct Runtime {
     component_provider: Option<Arc<ComponentProvider>>,
     /// What admission decided for each launched capsule, by capsule id.
     admissions: Admissions,
+    /// Where the auth state lives, once server mode has set it.
+    data_dir: RwLock<Option<std::path::PathBuf>>,
 }
 
 /// What admission decided for one launched capsule: who its bridge calls act
@@ -134,6 +136,7 @@ impl Runtime {
             running_capsules: RwLock::new(HashMap::new()),
             component_provider: None,
             admissions: Arc::new(StdRwLock::new(HashMap::new())),
+            data_dir: RwLock::new(None),
         }
     }
 
@@ -151,6 +154,7 @@ impl Runtime {
             running_capsules: RwLock::new(HashMap::new()),
             component_provider,
             admissions: Arc::new(StdRwLock::new(HashMap::new())),
+            data_dir: RwLock::new(None),
         }
     }
 
@@ -166,6 +170,7 @@ impl Runtime {
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         data_dir: std::path::PathBuf,
     ) {
+        *self.data_dir.write().await = Some(data_dir.clone());
         if let Some(ref component) = self.component_provider {
             component.set_bus_hostcall(bridge_hostcall(
                 self.admissions.clone(),
@@ -337,6 +342,7 @@ impl Runtime {
         // Verify signature if verifier is configured
         let signer = self.verify_capsule_signature(&manifest, path).await?;
         crate::component::validate_component_capsule(path, &manifest).await?;
+        let admission = self.admit(&manifest, &signer, principal_id).await?;
 
         // Find a compute provider that supports this capsule type
         let provider = self.get_provider_for_manifest(&manifest).ok_or_else(|| {
@@ -353,16 +359,12 @@ impl Runtime {
         // Load capsule
         let mut handle = provider.load(path, manifest).await?;
         if let Ok(mut admissions) = self.admissions.write() {
-            let admission = AdmissionContext {
-                actor: principal_id.clone(),
-                manifest_bounds: handle.manifest.resource_authority_bounds(),
-            };
-            admissions.insert(handle.id.0.clone(), admission);
+            admissions.insert(handle.id.0.clone(), admission.clone());
         }
         if handle.manifest.is_component_capsule() {
             if let Some(ref component) = self.component_provider {
                 component
-                    .set_bridge_principal(&handle.id, principal_id.clone())
+                    .set_bridge_principal(&handle.id, admission.actor)
                     .await;
             }
         }
@@ -383,6 +385,43 @@ impl Runtime {
         start?;
 
         Ok((handle, signer))
+    }
+
+    /// Admission for one launch. An ordinary capsule acts as its launcher. An
+    /// agent must be a component signed by a trusted key and launched by a
+    /// stored Human with current protection; it acts as its own principal,
+    /// minted here.
+    async fn admit(
+        &self,
+        manifest: &CapsuleManifest,
+        signer: &Signer,
+        launcher: Option<String>,
+    ) -> Result<AdmissionContext> {
+        let manifest_bounds = manifest.resource_authority_bounds();
+        if manifest.agent.is_none() {
+            return Ok(AdmissionContext {
+                actor: launcher,
+                manifest_bounds,
+            });
+        }
+        let refuse = |reason: &str| {
+            ElastosError::Compute(format!("Agent '{}' is refused: {reason}", manifest.name))
+        };
+        let Signer::Key { did } = signer else {
+            return Err(refuse("no trusted key signed it"));
+        };
+        if !manifest.is_component_capsule() {
+            return Err(refuse("an agent must be a component capsule"));
+        }
+        let launcher = launcher.ok_or_else(|| refuse("it has no launcher"))?;
+        let data_dir = self.data_dir.read().await.clone();
+        let data_dir = data_dir.ok_or_else(|| refuse("this Runtime has no auth state"))?;
+        let agent = crate::auth::admit_agent_principal(&data_dir, &launcher, did, &manifest.name)
+            .map_err(|err| refuse(&err.to_string()))?;
+        Ok(AdmissionContext {
+            actor: Some(agent.principal_id),
+            manifest_bounds,
+        })
     }
 
     /// Check that all providers required by a capsule are registered
@@ -643,6 +682,237 @@ pub(crate) mod tests {
         let answered: serde_json::Value = serde_json::from_str(&answered).unwrap();
         assert_eq!(answered["id"], 7, "{answered}");
         assert!(rt.block_on(pending_store.list_pending()).is_empty());
+    }
+
+    const ADMIT_OWNER: &str = "person:local:launcher";
+    const ADMIT_DID: &str = "did:key:z6MkAgentOne";
+    /// `agent:v1:` plus the SHA-256, computed outside this crate, of
+    /// "26:elastos.agent-principal/v1,21:person:local:launcher,20:did:key:z6MkAgentOne,11:notes-agent,".
+    const ADMIT_AGENT: &str =
+        "agent:v1:87073a7f8903007ec4ea33c8cadb59eedf9e156536425861e15ac78566aea786";
+    /// sha256(ADMIT_AGENT)[..12], computed outside this crate.
+    const ADMIT_AGENT_ROOT: &str = "localhost://UsersAI/72d04445606881899647f0f9";
+
+    fn agent_manifest() -> CapsuleManifest {
+        let mut manifest = unsigned_manifest();
+        manifest.name = "notes-agent".to_string();
+        manifest.bus_contract = Some(ELASTOS_BUS_V1_CONTRACT.to_string());
+        manifest.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
+        manifest
+    }
+
+    fn agent_key() -> Signer {
+        Signer::Key {
+            did: ADMIT_DID.to_string(),
+        }
+    }
+
+    /// A Runtime in server mode whose auth state holds ADMIT_OWNER as a Human
+    /// with current protection.
+    async fn admission_runtime() -> (Runtime, tempfile::TempDir) {
+        let (runtime, temp) = test_runtime().await;
+        *runtime.data_dir.write().await = Some(temp.path().to_path_buf());
+        crate::auth::store_test_principal_root_protection(temp.path(), ADMIT_OWNER);
+        (runtime, temp)
+    }
+
+    fn auth_bytes(temp: &tempfile::TempDir) -> Vec<u8> {
+        std::fs::read(crate::auth::auth_state_path(temp.path()).unwrap()).unwrap()
+    }
+
+    /// ADMIT-signer and ADMIT-restart: an agent signed by a trusted key and
+    /// launched by a protected Human acts as its own minted principal, with
+    /// the pinned id and root. Admitting it again changes nothing.
+    #[tokio::test]
+    async fn admission_mints_a_signed_agent_and_is_stable_across_launches() {
+        let (runtime, temp) = admission_runtime().await;
+        let manifest = agent_manifest();
+        let launcher = Some(ADMIT_OWNER.to_string());
+
+        let first = runtime
+            .admit(&manifest, &agent_key(), launcher.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(first.actor.as_deref(), Some(ADMIT_AGENT));
+        assert_eq!(first.manifest_bounds, manifest.resource_authority_bounds());
+        let record = crate::auth::stored_principal_record(temp.path(), ADMIT_AGENT)
+            .unwrap()
+            .expect("the agent record is stored");
+        assert_eq!(record.kind, crate::auth::PrincipalKind::Agent);
+        assert_eq!(record.localhost_root, ADMIT_AGENT_ROOT);
+        let state = crate::auth::load_auth_state(temp.path()).unwrap();
+        assert_eq!(
+            state
+                .principal_root_protections
+                .iter()
+                .filter(|stored| stored.principal_id == ADMIT_AGENT
+                    && stored.localhost_root == ADMIT_AGENT_ROOT)
+                .count(),
+            1
+        );
+        let before = auth_bytes(&temp);
+
+        let again = runtime
+            .admit(&manifest, &agent_key(), launcher)
+            .await
+            .unwrap();
+
+        assert_eq!(again.actor.as_deref(), Some(ADMIT_AGENT));
+        assert_eq!(auth_bytes(&temp), before);
+    }
+
+    /// A capsule that declares no agent acts as its launcher, whoever signed
+    /// it, and nothing is minted.
+    #[tokio::test]
+    async fn admission_leaves_an_ordinary_capsule_acting_as_its_launcher() {
+        let (runtime, temp) = admission_runtime().await;
+        let before = auth_bytes(&temp);
+        let mut manifest = agent_manifest();
+        manifest.agent = None;
+
+        for launcher in [None, Some("device:did:key:unstored".to_string())] {
+            let admission = runtime
+                .admit(&manifest, &Signer::UnsignedDev, launcher.clone())
+                .await
+                .unwrap();
+            assert_eq!(admission.actor, launcher);
+        }
+
+        assert_eq!(auth_bytes(&temp), before);
+    }
+
+    /// ADMIT-signer, ADMIT-nolauncher, ADMIT-owner and the microVM refusal:
+    /// each refusal names its reason and leaves the auth state byte-identical.
+    #[tokio::test]
+    async fn admission_refuses_an_agent_that_is_not_signed_launched_and_owned() {
+        const UNPROTECTED: &str = "person:local:unprotected";
+        for (case, reason) in [
+            ("unsigned-dev", "no trusted key signed it"),
+            ("installed-release", "no trusted key signed it"),
+            ("not-a-component", "an agent must be a component capsule"),
+            ("no-launcher", "it has no launcher"),
+            ("no-auth-state", "this Runtime has no auth state"),
+            ("unstored-launcher", "its launcher is not a stored human"),
+            ("agent-launcher", "its launcher is not a stored human"),
+            (
+                "unprotected-launcher",
+                "its launcher has no current protection",
+            ),
+        ] {
+            let (runtime, temp) = admission_runtime().await;
+            crate::auth::store_test_human_principal(temp.path(), UNPROTECTED);
+            let mut manifest = agent_manifest();
+            let mut signer = agent_key();
+            let mut launcher = Some(ADMIT_OWNER.to_string());
+            match case {
+                "unsigned-dev" => signer = Signer::UnsignedDev,
+                "installed-release" => signer = Signer::InstalledRelease,
+                "not-a-component" => {
+                    manifest.bus_contract = None;
+                    manifest.capsule_type = CapsuleType::MicroVM;
+                }
+                "no-launcher" => launcher = None,
+                "no-auth-state" => *runtime.data_dir.write().await = None,
+                "unstored-launcher" => launcher = Some("device:did:key:unstored".to_string()),
+                // A minted agent cannot launch another agent.
+                "agent-launcher" => {
+                    runtime
+                        .admit(&manifest, &signer, launcher.clone())
+                        .await
+                        .unwrap();
+                    manifest.name = "second-agent".to_string();
+                    launcher = Some(ADMIT_AGENT.to_string());
+                }
+                "unprotected-launcher" => launcher = Some(UNPROTECTED.to_string()),
+                _ => unreachable!(),
+            }
+            let before = auth_bytes(&temp);
+
+            let error = runtime
+                .admit(&manifest, &signer, launcher)
+                .await
+                .expect_err(case)
+                .to_string();
+
+            assert!(
+                error.ends_with(&format!("Agent '{}' is refused: {reason}", manifest.name)),
+                "{case}: {error}"
+            );
+            assert_eq!(auth_bytes(&temp), before, "{case}");
+        }
+    }
+
+    /// ADMIT-attach: `run_local` carries no launcher, so a signed agent
+    /// launched that way is refused before any provider loads it. The same
+    /// capsule without the agent declaration loads.
+    #[tokio::test]
+    async fn run_local_refuses_a_signed_agent_before_the_provider_loads() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let loads = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(
+            storage,
+            Arc::new(CountingComputeProvider {
+                loads: loads.clone(),
+            }),
+        );
+        let trusted = elastos_runtime::signature::SigningKey::from_bytes(&[42; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(trusted.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let entrypoint = b"vm image bytes";
+        let launch = |name: &str, agent: bool| {
+            let mut manifest = unsigned_manifest();
+            manifest.name = name.to_string();
+            manifest.capsule_type = CapsuleType::MicroVM;
+            manifest.entrypoint = "rootfs.ext4".to_string();
+            if agent {
+                manifest.agent = agent_manifest().agent;
+            }
+            elastos_runtime::signature::sign_capsule(
+                &trusted,
+                &mut manifest,
+                &hash_content(entrypoint),
+            )
+            .unwrap();
+            let dir = temp_dir.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(dir.join(&manifest.entrypoint), entrypoint).unwrap();
+            dir
+        };
+
+        let agent_dir = launch("vm-agent", true);
+        let error = runtime
+            .run_local(&agent_dir, Vec::new())
+            .await
+            .expect_err("a signed agent with no launcher")
+            .to_string();
+        assert!(
+            error.ends_with("Agent 'vm-agent' is refused: an agent must be a component capsule"),
+            "{error}"
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        let plain_dir = launch("vm-plain", false);
+        runtime.run_local(&plain_dir, Vec::new()).await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
     pub(crate) struct NoopComputeProvider;
