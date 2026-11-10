@@ -716,6 +716,40 @@ pub async fn run_update_for_data_dir(
     .await
 }
 
+/// Test-only sibling of [`run_update_for_data_dir`] with a caller-chosen
+/// deadline. It shares the apply entry's inner argument list through the
+/// deadline-taking sibling below, so the production list exists once.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn run_update_for_data_dir_with_deadline(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    try_p2p_fn: Option<&TryP2pFn>,
+    check_only: bool,
+    head_cid_override: Option<String>,
+    version: &str,
+    auto_confirm: bool,
+    force: bool,
+    repair_invalid_version: bool,
+    probe_deadline: std::time::Duration,
+) -> anyhow::Result<()> {
+    run_update_for_data_dir_with_mode_with_deadline(
+        data_dir,
+        fetch_fn,
+        try_p2p_fn,
+        check_only,
+        head_cid_override,
+        version,
+        auto_confirm,
+        force,
+        repair_invalid_version,
+        crate::setup::FirstPartyCarrierContext::Setup,
+        ApplyMode::Normal,
+        probe_deadline,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_update_for_data_dir_in_context(
     data_dir: &Path,
@@ -5424,6 +5458,11 @@ mod tests {
             error.to_string().contains("timed out after 5 seconds"),
             "{error:#}"
         );
+        assert_eq!(
+            probe_deadline::shipped().duration().as_nanos(),
+            5_000_000_000,
+            "the shipped probe deadline must be exactly five seconds"
+        );
         assert!(
             elapsed < std::time::Duration::from_secs(30),
             "probe hung past the thirty-second hang guard: {elapsed:?}"
@@ -6236,7 +6275,7 @@ mod tests {
                     Box::pin(async move { Ok(bytes) })
                 });
                 // release_cmd maps --rollback-to to this head override and force=true.
-                let result = run_update_for_data_dir(
+                let result = run_update_for_data_dir_with_deadline(
                     &data,
                     &fetch,
                     None,
@@ -6246,6 +6285,7 @@ mod tests {
                     true,
                     true,
                     false,
+                    TEST_PROBE_DEADLINE,
                 )
                 .await;
                 if seed == 7 {
@@ -6499,7 +6539,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("content {cid} is not published by this source"));
             Box::pin(async move { served })
         });
-        let result = run_update_for_data_dir(
+        let result = run_update_for_data_dir_with_deadline(
             data,
             &fetch,
             None,
@@ -6509,6 +6549,7 @@ mod tests {
             true,
             false,
             false,
+            TEST_PROBE_DEADLINE,
         )
         .await;
         let requests = requests.lock().unwrap().clone();
@@ -6609,7 +6650,7 @@ mod tests {
                 Box::pin(async move { served })
             });
             // release_cmd maps --rollback-to to this head override and force=true.
-            run_update_for_data_dir(
+            run_update_for_data_dir_with_deadline(
                 &data,
                 &fetch,
                 None,
@@ -6619,6 +6660,7 @@ mod tests {
                 true,
                 true,
                 false,
+                TEST_PROBE_DEADLINE,
             )
             .await
             .unwrap();
