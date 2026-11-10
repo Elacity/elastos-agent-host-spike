@@ -18470,51 +18470,33 @@ pub(crate) mod tests {
             ProofBinding::evm_account(20, "0x4444444444444444444444444444444444444444", now_ts());
         upsert_principal_for_binding_as(data_dir.path(), binding, id.to_string(), now_ts())
             .unwrap();
-        mutate_auth_state(data_dir.path(), |state| {
-            let record = state
-                .principals
-                .iter_mut()
-                .find(|record| record.principal_id == id)
-                .unwrap();
-            record.kind = PrincipalKind::Agent;
-            Ok(())
-        })
-        .unwrap();
-        let resolved =
-            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), id).unwrap();
-        let usersai = "localhost://UsersAI/81c212b19cae993c1b378f12";
-        assert_eq!(resolved.localhost_root(), usersai);
+        plant_principal_kind(data_dir.path(), id, PrincipalKind::Agent, None);
+        let error = ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("quarantined agent record"), "{error}");
         let users = "localhost://Users/81c212b19cae993c1b378f12";
         let uri = format!("{users}/notes.md");
         let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
         let error = write_principal_root_object(data_dir.path(), id, users, &uri, &path, b"no")
             .unwrap_err()
             .to_string();
-        assert_eq!(
-            error,
-            "principal localhost root must be the record's own root for its kind"
-        );
+        assert!(error.contains("quarantined agent record"), "{error}");
     }
 
     #[test]
     fn own_device_id_with_stored_agent_record_resolves_stored_kind_first() {
-        use sha2::Digest as _;
         let data_dir = tempfile::tempdir().unwrap();
         let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let principal_id = format!("device:{did}");
         store_test_human_principal(data_dir.path(), &principal_id);
         mint_agent_record(data_dir.path(), &principal_id, None);
-        let expected_root = format!(
-            "localhost://UsersAI/{}",
-            hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12])
-        );
-        let resolved =
-            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &principal_id)
-                .unwrap();
-        assert_eq!(
-            resolved.localhost_root(),
-            expected_root,
-            "stored own-device record must win before the device arm"
+        let error = ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &principal_id)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("quarantined agent record"),
+            "a quarantined stored record is refused before the device arm: {error}"
         );
     }
 
@@ -19014,12 +18996,11 @@ pub(crate) mod tests {
         let before = auth_state_file_bytes(data_dir.path());
         let error = sign_in_passkey(data_dir.path())
             .expect_err("passkey sign-in refused to change the agent admission record");
-        assert_auth_change_refused(
-            data_dir.path(),
-            &before,
-            error,
-            "passkey sign-in refused to change the agent admission record",
+        assert!(
+            error.to_string().contains("quarantined agent record"),
+            "{error}"
         );
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
 
     #[test]
@@ -19161,32 +19142,37 @@ pub(crate) mod tests {
         );
     }
 
-    fn write_state_file(data_dir: &Path, state: &AuthState) -> Vec<u8> {
-        let path = auth_state_path(data_dir).unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let bytes = serde_json::to_vec_pretty(state).unwrap();
-        std::fs::write(&path, &bytes).unwrap();
-        invalidate_verified_auth_state_cache(data_dir);
-        bytes
-    }
-
-    fn invalid_agent_state(edit: impl FnOnce(&mut PrincipalRecord)) -> AuthState {
-        let mut state = AuthState::default();
-        state
-            .principals
-            .push(test_person_record("person:local:owner"));
-        let mut agent = test_agent_record(TEST_AGENT_ID);
-        agent.owner = Some("person:local:owner".to_string());
-        edit(&mut agent);
-        state.principals.push(agent);
-        state
-    }
-
     fn assert_invalid_agent_refused(reason: &str, edit: impl FnOnce(&mut PrincipalRecord)) {
         let data_dir = tempfile::tempdir().unwrap();
-        let state = invalid_agent_state(edit);
-        let before = write_state_file(data_dir.path(), &state);
-        let saved = save_auth_state(data_dir.path(), &state, None);
+        store_test_human_principal(data_dir.path(), "person:local:owner");
+        let mut agent = test_agent_record(TEST_AGENT_ID);
+        edit(&mut agent);
+        insert_principal_into_auth_file(data_dir.path(), &agent);
+        let before = auth_state_file_bytes(data_dir.path());
+        let loaded = load_auth_state(data_dir.path()).expect(reason);
+        assert_eq!(
+            quarantine_reason(&loaded, &agent.principal_id),
+            Some(reason),
+            "{reason} on load"
+        );
+        let stored = loaded
+            .principals
+            .iter()
+            .find(|principal| principal.principal_id == agent.principal_id)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(stored).unwrap(),
+            serde_json::to_vec(&agent).unwrap(),
+            "{reason} on load"
+        );
+        let mut changed = loaded;
+        changed
+            .principals
+            .iter_mut()
+            .find(|principal| principal.principal_id == agent.principal_id)
+            .unwrap()
+            .display_name = "Changed".to_string();
+        let saved = save_auth_state(data_dir.path(), &changed, None);
         let saved_text = saved
             .as_ref()
             .err()
@@ -19197,14 +19183,9 @@ pub(crate) mod tests {
             "{reason} on save: {saved_text}"
         );
         assert_eq!(
-            std::fs::read(auth_state_path(data_dir.path()).unwrap()).unwrap(),
+            auth_state_file_bytes(data_dir.path()),
             before,
             "{reason} on save"
-        );
-        let loaded = load_auth_state(data_dir.path()).unwrap_err();
-        assert!(
-            loaded.to_string().contains(reason),
-            "{reason} on load: {loaded}"
         );
     }
 
