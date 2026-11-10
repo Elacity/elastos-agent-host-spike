@@ -204,10 +204,10 @@ Phase C real writes through the object provider; `exec-cargo-in-image` (Mac); ph
 
 ## 9. Cloud setup
 
-The repo pins Rust `1.91.0` in `rust-toolchain.toml`. Also needed:
+The repo pins Rust `1.95.0` in `rust-toolchain.toml`. Also needed:
 
 ```bash
-rustup target add wasm32-unknown-unknown --toolchain 1.91.0
+rustup target add wasm32-unknown-unknown --toolchain 1.95.0
 python3 --version   # 3.10 or newer
 node --version      # 20 or newer
 ```

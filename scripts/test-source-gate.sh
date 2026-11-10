@@ -22,8 +22,11 @@ redteam() {
   # local pre-push both run it. A skip is not a pass: unittest exits 0 on an
   # all-skipped run, so the exact run is checked below.
   # The full receipt probe builds three copies and takes 8-11 minutes; it stays
-  # a local command, not part of this gate:
-  #   python3 -I -m unittest discover -s lab/redteam/py \
+  # a local command, not part of this gate. It needs rustc 1.91.0, which is
+  # older than this repository's own pin, so name it (without RUSTC every test
+  # is skipped, and an all-skipped run exits 0):
+  #   RUSTC="$(rustup which --toolchain 1.91.0 rustc)" \
+  #     python3 -I -m unittest discover -s lab/redteam/py \
   #     -p test_wasm_capsule_receipt.py -v
   local output status=0
   output="$(python3 -I -m unittest discover -s lab/redteam/py \
