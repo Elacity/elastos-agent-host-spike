@@ -1725,10 +1725,9 @@ mod denial_authority {
                     "grant_expires_at": now + 3600,
                 } },
             });
-            crate::auth::write_principal_root_object(
+            crate::auth::write_principal_root_object_resolved(
                 data_dir,
-                principal_id,
-                root,
+                context.root(),
                 &uri,
                 &path,
                 &serde_json::to_vec_pretty(&state).unwrap(),
@@ -1743,10 +1742,9 @@ mod denial_authority {
             );
             let path = elastos_common::localhost::rooted_localhost_fs_path(self.owner.path(), &uri)
                 .unwrap();
-            let raw = crate::auth::read_principal_root_object(
+            let raw = crate::auth::read_principal_root_object_resolved(
                 self.owner.path(),
-                context.principal_id(),
-                context.root().localhost_root(),
+                context.root(),
                 &uri,
                 &path,
             )
@@ -1758,15 +1756,13 @@ mod denial_authority {
         /// principal-root object writer the Runtime uses.
         fn write_requests_state_bytes_for(&self, context: &HomeLaunchTokenContext, bytes: &[u8]) {
             let data_dir = self.owner.path();
-            let principal_id = context.principal_id();
             let root = context.root().localhost_root();
             let uri = format!("{root}/.AppData/ElastOS/Home/services-requests.json");
             let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            crate::auth::write_principal_root_object(
+            crate::auth::write_principal_root_object_resolved(
                 data_dir,
-                principal_id,
-                root,
+                context.root(),
                 &uri,
                 &path,
                 bytes,

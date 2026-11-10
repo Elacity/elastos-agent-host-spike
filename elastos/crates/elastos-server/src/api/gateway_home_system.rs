@@ -2949,10 +2949,9 @@ fn home_services_selection_state(
     if !path.is_file() {
         return Ok(default_state);
     };
-    let raw = match crate::auth::read_principal_root_object(
+    let raw = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &default_state.principal_id,
-        &default_state.localhost_root,
+        context.root(),
         &home_services_selection_state_uri(context),
         &path,
     ) {
@@ -3016,10 +3015,9 @@ fn home_save_services_selection_state(
     if raw.len() > HOME_SERVICES_STATE_MAX_BYTES {
         anyhow::bail!("Services state is too large");
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &state.principal_id,
-        &state.localhost_root,
+        context.root(),
         &home_services_selection_state_uri(context),
         &path,
         &raw,
@@ -3074,10 +3072,9 @@ fn home_services_requests_state(
     if !path.is_file() {
         return Ok(default_state);
     }
-    let raw = match crate::auth::read_principal_root_object(
+    let raw = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &default_state.principal_id,
-        &default_state.localhost_root,
+        context.root(),
         &home_services_requests_state_uri(context),
         &path,
     ) {
@@ -3118,10 +3115,9 @@ fn home_save_services_requests_state(
     if raw.len() > HOME_SERVICES_REQUESTS_MAX_BYTES {
         anyhow::bail!("Services requests state is too large");
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &state.principal_id,
-        &state.localhost_root,
+        context.root(),
         &home_services_requests_state_uri(context),
         &path,
         &raw,
@@ -6748,10 +6744,9 @@ fn home_active_shell_state(
     }
     let principal_id = home_browser_principal_id(context);
     let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_active_shell_state_uri(context),
         &path,
     ) {
@@ -6815,10 +6810,9 @@ fn home_save_active_shell(
     if let Some(parent) = path.parent() {
         crate::auth::create_owner_only_dir_all(data_dir, parent)?;
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_active_shell_state_uri(context),
         &path,
         &bytes,
@@ -7066,10 +7060,9 @@ fn home_browser_state(
     }
     let principal_id = home_browser_principal_id(context);
     let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_browser_state_uri(context),
         &path,
     ) {
@@ -7161,38 +7154,24 @@ fn warn_damaged_home_state(path: &std::path::Path, err: &anyhow::Error) {
     );
 }
 
-/// Saves a Home state file, refusing to replace one that is damaged: the
-/// refusal is the damage notice, which names the file and the action, and
-/// the file stays as it is until the person moves it out.
-fn write_home_state_object(
+/// Saves Home state and keeps the damaged-file refusal on the verified root.
+fn write_home_state_object_resolved(
     data_dir: &std::path::Path,
-    principal_id: &str,
-    localhost_root: &str,
+    resolved: &crate::auth::ResolvedPrincipalRoot,
     object_uri: &str,
     path: &std::path::Path,
     bytes: &[u8],
 ) -> anyhow::Result<()> {
     if path.is_file() {
-        if let Err(err) = crate::auth::read_principal_root_object(
-            data_dir,
-            principal_id,
-            localhost_root,
-            object_uri,
-            path,
-        ) {
+        if let Err(err) =
+            crate::auth::read_principal_root_object_resolved(data_dir, resolved, object_uri, path)
+        {
             if is_damaged_home_state(&err) {
                 return Err(err);
             }
         }
     }
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        localhost_root,
-        object_uri,
-        path,
-        bytes,
-    )
+    crate::auth::write_principal_root_object_resolved(data_dir, resolved, object_uri, path, bytes)
 }
 
 fn home_save_browser_state(
@@ -7221,10 +7200,9 @@ fn home_save_browser_state(
     if let Some(parent) = path.parent() {
         crate::auth::create_owner_only_dir_all(data_dir, parent)?;
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_browser_state_uri(context),
         &path,
         &bytes,
@@ -7280,12 +7258,9 @@ pub(super) fn migrate_legacy_services_peer_contacts(
     if !legacy_path.is_file() {
         return Ok(());
     }
-    let principal_id = home_browser_principal_id(context);
-    let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &legacy_uri,
         &legacy_path,
     ) {
@@ -7311,10 +7286,9 @@ pub(super) fn migrate_legacy_services_peer_contacts(
     if let Some(parent) = new_path.parent() {
         crate::auth::create_owner_only_dir_all(data_dir, parent)?;
     }
-    crate::auth::write_principal_root_object(
+    crate::auth::write_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_services_peer_contacts_uri(context),
         &new_path,
         &serde_json::to_vec_pretty(&state)?,
@@ -8276,10 +8250,9 @@ fn home_appearance_preferences(
         }
         Err(err) => return Err(err.into()),
     }
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_APPEARANCE_PREFERENCES_FILE),
         &path,
     ) {
@@ -8399,10 +8372,9 @@ fn home_save_appearance_preferences(
         if let Some(parent) = path.parent() {
             crate::auth::create_owner_only_dir_all(data_dir, parent)?;
         }
-        write_home_state_object(
+        write_home_state_object_resolved(
             data_dir,
-            &home_browser_principal_id(context),
-            &home_browser_localhost_root(context),
+            context.root(),
             &home_appearance_object_uri(context, HOME_APPEARANCE_PREFERENCES_FILE),
             &path,
             &bytes,
@@ -8494,10 +8466,9 @@ fn home_background_overlay_settings(
     if !path.is_file() {
         return Ok(defaults);
     }
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_BACKGROUND_OVERLAY_FILE),
         &path,
     ) {
@@ -8535,10 +8506,9 @@ fn home_save_background_overlay(
         "enabled": enabled,
         "opacity": home_clamp_background_overlay_opacity(opacity),
     });
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_BACKGROUND_OVERLAY_FILE),
         &path,
         &serde_json::to_vec_pretty(&payload)?,
@@ -8557,10 +8527,9 @@ fn home_save_background_image(
         crate::auth::create_owner_only_dir_all(data_dir, parent)?;
     }
     remove_home_background_images(data_dir, context)?;
-    crate::auth::write_principal_root_object(
+    crate::auth::write_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, file_name),
         &path,
         &bytes,
@@ -8587,10 +8556,9 @@ fn remove_home_background_images(
     for &(file_name, _content_type) in HOME_BACKGROUND_IMAGE_FILES {
         let path = home_appearance_path(data_dir, context, file_name)?;
         if path.is_file() {
-            if let Err(err) = crate::auth::read_principal_root_object(
+            if let Err(err) = crate::auth::read_principal_root_object_resolved(
                 data_dir,
-                &home_browser_principal_id(context),
-                &home_browser_localhost_root(context),
+                context.root(),
                 &home_appearance_object_uri(context, file_name),
                 &path,
             ) {
@@ -8772,13 +8740,7 @@ pub(super) async fn home_background_image(
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(err) => return home_error_response(err),
     };
-    match crate::auth::read_principal_root_object(
-        &state.data_dir,
-        &home_browser_principal_id(&context),
-        &home_browser_localhost_root(&context),
-        &entry.object_uri,
-        &entry.path,
-    ) {
+    match home_background_image_bytes(&state.data_dir, &context, &entry) {
         Ok(bytes) => {
             let mut response = bytes.into_response();
             let headers = response.headers_mut();
@@ -8801,6 +8763,19 @@ pub(super) async fn home_background_image(
         }
         Err(err) => home_error_response(anyhow::anyhow!(err)),
     }
+}
+
+fn home_background_image_bytes(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    entry: &HomeBackgroundImageEntry,
+) -> anyhow::Result<Vec<u8>> {
+    crate::auth::read_principal_root_object_resolved(
+        data_dir,
+        context.root(),
+        &entry.object_uri,
+        &entry.path,
+    )
 }
 
 #[cfg(test)]
@@ -9385,6 +9360,343 @@ mod stored_root_tests {
         fs::create_dir_all(&data_dir).unwrap();
         fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
         (temp, data_dir)
+    }
+
+    fn assert_only_file_named(data_dir: &std::path::Path, expected: &std::path::Path) {
+        fn collect(dir: &std::path::Path, name: &std::ffi::OsStr, found: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    collect(&entry.path(), name, found);
+                } else if kind.is_file() && entry.file_name() == name {
+                    found.push(entry.path());
+                }
+            }
+        }
+        let mut found = Vec::new();
+        collect(data_dir, expected.file_name().unwrap(), &mut found);
+        assert_eq!(
+            found,
+            vec![expected.to_path_buf()],
+            "state file must stay only under the verified root"
+        );
+    }
+
+    fn verified_parent_device_context(
+        data_dir: &std::path::Path,
+        app: &str,
+    ) -> (HomeLaunchTokenContext, String) {
+        let parent = tempfile::tempdir().unwrap();
+        let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let parent_context =
+            super::super::gateway_home_token::local_home_launch_token_context(parent.path())
+                .unwrap();
+        let token = super::super::gateway_home_token::issue_home_launch_token_with_context(
+            parent.path(),
+            app,
+            &parent_context,
+        )
+        .unwrap();
+        let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+            data_dir, &token, &[app], parent_did.clone(), parent.path(),
+        ).unwrap();
+        (verified.context, parent_did)
+    }
+
+    #[test]
+    fn parent_signed_services_selection_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SERVICES_CAPSULE_ID);
+        let parent_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{parent_did}").as_bytes())[..12])
+        );
+        assert_eq!(context.root().localhost_root(), parent_root);
+        let mut state = home_services_default_selection_state(&context);
+        state.local_offer_ids.insert("parent-offer".to_string());
+        home_save_services_selection_state(&data_dir, &context, &state).unwrap();
+        let read = home_services_selection_state(&data_dir, &context).unwrap();
+        assert!(read.local_offer_ids.contains("parent-offer"));
+        let parent_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/services-state.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_active_shell_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        let capsule_dir = data_dir.join("capsules/home-gui");
+        fs::create_dir_all(capsule_dir.join("browser")).unwrap();
+        fs::write(
+            capsule_dir.join("capsule.json"),
+            include_str!("../../../../../capsules/home-gui/capsule.json"),
+        )
+        .unwrap();
+        fs::write(capsule_dir.join("browser/index.html"), "Home fixture").unwrap();
+        fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({"external": {
+                "home-gui": {"install_path": "capsules/home-gui", "platforms": {}}
+            }, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+        home_save_active_shell(&data_dir, &context, HOME_GUI_SHELL_ID).unwrap();
+        assert_eq!(
+            home_active_shell_state(&data_dir, &context)
+                .unwrap()
+                .unwrap()
+                .active,
+            HOME_GUI_SHELL_ID
+        );
+        let parent_path = home_active_shell_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        assert_ne!(context.root().localhost_root(), child_root);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/active-shell.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_auth_store_person_services_selection_uses_stored_root_in_child() {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+
+        let (_temp, data_dir) = state_dir();
+        let parent = tempfile::tempdir().unwrap();
+        let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let mut record = crate::auth::store_test_human_principal(
+            parent.path(),
+            "person:local:parent-store-services",
+        );
+        record.localhost_root = "localhost://Users/parent-stored-root".to_string();
+        let mut auth_state = crate::auth::load_auth_state(parent.path()).unwrap();
+        auth_state.principals[0].localhost_root = record.localhost_root.clone();
+        crate::auth::save_auth_state(parent.path(), &auth_state, None).unwrap();
+        let now = crate::auth::now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:parent-store-services".to_string(),
+            session_id: "auth:parent-store-services".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec![SERVICES_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(parent.path(), grant.clone()).unwrap();
+        let token = super::super::gateway_home_token::issue_home_launch_token_for_auth_grant(
+            parent.path(),
+            SERVICES_CAPSULE_ID,
+            &grant,
+        )
+        .unwrap();
+        let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+            &data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did, parent.path(),
+        ).unwrap();
+        let context = verified.context;
+        assert_eq!(
+            context.root().localhost_root(),
+            "localhost://Users/parent-stored-root"
+        );
+        assert!(
+            crate::auth::stored_principal_record(&data_dir, &record.principal_id)
+                .unwrap()
+                .is_none()
+        );
+        let mut selection = home_services_default_selection_state(&context);
+        selection
+            .local_offer_ids
+            .insert("parent-person-offer".to_string());
+        home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
+        assert!(home_services_selection_state(&data_dir, &context)
+            .unwrap()
+            .local_offer_ids
+            .contains("parent-person-offer"));
+        let parent_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let formula_root = crate::auth::principal_localhost_root(&record.principal_id);
+        let formula_uri = format!("{formula_root}/.AppData/ElastOS/Home/services-state.json");
+        let formula_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &formula_uri).unwrap();
+        assert!(!formula_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_browser_state_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let updated = home_save_browser_state(
+            &data_dir,
+            &context,
+            HomeBrowserStateUpdate {
+                layout: Some(Some(serde_json::json!({"columns": 3}))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.layout, Some(serde_json::json!({"columns": 3})));
+        assert_eq!(
+            home_browser_state(&data_dir, &context).unwrap().layout,
+            Some(serde_json::json!({"columns": 3}))
+        );
+        let parent_path = home_browser_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/browser-state.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_peer_contacts_migration_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let legacy_uri = legacy_home_services_peer_contacts_uri(&context);
+        let legacy_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &legacy_uri).unwrap();
+        crate::auth::create_owner_only_dir_all(&data_dir, legacy_path.parent().unwrap()).unwrap();
+        let legacy = HomeServicesPeerContactsState {
+            schema: LEGACY_HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string(),
+            principal_id: context.principal_id().to_string(),
+            localhost_root: context.root().localhost_root().to_string(),
+            updated_at: 7,
+            contacts: BTreeMap::new(),
+        };
+        crate::auth::write_principal_root_object_resolved(
+            &data_dir,
+            context.root(),
+            &legacy_uri,
+            &legacy_path,
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        migrate_legacy_services_peer_contacts(&data_dir, &context).unwrap();
+        let new_uri = home_services_peer_contacts_uri(&context);
+        let new_path = home_services_peer_contacts_path(&data_dir, &context).unwrap();
+        assert_only_file_named(&data_dir, &new_path);
+        let bytes = crate::auth::read_principal_root_object_resolved(
+            &data_dir,
+            context.root(),
+            &new_uri,
+            &new_path,
+        )
+        .unwrap();
+        let migrated: HomeServicesPeerContactsState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(migrated.schema, HOME_SERVICES_PEER_CONTACTS_SCHEMA);
+        assert_eq!(migrated.updated_at, 7);
+        assert!(!legacy_path.exists());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/services-peer-contacts.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_appearance_preferences_stay_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        home_save_appearance_preferences(
+            &data_dir,
+            &context,
+            HomeAppearancePreferencesUpdate {
+                theme: Some("light".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            home_appearance_preferences(&data_dir, &context)
+                .unwrap()
+                .theme,
+            "light"
+        );
+        let parent_path =
+            home_appearance_path(&data_dir, &context, HOME_APPEARANCE_PREFERENCES_FILE).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/Appearance/preferences.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_background_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        home_save_background_overlay(&data_dir, &context, true, 0.4).unwrap();
+        assert_eq!(
+            home_background_overlay_settings(&data_dir, &context).unwrap(),
+            (true, 0.4)
+        );
+        let overlay_path =
+            home_appearance_path(&data_dir, &context, HOME_BACKGROUND_OVERLAY_FILE).unwrap();
+        assert_only_file_named(&data_dir, &overlay_path);
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"parent image".to_vec(),
+        )
+        .unwrap();
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_only_file_named(&data_dir, &entry.path);
+        let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
+        assert_eq!(bytes, b"parent image");
+        remove_home_background_images(&data_dir, &context).unwrap();
+        assert!(!entry.path.exists());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri =
+            format!("{child_root}/.AppData/ElastOS/Home/Appearance/background-overlay.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
     }
 
     #[test]
