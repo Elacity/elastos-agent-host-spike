@@ -1335,7 +1335,7 @@ fn handle_library_request(
                     .localhost_root()
                     .to_string();
             let uri = uri.unwrap_or_else(|| root.clone());
-            let target = library_target(data_dir, &principal_id, &uri)
+            let target = library_target_from_root(data_dir, &root, &uri)
                 .with_context(|| format!("Library list at {uri}"))?;
             if !target.path.exists() {
                 return Ok(json!({ "uri": target.uri, "objects": [] }));
@@ -1353,7 +1353,12 @@ fn handle_library_request(
                     continue;
                 }
                 let child_uri = format!("{}/{}", target.uri.trim_end_matches('/'), name);
-                objects.push(library_object(data_dir, &principal_id, &child_uri)?);
+                objects.push(library_object_from_root(
+                    data_dir,
+                    &principal_id,
+                    &root,
+                    &child_uri,
+                )?);
             }
             objects.sort_by(|a, b| {
                 a.kind
@@ -1762,9 +1767,9 @@ fn handle_library_request(
                     .localhost_root()
                     .to_string();
             let trash_root = format!("{root}/.Trash");
-            let target = library_target(data_dir, &principal_id, &trash_root)
+            let target = library_target_from_root(data_dir, &root, &trash_root)
                 .with_context(|| format!("Library empty Trash at {trash_root}"))?;
-            refuse_deleting_published(data_dir, &principal_id, &target.uri)?;
+            refuse_deleting_published_with_root(data_dir, &principal_id, &root, &target.uri)?;
             let mut deleted_uris = Vec::new();
             if target.path.exists() {
                 if !target.path.is_dir() {
@@ -1776,20 +1781,21 @@ fn handle_library_request(
                     let entry = entry?;
                     let name = entry.file_name().to_string_lossy().to_string();
                     let child_uri = format!("{}/{}", target.uri, name);
-                    let child = library_target(data_dir, &principal_id, &child_uri)?;
+                    let child = library_target_from_root(data_dir, &root, &child_uri)?;
                     if child.path.is_dir() {
                         fs::remove_dir_all(&child.path)?;
                     } else {
                         fs::remove_file(&child.path)?;
                     }
-                    remove_trash_record(data_dir, &principal_id, &child.uri)?;
+                    remove_trash_record_with_root(data_dir, &principal_id, &root, &child.uri)?;
                     deleted_uris.push(child.uri);
                 }
             }
             let deleted_count = deleted_uris.len();
-            append_library_event(
+            append_library_event_with_root(
                 data_dir,
                 &principal_id,
+                &root,
                 "empty_trash",
                 &target.uri,
                 json!({
@@ -2564,6 +2570,7 @@ fn read_runtime_json_with_root<T: serde::de::DeserializeOwned>(
 fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
     data_dir: &Path,
     principal_id: &str,
+    root: &str,
     dir_uri: &str,
 ) -> Vec<T> {
     let Some(dir) = rooted_localhost_fs_path(data_dir, dir_uri) else {
@@ -2579,7 +2586,8 @@ fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
         .map(|entry| entry.file_name().to_string_lossy().to_string())
         .filter(|name| name.ends_with(".json"))
         .filter_map(|name| {
-            read_runtime_json(data_dir, principal_id, &format!("{dir_uri}/{name}")).ok()
+            read_runtime_json_with_root(data_dir, principal_id, root, &format!("{dir_uri}/{name}"))
+                .ok()
         })
         .collect()
 }
@@ -2593,9 +2601,18 @@ fn publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRec
             return Vec::new();
         }
     };
+    publish_records_with_root(data_dir, principal_id, &root)
+}
+
+fn publish_records_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+) -> Vec<LibraryPublishRecord> {
     read_runtime_json_dir::<LibraryPublishRecord>(
         data_dir,
         principal_id,
+        root,
         &format!("{root}/{LIBRARY_RUNTIME_DIR}/Published"),
     )
 }
@@ -2603,6 +2620,17 @@ fn publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRec
 /// Every plain (not protected) publish record of this person, active or not.
 fn plain_publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRecord> {
     publish_records(data_dir, principal_id)
+        .into_iter()
+        .filter(|record| !record_is_runtime_custody(record))
+        .collect()
+}
+
+fn plain_publish_records_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+) -> Vec<LibraryPublishRecord> {
+    publish_records_with_root(data_dir, principal_id, root)
         .into_iter()
         .filter(|record| !record_is_runtime_custody(record))
         .collect()
@@ -4156,7 +4184,19 @@ fn library_request_touches_webspace(request: &ObjectProviderRequest) -> bool {
 }
 
 fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<LibraryObject> {
-    let target = library_target(data_dir, principal_id, uri)?;
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    library_object_from_root(data_dir, principal_id, &root, uri)
+}
+
+fn library_object_from_root(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    uri: &str,
+) -> anyhow::Result<LibraryObject> {
+    let target = library_target_from_root(data_dir, localhost_root, uri)?;
     // A place with no directory yet is the empty folder `list` already shows;
     // its times are unknown (0).
     let metadata = match fs::metadata(&target.path) {
@@ -8246,7 +8286,16 @@ fn remove_trash_record(data_dir: &Path, principal_id: &str, trash_uri: &str) -> 
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
-    let record_uri = trash_record_uri(&root, trash_uri);
+    remove_trash_record_with_root(data_dir, principal_id, &root, trash_uri)
+}
+
+fn remove_trash_record_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    trash_uri: &str,
+) -> anyhow::Result<()> {
+    let record_uri = trash_record_uri(root, trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
     // A removal mutates the path, so tests record it as a write.
@@ -8587,9 +8636,25 @@ fn move_publish_record(
 /// Refuses to delete `uri` (a file, or a folder and everything in it) while it
 /// holds an active plain publication: Unpublish withdraws it first.
 fn refuse_deleting_published(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<()> {
+    refuse_published_records(uri, &plain_publish_records(data_dir, principal_id))
+}
+
+fn refuse_deleting_published_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    uri: &str,
+) -> anyhow::Result<()> {
+    refuse_published_records(
+        uri,
+        &plain_publish_records_with_root(data_dir, principal_id, root),
+    )
+}
+
+fn refuse_published_records(uri: &str, records: &[LibraryPublishRecord]) -> anyhow::Result<()> {
     let folder = format!("{uri}/");
-    for record in plain_publish_records(data_dir, principal_id) {
-        if !record_is_published(&record) {
+    for record in records {
+        if !record_is_published(record) {
             continue;
         }
         if record.object_uri == uri {
@@ -8644,7 +8709,21 @@ fn append_library_event(
     uri: &str,
     details: Value,
 ) -> anyhow::Result<LibraryEvent> {
-    let mut events = read_library_events(data_dir, principal_id)?;
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    append_library_event_with_root(data_dir, principal_id, &root, op, uri, details)
+}
+
+fn append_library_event_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    op: &str,
+    uri: &str,
+    details: Value,
+) -> anyhow::Result<LibraryEvent> {
+    let mut events = read_library_events_with_root(data_dir, principal_id, root)?;
     let event = LibraryEvent {
         schema: LIBRARY_EVENT_SCHEMA.to_string(),
         event_id: library_event_id(op, uri, &details),
@@ -8658,7 +8737,7 @@ fn append_library_event(
         let keep_from = events.len() - MAX_LIBRARY_EVENTS;
         events.drain(0..keep_from);
     }
-    write_library_events(data_dir, principal_id, &events)?;
+    write_library_events_with_root(data_dir, principal_id, root, &events)?;
     library_event_notifier().notify_waiters();
     Ok(event)
 }
@@ -8706,7 +8785,16 @@ fn write_library_events(
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
-    let event_uri = library_event_log_uri(&root);
+    write_library_events_with_root(data_dir, principal_id, &root, events)
+}
+
+fn write_library_events_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    events: &[LibraryEvent],
+) -> anyhow::Result<()> {
+    let event_uri = library_event_log_uri(root);
     let event_path = rooted_localhost_fs_path(data_dir, &event_uri)
         .ok_or_else(|| anyhow!("invalid library event log path"))?;
     if let Some(parent) = event_path.parent() {
@@ -8720,7 +8808,7 @@ fn write_library_events(
     crate::auth::write_principal_root_object(
         data_dir,
         principal_id,
-        &root,
+        root,
         &event_uri,
         &event_path,
         &bytes,
@@ -11221,8 +11309,7 @@ mod r5a_tests {
         tracing::subscriber::with_default(subscriber, || {
             assert!(publish_records(absent.path(), r4_fixture::ID).is_empty());
         });
-        // The nested read_runtime_json also resolves the principal, so a
-        // fallback can scan this directory yet still return an empty list.
+        // An unresolved principal returns before this directory is read.
         assert!(!runtime_json_dir_reads(absent.path()).contains(&dir_uri));
         let warning = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
         assert!(
