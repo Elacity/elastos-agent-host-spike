@@ -11498,6 +11498,88 @@ pub(crate) fn store_test_human_principal(data_dir: &Path, principal_id: &str) ->
 }
 
 #[cfg(test)]
+const TEST_AGENT_ID: &str = "agent:v2:0123456789abcdef0123456789abcdef";
+
+#[cfg(test)]
+fn test_agent_record(agent_id: &str) -> PrincipalRecord {
+    let binding = ProofBinding::agent_admission(agent_id, 5);
+    PrincipalRecord {
+        principal_id: agent_id.to_string(),
+        proof_binding_id: binding.id(),
+        proof_binding: binding,
+        display_name: "Agent".to_string(),
+        initial_profile_display_name: None,
+        role: RuntimePrincipalRole::Guest,
+        localhost_root: principal_kind_localhost_root(agent_id, PrincipalKind::Agent),
+        kind: PrincipalKind::Agent,
+        created_at: 5,
+        updated_at: 5,
+        owner: Some("person:local:owner".to_string()),
+        request_id: Some("request-1".to_string()),
+        agent_host_package: Some(AgentHostPackage {
+            name: "agent-host".to_string(),
+            registry_cid: "bafyrecord".to_string(),
+        }),
+        retired_at: None,
+    }
+}
+
+#[cfg(test)]
+fn write_auth_state_value(data_dir: &Path, value: &Value) {
+    let path = auth_state_path(data_dir).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    set_secret_file_permissions(&path).unwrap();
+    invalidate_verified_auth_state_cache(data_dir);
+}
+
+#[cfg(test)]
+fn insert_principal_into_auth_file(data_dir: &Path, record: &PrincipalRecord) {
+    let path = auth_state_path(data_dir).unwrap();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["principals"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(record).unwrap());
+    write_auth_state_value(data_dir, &value);
+}
+
+#[cfg(test)]
+fn admit_passkey_principal_as_agent(
+    data_dir: &Path,
+    principal_id: &str,
+    agent_id: &str,
+    role: RuntimePrincipalRole,
+) {
+    let path = auth_state_path(data_dir).unwrap();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let principal = value["principals"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|item| item["principal_id"] == principal_id)
+        .unwrap();
+    principal["principal_id"] = serde_json::json!(agent_id);
+    principal["kind"] = serde_json::json!("agent");
+    principal["role"] = serde_json::json!(role);
+    principal["localhost_root"] = serde_json::json!(principal_kind_localhost_root(
+        agent_id,
+        PrincipalKind::Agent
+    ));
+    principal["owner"] = serde_json::json!(principal_id);
+    principal["request_id"] = serde_json::json!("request-1");
+    principal["agent_host_package"] =
+        serde_json::json!({"name": "agent-host", "registry_cid": "bafyrecord"});
+    principal["proof_binding"]["kind"] = serde_json::json!("agent_admission");
+    principal["proof_binding"]["subject"] = serde_json::json!(agent_id);
+    write_auth_state_value(data_dir, &value);
+}
+
+#[cfg(test)]
+fn auth_state_file_bytes(data_dir: &Path) -> Vec<u8> {
+    std::fs::read(auth_state_path(data_dir).unwrap()).unwrap()
+}
+
+#[cfg(test)]
 pub(crate) mod r4_fixture {
     use super::*;
     pub const ID: &str = "person:local:r4";
@@ -18003,6 +18085,88 @@ pub(crate) mod tests {
             &mut count,
         );
         assert_eq!(count, 2, "fresh agent id maker has no production caller");
+    }
+
+    #[test]
+    fn agent_record_root_is_the_hand_computed_literal() {
+        // Hand SHA-256 of `agent:v2:0123456789abcdef0123456789abcdef`,
+        // first 12 bytes. Computed once outside this function.
+        let record = test_agent_record(TEST_AGENT_ID);
+        assert_eq!(
+            record.localhost_root, "localhost://UsersAI/ba287e12925d9408db0f24e3",
+            "stored Agent root equals the hand-computed literal"
+        );
+    }
+
+    #[test]
+    fn agent_record_round_trips_in_auth_state() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = now_ts();
+        upsert_principal_for_binding(
+            data_dir.path(),
+            ProofBinding::evm_account(1, &format!("0x{}", "ab".repeat(20)), now),
+            now,
+        )
+        .unwrap();
+        let agent = test_agent_record(TEST_AGENT_ID);
+        insert_principal_into_auth_file(data_dir.path(), &agent);
+        let loaded = load_auth_state(data_dir.path()).unwrap();
+        let stored = loaded
+            .principals
+            .iter()
+            .find(|principal| principal.principal_id == TEST_AGENT_ID)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(stored).unwrap(),
+            serde_json::to_vec(&agent).unwrap(),
+            "agent fields round trip byte for byte"
+        );
+        mutate_auth_state(data_dir.path(), |_state| Ok(())).unwrap();
+        let again = load_auth_state(data_dir.path()).unwrap();
+        let restored = again
+            .principals
+            .iter()
+            .find(|principal| principal.principal_id == TEST_AGENT_ID)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(restored).unwrap(),
+            serde_json::to_vec(&agent).unwrap(),
+            "agent fields round trip byte for byte"
+        );
+    }
+
+    #[test]
+    fn auth_state_without_agent_records_is_unchanged() {
+        const FIXTURE: &[u8] = include_bytes!("../fixtures/auth-state-no-agent.json");
+        let data_dir = tempfile::tempdir().unwrap();
+        let path = auth_state_path(data_dir.path()).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, FIXTURE).unwrap();
+        let loaded = load_auth_state(data_dir.path()).unwrap();
+        assert!(loaded.principals.is_empty());
+        assert_eq!(
+            serde_json::to_vec_pretty(&loaded).unwrap(),
+            FIXTURE,
+            "auth state with no agent records is unchanged"
+        );
+        assert_eq!(
+            serde_json::to_vec_pretty(&AuthState::default()).unwrap(),
+            FIXTURE,
+            "auth state with no agent records is unchanged"
+        );
+        let human_dir = tempfile::tempdir().unwrap();
+        let human = store_test_human_principal(human_dir.path(), "person:local:plain");
+        let value = serde_json::to_value(&human).unwrap();
+        assert!(
+            value.get("owner").is_none(),
+            "a person record omits agent fields"
+        );
+        assert!(
+            value.get("request_id").is_none()
+                && value.get("agent_host_package").is_none()
+                && value.get("retired_at").is_none(),
+            "a person record omits agent fields"
+        );
     }
 
 }
