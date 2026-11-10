@@ -5201,8 +5201,10 @@ pub fn upsert_principal_for_binding_as_role_named(
         normalize_principal_records(state);
         let proof_binding_id = binding.id();
         // Kind Agent never changes: a sign-in cannot present the admission
-        // binding, and cannot take an Agent record's binding or principal id.
+        // binding, cannot name an id in the agent namespace, and cannot take
+        // an Agent record's binding or principal id.
         if binding.kind == ProofBindingKind::AgentAdmission
+            || principal_id.starts_with("agent:")
             || state.principals.iter().any(|principal| {
                 principal.kind == PrincipalKind::Agent
                     && (principal.proof_binding_id == proof_binding_id
@@ -12965,19 +12967,43 @@ pub(crate) mod tests {
     /// refusal leaves the auth state byte-identical.
     #[test]
     fn sign_in_upsert_refuses_an_agent_record() {
-        for case in ["binding-id", "principal-id", "admission-kind"] {
+        for case in [
+            "binding-id",
+            "principal-id",
+            "admission-kind",
+            "agent-namespace",
+        ] {
             let data_dir = tempfile::tempdir().unwrap();
-            let agent = stored_agent_fixture(data_dir.path());
+            let mut agent = stored_agent_fixture(data_dir.path());
             let mut binding = passkey_binding(1, 10, 10);
             let mut principal_id = "person:local:signer".to_string();
             match case {
+                // A stored record that lost its kind loads as Human; the
+                // agent namespace still refuses a sign-in that names its id.
+                "agent-namespace" => {
+                    principal_id = agent.principal_id.clone();
+                    mutate_auth_state(data_dir.path(), |state| {
+                        state.principals[0].kind = PrincipalKind::Human;
+                        Ok(())
+                    })
+                    .unwrap()
+                }
+                // An Agent record under an id outside the agent namespace.
+                "principal-id" => {
+                    agent.principal_id = "person:local:held-by-agent".into();
+                    principal_id = agent.principal_id.clone();
+                    mutate_auth_state(data_dir.path(), |state| {
+                        state.principals[0].principal_id = principal_id.clone();
+                        Ok(())
+                    })
+                    .unwrap()
+                }
                 // The Agent's binding id is planted as this passkey's id.
                 "binding-id" => mutate_auth_state(data_dir.path(), |state| {
                     state.principals[0].proof_binding_id = binding.id();
                     Ok(())
                 })
                 .unwrap(),
-                "principal-id" => principal_id = agent.principal_id.clone(),
                 // An admission binding no stored record holds.
                 "admission-kind" => {
                     binding = agent_admission_binding_fixture(&agent_admission_subject(
