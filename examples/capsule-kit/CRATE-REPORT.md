@@ -75,8 +75,8 @@ same; the tests that check them did not change. Rerun after the change: every ph
 component rebuilt for each runtime one), the page set (13), the bundle set (60), the whole seam set (21), and
 both container builds (below).
 
-Task 012 moved the list rules out of `album.rs` into `guest/src/list.rs`, so the photo core changed once more;
-its container hash above is stale until a cloud container run.
+Task 012 moved the list rules out of `album.rs` into `guest/src/list.rs`, so the photo core changed once more.
+Its container hash was rebuilt on 10 Nov 2026 (see "Reproducible build") and the record holds that value.
 
 ## Reproducible build
 
@@ -84,7 +84,7 @@ The container build is now the only reference, and the container recipe changed 
 
 | | Photo core | Documents core |
 |---|---|---|
-| Pinned container, recorded before task 012 (stale: not rerun, the Mac has no Docker) | [recorded-hashes.txt](repro/recorded-hashes.txt) | [recorded-hashes.txt](repro/recorded-hashes.txt) |
+| Pinned container at `7332bacb`, 10 Nov 2026: two fresh native x86_64 runners each, the same bytes both times | [recorded-hashes.txt](repro/recorded-hashes.txt) | [recorded-hashes.txt](repro/recorded-hashes.txt) |
 | Native, this worktree (`/Users/sash/code/wt-lane-photo`), after task 012 | `31e9576a7b97dacf1dc1cdc219c6f9dd34888ff8be39abe12c1f54b9058cc691` | `9eef034ffba27f156f1922fef9dafb20483d1e1e1bcf30302bfc1ab161c67fc1` |
 | Native, the old checkout (`/home/user/...`) | `5a284f2f…a516` | `a479a911…066b` |
 
@@ -175,8 +175,8 @@ gateway test allows a fifth file.
 | Bundle tool | 47 tests, 60/60 | 48 tests, 63/63 (the #32 fix for a trailing `/` or `/.`, merged in) |
 | Photo seam (`falsify-seam.py`, whole set) | 21/21 | 21/21 |
 | Documents viewer | 71 Rust, 14 page, 57/57 | 66 Rust (11 model, 27 guest, 12 host, 7 bundle, 9 Bus v2), 14 page, 52/52 (36 + 16; 5 tests and 5 falsifiers moved to the kit) |
-| Photo core hash | `add93842…dd22` | container `053b198d…9cfc` (stale); native here `5a284f2f…a516` before task 012, `31e9576a…c691` after |
-| Documents core hash | `8765e790…da40` | container `c946ad9e…a7cf` (stale); native here `a479a911…066b` before task 012, `9eef034f…7fc1` after |
+| Photo core hash | `add93842…dd22` | container `053b198d…9cfc` (before task 012; the record now holds the 10 Nov rebuild); native here `5a284f2f…a516` before task 012, `31e9576a…c691` after |
+| Documents core hash | `8765e790…da40` | container `c946ad9e…a7cf` (before task 012; the record now holds the 10 Nov rebuild); native here `a479a911…066b` before task 012, `9eef034f…7fc1` after |
 | Documents worst shelf | 62.2% | 50.2% |
 | Photo worst album | 64.9% | 59.1% |
 
@@ -196,9 +196,9 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
   component. Delete the `.wasm` first when you check a build by hand; `verify.sh` stops on the failure.
 - **Only the pinned-container hash counts.** The kit's crate is a path dependency outside each viewer's
   workspace, so native builds differ with the checkout path. The container mounts the repository at
-  `/build/elastos-runtime`, not at the builder's remap target (see "Reproducible build"). After task 012 the
-  recorded container hashes are stale: the Mac cannot rebuild them, and the native hashes above belong to this
-  worktree's path.
+  `/build/elastos-runtime`, not at the builder's remap target (see "Reproducible build"). The recorded
+  container hashes were rebuilt on 10 Nov 2026 on GitHub's native x86_64 runners, because neither the Mac nor
+  the ROG has Docker; the native hashes above belong to this worktree's path.
 - **One build folder for the whole repository** (`.cargo/config.toml` points every workspace at
   `target-build/`). Two Cargo runs wait on its lock. Do not run a container build or another `verify.sh` while a
   falsifier set runs: the falsifiers edit kit and viewer sources in place, and a build at that moment compiles a
@@ -236,8 +236,10 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
 
 - Run both `verify.sh` (each runs `capsule-kit/guest/verify.sh` first), the photo page and bundle checks, and
   the whole `falsify-seam.py`.
-- Run both container builds when a cloud machine is available: the recorded photo `053b198d…` and documents
-  `c946ad9e…` hashes are stale after task 012, so a cloud run must replace them (the native hashes differ by
-  checkout path; see "Reproducible build").
+- The container builds were rerun on 10 Nov 2026 at `7332bacb` (the side branch `claude/m2-kt2-hash-ci`,
+  workflow "Kit container hashes"): photo, documents and archive cores, each on two fresh native x86_64
+  runners with the same bytes. The record holds those three values. Rerun that workflow at a new commit
+  whenever a core's source or the kit's crate changes (the native hashes differ by checkout path; see
+  "Reproducible build").
 - Check that `capsule-kit/guest` builds with the Mac's toolchain for `wasm32-unknown-unknown` with `--features
   wit`, and with no features (the Bus v2 guest uses it that way, on Rust 1.95.0).

@@ -26,7 +26,7 @@ CASES = [
     (
         "the repro readme repeats the photo hash",
         README, [], [TEST],
-        [(README, "\n053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc\n")],
+        [(README, "\nc11bb294d15e6914f4322ea3d16f09a0fff4e81c617f66aa09d7a892a6c97248\n")],
     ),
 ]
 
@@ -45,13 +45,13 @@ class RecordedHashTests(unittest.TestCase):
         """the recorded hash check compares the artifact"""
         lines = [line for line in RECORD.read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith("#")]
-        self.assertEqual(len(lines), 2)
-        for name, line in zip(("photo-viewer", "docs-viewer"), lines):
+        self.assertEqual(len(lines), 3)
+        for name, line in zip(("photo-viewer", "docs-viewer", "archive-viewer"), lines):
             self.assertRegex(line, rf"\A{name} [0-9a-f]{{64}}\Z")
         hashes = [line.split()[1] for line in lines]
         self.assertEqual(CASES[1][4][0][1], f"\n{hashes[0]}\n",
                          "update the stale photo-hash plant from the record")
-        for folder in ("photo-viewer", "docs-viewer", "capsule-kit"):
+        for folder in ("photo-viewer", "docs-viewer", "archive-viewer", "capsule-kit"):
             for path in (EXAMPLES / folder).rglob("*.md"):
                 text = path.read_text()
                 for value in hashes:

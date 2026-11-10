@@ -1,3 +1,6 @@
-# Container component hashes; stale until a cloud container run refreshes them.
-photo-viewer 053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc
-docs-viewer c946ad9e0959f8ef985e978d30d0543e0d2bb7b17883f621ef61167366a3a7cf
+# Container component hashes: the sha256 of each viewer core built by
+# build-in-container.sh. Built at commit 7332bacb on native x86_64 runners,
+# twice each on fresh machines with the same result (10 Nov 2026).
+photo-viewer c11bb294d15e6914f4322ea3d16f09a0fff4e81c617f66aa09d7a892a6c97248
+docs-viewer 2219d49d379852ae4058b3c8d076842ce981da433147d175615fb0a04df10f59
+archive-viewer 770fad5ecc6f0502c81e3c7ea3bb7dca35465205a721ae413bce56831d004a60
