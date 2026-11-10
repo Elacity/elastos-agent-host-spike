@@ -4,9 +4,12 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use wasmtime::component::{bindgen, Component, HasSelf, Linker};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, WasmFeatures};
+use wasmtime::{
+    Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline, WasmFeatures,
+};
 
 use elastos_common::{
     CapsuleId, CapsuleManifest, CapsuleRuntimeAbi, CapsuleStatus, CapsuleType, ElastosError, Result,
@@ -27,6 +30,16 @@ bindgen!({
 
 const COMPONENT_FUEL: u64 = 100_000_000;
 const COMPONENT_MEMORY_SIZE: usize = 128 * 1024 * 1024;
+/// One deadline tick. Wasmtime calls this the engine "epoch"; this code says
+/// "tick", because "epoch" already names the capability revocation epoch.
+const DEADLINE_TICK: Duration = Duration::from_millis(10);
+/// How long one activation's own code may run. Time inside Bus calls is not
+/// counted, so a run that waits on the Runtime is not ended for waiting.
+/// Fuel counts instructions, and how long an instruction takes depends on the
+/// instruction and the machine; this bounds the time itself.
+const COMPONENT_RUN_DEADLINE: Duration = Duration::from_secs(10);
+/// The named ending of a run that the deadline stopped.
+const ENDING_EPOCH_DEADLINE: &str = "epoch-deadline";
 
 struct ComponentActivation {
     engine: Engine,
@@ -40,6 +53,10 @@ struct ComponentState {
     capsule_id: String,
     principal_id: Option<String>,
     limits: StoreLimits,
+    fuel: u64,
+    run_deadline: Duration,
+    run_started: Instant,
+    in_bus: Duration,
 }
 
 /// Component compute provider.
@@ -87,6 +104,7 @@ impl ComponentProvider {
                 let mut config = Config::new();
                 config.wasm_component_model(true);
                 config.consume_fuel(true);
+                config.epoch_interruption(true);
                 config.wasm_features(
                     WasmFeatures::THREADS
                         | WasmFeatures::SHARED_EVERYTHING_THREADS
@@ -94,7 +112,18 @@ impl ComponentProvider {
                         | WasmFeatures::STACK_SWITCHING,
                     false,
                 );
-                Engine::new(&config).map_err(|err| err.to_string())
+                let engine = Engine::new(&config).map_err(|err| err.to_string())?;
+                // The one ticker. A store with no deadline set traps at once,
+                // so a run can never be left without one.
+                let ticker = engine.clone();
+                std::thread::Builder::new()
+                    .name("component-deadline-tick".into())
+                    .spawn(move || loop {
+                        std::thread::sleep(DEADLINE_TICK);
+                        ticker.increment_epoch();
+                    })
+                    .map_err(|err| format!("deadline ticker: {err}"))?;
+                Ok(engine)
             })
             .clone()
             .map_err(|err| {
@@ -119,39 +148,47 @@ impl ComponentProvider {
     fn instantiate_component(
         engine: &Engine,
         component: &Component,
-        hostcall: Option<BridgeHostcall>,
-        capsule_id: String,
-        principal_id: Option<String>,
+        mut state: ComponentState,
     ) -> Result<()> {
-        let mut store = Store::new(
-            engine,
-            ComponentState {
-                hostcall,
-                capsule_id,
-                principal_id,
-                limits: Self::store_limits(),
-            },
-        );
+        // The deadline is armed before instantiation: a start function is guest code.
+        state.run_started = Instant::now();
+        let (fuel, first_ticks) = (state.fuel, deadline_ticks(state.run_deadline));
+        let mut store = Store::new(engine, state);
         store.limiter(|state| &mut state.limits);
+        store.set_epoch_deadline(first_ticks);
+        store.epoch_deadline_callback(|context| Ok(context.data().deadline_update()));
         store
-            .set_fuel(COMPONENT_FUEL)
+            .set_fuel(fuel)
             .map_err(|err| ElastosError::Compute(format!("Failed to set component fuel: {err}")))?;
 
         let mut linker = Linker::new(engine);
         ProductCapsuleV1::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(|err| ElastosError::Compute(format!("Failed to link bus imports: {err}")))?;
-        let bindings =
-            ProductCapsuleV1::instantiate(&mut store, component, &linker).map_err(|err| {
-                ElastosError::Compute(format!("Failed to instantiate component capsule: {err}"))
-            })?;
+        let bindings = ProductCapsuleV1::instantiate(&mut store, component, &linker)
+            .map_err(|err| run_error("Failed to instantiate component capsule", err))?;
         bindings
             .elastos_bus_lifecycle()
             .call_run(&mut store)
-            .map_err(|err| ElastosError::Compute(format!("Component lifecycle run failed: {err}")))?
+            .map_err(|err| run_error("Component lifecycle run failed", err))?
             .map_err(|err| ElastosError::Compute(format!("Component capsule denied: {err:?}")))?;
 
         Ok(())
     }
+}
+
+/// Whole ticks in `time`, and never zero: zero would trap before any guest code.
+fn deadline_ticks(time: Duration) -> u64 {
+    ((time.as_millis() / DEADLINE_TICK.as_millis()) as u64).max(1)
+}
+
+/// A run the deadline stopped gets its named ending; any other failure keeps its text.
+fn run_error(stage: &str, err: wasmtime::Error) -> ElastosError {
+    if err.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
+        return ElastosError::Compute(format!(
+            "Component run ended: {ENDING_EPOCH_DEADLINE} (its own code ran past its time limit)"
+        ));
+    }
+    ElastosError::Compute(format!("{stage}: {err}"))
 }
 
 impl Default for ComponentProvider {
@@ -225,8 +262,9 @@ impl ComputeProvider for ComponentProvider {
             .cloned()
             .flatten();
         let capsule_id = handle.id.0.clone();
+        let state = ComponentState::new(hostcall, capsule_id, principal_id);
         let result = tokio::task::spawn_blocking(move || {
-            Self::instantiate_component(&engine, &component, hostcall, capsule_id, principal_id)
+            Self::instantiate_component(&engine, &component, state)
         })
         .await;
 
@@ -328,18 +366,47 @@ fn json_body(
 }
 
 impl ComponentState {
+    fn new(
+        hostcall: Option<BridgeHostcall>,
+        capsule_id: String,
+        principal_id: Option<String>,
+    ) -> Self {
+        Self {
+            hostcall,
+            capsule_id,
+            principal_id,
+            limits: ComponentProvider::store_limits(),
+            fuel: COMPONENT_FUEL,
+            run_deadline: COMPONENT_RUN_DEADLINE,
+            run_started: Instant::now(),
+            in_bus: Duration::ZERO,
+        }
+    }
+
+    /// Called when the deadline is reached: go on for the time still left, or stop.
+    /// Time this run spent inside Bus calls does not count as its own running.
+    fn deadline_update(&self) -> UpdateDeadline {
+        let ran = self.run_started.elapsed().saturating_sub(self.in_bus);
+        match self.run_deadline.checked_sub(ran) {
+            Some(left) if left >= DEADLINE_TICK => UpdateDeadline::Continue(deadline_ticks(left)),
+            _ => UpdateDeadline::Interrupt,
+        }
+    }
+
     fn call_bridge(
-        &self,
+        &mut self,
         request: RuntimeRequest,
     ) -> std::result::Result<RuntimeResponse, elastos::bus::types::BusError> {
         let hostcall = self
             .hostcall
-            .as_ref()
+            .clone()
             .ok_or_else(|| bus_error("unavailable", "component bridge is not configured"))?;
         let line = guest_bus::bridge_envelope_json(1, request)
             .map_err(|err| bus_error("internal", err.to_string()))?;
-        let raw = hostcall(&line, &self.capsule_id, self.principal_id.as_deref())
-            .map_err(|err| bus_error("internal", err))?;
+        let asked = Instant::now();
+        let raw = hostcall(&line, &self.capsule_id, self.principal_id.as_deref());
+        self.in_bus += asked.elapsed();
+        let raw = raw.map_err(|err| bus_error("internal", err))?;
         let envelope: ResponseEnvelope =
             serde_json::from_str(&raw).map_err(|err| bus_error("internal", err.to_string()))?;
         if matches!(&envelope.response, RuntimeResponse::Error { .. }) {
@@ -487,6 +554,162 @@ mod tests {
         assert!(format!("{err:?}").contains("threads"), "{err:?}");
     }
 
+    /// A v1 component whose core module loops for ever: in `run`, or with
+    /// `at_start` in its start function. `spin: false` gives the same
+    /// component with no loop.
+    fn lifecycle_component(spin: bool, at_start: bool) -> Component {
+        let start = if spin && at_start {
+            "(start $spin)"
+        } else {
+            ""
+        };
+        let run = if spin && !at_start {
+            "(call $spin)"
+        } else {
+            ""
+        };
+        let text = format!(
+            r#"(component
+              (import "elastos:bus/types@1.0.0" (instance $types
+                (type $error (variant
+                  (case "denied" string) (case "not-found" string) (case "invalid" string)
+                  (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+                (export "bus-error" (type (eq $error)))))
+              (alias export $types "bus-error" (type $bus-error))
+              (core module $m
+                (memory (export "memory") 1)
+                (func $spin (loop $again (br $again)))
+                (func (export "run") (result i32) {run} (i32.const 0))
+                {start})
+              (core instance $i (instantiate $m))
+              (func $run (result (result (error $bus-error)))
+                (canon lift (core func $i "run") (memory $i "memory")))
+              (instance $lifecycle (export "run" (func $run)))
+              (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#
+        );
+        let engine = ComponentProvider::engine().expect("component engine");
+        Component::new(&engine, wat::parse_str(text).expect("component text")).expect("compiles")
+    }
+
+    /// An activation with the given time limit and fuel that never runs out,
+    /// so that only the deadline can end a loop.
+    fn state_with_deadline(run_deadline: Duration) -> ComponentState {
+        ComponentState {
+            fuel: u64::MAX,
+            run_deadline,
+            ..ComponentState::new(None, "capsule-1".into(), None)
+        }
+    }
+
+    /// Runs the production activation on its own thread and gives up after
+    /// 20 s, so a run that no deadline stops fails here instead of hanging.
+    fn run_to_its_end(component: Component, state: ComponentState) -> (Result<()>, Duration) {
+        let engine = ComponentProvider::engine().expect("component engine");
+        let (done, ended) = std::sync::mpsc::channel();
+        let began = Instant::now();
+        std::thread::spawn(move || {
+            let result = ComponentProvider::instantiate_component(&engine, &component, state);
+            let _ = done.send(result);
+        });
+        let result = ended
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the run was still going after 20 s: no deadline stopped it");
+        (result, began.elapsed())
+    }
+
+    fn assert_ended_by_the_deadline(result: Result<()>) {
+        let err = result.expect_err("a loop that never ends must not finish");
+        assert!(
+            err.to_string()
+                .contains("Component run ended: epoch-deadline"),
+            "the ending must be the named deadline ending, was: {err}"
+        );
+    }
+
+    #[test]
+    fn a_quick_run_finishes_under_its_deadline() {
+        let component = lifecycle_component(false, false);
+        let (result, _) = run_to_its_end(component, state_with_deadline(Duration::from_secs(5)));
+        result.expect("a run that returns at once is not ended by the deadline");
+    }
+
+    #[test]
+    fn a_runaway_run_ends_by_the_deadline() {
+        let component = lifecycle_component(true, false);
+        let (result, _) =
+            run_to_its_end(component, state_with_deadline(Duration::from_millis(200)));
+        assert_ended_by_the_deadline(result);
+    }
+
+    #[test]
+    fn a_runaway_start_function_ends_by_the_deadline() {
+        let component = lifecycle_component(true, true);
+        let (result, _) =
+            run_to_its_end(component, state_with_deadline(Duration::from_millis(200)));
+        assert_ended_by_the_deadline(result);
+    }
+
+    #[test]
+    fn time_inside_bus_calls_is_not_counted_as_running() {
+        // One second already spent inside Bus calls: the 200 ms of own running
+        // time is only used up once the run has lasted longer than that second.
+        let mut state = state_with_deadline(Duration::from_millis(200));
+        state.in_bus = Duration::from_secs(1);
+        let (result, lasted) = run_to_its_end(lifecycle_component(true, false), state);
+        assert_ended_by_the_deadline(result);
+        assert!(
+            lasted >= Duration::from_secs(1),
+            "the run was ended after {lasted:?}, before its Bus time was used up"
+        );
+    }
+
+    #[test]
+    fn a_bus_call_adds_its_time_to_the_time_inside_the_bus() {
+        let mut state = ComponentState {
+            hostcall: Some(Arc::new(|_line, _capsule, _principal| {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": { "type": "capability_token", "token": "grant-token" }
+                })
+                .to_string())
+            })),
+            ..ComponentState::new(None, "capsule-1".into(), None)
+        };
+        assert_eq!(state.in_bus, Duration::ZERO);
+        elastos::bus::capabilities::Host::request(
+            &mut state,
+            elastos::bus::types::CapabilityRequest {
+                resource: "localhost://Users/self/Documents/test.json".into(),
+                actions: vec!["read".into()],
+                reason: "test".into(),
+            },
+        )
+        .expect("the grant");
+        assert!(
+            state.in_bus >= Duration::from_millis(50),
+            "the 50 ms Bus call was counted as {:?}",
+            state.in_bus
+        );
+    }
+
+    #[test]
+    fn a_new_activation_has_ten_seconds_of_its_own_running_time() {
+        let state = ComponentState::new(None, "capsule-1".into(), None);
+        assert_eq!(state.run_deadline, Duration::from_secs(10));
+        assert_eq!(state.in_bus, Duration::ZERO);
+        assert_eq!(state.fuel, 100_000_000);
+    }
+
+    #[test]
+    fn deadline_ticks_are_whole_ten_millisecond_ticks_and_never_zero() {
+        assert_eq!(deadline_ticks(Duration::from_secs(10)), 1000);
+        assert_eq!(deadline_ticks(Duration::from_millis(200)), 20);
+        assert_eq!(deadline_ticks(Duration::from_millis(19)), 1);
+        assert_eq!(deadline_ticks(Duration::from_millis(1)), 1);
+        assert_eq!(deadline_ticks(Duration::ZERO), 1);
+    }
+
     #[test]
     fn component_provider_supports_only_wasm_type() {
         let provider = ComponentProvider::new();
@@ -516,7 +739,7 @@ mod tests {
             })),
             capsule_id: "capsule-1".into(),
             principal_id: Some("person:local:test".into()),
-            limits: ComponentProvider::store_limits(),
+            ..ComponentState::new(None, String::new(), None)
         };
 
         let result = elastos::bus::providers::Host::invoke(
@@ -565,7 +788,7 @@ mod tests {
             })),
             capsule_id: "capsule-1".into(),
             principal_id: Some("person:local:test".into()),
-            limits: ComponentProvider::store_limits(),
+            ..ComponentState::new(None, String::new(), None)
         };
 
         let err = elastos::bus::providers::Host::invoke(
@@ -607,7 +830,7 @@ mod tests {
                 })),
                 capsule_id: "capsule-1".into(),
                 principal_id: Some("person:local:test".into()),
-                limits: ComponentProvider::store_limits(),
+                ..ComponentState::new(None, String::new(), None)
             };
             elastos::bus::providers::Host::invoke(
                 &mut state,
@@ -674,7 +897,7 @@ mod tests {
             })),
             capsule_id: "capsule-1".into(),
             principal_id: Some("person:local:test".into()),
-            limits: ComponentProvider::store_limits(),
+            ..ComponentState::new(None, String::new(), None)
         };
 
         for grant in [None, Some(String::new())] {
@@ -714,7 +937,7 @@ mod tests {
             })),
             capsule_id: "capsule-1".into(),
             principal_id: None,
-            limits: ComponentProvider::store_limits(),
+            ..ComponentState::new(None, String::new(), None)
         };
 
         let grant = elastos::bus::capabilities::Host::request(
