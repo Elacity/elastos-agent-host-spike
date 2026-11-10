@@ -351,8 +351,9 @@ async fn verify_candidate_before_migration(
     verify_installed_binary_version(&path, version, deadline).await
 }
 
-/// Hard limit for an untrusted candidate's `--version` probe. Every build
-/// ships this value; callers that need another deadline pass it explicitly.
+/// Hard limit for an untrusted candidate's `--version` probe. Production
+/// entries always use this value; only the `#[cfg(test)]` siblings take a
+/// caller-chosen deadline.
 pub(crate) const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const _: () = assert!(VERSION_CHECK_TIMEOUT.as_nanos() == 5_000_000_000);
 
