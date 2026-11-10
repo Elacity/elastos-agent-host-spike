@@ -1,6 +1,8 @@
 # Container component hashes: the sha256 of each viewer core built by
-# build-in-container.sh. Built at commit 7332bacb on native x86_64 runners,
-# twice each on fresh machines with the same result (10 Nov 2026).
+# build-in-container.sh. Built at commit 7332bacb, and again at 99f5ff38 (the
+# examples-only landing, with main's files outside examples/), on native
+# x86_64 runners: twice each on fresh machines, the same bytes every time
+# (10 Nov 2026).
 photo-viewer c11bb294d15e6914f4322ea3d16f09a0fff4e81c617f66aa09d7a892a6c97248
 docs-viewer 2219d49d379852ae4058b3c8d076842ce981da433147d175615fb0a04df10f59
 archive-viewer 770fad5ecc6f0502c81e3c7ea3bb7dca35465205a721ae413bce56831d004a60
