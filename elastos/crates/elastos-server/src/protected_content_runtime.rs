@@ -2078,21 +2078,15 @@ fn open_media_source_no_links(literal: &Path, name: &str) -> anyhow::Result<fs::
         let metadata = dir.metadata().map_err(|_| {
             invalid_media_provider_config(format!("{name} prerequisite parent is unavailable"))
         })?;
-        let quoted = crate::install_transaction::shell_quote_path(display);
         if metadata.uid() != 0 && metadata.uid() != uid {
             return Err(invalid_media_provider_config(format!(
-                "{name} prerequisite parent is unsafe: {} is not owned by you; fix with: sudo chown \"$(id -u)\" {quoted}",
+                "{name} prerequisite parent is unsafe: {} is not owned by you or root. Choose a user-owned location with safe parents",
                 display.display()
             )));
         }
-        if metadata.permissions().mode() & 0o022 != 0 {
-            let sudo = if metadata.uid() == 0 && uid != 0 {
-                "sudo "
-            } else {
-                ""
-            };
+        if metadata.permissions().mode() & 0o002 != 0 {
             return Err(invalid_media_provider_config(format!(
-                "{name} prerequisite parent is unsafe: {} is group- or world-writable; fix with: {sudo}chmod go-w {quoted}",
+                "{name} prerequisite parent is unsafe: {} is world-writable. Choose a user-owned location with safe parents",
                 display.display()
             )));
         }
@@ -2689,6 +2683,7 @@ fn load_runtime_custody_composition_config(
                 ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
                     peer_did: canonical_peer_did,
                     timeout_ms: None,
+                    reply_wait_ms: None,
                 })
             }
         };
@@ -3465,7 +3460,8 @@ fn read_runtime_media_source(
             anyhow::anyhow!("stored source length {stored_len} is out of bounds").context(MESSAGE),
         );
     }
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root = crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+        .map_err(|error| anyhow::anyhow!(error).context(MESSAGE))?;
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
         principal_id,
@@ -6346,7 +6342,22 @@ pub(crate) async fn open_runtime_custody_viewer(
             return Err(release_unavailable_missing!()());
         }
     };
-    let localhost_root = crate::auth::principal_localhost_root(&input.principal_id);
+    let localhost_root =
+        match crate::auth::principal_stored_localhost_root(Some(data_dir), &input.principal_id) {
+            Ok(root) => root,
+            Err(_) => {
+                let _ = settle_runtime_custody_viewer_cleanup(
+                    data_dir,
+                    registry.clone(),
+                    &listing,
+                    &input.principal_id,
+                    mint_id,
+                    open_pending.clone(),
+                )
+                .await;
+                return Err(release_unavailable_missing!()());
+            }
+        };
     let operation = match assemble_protected_content_runtime_release_operation(
         data_dir,
         &input.principal_id,
@@ -7767,7 +7778,8 @@ pub(crate) fn load_runtime_custody_profile_did(
     data_dir: &Path,
     principal_id: &str,
 ) -> anyhow::Result<String> {
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root = crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+        .map_err(|_| release_unavailable_missing!()())?;
     let profile = crate::collaboration_profile_authority::load_profile_authority(
         data_dir,
         principal_id,

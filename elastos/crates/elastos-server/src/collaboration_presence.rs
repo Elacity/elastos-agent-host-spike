@@ -283,7 +283,14 @@ impl CollaborationPresenceProductPort {
             }
             // The grant is bound to the current Profile, not the Profile in
             // an old envelope. A replacement Profile revokes the old grant.
-            let root = crate::auth::principal_localhost_root(principal_id);
+            let root = crate::auth::principal_stored_localhost_root(
+                Some(self.core.data_root()),
+                principal_id,
+            )
+            .inspect_err(
+                |error| tracing::warn!(%error, "Community presence denies unresolved principal"),
+            )
+            .ok()?;
             let profile = crate::collaboration_profile_authority::load_profile_authority(
                 self.core.data_root(),
                 principal_id,
@@ -328,7 +335,14 @@ impl CollaborationPresenceProductPort {
                 return None;
             }
             let principal = &operation.principal;
-            let root = crate::auth::principal_localhost_root(principal);
+            let root = crate::auth::principal_stored_localhost_root(
+                Some(self.core.data_root()),
+                principal,
+            )
+            .inspect_err(
+                |error| tracing::warn!(%error, "Community presence denies unresolved principal"),
+            )
+            .ok()?;
             let profile = crate::collaboration_profile_authority::load_profile_authority(
                 self.core.data_root(),
                 principal,
@@ -687,11 +701,51 @@ impl CollaborationPresenceProductPort {
     }
 
     pub(crate) fn history_participants(&self, now: u64) -> anyhow::Result<Vec<HistoryParticipant>> {
+        let mut peers = self
+            .live_presence_endpoints(now)?
+            .into_iter()
+            .map(|(_, endpoint_did)| HistoryParticipant { endpoint_did })
+            .collect::<Vec<_>>();
+        peers.sort_by(|left, right| left.endpoint_did.cmp(&right.endpoint_did));
+        peers.dedup_by(|left, right| left.endpoint_did == right.endpoint_did);
+        Ok(peers)
+    }
+
+    /// The devices that signed the live presence this Home holds, leaving
+    /// out one that is also that member's Profile DID. Only the signature is
+    /// evidence of a device; a DID a Profile merely declares is not.
+    pub(crate) fn seen_device_dids(&self, now: u64) -> anyhow::Result<Vec<String>> {
         let state = self
             .read_model
             .load_state()?
             .unwrap_or_else(|| self.read_model.empty_state());
-        let mut peers = Vec::new();
+        let mut signers = Vec::new();
+        for record in state.records {
+            let presence = self.read_model.verify_record(&record)?;
+            if presence.expires_at <= now
+                || presence.issued_at > now.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS)
+            {
+                continue;
+            }
+            let authorized = self
+                .core
+                .authorize_stored_product_message(record.envelope.as_bytes())?;
+            let signer = &authorized.message().envelope().signer_did;
+            if *signer != presence.sender_profile_did {
+                signers.push(signer.clone());
+            }
+        }
+        Ok(signers)
+    }
+
+    /// `(Profile DID, sole endpoint DID)` of every live, non-bootstrap
+    /// presence this Home holds.
+    fn live_presence_endpoints(&self, now: u64) -> anyhow::Result<Vec<(String, String)>> {
+        let state = self
+            .read_model
+            .load_state()?
+            .unwrap_or_else(|| self.read_model.empty_state());
+        let mut endpoints = Vec::new();
         for record in state.records {
             let presence = self.read_model.verify_record(&record)?;
             if presence.expires_at <= now
@@ -706,14 +760,10 @@ impl CollaborationPresenceProductPort {
                 if self.core.is_bootstrap_endpoint(endpoint) {
                     continue;
                 }
-                peers.push(HistoryParticipant {
-                    endpoint_did: endpoint.to_string(),
-                });
+                endpoints.push((presence.sender_profile_did, endpoint.to_string()));
             }
         }
-        peers.sort_by(|left, right| left.endpoint_did.cmp(&right.endpoint_did));
-        peers.dedup_by(|left, right| left.endpoint_did == right.endpoint_did);
-        Ok(peers)
+        Ok(endpoints)
     }
 
     /// The request carries its own live signed presence, avoiding a race with
@@ -1422,6 +1472,220 @@ mod tests {
         }
     }
 
+    async fn r6_own_presence_case(
+        kind: crate::auth::PrincipalKind,
+    ) -> (
+        tempfile::TempDir,
+        CollaborationPresenceProductPort,
+        crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
+        crate::esp_binding::EspRequestBinding,
+    ) {
+        use crate::auth::r4_fixture::set_kind;
+        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        const AGENT_ROOT: &str = "localhost://UsersAI/5dca74bd48d800a148776e87";
+        const HUMAN_ROOT: &str = "localhost://Users/5dca74bd48d800a148776e87";
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let fixture = fixture_at(dir.path());
+        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+            elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: "r4-presence-agent".into(),
+                public_key: "r4-key".into(),
+                sign_count: 1,
+                user_verified: true,
+                origin: "https://elastos.elacitylabs.com".into(),
+                rp_id: "elastos.elacitylabs.com".into(),
+                created_at: NOW,
+                last_used_at: NOW,
+                revoked_at: None,
+            },
+        );
+        let record = crate::auth::upsert_principal_for_binding_as_role_named(
+            dir.path(),
+            binding,
+            ID.into(),
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("R6"),
+            NOW,
+        )
+        .unwrap();
+        let root = if kind == crate::auth::PrincipalKind::Agent {
+            AGENT_ROOT
+        } else {
+            HUMAN_ROOT
+        };
+        set_kind(dir.path(), ID, kind, root);
+        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, root);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            dir.path(),
+            ID,
+            root,
+            &record.proof_binding_id,
+            "R6",
+            None,
+            NOW,
+        )
+        .unwrap();
+        let authority = crate::collaboration_presence_grant::test_authority();
+        let port = fixture.presence.with_presence_authority(authority.clone());
+        crate::collaboration_presence_grant::set_presence_grant(
+            &authority,
+            dir.path(),
+            ID,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            crate::collaboration_presence_grant::PresenceDecision::Always,
+            NOW,
+        )
+        .await
+        .unwrap();
+        let granted = crate::collaboration_presence_grant::presence_grant(
+            &authority,
+            dir.path(),
+            ID,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            crate::collaboration_presence_grant::PresencePublisher::Runtime,
+            NOW,
+        )
+        .await
+        .unwrap();
+        let mut operation = presence_request_binding("r6-own", ID, &profile).unwrap();
+        operation.request_id = granted.bind_request_id("r6-own");
+        (dir, port, profile, operation)
+    }
+
+    #[derive(Clone)]
+    struct R6WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for R6WarningWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn r6_capture_warnings() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = R6WarningWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        (output, tracing::subscriber::set_default(subscriber))
+    }
+
+    fn r6_assert_unresolved_warning(output: &Arc<Mutex<Vec<u8>>>) {
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("Community presence denies unresolved principal")
+                && log.contains("has no stored record"),
+            "expected unresolved-principal denial warning: {log}"
+        );
+    }
+
+    /// Protected principal-root objects opened since `before` (the production
+    /// open path records each one per data root under cfg(test)).
+    fn r6_opens_since(data_root: &Path, before: usize) -> Vec<String> {
+        crate::auth::principal_root_object_opens(data_root)[before..].to_vec()
+    }
+
+    // The id-rule (Users) root's Profile, written independently of the code.
+    const R6_ID_RULE_PROFILE: &str =
+        "localhost://Users/5dca74bd48d800a148776e87/.AppData/ElastOS/Profile/profile-authority.json";
+
+    #[tokio::test]
+    async fn r6_retire_denied_current_presence_uses_stored_kind() {
+        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        for kind in [
+            crate::auth::PrincipalKind::Agent,
+            crate::auth::PrincipalKind::Human,
+        ] {
+            let (_dir, port, profile, _) = r6_own_presence_case(kind).await;
+            let result = port
+                .retire_denied_current_presence(ID, &profile.document().profile_did, NOW)
+                .await;
+            assert!(
+                result,
+                "stored {kind:?} current presence must remain granted"
+            );
+        }
+        // The Human id-rule root has a valid Profile and grant. Only the
+        // missing stored record may deny this previously granted presence.
+        let (missing, port, profile, _) =
+            r6_own_presence_case(crate::auth::PrincipalKind::Human).await;
+        let profile_did = &profile.document().profile_did;
+        let before = crate::auth::principal_root_object_opens(missing.path()).len();
+        assert!(
+            port.retire_denied_current_presence(ID, profile_did, NOW)
+                .await
+        );
+        // Live channel: the granted call reads this Human's id-rule Profile.
+        assert!(r6_opens_since(missing.path(), before).contains(&R6_ID_RULE_PROFILE.to_string()));
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        let (warnings, _guard) = r6_capture_warnings();
+        let before = crate::auth::principal_root_object_opens(missing.path()).len();
+        assert!(
+            !port
+                .retire_denied_current_presence(ID, profile_did, NOW)
+                .await
+        );
+        let opened = r6_opens_since(missing.path(), before);
+        assert!(
+            opened.is_empty(),
+            "unresolved presence must read no principal-root object, not the id-rule Profile: {opened:?}"
+        );
+        r6_assert_unresolved_warning(&warnings);
+    }
+
+    #[tokio::test]
+    async fn r6_check_own_operation_uses_stored_kind() {
+        for kind in [
+            crate::auth::PrincipalKind::Agent,
+            crate::auth::PrincipalKind::Human,
+        ] {
+            let (_dir, port, profile, operation) = r6_own_presence_case(kind).await;
+            let result = port
+                .check_own_operation(&operation, &profile.document().profile_did, NOW, false)
+                .await;
+            assert!(result, "stored {kind:?} operation must remain granted");
+        }
+        let (missing, port, profile, operation) =
+            r6_own_presence_case(crate::auth::PrincipalKind::Human).await;
+        let profile_did = &profile.document().profile_did;
+        let before = crate::auth::principal_root_object_opens(missing.path()).len();
+        assert!(
+            port.check_own_operation(&operation, profile_did, NOW, false)
+                .await
+        );
+        // Live channel: the granted call reads this Human's id-rule Profile.
+        assert!(r6_opens_since(missing.path(), before).contains(&R6_ID_RULE_PROFILE.to_string()));
+        crate::auth::r4_fixture::remove(missing.path(), &operation.principal);
+        let (warnings, _guard) = r6_capture_warnings();
+        let before = crate::auth::principal_root_object_opens(missing.path()).len();
+        assert!(
+            !port
+                .check_own_operation(&operation, profile_did, NOW, false)
+                .await
+        );
+        let opened = r6_opens_since(missing.path(), before);
+        assert!(
+            opened.is_empty(),
+            "unresolved operation must read no principal-root object, not the id-rule Profile: {opened:?}"
+        );
+        r6_assert_unresolved_warning(&warnings);
+    }
+
     fn remote_authority(
         fixture: &Fixture,
         display_name: &str,
@@ -1889,6 +2153,45 @@ mod tests {
             .data_root
             .join(PRESENCE_STATE_PARENT)
             .exists());
+    }
+
+    /// A member seen live in presence yields their device DID, never their
+    /// Profile DID, until the presence expires.
+    #[test]
+    fn seen_device_dids_are_live_members_device_dids() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = fixture_at(temp.path());
+        assert!(fixture.presence.seen_device_dids(NOW).unwrap().is_empty());
+        let (remote, remote_profile) = remote_authority(&fixture, "Seen", None);
+        let message = remote
+            .prepare_profile_outgoing(
+                &remote_profile,
+                CHAT_SERVICE,
+                PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({}),
+                NOW,
+                PRESENCE_TTL_SECS,
+            )
+            .unwrap();
+        fixture
+            .core
+            .accept_incoming_from_signed_source_for_test(message.envelope_bytes(), NOW)
+            .unwrap();
+        let handoffs = fixture.presence.pending_presences().unwrap();
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(
+            fixture.presence.project_handoff(&handoffs[0], NOW).unwrap(),
+            CollaborationPresenceProjectionOutcome::Applied
+        );
+        assert_eq!(
+            fixture.presence.seen_device_dids(NOW + 1).unwrap(),
+            vec![remote_profile.sole_endpoint_did().unwrap().to_string()]
+        );
+        assert!(fixture
+            .presence
+            .seen_device_dids(NOW + PRESENCE_TTL_SECS)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -95,8 +95,9 @@ Use dotted prerelease identifiers such as `-rc.31`, not `-rc31`.
 ## Pre-release Policy
 
 Use `-alpha.N` for a signed test release published while a version is still
-being built; the 0.8.0 train ships `0.8.0-alpha.N`. Use `-rc.N` for a signed
-candidate that is published before its final version.
+being built (the 0.8.0 test releases ran to `0.8.0-alpha.26`). Use `-rc.N` for
+a signed candidate that is published before its final version; 2.0.0 is
+published first as `2.0.0-rc.N`.
 A monthly source release (a repository tag; signed releases over Carrier are
 the only binary distribution) uses plain `X.Y.Z`; its notes state what is not
 ready for users.
@@ -151,6 +152,8 @@ This repo keeps one coordinated release changelog:
 - [`elastos/CHANGELOG.md`](../elastos/CHANGELOG.md)
 
 That matches the coordinated runtime release train better than per-crate changelogs. A publish is not complete unless the changelog and public status story are honest about what changed.
+
+A release section's Added, Changed, Fixed, Removed and Security bullets are what System shows, without their headings, before someone updates. `scripts/release-platform-input-test.py` holds every section dated from 31 October 2026 to the release-notes rules (#507): plain text for a person using Home, one standalone line per bullet, no internal terms, and an issue number only where a bullet states a limit.
 
 ## Publishing a release
 

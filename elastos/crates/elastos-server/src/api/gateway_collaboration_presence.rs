@@ -215,11 +215,11 @@ pub(super) fn authenticated_presence_presentation_for_context(
     if principal.principal_id != context.principal_id() {
         return Err(HomePresenceAuthenticationError::Denied);
     }
-    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
+    let localhost_root = context.root().localhost_root();
     let profile = crate::collaboration_profile_authority::load_profile_authority(
         &state.data_dir,
         context.principal_id(),
-        &localhost_root,
+        localhost_root,
     )
     .map_err(|_| HomePresenceAuthenticationError::Internal)?;
     let profile = profile.ok_or(HomePresenceAuthenticationError::ProfileRequired)?;
@@ -548,8 +548,15 @@ async fn publish_runtime_owned_presence_pass(
     let mut published = 0usize;
     let mut nobody_granted = true;
     let scope = port.presence_scope();
+    let auth_data_dir = super::gateway_home_token::home_launch_auth_data_dir(data_dir);
     for principal in crate::auth::active_passkey_principals(data_dir)? {
-        let localhost_root = crate::auth::principal_localhost_root(&principal.principal_id);
+        if crate::auth::stored_principal_record(&auth_data_dir, &principal.principal_id)?.is_none()
+        {
+            tracing::warn!(principal_id = %principal.principal_id,
+                "Runtime presence skips principal missing from trusted auth store");
+            continue;
+        }
+        let localhost_root = runtime_presence_principal_root(data_dir, &principal.principal_id)?;
         let Some(profile) = crate::collaboration_profile_authority::load_profile_authority(
             data_dir,
             &principal.principal_id,
@@ -596,6 +603,17 @@ async fn publish_runtime_owned_presence_pass(
         published = published.saturating_add(1);
     }
     Ok((published, nobody_granted))
+}
+
+fn runtime_presence_principal_root(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<String> {
+    Ok(
+        super::gateway_home_token::wallet_principal_root(data_dir, principal_id)?
+            .localhost_root()
+            .to_string(),
+    )
 }
 
 /// The one question every publisher asks: may this publisher announce this
@@ -658,6 +676,314 @@ fn presence_heartbeat_request_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn r4_presence_pass_skips_missing_auth_record() {
+        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        let child = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        for dir in [child.path(), parent.path()] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(child.path()).unwrap();
+        let now = crate::auth::now_ts();
+        let mut agent = None;
+        for credential in ["r4-presence-missing", "r4-presence-agent"] {
+            let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+                elastos_runtime::auth::PasskeyWebAuthnBinding {
+                    credential_id: credential.into(),
+                    public_key: "r4-key".into(),
+                    sign_count: 1,
+                    user_verified: true,
+                    origin: "https://elastos.elacitylabs.com".into(),
+                    rp_id: "elastos.elacitylabs.com".into(),
+                    created_at: now,
+                    last_used_at: now,
+                    revoked_at: None,
+                },
+            );
+            let id =
+                crate::auth::passkey_credential_principal_id("elastos.elacitylabs.com", credential)
+                    .unwrap();
+            let record = crate::auth::upsert_principal_for_binding_as_role_named(
+                child.path(),
+                binding,
+                id,
+                crate::auth::RuntimePrincipalRole::Admin,
+                Some("R4 Agent"),
+                now,
+            )
+            .unwrap();
+            if credential == "r4-presence-agent" {
+                agent = Some(record);
+            }
+        }
+        let agent = agent.unwrap();
+        assert_eq!(agent.principal_id, ID);
+        let protection = crate::auth::store_test_principal_root_protection(child.path(), ID);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            child.path(),
+            ID,
+            &protection.localhost_root,
+            &agent.proof_binding_id,
+            "R4 Agent",
+            None,
+            now,
+        )
+        .unwrap();
+        elastos_identity::load_or_create_did(parent.path()).unwrap();
+        crate::auth::upsert_principal_for_binding_as_role_named(
+            parent.path(),
+            agent.proof_binding.clone(),
+            ID.into(),
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("R4 Agent"),
+            now,
+        )
+        .unwrap();
+        let _auth_dir =
+            super::super::gateway_home_token::set_test_home_launch_auth_data_dir(parent.path());
+        let chat = crate::collaboration_product::test_chat_product_port(
+            child.path(),
+            "r4-presence",
+            "community",
+        );
+        let authority = crate::collaboration_presence_grant::test_authority();
+        let port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            chat.test_core().clone(),
+        )
+        .unwrap()
+        .with_presence_authority(authority.clone());
+        crate::collaboration_presence_grant::set_presence_grant(
+            &authority,
+            child.path(),
+            ID,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            crate::collaboration_presence_grant::PresenceDecision::Always,
+            now,
+        )
+        .await
+        .unwrap();
+        let result = publish_runtime_owned_presence_pass(child.path(), &port, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.0, 1,
+            "R4 valid profile publishes after a missing auth record"
+        );
+        let pending = port.pending_outgoing_presences(now).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].sender_profile_did(),
+            profile.document().profile_did
+        );
+    }
+
+    #[tokio::test]
+    async fn r4_presence_pass_skips_remote_principal_before_root_lookup() {
+        const REMOTE: &str = "remote:9c2e4a6b8d0f13572468ace0bdf13579";
+        const LOCAL: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        let child = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        for dir in [child.path(), parent.path()] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(child.path()).unwrap();
+        elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let now = crate::auth::now_ts();
+        let role = crate::auth::RuntimePrincipalRole::Admin;
+        let mut local = None;
+        for (credential, id) in [("r4-presence-remote", REMOTE), ("r4-presence-agent", LOCAL)] {
+            let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+                elastos_runtime::auth::PasskeyWebAuthnBinding {
+                    credential_id: credential.into(),
+                    public_key: "r4-key".into(),
+                    sign_count: 1,
+                    user_verified: true,
+                    origin: "https://elastos.elacitylabs.com".into(),
+                    rp_id: "elastos.elacitylabs.com".into(),
+                    created_at: now,
+                    last_used_at: now,
+                    revoked_at: None,
+                },
+            );
+            let upsert = |dir: &std::path::Path, binding| {
+                crate::auth::upsert_principal_for_binding_as_role_named(
+                    dir,
+                    binding,
+                    id.into(),
+                    role,
+                    Some("R4"),
+                    now,
+                )
+                .unwrap()
+            };
+            let record = upsert(child.path(), binding);
+            if id == LOCAL {
+                upsert(parent.path(), record.proof_binding.clone());
+                local = Some(record);
+            }
+        }
+        let local = local.unwrap();
+        let protection = crate::auth::store_test_principal_root_protection(child.path(), LOCAL);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            child.path(),
+            LOCAL,
+            &protection.localhost_root,
+            &local.proof_binding_id,
+            "R4",
+            None,
+            now,
+        )
+        .unwrap();
+        let _auth_dir =
+            super::super::gateway_home_token::set_test_home_launch_auth_data_dir(parent.path());
+        let chat = crate::collaboration_product::test_chat_product_port(
+            child.path(),
+            "r4-rm",
+            "community",
+        );
+        let authority = crate::collaboration_presence_grant::test_authority();
+        let port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            chat.test_core().clone(),
+        )
+        .unwrap()
+        .with_presence_authority(authority.clone());
+        crate::collaboration_presence_grant::set_presence_grant(
+            &authority,
+            child.path(),
+            LOCAL,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            crate::collaboration_presence_grant::PresenceDecision::Always,
+            now,
+        )
+        .await
+        .unwrap();
+        let result = publish_runtime_owned_presence_pass(child.path(), &port, now).await;
+        assert!(
+            matches!(result, Ok((1, false))),
+            "R4 presence skips the remote principal and publishes the local one: {result:?}"
+        );
+        let pending = port.pending_outgoing_presences(now).unwrap();
+        let senders: Vec<&str> = pending.iter().map(|p| p.sender_profile_did()).collect();
+        assert_eq!(senders, [profile.document().profile_did.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn r4_presence_pass_uses_agent_root() {
+        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
+        const AGENT_ROOT: &str = "localhost://UsersAI/5dca74bd48d800a148776e87";
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let now = crate::auth::now_ts();
+        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+            elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: "r4-presence-agent".into(),
+                public_key: "r4-key".into(),
+                sign_count: 1,
+                user_verified: true,
+                origin: "https://elastos.elacitylabs.com".into(),
+                rp_id: "elastos.elacitylabs.com".into(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+        );
+        crate::auth::upsert_principal_for_binding_as_role_named(
+            dir.path(),
+            binding,
+            ID.into(),
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("R4 Agent"),
+            now,
+        )
+        .unwrap();
+        crate::auth::r4_fixture::set_kind(
+            dir.path(),
+            ID,
+            crate::auth::PrincipalKind::Agent,
+            AGENT_ROOT,
+        );
+        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, AGENT_ROOT);
+        let record = crate::auth::stored_principal_record(dir.path(), ID)
+            .unwrap()
+            .unwrap();
+        let _profile = crate::collaboration_profile_authority::update_profile_authority(
+            dir.path(),
+            ID,
+            AGENT_ROOT,
+            &record.proof_binding_id,
+            "R4 Agent",
+            None,
+            now,
+        )
+        .unwrap();
+        assert!(
+            crate::collaboration_profile_authority::load_profile_authority(
+                dir.path(),
+                ID,
+                AGENT_ROOT,
+            )
+            .unwrap()
+            .is_some()
+        );
+        let path =
+            crate::collaboration_profile_authority::profile_authority_path(dir.path(), AGENT_ROOT)
+                .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let chat = crate::collaboration_product::test_chat_product_port(
+            dir.path(),
+            "r4-agent-root",
+            "community",
+        );
+        let port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            chat.test_core().clone(),
+        )
+        .unwrap();
+        let result = publish_runtime_owned_presence_pass(dir.path(), &port, now).await;
+        assert!(
+            matches!(&result, Err(error) if error.to_string() == "profile authority bundle must be a regular file"),
+            "R4 presence looked up the Agent profile under {AGENT_ROOT}: {result:?}"
+        );
+    }
+
+    #[test]
+    fn r4_runtime_presence_uses_stored_root() {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        use crate::auth::PrincipalKind;
+        let missing = tempfile::tempdir().unwrap();
+        assert_eq!(
+            runtime_presence_principal_root(missing.path(), ID)
+                .unwrap_err()
+                .to_string(),
+            "Wallet authority principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            store(dir.path(), kind);
+            assert_eq!(
+                runtime_presence_principal_root(dir.path(), ID).unwrap(),
+                expected,
+                "R4 runtime presence root"
+            );
+        }
+    }
+
     use crate::collaboration_profile_authority::signed_profile_document_for_test;
     use ed25519_dalek::SigningKey;
     use elastos_runtime::signature::generate_keypair;
@@ -1069,5 +1395,124 @@ mod tests {
             inside_bucket,
             presence_heartbeat_request_id(&changed, 44).unwrap()
         );
+    }
+
+    /// A stored passkey principal with a signed Profile, plus its GatewayState.
+    fn stored_presence_fixture(
+        temp: &std::path::Path,
+    ) -> (GatewayState, crate::auth::PrincipalRecord) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(temp).unwrap();
+        let now = crate::auth::now_ts();
+        let rp_id = "elastos.elacitylabs.com";
+        let credential_id = "presence-stored-root";
+        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+            elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: credential_id.to_string(),
+                public_key: "presence-stored-root-public-key".to_string(),
+                sign_count: 1,
+                user_verified: true,
+                origin: "https://elastos.elacitylabs.com".to_string(),
+                rp_id: rp_id.to_string(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+        );
+        let principal_id =
+            crate::auth::passkey_credential_principal_id(rp_id, credential_id).unwrap();
+        let principal = crate::auth::upsert_principal_for_binding_as_role_named(
+            temp,
+            binding,
+            principal_id,
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("Stored Presence"),
+            now,
+        )
+        .unwrap();
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp, &principal.principal_id);
+        crate::collaboration_profile_authority::update_profile_authority(
+            temp,
+            &principal.principal_id,
+            &protection.localhost_root,
+            &principal.proof_binding_id,
+            "Stored Presence",
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        let state = GatewayState {
+            carrier_endpoint: None,
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            collaboration_discovery_service: None,
+            identity_manager: std::sync::Arc::new(std::sync::OnceLock::new()),
+            cache_dir: temp.to_path_buf(),
+            data_dir: temp.to_path_buf(),
+        };
+        (state, principal)
+    }
+
+    #[test]
+    fn a_presence_context_without_a_stored_root_is_refused_before_the_id_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, principal) = stored_presence_fixture(temp.path());
+        let unstored = HomeLaunchTokenContext::for_test(
+            "person:local:presence-no-stored-record",
+            "session",
+            Some("proof:no-stored-record".to_string()),
+            "grant",
+        );
+        assert!(
+            matches!(
+                authenticated_presence_presentation_for_context(&state, &unstored),
+                Err(HomePresenceAuthenticationError::Denied)
+            ),
+            "a principal with no stored record is refused"
+        );
+        let fixture_root = HomeLaunchTokenContext::for_test(
+            principal.principal_id.clone(),
+            "session",
+            Some(principal.proof_binding_id.clone()),
+            "grant",
+        );
+        assert!(
+            matches!(
+                authenticated_presence_presentation_for_context(&state, &fixture_root),
+                Err(HomePresenceAuthenticationError::Internal)
+            ),
+            "a context root no stored record backs is refused, not served from the id-rule root"
+        );
+    }
+
+    #[test]
+    fn a_stored_presence_principal_keeps_its_stored_profile_presentation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, principal) = stored_presence_fixture(temp.path());
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(
+            temp.path(),
+            temp.path(),
+            &principal.principal_id,
+        )
+        .unwrap();
+        let context = HomeLaunchTokenContext::resolved(
+            root,
+            principal.principal_id.clone(),
+            "session".to_string(),
+            Some(principal.proof_binding_id.clone()),
+            "grant".to_string(),
+        );
+        let Ok(presentation) = authenticated_presence_presentation_for_context(&state, &context)
+        else {
+            panic!("a stored principal must present its signed Profile");
+        };
+        assert_eq!(presentation.display_name, "Stored Presence");
+        assert_eq!(presentation.principal_id, principal.principal_id);
     }
 }

@@ -83,6 +83,10 @@ struct LibraryObject {
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<Value>,
     published: bool,
+    /// The active publication: its own CID, link, time and the file revision
+    /// it shares, which can differ from the file's current bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication: Option<Value>,
     shared: bool,
     capabilities: Vec<&'static str>,
 }
@@ -127,6 +131,15 @@ struct LibraryPublishRecord {
     availability: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     listing_uri: Option<String>,
+    /// The file revision this publication shares (plain publications).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    /// This publication's owner id in Content, stable across rename and move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication_id: Option<String>,
+    /// The size of the published bytes (plain publications).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,12 +524,7 @@ impl Provider for ObjectProvider {
                 };
                 handle_runtime_custody_library_request(data_dir, registry, request, None).await
             }
-            request => {
-                tokio::task::spawn_blocking(move || handle_library_request(&data_dir, request))
-                    .await
-                    .map_err(|err| anyhow!("object provider task failed: {err}"))
-                    .and_then(|result| result)
-            }
+            request => handle_library_request_serialized(data_dir, request).await,
         };
 
         Ok(match result {
@@ -784,16 +792,39 @@ pub(crate) async fn handle_object_provider_runtime_request_with_gateway(
             handle_library_request_with_protected_content_status(data_dir, request, Some(registry))
                 .await
         }
-        request => tokio::task::spawn_blocking(move || handle_library_request(&data_dir, request))
-            .await
-            .map_err(|err| anyhow!("object provider task failed: {err}"))
-            .and_then(|result| result),
+        request => handle_library_request_serialized(data_dir, request).await,
     };
 
     match result {
         Ok(data) => provider_ok(data),
         Err(err) => provider_error_from("library_error", &err),
     }
+}
+
+/// A file operation that moves or checks publication records (rename, move,
+/// trash, restore, delete) runs under `PUBLICATIONS`, so a publish never
+/// writes a record for a file that moved meanwhile.
+async fn handle_library_request_serialized(
+    data_dir: PathBuf,
+    request: ObjectProviderRequest,
+) -> anyhow::Result<Value> {
+    let touches_records = matches!(
+        request,
+        ObjectProviderRequest::Rename { .. }
+            | ObjectProviderRequest::Move { .. }
+            | ObjectProviderRequest::Trash { .. }
+            | ObjectProviderRequest::Restore { .. }
+            | ObjectProviderRequest::DeletePermanently { .. }
+            | ObjectProviderRequest::EmptyTrash { .. }
+    );
+    let _serialized = match touches_records {
+        true => Some(PUBLICATIONS.lock().await),
+        false => None,
+    };
+    tokio::task::spawn_blocking(move || handle_library_request(&data_dir, request))
+        .await
+        .map_err(|err| anyhow!("object provider task failed: {err}"))
+        .and_then(|result| result)
 }
 
 async fn handle_library_request_with_protected_content_status(
@@ -1252,12 +1283,16 @@ fn handle_library_request(
 ) -> anyhow::Result<Value> {
     match request {
         ObjectProviderRequest::Roots { principal_id } => {
-            Ok(json!({ "roots": library_roots(data_dir, &principal_id) }))
+            Ok(json!({ "roots": library_roots(data_dir, &principal_id)? }))
         }
         ObjectProviderRequest::List { principal_id, uri } => {
-            let root = crate::auth::principal_localhost_root(&principal_id);
+            let root =
+                crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?
+                    .localhost_root()
+                    .to_string();
             let uri = uri.unwrap_or_else(|| root.clone());
-            let target = library_target(data_dir, &principal_id, &uri)?;
+            let target = library_target(data_dir, &principal_id, &uri)
+                .with_context(|| format!("Library list at {uri}"))?;
             if !target.path.exists() {
                 return Ok(json!({ "uri": target.uri, "objects": [] }));
             }
@@ -1568,6 +1603,7 @@ fn handle_library_request(
             if is_runtime_private_uri(&target.localhost_root, &target.uri) {
                 bail!("runtime-private Library objects cannot be moved to Trash");
             }
+            refuse_deleting_published(data_dir, &principal_id, &target.uri)?;
             let name = target
                 .uri
                 .rsplit('/')
@@ -1660,6 +1696,7 @@ fn handle_library_request(
                 bail!("library delete_permanently target must be in Trash");
             }
             check_revision(data_dir, &principal_id, &target.uri, if_revision.as_deref())?;
+            refuse_deleting_published(data_dir, &principal_id, &target.uri)?;
             if target.path.is_dir() {
                 fs::remove_dir_all(&target.path)?;
             } else {
@@ -1676,9 +1713,14 @@ fn handle_library_request(
             Ok(json!({ "deleted_uri": target.uri }))
         }
         ObjectProviderRequest::EmptyTrash { principal_id } => {
-            let root = crate::auth::principal_localhost_root(&principal_id);
+            let root =
+                crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?
+                    .localhost_root()
+                    .to_string();
             let trash_root = format!("{root}/.Trash");
-            let target = library_target(data_dir, &principal_id, &trash_root)?;
+            let target = library_target(data_dir, &principal_id, &trash_root)
+                .with_context(|| format!("Library empty Trash at {trash_root}"))?;
+            refuse_deleting_published(data_dir, &principal_id, &target.uri)?;
             let mut deleted_uris = Vec::new();
             if target.path.exists() {
                 if !target.path.is_dir() {
@@ -2010,8 +2052,8 @@ async fn library_publish(
     )>,
 ) -> anyhow::Result<Value> {
     let target = library_target(data_dir, principal_id, uri)?;
-    check_revision(data_dir, principal_id, &target.uri, if_revision)?;
     if let Some(protection) = protection {
+        check_revision(data_dir, principal_id, &target.uri, if_revision)?;
         anyhow::ensure!(
             crate::protected_content_runtime::protected_content_enabled(data_dir),
             "protected content is not available in this release"
@@ -2063,6 +2105,9 @@ async fn library_publish(
             receipt: facts.receipt,
             availability: facts.availability,
             listing_uri: facts.listing_uri,
+            revision: None,
+            publication_id: None,
+            size_bytes: None,
         };
         write_publish_record(data_dir, principal_id, &record)?;
         let object = library_object(data_dir, principal_id, &target.uri)?;
@@ -2091,47 +2136,169 @@ async fn library_publish(
             "published_at": record.published_at,
         }));
     }
-    if !target.path.is_file() {
-        bail!("library publish currently supports files only");
+    Ok(
+        publish_plain_library_file(data_dir, &registry, principal_id, &target, if_revision)
+            .await?
+            .data,
+    )
+}
+
+/// Library Publish and Chat attach share one size cap. An unencrypted file is
+/// refused from its size before it is read. An encrypted file's plaintext size
+/// is known only once it is decrypted, so its read is bounded by the size an
+/// 8 MiB file takes on disk (about 10.7 MiB) and the exact cap is checked
+/// right after.
+pub(crate) const LIBRARY_PUBLISH_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// The most a file within the cap takes on disk: an encrypted Library file is
+/// a small JSON envelope around its base64 AES-GCM ciphertext and 16-byte tag.
+const LIBRARY_PUBLISH_MAX_STORED_BYTES: u64 =
+    (LIBRARY_PUBLISH_MAX_BYTES + 16).div_ceil(3) * 4 + 64 * 1024;
+const PUBLISH_UNAVAILABLE: &str = "Publishing isn't available right now. Try again.";
+const PUBLISH_CHANGED_SINCE_PUBLISH: &str =
+    "This file changed after it was published. Unpublish it first, then publish it again.";
+const PUBLISH_NOT_ALLOWED_HERE: &str = "Only files in your Library places can be published.";
+const LIBRARY_RUNTIME_DIR: &str = ".AppData/LocalHost/.Runtime/Library";
+
+/// One Library file published publicly: the Library publish response, and the
+/// name, size and CID a Chat post shows.
+pub(crate) struct LibraryFilePublication {
+    pub(crate) data: Value,
+    pub(crate) cid: String,
+    pub(crate) name: String,
+    pub(crate) size_bytes: u64,
+    publication_id: String,
+}
+
+/// One lock for every publication record on this Home: publish, unpublish,
+/// repair, Chat attach, and the rename, move and delete steps that move or
+/// check records never interleave, whoever makes them. A record therefore
+/// always follows its file, and the published-CID index always matches the
+/// records.
+static PUBLICATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The one Library publish operation, shared by Library Publish and Chat
+/// attach: a file in one of the principal's Library places is pinned on this
+/// Home only and recorded with the revision it shares. A new record takes
+/// `publication_id` when given. Caller holds `PUBLICATIONS`.
+async fn publish_library_uri_locked(
+    data_dir: &Path,
+    registry: &ProviderRegistry,
+    principal_id: &str,
+    uri: &str,
+    if_revision: Option<&str>,
+    publication_id: Option<String>,
+) -> anyhow::Result<LibraryFilePublication> {
+    if !uri.trim().starts_with("localhost://") {
+        return Err(library_unsupported(
+            "not_allowed_here",
+            PUBLISH_NOT_ALLOWED_HERE,
+        ));
     }
-    let bytes = read_library_file_bytes(data_dir, principal_id, &target)?;
-    let filename = target
+    let target = library_target(data_dir, principal_id, uri)?;
+    publish_plain_locked(
+        data_dir,
+        registry,
+        principal_id,
+        &target,
+        if_revision,
+        publication_id,
+    )
+    .await
+}
+
+async fn publish_plain_library_file(
+    data_dir: &Path,
+    registry: &ProviderRegistry,
+    principal_id: &str,
+    target: &LibraryTarget,
+    if_revision: Option<&str>,
+) -> anyhow::Result<LibraryFilePublication> {
+    let _serialized = PUBLICATIONS.lock().await;
+    publish_plain_locked(data_dir, registry, principal_id, target, if_revision, None).await
+}
+
+async fn publish_plain_locked(
+    data_dir: &Path,
+    registry: &ProviderRegistry,
+    principal_id: &str,
+    target: &LibraryTarget,
+    if_revision: Option<&str>,
+    publication_id: Option<String>,
+) -> anyhow::Result<LibraryFilePublication> {
+    let (bytes, revision) = read_publish_source(data_dir, principal_id, target, if_revision)?;
+    let name = target
         .uri
         .rsplit('/')
         .next()
         .filter(|name| !name.is_empty())
-        .unwrap_or("object.bin");
+        .unwrap_or("object.bin")
+        .to_string();
+    let size_bytes = bytes.len() as u64;
+    if let Some(record) = read_publish_record(data_dir, principal_id, &target.uri)
+        .ok()
+        .filter(record_is_published)
+    {
+        if record_is_runtime_custody(&record) {
+            return Err(library_unsupported(
+                "protected",
+                "This file is protected. Unpublish it first.",
+            ));
+        }
+        if record.revision.as_deref() != Some(revision.as_str()) {
+            return Err(library_refusal(
+                "changed_since_publish",
+                PUBLISH_CHANGED_SINCE_PUBLISH,
+            ));
+        }
+        let object = library_object(data_dir, principal_id, &target.uri)?;
+        return Ok(LibraryFilePublication {
+            data: publication_response(&record, object),
+            publication_id: record_publication_id(&record),
+            cid: record.cid,
+            name,
+            size_bytes,
+        });
+    }
+    let publication_id = publication_id.unwrap_or_else(|| hex::encode(rand::random::<[u8; 16]>()));
+    // Pin first, then record. Peers are served only CIDs an active record
+    // lists, so a crash in between leaves a pinned CID that is not served,
+    // even when the same bytes were published and withdrawn before.
     let publish_request = json!({
         "op": "publish",
         "kind": "file",
-        "filename": filename,
-        "mime": mime_for_name(filename),
+        "filename": name,
+        "mime": mime_for_name(&name),
         "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
         "pin": true,
+        "availability_policy": crate::content::LOCAL_PIN_AVAILABILITY_POLICY,
         "publisher_did": principal_id,
     });
-    let response = registry
-        .send_raw("content", &publish_request)
-        .await
-        .map_err(|err| anyhow!("content provider unavailable: {err}"))?;
-    if response.get("status").and_then(Value::as_str) == Some("error") {
-        let message = response
-            .get("message")
+    drop(bytes);
+    let response = registry.send_raw("content", &publish_request).await;
+    drop(publish_request);
+    let data = match response {
+        Ok(response) if response.get("status").and_then(Value::as_str) != Some("error") => {
+            response.get("data").cloned()
+        }
+        Ok(response) => {
+            tracing::warn!(response = %response, "library publish: content publish refused");
+            None
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "library publish: content provider unavailable");
+            None
+        }
+    };
+    let Some((data, cid)) = data.and_then(|data| {
+        let cid = data
+            .get("cid")
             .and_then(Value::as_str)
-            .unwrap_or("content publish failed");
-        bail!("content publish failed: {message}");
-    }
-    let data = response
-        .get("data")
-        .cloned()
-        .ok_or_else(|| anyhow!("content publish response missing data"))?;
-    let payload_cid = data
-        .get("cid")
-        .and_then(Value::as_str)
-        .filter(|cid| !cid.trim().is_empty())
-        .ok_or_else(|| anyhow!("content publish response missing cid"))?
-        .to_string();
-    let cid = payload_cid;
+            .filter(|cid| !cid.trim().is_empty())?
+            .to_string();
+        Some((data, cid))
+    }) else {
+        return Err(library_refusal("unavailable", PUBLISH_UNAVAILABLE));
+    };
     let receipt = data
         .get("receipt")
         .cloned()
@@ -2140,7 +2307,7 @@ async fn library_publish(
         .get("availability")
         .cloned()
         .unwrap_or_else(|| json!({"status": "unknown"}));
-    let content_security = published_content_security(data_dir, principal_id, &target)?;
+    let content_security = published_content_security(data_dir, principal_id, target)?;
     let record = LibraryPublishRecord {
         schema: "elastos.library.publish-record/v1".to_string(),
         object_uri: target.uri.clone(),
@@ -2154,6 +2321,9 @@ async fn library_publish(
         receipt,
         availability,
         listing_uri: None,
+        revision: Some(revision),
+        publication_id: Some(publication_id.clone()),
+        size_bytes: Some(size_bytes),
     };
     write_publish_record(data_dir, principal_id, &record)?;
     let object = library_object(data_dir, principal_id, &target.uri)?;
@@ -2168,7 +2338,17 @@ async fn library_publish(
             "object": object,
         }),
     )?;
-    Ok(json!({
+    Ok(LibraryFilePublication {
+        data: publication_response(&record, object),
+        cid,
+        name,
+        size_bytes,
+        publication_id,
+    })
+}
+
+fn publication_response(record: &LibraryPublishRecord, object: LibraryObject) -> Value {
+    json!({
         "object": object,
         "uri": format!("elastos://{}", record.cid),
         "cid": record.cid,
@@ -2176,7 +2356,422 @@ async fn library_publish(
         "availability": record.availability,
         "content_security": record.content_security,
         "published_at": record.published_at,
-    }))
+    })
+}
+
+/// Whether `uri` is in one of the person's visible Library places: under
+/// their own root, with no hidden or system folder (`.AppData`, `.Trash`, any
+/// segment starting with a dot) on the way.
+fn is_publishable_place(localhost_root: &str, uri: &str) -> bool {
+    uri.strip_prefix(localhost_root)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|rest| {
+            rest.split('/')
+                .all(|segment| !segment.is_empty() && !segment.starts_with('.'))
+        })
+}
+
+/// The file about to be published and its revision, refused in plain words
+/// before any oversized read, and when its revision is stale.
+fn read_publish_source(
+    data_dir: &Path,
+    principal_id: &str,
+    target: &LibraryTarget,
+    if_revision: Option<&str>,
+) -> anyhow::Result<(Vec<u8>, String)> {
+    if !is_publishable_place(&target.localhost_root, &target.uri) {
+        return Err(library_unsupported(
+            "not_allowed_here",
+            PUBLISH_NOT_ALLOWED_HERE,
+        ));
+    }
+    if crate::auth::ensure_no_symlink_components(data_dir, &target.path).is_err() {
+        return Err(library_unsupported(
+            "not_allowed_here",
+            "Links and files in linked folders can't be published.",
+        ));
+    }
+    let metadata = match fs::symlink_metadata(&target.path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(library_refusal(
+                "not_found",
+                "This file is no longer in your Library.",
+            ));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if metadata.is_dir() {
+        return Err(library_unsupported("folder", "Folders can't be published."));
+    }
+    if !metadata.is_file() {
+        return Err(library_unsupported(
+            "not_allowed_here",
+            "Only files can be published.",
+        ));
+    }
+    if metadata.len() > LIBRARY_PUBLISH_MAX_STORED_BYTES {
+        return Err(library_refusal(
+            "too_large",
+            "This file is too large to publish.",
+        ));
+    }
+    let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let revision = format!("rev:{}", hex::encode(Sha256::digest(&bytes)));
+    if if_revision.is_some_and(|expected| !expected.trim().is_empty() && expected != revision) {
+        return Err(library_refusal(
+            "stale_revision",
+            "This file changed. Reload and try again.",
+        ));
+    }
+    if bytes.len() as u64 > LIBRARY_PUBLISH_MAX_BYTES {
+        return Err(library_refusal(
+            "too_large",
+            "This file is too large to publish.",
+        ));
+    }
+    if bytes.is_empty() {
+        return Err(library_refusal(
+            "empty_file",
+            "Empty files can't be published.",
+        ));
+    }
+    Ok((bytes, revision))
+}
+
+fn record_publication_id(record: &LibraryPublishRecord) -> String {
+    record
+        .publication_id
+        .clone()
+        .unwrap_or_else(|| format!("legacy-{}-{}", record.published_at, record.cid))
+}
+
+fn remove_runtime_file(data_dir: &Path, uri: &str) -> anyhow::Result<()> {
+    let path =
+        rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
+    // A removal mutates the path, so tests record it as a write.
+    #[cfg(test)]
+    crate::auth::principal_object_io::record_write(data_dir, &path);
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn write_runtime_json(
+    data_dir: &Path,
+    principal_id: &str,
+    uri: &str,
+    value: &impl Serialize,
+) -> anyhow::Result<()> {
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    write_runtime_json_with_root(data_dir, principal_id, &root, uri, value)
+}
+
+fn write_runtime_json_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    uri: &str,
+    value: &impl Serialize,
+) -> anyhow::Result<()> {
+    let path =
+        rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    crate::auth::write_principal_root_object(
+        data_dir,
+        principal_id,
+        root,
+        uri,
+        &path,
+        &serde_json::to_vec_pretty(value)?,
+    )
+}
+
+fn read_runtime_json<T: serde::de::DeserializeOwned>(
+    data_dir: &Path,
+    principal_id: &str,
+    uri: &str,
+) -> anyhow::Result<T> {
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    read_runtime_json_with_root(data_dir, principal_id, &root, uri)
+}
+
+fn read_runtime_json_with_root<T: serde::de::DeserializeOwned>(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+    uri: &str,
+) -> anyhow::Result<T> {
+    let path =
+        rooted_localhost_fs_path(data_dir, uri).ok_or_else(|| anyhow!("invalid Library path"))?;
+    let bytes = crate::auth::read_principal_root_object(data_dir, principal_id, root, uri, &path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Every readable `.json` entry of one Runtime Library folder.
+fn read_runtime_json_dir<T: serde::de::DeserializeOwned>(
+    data_dir: &Path,
+    principal_id: &str,
+    dir_uri: &str,
+) -> Vec<T> {
+    let Some(dir) = rooted_localhost_fs_path(data_dir, dir_uri) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    #[cfg(test)]
+    r5a_tests::record_runtime_json_dir_read(data_dir, dir_uri);
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".json"))
+        .filter_map(|name| {
+            read_runtime_json(data_dir, principal_id, &format!("{dir_uri}/{name}")).ok()
+        })
+        .collect()
+}
+
+/// Every publish record of this person, active or not.
+fn publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRecord> {
+    let root = match crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id) {
+        Ok(root) => root.localhost_root().to_string(),
+        Err(error) => {
+            tracing::warn!(%error, "library: skipping unresolved publish-record principal");
+            return Vec::new();
+        }
+    };
+    read_runtime_json_dir::<LibraryPublishRecord>(
+        data_dir,
+        principal_id,
+        &format!("{root}/{LIBRARY_RUNTIME_DIR}/Published"),
+    )
+}
+
+/// Every plain (not protected) publish record of this person, active or not.
+fn plain_publish_records(data_dir: &Path, principal_id: &str) -> Vec<LibraryPublishRecord> {
+    publish_records(data_dir, principal_id)
+        .into_iter()
+        .filter(|record| !record_is_runtime_custody(record))
+        .collect()
+}
+
+/// One Chat attach request, saved before anything is published: its
+/// `request_id` stays bound to this file and to the publication id it
+/// publishes under (or the publication it reused).
+#[derive(Serialize, Deserialize)]
+struct ChatAttachBinding {
+    schema: String,
+    request_id: String,
+    uri: String,
+    #[serde(default)]
+    if_revision: Option<String>,
+    publication_id: String,
+    bound_at: u64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+}
+
+fn chat_attach_binding_uri(
+    data_dir: &Path,
+    principal_id: &str,
+    request_id: &str,
+) -> anyhow::Result<String> {
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    let digest = hex::encode(Sha256::digest(request_id.as_bytes()));
+    Ok(format!(
+        "{root}/{LIBRARY_RUNTIME_DIR}/ChatAttach/{digest}.json"
+    ))
+}
+
+/// The publication for one Chat attach request, under the publications lock
+/// from the first look at its binding to the last write:
+/// - the same `request_id` with another file or revision is refused before
+///   anything happens;
+/// - the request is bound to its file and to a publication id before
+///   anything is published, so a retry always finds what it made;
+/// - a publication made or reused by this request is posted as it was,
+///   wherever the file is now, and one withdrawn since answers `withdrawn`
+///   and is never published again;
+/// - a new request passes `check_send_allowed` (the send rate limit) first.
+pub(crate) async fn chat_attach_publication(
+    data_dir: &Path,
+    registry: &ProviderRegistry,
+    principal_id: &str,
+    request_id: &str,
+    uri: &str,
+    if_revision: Option<&str>,
+    check_send_allowed: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<LibraryFilePublication> {
+    let _serialized = PUBLICATIONS.lock().await;
+    let uri = uri.trim();
+    let binding_uri = chat_attach_binding_uri(data_dir, principal_id, request_id)?;
+    let saved = read_runtime_json::<ChatAttachBinding>(data_dir, principal_id, &binding_uri).ok();
+    if let Some(mut binding) = saved {
+        if binding.uri != uri || binding.if_revision.as_deref() != if_revision {
+            return Err(library_refusal(
+                "request_id_reused",
+                "This request was already used for another file.",
+            ));
+        }
+        let by_id = plain_publish_records(data_dir, principal_id)
+            .into_iter()
+            .find(|record| record_publication_id(record) == binding.publication_id);
+        // Interrupted after reusing the file's existing publication, before
+        // its id was saved here: that publication is the one for this file
+        // and revision, withdrawn since this request began or still active.
+        let reused = || {
+            read_publish_record(data_dir, principal_id, &binding.uri)
+                .ok()
+                .filter(|record| !record_is_runtime_custody(record))
+                .filter(|record| {
+                    if_revision.is_none_or(|revision| record.revision.as_deref() == Some(revision))
+                })
+                .filter(|record| {
+                    record_is_published(record)
+                        || record
+                            .unpublished_at
+                            .is_some_and(|at| at >= binding.bound_at)
+                })
+        };
+        match by_id.or_else(reused) {
+            Some(record) if record_is_published(&record) => {
+                let publication_id = record_publication_id(&record);
+                if binding.publication_id != publication_id || binding.name.is_none() {
+                    binding.publication_id = publication_id.clone();
+                    binding.name = binding
+                        .name
+                        .or_else(|| binding.uri.rsplit('/').next().map(str::to_string));
+                    binding.size_bytes = binding.size_bytes.or(record.size_bytes);
+                    write_runtime_json(data_dir, principal_id, &binding_uri, &binding)?;
+                }
+                let object = library_object(data_dir, principal_id, &record.object_uri)?;
+                return Ok(LibraryFilePublication {
+                    data: publication_response(&record, object),
+                    name: binding.name.unwrap_or_default(),
+                    size_bytes: binding.size_bytes.unwrap_or_default(),
+                    cid: record.cid,
+                    publication_id,
+                });
+            }
+            Some(_) => return Err(chat_attach_withdrawn()),
+            // Bound, but nothing was recorded: publish as a new request.
+            None => {}
+        }
+    }
+    check_send_allowed()?;
+    let mut binding = ChatAttachBinding {
+        schema: "elastos.library.chat-attach/v1".to_string(),
+        request_id: request_id.to_string(),
+        uri: uri.to_string(),
+        if_revision: if_revision.map(str::to_string),
+        publication_id: hex::encode(rand::random::<[u8; 16]>()),
+        bound_at: now_ts(),
+        name: None,
+        size_bytes: None,
+    };
+    write_runtime_json(data_dir, principal_id, &binding_uri, &binding)?;
+    let publication = match publish_library_uri_locked(
+        data_dir,
+        registry,
+        principal_id,
+        uri,
+        if_revision,
+        Some(binding.publication_id.clone()),
+    )
+    .await
+    {
+        Ok(publication) => publication,
+        Err(err) => {
+            // A record this request wrote keeps its binding; otherwise
+            // nothing was published and nothing stays bound to this id.
+            let recorded = plain_publish_records(data_dir, principal_id)
+                .iter()
+                .any(|record| record_publication_id(record) == binding.publication_id);
+            if !recorded {
+                if let Err(unbind) = remove_runtime_file(data_dir, &binding_uri) {
+                    tracing::warn!(error = %unbind, "chat attach: binding not removed");
+                }
+            }
+            return Err(err);
+        }
+    };
+    binding.publication_id = publication.publication_id.clone();
+    binding.name = Some(publication.name.clone());
+    binding.size_bytes = Some(publication.size_bytes);
+    write_runtime_json(data_dir, principal_id, &binding_uri, &binding)?;
+    Ok(publication)
+}
+
+fn chat_attach_withdrawn() -> anyhow::Error {
+    library_refusal(
+        "withdrawn",
+        "This file is no longer shared. Publish it again to post it.",
+    )
+}
+
+/// What the object list and stat report for an active publication.
+fn publication_projection(record: &LibraryPublishRecord) -> Value {
+    json!({
+        "cid": record.cid,
+        "uri": format!("elastos://{}", record.cid),
+        "published_at": record.published_at,
+        "revision": record.revision,
+    })
+}
+
+/// A Library refusal with a stable code, an optional reason, and a message
+/// that is safe to show.
+#[derive(Debug)]
+pub(crate) struct LibraryRefusal {
+    pub(crate) code: &'static str,
+    pub(crate) reason: Option<&'static str>,
+    message: &'static str,
+}
+
+impl std::fmt::Display for LibraryRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for LibraryRefusal {}
+
+fn library_refusal(code: &'static str, message: &'static str) -> anyhow::Error {
+    anyhow::Error::new(LibraryRefusal {
+        code,
+        reason: None,
+        message,
+    })
+}
+
+/// An `unsupported` refusal; `reason` is `folder`, `protected` or
+/// `not_allowed_here`.
+fn library_unsupported(reason: &'static str, message: &'static str) -> anyhow::Error {
+    anyhow::Error::new(LibraryRefusal {
+        code: "unsupported",
+        reason: Some(reason),
+        message,
+    })
+}
+
+/// The Library refusal anywhere in `error`'s chain.
+pub(crate) fn find_library_refusal(error: &anyhow::Error) -> Option<&LibraryRefusal> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<LibraryRefusal>())
 }
 
 async fn library_unpublish(
@@ -2186,6 +2781,7 @@ async fn library_unpublish(
     uri: &str,
     if_revision: Option<&str>,
 ) -> anyhow::Result<Value> {
+    let _serialized = PUBLICATIONS.lock().await;
     let target = library_target(data_dir, principal_id, uri)?;
     check_revision(data_dir, principal_id, &target.uri, if_revision)?;
     let mut record = read_publish_record(data_dir, principal_id, &target.uri)
@@ -2193,29 +2789,44 @@ async fn library_unpublish(
     if !record_is_published(&record) {
         bail!("library object is not actively published");
     }
-    let response = registry
-        .send_raw(
-            "content",
-            &json!({
-                "op": "unpublish",
-                "cid": record.cid,
-                "object_did": target.uri,
-                "publisher_did": principal_id,
-            }),
-        )
-        .await
-        .map_err(|err| anyhow!("content provider unavailable: {err}"))?;
-    if response.get("status").and_then(Value::as_str) == Some("error") {
-        let message = response
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("content unpublish failed");
-        bail!("content unpublish failed: {message}");
-    }
-    let data = response
-        .get("data")
-        .cloned()
-        .ok_or_else(|| anyhow!("content unpublish response missing data"))?;
+    // Sharing follows the record: once it is withdrawn (and out of the
+    // published-CID index), peers are no longer served this CID from here.
+    // The pin is only local storage, which other publications, received
+    // files or models may share, so a plain Unpublish leaves it in place;
+    // removing pins no publication needs is a later cleanup. A protected
+    // publication keeps its existing withdrawal, which unpins.
+    let data = if record_is_runtime_custody(&record) {
+        let response = registry
+            .send_raw(
+                "content",
+                &json!({
+                    "op": "unpublish",
+                    "cid": record.cid,
+                    "object_did": target.uri,
+                    "publisher_did": principal_id,
+                }),
+            )
+            .await
+            .map_err(|err| anyhow!("content provider unavailable: {err}"))?;
+        if response.get("status").and_then(Value::as_str) == Some("error") {
+            let message = response
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("content unpublish failed");
+            bail!("content unpublish failed: {message}");
+        }
+        response
+            .get("data")
+            .cloned()
+            .ok_or_else(|| anyhow!("content unpublish response missing data"))?
+    } else {
+        json!({
+            "availability": {
+                "status": "withdrawn",
+                "note": "No longer shared from this Home. Copies others downloaded stay with them.",
+            },
+        })
+    };
     record.unpublished_at = Some(now_ts());
     record.shared_at = None;
     record.receipt = data
@@ -2255,19 +2866,23 @@ async fn library_repair(
     principal_id: &str,
     uri: &str,
 ) -> anyhow::Result<Value> {
+    let _serialized = PUBLICATIONS.lock().await;
     let target = library_target(data_dir, principal_id, uri)?;
     let mut record = read_publish_record(data_dir, principal_id, &target.uri)
         .context("library repair requires a published object")?;
+    let mut request = json!({
+        "op": "repair",
+        "cid": record.cid,
+        "object_did": target.uri,
+        "publisher_did": principal_id,
+    });
+    if !record_is_runtime_custody(&record) {
+        // A plain publication stays on this Home: Repair pins it here again.
+        request["availability_policy"] =
+            Value::String(crate::content::LOCAL_PIN_AVAILABILITY_POLICY.to_string());
+    }
     let response = registry
-        .send_raw(
-            "content",
-            &json!({
-                "op": "repair",
-                "cid": record.cid,
-                "object_did": target.uri,
-                "publisher_did": principal_id,
-            }),
-        )
+        .send_raw("content", &request)
         .await
         .map_err(|err| anyhow!("content provider unavailable: {err}"))?;
     if response.get("status").and_then(Value::as_str) == Some("error") {
@@ -3094,6 +3709,7 @@ fn webspace_stat_to_object(
         published_cid: None,
         metadata: Some(metadata),
         published: false,
+        publication: None,
         shared: false,
         capabilities,
     })
@@ -3103,8 +3719,10 @@ fn localhost_space_pointer_object(
     data_dir: &Path,
     principal_id: &str,
 ) -> anyhow::Result<LibraryObject> {
-    let uri = crate::auth::principal_localhost_root(principal_id);
-    let target = library_target(data_dir, principal_id, &uri)?;
+    let uri = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    let target = library_target_from_root(data_dir, &uri, &uri)?;
     let metadata = fs::metadata(&target.path).ok();
     let modified_at = metadata
         .as_ref()
@@ -3142,6 +3760,7 @@ fn localhost_space_pointer_object(
             "note": "This opens the signed principal's mutable localhost object space. It is not a broad host filesystem grant."
         })),
         published: false,
+        publication: None,
         shared: false,
         capabilities: vec!["open", "list", "properties"],
     })
@@ -3282,17 +3901,42 @@ fn inferred_webspace_target_uri(uri: &str) -> Option<String> {
 }
 
 fn library_target(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<LibraryTarget> {
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
-    let uri = clean_library_uri(&localhost_root, uri)?;
+    let localhost_root =
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+            .localhost_root()
+            .to_string();
+    library_target_from_root(data_dir, &localhost_root, uri)
+}
+
+fn library_target_from_root(
+    data_dir: &Path,
+    localhost_root: &str,
+    uri: &str,
+) -> anyhow::Result<LibraryTarget> {
+    let uri = clean_library_uri(localhost_root, uri)?;
     let rooted = uri
         .strip_prefix("localhost://")
         .ok_or_else(|| anyhow!("library object URI must be localhost://"))?;
     let path = rooted_localhost_fs_path(data_dir, rooted)
         .ok_or_else(|| anyhow!("invalid library object path"))?;
     Ok(LibraryTarget {
-        localhost_root,
+        localhost_root: localhost_root.to_string(),
         uri,
         path,
+    })
+}
+
+/// Refuses an object reached through a link anywhere from the data root down
+/// to the object itself, so a viewer that opens or saves by URI stays inside
+/// the principal's own folders.
+pub(crate) fn refuse_linked_library_object(
+    data_dir: &Path,
+    principal_id: &str,
+    uri: &str,
+) -> anyhow::Result<()> {
+    let target = library_target(data_dir, principal_id, uri)?;
+    crate::auth::ensure_no_symlink_components(data_dir, &target.path).map_err(|_| {
+        anyhow!("This file is a link or is in a linked folder, so it is not viewable in Home.")
     })
 }
 
@@ -3469,8 +4113,24 @@ fn library_request_touches_webspace(request: &ObjectProviderRequest) -> bool {
 
 fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<LibraryObject> {
     let target = library_target(data_dir, principal_id, uri)?;
-    let metadata = fs::metadata(&target.path)?;
-    let is_dir = metadata.is_dir();
+    // A place with no directory yet is the empty folder `list` already shows;
+    // its times are unknown (0).
+    let metadata = match fs::metadata(&target.path) {
+        Ok(metadata) => Some(metadata),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if library_roots(data_dir, principal_id)?
+                .iter()
+                .any(|root| root.uri == target.uri)
+            {
+                None
+            } else {
+                return Err(err.into());
+            }
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let is_dir = metadata.as_ref().is_none_or(fs::Metadata::is_dir);
+    let file_len = metadata.as_ref().map_or(0, fs::Metadata::len);
     let name = if target.uri == target.localhost_root {
         "Home".to_string()
     } else {
@@ -3482,8 +4142,14 @@ fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Res
             .unwrap_or("object")
             .to_string()
     };
-    let modified_at = system_time_secs(metadata.modified().ok()).unwrap_or_else(now_ts);
-    let created_at = system_time_secs(metadata.created().ok()).unwrap_or(modified_at);
+    let (modified_at, created_at) = match &metadata {
+        Some(metadata) => {
+            let modified_at = system_time_secs(metadata.modified().ok()).unwrap_or_else(now_ts);
+            let created_at = system_time_secs(metadata.created().ok()).unwrap_or(modified_at);
+            (modified_at, created_at)
+        }
+        None => (0, 0),
+    };
     let mut blocked_reason = None;
     let (size, revision, content_cid) = if is_dir {
         (0, directory_revision(&target.path, &target.uri)?, None)
@@ -3496,11 +4162,11 @@ fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Res
             }
             Err(err) if is_unencrypted_principal_root_object(&err) => {
                 blocked_reason = Some("protected_principal_root_object_not_encrypted".to_string());
-                blocked_object_projection(&target.uri, metadata.len(), modified_at)
+                blocked_object_projection(&target.uri, file_len, modified_at)
             }
             Err(err) if is_damaged_principal_root_object(&err) => {
                 blocked_reason = Some("protected_principal_root_object_damaged".to_string());
-                blocked_object_projection(&target.uri, metadata.len(), modified_at)
+                blocked_object_projection(&target.uri, file_len, modified_at)
             }
             Err(err) => return Err(err),
         }
@@ -3641,6 +4307,7 @@ fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Res
         published_cid,
         metadata: local_metadata,
         published: active_record.is_some(),
+        publication: active_record.map(publication_projection),
         shared: active_record.is_some_and(|record| record.shared_at.is_some()),
         capabilities,
     })
@@ -7137,8 +7804,10 @@ fn shared_access_open_contract(
     })
 }
 
-fn library_roots(data_dir: &Path, principal_id: &str) -> Vec<LibraryRoot> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+fn library_roots(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryRoot>> {
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let mut roots: Vec<_> = [
         ("home", "Home", root.clone(), "principal-root"),
         ("desktop", "Desktop", format!("{root}/Desktop"), "directory"),
@@ -7170,17 +7839,29 @@ fn library_roots(data_dir: &Path, principal_id: &str) -> Vec<LibraryRoot> {
         ),
     ]
     .into_iter()
-    .map(|(id, label, uri, kind)| LibraryRoot {
-        schema: LIBRARY_ROOT_SCHEMA,
-        id,
-        label,
-        uri,
-        kind,
-        metadata: None,
+    .map(|(id, label, uri, kind)| {
+        // The Public place says whether it holds items, so Library can list
+        // it only while it does.
+        let metadata = (id == "public").then(|| {
+            let (empty, item_count) = root_item_state(data_dir, principal_id, &uri);
+            json!({
+                "schema": "elastos.library.public-root/v1",
+                "empty": empty,
+                "item_count": item_count,
+            })
+        });
+        LibraryRoot {
+            schema: LIBRARY_ROOT_SCHEMA,
+            id,
+            label,
+            uri,
+            kind,
+            metadata,
+        }
     })
     .collect();
     let trash_uri = format!("{root}/.Trash");
-    let (empty, item_count) = trash_root_state(data_dir, principal_id, &trash_uri);
+    let (empty, item_count) = root_item_state(data_dir, principal_id, &trash_uri);
     roots.push(LibraryRoot {
         schema: LIBRARY_ROOT_SCHEMA,
         id: "trash",
@@ -7193,11 +7874,11 @@ fn library_roots(data_dir: &Path, principal_id: &str) -> Vec<LibraryRoot> {
             "item_count": item_count,
         })),
     });
-    roots
+    Ok(roots)
 }
 
-fn trash_root_state(data_dir: &Path, principal_id: &str, trash_uri: &str) -> (bool, usize) {
-    let Ok(target) = library_target(data_dir, principal_id, trash_uri) else {
+fn root_item_state(data_dir: &Path, principal_id: &str, uri: &str) -> (bool, usize) {
+    let Ok(target) = library_target(data_dir, principal_id, uri) else {
         return (true, 0);
     };
     let Ok(entries) = fs::read_dir(&target.path) else {
@@ -7353,7 +8034,7 @@ fn move_library_file(
         &bytes,
     )?;
     fs::remove_file(&from.path)?;
-    Ok(())
+    move_publish_record(data_dir, principal_id, &from.uri, &to.uri)
 }
 
 fn check_revision(
@@ -7476,7 +8157,9 @@ fn read_trash_record(
     principal_id: &str,
     trash_uri: &str,
 ) -> anyhow::Result<LibraryTrashRecord> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let record_uri = trash_record_uri(&root, trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
@@ -7495,7 +8178,9 @@ fn write_trash_record(
     principal_id: &str,
     record: &LibraryTrashRecord,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let record_uri = trash_record_uri(&root, &record.trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
@@ -7514,10 +8199,15 @@ fn write_trash_record(
 }
 
 fn remove_trash_record(data_dir: &Path, principal_id: &str, trash_uri: &str) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let record_uri = trash_record_uri(&root, trash_uri);
     let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
         .ok_or_else(|| anyhow!("invalid library Trash record path"))?;
+    // A removal mutates the path, so tests record it as a write.
+    #[cfg(test)]
+    crate::auth::principal_object_io::record_write(data_dir, &record_path);
     match fs::remove_file(record_path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -7535,18 +8225,15 @@ fn read_publish_record(
     principal_id: &str,
     object_uri: &str,
 ) -> anyhow::Result<LibraryPublishRecord> {
-    let root = crate::auth::principal_localhost_root(principal_id);
-    let record_uri = publish_record_uri(&root, object_uri);
-    let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
-        .ok_or_else(|| anyhow!("invalid library publish record path"))?;
-    let bytes = crate::auth::read_principal_root_object(
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    read_runtime_json_with_root(
         data_dir,
         principal_id,
         &root,
-        &record_uri,
-        &record_path,
-    )?;
-    Ok(serde_json::from_slice(&bytes)?)
+        &publish_record_uri(&root, object_uri),
+    )
 }
 
 fn write_publish_record(
@@ -7554,22 +8241,325 @@ fn write_publish_record(
     principal_id: &str,
     record: &LibraryPublishRecord,
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
-    let record_uri = publish_record_uri(&root, &record.object_uri);
-    let record_path = rooted_localhost_fs_path(data_dir, &record_uri)
-        .ok_or_else(|| anyhow!("invalid library publish record path"))?;
-    if let Some(parent) = record_path.parent() {
-        fs::create_dir_all(parent)?;
+    // Serving follows the index. A publication that ends leaves the index
+    // before its record changes, and one that starts joins it after: a crash
+    // in between serves less, never more.
+    let active = record_is_published(record);
+    if !active {
+        set_published_index_entry(data_dir, principal_id, record, false)?;
     }
-    let bytes = serde_json::to_vec_pretty(record)?;
-    crate::auth::write_principal_root_object(
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    write_runtime_json_with_root(
         data_dir,
         principal_id,
         &root,
-        &record_uri,
-        &record_path,
-        &bytes,
+        &publish_record_uri(&root, &record.object_uri),
+        record,
+    )?;
+    if active {
+        set_published_index_entry(data_dir, principal_id, record, true)?;
+    }
+    Ok(())
+}
+
+const PUBLISHED_INDEX_SCHEMA: &str = "elastos.library.published-cids/v1";
+
+/// This Home's active publications, by every person, as the CIDs each one
+/// shares and who may read them: the only thing a peer read of an ordinary
+/// Home is served on. Keys are opaque digests of person and publication; the
+/// records stay the source of truth and the index is reconciled from them at
+/// start.
+#[derive(Default, Serialize, Deserialize)]
+struct PublishedIndex {
+    schema: String,
+    #[serde(default)]
+    publications: std::collections::BTreeMap<String, PublishedEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PublishedEntry {
+    /// The person who published: a plain publication is for their contacts.
+    principal_id: String,
+    cids: BTreeSet<String>,
+    /// A protected listing's sealed payload, readable by any peer: opening it
+    /// needs the key release a purchase grants.
+    #[serde(default)]
+    any_peer: bool,
+}
+
+impl PublishedEntry {
+    fn of(principal_id: &str, record: &LibraryPublishRecord) -> Self {
+        Self {
+            principal_id: principal_id.to_string(),
+            cids: record_shared_cids(record),
+            any_peer: record_is_runtime_custody(record),
+        }
+    }
+}
+
+static PUBLISHED_INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn published_index_path(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join("ElastOS")
+        .join("SystemServices")
+        .join("Library")
+        .join("published-cids.json")
+}
+
+fn load_published_index(data_dir: &Path) -> anyhow::Result<PublishedIndex> {
+    match fs::read(published_index_path(data_dir)) {
+        Ok(bytes) => {
+            let index: PublishedIndex = serde_json::from_slice(&bytes)?;
+            anyhow::ensure!(
+                index.schema == PUBLISHED_INDEX_SCHEMA,
+                "published CID index has an unknown schema"
+            );
+            Ok(index)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(PublishedIndex {
+            schema: PUBLISHED_INDEX_SCHEMA.to_string(),
+            publications: Default::default(),
+        }),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn update_published_index(
+    data_dir: &Path,
+    change: impl FnOnce(&mut PublishedIndex),
+) -> anyhow::Result<()> {
+    let _guard = PUBLISHED_INDEX_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut index = load_published_index(data_dir)?;
+    change(&mut index);
+    crate::auth::atomic_write(
+        &published_index_path(data_dir),
+        &serde_json::to_vec_pretty(&index)?,
     )
+}
+
+fn published_index_key(principal_id: &str, record: &LibraryPublishRecord) -> String {
+    hex::encode(Sha256::digest(format!(
+        "{principal_id}\n{}",
+        record_publication_id(record)
+    )))
+}
+
+/// The CIDs one publication shares: its content, and a protected
+/// publication's listing.
+fn record_shared_cids(record: &LibraryPublishRecord) -> BTreeSet<String> {
+    let mut cids = BTreeSet::from([record.cid.clone()]);
+    if let Some(listing_cid) = record
+        .listing_uri
+        .as_deref()
+        .and_then(|uri| uri.strip_prefix("elastos://"))
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .filter(|cid| !cid.is_empty())
+    {
+        cids.insert(listing_cid.to_string());
+    }
+    cids
+}
+
+fn set_published_index_entry(
+    data_dir: &Path,
+    principal_id: &str,
+    record: &LibraryPublishRecord,
+    active: bool,
+) -> anyhow::Result<()> {
+    let key = published_index_key(principal_id, record);
+    update_published_index(data_dir, |index| {
+        if active {
+            index
+                .publications
+                .insert(key, PublishedEntry::of(principal_id, record));
+        } else {
+            index.publications.remove(&key);
+        }
+    })
+}
+
+/// Who may read `cid` from this Home: `None` when no active publication
+/// lists it, or the index cannot be read.
+pub(crate) struct PublishedAudience {
+    pub(crate) any_peer: bool,
+    /// The people whose publications list it; their contacts may read it.
+    pub(crate) principals: BTreeSet<String>,
+}
+
+pub(crate) fn published_cid_audience(data_dir: &Path, cid: &str) -> Option<PublishedAudience> {
+    let _guard = PUBLISHED_INDEX_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let index = load_published_index(data_dir).ok()?;
+    let mut audience = PublishedAudience {
+        any_peer: false,
+        principals: BTreeSet::new(),
+    };
+    for entry in index
+        .publications
+        .values()
+        .filter(|entry| entry.cids.contains(cid))
+    {
+        audience.any_peer |= entry.any_peer;
+        audience.principals.insert(entry.principal_id.clone());
+    }
+    (!audience.principals.is_empty()).then_some(audience)
+}
+
+#[cfg(test)]
+pub(crate) fn cid_is_published_here(data_dir: &Path, cid: &str) -> bool {
+    published_cid_audience(data_dir, cid).is_some()
+}
+
+/// Rewrites `object_uri`'s publish record as alpha.25 withdrew it after an
+/// Undo: withdrawn, without the publication id it never knew, and with the
+/// index left as it was.
+#[cfg(test)]
+pub(crate) fn withdraw_as_alpha25_for_test(data_dir: &Path, principal_id: &str, object_uri: &str) {
+    let mut record = read_publish_record(data_dir, principal_id, object_uri).unwrap();
+    record.publication_id = None;
+    record.unpublished_at = Some(record.published_at + 1);
+    let root = crate::auth::principal_localhost_root(principal_id);
+    write_runtime_json(
+        data_dir,
+        principal_id,
+        &publish_record_uri(&root, object_uri),
+        &record,
+    )
+    .unwrap();
+}
+
+/// Rebuilds the index at start from the publish records alone: an entry
+/// stays only while an active record backs it, whatever wrote it. A record
+/// an earlier release rewrote (for example a withdrawal after Undo, which
+/// drops the publication id) therefore can't leave its old entry behind, and
+/// a record this Runtime cannot read is not served until it can.
+pub fn reconcile_published_cids(data_dir: &Path) {
+    let principals: BTreeSet<String> = crate::auth::list_passkey_principals(data_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|principal| principal.principal_id)
+        .collect();
+    let mut publications = std::collections::BTreeMap::new();
+    for principal in &principals {
+        for record in publish_records(data_dir, principal) {
+            if record_is_published(&record) {
+                publications.insert(
+                    published_index_key(principal, &record),
+                    PublishedEntry::of(principal, &record),
+                );
+            }
+        }
+    }
+    if let Err(err) = update_published_index(data_dir, |index| {
+        index.publications = publications;
+    }) {
+        tracing::warn!(error = %err, "library: published CID index not reconciled");
+    }
+}
+
+/// Lists `cid` as published on this Home for any peer, as a test fixture's
+/// holder does.
+#[cfg(test)]
+pub(crate) fn publish_cid_for_test(data_dir: &Path, cid: &str) {
+    update_published_index(data_dir, |index| {
+        index.publications.insert(
+            format!("test:{cid}"),
+            PublishedEntry {
+                principal_id: "test".to_string(),
+                cids: BTreeSet::from([cid.to_string()]),
+                any_peer: true,
+            },
+        );
+    })
+    .unwrap();
+}
+
+/// Lists `cid` as `principal_id`'s Library publication, for their contacts.
+#[cfg(test)]
+pub(crate) fn publish_cid_for_contacts_for_test(data_dir: &Path, principal_id: &str, cid: &str) {
+    update_published_index(data_dir, |index| {
+        index.publications.insert(
+            format!("test:{cid}"),
+            PublishedEntry {
+                principal_id: principal_id.to_string(),
+                cids: BTreeSet::from([cid.to_string()]),
+                any_peer: false,
+            },
+        );
+    })
+    .unwrap();
+}
+
+/// Withdraws what `publish_cid_for_test` listed.
+#[cfg(test)]
+pub(crate) fn withdraw_cid_for_test(data_dir: &Path, cid: &str) {
+    update_published_index(data_dir, |index| {
+        index.publications.remove(&format!("test:{cid}"));
+    })
+    .unwrap();
+}
+
+fn remove_publish_record(
+    data_dir: &Path,
+    principal_id: &str,
+    object_uri: &str,
+) -> anyhow::Result<()> {
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    remove_runtime_file(data_dir, &publish_record_uri(&root, object_uri))
+}
+
+/// A plain publication moves with its file on rename and move, so Unpublish
+/// keeps control of it. Protected publications keep their records as before.
+fn move_publish_record(
+    data_dir: &Path,
+    principal_id: &str,
+    from_uri: &str,
+    to_uri: &str,
+) -> anyhow::Result<()> {
+    let Ok(mut record) = read_publish_record(data_dir, principal_id, from_uri) else {
+        return Ok(());
+    };
+    if record_is_runtime_custody(&record) {
+        return Ok(());
+    }
+    record.object_uri = to_uri.to_string();
+    if let Some(object_uri) = record.content_security.get_mut("object_uri") {
+        *object_uri = Value::String(to_uri.to_string());
+    }
+    write_publish_record(data_dir, principal_id, &record)?;
+    remove_publish_record(data_dir, principal_id, from_uri)
+}
+
+/// Refuses to delete `uri` (a file, or a folder and everything in it) while it
+/// holds an active plain publication: Unpublish withdraws it first.
+fn refuse_deleting_published(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Result<()> {
+    let folder = format!("{uri}/");
+    for record in plain_publish_records(data_dir, principal_id) {
+        if !record_is_published(&record) {
+            continue;
+        }
+        if record.object_uri == uri {
+            return Err(library_refusal(
+                "published_withdraw_first",
+                "Unpublish this file before deleting it.",
+            ));
+        }
+        if record.object_uri.starts_with(&folder) {
+            return Err(library_refusal(
+                "published_withdraw_first",
+                "This folder has published files. Unpublish them before deleting it.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn library_events(
@@ -7579,12 +8569,14 @@ fn library_events(
     since: Option<u64>,
     limit: Option<usize>,
 ) -> anyhow::Result<Vec<LibraryEvent>> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let uri_filter = uri_filter
         .map(|uri| clean_library_uri(&root, uri))
         .transpose()?;
     let limit = limit.unwrap_or(64).clamp(1, MAX_LIBRARY_EVENTS);
-    let mut events = read_library_events(data_dir, principal_id)?;
+    let mut events = read_library_events_with_root(data_dir, principal_id, &root)?;
     events.retain(|event| {
         since.map(|since| event.at > since).unwrap_or(true)
             && uri_filter
@@ -7626,8 +8618,18 @@ fn append_library_event(
 }
 
 fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryEvent>> {
-    let root = crate::auth::principal_localhost_root(principal_id);
-    let event_uri = library_event_log_uri(&root);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
+    read_library_events_with_root(data_dir, principal_id, &root)
+}
+
+fn read_library_events_with_root(
+    data_dir: &Path,
+    principal_id: &str,
+    root: &str,
+) -> anyhow::Result<Vec<LibraryEvent>> {
+    let event_uri = library_event_log_uri(root);
     let event_path = rooted_localhost_fs_path(data_dir, &event_uri)
         .ok_or_else(|| anyhow!("invalid library event log path"))?;
     if !event_path.exists() {
@@ -7636,7 +8638,7 @@ fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Ve
     let bytes = crate::auth::read_principal_root_object(
         data_dir,
         principal_id,
-        &root,
+        root,
         &event_uri,
         &event_path,
     )?;
@@ -7652,7 +8654,9 @@ fn write_library_events(
     principal_id: &str,
     events: &[LibraryEvent],
 ) -> anyhow::Result<()> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let event_uri = library_event_log_uri(&root);
     let event_path = rooted_localhost_fs_path(data_dir, &event_uri)
         .ok_or_else(|| anyhow!("invalid library event log path"))?;
@@ -7810,8 +8814,6 @@ fn viewer_ids_for_name(name: &str) -> Vec<&'static str> {
         vec!["image-viewer"]
     } else if lower.ends_with(".mp4") {
         vec!["video-viewer"]
-    } else if lower.ends_with(".pdf") {
-        vec!["documents"]
     } else if lower.ends_with(".gba") {
         vec!["gba-emulator"]
     } else {
@@ -7862,7 +8864,14 @@ fn provider_error(code: &str, message: &str) -> Value {
 /// chain beneath it (fail-closed site, provider verdict, RPC revert data) so
 /// an operator or driver can see why without the runtime log.
 fn provider_error_from(code: &str, error: &anyhow::Error) -> Value {
-    let mut response = provider_error(code, &error.to_string());
+    let refusal = find_library_refusal(error);
+    let mut response = provider_error(
+        refusal.map_or(code, |refusal| refusal.code),
+        &error.to_string(),
+    );
+    if let Some(reason) = refusal.and_then(|refusal| refusal.reason) {
+        response["reason"] = Value::String(reason.to_string());
+    }
     let detail = anyhow_error_detail(error);
     if !detail.is_empty() {
         response["detail"] = Value::String(detail);
@@ -7896,27 +8905,40 @@ mod tests {
         assert!(parsed.is_err(), "{parsed:?}");
     }
 
-    /// A5-S3c-0a, library: a stored Agent's Library roots sit under its own
-    /// UsersAI root. Expected-fail: library_roots still applies the id rule.
-    /// Flipped by A5-S3c-2b.
+    /// A5-S3c-0a: the Roots handler returns this stored Agent's UsersAI root.
     #[test]
-    #[ignore = "expected-fail until A5-S3c-2b"]
     fn a_stored_agents_library_roots_are_under_its_usersai_root() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let id = "person:local:s3c-agent-library";
-        crate::auth::store_test_human_principal(data_dir.path(), id);
-        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
-        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
-        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
-        let principal_id = id.to_string();
-        let request = super::ObjectProviderRequest::Roots { principal_id };
-        let roots = super::handle_library_request(data_dir.path(), request).unwrap();
-        let roots = roots["roots"].as_array().unwrap();
-        assert!(roots.len() > 1, "{roots:?}");
-        for entry in roots.iter().filter(|r| r["kind"] != "webspace-root") {
-            let uri = entry["uri"].as_str().unwrap();
-            assert!(uri == root || uri.starts_with(&format!("{root}/")), "{uri}");
+        use crate::auth::{r4_fixture, PrincipalKind};
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            r4_fixture::store(dir.path(), kind);
+            let request = super::ObjectProviderRequest::Roots {
+                principal_id: r4_fixture::ID.into(),
+            };
+            let roots = super::handle_library_request(dir.path(), request).unwrap();
+            let roots = roots["roots"].as_array().unwrap();
+            assert!(roots.len() > 1, "{roots:?}");
+            for entry in roots.iter().filter(|r| r["kind"] != "webspace-root") {
+                let uri = entry["uri"].as_str().unwrap();
+                assert!(uri == root || uri.starts_with(&format!("{root}/")), "{uri}");
+            }
         }
+        let absent = tempfile::tempdir().unwrap();
+        let result = super::handle_library_request(
+            absent.path(),
+            super::ObjectProviderRequest::Roots {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
     }
 
     #[test]
@@ -7936,6 +8958,53 @@ mod tests {
         assert!(plain.get("detail").is_none());
     }
 
+    /// Documents edits text: a name routes to it only when its manifest
+    /// accepts that extension, so a PDF or other binary never opens as text.
+    #[test]
+    fn documents_is_offered_only_for_extensions_its_manifest_accepts() {
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../capsules/documents/capsule.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let accepted: Vec<String> = manifest["interfaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|interface| interface["methods"].as_array().unwrap().iter())
+            .filter(|method| method["id"] == "document.open")
+            .flat_map(|method| method["input_schema"]["accepts"].as_array().unwrap().iter())
+            .flat_map(|accept| accept["extensions"].as_array().unwrap().iter())
+            .map(|extension| extension.as_str().unwrap().to_string())
+            .collect();
+        assert!(!accepted.is_empty());
+        for name in [
+            "note.md",
+            "note.txt",
+            "letter.pdf",
+            "photo.png",
+            "bundle.zip",
+            "clip.mp4",
+            "song.mp3",
+            "data.json",
+            "page.html",
+            "game.gba",
+            "blob.bin",
+        ] {
+            let routed = super::viewer_ids_for_name(name).contains(&"documents");
+            let accepts = accepted
+                .iter()
+                .any(|extension| name.ends_with(extension.as_str()));
+            assert_eq!(
+                routed, accepts,
+                "{name}: Documents routing must match its manifest"
+            );
+        }
+    }
+
     use super::*;
 
     /// #449: a folder added to a copy or move source after the tree check
@@ -7944,6 +9013,7 @@ mod tests {
     fn copy_and_move_writers_refuse_a_folder_added_after_the_tree_check() {
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-late-child";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
         let root = crate::auth::principal_localhost_root(principal_id);
         let rule = StartWalkRule::new(dir.path(), &root);
         let mut parent = format!("{root}/Documents");
@@ -8194,6 +9264,12 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-pax-sparse";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let archive_uri = format!("{root}/Documents/Pax.tar");
         write_library_file_bytes(
@@ -8296,6 +9372,12 @@ mod tests {
         use std::io::Write as _;
         let dir = tempfile::tempdir().unwrap();
         let principal_id = "person:local:library-destination-race";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let archive_uri = format!("{root}/Documents/Pack.zip");
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -8672,6 +9754,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkAgentsAreaLibrary";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let journal = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
         let doc = format!("{root}/Documents/x.txt");
@@ -8746,6 +9834,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkAgentsAreaWhitespace";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let root = crate::auth::principal_localhost_root(principal_id);
         let journal = rooted_localhost_fs_path(
             dir.path(),
@@ -8780,6 +9874,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyExisting";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -8844,6 +9944,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyConcurrent";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Concurrent.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -8937,6 +10043,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkCreateOnlyIfRevision";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -8972,6 +10084,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let principal_id = "did:key:z6MkRevisionedWrite";
+        crate::auth::store_test_human_principal(dir.path(), principal_id);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            principal_id,
+            &crate::auth::principal_localhost_root(principal_id),
+        );
         let file_uri = format!(
             "{}/Documents/Notes.txt",
             crate::auth::principal_localhost_root(principal_id)
@@ -9023,6 +10141,1466 @@ mod tests {
                 .decode(read["data"]["data"].as_str().unwrap())
                 .unwrap(),
             b"updated"
+        );
+    }
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+    use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    /// This Home's Content: records each request; a publish answers the same
+    /// CID for the same bytes.
+    #[derive(Default)]
+    struct RecordingContent {
+        requests: Mutex<Vec<Value>>,
+        down: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for RecordingContent {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("raw requests only".into()))
+        }
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+        fn name(&self) -> &'static str {
+            "recording-content"
+        }
+        async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            // A real Content call takes time; another request can run meanwhile.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if self.down.load(Ordering::SeqCst) {
+                return Err(ProviderError::Provider("content is down".into()));
+            }
+            let cid = match request["op"].as_str() {
+                Some("publish") => {
+                    let digest = Sha256::digest(request["data"].as_str().unwrap_or_default());
+                    format!("bafytest{}", &hex::encode(digest)[..16])
+                }
+                _ => request["cid"].as_str().unwrap_or_default().to_string(),
+            };
+            let status = if request["op"] == "unpublish" {
+                "local_unpinned"
+            } else {
+                "local_pinned"
+            };
+            Ok(json!({ "status": "ok", "data": {
+                "cid": cid,
+                "availability": { "status": status },
+                "receipt": { "status": status },
+            }}))
+        }
+    }
+
+    struct Home {
+        dir: tempfile::TempDir,
+        registry: Arc<ProviderRegistry>,
+        content: Arc<RecordingContent>,
+        principal: &'static str,
+        root: String,
+    }
+
+    async fn home(principal: &'static str) -> Home {
+        let registry = Arc::new(ProviderRegistry::new());
+        let content = Arc::new(RecordingContent::default());
+        registry
+            .register_sub_provider("content", content.clone())
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::auth::principal_localhost_root(principal);
+        crate::auth::store_test_human_principal(dir.path(), principal);
+        crate::auth::store_test_principal_root_protection_for(dir.path(), principal, &root);
+        Home {
+            dir,
+            registry,
+            content,
+            principal,
+            root,
+        }
+    }
+
+    impl Home {
+        async fn call(&self, op: &str, mut body: Value) -> Value {
+            body["op"] = json!(op);
+            body["principal_id"] = json!(self.principal);
+            handle_object_provider_runtime_request(self.dir.path(), self.registry.clone(), &body)
+                .await
+        }
+
+        fn uri(&self, path: &str) -> String {
+            format!("{}/{path}", self.root)
+        }
+
+        fn path(&self, path: &str) -> PathBuf {
+            library_target(self.dir.path(), self.principal, &self.uri(path))
+                .unwrap()
+                .path
+        }
+
+        async fn write(&self, path: &str, bytes: &[u8]) -> Value {
+            let write = self
+                .call(
+                    "write",
+                    json!({
+                        "uri": self.uri(path),
+                        "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    }),
+                )
+                .await;
+            assert_eq!(write["status"], "ok", "{write}");
+            write["data"]["object"].clone()
+        }
+
+        async fn publish(&self, path: &str) -> Value {
+            self.call("publish", json!({ "uri": self.uri(path) })).await
+        }
+
+        async fn stat(&self, path: &str) -> Value {
+            let stat = self.call("stat", json!({ "uri": self.uri(path) })).await;
+            assert_eq!(stat["status"], "ok", "{stat}");
+            stat["data"]["object"].clone()
+        }
+
+        fn requests(&self, op: &str) -> Vec<Value> {
+            self.content
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request["op"] == op)
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn assert_refused(response: &Value, code: &str) {
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], code, "{response}");
+    }
+
+    #[tokio::test]
+    async fn publish_and_repair_pin_on_this_home_only() {
+        let home = home("did:key:z6MkPublishLocalPin").await;
+        let object = home.write("Documents/notes.txt", b"hello").await;
+        let revision = object["revision"].as_str().unwrap().to_string();
+
+        let publish = home
+            .call(
+                "publish",
+                json!({ "uri": home.uri("Documents/notes.txt"), "if_revision": revision }),
+            )
+            .await;
+        assert_eq!(publish["status"], "ok", "{publish}");
+        let cid = publish["data"]["cid"].as_str().unwrap().to_string();
+        assert_eq!(publish["data"]["uri"], format!("elastos://{cid}"));
+        let requests = home.requests("publish");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["availability_policy"],
+            crate::content::LOCAL_PIN_AVAILABILITY_POLICY
+        );
+        let publication = &publish["data"]["object"]["publication"];
+        assert_eq!(publication["cid"], cid);
+        assert_eq!(publication["uri"], format!("elastos://{cid}"));
+        assert_eq!(publication["revision"], revision);
+        assert_eq!(publication["published_at"], publish["data"]["published_at"]);
+
+        // Publishing the same bytes again reuses the publication.
+        let again = home.publish("Documents/notes.txt").await;
+        assert_eq!(again["status"], "ok", "{again}");
+        assert_eq!(again["data"]["cid"], cid);
+        assert_eq!(
+            again["data"]["published_at"],
+            publish["data"]["published_at"]
+        );
+        assert_eq!(home.requests("publish").len(), 1);
+
+        let unpublish = home
+            .call(
+                "unpublish",
+                json!({ "uri": home.uri("Documents/notes.txt") }),
+            )
+            .await;
+        assert_eq!(unpublish["status"], "ok", "{unpublish}");
+        assert!(
+            home.requests("unpublish").is_empty(),
+            "withdrawal never unpins"
+        );
+        assert!(home.stat("Documents/notes.txt").await["publication"].is_null());
+
+        let repair = home
+            .call("repair", json!({ "uri": home.uri("Documents/notes.txt") }))
+            .await;
+        assert_eq!(repair["status"], "ok", "{repair}");
+        let repairs = home.requests("repair");
+        assert_eq!(
+            repairs[0]["availability_policy"],
+            crate::content::LOCAL_PIN_AVAILABILITY_POLICY
+        );
+        assert_eq!(
+            home.stat("Documents/notes.txt").await["publication"]["cid"],
+            cid
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_publications_keep_their_repair_and_unpublish_requests() {
+        let home = home("did:key:z6MkPublishProtectedKept").await;
+        home.write("Documents/film.mp4", b"sealed source").await;
+        let uri = home.uri("Documents/film.mp4");
+        let mut content_security = default_publish_content_security();
+        content_security["published_payload"] = json!(RUNTIME_CUSTODY_PUBLISHED_PAYLOAD);
+        write_publish_record(
+            home.dir.path(),
+            home.principal,
+            &LibraryPublishRecord {
+                schema: "elastos.library.publish-record/v1".to_string(),
+                object_uri: uri.clone(),
+                cid: "bafyprotected".to_string(),
+                published_at: 1,
+                unpublished_at: None,
+                shared_at: None,
+                share_policy: None,
+                share_grants: Vec::new(),
+                content_security,
+                receipt: json!({}),
+                availability: json!({ "status": "local_pinned" }),
+                listing_uri: Some("elastos://bafylisting".to_string()),
+                revision: None,
+                publication_id: None,
+                size_bytes: None,
+            },
+        )
+        .unwrap();
+
+        let repair = home.call("repair", json!({ "uri": uri })).await;
+        assert_eq!(repair["status"], "ok", "{repair}");
+        let unpublish = home.call("unpublish", json!({ "uri": uri })).await;
+        assert_eq!(unpublish["status"], "ok", "{unpublish}");
+        for request in home
+            .requests("repair")
+            .iter()
+            .chain(&home.requests("unpublish"))
+        {
+            assert!(request.get("availability_policy").is_none(), "{request}");
+        }
+        // A plain publish never replaces a protected publication.
+        home.call("repair", json!({ "uri": uri })).await;
+        let protected = home.publish("Documents/film.mp4").await;
+        assert_refused(&protected, "unsupported");
+        assert_eq!(protected["reason"], "protected");
+        assert!(home.requests("publish").is_empty());
+        // Buyers fetch the sealed payload and listing from any Home: an
+        // active protected publication is served to any peer.
+        for cid in ["bafyprotected", "bafylisting"] {
+            let audience = published_cid_audience(home.dir.path(), cid).unwrap();
+            assert!(audience.any_peer, "{cid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_refuses_empty_oversized_stale_folder_and_missing_in_plain_words() {
+        let home = home("did:key:z6MkPublishRefusals").await;
+
+        home.write("Documents/empty.txt", b"").await;
+        let empty = home.publish("Documents/empty.txt").await;
+        assert_refused(&empty, "empty_file");
+        assert_eq!(empty["message"], "Empty files can't be published.");
+
+        let cap = LIBRARY_PUBLISH_MAX_BYTES as usize;
+        home.write("Documents/at-cap.bin", &vec![7; cap]).await;
+        home.write("Documents/over-cap.bin", &vec![7; cap + 1])
+            .await;
+        let over = home.publish("Documents/over-cap.bin").await;
+        assert_refused(&over, "too_large");
+        assert_eq!(over["message"], "This file is too large to publish.");
+        // Far over the cap is refused from its size on disk, before reading.
+        std::fs::write(
+            home.path("Documents/huge.bin"),
+            vec![0; LIBRARY_PUBLISH_MAX_STORED_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert_refused(&home.publish("Documents/huge.bin").await, "too_large");
+        assert!(home.requests("publish").is_empty());
+        let at_cap = home.publish("Documents/at-cap.bin").await;
+        assert_eq!(at_cap["status"], "ok", "{at_cap}");
+        assert_eq!(home.requests("publish").len(), 1);
+
+        home.write("Documents/stale.txt", b"one").await;
+        let stale = home
+            .call(
+                "publish",
+                json!({ "uri": home.uri("Documents/stale.txt"), "if_revision": "rev:old" }),
+            )
+            .await;
+        assert_refused(&stale, "stale_revision");
+
+        let mkdir = home
+            .call(
+                "mkdir",
+                json!({ "parent_uri": home.uri("Documents"), "name": "Folder" }),
+            )
+            .await;
+        assert_eq!(mkdir["status"], "ok", "{mkdir}");
+        let folder = home.publish("Documents/Folder").await;
+        assert_refused(&folder, "unsupported");
+        assert_eq!(folder["message"], "Folders can't be published.");
+        assert_eq!(folder["reason"], "folder");
+        assert_refused(&home.publish("Documents/gone.txt").await, "not_found");
+
+        home.content.down.store(true, Ordering::SeqCst);
+        let down = home.publish("Documents/stale.txt").await;
+        assert_refused(&down, "unavailable");
+        assert_eq!(
+            down["message"],
+            "Publishing isn't available right now. Try again."
+        );
+        assert!(home.stat("Documents/stale.txt").await["publication"].is_null());
+    }
+
+    #[tokio::test]
+    async fn publish_refuses_traversal_other_roots_and_links() {
+        let home = home("did:key:z6MkPublishPaths").await;
+        home.write("Documents/mine.txt", b"mine").await;
+        let other_root = crate::auth::principal_localhost_root("did:key:z6MkSomeoneElse");
+        for uri in [
+            format!("{}/Documents/../Documents/mine.txt", home.root),
+            format!("{other_root}/Documents/mine.txt"),
+            "file:///etc/passwd".to_string(),
+        ] {
+            let refused = home.call("publish", json!({ "uri": uri })).await;
+            assert_eq!(refused["status"], "error", "{uri}: {refused}");
+        }
+        let refused = publish_library_uri_locked(
+            home.dir.path(),
+            &home.registry,
+            home.principal,
+            "file:///etc/passwd",
+            None,
+            None,
+        )
+        .await
+        .err()
+        .unwrap();
+        let refused = find_library_refusal(&refused).unwrap();
+        assert_eq!(refused.code, "unsupported");
+        assert_eq!(refused.reason, Some("not_allowed_here"));
+
+        #[cfg(unix)]
+        {
+            let outside = home.dir.path().join("outside.txt");
+            std::fs::write(&outside, b"outside").unwrap();
+            std::os::unix::fs::symlink(&outside, home.path("Documents/link.txt")).unwrap();
+            assert_refused(&home.publish("Documents/link.txt").await, "unsupported");
+            std::fs::create_dir_all(home.dir.path().join("elsewhere")).unwrap();
+            std::fs::write(home.dir.path().join("elsewhere/inner.txt"), b"inner").unwrap();
+            std::os::unix::fs::symlink(
+                home.dir.path().join("elsewhere"),
+                home.path("Documents/linked"),
+            )
+            .unwrap();
+            assert_refused(
+                &home.publish("Documents/linked/inner.txt").await,
+                "unsupported",
+            );
+        }
+        assert!(home.requests("publish").is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_allows_only_the_visible_library_places() {
+        let home = home("did:key:z6MkPublishPlaces").await;
+        // Runtime-held files, such as the Profile authority bundle, and any
+        // hidden folder are never published, whatever their bytes.
+        for hidden in [
+            ".AppData/ElastOS/Profile/profile-authority.json",
+            ".AppData/LocalHost/.Runtime/Library/Published/x.json",
+            ".Trash/old.txt",
+            "Documents/.secret/notes.txt",
+            ".hidden.txt",
+        ] {
+            let path = home.path(hidden);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{\"profile_signing_seed_hex\":\"00\"}").unwrap();
+            let refused = home.publish(hidden).await;
+            assert_refused(&refused, "unsupported");
+            assert_eq!(refused["reason"], "not_allowed_here", "{hidden}");
+            let refused = publish_library_uri_locked(
+                home.dir.path(),
+                &home.registry,
+                home.principal,
+                &home.uri(hidden),
+                None,
+                None,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(find_library_refusal(&refused).unwrap().code, "unsupported");
+        }
+        assert!(home.requests("publish").is_empty());
+
+        home.write("notes.txt", b"in Home").await;
+        home.write("Projects/plan.txt", b"in a folder of Home")
+            .await;
+        for visible in ["notes.txt", "Projects/plan.txt"] {
+            let published = home.publish(visible).await;
+            assert_eq!(published["status"], "ok", "{visible}: {published}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_publishes_of_one_file_make_one_publication() {
+        let home = home("did:key:z6MkPublishConcurrent").await;
+        home.write("Documents/race.txt", b"race").await;
+        let (first, second) = tokio::join!(
+            home.publish("Documents/race.txt"),
+            home.publish("Documents/race.txt")
+        );
+        assert_eq!(first["status"], "ok", "{first}");
+        assert_eq!(second["status"], "ok", "{second}");
+        assert_eq!(
+            first["data"]["published_at"],
+            second["data"]["published_at"]
+        );
+        assert_eq!(home.requests("publish").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn withdrawing_one_of_two_publications_of_the_same_bytes_keeps_the_other_served() {
+        let home = home("did:key:z6MkPublishSameBytes").await;
+        home.write("Documents/a.txt", b"same bytes").await;
+        home.write("Pictures/b.txt", b"same bytes").await;
+        let a = home.publish("Documents/a.txt").await;
+        let b = home.publish("Pictures/b.txt").await;
+        assert_eq!(a["data"]["cid"], b["data"]["cid"]);
+        let cid = a["data"]["cid"].as_str().unwrap().to_string();
+        assert!(cid_is_published_here(home.dir.path(), &cid));
+
+        let first = home
+            .call("unpublish", json!({ "uri": home.uri("Documents/a.txt") }))
+            .await;
+        assert_eq!(first["status"], "ok", "{first}");
+        assert_eq!(first["data"]["availability"]["status"], "withdrawn");
+        assert!(home.stat("Documents/a.txt").await["publication"].is_null());
+        assert!(
+            cid_is_published_here(home.dir.path(), &cid),
+            "b still served"
+        );
+
+        let last = home
+            .call("unpublish", json!({ "uri": home.uri("Pictures/b.txt") }))
+            .await;
+        assert_eq!(last["status"], "ok", "{last}");
+        assert!(!cid_is_published_here(home.dir.path(), &cid));
+        // Withdrawal never unpins: the pin is only local storage.
+        assert!(home.requests("unpublish").is_empty());
+    }
+
+    #[tokio::test]
+    async fn another_persons_unpublish_never_affects_a_publication_it_cannot_see_or_read() {
+        // Neither person is in the passkey list, and Alma's record is
+        // unreadable by the time Bruno withdraws.
+        let alma = home("did:key:z6MkAlmaUnlisted").await;
+        let bruno_id = "did:key:z6MkBrunoUnlisted";
+        alma.write("Documents/same.txt", b"shared bytes").await;
+        let published = alma.publish("Documents/same.txt").await;
+        let cid = published["data"]["cid"].as_str().unwrap().to_string();
+        let bruno_uri = format!(
+            "{}/Documents/same.txt",
+            crate::auth::principal_localhost_root(bruno_id)
+        );
+        crate::auth::store_test_human_principal(alma.dir.path(), bruno_id);
+        crate::auth::store_test_principal_root_protection_for(
+            alma.dir.path(),
+            bruno_id,
+            &crate::auth::principal_localhost_root(bruno_id),
+        );
+        let as_bruno = |op: &str, mut body: Value| {
+            body["op"] = json!(op);
+            body["principal_id"] = json!(bruno_id);
+            let (dir, registry) = (alma.dir.path().to_path_buf(), alma.registry.clone());
+            async move { handle_object_provider_runtime_request(&dir, registry, &body).await }
+        };
+        let write = as_bruno(
+            "write",
+            json!({
+                "uri": bruno_uri,
+                "data": base64::engine::general_purpose::STANDARD.encode(b"shared bytes"),
+            }),
+        )
+        .await;
+        assert_eq!(write["status"], "ok", "{write}");
+        let bruno = as_bruno("publish", json!({ "uri": bruno_uri })).await;
+        assert_eq!(bruno["data"]["cid"], cid.as_str());
+
+        let record_path = rooted_localhost_fs_path(
+            alma.dir.path(),
+            &publish_record_uri(&alma.root, &alma.uri("Documents/same.txt")),
+        )
+        .unwrap();
+        std::fs::write(&record_path, b"unreadable").unwrap();
+
+        let unpublish = as_bruno("unpublish", json!({ "uri": bruno_uri })).await;
+        assert_eq!(unpublish["status"], "ok", "{unpublish}");
+        assert!(
+            cid_is_published_here(alma.dir.path(), &cid),
+            "Alma's stays served"
+        );
+        // A restart serves only what a readable active record backs.
+        reconcile_published_cids(alma.dir.path());
+        assert!(
+            !cid_is_published_here(alma.dir.path(), &cid),
+            "an unreadable record is not served after a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_publish_serves_nothing_even_for_bytes_shared_before() {
+        let home = home("did:key:z6MkPublishCrashes").await;
+        home.write("Documents/c.txt", b"crash").await;
+        let first = home.publish("Documents/c.txt").await;
+        let cid = first["data"]["cid"].as_str().unwrap().to_string();
+        let unpublish = home
+            .call("unpublish", json!({ "uri": home.uri("Documents/c.txt") }))
+            .await;
+        assert_eq!(unpublish["status"], "ok", "{unpublish}");
+        assert!(!cid_is_published_here(home.dir.path(), &cid));
+
+        // Publishing the same bytes again stops after the pin, before the
+        // record: the old link stays unserved and Library shows no publication.
+        home.registry
+            .send_raw(
+                "content",
+                &json!({
+                    "op": "publish",
+                    "kind": "file",
+                    "data": base64::engine::general_purpose::STANDARD.encode(b"crash"),
+                    "pin": true,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!cid_is_published_here(home.dir.path(), &cid));
+        assert!(home.stat("Documents/c.txt").await["publication"].is_null());
+
+        let again = home.publish("Documents/c.txt").await;
+        assert_eq!(again["status"], "ok", "{again}");
+        assert!(cid_is_published_here(home.dir.path(), &cid));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rename_racing_a_publish_keeps_the_record_with_the_file() {
+        let home = home("did:key:z6MkPublishRenameRace").await;
+        home.write("Documents/a.txt", b"race").await;
+        let (publish, rename) = tokio::join!(
+            home.publish("Documents/a.txt"),
+            home.call(
+                "rename",
+                json!({ "uri": home.uri("Documents/a.txt"), "name": "b.txt" })
+            )
+        );
+        assert_eq!(rename["status"], "ok", "{rename}");
+        // Whichever ran first, no publication is left at a missing path.
+        for record in plain_publish_records(home.dir.path(), home.principal) {
+            assert_eq!(record.object_uri, home.uri("Documents/b.txt"), "{publish}");
+        }
+        if publish["status"] == "ok" {
+            assert_eq!(
+                home.stat("Documents/b.txt").await["publication"]["cid"],
+                publish["data"]["cid"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chat_attach_interrupted_after_its_record_posts_it_or_answers_withdrawn() {
+        let home = home("did:key:z6MkAttachInterrupted").await;
+        home.write("Documents/post.txt", b"post me").await;
+        let uri = home.uri("Documents/post.txt");
+        let bind = |request_id: &str, publication_id: &str| {
+            write_runtime_json(
+                home.dir.path(),
+                home.principal,
+                &chat_attach_binding_uri(home.dir.path(), home.principal, request_id).unwrap(),
+                &ChatAttachBinding {
+                    schema: "elastos.library.chat-attach/v1".to_string(),
+                    request_id: request_id.to_string(),
+                    uri: uri.clone(),
+                    if_revision: None,
+                    publication_id: publication_id.to_string(),
+                    bound_at: now_ts(),
+                    name: None,
+                    size_bytes: None,
+                },
+            )
+            .unwrap();
+        };
+        let attach = |request_id: &'static str| {
+            chat_attach_publication(
+                home.dir.path(),
+                &home.registry,
+                home.principal,
+                request_id,
+                &uri,
+                None,
+                || Ok(()),
+            )
+        };
+        // Bound and recorded under its own id; the binding was not updated.
+        bind("chat-attach:cut", "intended-id");
+        let recorded = {
+            let _serialized = PUBLICATIONS.lock().await;
+            publish_library_uri_locked(
+                home.dir.path(),
+                &home.registry,
+                home.principal,
+                &uri,
+                None,
+                Some("intended-id".to_string()),
+            )
+            .await
+            .unwrap()
+        };
+        let resumed = attach("chat-attach:cut").await.unwrap();
+        assert_eq!(resumed.cid, recorded.cid);
+        assert_eq!(resumed.name, "post.txt");
+        assert_eq!(resumed.size_bytes, 7);
+        // A second request bound before it reused that publication.
+        bind("chat-attach:reuse", "never-recorded");
+        let reused = attach("chat-attach:reuse").await.unwrap();
+        assert_eq!(reused.cid, recorded.cid);
+        assert_eq!(home.requests("publish").len(), 1);
+
+        let unpublish = home.call("unpublish", json!({ "uri": uri })).await;
+        assert_eq!(unpublish["status"], "ok", "{unpublish}");
+        for request_id in ["chat-attach:cut", "chat-attach:reuse"] {
+            let replay = attach(request_id).await.err().unwrap();
+            assert_eq!(find_library_refusal(&replay).unwrap().code, "withdrawn");
+        }
+        assert_eq!(home.requests("publish").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn changed_bytes_need_unpublish_before_a_new_publication() {
+        let home = home("did:key:z6MkPublishChanged").await;
+        home.write("Documents/draft.txt", b"first").await;
+        let first = home.publish("Documents/draft.txt").await;
+        let first_cid = first["data"]["cid"].as_str().unwrap().to_string();
+
+        home.write("Documents/draft.txt", b"second").await;
+        // The listing still names the published CID, not the new bytes.
+        assert_eq!(
+            home.stat("Documents/draft.txt").await["publication"]["cid"],
+            first_cid
+        );
+        let changed = home.publish("Documents/draft.txt").await;
+        assert_refused(&changed, "changed_since_publish");
+        assert_eq!(home.requests("publish").len(), 1);
+
+        let unpublish = home
+            .call(
+                "unpublish",
+                json!({ "uri": home.uri("Documents/draft.txt") }),
+            )
+            .await;
+        assert_eq!(unpublish["status"], "ok", "{unpublish}");
+        let second = home.publish("Documents/draft.txt").await;
+        assert_eq!(second["status"], "ok", "{second}");
+        assert_ne!(second["data"]["cid"], first_cid);
+        assert_eq!(home.requests("publish").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rename_and_move_carry_the_publication_and_trash_waits_for_unpublish() {
+        let home = home("did:key:z6MkPublishMoves").await;
+        home.write("Documents/Shared/a.txt", b"carried").await;
+        let publish = home.publish("Documents/Shared/a.txt").await;
+        let cid = publish["data"]["cid"].as_str().unwrap().to_string();
+
+        let rename = home
+            .call(
+                "rename",
+                json!({ "uri": home.uri("Documents/Shared/a.txt"), "name": "b.txt" }),
+            )
+            .await;
+        assert_eq!(rename["status"], "ok", "{rename}");
+        assert_eq!(rename["data"]["object"]["publication"]["cid"], cid);
+
+        home.write("Documents/Other/keep.txt", b"keep").await;
+        let moved = home
+            .call(
+                "move",
+                json!({
+                    "uri": home.uri("Documents/Shared/b.txt"),
+                    "target_parent_uri": home.uri("Documents/Other"),
+                }),
+            )
+            .await;
+        assert_eq!(moved["status"], "ok", "{moved}");
+        assert_eq!(moved["data"]["object"]["publication"]["cid"], cid);
+
+        // A folder rename carries the publications inside it.
+        let folder = home
+            .call(
+                "rename",
+                json!({ "uri": home.uri("Documents/Other"), "name": "Moved" }),
+            )
+            .await;
+        assert_eq!(folder["status"], "ok", "{folder}");
+        assert_eq!(
+            home.stat("Documents/Moved/b.txt").await["publication"]["cid"],
+            cid
+        );
+        // Nothing published is left behind at the old places.
+        home.write("Documents/Shared/a.txt", b"new file").await;
+        assert!(home.stat("Documents/Shared/a.txt").await["publication"].is_null());
+
+        for uri in ["Documents/Moved/b.txt", "Documents/Moved"] {
+            let trash = home.call("trash", json!({ "uri": home.uri(uri) })).await;
+            assert_refused(&trash, "published_withdraw_first");
+        }
+        assert!(home.path("Documents/Moved/b.txt").is_file());
+
+        let unpublish = home
+            .call(
+                "unpublish",
+                json!({ "uri": home.uri("Documents/Moved/b.txt") }),
+            )
+            .await;
+        assert_eq!(unpublish["status"], "ok", "{unpublish}");
+        assert!(!cid_is_published_here(home.dir.path(), &cid));
+        let trash = home
+            .call("trash", json!({ "uri": home.uri("Documents/Moved") }))
+            .await;
+        assert_eq!(trash["status"], "ok", "{trash}");
+    }
+}
+
+#[cfg(test)]
+mod r5a_tests {
+    use super::*;
+    use crate::auth::{principal_object_io, r4_fixture, PrincipalKind};
+    use std::collections::HashMap;
+    use std::sync::LazyLock;
+    use std::sync::Mutex;
+
+    static RUNTIME_JSON_DIR_READS: LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(super) fn record_runtime_json_dir_read(data_dir: &Path, uri: &str) {
+        RUNTIME_JSON_DIR_READS
+            .lock()
+            .unwrap()
+            .entry(data_dir.to_path_buf())
+            .or_default()
+            .push(uri.to_string());
+    }
+
+    fn runtime_json_dir_reads(data_dir: &Path) -> Vec<String> {
+        RUNTIME_JSON_DIR_READS
+            .lock()
+            .unwrap()
+            .get(data_dir)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn home(kind: PrincipalKind) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        r4_fixture::store(dir.path(), kind);
+        let root = match kind {
+            PrincipalKind::Agent => r4_fixture::AGENT_ROOT,
+            PrincipalKind::Human => r4_fixture::HUMAN_ROOT,
+        };
+        crate::auth::store_test_principal_root_protection_for(dir.path(), r4_fixture::ID, root);
+        dir
+    }
+
+    /// Writes real data where the id rule for `r4_fixture::ID` points, so an
+    /// unresolved-principal fallback would have something to read or overwrite.
+    fn seed_id_rule_file(data_dir: &Path, uri: &str, bytes: &[u8]) -> PathBuf {
+        let path = rooted_localhost_fs_path(data_dir, uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn list_uses_the_stored_agent_root_end_to_end() {
+        let agent = home(PrincipalKind::Agent);
+        let result = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        );
+        assert!(
+            result.as_ref().is_ok_and(
+                |value| value["uri"] == r4_fixture::AGENT_ROOT && value["objects"] == json!([])
+            ),
+            "{result:?}"
+        );
+        let human = home(PrincipalKind::Human);
+        let listed = handle_library_request(
+            human.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(listed["uri"], r4_fixture::HUMAN_ROOT);
+        let absent = tempfile::tempdir().unwrap();
+        let result = handle_library_request(
+            absent.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: None,
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn empty_trash_uses_the_stored_agent_root_end_to_end() {
+        let agent = home(PrincipalKind::Agent);
+        let agent_uri = format!("{}/.Trash/agent.txt", r4_fixture::AGENT_ROOT);
+        let agent_path = rooted_localhost_fs_path(agent.path(), &agent_uri).unwrap();
+        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        fs::write(&agent_path, b"agent trash").unwrap();
+        let id_uri = format!("{}/.Trash/id-rule.txt", r4_fixture::HUMAN_ROOT);
+        let id_path = rooted_localhost_fs_path(agent.path(), &id_uri).unwrap();
+        fs::create_dir_all(id_path.parent().unwrap()).unwrap();
+        fs::write(&id_path, b"id-rule trash").unwrap();
+        // The stored Agent root empties its own Trash; the id-rule decoy stays.
+        let result = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(!agent_path.exists(), "agent Trash was not emptied");
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), b"id-rule trash");
+        assert!(
+            result
+                .as_ref()
+                .is_ok_and(|value| value["deleted_count"] == 1),
+            "{result:?}"
+        );
+        let events = read_library_events(agent.path(), r4_fixture::ID).unwrap();
+        assert_eq!(
+            events.last().unwrap().uri,
+            format!("{}/.Trash", r4_fixture::AGENT_ROOT)
+        );
+        let human = home(PrincipalKind::Human);
+        let emptied = handle_library_request(
+            human.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(emptied["deleted_count"], 0);
+        let absent = tempfile::tempdir().unwrap();
+        let result = handle_library_request(
+            absent.path(),
+            ObjectProviderRequest::EmptyTrash {
+                principal_id: r4_fixture::ID.into(),
+            },
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_json_write_uses_the_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/write.json");
+            let result = write_runtime_json(dir.path(), r4_fixture::ID, &uri, &json!({"site": 3}));
+            assert!(result.is_ok(), "{root}: {result:?}");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            assert!(path.is_file(), "{uri}");
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let uri = format!("{}/R5a/write.json", r4_fixture::HUMAN_ROOT);
+        let result = write_runtime_json(absent.path(), r4_fixture::ID, &uri, &json!({}));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_json_read_uses_the_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/read.json");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            crate::auth::write_principal_root_object(
+                dir.path(),
+                r4_fixture::ID,
+                root,
+                &uri,
+                &path,
+                br#"{"site":4}"#,
+            )
+            .unwrap();
+            let result: anyhow::Result<Value> = read_runtime_json(dir.path(), r4_fixture::ID, &uri);
+            assert!(
+                result.as_ref().is_ok_and(|value| value["site"] == 4),
+                "{uri}: {result:?}"
+            );
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let uri = format!("{}/R5a/read.json", r4_fixture::HUMAN_ROOT);
+        let path = rooted_localhost_fs_path(absent.path(), &uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, br#"{"site":4}"#).unwrap();
+        let result = read_runtime_json::<Value>(absent.path(), r4_fixture::ID, &uri);
+        assert!(
+            result.is_err(),
+            "read an unstored principal's JSON: {result:?}"
+        );
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[derive(Clone)]
+    struct WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for WarningWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn publish_records_uses_stored_root_and_skips_unresolved_principals() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/{LIBRARY_RUNTIME_DIR}/Published/r5a.json");
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let object_uri = format!("{root}/Documents/r5a.txt");
+            let record = json!({
+                "schema": "elastos.library.publish/v1", "object_uri": object_uri,
+                "cid": "cid-r5a", "published_at": 1, "receipt": {},
+                "availability": {},
+            });
+            crate::auth::write_principal_root_object(
+                dir.path(),
+                r4_fixture::ID,
+                root,
+                &uri,
+                &path,
+                &serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            let records = publish_records(dir.path(), r4_fixture::ID);
+            assert_eq!(records.len(), 1, "{root}");
+            assert_eq!(records[0].object_uri, format!("{root}/Documents/r5a.txt"));
+        }
+        let absent = tempfile::tempdir().unwrap();
+        let dir_uri = format!("{}/{LIBRARY_RUNTIME_DIR}/Published", r4_fixture::HUMAN_ROOT);
+        let uri = format!("{dir_uri}/r5a.json");
+        let path = rooted_localhost_fs_path(absent.path(), &uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "schema": "elastos.library.publish/v1",
+                "object_uri": format!("{}/Documents/r5a.txt", r4_fixture::HUMAN_ROOT),
+                "cid": "cid-r5a", "published_at": 1,
+                "receipt": {}, "availability": {},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let writer = WarningWriter(warnings.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(publish_records(absent.path(), r4_fixture::ID).is_empty());
+        });
+        // The nested read_runtime_json also resolves the principal, so a
+        // fallback can scan this directory yet still return an empty list.
+        assert!(!runtime_json_dir_reads(absent.path()).contains(&dir_uri));
+        let warning = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
+        assert!(
+            warning.contains("skipping unresolved publish-record principal")
+                && warning.contains("has no stored record"),
+            "{warning}"
+        );
+    }
+
+    fn trash(root: &str) -> LibraryTrashRecord {
+        LibraryTrashRecord {
+            schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
+            trash_uri: format!("{root}/.Trash/t.txt"),
+            original_uri: format!("{root}/Documents/t.txt"),
+            original_name: "t.txt".into(),
+            trashed_at: 1,
+        }
+    }
+
+    #[test]
+    fn trash_record_write_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            let result = write_trash_record(dir.path(), r4_fixture::ID, &record);
+            let uri = trash_record_uri(root, &record.trash_uri);
+            assert!(
+                result.is_ok()
+                    && rooted_localhost_fs_path(dir.path(), &uri)
+                        .unwrap()
+                        .is_file(),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
+        let result = write_trash_record(dir.path(), r4_fixture::ID, &record);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        // The id-rule location holds real data; nothing may be read, written
+        // or returned from it once the stored record is gone.
+        assert_eq!(
+            fs::read(&id_path).unwrap_or_default(),
+            b"id-rule trash record"
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn trash_record_read_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            write_trash_record(dir.path(), r4_fixture::ID, &record).unwrap();
+            let result = read_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|value| value.original_uri == format!("{root}/Documents/t.txt")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
+        let result = read_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes);
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn trash_record_remove_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = trash(root);
+            write_trash_record(dir.path(), r4_fixture::ID, &record).unwrap();
+            let uri = trash_record_uri(root, &record.trash_uri);
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            assert!(path.is_file(), "{uri}");
+            let result = remove_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+            assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = trash(r4_fixture::HUMAN_ROOT);
+        let id_uri = trash_record_uri(r4_fixture::HUMAN_ROOT, &record.trash_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule trash record");
+        let result = remove_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            fs::read(&id_path).unwrap_or_default(),
+            b"id-rule trash record"
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    fn published(root: &str) -> LibraryPublishRecord {
+        serde_json::from_value(json!({
+            "schema": "elastos.library.publish/v1", "object_uri": format!("{root}/Documents/p.txt"),
+            "cid": "cid-r5b", "published_at": 1, "unpublished_at": 2,
+            "receipt": {}, "availability": {},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn publish_record_read_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = published(root);
+            let uri = publish_record_uri(root, &record.object_uri);
+            write_runtime_json(dir.path(), r4_fixture::ID, &uri, &record).unwrap();
+            let result = read_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|value| value.object_uri == format!("{root}/Documents/p.txt")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, &bytes);
+        let result = read_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes);
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn publish_record_write_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = published(root);
+            let uri = publish_record_uri(root, &record.object_uri);
+            let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+            assert!(
+                result.is_ok()
+                    && rooted_localhost_fs_path(dir.path(), &uri)
+                        .unwrap()
+                        .is_file(),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
+        let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            fs::read(&id_path).unwrap_or_default(),
+            b"id-rule publish record"
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn publish_record_remove_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let record = published(root);
+            let uri = publish_record_uri(root, &record.object_uri);
+            write_runtime_json(dir.path(), r4_fixture::ID, &uri, &record).unwrap();
+            let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+            assert!(path.is_file(), "{uri}");
+            let result = remove_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+            assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let id_uri = publish_record_uri(r4_fixture::HUMAN_ROOT, &record.object_uri);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule publish record");
+        let result = remove_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            fs::read(&id_path).unwrap_or_default(),
+            b"id-rule publish record"
+        );
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    fn event(root: &str) -> LibraryEvent {
+        LibraryEvent {
+            schema: LIBRARY_EVENT_SCHEMA.into(),
+            event_id: "r5b-event".into(),
+            op: "write".into(),
+            uri: format!("{root}/Documents/e.txt"),
+            at: 1,
+            details: json!({}),
+        }
+    }
+
+    #[test]
+    fn library_event_filter_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            write_library_events(dir.path(), r4_fixture::ID, &[event(root)]).unwrap();
+            let filter = format!("{root}/Documents/e.txt");
+            let result = library_events(dir.path(), r4_fixture::ID, Some(&filter), None, None);
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|values| values.len() == 1 && values[0].uri == filter),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
+        let bytes = format!(
+            "{}\n",
+            serde_json::to_string(&event(r4_fixture::HUMAN_ROOT)).unwrap()
+        );
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, bytes.as_bytes());
+        let result = library_events(dir.path(), r4_fixture::ID, None, None, None);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes.as_bytes());
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn library_event_read_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            write_library_events(dir.path(), r4_fixture::ID, &[event(root)]).unwrap();
+            let result = read_library_events(dir.path(), r4_fixture::ID);
+            assert!(
+                result.as_ref().is_ok_and(|values| values.len() == 1
+                    && values[0].uri == format!("{root}/Documents/e.txt")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
+        let bytes = format!(
+            "{}\n",
+            serde_json::to_string(&event(r4_fixture::HUMAN_ROOT)).unwrap()
+        );
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, bytes.as_bytes());
+        let result = read_library_events(dir.path(), r4_fixture::ID);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), bytes.as_bytes());
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn library_event_write_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = library_event_log_uri(root);
+            let result = write_library_events(dir.path(), r4_fixture::ID, &[event(root)]);
+            assert!(
+                result.is_ok()
+                    && rooted_localhost_fs_path(dir.path(), &uri)
+                        .unwrap()
+                        .is_file(),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
+        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule event log");
+        let result =
+            write_library_events(dir.path(), r4_fixture::ID, &[event(r4_fixture::HUMAN_ROOT)]);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&id_path).unwrap_or_default(), b"id-rule event log");
+        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn chat_attach_binding_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
+            assert!(
+                result.as_ref().is_ok_and(|uri| uri.starts_with(&format!(
+                    "{root}/.AppData/LocalHost/.Runtime/Library/ChatAttach/"
+                )) && uri.ends_with(".json")),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn localhost_spaces_pointer_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
+            assert!(
+                result.as_ref().is_ok_and(|object| object.uri == root),
+                "{root}: {result:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn library_target_uses_stored_root() {
+        for (kind, root) in [
+            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+        ] {
+            let dir = home(kind);
+            let uri = format!("{root}/Documents/a.txt");
+            let result = library_target(dir.path(), r4_fixture::ID, &uri);
+            assert!(
+                result.as_ref().is_ok_and(|target| target.uri == uri),
+                "{root}: {}",
+                result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default()
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let uri = format!("{}/Documents/a.txt", r4_fixture::HUMAN_ROOT);
+        let result = library_target(dir.path(), r4_fixture::ID, &uri);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "unstored Library target must refuse"
         );
     }
 }

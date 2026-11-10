@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -11,6 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 AUDIT = "protected-content-installed-static-audit.py"
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 PLATFORM = "linux-amd64"
 PROFILE = "protected-fixture"
 CANONICAL = {
@@ -167,11 +171,12 @@ class Fixture:
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         (self.source / ".gitignore").write_text("**/target/\n", encoding="utf-8")
         write_json(self.source / "components.json", manifest(self.binary_bytes), 0o644)
-        run(["git", "init", "--quiet"], cwd=self.source)
-        run(["git", "config", "user.name", "Static Audit Smoke"], cwd=self.source)
-        run(["git", "config", "user.email", "static-audit@invalid"], cwd=self.source)
-        run(["git", "add", "."], cwd=self.source)
-        run(["git", "commit", "--quiet", "-m", "static audit fixture"], cwd=self.source)
+        env = fixture_git.fixture_git_env(self.root)
+        run(["git", "init", "--quiet"], cwd=self.source, env=env)
+        run(["git", "config", "user.name", "Static Audit Smoke"], cwd=self.source, env=env)
+        run(["git", "config", "user.email", "static-audit@invalid"], cwd=self.source, env=env)
+        run(["git", "add", "."], cwd=self.source, env=env)
+        run(["git", "commit", "--quiet", "-m", "static audit fixture"], cwd=self.source, env=env)
 
         write_json(self.data / "components.json", manifest(self.binary_bytes), 0o600)
         for name, data in self.binary_bytes.items():

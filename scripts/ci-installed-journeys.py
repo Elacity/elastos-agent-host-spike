@@ -385,6 +385,13 @@ def runtime_unit_helper(control):
         os.close(owner_fd)
 
 
+class ExitStatusUnknown:
+    """The child has stopped, but this outside observer cannot read a status."""
+
+
+EXIT_STATUS_UNKNOWN = ExitStatusUnknown()
+
+
 class FiniteRuntime:
     """Outside observer for one identity-bound transient CI service."""
     def __init__(self, home, data, address, environment, gib, platform=sys.platform):
@@ -491,7 +498,9 @@ class FiniteRuntime:
         return result
 
     def poll(self):
-        return 1 if self.error or self.pid in self.fds and pidfd_exited(self.fds[self.pid]) else None
+        # The helper owns the Runtime's wait, so no exit status reaches this
+        # outside observer. Report the stop without inventing a code.
+        return EXIT_STATUS_UNKNOWN if self.error or self.pid in self.fds and pidfd_exited(self.fds[self.pid]) else None
 
     def observe_once(self, require_runtime=True):
         if (self.metric("memory.max") != str(self.budget) or self.metric("memory.swap.max") != "0"
@@ -1065,10 +1074,21 @@ def free_port(kind=socket.SOCK_STREAM):
         return probe.getsockname()[1]
 
 
-def wait_healthy(child, address, label, stop=None):
+def wait_healthy(child, address, label, stop=None, evidence=None):
+    """Refuse a Runtime that stops before health or leaves observation.
+
+    The message names the observed status or signal and the evidence file the
+    harness already writes. Runtime output stays in its private log; it never
+    reaches a CI log line, redacted or not.
+    """
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline and not (stop and stop.is_set()):
-        assert child.poll() is None, f"installed {label} exited before health" + failure_suffix(getattr(child, "failure", None))
+        code = child.poll()
+        if code is not None:
+            status = (f" (exit {code})" if code >= 0 else f" (signal {-code})") if type(code) is int else ""
+            raise AssertionError(f"installed {label} did not become healthy{status}"
+                                 + failure_suffix(getattr(child, "failure", None))
+                                 + (f"; evidence: {evidence}" if evidence else ""))
         try:
             with urllib.request.urlopen(f"http://{address}/healthz", timeout=1) as response:
                 if response.status == 200:
@@ -1087,18 +1107,29 @@ def post_json(url, body, token=None):
         return json.loads(response.read(1024 * 1024))
 
 
-def start_holder(home, data, consumer_data, consumer_environment):
+def serve_as_seed(data):
+    """Make this data dir a seed: a node that serves publisher content (Runtime's Publisher artifacts root)."""
+    path = data
+    for part in ("ElastOS", "SystemServices", "Publisher", "artifacts"):
+        path = path / part
+        path.mkdir(mode=0o700, exist_ok=True)
+
+
+def start_holder(home, data, consumer_data, consumer_environment, evidence=None):
     """Start the separate holder Home and name it as the consumer's one Carrier peer.
 
     The holder gateway starts its own Kubo with the pinned package before health.
+    Production serves model packages from a seed, so the holder is one: an
+    ordinary Home serves peers only files its people publish to their contacts.
     """
     environment = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(data.parent))
+    serve_as_seed(data)
     installed, number = str(data / "bin/elastos"), free_port()
     with (home / "holder-runtime.private.log").open("wb") as log:
         child = subprocess.Popen([installed, "gateway", "--addr", f"127.0.0.1:{number}"], env=environment,
                                  stdout=log, stderr=log, start_new_session=True)
     try:
-        wait_healthy(child, f"localhost:{number}", "holder Runtime")
+        wait_healthy(child, f"localhost:{number}", "holder Runtime", evidence=evidence)
         deadline = time.monotonic() + 30
         while not (data / "gateway-runtime-coords.json").is_file() and time.monotonic() < deadline:
             time.sleep(0.25)
@@ -1137,8 +1168,9 @@ def consumer_root_block(data, cid):
 
 class RepairRuntime:
     """Own the installed Home and its one deliberate interrupted-Get restart."""
-    def __init__(self, home, data, address, environment):
+    def __init__(self, home, data, address, environment, evidence=None):
         self.home, self.data, self.address, self.environment = home, data, address, environment
+        self.evidence = evidence
         self.control = home / "repair-control"
         self.control.mkdir(mode=0o700)
         self.log = (home / "journey-runtime.private.log").open("wb")
@@ -1263,7 +1295,7 @@ class RepairRuntime:
                 remaining -= len(part)
         self.kept = {"weights_bytes": whole, "weights_prefix_sha256": value.hexdigest(), "interrupted_process_cleanup": cleanup}
         self.launch()
-        wait_healthy(self.child, self.address, "restarted Runtime", self.stop)
+        wait_healthy(self.child, self.address, "restarted Runtime", self.stop, evidence=self.evidence)
         self.record["runtime_episodes"].append(self.identity())
         if weights.lstat().st_size < whole:
             raise RuntimeError("repair journey restart lost its kept prefix")
@@ -1417,18 +1449,21 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0, repair=Fa
         raise RuntimeError("installed journey fixture already owns running processes")
     if carrier:
         assert not (data / "ipfs-repo").exists() and not (data / "ipfs-repo").is_symlink(), "consumer Home starts without the package"
-        holder, record["package_holder"] = start_holder(holder_home, holder_data, data, environment)
+        holder, record["package_holder"] = start_holder(holder_home, holder_data, data, environment,
+                                                       evidence=evidence / "installed-journeys.json")
     number = free_port()
     address = f"localhost:{number}"
     started = time.monotonic()
     record["fixture_preparation_seconds"] = round(started - preparation_started, 2)
-    # Runtime logs stay private in the isolated Home; upload receipts/screenshots only.
+    # Runtime logs stay private in the isolated Home; upload receipts/screenshots
+    # only. A wait_healthy failure names its status and that evidence file.
     finite = None
     repair_runtime = None
     log = None
     try:
         if repair:
-            repair_runtime = RepairRuntime(home, data, f"127.0.0.1:{number}", environment)
+            repair_runtime = RepairRuntime(home, data, f"127.0.0.1:{number}", environment,
+                                              evidence=evidence / "installed-journeys.json")
             child = repair_runtime
         elif memory_gib:
             finite = FiniteRuntime(home, data, f"127.0.0.1:{number}", environment, memory_gib)
@@ -1448,7 +1483,7 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0, repair=Fa
             cleanup_runtime(holder, holder_data)
         raise
     try:
-        wait_healthy(child, address, "Runtime")
+        wait_healthy(child, address, "Runtime", evidence=evidence / "installed-journeys.json")
         command = ["node", "scripts/ci-installed-home-journey.mjs", f"http://{address}", str(evidence), str(data)]
         if finite:
             command += ["--memory-refusal" if memory_gib == 1 else "--resource-lifecycle", str(finite.control)]

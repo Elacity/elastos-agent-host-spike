@@ -1,8 +1,11 @@
 //! Lab stand-in for the Runtime's live-grant view, not the Runtime.
 //!
 //! `get_capability_list` is the one answer for `GET /api/capability/list`.
-//! `None` is the plain route. `Some("all_sessions_live")` is the query form.
-//! One filter keeps a grant whose life is `Live`. An ended session stays.
+//! `None` is the plain route: the caller's own session, five fields per entry
+//! and no `scope` key. `Some("all_sessions_live")` is the shell-only
+//! all-sessions view: every live grant, six fields per entry with its
+//! `session_id`, and the `scope` key. One filter keeps a grant whose life is
+//! `Live`. An ended session stays in the all-sessions view.
 //!
 //! `post_capsules`, `get_capsules` and `delete_capsule` answer the capsule
 //! routes for an admitted resident guest. Admission names a bundle by its lab
@@ -17,7 +20,7 @@
 //! route. `post_capability_validate` and `post_hosted_effect` are the two
 //! use paths; the private `use_grant` runs `authorise` on that same filter,
 //! then `admit_effect`, which holds the ask on the grant's own ledger handle
-//! against the session ceiling the grant route set at bind, and only then
+//! against the grant's own ceiling the grant route set at bind, and only then
 //! spends a `once` grant (M1 checks A6, A7).
 //!
 //! `stop_one` and the `worker_exited` seam share one private end path,
@@ -61,6 +64,7 @@ use grant_binding::{
     AdmitRefuse, BudgetAsk, GuestRequest, Handle, InstanceId, Refuse, Rights, Verifier,
 };
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -101,6 +105,10 @@ pub enum Caller<'a> {
     Shell,
     Client { session_id: &'a str },
 }
+
+/// The stand-in's session id for the shell caller. The plain list route reads
+/// the caller's own session, and the shell is one session in this model.
+const SHELL_SESSION: &str = "shell";
 
 /// Life of one seeded grant. The filter keeps `Live`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +288,10 @@ pub struct StandIn {
     /// kept as its error, so every later storage call answers with it.
     home_fd: Option<Result<OwnedFd, (u16, String)>>,
     grants: Vec<Grant>,
+    /// Request ids this stand-in's grant route minted, in mint order. A
+    /// `seed_grant` entry does not join it: that grant is present in the store
+    /// but was not minted by this run, so the A12 census treats it as foreign.
+    minted: BTreeSet<String>,
     requests: Vec<Request>,
     admitted: Vec<Admitted>,
     instances: Vec<Instance>,
@@ -299,11 +311,12 @@ pub struct StandIn {
     /// The `InstanceId` each live instance holds on `ledger`. It maps one
     /// instance id to one number and never goes the other way.
     instances_on_ledger: Vec<(String, InstanceId)>,
-    /// The bind step's one budget admission, by session. The first bind of a
-    /// session asks `EFFECT_BUDGET_CAP` and stores that as the session's
-    /// ceiling; a later bind of the same session asks nothing, so no use can
-    /// raise or lower the ceiling it reserves against.
-    admitted_on: Vec<String>,
+    /// The bind step's one budget admission, by grant handle. Each bind asks
+    /// `EFFECT_BUDGET_CAP` for the grant it just bound and stores that as that
+    /// grant's ceiling; a handle already admitted asks nothing, so no use can
+    /// raise or lower the ceiling its grant reserves against. Two grants of
+    /// one session keep separate ceilings.
+    admitted_on: Vec<Handle>,
 }
 
 impl StandIn {
@@ -312,6 +325,7 @@ impl StandIn {
             home: None,
             home_fd: None,
             grants: Vec::new(),
+            minted: BTreeSet::new(),
             requests: Vec::new(),
             admitted: Vec::new(),
             instances: Vec::new(),
@@ -742,6 +756,13 @@ impl StandIn {
         });
     }
 
+    /// Lab test seam, not a route: the request ids this stand-in's grant
+    /// route minted. The A12 census compares its live view with this set, so a
+    /// grant the run did not mint (a `seed_grant` entry) stays foreign.
+    pub fn minted_grant_ids(&self) -> BTreeSet<String> {
+        self.minted.clone()
+    }
+
     /// Lab test seam, not a route.
     ///
     /// Stores one `Live` grant exactly as `seed_grant` does, then binds it
@@ -822,16 +843,18 @@ impl StandIn {
             .expect("the caller just stored this request's grant");
         stored.binding = Some(bound);
         stored.run = mint_run_binding(request_id);
-        self.admit_on_ledger(&session_id, bound, instance)?;
+        self.admit_on_ledger(bound, instance)?;
         Ok(())
     }
 
-    /// Lab test seam, not a route. Private to this module.
+    /// Lab test seam, not a route. Fixtures use it to store a request record
+    /// the routes do not reach, such as one that is still pending after its
+    /// session stopped.
     ///
     /// Stores one pending request at the current instant. This method reads no
     /// clock and no disk. Its route caller `post_capability_request` runs
     /// `declared_ask` first, so an id it stores carries a declared ask.
-    pub(crate) fn seed_request(
+    pub fn seed_request(
         &mut self,
         request_id: &str,
         session_id: &str,
@@ -1127,6 +1150,7 @@ impl StandIn {
             .expect("the grant route just stored this request's grant")
             .plan = minted;
         self.bind_stored_grant(&request_id)?;
+        self.minted.insert(request_id.clone());
         Ok(json!({ "success": true }))
     }
 
@@ -1169,18 +1193,64 @@ impl StandIn {
     }
 
     /// `GET /api/capability/list` for the plain route or `?scope=`.
+    ///
+    /// The plain route is the real default: the caller's own session, five
+    /// fields per entry and no `scope` key. The shell caller answers for the
+    /// shell session, so it lists exactly the grants that session holds.
+    /// `?scope=all_sessions_live` is the shell-only all-sessions view, six
+    /// fields per entry with the grant's session.
     pub fn get_capability_list(
         &self,
         caller: Caller<'_>,
         scope: Option<&str>,
     ) -> Result<Value, (u16, String)> {
-        if let Some(scope) = scope {
-            if scope != LIVE_SCOPE {
-                return Err((400, format!("unknown capability list scope: {scope}")));
+        match scope {
+            None => Ok(self.render_own(caller)),
+            Some(LIVE_SCOPE) => {
+                require_shell(caller)?;
+                Ok(self.render_all_live())
             }
-            require_shell(caller)?;
+            Some(scope) => Err((400, format!("unknown capability list scope: {scope}"))),
         }
-        Ok(self.render(caller))
+    }
+
+    /// The plain route's answer: the caller's own session, five fields per
+    /// entry and no `scope` key. The shell caller answers for the shell
+    /// session and keeps every `Granted` record, like the real
+    /// `session_granted`; a client keeps its own live grants.
+    fn render_own(&self, caller: Caller<'_>) -> Value {
+        let own = match caller {
+            Caller::Shell => Caller::Client {
+                session_id: SHELL_SESSION,
+            },
+            Caller::Client { .. } => caller,
+        };
+        let mut grants = match caller {
+            Caller::Shell => self.granted_kept(own),
+            Caller::Client { .. } => self.kept(own),
+        };
+        grants.sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        let capabilities = grants
+            .iter()
+            .map(|grant| entry(grant, false))
+            .collect::<Vec<_>>();
+        json!({ "capabilities": capabilities })
+    }
+
+    /// The shell's `?scope=all_sessions_live` answer: every live grant, six
+    /// fields per entry with its session, sorted by session then request.
+    fn render_all_live(&self) -> Value {
+        let mut grants = self.kept(Caller::Shell);
+        grants.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then(left.request_id.cmp(&right.request_id))
+        });
+        let capabilities = grants
+            .iter()
+            .map(|grant| entry(grant, true))
+            .collect::<Vec<_>>();
+        json!({ "scope": LIVE_SCOPE, "capabilities": capabilities })
     }
 
     /// `POST /api/capability/validate`.
@@ -1195,7 +1265,7 @@ impl StandIn {
     /// An authorised grant is then admitted for its one effect (M1 check
     /// A7): the body's optional `amount` is the ask, defaulting to
     /// `EFFECT_BUDGET_CAP`, and `admit_effect` reserves it against the
-    /// session ceiling on the shared ledger before the `once` spend. A
+    /// grant's own ceiling on the shared ledger before the `once` spend. A
     /// missing, non-numeric or
     /// negative `amount` is status 400 with
     /// `budget ask needs a non-negative integer amount`, from `validate_body`
@@ -1831,24 +1901,19 @@ impl StandIn {
             .map_err(|refusal| (403, refusal.to_string()))
     }
 
-    /// The one budget admission, run once per session by `bind_stored_grant`.
+    /// The one budget admission, run once per grant by `bind_stored_grant`.
     ///
-    /// The session's first bind asks `EFFECT_BUDGET_CAP` through
-    /// `Verifier::admit_ask`, which sets that session identity's ceiling to
-    /// the cap; a later bind of the same session skips the ask, so no use
-    /// raises or lowers the ceiling it reserves against. A refusal is status
-    /// 403 with `AdmitRefuse`'s text and the caller stores nothing.
+    /// Each bind asks `EFFECT_BUDGET_CAP` through `Verifier::admit_ask`, which
+    /// sets that grant's ceiling to the cap; a handle already admitted skips
+    /// the ask, so no use raises or lowers the ceiling its grant reserves
+    /// against. A refusal is status 403 with `AdmitRefuse`'s text and the
+    /// caller stores nothing.
     fn admit_on_ledger(
         &mut self,
-        session_id: &str,
         handle: Handle,
         instance: InstanceId,
     ) -> Result<(), (u16, String)> {
-        if self
-            .admitted_on
-            .iter()
-            .any(|admitted| admitted == session_id)
-        {
+        if self.admitted_on.iter().any(|admitted| *admitted == handle) {
             return Ok(());
         }
         let call = self.ledger.open_call(instance);
@@ -1862,7 +1927,7 @@ impl StandIn {
                 EFFECT_BUDGET_CAP,
             )
             .map_err(|refusal| (403, admit_text(&refusal)))?;
-        self.admitted_on.push(session_id.to_owned());
+        self.admitted_on.push(handle);
         Ok(())
     }
 
@@ -1898,7 +1963,7 @@ impl StandIn {
 
     /// The one budget use. `use_grant` is its caller, for both routes.
     ///
-    /// The bind set the identity's ceiling (`admit_on_ledger`); a use only
+    /// The bind set the grant's own ceiling (`admit_on_ledger`); a use only
     /// holds its amount on the grant's own handle. A `once` grant asks
     /// against the cap first: an ask above `EFFECT_BUDGET_CAP` is 403 with
     /// `AdmitRefuse`'s text (a plain compare, no ceiling write).
@@ -1949,41 +2014,40 @@ impl StandIn {
             .unwrap_or(RESIDENT_WORLD)
     }
 
-    fn render(&self, caller: Caller<'_>) -> Value {
-        let mut grants = self.kept(caller);
-        let shell = matches!(caller, Caller::Shell);
-        if shell {
-            grants.sort_by(|left, right| {
-                left.session_id
-                    .cmp(&right.session_id)
-                    .then(left.request_id.cmp(&right.request_id))
-            });
-        } else {
-            grants.sort_by(|left, right| left.request_id.cmp(&right.request_id));
-        }
-        let capabilities = grants
-            .iter()
-            .map(|grant| entry(grant, shell))
-            .collect::<Vec<_>>();
-        body(shell, capabilities)
-    }
-
-    /// One filter. A grant stays when its life is `Live`. An ended session stays.
+    /// The live filter. A grant stays when its life is `Live`. An ended
+    /// session stays.
     fn kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
         self.grants
             .iter()
-            .filter(|grant| keep(grant, caller, self.instant))
+            .filter(|grant| keep_live(grant, caller, self.instant))
+            .collect()
+    }
+
+    /// The shell plain filter, matching the real `session_granted`: every
+    /// record the store still reports `Granted` for that session. Only
+    /// revocation moves a grant off `Granted`; an exhausted or
+    /// lifetime-expired grant stays in this answer.
+    fn granted_kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
+        self.grants
+            .iter()
+            .filter(|grant| keep_granted(grant, caller))
             .collect()
     }
 }
 
-fn keep(grant: &Grant, caller: Caller<'_>, instant: u64) -> bool {
+fn keep_live(grant: &Grant, caller: Caller<'_>, instant: u64) -> bool {
     // Ending a session leaves a live grant in this view.
     let _ended = grant.session_ended;
     is_live(grant.life) && !is_due(grant, instant) && visible(grant, caller)
 }
 
-/// One expiry compare. `keep` and `authorise` use it with the stored instant.
+/// The real plain route's `session_granted`: status `Granted` and that
+/// session. A spent allowance or a past lifetime leaves the status `Granted`.
+fn keep_granted(grant: &Grant, caller: Caller<'_>) -> bool {
+    !matches!(grant.life, Life::Revoked) && visible(grant, caller)
+}
+
+/// One expiry compare. `keep_live` and `authorise` use it with the stored instant.
 /// A grant at or past its `expires_at` no longer authorises and leaves the view.
 fn is_due(grant: &Grant, instant: u64) -> bool {
     matches!(grant.expires_at, Some(expires_at) if instant >= expires_at)
@@ -2027,17 +2091,6 @@ fn entry(grant: &Grant, include_session: bool) -> Value {
     fields.insert("duration".to_owned(), json!(grant.duration));
     fields.insert("granted_at".to_owned(), json!(grant.granted_at));
     Value::Object(fields)
-}
-
-fn body(shell: bool, capabilities: Vec<Value>) -> Value {
-    if shell {
-        json!({
-            "scope": LIVE_SCOPE,
-            "capabilities": capabilities,
-        })
-    } else {
-        json!({ "capabilities": capabilities })
-    }
 }
 
 fn request_entry(request: &Request) -> Value {
@@ -3086,14 +3139,18 @@ mod tests {
             .collect()
     }
 
-    fn shell_pair(standin: &StandIn) -> (Value, Value) {
-        let plain = standin
+    /// The shell's plain default: the shell session's own grants.
+    fn shell_plain(standin: &StandIn) -> Value {
+        standin
             .get_capability_list(Caller::Shell, None)
-            .expect("the stand-in shell plain view");
-        let query = standin
+            .expect("the stand-in shell plain view")
+    }
+
+    /// The shell's `?scope=all_sessions_live` view: every live grant.
+    fn shell_live(standin: &StandIn) -> Value {
+        standin
             .get_capability_list(Caller::Shell, Some("all_sessions_live"))
-            .expect("the stand-in shell query view");
-        (plain, query)
+            .expect("the stand-in shell all-sessions live view")
     }
 
     const SHELL_ENTRY: &[&str] = &[
@@ -3146,37 +3203,38 @@ mod tests {
             Life::Live,
             true,
         );
-        let (plain, query) = shell_pair(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
+            shell_plain(&standin),
+            json!({ "capabilities": [] }),
+            "the shell's plain view is its own session, with no scope key"
         );
+        let query = shell_live(&standin);
         assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-a".to_owned(), "req-b".to_owned(), "req-z".to_owned()]),
             "the stand-in lists every live grant"
         );
         assert_eq!(
-            request_order(&plain),
+            request_order(&query),
             ["req-a", "req-z", "req-b"],
             "the stand-in sorts live grants by session then request"
         );
         assert_keys(
-            &plain,
+            &query,
             &["capabilities", "scope"],
             "the stand-in shell view carries the scope marker",
         );
         assert_eq!(
-            plain["scope"], "all_sessions_live",
+            query["scope"], "all_sessions_live",
             "the stand-in marks the shell view all_sessions_live"
         );
         assert_entry_keys(
-            &plain,
+            &query,
             SHELL_ENTRY,
             "the stand-in shell entry carries the live-grant fields",
         );
         assert_eq!(
-            plain,
+            query,
             json!({
                 "scope": "all_sessions_live",
                 "capabilities": [
@@ -3211,24 +3269,131 @@ mod tests {
     }
 
     #[test]
+    fn standin_shell_plain_lists_the_shells_own_grants() {
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-shell",
+            SHELL_SESSION,
+            "res-shell",
+            "read",
+            "session",
+            7,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-client",
+            "s-a",
+            "res-client",
+            "read",
+            "once",
+            9,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            shell_plain(&standin),
+            json!({
+                "capabilities": [{
+                    "request_id": "req-shell",
+                    "resource": "res-shell",
+                    "action": "read",
+                    "duration": "session",
+                    "granted_at": 7
+                }]
+            }),
+            "the shell's plain view lists only the shell session's grants"
+        );
+    }
+
+    #[test]
+    fn standin_shell_plain_matches_the_real_session_granted_filter() {
+        let mut standin = StandIn::new();
+        for (request_id, resource, duration, granted_at, life) in [
+            ("req-shell-live", "res-live", "session", 5, Life::Live),
+            (
+                "req-shell-exhausted",
+                "res-exhausted",
+                "once",
+                6,
+                Life::Exhausted,
+            ),
+            ("req-shell-due", "res-due", "once", 1, Life::Live),
+            ("req-shell-revoked", "res-revoked", "once", 2, Life::Revoked),
+        ] {
+            standin.seed_grant(
+                request_id,
+                SHELL_SESSION,
+                resource,
+                "read",
+                duration,
+                granted_at,
+                life,
+                false,
+            );
+        }
+        standin.seed_grant(
+            "req-other-live",
+            "s-other",
+            "res-other",
+            "read",
+            "session",
+            4,
+            Life::Live,
+            false,
+        );
+        standin.set_instant(3_601);
+        assert_eq!(
+            shell_plain(&standin),
+            json!({
+                "capabilities": [
+                    {
+                        "request_id": "req-shell-due",
+                        "resource": "res-due",
+                        "action": "read",
+                        "duration": "once",
+                        "granted_at": 1
+                    },
+                    {
+                        "request_id": "req-shell-exhausted",
+                        "resource": "res-exhausted",
+                        "action": "read",
+                        "duration": "once",
+                        "granted_at": 6
+                    },
+                    {
+                        "request_id": "req-shell-live",
+                        "resource": "res-live",
+                        "action": "read",
+                        "duration": "session",
+                        "granted_at": 5
+                    }
+                ]
+            }),
+            "the plain view is session_granted: this session's Granted records, spent or expired included"
+        );
+    }
+
+    #[test]
     fn standin_empty_shell_view_has_the_scope_marker() {
         let standin = StandIn::new();
-        let (plain, query) = shell_pair(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one empty shell body for both route forms"
+            shell_plain(&standin),
+            json!({ "capabilities": [] }),
+            "the stand-in empty plain view is the shell's own session and has no scope key"
         );
+        let query = shell_live(&standin);
         assert_keys(
-            &plain,
+            &query,
             &["capabilities", "scope"],
             "the stand-in empty shell view has the scope marker",
         );
         assert_eq!(
-            plain["scope"], "all_sessions_live",
+            query["scope"], "all_sessions_live",
             "the stand-in marks an empty shell view all_sessions_live"
         );
         assert_eq!(
-            plain["capabilities"],
+            query["capabilities"],
             json!([]),
             "the stand-in returns an empty capability list when nothing is live"
         );
@@ -3433,13 +3598,9 @@ mod tests {
             Life::Live,
             false,
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-live".to_owned()]),
             "the stand-in leaves exhausted, revoked and expired grants out"
         );
@@ -4094,15 +4255,16 @@ mod tests {
             "starting",
             "the instance still exists while it holds no grant"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
             request_ids(&query),
             BTreeSet::new(),
             "the shell grant view is empty after a signed launch"
         );
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
+            shell_plain(&standin),
+            json!({ "capabilities": [] }),
+            "the shell's plain view is its own empty session after a signed launch"
         );
     }
 
@@ -4669,13 +4831,9 @@ mod tests {
             (Life::Live, false),
             "the stand-in leaves the seeded grant live"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-1".to_owned()]),
             "the stand-in still lists the seeded live grant"
         );
@@ -4712,13 +4870,9 @@ mod tests {
             (Life::Live, false),
             "the stand-in leaves a live grant on a refused stop"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-1".to_owned()]),
             "the stand-in still lists the live grant"
         );
@@ -4775,13 +4929,9 @@ mod tests {
             (Life::Live, false),
             "the stand-in leaves the sibling session's grant live"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in lists the sibling grant and leaves the revoked grants out"
         );
@@ -4828,13 +4978,9 @@ mod tests {
             (Life::Live, false),
             "the stand-in leaves the sibling grant live"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in still lists the sibling grant"
         );
@@ -4872,7 +5018,7 @@ mod tests {
             "the stand-in denies the stopped instance's pending request and names the stop"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::new(),
             "the stand-in shell live-grant list is empty after the stop"
         );
@@ -5432,7 +5578,7 @@ mod tests {
             "the stand-in ends the waiting instance failed with the deny reason",
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view");
         assert_eq!(
             request_ids(&live),
@@ -6023,7 +6169,7 @@ mod tests {
             "the stand-in leaves the sibling settler null"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view");
         assert_eq!(
             request_ids(&live),
@@ -6110,7 +6256,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live view")
             ),
             BTreeSet::from(["request-1".to_owned()]),
@@ -6173,7 +6319,7 @@ mod tests {
             "the stand-in runs the sibling after its start returns",
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from(["request-1".to_owned(), "request-2".to_owned()]),
             "the stand-in lists the granted request-2 beside this test's grant"
         );
@@ -6187,13 +6333,13 @@ mod tests {
         let at_expiry = 4 + GRANT_LIFETIME_SECS;
         standin.set_instant(at_expiry - 1);
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from(["request-1".to_owned(), "request-2".to_owned()]),
             "the stand-in keeps the granted request live one second before its expiry"
         );
         standin.set_instant(at_expiry);
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from(["request-1".to_owned()]),
             "the stand-in drops the granted request at its expiry instant"
         );
@@ -6240,7 +6386,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live view one second before the expiry")
             ),
             BTreeSet::from([request_id.clone()]),
@@ -6257,7 +6403,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live view after spending the once grant")
             ),
             BTreeSet::new(),
@@ -6314,20 +6460,11 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live view at the expiry instant")
             ),
             BTreeSet::new(),
             "the stand-in drops the grant from the shell all-sessions view at its expiry instant"
-        );
-        assert_eq!(
-            request_ids(
-                &standin
-                    .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
-                    .expect("the stand-in scoped live view at the expiry instant")
-            ),
-            BTreeSet::new(),
-            "the stand-in drops the grant from the scoped all-sessions view at its expiry instant"
         );
         assert_eq!(
             request_entries(&standin, &id)
@@ -6595,7 +6732,7 @@ mod tests {
             assert_eq!(
                 request_ids(
                     &standin
-                        .get_capability_list(Caller::Shell, None)
+                        .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                         .expect("the stand-in shell live view")
                 ),
                 BTreeSet::new(),
@@ -6700,7 +6837,7 @@ mod tests {
             "the stand-in stores the default rationale with the shell as settler"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view");
         assert_eq!(
             live["capabilities"][0]["duration"], "session",
@@ -6767,7 +6904,7 @@ mod tests {
             "the stand-in keeps the settled record after the refused late grant"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view");
         assert!(
             !request_ids(&live).contains(&req_s),
@@ -7109,7 +7246,7 @@ mod tests {
             "the stand-in leaves the granted record from the shell"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view after the expiry");
         assert_eq!(
             request_ids(&live),
@@ -7139,7 +7276,7 @@ mod tests {
             "the stand-in leaves the expired record after both refusals"
         );
         let live = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live view after both refusals");
         assert_eq!(
             request_ids(&live),
@@ -7614,13 +7751,9 @@ mod tests {
             (Life::Revoked, false),
             "the stand-in revokes the starting instance's live grant"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in drops the revoked grant and keeps the sibling grant"
         );
@@ -7910,18 +8043,14 @@ mod tests {
             json!({ "success": true }),
             "the stand-in answers success true for the shell grant"
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from([request_id.clone()]),
             "the stand-in lists exactly the one live grant"
         );
         assert_eq!(
-            plain["capabilities"][0]["session_id"], owner_id,
+            query["capabilities"][0]["session_id"], owner_id,
             "the stand-in binds that grant to the requester"
         );
         let sibling_list = standin
@@ -7946,7 +8075,7 @@ mod tests {
             "the stand-in did the work: the sibling refusal spends nothing"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from([request_id.clone()]),
             "the stand-in did the work: the refused sibling leaves the grant in the live view"
         );
@@ -7976,7 +8105,7 @@ mod tests {
             "the stand-in did the work: the owner's one use stores Exhausted"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::new(),
             "the stand-in did the work: the live view omits the spent grant"
         );
@@ -8011,7 +8140,7 @@ mod tests {
             "the stand-in stores the once grant live"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from([request_id.clone()]),
             "the stand-in lists the once grant live before its use"
         );
@@ -8038,7 +8167,7 @@ mod tests {
             "the stand-in did the work: the two refusals spend nothing"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from([request_id.clone()]),
             "the stand-in did the work: the two refusals leave the once grant live"
         );
@@ -8056,7 +8185,7 @@ mod tests {
             "the stand-in did the work: the owner's one use stores Exhausted"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::new(),
             "the stand-in omits the spent once grant from the live view"
         );
@@ -8107,7 +8236,7 @@ mod tests {
             )
             .expect("the shell grants the pending request once");
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from([request_id.clone()]),
             "the stand-in did the work: the live view lists the granted once request"
         );
@@ -8140,7 +8269,7 @@ mod tests {
                 "{message}: the refusal spends nothing"
             );
             assert_eq!(
-                request_ids(&shell_pair(&standin).0),
+                request_ids(&shell_live(&standin)),
                 BTreeSet::from([request_id.clone()]),
                 "{message}: the live view still lists the once grant"
             );
@@ -8163,7 +8292,7 @@ mod tests {
             "the stand-in did the work: that one use stores Exhausted"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::new(),
             "the stand-in did the work: the spent once grant leaves the live view"
         );
@@ -8202,13 +8331,9 @@ mod tests {
             "Revoked",
             "the stand-in refuses the stopped session's grant",
         );
-        let (plain, query) = shell_pair(&standin);
+        let query = shell_live(&standin);
         assert_eq!(
-            plain, query,
-            "the stand-in returns one shell body for both route forms"
-        );
-        assert_eq!(
-            request_ids(&plain),
+            request_ids(&query),
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in lists exactly the sibling grant"
         );
@@ -8239,6 +8364,67 @@ mod tests {
             "running",
             "",
             "the stand-in leaves instance 2 running",
+        );
+    }
+
+    /// F6 (Rong's table) on the stand-in path: `end_one_live_grant` runs the
+    /// `end_live_grant` step `revoke_live` runs, which ends the grant's
+    /// ledger binding through `Verifier::end_grant` and keeps the hold the
+    /// grant opened before the end. The hold comes from `admit_effect`, the
+    /// step the use routes run. After the end, a new hold on that handle is
+    /// refused `unknown handle`, and the earlier hold still releases through
+    /// the kept binding, which then leaves. Without the `end_grant` call the binding
+    /// stays live, so the new hold is refused over the ceiling instead.
+    #[test]
+    fn standin_ended_grant_keeps_its_open_hold() {
+        use grant_binding::ledger::{ReleaseRefuse, ReserveRefuse};
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-a",
+            "component-1",
+            "res",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        bind_seeded(&mut standin, "req-a", "component-1");
+        let handle = standin.grants[0].binding.expect("the bind stores a handle");
+        let hold = standin
+            .admit_effect("component-1", Some(handle), 4096)
+            .expect("the use step holds the whole cap");
+        let instance = standin.instance_on_ledger("component-1");
+        let call = standin.ledger.open_call(instance);
+        assert_eq!(
+            standin.ledger.reserve(&call, &guest_request(handle), 1),
+            Err(ReserveRefuse::OverCeiling {
+                ceiling: 4096,
+                held: 4096,
+                asked: 1
+            }),
+            "before the end, the open hold fills the grant's own ceiling"
+        );
+        standin.end_one_live_grant("req-a");
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Revoked, false),
+            "the stand-in writes Revoked on the ended grant"
+        );
+        assert_eq!(
+            standin.ledger.reserve(&call, &guest_request(handle), 1),
+            Err(ReserveRefuse::Binding(Refuse::UnknownHandle)),
+            "the end reached the ledger: the ended binding takes no new hold"
+        );
+        assert_eq!(
+            standin.ledger.release(&call, &guest_request(handle), hold),
+            Ok(()),
+            "the hold opened before the end is kept and releases through the kept binding"
+        );
+        assert_eq!(
+            standin.ledger.release(&call, &guest_request(handle), hold),
+            Err(ReleaseRefuse::Binding(Refuse::UnknownHandle)),
+            "the kept binding leaves the ledger with its last hold"
         );
     }
 
@@ -9270,7 +9456,7 @@ mod tests {
 
     fn assert_live_request_ids_empty(standin: &StandIn, message: &str) {
         let listed = standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
             .expect("the stand-in shell live-grant view");
         assert!(
             request_ids(&listed).is_empty(),
@@ -9705,7 +9891,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live-grant view")
             ),
             BTreeSet::from(["req-1".to_owned()]),
@@ -9761,7 +9947,7 @@ mod tests {
         assert_eq!(
             request_ids(
                 &standin
-                    .get_capability_list(Caller::Shell, None)
+                    .get_capability_list(Caller::Shell, Some("all_sessions_live"))
                     .expect("the stand-in shell live-grant view")
             ),
             BTreeSet::from(["req-1".to_owned()]),
@@ -10443,7 +10629,7 @@ mod tests {
             "the stand-in did the work: the undeclared ask stores no request-8"
         );
         assert_eq!(
-            request_ids(&shell_pair(&standin).0),
+            request_ids(&shell_live(&standin)),
             BTreeSet::from(["req-tok".to_owned(), "request-4".to_owned()]),
             "the stand-in did the work: the shell live view keeps req-tok and request-4"
         );

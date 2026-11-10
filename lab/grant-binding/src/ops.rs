@@ -83,19 +83,16 @@ impl Verifier {
                             .map_err(OperateRefuse::Binding)?;
                     }
                 }
-                #[rustfmt::skip]
+                if operation != Operation::ChildJournal
+                    && self.live_journal_holds(
+                        request.handle,
+                        &grant.identity,
+                        path,
+                        &grant.owned_root,
+                    )
                 {
-                    if operation != Operation::ChildJournal {
-                        if self.live_journal_holds(
-                            request.handle,
-                            &grant.identity,
-                            path,
-                            &grant.owned_root,
-                        ) {
-                            return Err(OperateRefuse::JournalHeld);
-                        }
-                    }
-                };
+                    return Err(OperateRefuse::JournalHeld);
+                }
                 let mut grant = grant;
                 let mut counted = request.handle;
                 while let Some(handle) = grant.parent {

@@ -75,7 +75,16 @@ impl<'a> Operator<'a> {
         }
         let second = self.census()?;
         self.child.stop()?;
-        let cleanup = agent_conformance::census::cleanup(self.home, self.port)?;
+        // The stopped runtime can still hold its lock or capture while it
+        // exits, so wait on the clean census instead of one snapshot.
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let cleanup = loop {
+            match agent_conformance::census::cleanup(self.home, self.port) {
+                Ok(line) => break line,
+                Err(reason) if Instant::now() >= deadline => return Err(reason),
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
         Ok(format!("operator census: {first} then {second} loopback sockets, API listener present in both; samples at least 3 seconds apart; group stopped\n{cleanup}"))
     }
 
