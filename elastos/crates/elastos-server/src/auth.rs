@@ -13668,6 +13668,75 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn repeat_mint_checks_each_protection_binding_without_a_write() {
+        for case in ["count", "id", "root", "protector count", "kind", "subject"] {
+            let data = tempfile::tempdir().unwrap();
+            let minted = mint_pinned_agent(data.path(), 5).unwrap();
+            mutate_auth_state(data.path(), |state| {
+                if case == "count" {
+                    let duplicate = state
+                        .principal_root_protections
+                        .iter()
+                        .find(|p| p.principal_id == minted.principal_id)
+                        .unwrap()
+                        .clone();
+                    state.principal_root_protections.push(duplicate);
+                    return Ok(());
+                }
+                let protection = state
+                    .principal_root_protections
+                    .iter_mut()
+                    .find(|p| p.principal_id == minted.principal_id)
+                    .unwrap();
+                match case {
+                    "id" => protection.principal_id = "agent:v1:other".into(),
+                    "root" => protection.localhost_root = "localhost://UsersAI/other".into(),
+                    "protector count" => {
+                        protection.protectors.push(protection.protectors[0].clone())
+                    }
+                    "kind" => {
+                        protection.protectors[0].kind = PrincipalRootProtectorKind::RecoveryKit
+                    }
+                    "subject" => {
+                        protection.protectors[0].subject = Some("person:local:other".into())
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(())
+            })
+            .unwrap();
+            let path = auth_state_path(data.path()).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let error = mint_pinned_agent(data.path(), 9)
+                .expect_err(case)
+                .to_string();
+            assert_eq!(
+                error, "agent principal has no unique OwnerRoot protection",
+                "{case}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn mint_refuses_preexisting_root_protection_without_a_record() {
+        let data = tempfile::tempdir().unwrap();
+        let minted = mint_pinned_agent(data.path(), 5).unwrap();
+        mutate_auth_state(data.path(), |state| {
+            state
+                .principals
+                .retain(|p| p.principal_id != minted.principal_id);
+            Ok(())
+        })
+        .unwrap();
+        let path = auth_state_path(data.path()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = mint_pinned_agent(data.path(), 9).unwrap_err().to_string();
+        assert_eq!(error, "agent root protection is held by another record");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
     /// The sign-in guard holds against a minted record, not only the fixture:
     /// a sign-in that names the minted agent's id is refused.
     #[test]

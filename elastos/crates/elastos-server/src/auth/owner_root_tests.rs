@@ -194,6 +194,7 @@ fn owner_root_absent_owner_refuses_before_object_open() {
         Ok(())
     })
     .unwrap();
+    store_test_human_principal(data.path(), "person:local:decoy");
     let owner_root = principal_kind_localhost_root(OWNER, PrincipalKind::Human);
     let decoy_uri = format!("{owner_root}/Documents/decoy.txt");
     let decoy_path = rooted_localhost_fs_path(data.path(), &decoy_uri).unwrap();
@@ -281,6 +282,54 @@ fn owner_root_salt_binding_refuses() {
         .unwrap_err()
         .to_string();
     assert_eq!(error, "OwnerRoot data key unwrap failed");
+}
+
+#[test]
+fn owner_root_hkdf_domain_is_pinned() {
+    let key = owner_root_wrapping_key(
+        &[7; 32],
+        &[3; 32],
+        "agent:v1:pinned",
+        "localhost://UsersAI/pinned",
+    )
+    .unwrap();
+    assert_eq!(
+        hex::encode(key),
+        "26884641438572eaa661b8b70268d51c4a6de26b6a7e30f2bb9db7d6226da7b3"
+    );
+}
+
+#[test]
+fn owner_root_missing_envelope_refuses_by_name() {
+    let (data, _, mut protection) = fixture();
+    protection.protectors[0].envelope = None;
+    assert_eq!(
+        principal_root_data_key_from_protection(data.path(), &protection)
+            .unwrap_err()
+            .to_string(),
+        "OwnerRoot envelope is missing"
+    );
+}
+
+#[test]
+fn owner_root_owner_record_requires_human_kind() {
+    let (data, _, protection) = fixture();
+    mutate_auth_state(data.path(), |state| {
+        state
+            .principals
+            .iter_mut()
+            .find(|p| p.principal_id == OWNER)
+            .unwrap()
+            .kind = PrincipalKind::Agent;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        principal_root_data_key_from_protection(data.path(), &protection)
+            .unwrap_err()
+            .to_string(),
+        "OwnerRoot owner principal is missing"
+    );
 }
 
 /// Two agents minted under ONE owner key get data keys that differ from each
@@ -402,7 +451,11 @@ fn owner_root_envelope_lengths_and_data_key_id_are_checked() {
     let (data, _, protection) = fixture();
     for (salt, nonce) in [
         (b"short".as_slice(), &[0u8; 12][..]),
+        (&[0u8; 31][..], &[0u8; 12][..]),
+        (&[0u8; 33][..], &[0u8; 12][..]),
         (&[0u8; 32][..], b"short".as_slice()),
+        (&[0u8; 32][..], &[0u8; 11][..]),
+        (&[0u8; 32][..], &[0u8; 13][..]),
     ] {
         let mut invalid = protection.clone();
         invalid.protectors[0].envelope.as_mut().unwrap().salt = b64_url(salt);
@@ -412,6 +465,38 @@ fn owner_root_envelope_lengths_and_data_key_id_are_checked() {
                 .unwrap_err()
                 .to_string(),
             "OwnerRoot envelope salt or nonce has invalid length"
+        );
+    }
+    let owner = load_principal_root_protection(
+        data.path(),
+        OWNER,
+        &principal_kind_localhost_root(OWNER, PrincipalKind::Human),
+    )
+    .unwrap()
+    .unwrap();
+    let owner_key = principal_root_data_key_from_protection(data.path(), &owner).unwrap();
+    for len in [31, 33] {
+        let mut invalid = protection.clone();
+        let envelope = invalid.protectors[0].envelope.as_mut().unwrap();
+        let salt = b64_url_decode(&envelope.salt).unwrap();
+        let nonce = b64_url_decode(&envelope.nonce).unwrap();
+        let wrapping_key = owner_root_wrapping_key(
+            &owner_key,
+            &salt,
+            &invalid.principal_id,
+            &invalid.localhost_root,
+        )
+        .unwrap();
+        let short_key = vec![0; len];
+        envelope.wrapped_data_key =
+            encrypt_aes256_gcm_bytes(&wrapping_key, &nonce, &short_key).unwrap();
+        invalid.data_key_id = principal_data_key_id(&short_key);
+        assert_eq!(
+            principal_root_data_key_from_protection(data.path(), &invalid)
+                .unwrap_err()
+                .to_string(),
+            "OwnerRoot data key binding mismatch",
+            "{len}"
         );
     }
     let mut wrong_id = protection;
@@ -511,7 +596,10 @@ fn owner_root_cas_stale_create_race_and_alias() {
     )
     .unwrap_err()
     .to_string();
-    assert!(!error.is_empty());
+    assert_eq!(
+        error,
+        "principal-root object URI has no canonical filesystem path"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), raced_bytes);
     assert_eq!(
         load_principal_root_protection(data.path(), &agent.principal_id, &agent.localhost_root)
