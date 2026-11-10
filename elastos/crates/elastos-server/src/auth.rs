@@ -1807,6 +1807,7 @@ pub(crate) fn complete_owner_recovery(
         return enrollment_denied();
     }
     let binding = owner_recovery_binding(client)?;
+    require_person_recovery_kit(kit)?;
     verify_recovery_kit_material(kit)?;
     if kit.localhost_root != principal_localhost_root(&kit.principal_id) {
         anyhow::bail!("recovery kit root does not match its principal");
@@ -7503,6 +7504,20 @@ fn verify_audit_chain_from(
 pub fn local_person_principal_id(proof_binding_id: &str) -> String {
     let digest = Sha256::digest(proof_binding_id.as_bytes());
     format!("person:local:{}", hex::encode(&digest[..16]))
+}
+
+/// An imported Recovery Kit may only name a person id the Runtime mints:
+/// `person:local:` plus one id segment. A device, agent or parent-DID
+/// principal has no stored record, so `known_here` never covers it and a
+/// made-up Kit naming one would move the importer onto that principal's
+/// canonical root. Every path that takes a Kit from a request calls this
+/// before it reads or writes anything.
+pub(crate) fn require_person_recovery_kit(kit: &RecoveryKitV1) -> anyhow::Result<()> {
+    let minted = kit.principal_id.strip_prefix("person:local:");
+    if !minted.is_some_and(|rest| !rest.is_empty() && !rest.contains(':')) {
+        anyhow::bail!("invalid recovery kit: principal is not a person id this Runtime mints");
+    }
+    Ok(())
 }
 
 pub fn passkey_credential_principal_id(rp_id: &str, credential_id: &str) -> anyhow::Result<String> {
