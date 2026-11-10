@@ -167,7 +167,10 @@ test("System switch confirms Off before passkey, preserves access on cancel, req
     }});
   const browser=await chromium.launch({headless:true});
   try {
-    const page=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});await page.goto(`${server.baseUrl}/fixture?settings=security`);
+    const consoleErrors=[];
+    const page=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});
+    page.on("console", message=>{if(message.type()==="error" && !/status of 409 \(Conflict\)/.test(message.text()))consoleErrors.push(message.text());});
+    await page.goto(`${server.baseUrl}/fixture?settings=security`);
     let frame=page.frameLocator("#system-frame");const toggle=()=>frame.getByRole("switch",{name:"Browser can use the internet",exact:true});
     const clickSwitch=async()=>{
       await frame.locator("#browser-internet-switch:not(:disabled)").waitFor();
@@ -195,6 +198,7 @@ test("System switch confirms Off before passkey, preserves access on cancel, req
     await clickSwitch();await page.waitForFunction(()=>messages.some(m=>m.type==="home:open-target" && m.target==="inbox"));
     assert.equal(writes[2].action,"request");assert.equal(await toggle().isChecked(),false);
     assert.deepEqual(server.requestFailures,[]);
+    assert.deepEqual(consoleErrors,[],"System permission controls produce no sandbox console errors");
   } finally {await browser.close();await server.close();}
 });
 
