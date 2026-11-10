@@ -1312,12 +1312,12 @@ async fn chat_online_expired_frame_is_refused_while_home_session_remains_valid()
     let authority = passkey_authority_with_name(dir.path(), Some("Owner"));
     install_signed_profile(dir.path(), &authority, "Owner");
     let app = gateway_router(state);
-    let context = gateway_home_token::HomeLaunchTokenContext {
-        principal_id: authority.principal_id.clone(),
-        session_id: authority.session_id.clone(),
-        proof_binding_id: Some(authority.proof_binding_id.clone()),
-        grant_id: authority.grant_id.clone(),
-    };
+    let context = gateway_home_token::HomeLaunchTokenContext::for_test(
+        authority.principal_id.clone(),
+        authority.session_id.clone(),
+        Some(authority.proof_binding_id.clone()),
+        authority.grant_id.clone(),
+    );
     let live = gateway_home_token::issue_home_projection_launch_token_with_context(
         dir.path(),
         "chat-room",
@@ -1428,12 +1428,12 @@ async fn chat_online_configured_poll_does_not_renew_room_session() {
     let authority = passkey_authority_with_name(dir.path(), Some("Owner"));
     install_signed_profile(dir.path(), &authority, "Owner");
     let app = gateway_router(state);
-    let context = gateway_home_token::HomeLaunchTokenContext {
-        principal_id: authority.principal_id.clone(),
-        session_id: authority.session_id.clone(),
-        proof_binding_id: Some(authority.proof_binding_id.clone()),
-        grant_id: authority.grant_id.clone(),
-    };
+    let context = gateway_home_token::HomeLaunchTokenContext::for_test(
+        authority.principal_id.clone(),
+        authority.session_id.clone(),
+        Some(authority.proof_binding_id.clone()),
+        authority.grant_id.clone(),
+    );
     let token = gateway_home_token::issue_home_projection_launch_token_with_context(
         dir.path(),
         "chat-room",

@@ -37,12 +37,12 @@ async fn room_session_bound_fixture(frame_lifetime: u64, outcome: &str, configur
     use base64::Engine as _;
     let dir = tempfile::tempdir().unwrap();
     let authority = passkey_authority_with_profile(dir.path(), "owner");
-    let context = HomeLaunchTokenContext {
-        principal_id: authority.principal_id.clone(),
-        session_id: authority.session_id.clone(),
-        proof_binding_id: Some(authority.proof_binding_id.clone()),
-        grant_id: authority.grant_id.clone(),
-    };
+    let context = HomeLaunchTokenContext::for_test(
+        authority.principal_id.clone(),
+        authority.session_id.clone(),
+        Some(authority.proof_binding_id.clone()),
+        authority.grant_id.clone(),
+    );
     let mut grant = crate::auth::load_active_session_grant(
         dir.path(),
         &authority.session_id,

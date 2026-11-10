@@ -617,12 +617,12 @@ async fn system_update_summary_explains_newer_test_install_without_offer() {
         let dir = tempfile::tempdir().unwrap();
         let _state = test_state(dir.path());
         let owner = passkey_authority_with_name(dir.path(), Some("owner"));
-        let context = HomeLaunchTokenContext {
-            principal_id: owner.principal_id,
-            session_id: owner.session_id,
-            proof_binding_id: Some(owner.proof_binding_id),
-            grant_id: owner.grant_id,
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            owner.principal_id,
+            owner.session_id,
+            Some(owner.proof_binding_id),
+            owner.grant_id,
+        );
         configure_update_summary(dir.path());
         let mut sources = crate::sources::load_trusted_sources(dir.path()).unwrap();
         sources.sources[0].channel = subscription.into();

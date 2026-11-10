@@ -1895,12 +1895,12 @@ mod tests {
     #[test]
     fn home_token_projection_lapsed_grant_returns_unauthorized() {
         let data = tempfile::tempdir().unwrap();
-        let context = HomeLaunchTokenContext {
-            principal_id: "person:local:alice".into(),
-            session_id: "auth:alice".into(),
-            proof_binding_id: Some("proof:alice".into()),
-            grant_id: "grant:alice".into(),
-        };
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "auth:alice",
+            Some("proof:alice".into()),
+            "grant:alice",
+        );
         let mut grant = elastos_runtime::auth::AuthSessionGrantV1 {
             schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
             principal_id: context.principal_id.clone(),

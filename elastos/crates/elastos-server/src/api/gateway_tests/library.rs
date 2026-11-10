@@ -8758,6 +8758,7 @@ async fn r4_runtime_custody_buy_refuses_remote_context_at_root_lookup() {
     );
     // The remote context as gateway_model_service builds it: empty-root sentinel.
     let required = RequiredHomeLaunchToken {
+        expires_at: crate::auth::now_ts() + 60,
         launch_id: "r4-remote-launch".into(),
         launch_context: HomeLaunchContext {
             schema: "elastos.runtime.browser-launch/v1".into(),
