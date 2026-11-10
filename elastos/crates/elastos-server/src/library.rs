@@ -8241,16 +8241,18 @@ fn write_publish_record(
     principal_id: &str,
     record: &LibraryPublishRecord,
 ) -> anyhow::Result<()> {
-    // Serving follows the index. A publication that ends leaves the index
-    // before its record changes, and one that starts joins it after: a crash
-    // in between serves less, never more.
+    // Resolve before the index changes. An unstored principal is refused
+    // with the index file byte-identical. Serving still follows the index:
+    // a publication that ends leaves the index before its record changes,
+    // and one that starts joins it after, so a crash in between serves
+    // less, never more.
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
+        .localhost_root()
+        .to_string();
     let active = record_is_published(record);
     if !active {
         set_published_index_entry(data_dir, principal_id, record, false)?;
     }
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
     write_runtime_json_with_root(
         data_dir,
         principal_id,
@@ -11376,6 +11378,29 @@ mod r5a_tests {
         );
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn publish_record_write_leaves_an_unstored_principals_index_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = published_index_path(dir.path());
+        fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        // Compact on purpose: a rewrite through to_vec_pretty is not these bytes.
+        let before = br#"{"schema":"elastos.library.published-cids/v1","publications":{}}"#;
+        fs::write(&index_path, before).unwrap();
+        let record = published(r4_fixture::HUMAN_ROOT);
+        let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("has no stored record")),
+            "{result:?}"
+        );
+        assert_eq!(
+            fs::read(&index_path).unwrap_or_default(),
+            before,
+            "unstored publish withdrawal changed the shared index"
+        );
     }
 
     #[test]
