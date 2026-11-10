@@ -7920,26 +7920,13 @@ fn stored_principal_kind(data_dir: &Path, principal_id: &str) -> anyhow::Result<
         .ok_or_else(|| anyhow!("principal has no stored record; its kind cannot be chosen"))
 }
 
-/// Binds an object URI to the stored Human root or the minted Agent root.
+/// Binds an object URI to its stored kind and root, or this Runtime's device.
 fn validate_principal_root_object_binding_in_state(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
-    if let Some(did) = principal_id.strip_prefix("device:") {
-        // The launch token verifier resolved this root from the signer DID it
-        // verified. A subordinate gateway trusts its parent's DID without
-        // holding that key, so the same verified-device derivation binds the
-        // object, and no other id shape does.
-        if did.trim().is_empty()
-            || localhost_root != verified_device_localhost_root(did)
-            || !object_uri_is_under_root(localhost_root, object_uri)
-        {
-            anyhow::bail!("principal localhost root must be the verified device root");
-        }
-        return Ok(());
-    }
     if let Some(record) = stored_principal_record(data_dir, principal_id)? {
         if record.kind == PrincipalKind::Human {
             if !record.localhost_root.starts_with("localhost://Users/")
@@ -7950,6 +7937,21 @@ fn validate_principal_root_object_binding_in_state(
             }
             return Ok(());
         }
+        return validate_principal_root_object_binding_for_kind(
+            principal_id,
+            localhost_root,
+            object_uri,
+            record.kind,
+        );
+    }
+    if principal_id.starts_with("device:") {
+        let resolved = ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?;
+        if localhost_root != resolved.localhost_root()
+            || !object_uri_is_under_root(localhost_root, object_uri)
+        {
+            anyhow::bail!("principal localhost root must be the verified device root");
+        }
+        return Ok(());
     }
     let kind = stored_principal_kind(data_dir, principal_id)?;
     validate_principal_root_object_binding_for_kind(principal_id, localhost_root, object_uri, kind)
@@ -12785,9 +12787,48 @@ pub(crate) mod tests {
     fn recovered_root_reassignment_refuses_usersai_root() {
         let data_dir = tempfile::tempdir().unwrap();
         let (mut reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
-        let usersai = "localhost://UsersAI/aaaaaaaaaaaaaaaaaaaaaaaa";
+        let usersai = "localhost://UsersAI/dc663b8d8301915163d871b9";
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principal_root_protections
+                .retain(|stored| stored.principal_id != reassignment.recovered_principal_id);
+            Ok(())
+        })
+        .unwrap();
+        let recovered_id = reassignment.recovered_principal_id.clone();
+        let binding =
+            ProofBinding::evm_account(20, "0x5555555555555555555555555555555555555555", now_ts());
+        upsert_principal_for_binding_as(data_dir.path(), binding, recovered_id.clone(), now_ts())
+            .unwrap();
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principals
+                .iter_mut()
+                .find(|record| record.proof_binding_id == reassignment.proof_binding_id)
+                .unwrap()
+                .role = RuntimePrincipalRole::Admin;
+            let record = state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == recovered_id)
+                .unwrap();
+            record.kind = PrincipalKind::Agent;
+            record.localhost_root = usersai.to_string();
+            Ok(())
+        })
+        .unwrap();
+        let protection = store_test_principal_root_protection_for(
+            data_dir.path(),
+            &reassignment.recovered_principal_id,
+            usersai,
+        );
+        reassignment.kit = recovery_kit_from_archive(
+            data_dir.path(),
+            protection.protectors[0].archive.as_ref().unwrap(),
+        )
+        .unwrap();
+        reassignment.protection = protection;
         reassignment.recovered_localhost_root = usersai.into();
-        reassignment.protection.localhost_root = usersai.into();
         let path = auth_state_path(data_dir.path()).unwrap();
         let before = std::fs::read(&path).unwrap();
 
@@ -17397,17 +17438,16 @@ pub(crate) mod tests {
             .contains("has no stored record"));
     }
 
-    /// A subordinate gateway trusts the parent DID that signed the launch
-    /// token. The writer binds that parent-signed device's object to the
-    /// exact root the verifier resolved for that DID, and to no other root.
+    /// A bare device id has no authority to select its matching hash root.
     #[test]
-    fn parent_signed_device_object_binding_uses_the_verified_device_root() {
+    fn unverified_device_object_binding_refuses_matching_root() {
         let data_dir = tempfile::tempdir().unwrap();
         let principal = "device:did:key:z6MkParentSignedDevice";
         let root = "localhost://Users/45c2b381a3e1d3ed5e2a5ede";
         let uri = format!("{root}/.AppData/ElastOS/Home/services-requests.json");
         let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"foreign bytes").unwrap();
         let written = write_principal_root_object(
             data_dir.path(),
             principal,
@@ -17416,11 +17456,16 @@ pub(crate) mod tests {
             &path,
             b"parent-signed denial",
         );
-        assert!(
-            written.is_ok(),
-            "the verified parent device root must bind: {written:?}"
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), b"parent-signed denial");
+        assert!(written
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+        let read = read_principal_root_object(data_dir.path(), principal, root, &uri, &path);
+        assert!(read
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"foreign bytes");
 
         // A device id with any other root is refused.
         let other = "localhost://UsersAI/45c2b381a3e1d3ed5e2a5ede";
@@ -17435,10 +17480,7 @@ pub(crate) mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert_eq!(
-            error,
-            "principal localhost root must be the verified device root"
-        );
+        assert!(error.contains("has no stored record"), "{error}");
 
         // An empty device id and a non-device id stay refused.
         for (id, bad_root) in [
@@ -17456,10 +17498,67 @@ pub(crate) mod tests {
             )
             .unwrap_err()
             .to_string();
-            assert!(
-                error.contains("verified device root") || error.contains("no stored record"),
-                "{id}: {error}"
-            );
+            assert!(error.contains("has no stored record"), "{id}: {error}");
         }
+    }
+
+    #[test]
+    fn verified_device_object_binding_uses_typed_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let resolved =
+            ResolvedPrincipalRoot::verified_device_signer("did:key:z6MkParentSignedDevice");
+        let root = "localhost://Users/45c2b381a3e1d3ed5e2a5ede";
+        assert_eq!(resolved.localhost_root(), root);
+        let uri = format!("{root}/notes.md");
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_principal_root_object_resolved(data_dir.path(), &resolved, &uri, &path, b"verified")
+            .unwrap();
+        assert_eq!(
+            read_principal_root_object_resolved(data_dir.path(), &resolved, &uri, &path).unwrap(),
+            b"verified"
+        );
+        assert!(write_principal_root_object_resolved(
+            data_dir.path(),
+            &resolved,
+            "localhost://UsersAI/45c2b381a3e1d3ed5e2a5ede/notes.md",
+            &path,
+            b"no"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn stored_device_prefix_agent_uses_record_kind() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let id = "device:did:key:z6MkStoredAgent";
+        let binding =
+            ProofBinding::evm_account(20, "0x4444444444444444444444444444444444444444", now_ts());
+        upsert_principal_for_binding_as(data_dir.path(), binding, id.to_string(), now_ts())
+            .unwrap();
+        mutate_auth_state(data_dir.path(), |state| {
+            let record = state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == id)
+                .unwrap();
+            record.kind = PrincipalKind::Agent;
+            Ok(())
+        })
+        .unwrap();
+        let resolved =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), id).unwrap();
+        let usersai = principal_kind_localhost_root(id, PrincipalKind::Agent);
+        assert_eq!(resolved.localhost_root(), usersai);
+        let users = principal_kind_localhost_root(id, PrincipalKind::Human);
+        let uri = format!("{users}/notes.md");
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        let error = write_principal_root_object(data_dir.path(), id, &users, &uri, &path, b"no")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "principal localhost root must be the record's own root for its kind"
+        );
     }
 }
