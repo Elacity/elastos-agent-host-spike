@@ -8158,6 +8158,50 @@ mod tests {
     }
 
     #[test]
+    fn configured_readiness_keeps_recordless_noncanonical_stored_human_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:recordless-noncanonical-readiness";
+        let root = "localhost://Users/stored-noncanonical-root";
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
+        let record = state
+            .principals
+            .iter_mut()
+            .find(|record| record.principal_id == principal_id)
+            .unwrap();
+        assert_ne!(record.localhost_root, root);
+        record.localhost_root = root.to_string();
+        crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
+        crate::auth::store_test_principal_root_protection_for(temp.path(), principal_id, root);
+        let uri = format!("{root}/.AppData/LocalHost/GBA/ucity/rom-id.sav");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(temp.path(), &uri).unwrap();
+        crate::auth::write_principal_root_object(
+            temp.path(),
+            principal_id,
+            root,
+            &uri,
+            &path,
+            b"protected object",
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
+        state
+            .principals
+            .retain(|record| record.principal_id != principal_id);
+        crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
+        assert!(
+            crate::auth::stored_principal_record(temp.path(), principal_id)
+                .unwrap()
+                .is_none()
+        );
+
+        verify_configured_principal_roots_ready(temp.path())
+            .expect("stored noncanonical Human protection must keep Home ready without a record");
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
     fn configured_readiness_refuses_recordless_usersai_protection() {
         let temp = tempfile::tempdir().unwrap();
         let principal_id = "agent:recordless-readiness";

@@ -8252,17 +8252,10 @@ fn walk_declared_principal_root_objects(
     let mut declared = std::collections::BTreeMap::<String, PathBuf>::new();
     for declaration in inventory {
         let uri = declaration.uri();
-        let new_kind = match declared_kind {
-            Some(kind) if stored_principal_record(data_dir, principal_id)?.is_none() => Some(kind),
-            _ => None,
-        };
-        if let Some(kind) = new_kind {
-            validate_principal_root_object_binding_for_kind(
-                principal_id,
-                localhost_root,
-                uri,
-                kind,
-            )?;
+        if declared_kind.is_some() && stored_principal_record(data_dir, principal_id)?.is_none() {
+            if !object_uri_is_under_root(localhost_root, uri) {
+                anyhow::bail!("principal-root object URI is outside the principal root");
+            }
         } else {
             validate_principal_root_object_binding_in_state(
                 data_dir,
@@ -17593,6 +17586,32 @@ pub(crate) mod tests {
             resolved.localhost_root(),
             expected_root,
             "stored own-device record must win before the device arm"
+        );
+    }
+
+    #[test]
+    fn recordless_scan_refuses_declaration_outside_stored_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:recordless-outside";
+        let root = "localhost://Users/stored-noncanonical-root";
+        let protection =
+            store_test_principal_root_protection_for(data_dir.path(), principal_id, root);
+        let outside = "localhost://Users/other-root/Documents/outside.txt";
+        let inventory = [PrincipalRootProtectedObjectDeclarationV1::Exact {
+            object_uri: outside.to_string(),
+        }];
+        let error = scan_principal_root_with_protection(
+            data_dir.path(),
+            principal_id,
+            root,
+            &inventory,
+            Some(&protection),
+            PrincipalRootScanMode::Readiness,
+        )
+        .expect_err("record-less scan must keep declarations under its stored root");
+        assert_eq!(
+            error.to_string(),
+            "principal-root object URI is outside the principal root"
         );
     }
 
