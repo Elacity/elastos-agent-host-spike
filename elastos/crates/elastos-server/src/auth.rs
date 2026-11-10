@@ -6750,6 +6750,9 @@ pub fn commit_recovered_root_reassignment(
         updated_at,
     } = reassignment;
     validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
+    if recovered_localhost_root.starts_with("localhost://UsersAI/") {
+        anyhow::bail!("recovery kit requires a human root");
+    }
     if protection.principal_id != recovered_principal_id
         || protection.localhost_root != recovered_localhost_root
         || protection.data_key_id != kit.data_key_id
@@ -12582,6 +12585,24 @@ pub(crate) mod tests {
             confirmed_initial_profile_name(data_dir.path(), &replacement_grant).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn recovered_root_reassignment_refuses_usersai_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (mut reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
+        let usersai = "localhost://UsersAI/aaaaaaaaaaaaaaaaaaaaaaaa";
+        reassignment.recovered_localhost_root = usersai.into();
+        reassignment.protection.localhost_root = usersai.into();
+        let path = auth_state_path(data_dir.path()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let error = commit_recovered_root_reassignment(data_dir.path(), reassignment)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("recovery kit requires a human root"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
