@@ -1082,17 +1082,25 @@ mod tests {
     #[test]
     fn a_runaway_run_ends_by_the_deadline() {
         let component = lifecycle_component(true, false);
-        let (result, _) =
+        let (result, lasted) =
             run_to_its_end(component, state_with_deadline(Duration::from_millis(200)));
         assert_ended_by_the_deadline(result);
+        assert!(
+            lasted < Duration::from_secs(2),
+            "a 200 ms limit ended the run only after {lasted:?}"
+        );
     }
 
     #[test]
     fn a_runaway_start_function_ends_by_the_deadline() {
         let component = lifecycle_component(true, true);
-        let (result, _) =
+        let (result, lasted) =
             run_to_its_end(component, state_with_deadline(Duration::from_millis(200)));
         assert_ended_by_the_deadline(result);
+        assert!(
+            lasted < Duration::from_secs(2),
+            "a 200 ms limit ended the start function only after {lasted:?}"
+        );
     }
 
     #[test]
@@ -1109,7 +1117,7 @@ mod tests {
         );
         // And not much later: Bus time is taken off once, not more than once.
         assert!(
-            lasted < Duration::from_secs(10),
+            lasted < Duration::from_secs(3),
             "the run went on for {lasted:?} with 1.2 s allowed"
         );
     }
