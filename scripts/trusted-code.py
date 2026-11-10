@@ -193,8 +193,8 @@ def library_rows(manifest, packages):
 
 
 def program_rows(manifest, external):
-    """One row per manifest host program from components.json's external set, and the native programs
-    that set holds but the manifest does not list."""
+    """One row per manifest host program from components.json's external set, and every external entry
+    the manifest does not list, whatever its kind."""
     rows = []
     for name in manifest["host_programs"]:
         component = external.get(name)
@@ -205,24 +205,32 @@ def program_rows(manifest, external):
             row["kind"] = ("native-provider" if (component.get("provider_runtime") or {}).get("substrate") == "native"
                            else "native-host" if name == "shell" else "other")
         rows.append(row)
-    native = {name for name, component in external.items()
-              if (component.get("provider_runtime") or {}).get("substrate") == "native"}
-    native.add("shell")  # the tree's trusted native-host helper: elastos-common/src/manifest.rs:893
-    return rows, sorted(native - set(manifest["host_programs"]))
+    return rows, sorted(set(external) - set(manifest["host_programs"]))
+
+
+def trusted_total(core_code, rows):
+    """The code the tree trusts: the core crate plus each listed file outside it. A listed file inside
+    the core crate is already in core_code, so it is named as excluded, not added again."""
+    excluded = [row["path"] for row in rows if row.get("in_core")]
+    outside = sum(row["counts"]["code"] for row in rows if not row.get("in_core"))
+    return {"code": core_code + outside, "core_code": core_code,
+            "listed_outside_core": outside, "excluded_in_core": excluded}
 
 
 def measure(root, manifest):
     totals = core_size.count(core_size.worktree_files(root))
+    files = file_rows(root, manifest)
     programs, unlisted = program_rows(manifest, json.loads((root / COMPONENTS).read_text(encoding="utf-8"))["external"])
     return {
         "root": str(root),
         "core": {"crate": core_size.CRATE, "code": totals["code"], "counts": totals,
                  "counter": "scripts/core-size.py:count"},
-        "files": file_rows(root, manifest),
+        "files": files,
+        "trusted_code_total": trusted_total(totals["code"], files),
         "absent_candidates": manifest.get("absent_candidates", []),
         "libraries": library_rows(manifest, lock_packages((root / LOCK).read_text(encoding="utf-8"))),
         "host_programs": programs,
-        "unlisted_native_programs": unlisted,
+        "unlisted_programs": unlisted,
     }
 
 
@@ -240,6 +248,18 @@ def text(report):
         out.append(f"{row['path']} | {counts['code']} | {counts['total']} | {counts['tests']} |"
                    f" {counts['comments']} | {counts['blank']} | {note}")
     out.append(f"allow-listed code total: {sum(row['counts']['code'] for row in report['files'])} lines")
+    total = report["trusted_code_total"]
+    out.append(f"trusted-code total: {total['code']} code lines = core crate {total['core_code']} +"
+               f" listed files outside the core {total['listed_outside_core']}")
+    out.append("left out of that sum, already counted in the core crate: " +
+               (", ".join(total["excluded_in_core"]) or "none"))
+    out.append("module targets not followed (declared by a listed file, not listed):")
+    warnings = [warning for row in report["files"] for warning in row.get("module_warnings", [])]
+    for warning in warnings:
+        out.append(f"{warning['path']}:{warning['line']}: mod {warning['mod']};"
+                   f" {warning['target']} is not listed")
+    if not warnings:
+        out.append("none")
     out.append("")
     out.append("trusted libraries (elastos/Cargo.lock):")
     out.append("entry | packages and versions | issue version")
@@ -247,6 +267,13 @@ def text(report):
     for row in report["libraries"]:
         versions = ", ".join(f"{name} {', '.join(found)}" for name, found in row["packages"].items()) or "missing"
         out.append(f"{row['entry']} | {versions} | {row.get('issue_version', '')}")
+    out.append("lock packages in a listed entry's family that the entry does not cover:")
+    gaps = [(row["entry"], name, versions)
+            for row in report["libraries"] for name, versions in row["family_not_covered"].items()]
+    for entry, name, versions in gaps:
+        out.append(f"{entry} family: {name} {', '.join(versions)} not covered")
+    if not gaps:
+        out.append("none")
     out.append("")
     out.append("host programs (components.json external):")
     out.append("name | install path | platforms | kind | present")
@@ -254,7 +281,7 @@ def text(report):
     for row in report["host_programs"]:
         out.append(f"{row['name']} | {row.get('install_path') or ''} |"
                    f" {', '.join(row.get('platforms', []))} | {row.get('kind', '')} | {row['present']}")
-    out.append("unlisted native programs: " + (", ".join(report["unlisted_native_programs"]) or "none"))
+    out.append("unlisted host programs: " + (", ".join(report["unlisted_programs"]) or "none"))
     out.append("issue candidates absent from this tree: " + (", ".join(report["absent_candidates"]) or "none"))
     return "\n".join(out)
 
