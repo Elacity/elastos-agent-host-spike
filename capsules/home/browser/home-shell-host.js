@@ -91,7 +91,7 @@ const SHELL_MESSAGE_OPEN_TARGET_SOURCES = Object.freeze({
   assistant: new Set(["marketplace", "system", "inbox"]),
   "home-agent": new Set(["marketplace", "system", "inbox"]),
   "archive-manager": new Set(["library"]),
-  browser: new Set(["library"]),
+  browser: new Set(["library", "inbox", "system"]),
   "chat-room": new Set(["library", "people", "inbox"]),
   "gba-emulator": new Set(["library"]),
   "home-cli": "visible-target",
@@ -2165,6 +2165,16 @@ window.addEventListener("message", (event) => {
   )) {
     console.warn("home ignored an app's Browser open with a query", context.targetId);
     return;
+  }
+  if (context.targetId === "browser" && ["inbox", "system"].includes(target)) {
+    if (!hasExactMessageKeys(data, ["type", "target", "query", "homeToken"])
+      || !data.query || typeof data.query !== "object" || Array.isArray(data.query)) return;
+    const keys = Object.keys(data.query);
+    const inbox = target === "inbox" && keys.length === 1 && keys[0] === "notification_id"
+      && data.query.notification_id === "browser-internet:permission";
+    const settings = target === "system" && keys.length === 1 && keys[0] === "settings"
+      && data.query.settings === "security";
+    if (!inbox && !settings) return;
   }
   if (context.targetId === "chat-room" && ["people", "inbox"].includes(target)) {
     if (!hasExactMessageKeys(data, ["type", "target", "query", "homeToken"])

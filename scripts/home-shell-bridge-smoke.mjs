@@ -2405,6 +2405,40 @@ sendChildMessage("null", browserFrameWindow, {
   type: "home:app-ready",
   homeToken: "browser-token",
 });
+// Exercise the real Home policy, not a parent that accepts every capsule message.
+{
+  const opened = () => shellMessages.filter(m => m.payload?.command === "open-target").map(m => m.payload);
+  const intent = (target, query) => ({ type: "home:open-target", target, query, homeToken: "browser-token" });
+  const before = opened().length;
+  for (const target of ["inbox", "system"]) {
+    const exact = target === "inbox" ? { notification_id: "browser-internet:permission" } : { settings: "security" };
+    for (const query of [undefined, null, [], "security", {}, { other: "security" },
+      target === "inbox" ? { notification_id: "other" } : { settings: "accounts" },
+      { ...exact, extra: "injected" }]) {
+      sendChildMessage("null", browserFrameWindow, intent(target, query));
+    }
+    sendChildMessage("null", browserFrameWindow, { ...intent(target, exact), extra: "injected" });
+    sendChildMessage("https://evil.invalid", browserFrameWindow, intent(target, exact));
+    sendChildMessage("null", {}, intent(target, exact));
+    sendChildMessage("null", browserFrameWindow, { ...intent(target, exact), homeToken: "wrong" });
+  }
+  sendChildMessage("null", browserFrameWindow, intent("people", {}));
+  sendChildMessage("null", browserFrameWindow, intent("browser", { url: "https://evil.invalid" }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert(opened().length === before, "Browser permission shortcuts reject other queries, apps, fields and untrusted sources");
+  const expected = [
+    ["inbox", { notification_id: "browser-internet:permission" }],
+    ["system", { settings: "security" }],
+    ["library", { mode: "browse" }],
+  ];
+  for (const [target, query] of expected) {
+    sendChildMessage("null", browserFrameWindow, intent(target, query));
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  assert(JSON.stringify(opened().slice(before).map(({target, query}) => [target, query])) === JSON.stringify(expected),
+    "Browser opens the selected permission request, Security, and existing Library route", opened().slice(before));
+  console.log("Browser permission routes: exact Inbox and Security accepted; invalid routes rejected; Library preserved");
+}
 const connectorLaunchesBeforeBrowserRequest = requests.filter(
   (request) =>
     request.url === "/api/apps/home/launch" &&
