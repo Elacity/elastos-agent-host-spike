@@ -631,7 +631,11 @@ async fn gba_viewer_reads_only_compatible_library_objects_as_raw_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(library_test_state(dir.path()).await);
     let context = local_home_launch_token_context(dir.path()).unwrap();
-    crate::auth::store_test_human_principal(dir.path(), &context.principal_id);
+    assert!(
+        crate::auth::stored_principal_record(dir.path(), &context.principal_id)
+            .unwrap()
+            .is_none()
+    );
     let principal_root = crate::auth::principal_localhost_root(&context.principal_id);
 
     for (name, bytes) in [
