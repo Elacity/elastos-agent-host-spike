@@ -4351,7 +4351,7 @@ async fn test_browser_personal_sign_queues_wallet_inbox_approval() {
     let inbox_json: serde_json::Value = serde_json::from_slice(&inbox_body).unwrap();
     assert_eq!(inbox_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        inbox_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&inbox_json["notifications"], "wallet_approval_request")[0]["title"],
         "Browser signature request"
     );
 }
@@ -4452,7 +4452,7 @@ async fn test_browser_typed_data_sign_queues_wallet_inbox_approval() {
     let inbox_json: serde_json::Value = serde_json::from_slice(&inbox_body).unwrap();
     assert_eq!(inbox_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        inbox_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&inbox_json["notifications"], "wallet_approval_request")[0]["title"],
         "Browser typed data signature request"
     );
 }
@@ -5142,7 +5142,7 @@ async fn test_browser_eth_send_transaction_queues_wallet_inbox_approval() {
     let inbox_json: serde_json::Value = serde_json::from_slice(&inbox_body).unwrap();
     assert_eq!(inbox_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        inbox_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&inbox_json["notifications"], "wallet_approval_request")[0]["title"],
         "Transaction approval request"
     );
 }
