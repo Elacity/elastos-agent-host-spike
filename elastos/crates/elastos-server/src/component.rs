@@ -11,6 +11,12 @@ const ALLOWED_BUS_IMPORTS: &[&str] = &[
     "elastos:bus/providers@1.0.0",
 ];
 
+/// Parse caps: bounds on the work the compiler is asked to do, checked in the
+/// same pass as the imports. The largest component in this repository
+/// (agent-host) has 896 functions and a largest body of 88,523 bytes.
+const MAX_COMPONENT_FUNCTIONS: u32 = 20_000;
+const MAX_FUNCTION_BODY_BYTES: usize = 512 * 1024;
+
 const FORBIDDEN_AUTHORITY_MARKERS: &[&str] = &[
     "wasi",
     "env",
@@ -48,6 +54,7 @@ pub(crate) async fn read_admitted_entrypoint(
 
 pub(crate) fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
     let mut saw_root_header = false;
+    let mut functions: u32 = 0;
 
     for payload in Parser::new(0).parse_all(bytes) {
         match payload.map_err(|err| format!("failed to parse component entrypoint: {err}"))? {
@@ -92,6 +99,22 @@ pub(crate) fn validate_component_imports(bytes: &[u8]) -> std::result::Result<()
                             name
                         ));
                     }
+                }
+            }
+            Payload::CodeSectionStart { count, .. } => {
+                functions = functions.saturating_add(count);
+                if functions > MAX_COMPONENT_FUNCTIONS {
+                    return Err(format!(
+                        "component has more than {MAX_COMPONENT_FUNCTIONS} functions"
+                    ));
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                let len = body.range().len();
+                if len > MAX_FUNCTION_BODY_BYTES {
+                    return Err(format!(
+                        "component function body of {len} bytes is over the {MAX_FUNCTION_BODY_BYTES} byte limit"
+                    ));
                 }
             }
             Payload::ImportSection(section) => {
@@ -226,6 +249,62 @@ mod tests {
         let err = validate_component_imports(&component.finish()).unwrap_err();
         assert!(err.contains("core module import"));
         assert!(err.contains("wasi_snapshot_preview1::fd_write"));
+    }
+
+    /// A component holding core modules, one per entry of `modules`; each
+    /// module has that many functions, each a body of `body_len` bytes.
+    fn component_with_functions(modules: &[u32], body_len: usize) -> Vec<u8> {
+        let mut component = Component::new();
+        for count in modules {
+            let mut module = wasm_encoder::Module::new();
+            let mut types = wasm_encoder::TypeSection::new();
+            types.ty().function([], []);
+            module.section(&types);
+            let mut functions = wasm_encoder::FunctionSection::new();
+            let mut code = wasm_encoder::CodeSection::new();
+            // A body is its locals count (one byte), its instructions, and `end`.
+            let mut body = wasm_encoder::Function::new([]);
+            for _ in 0..body_len - 2 {
+                body.instruction(&wasm_encoder::Instruction::Nop);
+            }
+            body.instruction(&wasm_encoder::Instruction::End);
+            for _ in 0..*count {
+                functions.function(0);
+                code.function(&body);
+            }
+            module.section(&functions);
+            module.section(&code);
+            component.section(&wasm_encoder::ModuleSection(&module));
+        }
+        component.finish()
+    }
+
+    #[test]
+    fn a_component_may_hold_twenty_thousand_functions_and_no_more() {
+        // The count is over every core module of the component together.
+        validate_component_imports(&component_with_functions(&[12_000, 8_000], 2)).unwrap();
+        let err =
+            validate_component_imports(&component_with_functions(&[12_000, 8_001], 2)).unwrap_err();
+        assert_eq!(err, "component has more than 20000 functions");
+    }
+
+    #[test]
+    fn a_function_body_may_be_512_kib_and_no_more() {
+        validate_component_imports(&component_with_functions(&[1], 512 * 1024)).unwrap();
+        let err = validate_component_imports(&component_with_functions(&[1], 512 * 1024 + 1))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "component function body of 524289 bytes is over the 524288 byte limit"
+        );
+    }
+
+    #[test]
+    fn the_repository_fixture_is_far_under_the_parse_caps() {
+        let bytes = include_bytes!(
+            "../../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"
+        );
+        validate_component_imports(bytes).unwrap();
     }
 
     #[test]
