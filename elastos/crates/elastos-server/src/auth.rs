@@ -7822,6 +7822,15 @@ fn validate_principal_root_object_binding_in_state(
     localhost_root: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
+    if principal_id.starts_with("device:") {
+        let resolved = ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?;
+        if resolved.localhost_root() != localhost_root
+            || !object_uri_is_under_root(localhost_root, object_uri)
+        {
+            anyhow::bail!("principal localhost root must be the verified device root");
+        }
+        return Ok(());
+    }
     if let Some(record) = stored_principal_record(data_dir, principal_id)? {
         if record.kind == PrincipalKind::Human {
             if !record.localhost_root.starts_with("localhost://Users/")
