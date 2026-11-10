@@ -12905,6 +12905,21 @@ pub(crate) mod tests {
         );
     }
 
+    /// The length prefix counts bytes, not characters: a name of 9 characters
+    /// and 16 bytes is pinned to a digest computed outside this crate.
+    #[test]
+    fn agent_principal_id_counts_bytes_in_a_non_ascii_name() {
+        let name = "nötes ノート";
+        assert_eq!(
+            agent_admission_subject(AGENT_OWNER, AGENT_DID, name),
+            "26:elastos.agent-principal/v1,18:person:local:owner,20:did:key:z6MkAgentOne,16:nötes ノート,"
+        );
+        assert_eq!(
+            agent_principal_id(AGENT_OWNER, AGENT_DID, name),
+            "agent:v1:76415fcb3e4867a79ebabd2da8f99c5853b9a09b65b1735d928ed669ef6764fb"
+        );
+    }
+
     /// ID-ambig: where one field ends is part of the id. Each pair is one
     /// string under plain concatenation or under a comma join.
     #[test]
