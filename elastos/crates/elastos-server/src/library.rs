@@ -8334,11 +8334,11 @@ fn write_publish_record(
     principal_id: &str,
     record: &LibraryPublishRecord,
 ) -> anyhow::Result<()> {
-    // Resolve before the index changes. An unstored principal is refused
-    // with the index file byte-identical. Serving still follows the index:
-    // a publication that ends leaves the index before its record changes,
-    // and one that starts joins it after, so a crash in between serves
-    // less, never more.
+    // No public Library operation calls this for an unstored principal;
+    // each one resolves first, so this order is not what decides serving
+    // for that principal. A publication that ends leaves the index before
+    // its record changes, and one that starts joins it after, so a crash
+    // in between serves less, never more.
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
         .to_string();
@@ -11913,5 +11913,103 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "unstored Library target must refuse"
         );
+    }
+
+    const UNSTORED_INDEX: &[u8] = br#"{"schema":"elastos.library.published-cids/v1","publications":{"k":{"any_peer":true,"cids":["bafy-r5b-unstored"],"principal_id":"person:local:r4"}}}"#;
+    const UNSTORED_REFUSAL: &str =
+        "principal 'person:local:r4' has no stored record; its root cannot be chosen";
+
+    fn block<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// An unstored principal, with a publish-index entry seeded as literal
+    /// bytes. The call must refuse by the resolve's own sentence, those
+    /// bytes must stay, and `published_cid_audience` must still report the
+    /// seeded audience.
+    fn unstored_index_stays(op: &str, run: impl FnOnce(&Path) -> anyhow::Result<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let index = published_index_path(dir.path());
+        fs::create_dir_all(index.parent().unwrap()).unwrap();
+        fs::write(&index, UNSTORED_INDEX).unwrap();
+        assert_unstored_audience(dir.path(), op);
+        let result = run(dir.path());
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string() == UNSTORED_REFUSAL),
+            "{op} must refuse an unstored principal by name: {result:?}"
+        );
+        assert_eq!(
+            fs::read(&index).unwrap_or_default(),
+            UNSTORED_INDEX,
+            "{op} changed the shared index"
+        );
+        assert_unstored_audience(dir.path(), op);
+    }
+
+    fn assert_unstored_audience(dir: &Path, op: &str) {
+        let audience = published_cid_audience(dir, "bafy-r5b-unstored").unwrap();
+        assert!(audience.any_peer, "{op}");
+        assert_eq!(
+            audience.principals,
+            BTreeSet::from(["person:local:r4".to_string()]),
+            "{op}"
+        );
+    }
+
+    fn unstored_publish_op(op: &str, dir: &Path) -> anyhow::Result<()> {
+        let file = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/p.txt";
+        match op {
+            "publish" => block(library_publish(
+                dir,
+                Arc::new(ProviderRegistry::new()),
+                r4_fixture::ID,
+                file,
+                None,
+                None,
+                None,
+            ))
+            .map(|_| ()),
+            "unpublish" => block(library_unpublish(
+                dir,
+                Arc::new(ProviderRegistry::new()),
+                r4_fixture::ID,
+                file,
+                None,
+            ))
+            .map(|_| ()),
+            "repair" => block(library_repair(
+                dir,
+                Arc::new(ProviderRegistry::new()),
+                r4_fixture::ID,
+                file,
+            ))
+            .map(|_| ()),
+            _ => unreachable!("{op}"),
+        }
+    }
+
+    fn unstored_publish_row(op: &'static str) {
+        unstored_index_stays(op, |dir| unstored_publish_op(op, dir));
+    }
+
+    #[test]
+    fn publish_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("publish");
+    }
+
+    #[test]
+    fn unpublish_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("unpublish");
+    }
+
+    #[test]
+    fn repair_of_an_unstored_principal_keeps_the_shared_index() {
+        unstored_publish_row("repair");
     }
 }
