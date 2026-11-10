@@ -2212,6 +2212,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   };
 
   const followAfterFlush = () => {
+    // Plant: the room never follows a growing reply.
+    return;
     if (!stickToBottom || followRaf || selectionInStream()) {
       return;
     }
