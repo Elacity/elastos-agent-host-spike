@@ -8103,6 +8103,83 @@ mod tests {
         assert_eq!(std::fs::read(object_path).unwrap(), b"legacy save");
     }
 
+    #[test]
+    fn configured_readiness_keeps_recordless_stored_human_protection_and_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:recordless-readiness";
+        let record = crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let root = record.localhost_root;
+        crate::auth::store_test_principal_root_protection_for(temp.path(), principal_id, &root);
+        let uri = format!("{root}/.AppData/LocalHost/GBA/ucity/rom-id.sav");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(temp.path(), &uri).unwrap();
+        crate::auth::write_principal_root_object(
+            temp.path(),
+            principal_id,
+            &root,
+            &uri,
+            &path,
+            b"protected object",
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
+        state
+            .principals
+            .retain(|record| record.principal_id != principal_id);
+        crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
+        assert!(
+            crate::auth::stored_principal_record(temp.path(), principal_id)
+                .unwrap()
+                .is_none()
+        );
+
+        verify_configured_principal_roots_ready(temp.path())
+            .expect("stored Human protection must keep Home ready without a record");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let read_err =
+            crate::auth::read_principal_root_object(temp.path(), principal_id, &root, &uri, &path)
+                .unwrap_err();
+        assert!(read_err
+            .to_string()
+            .contains("principal has no stored record"));
+        let write_err = crate::auth::write_principal_root_object(
+            temp.path(),
+            principal_id,
+            &root,
+            &uri,
+            &path,
+            b"replacement",
+        )
+        .unwrap_err();
+        assert!(write_err
+            .to_string()
+            .contains("principal has no stored record"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn configured_readiness_refuses_recordless_usersai_protection() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "agent:recordless-readiness";
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let record = crate::auth::tests::mint_agent_record(temp.path(), principal_id, None);
+        crate::auth::store_test_principal_root_protection_for(
+            temp.path(),
+            principal_id,
+            &record.localhost_root,
+        );
+        let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
+        state.principals.retain(|record| record.principal_id != principal_id);
+        crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
+        let error = verify_configured_principal_roots_ready(temp.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("record-less stored protection requires its own localhost://Users/ root"),
+            "{error}"
+        );
+    }
+
     #[tokio::test]
     async fn recovery_kit_import_consumes_matching_did_recovery_proof() {
         let temp = tempfile::tempdir().unwrap();
@@ -8316,6 +8393,11 @@ mod tests {
         let current_principal =
             crate::auth::load_principal_for_proof_binding(temp.path(), &current.proof_binding_id)
                 .unwrap();
+        crate::auth::store_test_principal_root_protection_for(
+            temp.path(),
+            &current_principal.principal_id,
+            &current_principal.localhost_root,
+        );
         assert_ne!(old_principal.principal_id, current_principal.principal_id);
         assert_ne!(
             old_principal.localhost_root,
@@ -8337,6 +8419,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.status, "reassigned");
+        verify_configured_principal_roots_ready(temp.path())
+            .expect("reassignment must leave the importer protection ready");
         assert_eq!(response.principal_id, old_principal.principal_id);
         assert_eq!(response.localhost_root, old_principal.localhost_root);
         assert_eq!(

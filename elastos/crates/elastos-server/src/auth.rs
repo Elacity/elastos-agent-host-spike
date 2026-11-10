@@ -8122,6 +8122,20 @@ fn scan_principal_root_with_protection(
     protection: Option<&PrincipalRootProtectionV1>,
     mode: PrincipalRootScanMode,
 ) -> anyhow::Result<PrincipalRootScan> {
+    let declared_kind = match protection {
+        Some(stored) if stored_principal_record(data_dir, principal_id)?.is_none() => {
+            if stored.principal_id != principal_id
+                || stored.localhost_root != localhost_root
+                || !stored.localhost_root.starts_with("localhost://Users/")
+            {
+                anyhow::bail!(
+                    "record-less stored protection requires its own localhost://Users/ root"
+                );
+            }
+            Some(PrincipalKind::Human)
+        }
+        _ => None,
+    };
     let scan = scan_declared_principal_root_objects(
         data_dir,
         principal_id,
@@ -8129,7 +8143,7 @@ fn scan_principal_root_with_protection(
         inventory,
         protection.map(|protection| protection.data_key_id.as_str()),
         mode,
-        None,
+        declared_kind,
     )?;
     if let Some(protection) = protection.filter(|_| scan.encrypted > 0) {
         principal_root_data_key_from_protection(data_dir, protection)?;
