@@ -19233,6 +19233,116 @@ pub(crate) mod tests {
         });
     }
 
+    #[test]
+    fn agent_kind_binding_cross_check_is_refused_on_save_and_load() {
+        assert_invalid_agent_refused("agent kind binding mismatch", |agent| {
+            agent.proof_binding =
+                ProofBinding::evm_account(1, &format!("0x{}", "cd".repeat(20)), 5);
+            agent.proof_binding_id = agent.proof_binding.id();
+        });
+    }
+
+    #[test]
+    fn quarantined_agent_record_lets_the_owner_sign_in() {
+        for case in 0..MALFORMED_AGENT_CASES {
+            let data_dir = tempfile::tempdir().unwrap();
+            let now = now_ts();
+            let person = upsert_principal_for_binding_as(
+                data_dir.path(),
+                passkey_binding(1, now, now),
+                "person:local:signer".to_string(),
+                now,
+            )
+            .unwrap();
+            let mut agent = test_agent_record(TEST_AGENT_ID);
+            agent.owner = Some(person.principal_id.clone());
+            let reason = edit_malformed_agent(&mut agent, case);
+            let planted = serde_json::to_vec(&agent).unwrap();
+            insert_principal_into_auth_file(data_dir.path(), &agent);
+            let loaded = load_auth_state(data_dir.path()).expect(reason);
+            assert_eq!(
+                quarantine_reason(&loaded, &agent.principal_id),
+                Some(reason),
+                "{reason}"
+            );
+            let grant = sign_in_passkey(data_dir.path()).expect(reason);
+            assert_eq!(grant.principal_id, person.principal_id, "{reason}");
+            let root_error =
+                principal_stored_localhost_root(Some(data_dir.path()), &agent.principal_id)
+                    .unwrap_err();
+            assert!(
+                root_error.contains("quarantined agent record"),
+                "{reason}: {root_error}"
+            );
+            let resolve_error = ResolvedPrincipalRoot::resolve(
+                data_dir.path(),
+                data_dir.path(),
+                &agent.principal_id,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                resolve_error.contains("quarantined agent record"),
+                "{reason}: {resolve_error}"
+            );
+            let uri = format!("{}/notes.md", agent.localhost_root);
+            let read_error = read_principal_root_object(
+                data_dir.path(),
+                &agent.principal_id,
+                &agent.localhost_root,
+                &uri,
+                data_dir.path(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                read_error.contains("quarantined agent record"),
+                "{reason}: {read_error}"
+            );
+            let write_error = write_principal_root_object(
+                data_dir.path(),
+                &agent.principal_id,
+                &agent.localhost_root,
+                &uri,
+                data_dir.path(),
+                b"no",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                write_error.contains("quarantined agent record"),
+                "{reason}: {write_error}"
+            );
+            let mut named = grant.clone();
+            named.principal_id = agent.principal_id.clone();
+            named.session_id = format!("auth:quarantine:{case}");
+            let session_error = store_session_grant(data_dir.path(), named)
+                .expect_err(reason)
+                .to_string();
+            assert!(
+                session_error.contains("quarantined agent record"),
+                "{reason}: {session_error}"
+            );
+            mutate_auth_state(data_dir.path(), |state| {
+                state
+                    .principals
+                    .iter_mut()
+                    .find(|principal| principal.principal_id == person.principal_id)
+                    .unwrap()
+                    .display_name = "Owner renamed".to_string();
+                Ok(())
+            })
+            .expect(reason);
+            let stored = load_auth_state(data_dir.path())
+                .unwrap()
+                .principals
+                .into_iter()
+                .find(|principal| principal.principal_id == agent.principal_id)
+                .expect(reason);
+            assert_eq!(serde_json::to_vec(&stored).unwrap(), planted, "{reason}");
+        }
+    }
+
     fn refuse_duplicate_agent_records(
         label: &str,
         reason: &str,
