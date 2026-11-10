@@ -73,11 +73,14 @@ pub struct Runtime {
 }
 
 /// What admission decided for one launched capsule: who its bridge calls act
-/// as, and the manifest's resource ceilings. The bridge acts with exactly
-/// this, and a capsule with no admission context is refused.
+/// as, the Human an agent acts for, and the manifest's resource ceilings.
+/// The bridge acts with exactly this, and a capsule with no admission
+/// context is refused.
 #[derive(Debug, Clone)]
 pub(crate) struct AdmissionContext {
     pub(crate) actor: Option<String>,
+    /// The launcher of an admitted agent. None for an ordinary capsule.
+    pub(crate) owner: Option<String>,
     pub(crate) manifest_bounds: Vec<String>,
 }
 
@@ -387,10 +390,11 @@ impl Runtime {
         Ok((handle, signer))
     }
 
-    /// Admission for one launch. An ordinary capsule acts as its launcher. An
-    /// agent must be a component signed by a trusted key and launched by a
-    /// stored Human with current protection; it acts as its own principal,
-    /// minted here.
+    /// Admission for one launch. An ordinary capsule acts as its launcher and
+    /// names no owner. An agent must be a component signed by a trusted key
+    /// and launched by a stored Human with current protection; it acts as its
+    /// own principal, minted here, and carries that launcher as the person it
+    /// acts for.
     async fn admit(
         &self,
         manifest: &CapsuleManifest,
@@ -401,6 +405,7 @@ impl Runtime {
         if manifest.agent.is_none() {
             return Ok(AdmissionContext {
                 actor: launcher,
+                owner: None,
                 manifest_bounds,
             });
         }
@@ -420,6 +425,7 @@ impl Runtime {
             .map_err(|err| refuse(&err.to_string()))?;
         Ok(AdmissionContext {
             actor: Some(agent.principal_id),
+            owner: Some(launcher),
             manifest_bounds,
         })
     }
@@ -675,6 +681,7 @@ pub(crate) mod tests {
             "admitted".into(),
             AdmissionContext {
                 actor: None,
+                owner: None,
                 manifest_bounds: vec!["localhost://Local/SharedByLocalUsersAndBots/Home/*".into()],
             },
         );
@@ -737,6 +744,11 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(first.actor.as_deref(), Some(ADMIT_AGENT));
+        assert_eq!(
+            first.owner.as_deref(),
+            Some(ADMIT_OWNER),
+            "ADMIT-owner-carried: an admitted agent carries its launcher"
+        );
         assert_eq!(first.manifest_bounds, manifest.resource_authority_bounds());
         let record = crate::auth::stored_principal_record(temp.path(), ADMIT_AGENT)
             .unwrap()
@@ -761,6 +773,11 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(again.actor.as_deref(), Some(ADMIT_AGENT));
+        assert_eq!(
+            again.owner.as_deref(),
+            Some(ADMIT_OWNER),
+            "ADMIT-owner-carried: a second admission carries the same launcher"
+        );
         assert_eq!(auth_bytes(&temp), before);
     }
 
@@ -779,6 +796,10 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             assert_eq!(admission.actor, launcher);
+            assert!(
+                admission.owner.is_none(),
+                "ADMIT-owner-carried: an ordinary capsule has no owner"
+            );
         }
 
         assert_eq!(auth_bytes(&temp), before);

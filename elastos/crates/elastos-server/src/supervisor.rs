@@ -1180,6 +1180,7 @@ impl Supervisor {
                         &format!("vm-{}", name),
                         crate::runtime::AdmissionContext {
                             actor: principal_id.clone(),
+                            owner: None,
                             manifest_bounds: manifest.resource_authority_bounds(),
                         },
                         self.data_dir.clone(),

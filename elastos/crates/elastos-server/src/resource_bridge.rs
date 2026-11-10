@@ -41,6 +41,9 @@ pub struct BridgeContext {
     pub capsule_id: String,
     /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
     pub principal_id: Option<String>,
+    /// The Human an agent acts for. None for an ordinary capsule. Set only
+    /// from the admission, in `BridgeContext::admitted`.
+    pub owner: Option<String>,
     /// Manifest-declared resource ceilings for capsule-requestable authority.
     pub manifest_capabilities: Vec<String>,
     /// Runtime data directory used by protected principal-root storage helpers.
@@ -63,6 +66,7 @@ impl BridgeContext {
             pending_store,
             capsule_id: capsule_id.to_string(),
             principal_id: admission.actor,
+            owner: admission.owner,
             manifest_capabilities: admission.manifest_bounds,
             data_dir: Some(data_dir),
         }
@@ -1696,6 +1700,7 @@ mod tests {
             ),
             capsule_id: "test-capsule".to_string(),
             principal_id: None,
+            owner: None,
             manifest_capabilities: vec![
                 "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string()
             ],
