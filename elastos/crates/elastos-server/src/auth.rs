@@ -12964,7 +12964,7 @@ pub(crate) mod tests {
         assert_eq!(principal.role, RuntimePrincipalRole::Admin);
         assert_eq!(
             principal.localhost_root,
-            principal_localhost_root(&principal_id)
+            "localhost://Users/24182714fcf4f264a8c3dda2"
         );
         assert_eq!(active_passkey_principal_count(data_dir.path()).unwrap(), 1);
     }
