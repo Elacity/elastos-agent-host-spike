@@ -7060,10 +7060,9 @@ fn home_browser_state(
     }
     let principal_id = home_browser_principal_id(context);
     let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_browser_state_uri(context),
         &path,
     ) {
@@ -7234,10 +7233,9 @@ fn home_save_browser_state(
     if let Some(parent) = path.parent() {
         crate::auth::create_owner_only_dir_all(data_dir, parent)?;
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_browser_state_uri(context),
         &path,
         &bytes,
@@ -9555,6 +9553,39 @@ mod stored_root_tests {
         let formula_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &formula_uri).unwrap();
         assert!(!formula_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_browser_state_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let updated = home_save_browser_state(
+            &data_dir,
+            &context,
+            HomeBrowserStateUpdate {
+                layout: Some(Some(serde_json::json!({"columns": 3}))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.layout, Some(serde_json::json!({"columns": 3})));
+        assert_eq!(
+            home_browser_state(&data_dir, &context).unwrap().layout,
+            Some(serde_json::json!({"columns": 3}))
+        );
+        assert!(home_browser_state_path(&data_dir, &context)
+            .unwrap()
+            .is_file());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/browser-state.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
     }
 
     #[test]
