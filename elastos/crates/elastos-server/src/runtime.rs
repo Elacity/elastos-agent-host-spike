@@ -805,6 +805,143 @@ pub(crate) mod tests {
         assert_eq!(auth_bytes(&temp), before);
     }
 
+    /// One resource invoke through the production hostcall, under the
+    /// admission `admit` returned. The principal the caller claims is not
+    /// the actor.
+    fn audited_bridge_call(
+        rt: &tokio::runtime::Runtime,
+        data_dir: &std::path::Path,
+        admission: AdmissionContext,
+    ) -> serde_json::Value {
+        let admissions: Admissions = Arc::new(StdRwLock::new(HashMap::new()));
+        admissions
+            .write()
+            .unwrap()
+            .insert("capsule-1".into(), admission);
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store =
+            Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log));
+        let hostcall = bridge_hostcall(
+            admissions,
+            Arc::new(ProviderRegistry::new()),
+            capability_manager,
+            pending_store,
+            data_dir.to_path_buf(),
+            rt.handle().clone(),
+        );
+        let line = r#"{"id":7,"request":{"type":"resource_invoke","uri":"localhost://Local/Elsewhere/a.txt","operation":"read","body":{}}}"#;
+        let answered = hostcall(line, "capsule-1", Some("forged-actor"))
+            .expect("an admitted capsule is answered");
+        serde_json::from_str(&answered).unwrap()
+    }
+
+    fn persisted_invoke_objects(data_dir: &std::path::Path) -> Vec<serde_json::Value> {
+        let path = crate::auth::auth_state_path(data_dir).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        value["audit"]
+            .as_array()
+            .expect("auth state stores audit events")
+            .iter()
+            .filter(|event| {
+                event["event_type"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("component.invoke.")
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn signatures_of_invoke_events_verify(data_dir: &std::path::Path) {
+        let state = crate::auth::load_auth_state(data_dir).expect("persisted audit verifies");
+        let events: Vec<_> = state
+            .audit
+            .iter()
+            .filter(|event| event.event_type.starts_with("component.invoke."))
+            .collect();
+        assert!(!events.is_empty(), "the bridge call wrote an invoke audit");
+        for event in events {
+            crate::auth::verify_signed_full_recovery_outcome_audit_event(data_dir, event)
+                .expect("invoke audit signature verifies");
+            assert!(event.signature.as_ref().is_some_and(|sig| !sig.is_empty()));
+        }
+    }
+
+    /// AUDIT-actor: a bridge call under an agent admission records the agent
+    /// as `principal_id` and the owner as `on_behalf_of`. Both ids are literals.
+    #[test]
+    fn audit_of_an_agent_admission_names_the_agent_and_its_owner() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (runtime, temp) = rt.block_on(admission_runtime());
+        let admission = rt
+            .block_on(runtime.admit(
+                &agent_manifest(),
+                &agent_key(),
+                Some(ADMIT_OWNER.to_string()),
+            ))
+            .unwrap();
+
+        let answered = audited_bridge_call(&rt, temp.path(), admission);
+
+        assert_eq!(answered["id"], 7, "the bridge call is answered: {answered}");
+        signatures_of_invoke_events_verify(temp.path());
+        let events = persisted_invoke_objects(temp.path());
+        assert!(events.len() >= 2, "requested and completed: {events:?}");
+        for event in &events {
+            assert_eq!(
+                event["principal_id"].as_str(),
+                Some(ADMIT_AGENT),
+                "AUDIT-actor: principal_id is the agent, not the owner: {event}"
+            );
+            assert_eq!(
+                event["on_behalf_of"].as_str(),
+                Some(ADMIT_OWNER),
+                "AUDIT-actor: on_behalf_of is the owner: {event}"
+            );
+        }
+    }
+
+    /// AUDIT-human: the same call under an ordinary admission writes no
+    /// `on_behalf_of` key, and the signature still verifies.
+    #[test]
+    fn audit_of_an_ordinary_admission_omits_on_behalf_of() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (runtime, temp) = rt.block_on(admission_runtime());
+        let mut manifest = agent_manifest();
+        manifest.agent = None;
+        let admission = rt
+            .block_on(runtime.admit(
+                &manifest,
+                &Signer::UnsignedDev,
+                Some(ADMIT_OWNER.to_string()),
+            ))
+            .unwrap();
+
+        let answered = audited_bridge_call(&rt, temp.path(), admission);
+
+        assert_eq!(answered["id"], 7, "the bridge call is answered: {answered}");
+        signatures_of_invoke_events_verify(temp.path());
+        let events = persisted_invoke_objects(temp.path());
+        assert!(!events.is_empty(), "{events:?}");
+        for event in &events {
+            assert!(
+                event.get("on_behalf_of").is_none(),
+                "AUDIT-human: ordinary admission writes no on_behalf_of key: {event}"
+            );
+            assert_eq!(
+                event["principal_id"].as_str(),
+                Some(ADMIT_OWNER),
+                "an ordinary capsule acts as its launcher: {event}"
+            );
+        }
+    }
+
     /// ADMIT-signer, ADMIT-nolauncher, ADMIT-owner and the microVM refusal:
     /// each refusal names its reason and leaves the auth state byte-identical.
     #[tokio::test]

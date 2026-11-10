@@ -677,6 +677,7 @@ fn append_viewer_library_audit(
             event_id: format!("audit:{event_type}:{request_id}:{now}"),
             event_type: event_type.to_string(),
             principal_id: Some(context.principal_id().to_string()),
+            on_behalf_of: None,
             proof_binding_id: context.proof_binding_id().map(ToString::to_string),
             session_id: Some(context.session_id().to_string()),
             challenge_id: Some(request_id.to_string()),

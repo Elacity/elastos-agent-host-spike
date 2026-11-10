@@ -2408,6 +2408,7 @@ fn append_transaction_effect_audit(
         event_id: event_id.clone(),
         event_type: event_type.to_string(),
         principal_id: Some(effect.authority.principal_id.clone()),
+        on_behalf_of: None,
         proof_binding_id: effect.authority.proof_binding_id.clone(),
         session_id: Some(effect.authority.session_id.clone()),
         challenge_id: Some(effect.effect_id.clone()),

@@ -771,6 +771,7 @@ fn append_step_up_completion_audit(
             event_id: format!("audit:{}", gateway_home_token::uuid_like_token()),
             event_type: "auth.passkey_step_up.completed".to_string(),
             principal_id: Some(pending.principal_id.clone()),
+            on_behalf_of: None,
             proof_binding_id: Some(pending.proof_binding_id.clone()),
             session_id: Some(pending.session_id.clone()),
             challenge_id: Some(pending.ceremony_id.clone()),

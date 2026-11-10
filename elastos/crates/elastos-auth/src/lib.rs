@@ -228,6 +228,10 @@ pub struct RuntimeAuditEventV1 {
     pub event_id: String,
     pub event_type: String,
     pub principal_id: Option<String>,
+    /// The Human an agent acts for. Omitted from the signed bytes when absent,
+    /// so an event that names no owner keeps the JSON it had before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
     pub proof_binding_id: Option<String>,
     pub session_id: Option<String>,
     pub challenge_id: Option<String>,
@@ -1788,5 +1792,39 @@ mod tests {
         assert!(validate_did_recovery_proof(&proof)
             .unwrap_err()
             .contains("hex encoded"));
+    }
+
+    /// AUDIT-bytes: an event with no owner serialises to the JSON this struct
+    /// had before `on_behalf_of` existed. The string is written out here; it
+    /// is not produced by the code under test.
+    #[test]
+    fn an_audit_event_without_an_owner_keeps_its_json_bytes() {
+        let event = RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:bytes".to_string(),
+            event_type: "test.bytes".to_string(),
+            principal_id: Some("person:local:launcher".to_string()),
+            on_behalf_of: None,
+            proof_binding_id: None,
+            session_id: Some("capsule-1".to_string()),
+            challenge_id: Some("component-invoke:1".to_string()),
+            capsule_id: Some("capsule-1".to_string()),
+            result: "pending".to_string(),
+            reason: "read localhost://Local/Elsewhere/a.txt".to_string(),
+            occurred_at: 1,
+            signer_did: None,
+            signature: None,
+        };
+        let bytes = serde_json::to_vec(&event).unwrap();
+        let expected = "\
+{\"schema\":\"elastos.audit.event/v1\",\"event_id\":\"audit:bytes\",\"event_type\":\"test.bytes\",\
+\"principal_id\":\"person:local:launcher\",\"proof_binding_id\":null,\"session_id\":\"capsule-1\",\
+\"challenge_id\":\"component-invoke:1\",\"capsule_id\":\"capsule-1\",\"result\":\"pending\",\
+\"reason\":\"read localhost://Local/Elsewhere/a.txt\",\"occurred_at\":1}";
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            expected,
+            "AUDIT-bytes"
+        );
     }
 }

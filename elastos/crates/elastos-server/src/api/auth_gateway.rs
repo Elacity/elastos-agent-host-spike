@@ -4908,6 +4908,7 @@ fn audit_event(input: AuditEventInput<'_>) -> RuntimeAuditEventV1 {
         event_id: format!("audit:{}", random_hex(16)),
         event_type: input.event_type.to_string(),
         principal_id: input.principal_id,
+        on_behalf_of: None,
         proof_binding_id: input.proof_binding_id,
         session_id: input.session_id,
         challenge_id: input.challenge_id,

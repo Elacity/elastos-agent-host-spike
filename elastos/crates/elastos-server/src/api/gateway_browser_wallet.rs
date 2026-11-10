@@ -681,6 +681,7 @@ fn append_browser_effect_audit(
             ),
             event_type: input.event_type.to_string(),
             principal_id: Some(input.principal_id.to_string()),
+            on_behalf_of: None,
             proof_binding_id: None,
             session_id: Some(input.session_id.to_string()),
             challenge_id: Some(input.request_id.to_string()),

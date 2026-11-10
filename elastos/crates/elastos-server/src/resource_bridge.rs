@@ -335,6 +335,7 @@ fn emit_component_invoke_audit(
             ComponentInvokeAudit {
                 capsule_id: &bridge_ctx.capsule_id,
                 principal_id: bridge_ctx.principal_id.as_deref(),
+                on_behalf_of: bridge_ctx.owner.as_deref(),
                 audit_id,
                 phase,
                 resource: &dispatch.resource,
@@ -1273,6 +1274,7 @@ pub async fn handle_remote_request_with_audit_dir(
                         ComponentInvokeAudit {
                             capsule_id,
                             principal_id,
+                            on_behalf_of: None,
                             audit_id: &audit_id,
                             phase,
                             resource: &dispatch.resource,
@@ -1545,6 +1547,7 @@ pub async fn handle_remote_request_with_audit_dir(
 struct ComponentInvokeAudit<'a> {
     capsule_id: &'a str,
     principal_id: Option<&'a str>,
+    on_behalf_of: Option<&'a str>,
     audit_id: &'a str,
     phase: &'a str,
     resource: &'a str,
@@ -1565,6 +1568,7 @@ fn record_component_invoke_event(data_dir: &Path, event: ComponentInvokeAudit<'_
             event_id: format!("audit:{}", random_hex(16)),
             event_type: format!("component.invoke.{}", event.phase),
             principal_id: event.principal_id.map(ToString::to_string),
+            on_behalf_of: event.on_behalf_of.map(ToString::to_string),
             proof_binding_id: None,
             session_id: Some(event.capsule_id.to_string()),
             challenge_id: Some(event.audit_id.to_string()),
