@@ -30,20 +30,51 @@ import time
 # Cargo decides what to rebuild by comparing file times with the time of its
 # last build. On a machine whose clock steps backwards (seen on WSL), a file
 # written now can look older than that build: nothing is rebuilt, and the
-# previous mutant's test binary is run again. The runner therefore remembers
-# the latest time it has seen, stamps a restored file just after it, and
-# checks that a mutant was really rebuilt before any test is scored.
+# previous mutant's test binary is run again. Two rules keep that out:
+# 1. The runner keeps the latest time it has seen (the clock, or its start
+#    time plus the time that has really passed, whichever is later), reads it
+#    around every command, and stamps every mutant and every restored file
+#    after it. Each stamp is later than the one before.
+# 2. A build of a mutant in which Cargo printed no "Compiling" is made once
+#    more, with the files stamped a minute ahead.
 _latest_seen = 0.0
 _planted = []
+_started = (time.time(), time.monotonic())
+
+
+def _note_time():
+    global _latest_seen
+    passed = time.monotonic() - _started[1]
+    _latest_seen = max(_latest_seen, time.time(), _started[0] + passed)
 
 
 def _stamp_after_latest(paths, margin):
     """Gives each file a modification time `margin` seconds after the latest
-    time this run has seen, whatever the clock says now."""
+    time this run has seen or stamped, whatever the clock says now."""
     global _latest_seen
-    _latest_seen = max(_latest_seen, time.time())
+    _note_time()
+    _latest_seen += margin
     for path in paths:
-        os.utime(path, (_latest_seen + margin, _latest_seen + margin))
+        os.utime(path, (_latest_seen, _latest_seen))
+
+
+def stamp(paths):
+    """For a script that changes or restores a second source file itself: the
+    next build must see the file as newer than anything built so far."""
+    _stamp_after_latest(paths, 1)
+
+
+def planted(paths):
+    """Says a mutant has just been written to `paths`. `falsify` calls it; a
+    script with a loop of its own calls it after writing."""
+    _planted[:] = [pathlib.Path(path) for path in paths]
+    _stamp_after_latest(_planted, 1)
+
+
+def restored(paths):
+    """Says the original bytes have just been written back to `paths`."""
+    _planted.clear()
+    _stamp_after_latest(paths, 1)
 
 
 def env():
@@ -53,7 +84,10 @@ def env():
 
 
 def run(cmd, cwd):
-    return subprocess.run(cmd, cwd=cwd, env=env(), capture_output=True, text=True)
+    _note_time()
+    result = subprocess.run(cmd, cwd=cwd, env=env(), capture_output=True, text=True)
+    _note_time()
+    return result
 
 
 def check(cases):
@@ -94,16 +128,15 @@ def falsify(cases, prepare, test_fails, parts=(), show_tests=False, failing_test
             for other, extra in appends:
                 other = pathlib.Path(other)
                 other.write_text(other.read_text() + extra)
-            _planted[:] = touched
+            planted(touched)
             if prepare is not None:
                 prepare()
             results = [(test, test_fails(test)) for test in tests]
             actual = set(map(str, failing_tests())) if failing_tests is not None else None
         finally:
-            _planted.clear()
             for each, data in saved.items():
                 each.write_bytes(data)
-            _stamp_after_latest(saved, 1)
+            restored(saved)
         survivors = [test for test, failed in results if not failed]
         declared = set(map(str, tests))
         unexpected = sorted(actual - declared) if actual is not None else []
