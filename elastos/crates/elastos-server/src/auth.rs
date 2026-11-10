@@ -3487,35 +3487,31 @@ mod owner_recovery_tests {
 
     fn agent_selected_by_owner_recovery(admin: &PrincipalRecord) -> PrincipalRecord {
         let mut record = test_agent_record(TEST_AGENT_ID);
-        record.principal_id = admin.principal_id.clone();
-        record.localhost_root =
-            principal_kind_localhost_root(&record.principal_id, PrincipalKind::Agent);
         record.owner = Some(admin.principal_id.clone());
         record
     }
 
     #[test]
-    fn agent_admission_guard_owner_recovery_refuses_to_change_the_record() {
+    fn agent_admission_guard_owner_recovery_leaves_the_agent_record_unchanged() {
         let mut home = home();
-        insert_principal_into_auth_file(
-            home.root.path(),
-            &agent_selected_by_owner_recovery(&home.admin),
-        );
+        let agent = agent_selected_by_owner_recovery(&home.admin);
+        let agent_bytes = serde_json::to_vec(&agent).unwrap();
+        insert_principal_into_auth_file(home.root.path(), &agent);
         let code = arm(&home);
         let response = begin(&mut home, &code).unwrap();
         let kit = home.kit.clone();
-        let before = auth_bytes(&home);
-        let error = complete(&mut home, &code, &response, &kit)
-            .expect_err("owner recovery refused to change the agent admission record")
-            .to_string();
-        assert!(
-            error.contains("agent admission record change refused"),
-            "owner recovery refused to change the agent admission record"
-        );
+        complete(&mut home, &code, &response, &kit)
+            .expect("owner recovery leaves the agent record in place");
+        let stored = load_auth_state(home.root.path())
+            .unwrap()
+            .principals
+            .into_iter()
+            .find(|record| record.principal_id == TEST_AGENT_ID)
+            .unwrap();
         assert_eq!(
-            auth_bytes(&home),
-            before,
-            "owner recovery refused to change the agent admission record"
+            serde_json::to_vec(&stored).unwrap(),
+            agent_bytes,
+            "owner recovery leaves the agent record in place"
         );
     }
 
@@ -5239,51 +5235,131 @@ fn agent_admission_record_same(before: &PrincipalRecord, after: &PrincipalRecord
     before == &after
 }
 
-fn agent_admission_change_reason(
+fn records_share_key(records: &[PrincipalRecord], key: impl Fn(&PrincipalRecord) -> &str) -> bool {
+    records.iter().enumerate().any(|(index, record)| {
+        let value = key(record);
+        records
+            .iter()
+            .skip(index + 1)
+            .any(|other| key(other) == value)
+    })
+}
+
+/// Duplicate keys in the after-state. A second passkey for one person may
+/// share that person's principal id. An AgentAdmission record may not share
+/// a principal id with any record, and no two records may share a binding id.
+fn agent_admission_duplicate_reason(after: &[PrincipalRecord]) -> Option<&'static str> {
+    if records_share_key(after, |record| record.proof_binding_id.as_str()) {
+        return Some("duplicate proof binding id");
+    }
+    if after.iter().enumerate().any(|(index, record)| {
+        is_agent_admission_record(record)
+            && after.iter().enumerate().any(|(other_index, other)| {
+                other_index != index && other.principal_id == record.principal_id
+            })
+    }) {
+        return Some("duplicate principal id");
+    }
+    let agents: Vec<&PrincipalRecord> = after
+        .iter()
+        .filter(|record| is_agent_admission_record(record))
+        .collect();
+    if agents.iter().enumerate().any(|(index, record)| {
+        agents
+            .iter()
+            .skip(index + 1)
+            .any(|other| other.localhost_root == record.localhost_root)
+    }) {
+        return Some("duplicate agent admission root");
+    }
+    None
+}
+
+fn agent_admission_pair_difference(
+    old: &PrincipalRecord,
+    new: &PrincipalRecord,
+) -> Option<&'static str> {
+    if new.principal_id != old.principal_id {
+        return Some("agent admission id change");
+    }
+    if new.owner != old.owner {
+        return Some("agent admission owner change");
+    }
+    if !agent_admission_binding_same(&old.proof_binding, &new.proof_binding) {
+        return Some("agent admission binding change");
+    }
+    if new.localhost_root != old.localhost_root {
+        return Some("agent admission root change");
+    }
+    if new.kind != old.kind {
+        return Some("agent admission kind change");
+    }
+    if !agent_admission_record_same(old, new) {
+        return Some("agent admission record change");
+    }
+    None
+}
+
+/// Pairs AgentAdmission records by principal id, one-to-one in both directions.
+fn agent_admission_paired_change_reason(
     before: &[PrincipalRecord],
     after: &[PrincipalRecord],
 ) -> Option<&'static str> {
-    // The proof binding id stays on the record when a later write changes the
-    // principal id, so it identifies the record across that change. Two
-    // records can share a principal id; the binding id does not.
-    for old in before
+    let before_agents: Vec<&PrincipalRecord> = before
         .iter()
         .filter(|record| is_agent_admission_record(record))
-    {
-        let Some(new) = after
+        .collect();
+    let after_agents: Vec<&PrincipalRecord> = after
+        .iter()
+        .filter(|record| is_agent_admission_record(record))
+        .collect();
+    if before_agents.iter().enumerate().any(|(index, record)| {
+        before_agents
             .iter()
-            .find(|record| record.proof_binding_id == old.proof_binding_id)
-        else {
+            .skip(index + 1)
+            .any(|other| other.principal_id == record.principal_id)
+    }) {
+        return Some("duplicate principal id");
+    }
+    for old in &before_agents {
+        let mut matches = after_agents
+            .iter()
+            .copied()
+            .filter(|record| record.principal_id == old.principal_id);
+        let Some(new) = matches.next() else {
+            if after_agents
+                .iter()
+                .any(|record| record.proof_binding_id == old.proof_binding_id)
+            {
+                return Some("agent admission id change");
+            }
             return Some("agent admission record removed");
         };
-        if new.principal_id != old.principal_id {
-            return Some("agent admission id change");
+        if matches.next().is_some() {
+            return Some("duplicate principal id");
         }
-        if new.owner != old.owner {
-            return Some("agent admission owner change");
-        }
-        if !agent_admission_binding_same(&old.proof_binding, &new.proof_binding) {
-            return Some("agent admission binding change");
-        }
-        if new.localhost_root != old.localhost_root {
-            return Some("agent admission root change");
-        }
-        if new.kind != old.kind {
-            return Some("agent admission kind change");
-        }
-        if !agent_admission_record_same(old, new) {
-            return Some("agent admission record change");
+        if let Some(reason) = agent_admission_pair_difference(old, new) {
+            return Some(reason);
         }
     }
-    if after.iter().any(|record| {
-        is_agent_admission_record(record)
-            && !before.iter().any(|old| {
-                is_agent_admission_record(old) && old.proof_binding_id == record.proof_binding_id
-            })
+    if after_agents.iter().any(|record| {
+        !before_agents
+            .iter()
+            .any(|old| old.principal_id == record.principal_id)
     }) {
         return Some("new agent admission record");
     }
     None
+}
+
+fn agent_admission_change_reason(
+    before: &[PrincipalRecord],
+    after: &[PrincipalRecord],
+) -> Option<&'static str> {
+    if let Some(reason) = agent_admission_duplicate_reason(after) {
+        return Some(reason);
+    }
+    agent_admission_paired_change_reason(before, after)
 }
 
 fn principals_before_save(
