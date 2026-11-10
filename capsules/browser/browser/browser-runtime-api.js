@@ -178,7 +178,7 @@ export function createRuntimeApi({ launchToken }) {
 }
 
 // Consent is separate from Engine readiness and viewer compatibility. The
-// Runtime creates the current request when Browser first reads this endpoint.
+// Runtime summary is read-only; explicit Browser actions create the request.
 export async function browserInternetGranted(fetchJson, showDecision = () => {}) {
   const consent = await fetchJson("/api/apps/browser/internet");
   const granted = consent?.status === "granted";

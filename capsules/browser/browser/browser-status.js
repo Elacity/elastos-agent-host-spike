@@ -61,7 +61,7 @@ export function runtimeOpenOutcome(error) {
 
 export function friendlyOpenError(error) {
   if (error?.payload?.code === "browser_internet_grant_required") {
-    return "Browser can't open websites yet. Allow internet access in Inbox.";
+    return "Internet access is off for Browser. Open Settings to change it.";
   }
   const text = sanitizedErrorText(error);
   if (isAuthoritySessionError(error)) {

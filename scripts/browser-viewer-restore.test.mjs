@@ -26,6 +26,7 @@ function summary() {
 function harness() {
   const calls = [], failures = [], requests = [];
   const state = vm.createContext({
+    explicitBrowserOpen: true, browserInternetPollingActive: true, internetContinuationUrl: null,
     checkBrowserInternet: () => browserInternetGranted(async () => ({status:"granted"})), crypto, URLSearchParams, AbortSignal, currentPage: null, currentPageGeneration: 0, nextPageGeneration: 1,
     restoredViewerOwner: null, unloadCleanupStarted: false, relaunchRequested: false,
     homeWindowCloseInFlight: false, homeWindowTerminalCloseConfirmed: false,

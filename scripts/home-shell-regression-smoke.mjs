@@ -1496,6 +1496,7 @@ const browserEntry = [...shellCore.shellState.windows.values()].find((entry) => 
     { left: [leftBefore, browserEntry.node.style.left], top: [topBefore, browserEntry.node.style.top] },
   );
 }
+assert(browserEntry.launchQuery.browser_restore === "0", "explicit Browser open carries user intent");
 const browserClose = browserEntry.node.querySelector("[data-action='close']");
 browserClose.focus();
 shellWindows.minimizeWindow(browserEntry.id);
@@ -1564,6 +1565,7 @@ assert(
   "Home refresh changed the persisted Browser window identity",
   restoredBrowserLaunches,
 );
+assert(restoredBrowserLaunches[0].query.browser_restore === "1", "restored Browser carries no open intent");
 const restoredBrowserEntry = [...shellCore.shellState.windows.values()][0];
 const restoredBrowserFrame = restoredBrowserEntry.node.querySelector(".window-frame");
 const browserCloseMessages = [];

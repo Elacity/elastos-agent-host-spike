@@ -8,7 +8,7 @@ import {
   normalizeUrl,
   sameBrowserStreamTarget,
   visibleAddressForUrl,
-} from "./browser-runtime-api.js?v=browser-20261110a";
+} from "./browser-runtime-api.js?v=browser-20261110b";
 import {
   createBrowserClipboardBridge,
 } from "./browser-clipboard.js?v=browser-20261022d";
@@ -28,7 +28,7 @@ import {
   isAuthoritySessionError,
   isMissingRuntimePageError,
   requestedDisplayMode,
-} from "./browser-status.js?v=browser-20261110a";
+} from "./browser-status.js?v=browser-20261110b";
 import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261101d";
 import { engineChoiceHidden, renderServiceSelection } from "./browser-service-selection.js?v=browser-20261015a";
 
@@ -57,7 +57,7 @@ const GUARANTEE_MECHANISM_MICROVM = "mechanism_microvm";
 const GUARANTEE_OPERATOR_RBI = "operator_rbi";
 const GUARANTEE_POLICY_WEBVIEW = "policy_webview";
 const LOCAL_EXIT_LABEL = "This device";
-const LOCAL_EXIT_SUMMARY = "Use this device's Exit Node for Browser traffic.";
+const LOCAL_EXIT_SUMMARY = "Websites see this Mac's internet address.";
 const DEFAULT_ENGINE_LABEL = "Automatic";
 const DEFAULT_ENGINE_SUMMARY = "Runtime chooses a compatible Browser Engine.";
 const BROWSER_WINDOW_CLOSE_REQUEST_TYPE =
@@ -177,43 +177,102 @@ function openInternetControl(target, query = {}) {
   window.top.postMessage({ type:"home:open-target", homeToken:launchToken, target, query }, homeParentOrigin);
 }
 
+const explicitBrowserOpen = params.get("browser_restore") !== "1"
+  && !["reload", "back_forward"].includes(performance.getEntriesByType("navigation")[0]?.type);
 let browserInternetPollingActive = true;
 let browserInternetPollTimer = 0;
 let finishInternetPollWait = null;
-let internetRequestOpened = false;
+let currentInternetConsent = null;
+let pendingInternetNavigation = null;
+let internetContinuationUrl = null;
+let internetRequestPromise = null;
 
 function stopInternetPolling() {
   browserInternetPollingActive = false;
+  pendingInternetNavigation = null;
+  internetContinuationUrl = null;
   window.clearTimeout(browserInternetPollTimer);
   finishInternetPollWait?.();
 }
 window.addEventListener("pagehide", stopInternetPolling);
 window.addEventListener("beforeunload", stopInternetPolling);
 
-async function checkBrowserInternet() {
+function renderInternetConsent(consent) {
+  currentInternetConsent = consent;
+  const allowed = consent?.status === "granted";
+  const expired = consent?.status === "requested" && !consent.request;
+  const off = expired || ["refused", "revoked"].includes(consent?.status);
+  if (off || (pendingInternetNavigation && consent?.status === "requested"
+      && consent.request?.request_id !== pendingInternetNavigation.requestId)) {
+    pendingInternetNavigation = null;
+  }
+  browserInternetAllowed = allowed;
+  statusNode.hidden = !allowed;
+  setLoading(allowed && document.body.dataset.loading === "true");
+  document.querySelector("#browser-internet-request").hidden = allowed;
+  document.querySelector("#browser-internet-value").textContent = `Internet access: ${allowed ? "Allowed" : "Off"}`;
+  if (allowed) return;
+  window.clearTimeout(statusTimer);
+  statusNode.dataset.visible = "false";
+  const waiting = consent?.status === "requested" && !expired;
+  document.querySelector("#browser-internet-heading").textContent = off
+    ? "Internet access is off for Browser." : waiting
+    ? "Waiting for your answer in Inbox." : "Browser can't open websites yet";
+  const hint = document.querySelector("#browser-internet-hint");
+  hint.hidden = off || waiting;
+  hint.textContent = "Enter a website and press Go.";
+  const button = document.querySelector("#browser-internet-review");
+  button.hidden = !off && !waiting;
+  button.textContent = off ? "Open Settings" : "Show Request";
+  button.dataset.off = String(off);
+}
+
+function showInternetRequest() {
+  openInternetControl("inbox", { notification_id: "browser-internet:permission" });
+}
+
+async function requestInternetNavigation(value) {
+  if (!browserInternetPollingActive) return;
+  if (["refused", "revoked"].includes(currentInternetConsent?.status)) {
+    openInternetControl("system", {settings:"security"});
+    return;
+  }
+  // The URL belongs only to this live window; Home persists no continuation.
+  const url = normalizeUrl(value);
+  if (internetRequestPromise) return internetRequestPromise;
+  internetRequestPromise = (async () => {
+    const consent = await fetchJson("/api/apps/browser/internet", {method:"POST",body:{action:"request"}});
+    if (!browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
+    renderInternetConsent(consent);
+    pendingInternetNavigation = {
+      url, requestId: consent.request_id || consent.request?.request_id,
+      expiresAt: consent.request?.expires_at || 0,
+    };
+    if (consent.status !== "granted") showInternetRequest();
+  })();
+  try { await internetRequestPromise; }
+  finally { internetRequestPromise = null; }
+}
+
+async function checkBrowserInternet(initialUrl) {
+  let firstRead = true;
   while (browserInternetPollingActive && !homeWindowCloseInFlight && !homeWindowTerminalCloseConfirmed) {
     const granted = await browserInternetGranted(fetchJson, (allowed, consent) => {
-      if (!browserInternetPollingActive) return;
-      browserInternetAllowed = allowed;
-      statusNode.hidden = !allowed;
-      setLoading(allowed && document.body.dataset.loading === "true");
-      document.querySelector("#browser-internet-request").hidden = allowed;
-      document.querySelector("#browser-internet-value").textContent = `Internet access: ${allowed ? "Allowed" : "Off"}`;
-      if (allowed) return;
-      window.clearTimeout(statusTimer);
-      statusNode.dataset.visible = "false";
-      const off = consent?.status === "refused" || consent?.status === "revoked";
-      document.querySelector("#browser-internet-heading").textContent = off
-        ? "Internet access is off for Browser." : "Browser can't open websites yet";
-      const hint = document.querySelector("#browser-internet-hint");
-      hint.hidden = off;
-      hint.textContent = internetRequestOpened ? "Waiting for your answer in Inbox." : "Allow internet access in Inbox.";
-      const button = document.querySelector("#browser-internet-review");
-      button.textContent = off ? "Open Settings" : "Ask in Inbox";
-      button.dataset.off = String(off);
+      if (browserInternetPollingActive) renderInternetConsent(consent);
     });
-    if (!browserInternetPollingActive) return false;
-    if (granted) return true;
+    if (!browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return false;
+    if (granted) {
+      const pending = pendingInternetNavigation;
+      pendingInternetNavigation = null;
+      if (firstRead) return true;
+      if (!pending || currentInternetConsent.request_id !== pending.requestId || (pending.expiresAt && pending.expiresAt * 1000 <= Date.now())) return false;
+      internetContinuationUrl = pending.url;
+      return true;
+    }
+    if (firstRead && explicitBrowserOpen && !["refused", "revoked"].includes(currentInternetConsent?.status)) {
+      await requestInternetNavigation(initialUrl);
+    }
+    firstRead = false;
     await new Promise(resolve => {
       finishInternetPollWait = resolve;
       browserInternetPollTimer = window.setTimeout(resolve, 2000);
@@ -223,21 +282,12 @@ async function checkBrowserInternet() {
   return false;
 }
 
-document.querySelector("#browser-internet-review")?.addEventListener("click", async event => {
+document.querySelector("#browser-internet-review")?.addEventListener("click", event => {
   if (event.currentTarget.dataset.off === "true") {
     openInternetControl("system", {settings:"security"});
-    return;
+  } else {
+    showInternetRequest();
   }
-  const button = event.currentTarget;
-  button.disabled = true;
-  try {
-    await fetchJson("/api/apps/browser/internet", {method:"POST",body:{action:"request"}});
-    internetRequestOpened = true;
-    document.querySelector("#browser-internet-hint").textContent = "Waiting for your answer in Inbox.";
-    openInternetControl("inbox");
-  } catch (error) {
-    document.querySelector("#browser-internet-hint").textContent = friendlyOpenError(error);
-  } finally { button.disabled = false; }
 });
 document.querySelector("#browser-internet-settings")?.addEventListener("click", () => {
   openInternetControl("system", {settings:"security"});
@@ -479,7 +529,7 @@ function requestFreshRuntimeAuthority(error) {
 
 function setLoading(loading) {
   document.body.dataset.loading = loading ? "true" : "false";
-  addressInput.disabled = loading || !browserInternetAllowed;
+  addressInput.disabled = loading;
   if (engineSelect) {
     engineSelect.disabled = loading;
   }
@@ -2184,13 +2234,8 @@ function remoteCarrierExitLabel(exit) {
 }
 
 function remoteCarrierExitSummary(exit) {
-  const label = remoteCarrierExitLabel(exit);
-  const remaining = Number(exit?.accounting?.active_streams_remaining);
-  const quota =
-    Number.isFinite(remaining) && remaining >= 0
-      ? ` ${remaining} stream${remaining === 1 ? "" : "s"} available.`
-      : "";
-  return `${label}.${quota}`;
+  const name = String(exit?.display_name || exit?.label || "this contact").trim();
+  return `Websites see ${name}'s internet address.`;
 }
 
 function browserExitLabel(remoteExitId = selectedRemoteExitId) {
@@ -2712,7 +2757,15 @@ async function navigateBrowser(command) {
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   clearAddressDraft();
-  navigateAddress(addressInput.value).catch(() => {});
+  if (!browserInternetAllowed) {
+    requestInternetNavigation(addressInput.value).catch(error => {
+      const hint = document.querySelector("#browser-internet-hint");
+      hint.hidden = false;
+      hint.textContent = friendlyOpenError(error);
+    });
+  } else {
+    navigateAddress(addressInput.value).catch(() => {});
+  }
 });
 
 addressInput.addEventListener("input", markAddressDraftEdited);
@@ -3099,11 +3152,19 @@ const initialUrl = requestedStartupUrl || DEFAULT_URL;
 addressInput.value = initialUrl;
 setLoading(true);
 showStatus("Browser is checking its Engine. Wait, or reopen Browser from Home to retry.", { sticky: true });
-checkBrowserInternet().then(granted => granted ? fetchBrowserSummary({ remoteServices: false }) : null)
+checkBrowserInternet(initialUrl).then(granted => granted ? fetchBrowserSummary({ remoteServices: false }) : null)
   .then(async (summary) => {
-    if (!summary) return;
+    if (!summary || !browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
     if (await restoreRuntimePageViewer(summary)) return;
-    return requestRuntimeOpen(initialUrl, { history: "replace" });
+    if (!browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
+    if (!internetContinuationUrl && !explicitBrowserOpen) {
+      setLoading(false);
+      showStatus("Enter a website and press Go.");
+      return;
+    }
+    const url = internetContinuationUrl || initialUrl;
+    internetContinuationUrl = null;
+    return requestRuntimeOpen(url, { history: "replace" });
   })
   .catch((error) => {
     if (unloadCleanupStarted || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;

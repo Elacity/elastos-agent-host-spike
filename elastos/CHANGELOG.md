@@ -37,7 +37,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - Browser opens websites only after you allow internet access with your passkey in Inbox. Turn it off in System, Security.
 - Known issue: Home itself shows the approval, not a separate ElastOS screen, so read the request before you confirm with your passkey (#178).
-- Known issue: after Undo to 2.0.0, Browser uses this computer's internet connection again without asking (#559).
+- Known issue: after Undo to 2.0.0, Browser goes online again without asking (#559).
 - Community room access ends when your sign-in ends.
 
 ## [2.0.1-rc.2] - 2026-11-09
@@ -56,7 +56,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
-- Since 2.0.1-rc.1: Browser asks before it uses this computer's internet connection, updating and Undo no longer stop when Browser is set up, Assistant no longer flashes Jump to latest, a busy Home no longer reports shared model access as inactive, and Browser says when its session has expired.
+- Since 2.0.1-rc.1: Browser asks before it goes online, updating and Undo no longer stop when Browser is set up, Assistant no longer flashes Jump to latest, a busy Home no longer reports shared model access as inactive, and Browser says when its session has expired.
 - Open apps, including Chat, stay connected while Home runs, and reconnect by themselves after a network drop or a restart.
 - Assistant keeps a finished answer in view, also while you type a longer question.
 - Assistant follows a growing answer only while you are at the end, and Jump to latest no longer flashes while an answer streams.
@@ -73,7 +73,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - Browser opens websites only after you allow internet access with your passkey in Inbox. Turn it off in System, Security.
 - Known issue: Home itself shows the approval, not a separate ElastOS screen, so read the request before you confirm with your passkey (#178).
-- Known issue: after Undo to 2.0.0, Browser uses this computer's internet connection again without asking (#559).
+- Known issue: after Undo to 2.0.0, Browser goes online again without asking (#559).
 - Community room access ends when your sign-in ends.
 
 ## [2.0.1-rc.1] - 2026-11-06

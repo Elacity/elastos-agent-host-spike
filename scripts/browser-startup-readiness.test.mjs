@@ -20,6 +20,7 @@ function start({ expired = false, params = new URLSearchParams() } = {}) {
   const readiness = { loading: false };
   const setLoading = loading => { readiness.loading = loading; address.disabled = loading; };
   const settled = vm.runInNewContext(startup, {
+    explicitBrowserOpen: true, browserInternetPollingActive: true, internetContinuationUrl: null,
     checkBrowserInternet: () => browserInternetGranted(async () => ({status:"granted"})),
     unloadCleanupStarted: false, homeWindowCloseInFlight: false, homeWindowTerminalCloseConfirmed: false,
     params, DEFAULT_URL: "https://ela.city/", addressInput: address,

@@ -11364,7 +11364,13 @@ async fn browser_internet_guest_cannot_answer_and_ending_one_launch_keeps_home_c
     let guest_inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &guest);
     let state = internet_test_state(dir.path());
     let app = gateway_router(state.clone());
-    let (_, pending) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    let (_, pending) = internet_route(
+        &app,
+        &browser,
+        "/api/apps/browser/internet",
+        Some(json!({"action":"request"})),
+    )
+    .await;
     for action in ["allow", "deny"] {
         let (status,_) = internet_route(&app,&guest_inbox,"/api/apps/inbox/actions",Some(json!({"action_id":format!("browser-internet-{action}:{}",pending["request"]["request_id"].as_str().unwrap())}))).await;
         assert_ne!(status, StatusCode::OK);
@@ -11688,4 +11694,67 @@ async fn browser_internet_decisions_stay_in_inbox_as_read_history() {
             .iter()
             .any(|e| e["kind"] == "browser_internet_request"));
     }
+}
+
+#[tokio::test]
+async fn browser_internet_summary_never_creates_or_renews_a_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let app = gateway_router(internet_test_state(dir.path()));
+    let (_, fresh) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    assert_eq!(fresh["status"], "off", "restoring a window is read-only");
+    assert!(!dir.path().join("browser-internet.json").exists());
+    let (_, pending) = internet_route(
+        &app,
+        &browser,
+        "/api/apps/browser/internet",
+        Some(json!({"action":"request"})),
+    )
+    .await;
+    assert_eq!(pending["status"], "requested");
+    let path = dir.path().join("browser-internet.json");
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["expires_at"] = json!(0);
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let (_, expired) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    assert_eq!(expired["status"], "requested");
+    assert_eq!(expired["request"], Value::Null);
+    let (_, summary) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+    assert_eq!(summary["notifications"]["unread_count"], 0);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap(),
+        record
+    );
+}
+
+#[tokio::test]
+async fn browser_internet_grant_identifies_the_answered_request_for_continuation() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let app = gateway_router(internet_test_state(dir.path()));
+    let (_, pending) = internet_route(
+        &app,
+        &browser,
+        "/api/apps/browser/internet",
+        Some(json!({"action":"request"})),
+    )
+    .await;
+    internet_allow(&app, dir.path(), &browser, &inbox).await;
+    let (_, granted) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    assert_eq!(granted["status"], "granted");
+    assert_eq!(granted["request_id"], pending["request"]["request_id"]);
+    let path = dir.path().join("browser-internet.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("request_id");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let (_, older_grant) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    assert_eq!(
+        older_grant["status"], "granted",
+        "existing grants remain valid"
+    );
+    assert_eq!(older_grant["request_id"], Value::Null);
 }

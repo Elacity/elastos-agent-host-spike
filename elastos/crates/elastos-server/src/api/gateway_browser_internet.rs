@@ -25,6 +25,9 @@ enum Consent {
         at: u64,
     },
     Granted {
+        // Correlates a waiting window with the answer; older grants stay valid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         token_id: String,
         owner: InternetOwner,
         at: u64,
@@ -162,6 +165,7 @@ pub(in crate::api::gateway) fn granted_fixture(
     save(
         data,
         &Consent::Granted {
+            request_id: None,
             token_id: token.id().to_string(),
             owner: InternetOwner {
                 principal_id: principal_id.into(),
@@ -256,8 +260,8 @@ fn public_record(record: Option<&Consent>) -> serde_json::Value {
         Some(record @ Consent::Requested { .. }) => {
             serde_json::json!({"status":"requested", "request":grant_request(record).ok()})
         }
-        Some(record @ Consent::Granted { .. }) => {
-            serde_json::json!({"status":"granted", "request":revoke_request(record).ok()})
+        Some(record @ Consent::Granted { request_id, .. }) => {
+            serde_json::json!({"status":"granted", "request_id":request_id, "request":revoke_request(record).ok()})
         }
         Some(Consent::Refused { .. }) => serde_json::json!({"status":"refused"}),
         Some(Consent::Revoked { .. }) => serde_json::json!({"status":"revoked"}),
@@ -348,6 +352,7 @@ pub(super) async fn answer(
     save(
         &state.data_dir,
         &Consent::Granted {
+            request_id: Some(id.into()),
             token_id: capability.id().to_string(),
             owner: InternetOwner {
                 principal_id: launch.context.principal_id.clone(),
@@ -624,19 +629,15 @@ pub(super) fn refusal(error: anyhow::Error) -> Response {
 }
 
 pub(super) async fn summary(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
-    let authority = match require_runtime_wallet_authority(
+    if let Err(error) = require_runtime_wallet_authority(
         &state.data_dir,
         &headers,
         &[BROWSER_CAPSULE_ID, INBOX_CAPSULE_ID, SYSTEM_CAPSULE_ID],
     ) {
-        Ok(authority) => authority,
-        Err(error) => return refusal(error),
-    };
-    if authority.verified_context().actor() == BROWSER_CAPSULE_ID {
-        // Opening Browser asks once, including on an updated Home. Refused and
-        // revoked decisions wait for an explicit admin request.
-        let _ = effect_for_authority(&state, &authority, true).await;
+        return refusal(error);
     }
+    // Reads, including restored windows and polls, cannot create or renew a request.
+    // Explicit Browser actions use the existing owner-checked request action.
     match load(&state.data_dir) {
         Ok(record) => {
             let mut value = public_record(record.as_ref());

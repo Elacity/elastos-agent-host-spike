@@ -504,7 +504,7 @@
     function fillEntryActions(actions, entry) {
       const actionId = entry.action_ref && entry.action_ref.action_id;
       if (entry.kind === "browser_internet_decision") {
-        actions.appendChild(createButton("Change in Settings", () => openSource("system", {settings:"security"})));
+        actions.appendChild(createButton("Manage in Settings", () => openSource("system", {settings:"security"})));
         return;
       }
       // A request Inbox decides itself has no other app to open.
