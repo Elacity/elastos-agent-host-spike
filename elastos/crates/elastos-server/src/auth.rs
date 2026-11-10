@@ -4417,6 +4417,7 @@ pub(crate) fn confirmed_initial_profile_name(
             p.principal_id == grant.principal_id && p.proof_binding_id == grant.proof_binding_id
         })
         .ok_or(OwnerEnrollmentDenied)?;
+    refuse_named_quarantine(&state, &grant.principal_id)?;
     ensure_proof_binding_not_revoked(principal)?;
     Ok(principal.initial_profile_display_name.clone())
 }
@@ -4478,6 +4479,14 @@ fn grant_passkey_session_in_state(
     let display_name = clean_principal_display_name(request.display_name)?;
     let profile_display_name = clean_principal_display_name(request.profile_display_name)?;
     {
+        if let Some(principal_id) = state
+            .principals
+            .iter()
+            .find(|principal| principal.proof_binding_id == binding.id())
+            .map(|principal| principal.principal_id.clone())
+        {
+            refuse_named_quarantine(state, &principal_id)?;
+        }
         let existing = state
             .principals
             .iter_mut()
@@ -5171,9 +5180,7 @@ fn parse_auth_state(data_dir: &Path, bytes: &[u8]) -> anyhow::Result<AuthState> 
     if state.schema != AUTH_STATE_SCHEMA {
         anyhow::bail!("unsupported auth state schema");
     }
-    if let Some(reason) = agent_admission_state_violation(&state.principals) {
-        anyhow::bail!("agent admission record invalid: {reason}");
-    }
+    quarantine_malformed_agents(&mut state);
     normalize_principal_records(&mut state);
     Ok(state)
 }
@@ -5280,6 +5287,7 @@ fn agent_admission_duplicate_reason(after: &[PrincipalRecord]) -> Option<&'stati
 }
 
 fn agent_admission_pair_difference(
+    records: &[PrincipalRecord],
     old: &PrincipalRecord,
     new: &PrincipalRecord,
 ) -> Option<&'static str> {
@@ -5298,10 +5306,14 @@ fn agent_admission_pair_difference(
     if new.kind != old.kind {
         return Some("agent admission kind change");
     }
-    if !agent_admission_record_same(old, new) {
-        return Some("agent admission record change");
+    // An unchanged malformed record is kept. A real edit names its reason.
+    if agent_admission_record_same(old, new) {
+        return None;
     }
-    None
+    if let Some(reason) = agent_admission_record_violation(records, new) {
+        return Some(reason);
+    }
+    Some("agent admission record change")
 }
 
 /// Pairs AgentAdmission records by principal id, one-to-one in both directions.
@@ -5342,7 +5354,7 @@ fn agent_admission_paired_change_reason(
         if matches.next().is_some() {
             return Some("duplicate principal id");
         }
-        if let Some(reason) = agent_admission_pair_difference(old, new) {
+        if let Some(reason) = agent_admission_pair_difference(after, old, new) {
             return Some(reason);
         }
     }
@@ -5882,7 +5894,15 @@ pub fn upsert_principal_for_binding_as_role_named(
 }
 
 fn normalize_principal_records(state: &mut AuthState) {
+    let quarantined: std::collections::HashSet<&str> = state
+        .quarantined
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
     for principal in &mut state.principals {
+        if quarantined.contains(principal.principal_id.as_str()) {
+            continue;
+        }
         if principal.localhost_root.trim().is_empty() || principal.kind == PrincipalKind::Agent {
             principal.localhost_root =
                 principal_kind_localhost_root(&principal.principal_id, principal.kind);
@@ -5927,6 +5947,13 @@ pub fn set_principal_display_name(
     let display_name = clean_principal_display_name(Some(display_name))?
         .ok_or_else(|| anyhow!("principal display name must not be empty"))?;
     mutate_auth_state(data_dir, |state| {
+        let principal_id = state
+            .principals
+            .iter()
+            .find(|principal| principal.proof_binding_id == proof_binding_id)
+            .map(|principal| principal.principal_id.clone())
+            .ok_or_else(|| anyhow!("proof binding not found"))?;
+        refuse_named_quarantine(state, &principal_id)?;
         let principal = state
             .principals
             .iter_mut()
@@ -5940,6 +5967,7 @@ pub fn set_principal_display_name(
 
 pub fn store_session_grant(data_dir: &Path, grant: AuthSessionGrantV1) -> anyhow::Result<()> {
     mutate_auth_state(data_dir, |state| {
+        refuse_named_quarantine(state, &grant.principal_id)?;
         state
             .sessions
             .retain(|stored| stored.grant.session_id != grant.session_id);
@@ -5956,6 +5984,7 @@ pub fn renew_session_grant(data_dir: &Path, grant: AuthSessionGrantV1) -> anyhow
 }
 
 fn renew_session_in_state(state: &mut AuthState, grant: AuthSessionGrantV1) -> anyhow::Result<()> {
+    refuse_named_quarantine(state, &grant.principal_id)?;
     let stored = state
         .sessions
         .iter_mut()
@@ -6008,6 +6037,7 @@ pub fn rotate_session_grant(
     revoked_at: u64,
 ) -> anyhow::Result<()> {
     mutate_auth_state(data_dir, |state| {
+        refuse_named_quarantine(state, &grant.principal_id)?;
         if let Some(previous) = state
             .sessions
             .iter_mut()
@@ -6056,6 +6086,7 @@ pub fn load_active_session_grant(
     if stored.revoked_at.is_some() || stored.grant.expires_at <= now {
         anyhow::bail!("auth session is not active");
     }
+    refuse_named_quarantine(&state, &stored.grant.principal_id)?;
     Ok(stored.grant.clone())
 }
 
@@ -6065,6 +6096,7 @@ pub fn is_auth_session_active(data_dir: &Path, session_id: &str, now: u64) -> an
         stored.grant.session_id == session_id
             && stored.revoked_at.is_none()
             && stored.grant.expires_at > now
+            && quarantine_reason(&state, &stored.grant.principal_id).is_none()
     }))
 }
 
@@ -6438,6 +6470,7 @@ pub(crate) fn read_principal_root_object_resolved(
 ) -> anyhow::Result<Vec<u8>> {
     #[cfg(test)]
     principal_object_io::record_read(data_dir, path);
+    resolved.refuse_if_quarantined(data_dir)?;
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock(data_dir)
@@ -6757,6 +6790,7 @@ pub(crate) fn write_principal_root_object_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
+    resolved.refuse_if_quarantined(data_dir)?;
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock(data_dir)
@@ -6836,6 +6870,7 @@ pub(crate) fn write_protected_principal_root_object_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
+    resolved.refuse_if_quarantined(data_dir)?;
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock(data_dir)
@@ -6920,6 +6955,7 @@ pub(crate) fn write_principal_root_object_if_revision_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
+    resolved.refuse_if_quarantined(data_dir)?;
     let (principal_id, root) = resolved.local_binding(object_uri)?;
     validate_principal_root_object_path(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock(data_dir)
@@ -7358,11 +7394,14 @@ pub fn load_principal_for_proof_binding(
     proof_binding_id: &str,
 ) -> anyhow::Result<PrincipalRecord> {
     let state = load_auth_state(data_dir)?;
-    state
+    let principal = state
         .principals
-        .into_iter()
+        .iter()
         .find(|principal| principal.proof_binding_id == proof_binding_id)
-        .ok_or_else(|| anyhow!("proof binding not found"))
+        .ok_or_else(|| anyhow!("proof binding not found"))?
+        .clone();
+    refuse_named_quarantine(&state, &principal.principal_id)?;
+    Ok(principal)
 }
 
 pub fn ensure_proof_binding_not_revoked(record: &PrincipalRecord) -> anyhow::Result<()> {
@@ -8451,10 +8490,17 @@ pub(crate) fn principal_stored_localhost_root(
     principal_id: &str,
 ) -> Result<String, String> {
     let data_dir = data_dir.ok_or("principal roots require a local runtime data directory")?;
-    let stored = stored_principal_record(data_dir, principal_id);
-    let record = stored.map_err(|err| err.to_string())?.ok_or_else(|| {
-        format!("principal '{principal_id}' has no stored record; its root cannot be chosen")
-    })?;
+    let state = load_auth_state(data_dir).map_err(|err| err.to_string())?;
+    if let Some(reason) = quarantine_reason(&state, principal_id) {
+        return Err(format!("quarantined agent record: {reason}"));
+    }
+    let record = state
+        .principals
+        .into_iter()
+        .find(|principal| principal.principal_id == principal_id)
+        .ok_or_else(|| {
+            format!("principal '{principal_id}' has no stored record; its root cannot be chosen")
+        })?;
     match record.kind {
         PrincipalKind::Human if record.localhost_root.starts_with("localhost://Users/") => {
             Ok(record.localhost_root)
@@ -8487,7 +8533,13 @@ impl ResolvedPrincipalRoot {
         auth_data_dir: &Path,
         principal_id: &str,
     ) -> anyhow::Result<Self> {
-        if let Some(root) = stored_principal_record(auth_data_dir, principal_id)? {
+        let state = load_auth_state(auth_data_dir)?;
+        refuse_named_quarantine(&state, principal_id)?;
+        if let Some(root) = state
+            .principals
+            .into_iter()
+            .find(|principal| principal.principal_id == principal_id)
+        {
             let root = match root.kind {
                 PrincipalKind::Human if root.localhost_root.starts_with("localhost://Users/") => {
                     root.localhost_root
@@ -8538,6 +8590,11 @@ impl ResolvedPrincipalRoot {
             principal_id: PrincipalId::device_did(did).as_str().to_string(),
             arm: RootArm::Local(verified_device_localhost_root(did)),
         }
+    }
+
+    fn refuse_if_quarantined(&self, data_dir: &Path) -> anyhow::Result<()> {
+        let state = load_auth_state(data_dir)?;
+        refuse_named_quarantine(&state, &self.principal_id)
     }
 
     fn local_binding(&self, object_uri: &str) -> anyhow::Result<(&str, &str)> {
@@ -8706,7 +8763,13 @@ fn validate_principal_root_object_binding_in_state(
     localhost_root: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
-    if let Some(record) = stored_principal_record(data_dir, principal_id)? {
+    let state = load_auth_state(data_dir)?;
+    refuse_named_quarantine(&state, principal_id)?;
+    if let Some(record) = state
+        .principals
+        .iter()
+        .find(|principal| principal.principal_id == principal_id)
+    {
         if record.kind == PrincipalKind::Human {
             if !record.localhost_root.starts_with("localhost://Users/")
                 || localhost_root != record.localhost_root
