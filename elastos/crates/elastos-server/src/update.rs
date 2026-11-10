@@ -5204,6 +5204,78 @@ mod tests {
         assert_process_gone(pid);
     }
 
+    /// The production apply entry, not its test sibling, fixes the shipped
+    /// deadline. A hung candidate must return after the five-second timer, not
+    /// before a shorter value or after a longer one, and leave the Home intact.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn production_apply_entry_times_out_a_hung_candidate_at_five_seconds() {
+        // Lower: the five-second timer cannot return sooner. Upper: 15 s of
+        // scheduler slack over that timer, well below the 30 s a wrong constant
+        // would take under the same load (REVIEW-PATTERNS item 9).
+        const LOWER: std::time::Duration = std::time::Duration::from_millis(4_500);
+        const UPPER: std::time::Duration = std::time::Duration::from_secs(20);
+        let components =
+            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+        for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
+            let label = match mode {
+                ApplyMode::Normal => "normal",
+                ApplyMode::FrozenOffline => "frozen offline",
+            };
+            let (_fixture, data, binary, _source) = default_apply_fixture(components);
+            let old_binary = std::fs::read(&binary).unwrap();
+            let pid_path = data.join("probe-pid");
+            let executable = format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 3600\n",
+                pid_path.display()
+            );
+            let started = std::time::Instant::now();
+            let error = apply_signed_fixture_serving(
+                &data,
+                executable.as_bytes(),
+                components,
+                mode,
+                "0.7.1",
+                false,
+                false,
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap_err();
+            let elapsed = started.elapsed();
+            assert!(elapsed >= LOWER, "{label}: returned after {elapsed:?}");
+            assert!(elapsed < UPPER, "{label}: returned after {elapsed:?}");
+            assert!(
+                error.to_string().contains("timed out after 5 seconds"),
+                "{label}: {error:#}"
+            );
+            let pid = recorded_pid(&pid_path, std::time::Duration::from_secs(10))
+                .await
+                .unwrap_or_else(|missing| panic!("{label}: {missing}"));
+            assert_process_gone(pid);
+            assert_eq!(
+                load_trusted_sources(&data)
+                    .unwrap()
+                    .default_source()
+                    .unwrap()
+                    .installed_version,
+                "0.7.0",
+                "{label}: installed release changed"
+            );
+            assert_eq!(std::fs::read(&binary).unwrap(), old_binary, "{label}");
+            assert_eq!(
+                std::fs::read(data.join("owner-data")).unwrap(),
+                b"owner data",
+                "{label}"
+            );
+            assert!(
+                !InstallTransaction::has_pending_recovery(&binary),
+                "{label}: journal retained"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn production_update_probe_uses_the_shipped_five_second_deadline() {
