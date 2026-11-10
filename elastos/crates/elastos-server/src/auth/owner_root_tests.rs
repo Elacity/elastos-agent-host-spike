@@ -264,9 +264,22 @@ fn owner_root_envelope_cipher_and_kdf_are_checked() {
     .expect_err("a relabelled stored envelope")
     .to_string();
     assert!(
-        error.contains("OwnerRoot envelope cipher or KDF is unsupported"),
+        error.contains("OwnerRoot protector envelope must use aes-256-gcm"),
         "{error}"
     );
+}
+
+#[test]
+fn owner_root_store_refuses_other_cipher_name_without_write() {
+    let (data, _, mut protection) = fixture();
+    let path = auth_state_path(data.path()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    protection.protectors[0].envelope.as_mut().unwrap().cipher = "chacha20-poly1305".into();
+    let error = store_principal_root_protection(data.path(), protection)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "OwnerRoot protector envelope must use aes-256-gcm");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[test]

@@ -636,6 +636,11 @@ fn validate_principal_root_protector_kind_envelope(
     if protector.kind == PrincipalRootProtectorKind::OwnerRoot && envelope.kdf != "hkdf-sha256" {
         return Err("OwnerRoot protector envelope must use hkdf-sha256".to_string());
     }
+    if protector.kind == PrincipalRootProtectorKind::OwnerRoot
+        && envelope.cipher != DEFAULT_PRINCIPAL_ROOT_CIPHER
+    {
+        return Err("OwnerRoot protector envelope must use aes-256-gcm".to_string());
+    }
     Ok(())
 }
 
