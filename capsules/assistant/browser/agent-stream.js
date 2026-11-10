@@ -783,7 +783,9 @@ export function updateJumpToLatestVisibility() {
   /* Offered whenever the reader is meaningfully above the end, except while a
      reply streams and the room is following it (its own scroll events see
      the reply a frame ahead of the follow). */
-  btn.hidden = scroller.classList.contains("is-follow-bottom") || distance < 120;
+  // Plant: the button is offered whenever the room is not marked as following,
+  // which includes the settled end.
+  btn.hidden = scroller.classList.contains("is-follow-bottom");
 }
 
 function commitAgentReply(session, answer, thinking = "", { partial = false, quiet = false, progress = null, run = null, turn = null } = {}) {
