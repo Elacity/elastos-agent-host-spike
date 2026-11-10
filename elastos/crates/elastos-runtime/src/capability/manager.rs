@@ -972,7 +972,7 @@ mod tests {
         let used = manager.validate(&once, "test-capsule", Action::Read, &resource, None);
         used.await.unwrap();
         let revoked = grant(None, None);
-        manager.revoke(revoked.id, "test").await;
+        manager.revoke(revoked.id, "test").await.unwrap();
         let expired = grant(None, Some(SecureTimestamp::at(1)));
 
         assert!(manager.can_still_validate(&live).await, "a live token");

@@ -1156,7 +1156,10 @@ mod tests {
         let (live_a, _) = grant_in(&state, "session-a", None, None).await;
         let (live_b, _) = grant_in(&state, "session-b", None, None).await;
         let (revoked, token) = grant_in(&state, "session-a", None, None).await;
-        manager.revoke(*token.id(), "operator detached").await; // record stays granted
+        manager
+            .revoke(*token.id(), "operator detached")
+            .await
+            .unwrap(); // record stays granted
         let (spent, token) = grant_in(&state, "session-b", Some(1), None).await;
         let resource = ResourceId::new("elastos://content/publish");
         let used = manager.validate(&token, "session-b", Action::Write, &resource, None);
@@ -1230,7 +1233,10 @@ mod tests {
         manager.revoke_all("key rotated");
         let (live, _) = grant_in(&state, "session-live", None, None).await;
         let (revoked, token) = grant_in(&state, "session-dead", None, None).await;
-        manager.revoke(*token.id(), "operator detached").await;
+        manager
+            .revoke(*token.id(), "operator detached")
+            .await
+            .unwrap();
         let mut spent = Vec::new();
         for n in 0..MAX_PENDING_REQUESTS - 3 {
             let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
