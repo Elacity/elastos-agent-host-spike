@@ -1,3 +1,4 @@
+import { browserInternetGranted } from "../capsules/browser/browser/browser-runtime-api.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -24,7 +25,8 @@ function summary() {
 }
 function harness() {
   const calls = [], failures = [], requests = [];
-  const state = vm.createContext({ crypto, URLSearchParams, AbortSignal, currentPage: null, currentPageGeneration: 0, nextPageGeneration: 1,
+  const state = vm.createContext({
+    checkBrowserInternet: () => browserInternetGranted(async () => ({status:"granted"})), crypto, URLSearchParams, AbortSignal, currentPage: null, currentPageGeneration: 0, nextPageGeneration: 1,
     restoredViewerOwner: null, unloadCleanupStarted: false, relaunchRequested: false,
     homeWindowCloseInFlight: false, homeWindowTerminalCloseConfirmed: false,
     pendingHomeWindowCloseDelivery: null, runtimePageCleanup: { status: () => null },

@@ -1702,7 +1702,7 @@ async fn test_home_summary_reports_identity_and_launch_targets() {
     } else {
         assert!(
             browser.is_none(),
-            "Browser is hidden on hosts without a local Engine"
+            "Browser is hidden on unsupported platforms"
         );
     }
     assert!(targets
@@ -3209,6 +3209,7 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
         anonymous_dir.path(),
         receipt.clone(),
         anonymous.endpoint().as_ref(),
+        gateway_browser_internet::transport_fixture(),
     )
     .await
     .unwrap();
@@ -3252,9 +3253,14 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
         socket.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
     });
-    let attached = browser_attach_runtime_stream_path(left.path(), receipt, Some(&endpoint))
-        .await
-        .unwrap();
+    let attached = browser_attach_runtime_stream_path(
+        left.path(),
+        receipt,
+        Some(&endpoint),
+        gateway_browser_internet::transport_fixture(),
+    )
+    .await
+    .unwrap();
     let runtime_path = std::path::PathBuf::from(
         attached["adapter_ipc"]["runtime_stream_path"]
             .as_str()
@@ -10834,6 +10840,7 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     .is_err());
     // Exercise the actual Browser summary caller with a consumer that has no local Engine.
     let mut consumer_state = test_state(left.path());
+    consumer_state.browser_internet = granted_browser_internet(left.path());
     consumer_state.provider_registry = Some(consumer_registry.clone());
     consumer_state.carrier_endpoint = Some(endpoint.clone());
     consumer_state.collaboration_discovery_service = Some(
