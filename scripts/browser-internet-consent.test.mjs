@@ -7,7 +7,7 @@ import {makeSystemSummary,makeAppearanceRecord,inertSystemApiResponse} from "./s
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const root = new URL("../", import.meta.url);
-const consentText = "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. Turn this off any time in System, Security.";
+const consentText = "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. You can turn this off here in Inbox.";
 const hostScript = `window.messages=[];window.approvals=[];window.passkeyAllowed=true;window.holdPasskey=false;
 window.showFixtureApp=(target,query={})=>{
   for(const frame of document.querySelectorAll('iframe')) frame.hidden=true;
@@ -21,6 +21,7 @@ addEventListener('message',e=>{
   if(e.data?.type==='home:open-target' && new URLSearchParams(location.search).has('flow')) {
     showFixtureApp(e.data.target,e.data.query);return;
   }
+  if(e.data?.type==="home:focus-browser" && document.querySelector('iframe[data-app="browser"]')) {showFixtureApp("browser");return;}
   if(e.data?.type!=="elastos.home.passkey-step-up.request/v1")return;
   approvals.push(e.data.operation);
   window.completeFixturePasskey=()=>e.source.postMessage({type:"elastos.home.passkey-step-up.result/v1",requestId:e.data.requestId,
@@ -68,11 +69,11 @@ async function fixture() {
     }
     if (url.pathname === "/api/apps/inbox/summary") {
       const pending=state.consent === "requested";
-      const body=pending?consentText:state.consent === "granted"?"Browser can use the internet. Allowed with your passkey.":state.consent === "refused"?"Not allowed.":"Turned off.";
+      const body=pending?consentText:state.consent === "granted"?"Browser can open websites. Allowed with your passkey.":state.consent === "refused"?"Browser cannot open websites. Not allowed.":"Browser cannot open websites. Turned off.";
       json({notifications:{unread_count:pending?1:0,attention_count:pending?1:0,entries:[{
         id:"browser-internet:permission",source_app:"browser",kind:pending?"browser_internet_request":"browser_internet_decision",
         title:pending?"Allow Browser to use the internet?":"Browser internet access",body,severity:pending?"attention":"info",read:!pending,created_at:1794312000,
-        action_ref:pending?{app:"inbox",action_id:"browser-internet-allow:fixture"}:null,
+        action_ref:{app:"inbox",action_id:pending?"browser-internet-allow:fixture":state.consent==="granted"?"browser-internet-turn-off:fixture-grant":"browser-internet-request"},
       }]}});return;
     }
     if (url.pathname === "/api/apps/inbox/actions") {
@@ -80,6 +81,7 @@ async function fixture() {
       if(input.action_id === "browser-internet-allow:fixture") {
         assert.equal(input.step_up_token,"fixture-step-up");state.consent="granted";
       } else if(input.action_id === "browser-internet-deny:fixture") state.consent="refused";
+      else if(input.action_id === "browser-internet-turn-off:fixture-grant") {assert.equal(input.step_up_token,"fixture-step-up");state.consent="revoked";}
       json({ok:true});return;
     }
     if (url.pathname === "/api/apps/browser/summary") {
@@ -101,8 +103,8 @@ async function fixture() {
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
   return {state,url:`http://127.0.0.1:${server.address().port}/`,close:()=>new Promise(resolve=>server.close(resolve))};
 }
-async function settingsMessage(page) {
-  await page.waitForFunction(()=>messages.some(m=>m.type==="home:open-target" && m.target==="system" && m.query.settings==="security"));
+async function inboxMessage(page) {
+  await page.waitForFunction(()=>messages.some(m=>m.type==="home:open-target" && m.target==="inbox" && m.query.notification_id==="browser-internet:permission"));
 }
 
 test("Browser asks once, polls every two seconds and opens the requested page without a click", async () => {
@@ -131,7 +133,7 @@ test("Browser asks once, polls every two seconds and opens the requested page wi
       await frame.locator("#browser-exit").selectOption("legacy-exit");
       await frame.getByText("Websites see the address of the shared connection.",{exact:true}).waitFor();
       await frame.locator("#browser-exit").selectOption("");
-      await frame.getByRole("button",{name:"Change in Settings",exact:true}).click();await settingsMessage(page);
+      await frame.getByRole("button",{name:"Manage in Inbox",exact:true}).click();await inboxMessage(page);
       await frame.getByRole("button",{name:"Close Browser settings"}).click();
       f.state.consent="granted";
       await page.waitForResponse(r=>r.url().endsWith("/api/apps/browser/open"),{timeout:5000});
@@ -145,8 +147,9 @@ test("Browser asks once, polls every two seconds and opens the requested page wi
       await frame.getByText("Internet access: Allowed",{exact:true}).waitFor();
       await frame.getByText("Pages go out through",{exact:true}).waitFor();await frame.getByText("Websites see this Mac's internet address.",{exact:true}).waitFor();
       await screen(page,"browser-settings");
-      const reads=f.state.reads;await page.waitForTimeout(2200);assert.equal(f.state.reads,reads,"permission poll stops after grant");
+      assert.equal(f.state.opens.length,1,"refresh does not repeat the open");
       f.state.consent="revoked";
+      await frame.getByText("Internet access is off for Browser.",{exact:true}).waitFor({timeout:4000});
       await frame.getByRole("button",{name:"Close Browser settings"}).click();
       await frame.getByRole("button",{name:"Browser settings",exact:true}).click();
       await frame.getByText("Internet access: Off",{exact:true}).waitFor({timeout:2000});
@@ -157,7 +160,7 @@ test("Browser asks once, polls every two seconds and opens the requested page wi
       const page=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});await page.goto(f.url);const frame=page.frameLocator("iframe");
       await frame.getByText("Internet access is off for Browser.",{exact:true}).waitFor();
       await screen(page,"browser-off");
-      await frame.getByRole("button",{name:"Open Settings",exact:true}).click();await settingsMessage(page);
+      await frame.getByRole("button",{name:"Open Inbox",exact:true}).click();await inboxMessage(page);
       const reads=f.state.reads;await page.goto("about:blank");await page.waitForTimeout(2200);
       assert.equal(f.state.reads,reads,"permission polling stops on leave");await page.close();
     }
@@ -242,157 +245,67 @@ test("restoring after approval never creates a fresh page, and reload never repe
   } finally {await browser.close();await f.close();}
 });
 
-test("Inbox keeps Allow, Don't Allow and Turn Off as read history with one Settings link", async () => {
+test("Inbox manages active and off grants with confirmation, passkey and retained decisions", async () => {
   const f=await fixture();const browser=await chromium.launch({headless:true});
   try {
-    for (const answer of ["Allow","Don't Allow","Turn Off"]) {
-      f.state.consent=answer === "Turn Off"?"revoked":"requested";
-      const page=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});
-      await page.goto(f.url+"?app=inbox");const frame=page.frameLocator("iframe");
-      if (answer !== "Turn Off") {
-        await frame.locator("#entry-detail").getByText(consentText,{exact:true}).waitFor();await screen(page,"inbox-request");
-        await page.waitForLoadState("networkidle");
-        assert.equal(await frame.locator(".entry-row-unread").count(),1,"an open permission request stays unread until answered");
-        assert.deepEqual(await frame.locator("#entry-detail button").allTextContents(),["Don't Allow","Allow"]);
-        await frame.locator("#entry-detail").getByRole("button",{name:answer,exact:true}).click();
-      }
-      const body=answer === "Allow"?/Browser can use the internet\. Allowed with your passkey on/:answer === "Don't Allow"?/Not allowed on/:/Turned off on/;
-      await frame.locator("#entry-detail .entry-body").filter({hasText:body}).waitFor();
-      assert.equal(await frame.locator("#pending-count").innerText(),"0");assert.equal(await frame.locator("#review-count").innerText(),"0");
-      assert.deepEqual(await frame.locator("#entry-detail button").allTextContents(),["Manage in Settings"]);
-      await frame.locator("#entry-detail").getByRole("button",{name:"Manage in Settings"}).click();await settingsMessage(page);
-      assert.deepEqual(await page.evaluate(()=>approvals),answer === "Allow"?["browser.internet.grant"]:[]);
-      if(answer === "Allow") await screen(page,"inbox-decided-allowed");
-      await page.reload();
-      await frame.locator("#entry-detail .entry-body").filter({hasText:body}).waitFor();
-      assert.equal(await frame.locator("#pending-count").innerText(),"0");
-      if(answer === "Allow") {
-        const requests=f.state.requests;f.state.consent="revoked";await page.reload();
-        await frame.locator("#entry-detail .entry-body").filter({hasText:/Turned off on/}).waitFor();
-        assert.equal(f.state.requests,requests,"turning off updates the same history without a new request");
-      }
-      await page.close();
-    }
-  } finally {await browser.close();await f.close();}
-});
-
-test("first-run Go, Inbox Allow, passkey, automatic page; Manage reaches the real Security switch", async () => {
-  const f=await fixture();const browser=await chromium.launch({headless:true});
-  try {
+    f.state.consent="granted";
     const page=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});
-    let releaseRequest;
-    f.state.requestBarrier=new Promise(resolve=>{releaseRequest=resolve;});
-    await page.goto(f.url+"?flow=1");
-    const browserFrame=page.frameLocator('iframe[data-app="browser"]');
-    await browserFrame.locator("#browser-internet-request").waitFor();
-    await browserFrame.getByRole("textbox",{name:"Web address"}).fill("https://example.com/first-run");
-    await screen(page,"flow-1");
-    assert.equal(f.state.requests,1);
-    await browserFrame.getByRole("textbox",{name:"Web address"}).press("Enter");
-    releaseRequest();
-    const inbox=page.frameLocator('iframe[data-app="inbox"]');
-    await inbox.getByRole("button",{name:"Allow",exact:true}).waitFor();
-    await screen(page,"flow-2");
-    assert.equal(f.state.requests,1);assert.equal(f.state.opens.length,0);assert.deepEqual(await page.evaluate(()=>approvals),[]);
-    await page.evaluate(()=>holdPasskey=true);
-    await inbox.getByRole("button",{name:"Allow",exact:true}).click();
+    await page.goto(f.url+"?app=inbox");const frame=page.frameLocator("iframe");
+    const off=frame.locator("#entry-detail").getByRole("button",{name:"Turn Off",exact:true});
+    await off.waitFor({timeout:3000});await screen(page,"inbox-decided-allowed");
+    await off.click();await frame.locator("dialog[open]").waitFor();
+    assert.equal(await frame.locator('dialog [value="cancel"]').evaluate(e=>e===document.activeElement),true);
+    await screen(page,"inbox-confirm");
+    await frame.getByRole("button",{name:"Cancel",exact:true}).click();
+    assert.deepEqual(await page.evaluate(()=>approvals),[]);assert.equal(f.state.consent,"granted");
+    await page.evaluate(()=>passkeyAllowed=false);await off.click();await frame.locator('dialog [value="off"]').click();
     await page.waitForFunction(()=>approvals.length===1);
-    assert.equal(f.state.consent,"requested");assert.equal(f.state.opens.length,0);
-    // The real Inbox is awaiting Home's passkey result. The fixture pauses the
-    // authentication boundary; it does not draw a counterfeit OS passkey sheet.
-    await screen(page,"flow-3");
-    await page.evaluate(()=>completeFixturePasskey());
-    await page.waitForResponse(r=>r.url().endsWith("/api/apps/browser/open"));
-    assert.deepEqual(await page.evaluate(()=>approvals),["browser.internet.grant"]);
-    assert.equal(f.state.opens.length,1);assert.equal(f.state.opens[0].url,"https://example.com/first-run");
-    await page.evaluate(()=>showFixtureApp("browser"));await screen(page,"flow-4");
-    await page.evaluate(()=>showFixtureApp("inbox"));
-    await inbox.getByRole("button",{name:"Manage in Settings",exact:true}).click();
-    const system=page.frameLocator('iframe[data-app="system"]');
-    await system.locator("#browser-internet-switch:checked:not(:disabled)").waitFor();
-    assert.equal(await system.getByRole("heading",{name:"Permissions",exact:true}).count(),1);
-    await page.evaluate(()=>holdPasskey=false);
-    await system.locator("label:has(#browser-internet-switch)").click();
-    await system.getByRole("button",{name:"Turn Off",exact:true}).click();
-    await system.locator("#browser-internet-switch:not(:checked):not(:disabled)").waitFor();
-    assert.equal(f.state.consent,"revoked");assert.equal(f.state.requests,1);
-    await page.evaluate(()=>showFixtureApp("inbox"));
-    await inbox.locator("body").evaluate(()=>location.reload());
-    await inbox.locator("#entry-detail .entry-body").filter({hasText:/Turned off on/}).waitFor();
-    assert.equal(await inbox.locator("#pending-count").innerText(),"0");
-    assert.equal(f.state.requests,1,"System revoke updates history without requesting access");
-    await page.close();
-    for(const link of ["Open Settings","Change in Settings"]) {
-      const settingsPage=await browser.newPage();await settingsPage.goto(f.url+"?flow=1");
-      const offBrowser=settingsPage.frameLocator('iframe[data-app="browser"]');
-      await offBrowser.getByText("Internet access is off for Browser.",{exact:true}).waitFor();
-      if(link==="Change in Settings") await offBrowser.getByRole("button",{name:"Browser settings",exact:true}).click();
-      await offBrowser.getByRole("button",{name:link,exact:true}).click();
-      const settings=settingsPage.frameLocator('iframe[data-app="system"]');
-      await settings.locator("#browser-internet-switch:not(:checked):not(:disabled)").waitFor();
-      assert.equal(await settings.getByRole("heading",{name:"Permissions",exact:true}).count(),1);
-      assert.equal(f.state.requests,1);await settingsPage.close();
-    }
+    await frame.locator('#entry-detail button:not(:disabled)').waitFor();assert.equal(f.state.consent,"granted");assert.equal(f.state.actions.length,0);
+    await page.evaluate(()=>passkeyAllowed=true);await off.click();await frame.locator('dialog [value="off"]').click();
+    await frame.locator("#entry-detail .entry-body").filter({hasText:/Browser cannot open websites. Turned off on/}).waitFor();
+    assert.equal(f.state.requests,0);assert.equal(await frame.locator("#pending-count").innerText(),"0");await screen(page,"inbox-turned-off");
+    await page.reload();await frame.locator("#entry-detail .entry-body").filter({hasText:/Turned off on/}).waitFor();
+    await frame.getByRole("button",{name:"Allow",exact:true}).click();
+    await frame.locator("#entry-detail .entry-body").filter({hasText:/Browser can open websites. Allowed with your passkey on/}).waitFor();
+    assert.equal(f.state.requests,1);assert.equal(await frame.locator("#pending-count").innerText(),"0");
+    await page.waitForFunction(()=>messages.some(m=>m.type==="home:focus-browser"));
+    f.state.consent="requested";await page.reload();await screen(page,"inbox-request");
+    await frame.getByRole("button",{name:"Don't Allow",exact:true}).click();
+    await frame.locator("#entry-detail .entry-body").filter({hasText:/Browser cannot open websites. Not allowed on/}).waitFor();
+    assert.equal(await frame.locator("#pending-count").innerText(),"0");
+    await frame.getByRole("button",{name:"Allow",exact:true}).click();
+    await off.waitFor();await page.close();
   } finally {await browser.close();await f.close();}
 });
 
-test("System switch confirms Off before passkey, preserves access on cancel, requests On, and retries stop", async () => {
-  const {startSystemFixtureServer,makeSystemSummary,makeAppearanceRecord,jsonResponse} = await import("./system-uiux-fixture.mjs");
-  let consent="granted",pending=false,writes=[];
-  const server=await startSystemFixtureServer({title:"Browser permission",hostScript,
-    async onApiRequest({request,response,url}) {
-      if(url.pathname==="/api/apps/system/summary") {jsonResponse(response,makeSystemSummary(makeAppearanceRecord({theme:"light"})));return true;}
-      if(url.pathname!=="/api/apps/browser/internet")return false;
-      if(request.method==="POST") {
-        let body="";for await(const part of request)body+=part;const input=JSON.parse(body);writes.push(input);
-        if(input.action === "request") {assert.equal(pending,false);consent="requested";jsonResponse(response,{status:consent});}
-        else {
-          assert.equal(input.action,"revoke");assert.equal(input.step_up_token,pending?undefined:"fixture-step-up");
-          consent="revoked";
-          if(!pending){pending=true;jsonResponse(response,{status:"stop_incomplete"},409);}
-          else {pending=false;jsonResponse(response,{status:"revoked",revoke_list:"persisted"});}
-        }
-      } else jsonResponse(response,{status:consent,stop_pending:pending,request:{resource:"elastos://browser/internet",grant_id:"fixture"}});
-      return true;
-    }});
-  const browser=await chromium.launch({headless:true});
-  try {
-    const consoleErrors=[];
-    const page=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});
-    page.on("console", message=>{if(message.type()==="error" && !/status of 409 \(Conflict\)/.test(message.text()))consoleErrors.push(message.text());});
-    await page.goto(`${server.baseUrl}/fixture?settings=security`);
-    let frame=page.frameLocator("#system-frame");const toggle=()=>frame.getByRole("switch",{name:"Browser can use the internet",exact:true});
-    const clickSwitch=async()=>{
-      await frame.locator("#browser-internet-switch:not(:disabled)").waitFor();
-      await frame.locator("label:has(#browser-internet-switch)").click();
-    };
-    await page.waitForFunction(()=>messages.length>0);await frame.locator("#browser-internet-switch:checked:not(:disabled)").waitFor({timeout:4000});
-    await screen(page,"system-switch-on");
-    await clickSwitch();const confirm=()=>frame.getByRole("dialog");await confirm().waitFor();
-    assert.match(await confirm().innerText(),/Turn off internet access for Browser\? Open Browser windows stop loading pages\./);
-    assert.equal(await confirm().getByRole("button",{name:"Cancel",exact:true}).evaluate(n=>n===n.ownerDocument.activeElement),true);
-    assert.deepEqual(await page.evaluate(()=>approvals),[]);assert.equal(writes.length,0);await screen(page,"system-confirm");
-    await confirm().getByRole("button",{name:"Cancel",exact:true}).click();assert.equal(await toggle().isChecked(),true);
-    await page.evaluate(()=>passkeyAllowed=false);await clickSwitch();await confirm().getByRole("button",{name:"Turn Off",exact:true}).click();
-    await frame.locator("#browser-internet-error").filter({hasText:/passkey/i}).waitFor();assert.equal(writes.length,0);assert.equal(await toggle().isChecked(),true);
-    await clickSwitch();await confirm().waitFor();await frame.locator('#browser-internet-confirm [value="cancel"]').press("Escape");
-    await confirm().waitFor({state:"hidden"});
-    await frame.locator("#browser-internet-switch:not(:disabled)").waitFor();
-    assert.deepEqual(await page.evaluate(()=>approvals),["browser.internet.revoke"],"Escape cancels even after a previous Turn Off answer");
-    await page.evaluate(()=>passkeyAllowed=true);await clickSwitch();await confirm().getByRole("button",{name:"Turn Off",exact:true}).click();
-    await frame.locator("#browser-internet-error").filter({hasText:/try again/i}).waitFor();assert.equal(writes.length,1);
-    assert.deepEqual(await page.evaluate(()=>approvals),["browser.internet.revoke","browser.internet.revoke"]);
-    await page.reload();frame=page.frameLocator("#system-frame");await Promise.all([page.waitForResponse(r=>r.url().endsWith("/api/apps/browser/internet") && r.request().method()==="POST"),clickSwitch()]);
-    assert.equal(pending,false);assert.equal(writes.length,2);assert.deepEqual(await page.evaluate(()=>approvals),[]);
-    assert.equal(await toggle().isChecked(),false);
-    await clickSwitch();await page.waitForFunction(()=>messages.some(m=>m.type==="home:open-target" && m.target==="inbox"));
-    assert.equal(writes[2].action,"request");assert.equal(await toggle().isChecked(),false);
-    assert.deepEqual(server.requestFailures,[]);
-    assert.deepEqual(consoleErrors,[],"System permission controls produce no sandbox console errors");
-  } finally {await browser.close();await server.close();}
+test("first-run Allow returns focus to the existing Browser, and off links select Inbox", async () => {
+ const f=await fixture();const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});
+  let release;f.state.requestBarrier=new Promise(r=>release=r);
+  await page.goto(f.url+"?flow=1");const frame=page.frameLocator('iframe[data-app="browser"]');
+  await frame.locator("#browser-url").fill("https://example.com/first-run");await frame.locator("#browser-url").press("Enter");await screen(page,"flow-1");release();
+  const inbox=page.frameLocator('iframe[data-app="inbox"]');await inbox.getByRole("button",{name:"Allow",exact:true}).waitFor();await screen(page,"flow-2");
+  await page.evaluate(()=>holdPasskey=true);await inbox.getByRole("button",{name:"Allow",exact:true}).click();await page.waitForFunction(()=>approvals.length===1);await screen(page,"flow-3");
+  await page.evaluate(()=>completeFixturePasskey());await page.waitForResponse(r=>r.url().endsWith("/api/apps/browser/open"));
+  await page.waitForFunction(()=>!document.querySelector('iframe[data-app="browser"]').hidden);assert.equal(f.state.opens.length,1);await screen(page,"flow-4");
+  await page.close();f.state.consent="revoked";
+  for(const link of ["Open Inbox","Manage in Inbox"]) {
+   const p=await browser.newPage({viewport:{width:1280,height:844},colorScheme:"light"});await p.goto(f.url+"?flow=1");const b=p.frameLocator('iframe[data-app="browser"]');
+   await b.getByRole("button",{name:"Open Inbox",exact:true}).waitFor();await screen(p,"browser-off");
+   if(link==="Manage in Inbox") await b.getByRole("button",{name:"Browser settings",exact:true}).click();
+   await b.getByRole("button",{name:link,exact:true}).click();await p.frameLocator('iframe[data-app="inbox"]').getByRole("button",{name:"Allow",exact:true}).waitFor();await p.close();
+  }
+ } finally {await browser.close();await f.close();}
 });
 
 test("internet grant refusal points to the permission request", async () => {
   const {friendlyOpenError} = await import("../capsules/browser/browser/browser-status.js");
-  assert.equal(friendlyOpenError({status:403,payload:{code:"browser_internet_grant_required"}}),"Internet access is off for Browser. Open Settings to change it.");
+  assert.equal(friendlyOpenError({status:403,payload:{code:"browser_internet_grant_required"}}),"Internet access is off for Browser. Open Inbox to change it.");
 });
+
+ test("System contains no optional Browser permission integration",()=>{
+   for(const name of ["index.html","system.js","style.css"]) {
+     assert.doesNotMatch(readFileSync(new URL(`capsules/system/browser/${name}`,root),"utf8"),/browser-internet|browserInternet|browser\.internet|\/api\/apps\/browser\/internet/);
+   }
+ });

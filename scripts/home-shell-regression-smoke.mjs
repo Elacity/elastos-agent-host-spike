@@ -3134,3 +3134,16 @@ assert(await lockWithLateWindow === false && lockRequests === 1,
 assert(shellCore.shellState.windows.has(lateWindow.entry.id), "the late window keeps its edits");
 console.log("[home-shell-regression] Documents preference reaches every window, survives reload, and Lock and sign-out ask first: PASS");
 console.log("[home-shell-regression] PASS");
+
+{
+ const before = shellCore.shellState.windows.size;
+ shellCore.shellState.windows.clear();
+ assert(shellWindows.focusOpenBrowserWindow() === false, "Inbox focus must not create a closed Browser");
+ assert(shellCore.shellState.windows.size === 0, "Inbox focus created a window");
+ await openHybrid("browser", {});
+ const existing=[...shellCore.shellState.windows.values()][0];
+ const launches=restoredBrowserLaunches.length;
+ shellCore.shellState.activeWindowId=null;
+ assert(shellWindows.focusOpenBrowserWindow() === true, "Inbox could not focus live Browser");
+ assert(shellCore.shellState.activeWindowId===existing.id && restoredBrowserLaunches.length===launches, "Inbox focus relaunched Browser");
+}

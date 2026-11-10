@@ -2637,3 +2637,10 @@ export function handleShellResize() {
   rerenderShellSurfaces({ desktop: true, taskbar: true });
   persistBrowserSession();
 }
+
+export function focusOpenBrowserWindow() {
+  const entry = topBrowserWindowEntryForTarget("browser");
+  if (!entry) return false;
+  focusWindow(entry.id);
+  return true;
+}

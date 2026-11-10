@@ -186,9 +186,8 @@ try {
   await test("ordinary System Open reuses its frame and preserves an editable draft", fixtureTest(async f => {
     await f.shell.evaluate(() => fixture.windows.openTarget('system', {query:{settings:'security'}}));
     const system = await f.currentSystem();
-    await system.getByRole('switch', {name:'Browser can use the internet', exact:true}).waitFor();
-    assert.equal(await system.isChecked('#browser-internet-switch'), false);
-    assert.equal(await system.locator('#browser-internet-stop').count(), 0);
+    await system.locator('#recovery-password').waitFor();
+    assert.equal(await system.locator('#browser-internet-switch').count(), 0);
     await system.fill('#recovery-password', 'fixture-unsaved-draft');
     await f.shell.evaluate(() => fixture.windows.openTarget('system'));
     await f.shell.evaluate(() => new Promise(requestAnimationFrame));

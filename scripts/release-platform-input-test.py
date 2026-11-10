@@ -1853,7 +1853,7 @@ class ReleaseNotesRulesTest(unittest.TestCase):
     changelog = (Path(__file__).resolve().parents[1] / "elastos/CHANGELOG.md").read_text(encoding="utf-8")
 
     def test_browser_permission_notes_name_the_permission_and_settings(self):
-        note = "Browser opens websites only after you allow internet access with your passkey in Inbox. Turn it off in System, Security."
+        note = "Browser opens websites only after you allow internet access with your passkey in Inbox, where you can also turn it off."
         for version in ("2.0.1", "2.0.1-rc.2"):
             body = self.changelog.split(f"## [{version}] - ", 1)[1].split("\n## ", 1)[0]
             security = body.split("### Security\n", 1)[1].split("\n### ", 1)[0]

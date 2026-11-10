@@ -386,69 +386,6 @@ function hasShellAccess() {
   return apiHomeToken.length > 0;
 }
 
-let browserInternetBusy = false;
-const browserInternetSwitch = document.querySelector("#browser-internet-switch");
-const browserInternetError = document.querySelector("#browser-internet-error");
-
-function showBrowserInternetError(message) {
-  browserInternetError.textContent = message;
-  browserInternetError.hidden = !message;
-  browserInternetSwitch.setAttribute("aria-invalid", String(Boolean(message)));
-}
-
-async function refreshBrowserInternet() {
-  if (!browserInternetSwitch || browserInternetBusy) return;
-  try {
-    const consent = await fetchJson("/api/apps/browser/internet", {headers:shellHeaders()});
-    browserInternetSwitch.checked = consent.status === "granted";
-    browserInternetSwitch.disabled = currentAccess.role !== "admin";
-    if (consent.stop_pending) showBrowserInternetError("Some Browser windows are still stopping; use the switch to try again.");
-  } catch (_error) {
-    showBrowserInternetError("Permission could not be checked; refresh System to try again.");
-    browserInternetSwitch.disabled = true;
-  }
-}
-
-function confirmBrowserInternetOff() {
-  const dialog = document.querySelector("#browser-internet-confirm");
-  return new Promise(resolve => {
-    dialog.addEventListener("close", () => resolve(dialog.returnValue === "off"), {once:true});
-    dialog.showModal();
-    dialog.querySelector('[value="cancel"]').focus();
-  });
-}
-
-browserInternetSwitch?.addEventListener("change", async () => {
-  if (browserInternetBusy) return;
-  browserInternetBusy = true;
-  browserInternetSwitch.disabled = true;
-  showBrowserInternetError("");
-  let stopping = false;
-  try {
-    const consent = await fetchJson("/api/apps/browser/internet", {headers:shellHeaders()});
-    // The switch reflects Runtime's decision while confirmation is in progress.
-    browserInternetSwitch.checked = consent.status === "granted";
-    if (consent.status === "granted" || consent.stop_pending) {
-      if (!consent.stop_pending && !await confirmBrowserInternetOff()) return;
-      const stepUpToken = consent.stop_pending ? undefined : await requestPasskeyStepUp("browser.internet.revoke", consent.request);
-      stopping = true;
-      const result = await fetchJson("/api/apps/browser/internet", {method:"POST",headers:shellHeaders({"content-type":"application/json"}),
-        body:JSON.stringify({action:"revoke",step_up_token:stepUpToken})});
-      if (result.status !== "revoked") throw new Error("Stop is incomplete");
-      if (result.revoke_list !== "persisted") showBrowserInternetError("Browser is off; Runtime could not save the capability revoke list.");
-    } else {
-      await fetchJson("/api/apps/browser/internet", {method:"POST",headers:shellHeaders({"content-type":"application/json"}),
-        body:JSON.stringify({action:"request"})});
-      openCapsuleTarget("inbox");
-    }
-  } catch (_error) {
-    showBrowserInternetError(stopping ? "Some Browser windows are still stopping; use the switch to try again." : "Permission did not change; use your passkey to try again.");
-  } finally {
-    browserInternetBusy = false;
-    await refreshBrowserInternet();
-  }
-});
-
 async function refreshSystemSummary() {
   if (systemSummaryInFlight) return systemSummaryInFlight;
   systemSummaryInFlight = (async () => {
@@ -507,7 +444,6 @@ function renderSystemSummary(systemSummary) {
   setField("device-did", shortDid(identity.device_did), "", identity.device_did);
   syncDeviceDidCopy(identity.device_did);
   setAccessPolicy(access);
-  void refreshBrowserInternet();
   setPasskeyAuthority(authority);
   acceptAppearance(appearance);
   setRuntimeState(runtime);
@@ -877,7 +813,6 @@ async function onGuestRegistrationChange() {
       body: JSON.stringify({ enabled: guestRegistrationInput.checked }),
     });
     setAccessPolicy(access);
-  void refreshBrowserInternet();
     showGuestRegistrationStatus(access.guest_registration_enabled ? "Guest creation on." : "Guest creation off.", "success");
   } catch (error) {
     guestRegistrationInput.checked = currentAccess.guest_registration_enabled === true;

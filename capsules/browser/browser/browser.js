@@ -224,7 +224,7 @@ function renderInternetConsent(consent) {
   hint.textContent = "Enter a website and press Go.";
   const button = document.querySelector("#browser-internet-review");
   button.hidden = !off && !waiting;
-  button.textContent = off ? "Open Settings" : "Show Request";
+  button.textContent = off ? "Open Inbox" : "Show Request";
   button.dataset.off = String(off);
 }
 
@@ -235,7 +235,7 @@ function showInternetRequest() {
 async function requestInternetNavigation(value) {
   if (!browserInternetPollingActive) return;
   if (["refused", "revoked"].includes(currentInternetConsent?.status)) {
-    openInternetControl("system", {settings:"security"});
+    showInternetRequest();
     return;
   }
   // The URL belongs only to this live window; Home persists no continuation.
@@ -286,13 +286,13 @@ async function checkBrowserInternet(initialUrl) {
 
 document.querySelector("#browser-internet-review")?.addEventListener("click", event => {
   if (event.currentTarget.dataset.off === "true") {
-    openInternetControl("system", {settings:"security"});
+    showInternetRequest();
   } else {
     showInternetRequest();
   }
 });
 document.querySelector("#browser-internet-settings")?.addEventListener("click", () => {
-  openInternetControl("system", {settings:"security"});
+  showInternetRequest();
 });
 
 function setSettingsOpen(open) {
@@ -3154,7 +3154,21 @@ const initialUrl = requestedStartupUrl || DEFAULT_URL;
 addressInput.value = initialUrl;
 setLoading(true);
 showStatus("Browser is checking its Engine. Wait, or reopen Browser from Home to retry.", { sticky: true });
-checkBrowserInternet(initialUrl).then(granted => granted ? fetchBrowserSummary({ remoteServices: false }) : null)
+function watchInternetPermission() {
+  if (!browserInternetPollingActive) return;
+  browserInternetPollTimer = window.setTimeout(async () => {
+    try {
+      await browserInternetGranted(fetchJson, (_allowed, consent) => {
+        if (browserInternetPollingActive) renderInternetConsent(consent);
+      });
+    } catch (_) { /* Keep the last Runtime state until the next read succeeds. */ }
+    watchInternetPermission();
+  }, 2000);
+}
+checkBrowserInternet(initialUrl).then(granted => {
+  if (browserInternetPollingActive) watchInternetPermission();
+  return granted ? fetchBrowserSummary({ remoteServices: false }) : null;
+})
   .then(async (summary) => {
     if (!summary || !browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
     if (await restoreRuntimePageViewer(summary)) return;

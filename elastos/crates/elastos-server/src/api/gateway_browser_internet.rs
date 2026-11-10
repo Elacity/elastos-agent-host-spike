@@ -11,7 +11,7 @@ pub(super) const RESOURCE: &str = "elastos://browser/internet";
 pub(super) const GRANT_OPERATION: &str = "browser.internet.grant";
 pub(super) const REVOKE_OPERATION: &str = "browser.internet.revoke";
 pub(super) const CONSENT_TEXT: &str =
-    "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. Turn this off any time in System, Security.";
+    "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. You can turn this off here in Inbox.";
 const RECORD: &str = "browser-internet.json";
 const TOKEN: &str = "browser-internet-token.json";
 const REQUEST_TTL: u64 = 1800;
@@ -292,6 +292,14 @@ pub(super) async fn answer(
     token: Option<&str>,
 ) -> anyhow::Result<String> {
     ensure_admin_context(&state.data_dir, &launch.context)?;
+    anyhow::ensure!(
+        launch.launch_context.executable_actor == INBOX_CAPSULE_ID,
+        "Inbox launch required"
+    );
+    if let Some(id) = action_id.strip_prefix("browser-internet-turn-off:") {
+        revoke(state, launch, Some(id), token).await?;
+        return Ok("Browser cannot open websites. Turned off.".into());
+    }
     // Deny, replacement request, step-up consume and grant commit share this lock.
     let _guard = state.browser_internet.generation.lock().await;
     let (allow, id) = if let Some(id) = action_id.strip_prefix("browser-internet-allow:") {
@@ -361,7 +369,7 @@ pub(super) async fn answer(
             at: now_ts(),
         },
     )?;
-    Ok("Browser can use the internet. Allowed with your passkey.".into())
+    Ok("Browser can open websites. Allowed with your passkey.".into())
 }
 
 pub(super) fn notification(
@@ -369,8 +377,9 @@ pub(super) fn notification(
     context: &HomeLaunchTokenContext,
 ) -> Option<HomeNotificationEntrySummary> {
     ensure_admin_context(&state.data_dir, context).ok()?;
+    resolve_capsule_dir(&state.data_dir, BROWSER_CAPSULE_ID)?;
     let record = load(&state.data_dir).ok()??;
-    let (at, body) = match &record {
+    let (at, body, action_id) = match &record {
         Consent::Requested { request_id, at, .. } => {
             let request = grant_request(&record).ok()?;
             return Some(HomeNotificationEntrySummary {
@@ -388,12 +397,31 @@ pub(super) fn notification(
                 }),
             });
         }
-        Consent::Granted { at, .. } => (
+        Consent::Granted { at, token_id, .. } => (
             *at,
-            "Browser can use the internet. Allowed with your passkey.",
+            "Browser can open websites. Allowed with your passkey.",
+            format!("browser-internet-turn-off:{token_id}"),
         ),
-        Consent::Refused { at, .. } => (*at, "Not allowed."),
-        Consent::Revoked { at, .. } => (*at, "Turned off."),
+        Consent::Refused { at, .. } => (
+            *at,
+            "Browser cannot open websites. Not allowed.",
+            "browser-internet-request".into(),
+        ),
+        Consent::Revoked { at, token_id, .. } => (
+            *at,
+            "Browser cannot open websites. Turned off.",
+            if state
+                .browser_internet
+                .generation
+                .try_lock()
+                .ok()
+                .is_some_and(|live| live.is_some())
+            {
+                format!("browser-internet-turn-off:{token_id}")
+            } else {
+                "browser-internet-request".into()
+            },
+        ),
     };
     Some(HomeNotificationEntrySummary {
         id: "browser-internet:permission".into(),
@@ -404,7 +432,10 @@ pub(super) fn notification(
         severity: "info".into(),
         read: true,
         created_at: at,
-        action_ref: None,
+        action_ref: Some(HomeNotificationActionSummary {
+            app: INBOX_CAPSULE_ID.into(),
+            action_id,
+        }),
     })
 }
 
@@ -632,7 +663,7 @@ pub(super) async fn summary(State(state): State<GatewayState>, headers: HeaderMa
     if let Err(error) = require_runtime_wallet_authority(
         &state.data_dir,
         &headers,
-        &[BROWSER_CAPSULE_ID, INBOX_CAPSULE_ID, SYSTEM_CAPSULE_ID],
+        &[BROWSER_CAPSULE_ID, INBOX_CAPSULE_ID],
     ) {
         return refusal(error);
     }
@@ -682,7 +713,7 @@ async fn action_inner(
     let launch = require_home_launch_token_binding(
         &state.data_dir,
         headers,
-        &[BROWSER_CAPSULE_ID, SYSTEM_CAPSULE_ID],
+        &[BROWSER_CAPSULE_ID, INBOX_CAPSULE_ID],
     )?;
     if input.action == "end" {
         // The executable actor identifies the frame, including when Home owns
@@ -695,9 +726,9 @@ async fn action_inner(
         return Ok(serde_json::json!({"status":"ended"}));
     }
     ensure_admin_context(&state.data_dir, &launch.context)?;
-    let mut live = state.browser_internet.generation.lock().await;
-    let record = load(&state.data_dir)?;
     if input.action == "request" {
+        let live = state.browser_internet.generation.lock().await;
+        let record = load(&state.data_dir)?;
         anyhow::ensure!(
             !matches!(&record, Some(Consent::Revoked { .. })) || live.is_none(),
             "Finish stopping Browser internet before requesting it again"
@@ -710,13 +741,41 @@ async fn action_inner(
         return Ok(public_record(load(&state.data_dir)?.as_ref()));
     }
     anyhow::ensure!(input.action == "revoke", "Invalid Browser internet action");
-    let record = record.ok_or_else(|| anyhow::anyhow!("Browser internet access is off"))?;
+    anyhow::ensure!(
+        launch.launch_context.executable_actor == INBOX_CAPSULE_ID,
+        "Inbox launch required"
+    );
+    revoke(state, &launch, None, input.step_up_token.as_deref()).await
+}
+
+async fn revoke(
+    state: &GatewayState,
+    launch: &RequiredHomeLaunchToken,
+    expected_id: Option<&str>,
+    step_up_token: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    anyhow::ensure!(
+        launch.launch_context.executable_actor == INBOX_CAPSULE_ID,
+        "Inbox launch required"
+    );
+    ensure_admin_context(&state.data_dir, &launch.context)?;
+    let mut live = state.browser_internet.generation.lock().await;
+    let record =
+        load(&state.data_dir)?.ok_or_else(|| anyhow::anyhow!("Browser internet access is off"))?;
+    let stored_id = match &record {
+        Consent::Granted { token_id, .. } | Consent::Revoked { token_id, .. } => token_id,
+        _ => anyhow::bail!("Browser internet access is off"),
+    };
+    anyhow::ensure!(
+        expected_id.is_none_or(|id| id == stored_id),
+        "Browser internet grant has changed"
+    );
     let token_id = match &record {
         Consent::Granted { token_id, .. } => {
             consume_passkey_step_up_token(
                 &state.data_dir,
-                input.step_up_token.as_deref().unwrap_or_default(),
-                &launch,
+                step_up_token.unwrap_or_default(),
+                launch,
                 180,
                 REVOKE_OPERATION,
                 &revoke_request(&record)?,

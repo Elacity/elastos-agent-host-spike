@@ -35,7 +35,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Security
 
-- Browser opens websites only after you allow internet access with your passkey in Inbox. Turn it off in System, Security.
+- Browser opens websites only after you allow internet access with your passkey in Inbox, where you can also turn it off.
 - Known issue: Home itself shows the approval, not a separate ElastOS screen, so read the request before you confirm with your passkey (#178).
 - Known issue: after Undo to 2.0.0, Browser goes online again without asking (#559).
 - Community room access ends when your sign-in ends.
@@ -71,7 +71,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Security
 
-- Browser opens websites only after you allow internet access with your passkey in Inbox. Turn it off in System, Security.
+- Browser opens websites only after you allow internet access with your passkey in Inbox, where you can also turn it off.
 - Known issue: Home itself shows the approval, not a separate ElastOS screen, so read the request before you confirm with your passkey (#178).
 - Known issue: after Undo to 2.0.0, Browser goes online again without asking (#559).
 - Community room access ends when your sign-in ends.

@@ -501,10 +501,47 @@
       return card;
     }
 
+    function confirmBrowserInternetOff() {
+      const dialog = document.querySelector("#browser-internet-confirm");
+      return new Promise(resolve => {
+        dialog.addEventListener("close", () => resolve(dialog.returnValue === "off"), {once:true});
+        dialog.showModal();dialog.querySelector('[value="cancel"]').focus();
+      });
+    }
+
+    async function allowBrowserInternet(actionId) {
+      setButtonsDisabled(true);
+      try {
+        const current = actionId ? await api("/api/apps/browser/internet")
+          : await api("/api/apps/browser/internet", {method:"POST",body:JSON.stringify({action:"request"})});
+        const expected = "browser-internet-allow:" + current.request?.request_id;
+        if (current.status !== "requested" || (actionId && actionId !== expected)) {
+          throw new Error("This request has changed. Refresh Inbox and review the current request.");
+        }
+        const stepUpToken = await requestPasskeyStepUp("browser.internet.grant", current.request);
+        await inboxAction(expected, {step_up_token:stepUpToken});
+        setStatus("Browser can open websites.");await loadInbox();notifyHome();
+        window.top.postMessage({type:"home:focus-browser",homeToken:state.homeToken},homeParentOrigin);
+      } finally {setButtonsDisabled(false);}
+    }
+
     function fillEntryActions(actions, entry) {
       const actionId = entry.action_ref && entry.action_ref.action_id;
       if (entry.kind === "browser_internet_decision") {
-        actions.appendChild(createButton("Manage in Settings", () => openSource("system", {settings:"security"})));
+        if (actionId?.startsWith("browser-internet-turn-off:")) {
+          actions.appendChild(createButton("Turn Off", async () => {
+            if (!await confirmBrowserInternetOff()) return;
+            setButtonsDisabled(true);
+            try {
+              const current = await api("/api/apps/browser/internet");
+              const stepUpToken = current.stop_pending ? undefined : await requestPasskeyStepUp("browser.internet.revoke", current.request);
+              await inboxAction(actionId, {step_up_token:stepUpToken});
+              await loadInbox();notifyHome();
+            } finally { setButtonsDisabled(false); }
+          }, "danger"));
+        } else if (actionId === "browser-internet-request") {
+          actions.appendChild(createButton("Allow", () => allowBrowserInternet(), "primary"));
+        }
         return;
       }
       // A request Inbox decides itself has no other app to open.
@@ -517,20 +554,7 @@
 
       if (typeof actionId === "string" && actionId.startsWith("browser-internet-allow:")) {
         actions.appendChild(createActionButton("Don't Allow", actionId.replace("browser-internet-allow:", "browser-internet-deny:")));
-        actions.appendChild(createButton("Allow", async () => {
-          setButtonsDisabled(true);
-          try {
-            const current = await api("/api/apps/browser/internet");
-            if (current.status !== "requested" || actionId !== "browser-internet-allow:" + current.request?.request_id) {
-              throw new Error("This request has changed. Refresh Inbox and review the current request.");
-            }
-            const stepUpToken = await requestPasskeyStepUp("browser.internet.grant", current.request);
-            await inboxAction(actionId, { step_up_token: stepUpToken });
-            setStatus("Browser can use the internet.");
-            await loadInbox();
-            notifyHome();
-          } finally { setButtonsDisabled(false); }
-        }, "primary"));
+        actions.appendChild(createButton("Allow", () => allowBrowserInternet(actionId), "primary"));
       } else if (typeof actionId === "string" && actionId.startsWith("room-approve-request:")) {
         actions.appendChild(createActionButton("Approve", actionId, "primary"));
         actions.appendChild(createActionButton("Deny", "room-deny-request:" + actionId.slice("room-approve-request:".length), "danger"));
