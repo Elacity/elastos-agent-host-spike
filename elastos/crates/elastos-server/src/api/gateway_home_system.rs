@@ -7154,40 +7154,7 @@ fn warn_damaged_home_state(path: &std::path::Path, err: &anyhow::Error) {
     );
 }
 
-/// Saves a Home state file, refusing to replace one that is damaged: the
-/// refusal is the damage notice, which names the file and the action, and
-/// the file stays as it is until the person moves it out.
-fn write_home_state_object(
-    data_dir: &std::path::Path,
-    principal_id: &str,
-    localhost_root: &str,
-    object_uri: &str,
-    path: &std::path::Path,
-    bytes: &[u8],
-) -> anyhow::Result<()> {
-    if path.is_file() {
-        if let Err(err) = crate::auth::read_principal_root_object(
-            data_dir,
-            principal_id,
-            localhost_root,
-            object_uri,
-            path,
-        ) {
-            if is_damaged_home_state(&err) {
-                return Err(err);
-            }
-        }
-    }
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        localhost_root,
-        object_uri,
-        path,
-        bytes,
-    )
-}
-
+/// Saves Home state and keeps the damaged-file refusal on the verified root.
 fn write_home_state_object_resolved(
     data_dir: &std::path::Path,
     resolved: &crate::auth::ResolvedPrincipalRoot,
@@ -8283,10 +8250,9 @@ fn home_appearance_preferences(
         }
         Err(err) => return Err(err.into()),
     }
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_APPEARANCE_PREFERENCES_FILE),
         &path,
     ) {
@@ -8406,10 +8372,9 @@ fn home_save_appearance_preferences(
         if let Some(parent) = path.parent() {
             crate::auth::create_owner_only_dir_all(data_dir, parent)?;
         }
-        write_home_state_object(
+        write_home_state_object_resolved(
             data_dir,
-            &home_browser_principal_id(context),
-            &home_browser_localhost_root(context),
+            context.root(),
             &home_appearance_object_uri(context, HOME_APPEARANCE_PREFERENCES_FILE),
             &path,
             &bytes,
@@ -8501,10 +8466,9 @@ fn home_background_overlay_settings(
     if !path.is_file() {
         return Ok(defaults);
     }
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_BACKGROUND_OVERLAY_FILE),
         &path,
     ) {
@@ -8542,10 +8506,9 @@ fn home_save_background_overlay(
         "enabled": enabled,
         "opacity": home_clamp_background_overlay_opacity(opacity),
     });
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_BACKGROUND_OVERLAY_FILE),
         &path,
         &serde_json::to_vec_pretty(&payload)?,
@@ -8564,10 +8527,9 @@ fn home_save_background_image(
         crate::auth::create_owner_only_dir_all(data_dir, parent)?;
     }
     remove_home_background_images(data_dir, context)?;
-    crate::auth::write_principal_root_object(
+    crate::auth::write_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, file_name),
         &path,
         &bytes,
@@ -8594,10 +8556,9 @@ fn remove_home_background_images(
     for &(file_name, _content_type) in HOME_BACKGROUND_IMAGE_FILES {
         let path = home_appearance_path(data_dir, context, file_name)?;
         if path.is_file() {
-            if let Err(err) = crate::auth::read_principal_root_object(
+            if let Err(err) = crate::auth::read_principal_root_object_resolved(
                 data_dir,
-                &home_browser_principal_id(context),
-                &home_browser_localhost_root(context),
+                context.root(),
                 &home_appearance_object_uri(context, file_name),
                 &path,
             ) {
@@ -8779,10 +8740,9 @@ pub(super) async fn home_background_image(
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(err) => return home_error_response(err),
     };
-    match crate::auth::read_principal_root_object(
+    match crate::auth::read_principal_root_object_resolved(
         &state.data_dir,
-        &home_browser_principal_id(&context),
-        &home_browser_localhost_root(&context),
+        context.root(),
         &entry.object_uri,
         &entry.path,
     ) {
@@ -9628,6 +9588,84 @@ mod stored_root_tests {
             hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
         );
         let child_uri = format!("{child_root}/.AppData/ElastOS/Home/services-peer-contacts.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_appearance_preferences_stay_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        home_save_appearance_preferences(
+            &data_dir,
+            &context,
+            HomeAppearancePreferencesUpdate {
+                theme: Some("light".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            home_appearance_preferences(&data_dir, &context)
+                .unwrap()
+                .theme,
+            "light"
+        );
+        assert!(
+            home_appearance_path(&data_dir, &context, HOME_APPEARANCE_PREFERENCES_FILE)
+                .unwrap()
+                .is_file()
+        );
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/Appearance/preferences.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_background_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        home_save_background_overlay(&data_dir, &context, true, 0.4).unwrap();
+        assert_eq!(
+            home_background_overlay_settings(&data_dir, &context).unwrap(),
+            (true, 0.4)
+        );
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"parent image".to_vec(),
+        )
+        .unwrap();
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        let bytes = crate::auth::read_principal_root_object_resolved(
+            &data_dir,
+            context.root(),
+            &entry.object_uri,
+            &entry.path,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"parent image");
+        remove_home_background_images(&data_dir, &context).unwrap();
+        assert!(!entry.path.exists());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri =
+            format!("{child_root}/.AppData/ElastOS/Home/Appearance/background-overlay.json");
         let child_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
         assert!(!child_path.exists());
