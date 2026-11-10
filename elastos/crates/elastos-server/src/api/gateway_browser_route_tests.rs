@@ -10752,6 +10752,186 @@ async fn internet_stop(app: &Router, dir: &std::path::Path, system: &str) {
     assert_eq!(result["status"], "revoked");
 }
 
+async fn internet_home_launch_token(app: &Router, home: &str, target: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header("x-elastos-home-token", home)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"target": target}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "Home launch failed");
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    let launch: Value = serde_json::from_slice(&bytes).unwrap();
+    let route = url::Url::parse(&format!(
+        "http://localhost:61180{}",
+        launch["route"].as_str().unwrap()
+    ))
+    .unwrap();
+    form_urlencoded::parse(route.fragment().unwrap().as_bytes())
+        .find(|(key, _)| key == "home_token")
+        .unwrap()
+        .1
+        .into_owned()
+}
+
+#[tokio::test]
+async fn browser_internet_end_accepts_only_its_home_launched_browser_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let home = app_token_for_authority(dir.path(), HOME_CAPSULE_ID, &owner);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let state = internet_test_state(dir.path());
+    // These launch fixtures use web projections so home_launch needs no Runtime process.
+    for target in [BROWSER_CAPSULE_ID, SYSTEM_CAPSULE_ID, "assistant"] {
+        let path = dir
+            .path()
+            .join("capsules")
+            .join(target)
+            .join("capsule.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["type"] = json!("web-projection");
+        manifest["runtime_abi"] = json!("elastos.runtime-projection/v1");
+        manifest["bus_contract"] = json!("elastos.runtime-projection/v1");
+        manifest["execution"] = json!("web-projection");
+        manifest["projections"] = json!(["web"]);
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+    let app = gateway_router(state.clone());
+    let browser = internet_home_launch_token(&app, &home, BROWSER_CAPSULE_ID).await;
+    let second = internet_home_launch_token(&app, &home, BROWSER_CAPSULE_ID).await;
+    let system = internet_home_launch_token(&app, &home, SYSTEM_CAPSULE_ID).await;
+    let direct_system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &owner);
+    let assistant = internet_home_launch_token(&app, &home, "assistant").await;
+    let launch =
+        require_carried_home_launch_token(dir.path(), &browser, &[BROWSER_CAPSULE_ID]).unwrap();
+    assert_eq!(launch.launch_context.authority_actor, HOME_CAPSULE_ID);
+    assert_eq!(launch.launch_context.executable_actor, BROWSER_CAPSULE_ID);
+    assert_eq!(launch.launch_context.selected_resource, BROWSER_CAPSULE_ID);
+    internet_allow(&app, dir.path(), &browser, &inbox).await;
+    let first_authority =
+        runtime_wallet_authority_for_app_token(dir.path(), BROWSER_CAPSULE_ID, &browser);
+    let second_authority =
+        runtime_wallet_authority_for_app_token(dir.path(), BROWSER_CAPSULE_ID, &second);
+    assert_ne!(
+        first_authority.verified_context().launch_id(),
+        second_authority.verified_context().launch_id()
+    );
+    let first_effect =
+        gateway_browser_internet::effect_for_authority(&state, &first_authority, false)
+            .await
+            .unwrap();
+    let second_effect =
+        gateway_browser_internet::effect_for_authority(&state, &second_authority, false)
+            .await
+            .unwrap();
+    let consent = std::fs::read(dir.path().join("browser-internet.json")).unwrap();
+
+    // Age the real Home projection using this isolated fixture's signing key.
+    let codec = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut envelope: Value = serde_json::from_slice(&codec.decode(&browser).unwrap()).unwrap();
+    let now = now_ts();
+    envelope["payload"]["iat"] = json!(now - HOME_LAUNCH_TOKEN_TTL_SECS - 1);
+    envelope["payload"]["exp"] = json!(now - 1);
+    let (key, _) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let (signature, signer) = crate::crypto::domain_separated_sign(
+        &key,
+        HOME_LAUNCH_TOKEN_DOMAIN,
+        serde_json::to_string(&envelope["payload"])
+            .unwrap()
+            .as_bytes(),
+    );
+    envelope["signature"] = json!(signature);
+    envelope["signer_did"] = json!(signer);
+    let expired = codec.encode(serde_json::to_vec(&envelope).unwrap());
+    assert_eq!(
+        require_carried_home_launch_token(dir.path(), &expired, &[BROWSER_CAPSULE_ID])
+            .unwrap_err()
+            .to_string(),
+        "home launch token expired"
+    );
+    let foreign_dir = tempfile::tempdir().unwrap();
+    let foreign = app_token_for_authority(
+        foreign_dir.path(),
+        BROWSER_CAPSULE_ID,
+        &passkey_authority(foreign_dir.path()),
+    );
+    for (case, token) in [
+        ("System", &system),
+        ("direct System", &direct_system),
+        ("Home", &home),
+        ("Assistant", &assistant),
+        ("expired", &expired),
+        ("foreign Home", &foreign),
+    ] {
+        let (status, _) = internet_route(
+            &app,
+            token,
+            "/api/apps/browser/internet",
+            Some(json!({"action":"end"})),
+        )
+        .await;
+        assert!(status.is_client_error(), "{case} end accepted");
+        assert!(
+            first_effect.fence.enter().await.is_ok(),
+            "{case} ended Browser"
+        );
+        assert!(
+            second_effect.fence.enter().await.is_ok(),
+            "{case} ended another Browser"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("browser-internet.json")).unwrap(),
+            consent
+        );
+    }
+    for _ in 0..2 {
+        let (status, result) = internet_route(
+            &app,
+            &browser,
+            "/api/apps/browser/internet",
+            Some(json!({"action":"end"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["status"], "ended");
+    }
+    assert!(*first_effect.cancelled.borrow());
+    assert!(first_effect.fence.enter().await.is_err());
+    assert!(
+        gateway_browser_internet::effect_for_authority(&state, &first_authority, false)
+            .await
+            .is_err()
+    );
+    assert!(!*second_effect.cancelled.borrow());
+    assert!(second_effect.fence.enter().await.is_ok());
+    assert!(
+        gateway_browser_internet::effect_for_authority(&state, &second_authority, false)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("browser-internet.json")).unwrap(),
+        consent
+    );
+    let (status, summary) = internet_route(&app, &system, "/api/apps/browser/internet", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary["status"], "granted");
+    internet_stop(&app, dir.path(), &system).await;
+    assert!(
+        *second_effect.cancelled.borrow(),
+        "System projection stops the remaining launch"
+    );
+}
+
 #[tokio::test]
 async fn browser_internet_allow_is_bound_to_current_request_and_consent_has_no_token() {
     let dir = tempfile::tempdir().unwrap();

@@ -666,8 +666,10 @@ async fn action_inner(
         &[BROWSER_CAPSULE_ID, SYSTEM_CAPSULE_ID],
     )?;
     if input.action == "end" {
+        // The executable actor identifies the frame, including when Home owns
+        // the projection's authority. End only the validated token's launch.
         anyhow::ensure!(
-            launch.launch_context.authority_actor == BROWSER_CAPSULE_ID,
+            launch.launch_context.executable_actor == BROWSER_CAPSULE_ID,
             "Browser launch required"
         );
         end_instance(state, &launch.launch_id).await?;
