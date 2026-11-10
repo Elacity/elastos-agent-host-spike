@@ -3476,7 +3476,7 @@ mod tests {
             repair_invalid_version,
             rollback,
             Vec::new(),
-            probe_deadline,
+            Some(probe_deadline),
         )
         .await
     }
@@ -3493,7 +3493,7 @@ mod tests {
         repair_invalid_version: bool,
         rollback: bool,
         support: Vec<(String, Vec<u8>)>,
-        probe_deadline: std::time::Duration,
+        probe_deadline: Option<std::time::Duration>,
     ) -> anyhow::Result<()> {
         use sha2::Digest;
 
@@ -3534,21 +3534,40 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
             Box::pin(async move { bytes })
         });
-        run_update_for_data_dir_with_mode_with_deadline(
-            data_dir,
-            &fetch,
-            None,
-            false,
-            Some(head_cid),
-            "0.6.0",
-            true,
-            rollback,
-            repair_invalid_version,
-            crate::setup::FirstPartyCarrierContext::Setup,
-            mode,
-            probe_deadline,
-        )
-        .await
+        // `None` drives the production entry, which fixes the shipped deadline
+        // itself; `Some` uses the deadline-taking test sibling.
+        if let Some(deadline) = probe_deadline {
+            run_update_for_data_dir_with_mode_with_deadline(
+                data_dir,
+                &fetch,
+                None,
+                false,
+                Some(head_cid),
+                "0.6.0",
+                true,
+                rollback,
+                repair_invalid_version,
+                crate::setup::FirstPartyCarrierContext::Setup,
+                mode,
+                deadline,
+            )
+            .await
+        } else {
+            run_update_for_data_dir_with_mode(
+                data_dir,
+                &fetch,
+                None,
+                false,
+                Some(head_cid),
+                "0.6.0",
+                true,
+                rollback,
+                repair_invalid_version,
+                crate::setup::FirstPartyCarrierContext::Setup,
+                mode,
+            )
+            .await
+        }
     }
 
     #[cfg(unix)]
@@ -3677,7 +3696,7 @@ mod tests {
             false,
             false,
             vec![(b_cid, b.clone())],
-            VERSION_CHECK_TIMEOUT,
+            Some(VERSION_CHECK_TIMEOUT),
         )
         .await
         .unwrap();
@@ -3694,7 +3713,7 @@ mod tests {
             false,
             true,
             vec![(a_cid, a.clone())],
-            VERSION_CHECK_TIMEOUT,
+            Some(VERSION_CHECK_TIMEOUT),
         )
         .await
         .unwrap();
@@ -3711,7 +3730,7 @@ mod tests {
             false,
             true,
             Vec::new(),
-            VERSION_CHECK_TIMEOUT,
+            Some(VERSION_CHECK_TIMEOUT),
         )
         .await
         .unwrap();
@@ -3741,7 +3760,7 @@ mod tests {
             false,
             false,
             Vec::new(),
-            VERSION_CHECK_TIMEOUT,
+            Some(VERSION_CHECK_TIMEOUT),
         )
         .await
         .unwrap_err();
@@ -3762,7 +3781,7 @@ mod tests {
             false,
             false,
             vec![(cid, bytes.clone())],
-            VERSION_CHECK_TIMEOUT,
+            Some(VERSION_CHECK_TIMEOUT),
         )
         .await
         .unwrap();
@@ -3848,7 +3867,7 @@ mod tests {
                 false,
                 false,
                 vec![(catalogue_cid.clone(), catalogue.clone())],
-                VERSION_CHECK_TIMEOUT,
+                Some(VERSION_CHECK_TIMEOUT),
             )
             .await
             .unwrap();
