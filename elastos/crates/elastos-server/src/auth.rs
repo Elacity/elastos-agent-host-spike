@@ -1808,8 +1808,7 @@ pub(crate) fn complete_owner_recovery(
     }
     let binding = owner_recovery_binding(client)?;
     verify_recovery_kit_material(kit)?;
-    if kit.localhost_root
-        != principal_kind_localhost_root(&kit.principal_id, PrincipalKind::Human)
+    if kit.localhost_root != principal_kind_localhost_root(&kit.principal_id, PrincipalKind::Human)
     {
         anyhow::bail!("recovery kit root does not match its principal");
     }
@@ -1826,13 +1825,9 @@ pub(crate) fn complete_owner_recovery(
             })
             .cloned()
             .collect::<Vec<_>>();
-        if !replaced
-            .iter()
-            .any(|principal| {
-                principal.kind == PrincipalKind::Human
-                    && principal.role == RuntimePrincipalRole::Admin
-            })
-        {
+        if !replaced.iter().any(|principal| {
+            principal.kind == PrincipalKind::Human && principal.role == RuntimePrincipalRole::Admin
+        }) {
             anyhow::bail!("recovery kit does not match an admin of this Home");
         }
         if !state.principal_root_protections.iter().any(|stored| {
@@ -4288,7 +4283,10 @@ fn grant_passkey_session_in_state(
                 let principal_id =
                     passkey_credential_principal_id(&credential.rp_id, &credential.credential_id)?;
                 let principal = PrincipalRecord {
-                    localhost_root: principal_kind_localhost_root(&principal_id, PrincipalKind::Human),
+                    localhost_root: principal_kind_localhost_root(
+                        &principal_id,
+                        PrincipalKind::Human,
+                    ),
                     principal_id,
                     proof_binding_id: binding.id(),
                     proof_binding: binding,
@@ -7600,7 +7598,9 @@ impl ResolvedPrincipalRoot {
         principal_id: &str,
     ) -> anyhow::Result<Self> {
         let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
-        if let Some(did) = device.filter(|did| PrincipalId::device_did(did).as_str() == principal_id) {
+        if let Some(did) =
+            device.filter(|did| PrincipalId::device_did(did).as_str() == principal_id)
+        {
             // Today's device root: the one Users rule, applied to `device:<did>`.
             return Ok(Self(RootArm::Local(verified_device_localhost_root(&did))));
         }
@@ -7784,12 +7784,7 @@ fn validate_principal_root_object_binding_in_state(
         }
     }
     let kind = stored_principal_kind(data_dir, principal_id)?;
-    validate_principal_root_object_binding_for_kind(
-        principal_id,
-        localhost_root,
-        object_uri,
-        kind,
-    )
+    validate_principal_root_object_binding_for_kind(principal_id, localhost_root, object_uri, kind)
 }
 
 fn validate_principal_root_object_path(
@@ -12601,7 +12596,10 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("recovery kit requires a human root"), "{error}");
+        assert!(
+            error.contains("recovery kit requires a human root"),
+            "{error}"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
@@ -16988,6 +16986,55 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string()
             .contains("has no stored record"));
+    }
+
+    #[test]
+    fn r8_resolve_uses_stored_human_and_agent_roots() {
+        let (runtime_dir, auth_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let id = "person:local:human-binding-check";
+        let binding =
+            ProofBinding::evm_account(20, "0x4444444444444444444444444444444444444444", now_ts());
+        let human =
+            upsert_principal_for_binding_as(auth_dir.path(), binding, id.to_string(), now_ts())
+                .unwrap();
+        assert_eq!(
+            human.localhost_root,
+            "localhost://Users/d81978bb3081a4adbfa39b2a"
+        );
+        let resolved =
+            ResolvedPrincipalRoot::resolve(runtime_dir.path(), auth_dir.path(), id).unwrap();
+        assert_eq!(
+            resolved.localhost_root(),
+            "localhost://Users/d81978bb3081a4adbfa39b2a"
+        );
+
+        mutate_auth_state(auth_dir.path(), |state| {
+            let stored = state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == id)
+                .unwrap();
+            stored.kind = PrincipalKind::Agent;
+            stored.localhost_root = "localhost://UsersAI/d81978bb3081a4adbfa39b2a".into();
+            Ok(())
+        })
+        .unwrap();
+        let resolved =
+            ResolvedPrincipalRoot::resolve(runtime_dir.path(), auth_dir.path(), id).unwrap();
+        assert_eq!(
+            resolved.localhost_root(),
+            "localhost://UsersAI/d81978bb3081a4adbfa39b2a"
+        );
+
+        mutate_auth_state(auth_dir.path(), |state| {
+            state.principals.retain(|record| record.principal_id != id);
+            Ok(())
+        })
+        .unwrap();
+        let error = ResolvedPrincipalRoot::resolve(runtime_dir.path(), auth_dir.path(), id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("has no stored record"), "{error}");
     }
 
     #[test]
