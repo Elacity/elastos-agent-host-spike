@@ -9354,6 +9354,27 @@ mod stored_root_tests {
         (temp, data_dir)
     }
 
+    fn assert_only_file_named(data_dir: &std::path::Path, expected: &std::path::Path) {
+        fn collect(dir: &std::path::Path, name: &std::ffi::OsStr, found: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    collect(&entry.path(), name, found);
+                } else if kind.is_file() && entry.file_name() == name {
+                    found.push(entry.path());
+                }
+            }
+        }
+        let mut found = Vec::new();
+        collect(data_dir, expected.file_name().unwrap(), &mut found);
+        assert_eq!(
+            found,
+            vec![expected.to_path_buf()],
+            "state file must stay only under the verified root"
+        );
+    }
+
     fn verified_parent_device_context(
         data_dir: &std::path::Path,
         app: &str,
@@ -9392,6 +9413,7 @@ mod stored_root_tests {
         assert!(read.local_offer_ids.contains("parent-offer"));
         let parent_path = home_services_selection_state_path(&data_dir, &context).unwrap();
         assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
         let child_root = format!(
             "localhost://Users/{}",
             hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
@@ -9431,9 +9453,9 @@ mod stored_root_tests {
                 .active,
             HOME_GUI_SHELL_ID
         );
-        assert!(home_active_shell_state_path(&data_dir, &context)
-            .unwrap()
-            .is_file());
+        let parent_path = home_active_shell_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
         let child_root = format!(
             "localhost://Users/{}",
             hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
@@ -9501,9 +9523,9 @@ mod stored_root_tests {
             .unwrap()
             .local_offer_ids
             .contains("parent-person-offer"));
-        assert!(home_services_selection_state_path(&data_dir, &context)
-            .unwrap()
-            .is_file());
+        let parent_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
         let formula_root = crate::auth::principal_localhost_root(&record.principal_id);
         let formula_uri = format!("{formula_root}/.AppData/ElastOS/Home/services-state.json");
         let formula_path =
@@ -9531,9 +9553,9 @@ mod stored_root_tests {
             home_browser_state(&data_dir, &context).unwrap().layout,
             Some(serde_json::json!({"columns": 3}))
         );
-        assert!(home_browser_state_path(&data_dir, &context)
-            .unwrap()
-            .is_file());
+        let parent_path = home_browser_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
         let child_root = format!(
             "localhost://Users/{}",
             hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
@@ -9572,6 +9594,7 @@ mod stored_root_tests {
         migrate_legacy_services_peer_contacts(&data_dir, &context).unwrap();
         let new_uri = home_services_peer_contacts_uri(&context);
         let new_path = home_services_peer_contacts_path(&data_dir, &context).unwrap();
+        assert_only_file_named(&data_dir, &new_path);
         let bytes = crate::auth::read_principal_root_object_resolved(
             &data_dir,
             context.root(),
@@ -9614,11 +9637,10 @@ mod stored_root_tests {
                 .theme,
             "light"
         );
-        assert!(
-            home_appearance_path(&data_dir, &context, HOME_APPEARANCE_PREFERENCES_FILE)
-                .unwrap()
-                .is_file()
-        );
+        let parent_path =
+            home_appearance_path(&data_dir, &context, HOME_APPEARANCE_PREFERENCES_FILE).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
         let child_root = format!(
             "localhost://Users/{}",
             hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
@@ -9640,6 +9662,9 @@ mod stored_root_tests {
             home_background_overlay_settings(&data_dir, &context).unwrap(),
             (true, 0.4)
         );
+        let overlay_path =
+            home_appearance_path(&data_dir, &context, HOME_BACKGROUND_OVERLAY_FILE).unwrap();
+        assert_only_file_named(&data_dir, &overlay_path);
         home_save_background_image(
             &data_dir,
             &context,
@@ -9650,6 +9675,7 @@ mod stored_root_tests {
         let entry = home_background_image_entry(&data_dir, &context)
             .unwrap()
             .unwrap();
+        assert_only_file_named(&data_dir, &entry.path);
         let bytes = crate::auth::read_principal_root_object_resolved(
             &data_dir,
             context.root(),
