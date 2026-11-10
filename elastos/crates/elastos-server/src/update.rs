@@ -5057,20 +5057,25 @@ mod tests {
 
     /// Waits for the candidate shell to publish its grandchild PID. A starved
     /// machine may not have run the script before the probe returned. The wait
-    /// is async so a test can run it beside the probe future.
+    /// is async so a test can run it beside the probe future; it returns its
+    /// failure so the probe can finish its clean-up before any assertion.
     #[cfg(unix)]
-    async fn recorded_pid(path: &std::path::Path, limit: std::time::Duration) -> i32 {
+    async fn recorded_pid(
+        path: &std::path::Path,
+        limit: std::time::Duration,
+    ) -> std::result::Result<i32, String> {
         let until = tokio::time::Instant::now() + limit;
         loop {
             if let Ok(text) = tokio::fs::read_to_string(path).await {
                 if let Ok(pid) = text.trim().parse() {
-                    return pid;
+                    return Ok(pid);
                 }
             }
-            assert!(
-                tokio::time::Instant::now() < until,
-                "candidate did not record its child PID within {limit:?}"
-            );
+            if tokio::time::Instant::now() >= until {
+                return Err(format!(
+                    "candidate did not record its child PID within {limit:?}"
+                ));
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
@@ -5166,13 +5171,13 @@ mod tests {
             "0.1.0",
             LEAKY_PROBE_DEADLINE,
         ));
-        let pid = tokio::select! {
-            pid = recorded_pid(&pid_path, PID_RECORD_BUDGET) => pid,
-            result = probe.as_mut() => panic!(
-                "probe returned before the candidate recorded its PID within {PID_RECORD_BUDGET:?}: {result:?}"
-            ),
-        };
-        let error = probe.await.unwrap_err();
+        // Run both to completion, so the probe's group clean-up finishes before
+        // any assertion. A panic inside the old select! could drop the pending
+        // probe while its PID was ready, or drop it from the PID failure.
+        let (pid, result) =
+            tokio::join!(recorded_pid(&pid_path, PID_RECORD_BUDGET), probe.as_mut(),);
+        let error = result.unwrap_err();
+        let pid = pid.unwrap_or_else(|missing| panic!("{missing}: probe returned {error:?}"));
         assert!(
             error.to_string().contains("timed out after 30 seconds"),
             "{error:#}"
