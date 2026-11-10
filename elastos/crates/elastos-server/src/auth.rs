@@ -1831,6 +1831,14 @@ pub(crate) fn complete_owner_recovery(
         }) {
             anyhow::bail!("recovery kit does not match an admin of this Home");
         }
+        // Kind Agent never changes: owner recovery removes the records it
+        // replaces, and an Agent record is never one of them.
+        if replaced
+            .iter()
+            .any(|principal| principal.kind == PrincipalKind::Agent)
+        {
+            anyhow::bail!("recovery cannot replace an agent principal");
+        }
         if !state.principal_root_protections.iter().any(|stored| {
             stored.principal_id == kit.principal_id
                 && stored.localhost_root == kit.localhost_root
@@ -3175,6 +3183,7 @@ mod owner_recovery_tests {
             "guest-kit",
             "other-home-kit",
             "agent-admin",
+            "agent-shares-kit-id",
         ] {
             let mut home = home();
             let code = arm(&home);
@@ -3219,6 +3228,24 @@ mod owner_recovery_tests {
                     Ok(())
                 })
                 .unwrap(),
+                // An Agent record that holds the Kit's principal id would be
+                // removed with the admin it sits beside.
+                "agent-shares-kit-id" => mutate_auth_state(home.root.path(), |state| {
+                    let mut agent = home.admin.clone();
+                    agent.kind = PrincipalKind::Agent;
+                    agent.role = RuntimePrincipalRole::Guest;
+                    agent.proof_binding_id = "agent-admission:v1:shares-kit-id".into();
+                    agent.proof_binding = ProofBinding {
+                        kind: ProofBindingKind::AgentAdmission,
+                        subject: "shares-kit-id".into(),
+                        chain_id: None,
+                        verified_at: 5,
+                        passkey: None,
+                    };
+                    state.principals.push(agent);
+                    Ok(())
+                })
+                .unwrap(),
                 _ => unreachable!(),
             }
             let before = auth_bytes(&home);
@@ -3237,6 +3264,14 @@ mod owner_recovery_tests {
                 assert!(
                     error.to_string().contains("does not match an admin"),
                     "{error}"
+                );
+            }
+            if case == "agent-shares-kit-id" {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("recovery cannot replace an agent principal"),
+                    "{case}: {error}"
                 );
             }
 
