@@ -194,27 +194,53 @@ try {
   const frame = page.frames().find(candidate => candidate.url().includes("/apps/assistant/"));
 
   const input = room.locator("#agent-composer-input");
-  // Polls until the newest block is at the end and fully above the composer,
-  // for up to 5 s; then asserts on the last measurement.
-  const expectNewestAboveComposer = async (selector, label) => {
-    const deadline = Date.now() + 5000;
+  // Waits for a page condition. A deadline failure names the condition and
+  // the state that was still missing, so a loaded machine reports what never
+  // held instead of a bare timeout.
+  const waitForCondition = async (label, fn, arg = null, timeout = 20000) => {
+    try {
+      await frame.waitForFunction(fn, arg, { timeout, polling: 50 });
+    } catch {
+      const seen = await frame.evaluate(fn, arg).catch(() => "the page threw");
+      assert.fail(`${label}, within ${timeout} ms: ${JSON.stringify(seen)}`);
+    }
+  };
+  // Polls until the newest block is at the end and fully above the composer;
+  // then asserts on the last measurement. A finished reply reaches this state
+  // through the page's own deferred render, so the bound has to cover that
+  // work as well as the scroll that follows it.
+  const expectNewestAboveComposer = async (selector, label, timeout = 15000) => {
+    const deadline = Date.now() + timeout;
     let seen = await frame.evaluate(newestClearance, selector);
     while (!(seen.newest && seen.atEnd && seen.abovePx >= 0) && Date.now() < deadline) {
       await page.waitForTimeout(50);
       seen = await frame.evaluate(newestClearance, selector);
     }
-    assert.ok(seen.newest && seen.atEnd, `${label} is the newest block, at the end: ${JSON.stringify(seen)}`);
-    assert.ok(seen.abovePx >= 0, `${label} sits fully above the composer: ${JSON.stringify(seen)}`);
+    assert.ok(seen.newest && seen.atEnd,
+      `${label} is the newest block, at the end, within ${timeout} ms: ${JSON.stringify(seen)}`);
+    assert.ok(seen.abovePx >= 0,
+      `${label} sits fully above the composer, within ${timeout} ms: ${JSON.stringify(seen)}`);
     return seen.abovePx;
   };
   // A long follow-up being typed grows the composer upwards; wait for the
   // growth so the next measurement cannot pass on the old composer.
   const composerHeight = () => frame.evaluate(() => document.querySelector(".taskbar.is-agent-face").getBoundingClientRect().height);
+  const composerRestHeight = await composerHeight();
   const typeLongFollowUp = async () => {
     const before = await composerHeight();
     await input.fill(Array.from({ length: 6 }, (_, i) => `Follow-up line ${i + 1}`).join("\n"));
     await frame.waitForFunction((height) =>
       document.querySelector(".taskbar.is-agent-face").getBoundingClientRect().height > height, before, { timeout: 5000 });
+  };
+  // Clearing it shrinks the composer back. The room's clearance and its end
+  // position move with that layout, so wait for the rest height before the
+  // next reply is measured; otherwise the clearance can settle after the
+  // reply's own end pin and leave the room short of the end.
+  const clearFollowUp = async () => {
+    await input.fill("");
+    await waitForCondition("the composer returns to its resting height",
+      (height) => document.querySelector(".taskbar.is-agent-face").getBoundingClientRect().height <= height + 1,
+      composerRestHeight, 5000);
   };
   const seen = {};
 
@@ -224,7 +250,7 @@ try {
   seen.status = await expectNewestAboveComposer(".agent-progress", "the status line");
   await typeLongFollowUp();
   seen.statusTyping = await expectNewestAboveComposer(".agent-progress", "the status line, while a follow-up is typed");
-  await input.fill("");
+  await clearFollowUp();
 
   stage = "streamed reply";
   fixture.events = [
@@ -233,11 +259,22 @@ try {
   ];
   await room.locator(".agent-msg-agent.is-streaming").waitFor({ state: "detached", timeout: 15000 });
   await room.locator(".agent-msg-agent").last().filter({ hasText: "Streamed step 25" }).waitFor({ timeout: 5000 });
+  // A finished reply gets its settled render after the stream closes, and
+  // that render changes the reply's height. The position below is the
+  // settled reply's, so wait for the phase, not for a fixed pause.
+  await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').last().waitFor({ timeout: 20000 });
   seen.reply = await expectNewestAboveComposer(".agent-msg-agent", "the newest reply");
   await typeLongFollowUp();
   seen.replyTyping = await expectNewestAboveComposer(".agent-msg-agent", "the newest reply, while a follow-up is typed");
 
   stage = "numbered list markers";
+  // Both replies paint their numbered list from Markdown: the saved one with
+  // the history render, the streamed one when it settles. Wait for both to
+  // exist; the counts and marker widths are asserted next.
+  await waitForCondition("the saved and the streamed reply each render a numbered list", () => {
+    const lists = [...document.querySelectorAll(".agent-msg-agent ol.agent-md-list")];
+    return lists.length >= 2 ? true : { lists: lists.length, items: lists.map(list => list.children.length) };
+  }, null, 15000);
   const markers = await frame.evaluate(markerReport, ".agent-msg-agent ol.agent-md-list");
   assert.deepEqual(markers.map(list => list.items), [12, 25], `saved and streamed lists render: ${JSON.stringify(markers)}`);
   for (const list of markers) {
@@ -250,7 +287,7 @@ try {
   // scrolling up. The room follows the reply while it streams and after it
   // settles into its history render.
   stage = "a sent message's long reply";
-  await input.fill("");
+  await clearFollowUp();
   await frame.evaluate(() => {
     const scroller = document.querySelector("#agent-harness-stream");
     window.__follow = { on: true, samples: [] };
@@ -267,15 +304,32 @@ try {
   await input.press("Enter");
   await room.locator(".agent-progress:not([hidden])").last().filter({ hasText: "Working out the best approach" })
     .waitFor({ timeout: 10000 });
-  // The model takes a few seconds to its first words (the status line has
-  // settled). Its first chunk lands with the reply row's own scroll to the
-  // end; the next scroll event then sees the end 200+ px away.
-  await page.waitForTimeout(3000);
+  // The room rests at the end with the status line showing, as it does before
+  // a hosted model's first words; the sampler above then sees the reply row
+  // appear and grow under a reader who never left the end. Ten consecutive
+  // frames is a settled room at any frame rate.
+  await frame.evaluate(() => {
+    window.__rest = { stable: 0, frames: 0 };
+    const step = () => {
+      if (!window.__rest || window.__rest.stable >= 10) return;
+      const scroller = document.querySelector("#agent-harness-stream");
+      const progress = document.querySelector(".agent-progress:not([hidden])");
+      const streaming = document.querySelector(".agent-msg-agent.is-streaming");
+      const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 8;
+      window.__rest.stable = progress && !streaming && atEnd ? window.__rest.stable + 1 : 0;
+      window.__rest.frames += 1;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+  await waitForCondition("the room rests at the end with the status line showing",
+    () => window.__rest.stable >= 10, null, 10000);
   const sent = fixture.runs.get("run-sent-1");
   assert.ok(sent, "the message started a run");
   const replyChunks = gardenReply.match(/[\s\S]{1,300}/g);
   for (const [index, text] of replyChunks.entries()) {
     sent.push({ sequence: index + 1, kind: "text_delta", data: { text } });
+    // Pacing: the reply must arrive over many frames, as a stream does.
     await page.waitForTimeout(10);
   }
   sent.push({ sequence: replyChunks.length + 1, kind: "completed", data: {} });
