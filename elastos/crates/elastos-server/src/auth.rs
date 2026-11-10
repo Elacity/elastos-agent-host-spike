@@ -11920,13 +11920,13 @@ const TEST_AGENT_ID: &str = "agent:v2:0123456789abcdef0123456789abcdef";
 
 #[cfg(test)]
 fn test_agent_record(agent_id: &str) -> PrincipalRecord {
-    let display_name = "Agent".to_string();
+    let display_name = "Agent";
     let binding = ProofBinding::agent_admission(agent_id, 5);
     PrincipalRecord {
         principal_id: agent_id.to_string(),
         proof_binding_id: binding.id(),
         proof_binding: binding,
-        display_name: display_name.clone(),
+        display_name: display_name.to_string(),
         initial_profile_display_name: None,
         role: RuntimePrincipalRole::Guest,
         localhost_root: principal_kind_localhost_root(agent_id, PrincipalKind::Agent),
