@@ -85,7 +85,7 @@ The container build is now the only reference, and the container recipe changed 
 | | Photo core | Documents core |
 |---|---|---|
 | Pinned container at `7332bacb`, 10 Nov 2026: two fresh native x86_64 runners each, the same bytes both times | [recorded-hashes.txt](repro/recorded-hashes.txt) | [recorded-hashes.txt](repro/recorded-hashes.txt) |
-| Native, this worktree (`/Users/sash/code/wt-lane-photo`), after task 012 | `31e9576a7b97dacf1dc1cdc219c6f9dd34888ff8be39abe12c1f54b9058cc691` | `9eef034ffba27f156f1922fef9dafb20483d1e1e1bcf30302bfc1ab161c67fc1` |
+| Native, the photo lane's own worktree, after task 012 | `31e9576a7b97dacf1dc1cdc219c6f9dd34888ff8be39abe12c1f54b9058cc691` | `9eef034ffba27f156f1922fef9dafb20483d1e1e1bcf30302bfc1ab161c67fc1` |
 | Native, the old checkout (`/home/user/...`) | `5a284f2f…a516` | `a479a911…066b` |
 
 The native hashes are the sha256 line that `scripts/build-component-capsule.sh <viewer>` prints for

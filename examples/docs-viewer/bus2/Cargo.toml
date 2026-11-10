@@ -1,6 +1,6 @@
 # The documents viewer on the DRAFT Bus v2, run by the Bus v2 proof's stub
 # host (examples/bus2-proof/host). Its own workspace, like the proof's: Rust
-# 1.95.0 (rust-toolchain.toml) for Wasmtime 48.0.7, outside the ElastOS
+# 1.95.0 (rust-toolchain.toml) for Wasmtime 48.0.8, outside the ElastOS
 # workspace, CI and release lists.
 [workspace]
 resolver = "2"

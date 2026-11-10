@@ -7,8 +7,8 @@ contain no downloaded artwork or personal data and use the repository's MIT
 licence. Each is 4 × 4 pixels: `01.png` is (220, 40, 40), `02.jpg` is
 (40, 180, 40), and `03.webp` is (40, 40, 220). PNG scanlines use filter 0,
 8-bit RGB, Python's zlib compression, and standard IHDR/IDAT/IEND chunks.
-The green PNG was encoded with `ffmpeg -frames:v 1 -q:v 2`; the blue PNG
-with `cwebp -lossless`. The stand-in sentence is embedded as PNG tEXt,
+The green JPEG was encoded from its PNG with `ffmpeg -frames:v 1 -q:v 2`; the
+blue WebP from its PNG with `cwebp -lossless`. The stand-in sentence is embedded as PNG tEXt,
 JPEG COM, and WebP XMP metadata. The temporary PNG inputs were removed.
 
 The source manifest pins the surface closure
