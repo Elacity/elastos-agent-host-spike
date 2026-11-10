@@ -18756,6 +18756,100 @@ pub(crate) mod tests {
         );
     }
 
+    fn refuse_duplicate_agent_records(
+        label: &str,
+        reason: &str,
+        edit: impl FnOnce(&mut Vec<PrincipalRecord>),
+    ) {
+        let data_dir = person_file_with_agent();
+        let before = auth_state_file_bytes(data_dir.path());
+        let error = mutate_auth_state(data_dir.path(), |state| {
+            edit(&mut state.principals);
+            Ok(())
+        })
+        .expect_err(label);
+        assert!(error.to_string().contains(reason), "{label}: {error}");
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{label}");
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_duplicate_binding_id() {
+        refuse_duplicate_agent_records(
+            "duplicate binding id was refused",
+            "duplicate proof binding id",
+            |principals| {
+                let original = principals
+                    .iter()
+                    .find(|record| record.principal_id == TEST_AGENT_ID)
+                    .unwrap()
+                    .clone();
+                let mut copy = original;
+                copy.principal_id = "agent:v2:ffffffffffffffffffffffffffffffff".to_string();
+                copy.owner = Some("person:local:other".to_string());
+                copy.localhost_root = "localhost://UsersAI/ffffffffffffffffffffffff".to_string();
+                principals.push(copy);
+            },
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_duplicate_principal_id() {
+        refuse_duplicate_agent_records(
+            "duplicate principal id was refused",
+            "duplicate principal id",
+            |principals| {
+                let principal_id = principals
+                    .iter()
+                    .find(|record| record.principal_id == TEST_AGENT_ID)
+                    .unwrap()
+                    .principal_id
+                    .clone();
+                let mut copy = test_agent_record("agent:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                copy.principal_id = principal_id;
+                copy.localhost_root = "localhost://UsersAI/000000000000000000000000".to_string();
+                principals.push(copy);
+            },
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_duplicate_root() {
+        refuse_duplicate_agent_records(
+            "duplicate agent root was refused",
+            "duplicate agent admission root",
+            |principals| {
+                let root = principals
+                    .iter()
+                    .find(|record| record.principal_id == TEST_AGENT_ID)
+                    .unwrap()
+                    .localhost_root
+                    .clone();
+                let mut copy = test_agent_record("agent:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                copy.localhost_root = root;
+                principals.push(copy);
+            },
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_duplicate_binding_id_in_either_order() {
+        refuse_duplicate_agent_records(
+            "duplicate binding id was refused ahead of the original",
+            "duplicate proof binding id",
+            |principals| {
+                let index = principals
+                    .iter()
+                    .position(|record| record.principal_id == TEST_AGENT_ID)
+                    .unwrap();
+                let original = principals.remove(index);
+                let mut changed = original.clone();
+                changed.owner = Some("person:local:other".to_string());
+                principals.insert(0, changed);
+                principals.push(original);
+            },
+        );
+    }
+
     #[test]
     fn agent_admission_guard_refuses_every_named_operation() {
         for permit in [
