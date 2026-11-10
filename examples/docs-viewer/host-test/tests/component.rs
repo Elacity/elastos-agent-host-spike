@@ -209,7 +209,10 @@ async fn no_grant_stops_the_run_through_the_runtime() {
     let (result, bridge) = run(bridge).await;
     let err = result.unwrap_err();
     assert!(denied(&err), "{err}");
-    assert!(err.contains(A), "{err}");
+    assert!(
+        err.contains(&format!("has no grant for {A}: no read grant for {A}")),
+        "the run must stop at the refused grant, not at a later read: {err}"
+    );
     assert_eq!(bridge.invokes_on(A), 0, "no read without a grant");
     assert_eq!(bridge.invokes_on(B), 0);
     assert!(bridge.written.is_empty());
