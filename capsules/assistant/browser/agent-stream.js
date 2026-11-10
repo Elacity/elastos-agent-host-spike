@@ -161,7 +161,7 @@ function observeTranscript(scroller, content) {
   document.addEventListener("keydown", event => {
     if (event.defaultPrevented || event.target.closest?.("input, textarea, select, [contenteditable]")) return;
     if (event.target !== document.body && !scroller.contains(event.target)) return;
-    if (["PageUp", "Home", "ArrowUp", "PageDown", "End", "ArrowDown", " "].includes(event.key)) {
+    if (["PageUp", "Home", "ArrowUp", "PageDown", "ArrowDown", " "].includes(event.key)) {
       heldKeys.add(event.key);
       readerInput();
     }
