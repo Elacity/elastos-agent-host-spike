@@ -11920,12 +11920,13 @@ const TEST_AGENT_ID: &str = "agent:v2:0123456789abcdef0123456789abcdef";
 
 #[cfg(test)]
 fn test_agent_record(agent_id: &str) -> PrincipalRecord {
+    let display_name = "Agent".to_string();
     let binding = ProofBinding::agent_admission(agent_id, 5);
     PrincipalRecord {
         principal_id: agent_id.to_string(),
         proof_binding_id: binding.id(),
         proof_binding: binding,
-        display_name: "Agent".to_string(),
+        display_name: display_name.clone(),
         initial_profile_display_name: None,
         role: RuntimePrincipalRole::Guest,
         localhost_root: principal_kind_localhost_root(agent_id, PrincipalKind::Agent),
@@ -18514,22 +18515,41 @@ pub(crate) mod tests {
 
     #[test]
     fn fresh_agent_id_has_no_production_caller() {
-        fn walk(dir: &std::path::Path, needle: &str, count: &mut usize) {
+        // `fresh_agent_id` then optional whitespace, including a line break, then `(`.
+        // The name is split so this scanner is not itself a call.
+        fn count_calls(text: &str) -> usize {
+            let name = ["fresh_agent", "_id"].concat();
+            let mut count = 0usize;
+            let mut rest = text;
+            while let Some(index) = rest.find(&name) {
+                let after = &rest[index + name.len()..];
+                if after.trim_start().starts_with('(') {
+                    count += 1;
+                }
+                rest = &rest[index + name.len()..];
+            }
+            count
+        }
+        fn walk(dir: &std::path::Path, count: &mut usize) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
-                    walk(&path, needle, count);
+                    walk(&path, count);
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let text = std::fs::read_to_string(&path).unwrap();
-                    *count += text.matches(needle).count();
+                    *count += count_calls(&text);
                 }
             }
         }
+        let split_call = ["fresh_agent", "_id\n("].concat();
+        assert_eq!(
+            count_calls(&split_call),
+            1,
+            "a call split by a line break counts"
+        );
         let mut count = 0;
-        let needle = ["fresh_agent", "_id("].concat();
         walk(
             &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
-            &needle,
             &mut count,
         );
         assert_eq!(count, 2, "fresh agent id maker has no production caller");
@@ -18903,10 +18923,15 @@ pub(crate) mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let state = invalid_agent_state(edit);
         let before = write_state_file(data_dir.path(), &state);
-        let saved = save_auth_state(data_dir.path(), &state, None).unwrap_err();
+        let saved = save_auth_state(data_dir.path(), &state, None);
+        let saved_text = saved
+            .as_ref()
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
         assert!(
-            saved.to_string().contains(reason),
-            "{reason} on save: {saved}"
+            saved_text.contains(reason),
+            "{reason} on save: {saved_text}"
         );
         assert_eq!(
             std::fs::read(auth_state_path(data_dir.path()).unwrap()).unwrap(),
