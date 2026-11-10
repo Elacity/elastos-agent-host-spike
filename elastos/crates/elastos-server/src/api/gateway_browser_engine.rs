@@ -420,7 +420,7 @@ pub(in crate::api::gateway) async fn browser_net_summary(
     let contact_names = super::super::gateway_home_system::browser_exit_contact_names(
         &state.data_dir,
         context,
-        state.collaboration_discovery_service.as_deref(),
+        state.collaboration_discovery_service.as_ref(),
     )
     .unwrap_or_default();
     let exit_provider = browser_exit_summary(registry, principal_id, &contact_names).await;
