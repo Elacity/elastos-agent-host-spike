@@ -3438,6 +3438,85 @@ async fn restarting_update_uses_the_explicit_controller_probe_deadline() {
     owner.controller.stop_child().await.unwrap();
 }
 
+/// The production restart entry, not its deadline-taking test sibling, fixes
+/// the shipped deadline. A hung candidate must return at the five-second timer
+/// and leave Home running with every installed file unchanged.
+#[tokio::test]
+async fn production_restarting_update_times_out_a_hung_candidate_at_five_seconds() {
+    // Lower: the five-second timer cannot return sooner. Upper: 15 s of
+    // scheduler slack over that timer, well below the 30 s a wrong constant
+    // would take under the same load (REVIEW-PATTERNS item 9).
+    const LOWER: Duration = Duration::from_millis(4_500);
+    const UPPER: Duration = Duration::from_secs(20);
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        old,
+    } = restart_scenario(
+        |fixture| {
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 3600\n",
+                fixture.data.join("probe-pid").display()
+            )
+        },
+        0,
+        None,
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let error =
+        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
+            .await
+            .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= LOWER, "returned after {elapsed:?}");
+    assert!(elapsed < UPPER, "returned after {elapsed:?}");
+    let message = format!("{error:#}");
+    assert!(message.contains("timed out after 5 seconds"), "{message}");
+    // The probe runs before the owner stops Home.
+    assert_eq!(owner.stops, 0);
+    for (path, bytes) in old {
+        assert_eq!(fs::read(&path).unwrap(), bytes, "{}", path.display());
+    }
+    assert_no_recovery_files(&fixture);
+    let pid = wait_for_recorded_pid(&fixture.data.join("probe-pid")).await;
+    wait_until_gone(pid).await;
+    owner.controller.stop_child().await.unwrap();
+}
+
+/// The probe returns before a starved shell may have run; wait briefly for its
+/// PID, then prove the probe's group clean-up reaped it.
+async fn wait_for_recorded_pid(path: &Path) -> i32 {
+    let until = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(pid) = fs::read_to_string(path).unwrap_or_default().trim().parse() {
+            return pid;
+        }
+        assert!(
+            tokio::time::Instant::now() < until,
+            "candidate recorded no PID"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_until_gone(pid: i32) {
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        // SAFETY: signal 0 only checks whether the PID still exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < until,
+            "process {pid} survived"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// A candidate whose `--version` answers more slowly than the shipped five
 /// seconds, but inside the deadline the caller passes, is accepted.
 #[tokio::test]
