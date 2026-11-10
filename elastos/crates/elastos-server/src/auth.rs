@@ -7822,9 +7822,13 @@ fn validate_principal_root_object_binding_in_state(
     localhost_root: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
-    if principal_id.starts_with("device:") {
-        let resolved = ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?;
-        if resolved.localhost_root() != localhost_root
+    if let Some(did) = principal_id.strip_prefix("device:") {
+        // The launch token verifier resolved this root from the signer DID it
+        // verified. A subordinate gateway trusts its parent's DID without
+        // holding that key, so the same verified-device derivation binds the
+        // object, and no other id shape does.
+        if did.trim().is_empty()
+            || localhost_root != verified_device_localhost_root(did)
             || !object_uri_is_under_root(localhost_root, object_uri)
         {
             anyhow::bail!("principal localhost root must be the verified device root");
@@ -17248,5 +17252,71 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string()
             .contains("has no stored record"));
+    }
+
+    /// A subordinate gateway trusts the parent DID that signed the launch
+    /// token. The writer binds that parent-signed device's object to the
+    /// exact root the verifier resolved for that DID, and to no other root.
+    #[test]
+    fn parent_signed_device_object_binding_uses_the_verified_device_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let principal = "device:did:key:z6MkParentSignedDevice";
+        let root = "localhost://Users/45c2b381a3e1d3ed5e2a5ede";
+        let uri = format!("{root}/.AppData/ElastOS/Home/services-requests.json");
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let written = write_principal_root_object(
+            data_dir.path(),
+            principal,
+            root,
+            &uri,
+            &path,
+            b"parent-signed denial",
+        );
+        assert!(
+            written.is_ok(),
+            "the verified parent device root must bind: {written:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"parent-signed denial");
+
+        // A device id with any other root is refused.
+        let other = "localhost://UsersAI/45c2b381a3e1d3ed5e2a5ede";
+        let other_uri = format!("{other}/notes.md");
+        let error = write_principal_root_object(
+            data_dir.path(),
+            principal,
+            other,
+            &other_uri,
+            &rooted_localhost_fs_path(data_dir.path(), &other_uri).unwrap(),
+            b"no",
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "principal localhost root must be the verified device root"
+        );
+
+        // An empty device id and a non-device id stay refused.
+        for (id, bad_root) in [
+            ("device:", "localhost://Users/8d950c4cf76dd90847563784"),
+            ("person:local:no-record", root),
+        ] {
+            let bad_uri = format!("{bad_root}/notes.md");
+            let error = write_principal_root_object(
+                data_dir.path(),
+                id,
+                bad_root,
+                &bad_uri,
+                &rooted_localhost_fs_path(data_dir.path(), &bad_uri).unwrap(),
+                b"no",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("verified device root") || error.contains("no stored record"),
+                "{id}: {error}"
+            );
+        }
     }
 }
