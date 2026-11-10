@@ -8740,12 +8740,7 @@ pub(super) async fn home_background_image(
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(err) => return home_error_response(err),
     };
-    match crate::auth::read_principal_root_object_resolved(
-        &state.data_dir,
-        context.root(),
-        &entry.object_uri,
-        &entry.path,
-    ) {
+    match home_background_image_bytes(&state.data_dir, &context, &entry) {
         Ok(bytes) => {
             let mut response = bytes.into_response();
             let headers = response.headers_mut();
@@ -8768,6 +8763,19 @@ pub(super) async fn home_background_image(
         }
         Err(err) => home_error_response(anyhow::anyhow!(err)),
     }
+}
+
+fn home_background_image_bytes(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    entry: &HomeBackgroundImageEntry,
+) -> anyhow::Result<Vec<u8>> {
+    crate::auth::read_principal_root_object_resolved(
+        data_dir,
+        context.root(),
+        &entry.object_uri,
+        &entry.path,
+    )
 }
 
 #[cfg(test)]
@@ -9676,13 +9684,7 @@ mod stored_root_tests {
             .unwrap()
             .unwrap();
         assert_only_file_named(&data_dir, &entry.path);
-        let bytes = crate::auth::read_principal_root_object_resolved(
-            &data_dir,
-            context.root(),
-            &entry.object_uri,
-            &entry.path,
-        )
-        .unwrap();
+        let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
         assert_eq!(bytes, b"parent image");
         remove_home_background_images(&data_dir, &context).unwrap();
         assert!(!entry.path.exists());
