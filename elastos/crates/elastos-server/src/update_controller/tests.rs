@@ -10,9 +10,10 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 type SnapshotEntry = (u32, Option<Vec<u8>>, Option<PathBuf>);
 type Snapshot = std::collections::BTreeMap<PathBuf, SnapshotEntry>;
 
-/// Controller tests drive the production restart path under heavy parallel load,
-/// so a candidate's version probe gets far more than the shipped five seconds.
-/// The production controller passes [`crate::update::VERSION_CHECK_TIMEOUT`].
+/// Controller tests drive the restart path under heavy parallel load, so a
+/// candidate's version probe gets a deadline far above the shipped five
+/// seconds. The production entry fixes the shipped five seconds itself and
+/// takes no deadline; the test sibling takes this one.
 const TEST_PROBE_DEADLINE: Duration = Duration::from_secs(60);
 
 /// A crash candidate must get time to start under the same load. The previous
@@ -3399,9 +3400,9 @@ async fn real_controller_hung_start_restores_previous_home_once() {
     real_controller_restart_failure("hung", 0).await;
 }
 
-/// The controller path uses the deadline its caller passes, not the shipped one.
-/// Production passes five seconds; this row passes one second and the candidate
-/// hangs, so the error proves which deadline reached the probe.
+/// The test sibling uses the deadline its caller passes; the production entry
+/// fixes the shipped five seconds itself. This row passes one second while the
+/// candidate hangs, so the error proves which deadline reached the probe.
 #[tokio::test]
 async fn restarting_update_uses_the_explicit_controller_probe_deadline() {
     let RestartScenario {
