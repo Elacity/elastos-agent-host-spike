@@ -5218,8 +5218,8 @@ pub fn upsert_principal_for_binding_as_role_named(
 /// until then nothing calls this.
 ///
 /// Checked under the auth-state lock:
-/// - an id held by a record of another kind or binding refuses (its root
-///   needs no check: loading recomputes an Agent's root from its id);
+/// - an id held by a record of another kind, binding or role refuses (its
+///   root needs no check: loading recomputes an Agent's root from its id);
 /// - a root held by another record refuses;
 /// - the same tuple again changes nothing.
 pub fn mint_agent_principal(
@@ -5267,6 +5267,9 @@ pub fn mint_agent_principal(
                     || stored.proof_binding_id != record.proof_binding_id
                     || stored.proof_binding.kind != ProofBindingKind::AgentAdmission
                     || stored.proof_binding.subject != record.proof_binding.subject
+                    || stored.proof_binding.chain_id.is_some()
+                    || stored.proof_binding.passkey.is_some()
+                    || stored.role != RuntimePrincipalRole::Guest
                 {
                     anyhow::bail!("agent principal id is held by a different record");
                 }
@@ -13099,6 +13102,9 @@ pub(crate) mod tests {
             "other-binding-id",
             "passkey-binding-kind",
             "other-subject",
+            "binding-has-chain",
+            "binding-has-passkey",
+            "admin-role",
         ] {
             let data_dir = tempfile::tempdir().unwrap();
             mint_pinned_agent(data_dir.path(), 5).unwrap();
@@ -13114,6 +13120,11 @@ pub(crate) mod tests {
                         stored.proof_binding.kind = ProofBindingKind::PasskeyWebAuthn
                     }
                     "other-subject" => stored.proof_binding.subject = "other".into(),
+                    "binding-has-chain" => stored.proof_binding.chain_id = Some(1),
+                    "binding-has-passkey" => {
+                        stored.proof_binding.passkey = passkey_binding(1, 10, 10).passkey
+                    }
+                    "admin-role" => stored.role = RuntimePrincipalRole::Admin,
                     "stored-twice" => {
                         let twin = stored.clone();
                         state.principals.push(twin);
