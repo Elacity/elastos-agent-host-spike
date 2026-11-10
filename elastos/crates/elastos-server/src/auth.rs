@@ -7596,7 +7596,7 @@ fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> Str
     }
 }
 
-/// The Users root for a signer whose DID was verified as this Runtime's device.
+/// The Users root for a device DID verified by the Runtime or a launch token.
 fn verified_device_localhost_root(did: &str) -> String {
     let device_id = PrincipalId::device_did(did);
     let digest = Sha256::digest(device_id.as_str().as_bytes());
@@ -7629,7 +7629,10 @@ pub(crate) fn principal_stored_localhost_root(
 /// rong-ruling-1455b-s3c1a-1430-1000). Only this module constructs one.
 /// A remote principal's root owns no localhost path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedPrincipalRoot(RootArm);
+pub(crate) struct ResolvedPrincipalRoot {
+    principal_id: String,
+    arm: RootArm,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RootArm {
@@ -7638,24 +7641,41 @@ enum RootArm {
 }
 
 impl ResolvedPrincipalRoot {
-    /// The one resolver. The device's own DID (in `data_dir`) takes the device
-    /// arm, matched against the device identity, never an id prefix; any other
-    /// principal takes its record's root in the auth store (`auth_data_dir`, where
-    /// grants and principals live), and no record refuses.
+    /// Stored records take their stored kind and root. Without a record, only
+    /// this Runtime's own device DID takes the device arm.
     pub(crate) fn resolve(
         data_dir: &Path,
         auth_data_dir: &Path,
         principal_id: &str,
     ) -> anyhow::Result<Self> {
+        if let Some(root) = stored_principal_record(auth_data_dir, principal_id)? {
+            let root = match root.kind {
+                PrincipalKind::Human if root.localhost_root.starts_with("localhost://Users/") => {
+                    root.localhost_root
+                }
+                PrincipalKind::Human => anyhow::bail!("stored human principal root is invalid"),
+                PrincipalKind::Agent => principal_kind_localhost_root(principal_id, root.kind),
+            };
+            return Ok(Self {
+                principal_id: principal_id.to_string(),
+                arm: RootArm::Local(root),
+            });
+        }
         let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
         if let Some(did) =
             device.filter(|did| PrincipalId::device_did(did).as_str() == principal_id)
         {
             // Today's device root: the one Users rule, applied to `device:<did>`.
-            return Ok(Self(RootArm::Local(verified_device_localhost_root(&did))));
+            return Ok(Self {
+                principal_id: principal_id.to_string(),
+                arm: RootArm::Local(verified_device_localhost_root(&did)),
+            });
         }
         principal_stored_localhost_root(Some(auth_data_dir), principal_id)
-            .map(|root| Self(RootArm::Local(root)))
+            .map(|root| Self {
+                principal_id: principal_id.to_string(),
+                arm: RootArm::Local(root),
+            })
             .map_err(|err| anyhow!(err))
     }
 
@@ -7663,7 +7683,7 @@ impl ResolvedPrincipalRoot {
     /// localhost path, so it has the empty root: every path resolver refuses
     /// an empty root, and no caller falls back to the principal-id rule.
     pub(crate) fn localhost_root(&self) -> &str {
-        match &self.0 {
+        match &self.arm {
             RootArm::Local(root) => root,
             RootArm::Remote => "",
         }
@@ -7674,7 +7694,19 @@ impl ResolvedPrincipalRoot {
     /// trusts its parent's DID without holding that device key, so this takes
     /// the device root directly and MUST NOT call `resolve`.
     pub(crate) fn verified_device_signer(did: &str) -> Self {
-        Self(RootArm::Local(verified_device_localhost_root(did)))
+        Self {
+            principal_id: PrincipalId::device_did(did).as_str().to_string(),
+            arm: RootArm::Local(verified_device_localhost_root(did)),
+        }
+    }
+
+    fn local_binding(&self, object_uri: &str) -> anyhow::Result<(&str, &str)> {
+        match &self.arm {
+            RootArm::Local(root) if object_uri_is_under_root(root, object_uri) => {
+                Ok((&self.principal_id, root))
+            }
+            _ => anyhow::bail!("principal-root object URI is outside the resolved root"),
+        }
     }
 
     /// The root that verified Recovery Kit material proves for its principal.
@@ -7690,7 +7722,10 @@ impl ResolvedPrincipalRoot {
         if localhost_root != principal_kind_localhost_root(principal_id, PrincipalKind::Human) {
             anyhow::bail!("recovery kit root is not canonical for its principal");
         }
-        Ok(Self(RootArm::Local(localhost_root.to_string())))
+        Ok(Self {
+            principal_id: principal_id.to_string(),
+            arm: RootArm::Local(localhost_root.to_string()),
+        })
     }
 
     /// A recovered record already binds this kit to its stored root. The
@@ -7702,7 +7737,10 @@ impl ResolvedPrincipalRoot {
         if record.principal_id != kit.principal_id || record.localhost_root != kit.localhost_root {
             anyhow::bail!("recovery kit does not match the stored principal root");
         }
-        Ok(Self(RootArm::Local(kit.localhost_root.clone())))
+        Ok(Self {
+            principal_id: kit.principal_id.clone(),
+            arm: RootArm::Local(kit.localhost_root.clone()),
+        })
     }
 
     /// Test-only root for a fixture principal (A5-P2a-ii-0b's two
@@ -7710,7 +7748,10 @@ impl ResolvedPrincipalRoot {
     /// through `resolve` or verified recovery material.
     #[cfg(test)]
     pub(crate) fn for_test_principal(principal_id: &str) -> Self {
-        Self(RootArm::Local(format!("test-root/{principal_id}")))
+        Self {
+            principal_id: principal_id.to_string(),
+            arm: RootArm::Local(format!("test-root/{principal_id}")),
+        }
     }
 
     /// The remote principal's root (D2, rong-ruling-1514-1515-p2a-1059 3.3):
@@ -7725,13 +7766,16 @@ impl ResolvedPrincipalRoot {
         if !shaped {
             anyhow::bail!("resolved remote root needs a remote principal id");
         }
-        Ok(Self(RootArm::Remote))
+        Ok(Self {
+            principal_id: remote_principal_id.to_string(),
+            arm: RootArm::Remote,
+        })
     }
 
     /// Whether this root may own `object_uri`; a remote root owns nothing.
     #[cfg(test)]
     pub(crate) fn owns_object_uri(&self, object_uri: &str) -> anyhow::Result<()> {
-        match &self.0 {
+        match &self.arm {
             RootArm::Local(root) if object_uri_is_under_root(root, object_uri) => Ok(()),
             _ => anyhow::bail!("this principal root owns no such localhost object"),
         }
