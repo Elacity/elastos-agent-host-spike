@@ -671,7 +671,6 @@ pub(crate) async fn run_update_for_data_dir_in_context(
         repair_invalid_version,
         carrier_context,
         ApplyMode::Normal,
-        VERSION_CHECK_TIMEOUT,
     )
     .await
 }
@@ -703,7 +702,6 @@ pub async fn run_frozen_update_for_data_dir(
         false,
         crate::setup::FirstPartyCarrierContext::Setup,
         ApplyMode::FrozenOffline,
-        VERSION_CHECK_TIMEOUT,
     )
     .await
 }
@@ -835,9 +833,36 @@ pub(crate) trait RestartOwner: Send {
 }
 
 /// Runs the frozen offline update owned by a Home restart controller. The
-/// controller passes the deadline for the untrusted candidate's version probe:
-/// production passes [`VERSION_CHECK_TIMEOUT`]; tests may pass a generous one.
+/// untrusted candidate's version probe always uses [`VERSION_CHECK_TIMEOUT`];
+/// the entry has no deadline parameter, so a production caller cannot name
+/// another value. Controller tests use the `#[cfg(test)]` sibling.
 pub(crate) async fn run_restarting_update(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    head_cid: String,
+    owner: &mut dyn RestartOwner,
+) -> anyhow::Result<()> {
+    run_update_with_restart(
+        data_dir,
+        fetch_fn,
+        None,
+        false,
+        Some(head_cid),
+        env!("ELASTOS_VERSION"),
+        true,
+        false,
+        false,
+        crate::setup::FirstPartyCarrierContext::Setup,
+        ApplyMode::FrozenOffline,
+        Some(owner),
+        VERSION_CHECK_TIMEOUT,
+    )
+    .await
+}
+
+/// Test-only sibling of [`run_restarting_update`] with a caller-chosen deadline.
+#[cfg(test)]
+pub(crate) async fn run_restarting_update_with_deadline(
     data_dir: &Path,
     fetch_fn: &FetchFn,
     head_cid: String,
@@ -864,6 +889,42 @@ pub(crate) async fn run_restarting_update(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_update_for_data_dir_with_mode(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    try_p2p_fn: Option<&TryP2pFn>,
+    check_only: bool,
+    head_cid_override: Option<String>,
+    version: &str,
+    auto_confirm: bool,
+    force: bool,
+    repair_invalid_version: bool,
+    carrier_context: crate::setup::FirstPartyCarrierContext,
+    apply_mode: ApplyMode,
+) -> anyhow::Result<()> {
+    on_heap(|| {
+        run_update_with_restart(
+            data_dir,
+            fetch_fn,
+            try_p2p_fn,
+            check_only,
+            head_cid_override,
+            version,
+            auto_confirm,
+            force,
+            repair_invalid_version,
+            carrier_context,
+            apply_mode,
+            None,
+            VERSION_CHECK_TIMEOUT,
+        )
+    })
+    .await
+}
+
+/// Test-only sibling of [`run_update_for_data_dir_with_mode`] with a caller-chosen deadline.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn run_update_for_data_dir_with_mode_with_deadline(
     data_dir: &Path,
     fetch_fn: &FetchFn,
     try_p2p_fn: Option<&TryP2pFn>,
@@ -3472,7 +3533,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
             Box::pin(async move { bytes })
         });
-        run_update_for_data_dir_with_mode(
+        run_update_for_data_dir_with_mode_with_deadline(
             data_dir,
             &fetch,
             None,
@@ -4005,7 +4066,7 @@ mod tests {
                         .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
                     Box::pin(async move { bytes })
                 });
-                let error = run_update_for_data_dir_with_mode(
+                let error = run_update_for_data_dir_with_mode_with_deadline(
                     &data,
                     &fetch,
                     None,

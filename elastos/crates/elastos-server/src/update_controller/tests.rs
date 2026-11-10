@@ -3417,7 +3417,7 @@ async fn restarting_update_uses_the_explicit_controller_probe_deadline() {
     )
     .await;
     let started = std::time::Instant::now();
-    let error = crate::update::run_restarting_update(
+    let error = crate::update::run_restarting_update_with_deadline(
         &fixture.data,
         &fetch,
         request.head_cid,
@@ -3640,7 +3640,7 @@ async fn real_controller_restart_failure(failure: &str, previous_delay: u64) {
     .await;
     let interpreter = fixture.data.join("candidate-interpreter");
     let started = std::time::Instant::now();
-    let result = crate::update::run_restarting_update(
+    let result = crate::update::run_restarting_update_with_deadline(
         &fixture.data,
         &fetch,
         request.head_cid,
@@ -3817,7 +3817,7 @@ async fn real_controller_accepts_a_new_home_ready_after_45_seconds() {
     )
     .await;
     let started = std::time::Instant::now();
-    let result = crate::update::run_restarting_update(
+    let result = crate::update::run_restarting_update_with_deadline(
         &fixture.data,
         &fetch,
         request.head_cid,
@@ -3862,7 +3862,7 @@ async fn dead_previous_start() -> (PrivateFixture, Vec<(PathBuf, Vec<u8>)>) {
         old,
     } = restart_scenario(crash_candidate, 0, Some(TEST_READY_BUDGET)).await;
     fixture.file(&fixture.data.join("previous-fail"), b"", 0o600);
-    let result = crate::update::run_restarting_update(
+    let result = crate::update::run_restarting_update_with_deadline(
         &fixture.data,
         &fetch,
         request.head_cid,
@@ -3974,7 +3974,7 @@ async fn unspawnable_rollback_start_is_started_by_the_next_run() {
         Some(Duration::from_secs(3)),
     )
     .await;
-    let result = crate::update::run_restarting_update(
+    let result = crate::update::run_restarting_update_with_deadline(
         &fixture.data,
         &fetch,
         request.head_cid,
@@ -5125,7 +5125,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
                 Ok(bytes)
             })
         });
-        let result = crate::update::run_restarting_update(
+        let result = crate::update::run_restarting_update_with_deadline(
             &fixture.data,
             &fetch,
             request.head_cid,
@@ -5429,7 +5429,7 @@ async fn system_update_fetches_the_pinned_network_before_stop_and_joins_after_ac
                 bytes.ok_or_else(|| anyhow::anyhow!("content {cid} is not published"))
             })
         });
-        let result = crate::update::run_restarting_update(
+        let result = crate::update::run_restarting_update_with_deadline(
             &fixture.data,
             &fetch,
             request.head_cid,
