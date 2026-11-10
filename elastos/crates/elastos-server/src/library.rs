@@ -8742,6 +8742,8 @@ fn append_library_event_with_root(
     Ok(event)
 }
 
+// The rows call this resolving entry point. Production callers already hold a root.
+#[cfg(test)]
 fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryEvent>> {
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
         .localhost_root()
@@ -8777,6 +8779,8 @@ fn read_library_events_with_root(
         .collect()
 }
 
+// The rows call this resolving entry point. Production callers already hold a root.
+#[cfg(test)]
 fn write_library_events(
     data_dir: &Path,
     principal_id: &str,
