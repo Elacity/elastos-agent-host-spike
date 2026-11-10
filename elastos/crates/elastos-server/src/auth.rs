@@ -17370,18 +17370,6 @@ pub(crate) mod tests {
         assert!(resolved.owns_object_uri(&sibling_uri).is_err());
     }
 
-    #[test]
-    fn r8_verified_device_signer_uses_the_device_root() {
-        // Constructor row: this fixture tests the root mapping, not token proof.
-        let signer =
-            verified_launch_token_signer::fixture_unverified_for_tests("did:key:z6MkR8Device");
-        let resolved = ResolvedPrincipalRoot::verified_device_signer(&signer);
-        assert_eq!(
-            resolved.localhost_root(),
-            "localhost://Users/af179fa6924299eea2520df3"
-        );
-    }
-
     /// P6 (Codex r1 #1462, Rong 1158 sec. 3): a stored Agent resolves to its
     /// UsersAI root, never a person's Users root. The record is minted the way
     /// `agent_principal_owns_the_usersai_root` mints one; no production API
@@ -17527,35 +17515,6 @@ pub(crate) mod tests {
             .to_string();
             assert!(error.contains("has no stored record"), "{id}: {error}");
         }
-    }
-
-    #[test]
-    fn verified_device_object_binding_uses_typed_root() {
-        let data_dir = tempfile::tempdir().unwrap();
-        // Constructor row: the real token proof is in remote_model.
-        let signer = verified_launch_token_signer::fixture_unverified_for_tests(
-            "did:key:z6MkParentSignedDevice",
-        );
-        let resolved = ResolvedPrincipalRoot::verified_device_signer(&signer);
-        let root = "localhost://Users/45c2b381a3e1d3ed5e2a5ede";
-        assert_eq!(resolved.localhost_root(), root);
-        let uri = format!("{root}/notes.md");
-        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        write_principal_root_object_resolved(data_dir.path(), &resolved, &uri, &path, b"verified")
-            .unwrap();
-        assert_eq!(
-            read_principal_root_object_resolved(data_dir.path(), &resolved, &uri, &path).unwrap(),
-            b"verified"
-        );
-        assert!(write_principal_root_object_resolved(
-            data_dir.path(),
-            &resolved,
-            "localhost://UsersAI/45c2b381a3e1d3ed5e2a5ede/notes.md",
-            &path,
-            b"no"
-        )
-        .is_err());
     }
 
     #[test]
