@@ -27,51 +27,61 @@ _spec.loader.exec_module(core_size)
 
 def statement_end(vals, q):
     """Last token of the cfg(test) statement or block that starts at vals[q]: its ; or comma at depth
-    0, the brace that closes a block at depth 0, or the token before the enclosing block ends."""
+    0, the brace that closes its final block at depth 0, or the token before the enclosing block ends.
+    An else branch or else-if chain belongs to the same statement."""
     depth = 0
-    for p in range(q, len(vals)):
+    p = q
+    while p < len(vals):
         if vals[p] in core_size.OPEN:
             depth += 1
         elif vals[p] in core_size.CLOSE:
             if depth == 0:
                 return p - 1
             depth -= 1
-            if depth == 0 and vals[p] == "}":
-                return p
+            if depth == 0 and vals[p] == "}" and vals[p + 1] != "else":
+                return p + 1 if vals[p + 1] == ";" else p
         elif vals[p] in (";", ",") and depth == 0:
             return p
+        p += 1
     return len(vals) - 1
 
 
 def analyse(tokens):
-    """(test token indexes, test spans) as core-size.py's analyse gives them; where it refuses a
-    #[cfg(test)] on a statement, that statement's own span from the attribute. The span stops at the
-    statement's ; or closing brace, so a line the counter cannot place stays code, never test."""
+    """(test token indexes, test spans, outline module declarations) as core-size.py's analyse gives
+    them; where it refuses a #[cfg(test)] on a statement, that statement's own span from the attribute.
+    A file that uses include! is refused on both paths: a counted file holds only its own text. The
+    span stops at the statement's ;, a comma at bracket depth 0, or its final closing brace, so a line
+    the counter cannot place stays code, never test."""
     try:
         tests, spans, mods, includes = core_size.analyse(tokens)
-        return tests, spans
     except core_size.Refusal as error:
         if "test cfg on a match arm" not in str(error):
             raise
-    code = [token for token in tokens if token[1] != "comment"]
-    vals, lines = [token[2] for token in code] + [""] * 4, [token[0] for token in code]
-    found = {"spans": [], "attrs": set(), "mods": [], "mod_tokens": set(), "includes": []}
-    core_size.parse_items(vals, lines, 0, len(code), False, found)
-    for k in range(len(code)):  # attributes the item walk did not consume sit on a statement
-        if vals[k] == "#" and k not in found["attrs"] and vals[k + 1] == "[":
-            if core_size.attr_is_test(vals, k + 1, core_size.closer(vals, k + 1)):
-                found["spans"].append((k, statement_end(vals, core_size.closer(vals, k + 1) + 1)))
-        if vals[k] == "include" and vals[k + 1] == "!":
-            raise core_size.Refusal("include! of another file: a counted file holds only its own text",
-                                    lines[k])
-    return {k for a, b in found["spans"] for k in range(a, b + 1)}, found["spans"]
+        code = [token for token in tokens if token[1] != "comment"]
+        vals, lines = [token[2] for token in code] + [""] * 4, [token[0] for token in code]
+        found = {"spans": [], "attrs": set(), "mods": [], "mod_tokens": set(), "includes": []}
+        core_size.parse_items(vals, lines, 0, len(code), False, found)
+        for k in range(len(code)):  # attributes the item walk did not consume sit on a statement
+            if vals[k] == "#" and k not in found["attrs"] and vals[k + 1] == "[":
+                if core_size.attr_is_test(vals, k + 1, core_size.closer(vals, k + 1)):
+                    found["spans"].append((k, statement_end(vals, core_size.closer(vals, k + 1) + 1)))
+            if vals[k] == "include" and vals[k + 1] == "!":
+                found["includes"].append((core_size.literal_text(vals[k + 3]) or "another file", lines[k]))
+        tests = {k for a, b in found["spans"] for k in range(a, b + 1)}
+        spans, mods, includes = found["spans"], found["mods"], found["includes"]
+    if includes:
+        target, line = includes[0][:2]
+        raise core_size.Refusal(f"include! of {target}: a counted file holds only its own text", line)
+    return tests, spans, mods
 
 
-def count_file(text):
+def count_file(text, mods=None):
     """The line totals of one .rs file in core-size.py's classes: its count() per-file loop without
-    the module tree, over its lexer and analyser."""
+    the module tree, over its lexer and analyser. Outline module declarations go to mods when given."""
     tokens, starts = core_size.lex(text)
-    tests, spans = analyse(tokens)
+    tests, spans, found_mods = analyse(tokens)
+    if mods is not None:
+        mods.extend(found_mods)
     lines = text.split("\n")
     if lines[-1] == "":
         lines.pop()
@@ -98,11 +108,32 @@ def test_file_totals(text):
             "comments": 0, "blank": 0, "code": 0}
 
 
+def module_warnings(root, path, mods, listed):
+    """Warnings for a listed file that declares a non-test `mod name;` whose file the manifest does not
+    list: the count does not follow module targets, so that file's code stays out of the count."""
+    here = path.rpartition("/")[0]
+    owns = path.endswith("/mod.rs") or path.rpartition("/")[2] in ("lib.rs", "main.rs")
+    folder = here if owns else path[:-3]
+    warnings = []
+    for name, attrs, line, mod_test, inline in mods:
+        if mod_test:
+            continue
+        base = "/".join((folder,) + inline) if inline else folder
+        given = core_size.path_attribute(attrs)
+        targets = ([normpath(f"{base if inline else here}/{given}")] if given
+                   else [f"{base}/{name}.rs", f"{base}/{name}/mod.rs"])
+        found = [target for target in targets if (root / target).is_file()]
+        if found and not listed.intersection(found):
+            warnings.append({"path": path, "line": line + 1, "mod": name, "target": found[0]})
+    return warnings
+
+
 def file_rows(root, manifest):
     """One row per listed file: its path, its line totals, and why it has none."""
-    rows = []
+    rows, listed = [], set(manifest["files"])
     for path in manifest["files"]:
-        row = {"path": path, "counts": dict.fromkeys(KINDS, 0)}
+        row = {"path": path, "counts": dict.fromkeys(KINDS, 0),
+               "in_core": path.startswith(core_size.CRATE + "/")}
         if not path.endswith(".rs"):
             row["error"] = "not a Rust file"
         elif not (root / path).is_file():
@@ -111,7 +142,13 @@ def file_rows(root, manifest):
             row["test_file"] = True
             row["counts"] = test_file_totals((root / path).read_text(encoding="utf-8"))
         else:
-            row["counts"] = count_file((root / path).read_text(encoding="utf-8"))
+            mods = []
+            try:
+                row["counts"] = count_file((root / path).read_text(encoding="utf-8"), mods)
+            except core_size.Refusal as error:
+                where = path + ("" if error.line is None else f":{error.line + 1}")
+                raise core_size.Refusal(f"{where}: {error}") from None
+            row["module_warnings"] = module_warnings(root, path, mods, listed)
         rows.append(row)
     return rows
 
@@ -135,13 +172,19 @@ def library_rows(manifest, packages):
         if "name" in entry:
             versions = sorted({version for name, version in packages if name == entry["name"]})
             row = {"entry": entry["name"], "packages": {entry["name"]: versions}, "found": bool(versions)}
+            family = {}
+            for name, version in packages:
+                if name.startswith(entry["name"] + "-"):
+                    family.setdefault(name, set()).add(version)
+            row["family_not_covered"] = {name: sorted(family[name]) for name in sorted(family)}
         else:
             members = {}
             for name, version in packages:
                 if name.startswith(entry["prefix"]):
                     members.setdefault(name, set()).add(version)
             row = {"entry": entry["prefix"] + "*", "found": bool(members),
-                   "packages": {name: sorted(members[name]) for name in sorted(members)}}
+                   "packages": {name: sorted(members[name]) for name in sorted(members)},
+                   "family_not_covered": {}}
         if "issue_version" in entry:
             row["issue_version"] = entry["issue_version"]
             row["version_matches"] = row["found"] and row["packages"][entry["name"]] == [entry["issue_version"]]
