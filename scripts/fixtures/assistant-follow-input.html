@@ -165,6 +165,7 @@
     return snap();
   };
   const heldGrowth = async label => {
+    await settle(`${label}: the reader position settled`);
     const held = await waitFor(`${label}: a reader above the end keeps their place`, () => {
       const state = snap();
       return state.fromEnd > 8 && !state.follow && state.jump ? state : null;
@@ -174,6 +175,7 @@
     expect(held.fromEnd > 8 && !held.follow && held.jump && after.top === held.top, label);
   };
   const followingGrowth = async label => {
+    await settle(`${label}: the room reached its resting position`);
     const held = await waitFor(`${label}: a following room rests at the end`, () => {
       const state = snap();
       return state.follow && !state.jump && state.fromEnd <= 8 ? state : null;
