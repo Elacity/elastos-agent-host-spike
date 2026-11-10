@@ -1,0 +1,41 @@
+[package]
+name = "capsule-v1-host-test"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# The host-test harness shared by the Bus v1 component capsules of the capsule
+# kit (item A2). A dev-dependency of each capsule's host-test; tests only.
+
+[dependencies]
+elastos-common = { path = "../../../elastos/crates/elastos-common" }
+elastos-compute = { path = "../../../elastos/crates/elastos-compute" }
+serde_json = "1"
+# Wasmtime's default features minus `cache`: this host test never sets a compilation cache,
+# and `cache` is the only thing that pulls zstd into the build. Same list as elastos-compute.
+wasmtime = { version = "36", default-features = false, features = [
+    "async",
+    "gc",
+    "gc-drc",
+    "gc-null",
+    "wat",
+    "profiling",
+    "parallel-compilation",
+    "cranelift",
+    "pooling-allocator",
+    "demangle",
+    "addr2line",
+    "coredump",
+    "debug-builtins",
+    "runtime",
+    "component-model",
+    "threads",
+    "stack-switching",
+    "std",
+] }
+# Same pin as elastos-server, for the copied admission validator.
+wasmparser = "=0.236.1"
+
+# Keep it outside the main ElastOS Cargo workspace.
+[workspace]

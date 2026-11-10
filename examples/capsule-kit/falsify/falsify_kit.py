@@ -1,0 +1,329 @@
+"""The capsule kit's mutation runner (kit item A4).
+
+A falsifier breaks one check by replacing exact text in a file, requires the
+mutant to compile, runs EVERY test named for it, and requires EVERY one to
+FAIL. A case where any named test still passes is reported as SURVIVED, with
+the tests that passed: a named test that does not notice the mutant proves
+nothing about it. The file is restored from its saved bytes afterwards, also
+on error or Ctrl-C. Each capsule's falsify scripts keep only their cases and say how to run
+their tests; this module does the rest. Moved here from the photo viewer's and
+the documents viewer's runners.
+
+A case is (name, path, replacements, tests[, appends]):
+- path: the file to change (a link is followed, so a shared source is changed
+  where it lives);
+- replacements: [(old, new)]; each old text must occur exactly once;
+- tests: a list of whatever the capsule's `test_fails` function takes, one per
+  named test;
+- appends: optional [(path, text)] added to other files while the case runs.
+
+Scripts import it with `sys.path.insert(0, <kit>/falsify)`, so they still run
+with `python3 -I`.
+"""
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+
+# Cargo decides what to rebuild by comparing file times with the time of its
+# last build. On a machine whose clock steps backwards (seen on WSL), a file
+# written now can look older than that build: nothing is rebuilt, and the
+# previous mutant's test binary is run again. Two rules keep that out:
+# 1. The runner keeps the latest time it has seen (the clock, or its start
+#    time plus the time that has really passed, whichever is later), reads it
+#    around every command, and stamps every mutant and every restored file
+#    after it. Each stamp is later than the one before.
+# 2. No test is scored until a build is known to have compiled the mutant:
+#    Cargo printed "Compiling <crate>" for the crate of every Rust file the
+#    mutant changed. A build that did not is tried once more with the files
+#    stamped a minute ahead; if that does not either, the run stops.
+_latest_seen = 0.0
+_planted = []
+_compiled = False
+_started = (time.time(), time.monotonic())
+
+
+def _note_time():
+    global _latest_seen
+    passed = time.monotonic() - _started[1]
+    _latest_seen = max(_latest_seen, time.time(), _started[0] + passed)
+
+
+def _stamp_after_latest(paths, margin):
+    """Gives each file a modification time `margin` seconds after the latest
+    time this run has seen or stamped, whatever the clock says now."""
+    global _latest_seen
+    _note_time()
+    _latest_seen += margin
+    for path in paths:
+        os.utime(path, (_latest_seen, _latest_seen))
+
+
+def stamp(paths):
+    """For a script that changes or restores a second source file itself: the
+    next build must see the file as newer than anything built so far."""
+    _stamp_after_latest(paths, 1)
+
+
+def planted(paths):
+    """Says a mutant has just been written to `paths`. `falsify` calls it; a
+    script with a loop of its own calls it after writing, so that `build` and
+    `cargo_test_fails` hold that loop to the same rule."""
+    global _compiled
+    _planted[:] = [pathlib.Path(path) for path in paths]
+    _compiled = False
+    _stamp_after_latest(_planted, 1)
+
+
+def restored(paths):
+    """Says the original bytes have just been written back to `paths`."""
+    global _compiled
+    _planted.clear()
+    _compiled = False
+    _stamp_after_latest(paths, 1)
+
+
+def env():
+    environment = dict(os.environ)
+    environment.setdefault("RUST_TEST_THREADS", "2")
+    return environment
+
+
+def run(cmd, cwd):
+    _note_time()
+    result = subprocess.run(cmd, cwd=cwd, env=env(), capture_output=True, text=True)
+    _note_time()
+    return result
+
+
+def _crate(path):
+    """The Cargo package a source file belongs to: the name in the nearest
+    Cargo.toml above it that has a [package] table."""
+    for folder in pathlib.Path(path).resolve().parents:
+        manifest = folder / "Cargo.toml"
+        if not manifest.is_file():
+            continue
+        in_package = False
+        for line in manifest.read_text().splitlines():
+            if line.startswith("["):
+                in_package = line.strip() == "[package]"
+            name = re.match(r'name\s*=\s*"([^"]+)"', line)
+            if in_package and name:
+                return name.group(1)
+    raise SystemExit(f"{path} is in no Cargo package: a mutant there cannot be shown to be compiled")
+
+
+def _not_compiled(stderr):
+    """The crates of the planted Rust files that this build did not compile."""
+    crates = sorted({_crate(path) for path in _planted if str(path).endswith(".rs")})
+    return [crate for crate in crates if not re.search(rf"^\s*Compiling {re.escape(crate)} v", stderr, re.M)]
+
+
+def build(cmd, cwd, failure="a falsifier does not compile"):
+    """Runs a build command (Cargo, or a script that runs Cargo without
+    --quiet) that must compile the mutant in place, and stops the run if it
+    fails or did not compile the mutant's crate. With no mutant in place it
+    only has to pass."""
+    global _compiled
+    result = run(cmd, cwd)
+    if result.returncode == 0 and _not_compiled(result.stderr):
+        _stamp_after_latest(_planted, 60)
+        result = run(cmd, cwd)
+        if result.returncode == 0 and _not_compiled(result.stderr):
+            names = ", ".join(str(path) for path in _planted)
+            raise SystemExit(
+                f"the build did not compile {', '.join(_not_compiled(result.stderr))} "
+                f"with a mutant in {names}: no test can be scored"
+            )
+    if result.returncode != 0:
+        print(result.stderr[-3000:])
+        raise SystemExit(failure)
+    _compiled = bool(_planted)
+    return result
+
+
+def check(cases):
+    """Every old text occurs exactly once in its file."""
+    for case in cases:
+        name, path, replacements = case[0], pathlib.Path(case[1]), case[2]
+        text = path.read_text()
+        for old, _ in replacements:
+            if text.count(old) != 1:
+                raise SystemExit(f"{name}: expected the text once in {path}, found {text.count(old)}")
+
+
+def falsify(cases, prepare, test_fails, parts=(), show_tests=False, failing_tests=None):
+    """Runs each case whose name holds one of `parts` (all if none).
+
+    `prepare()` builds the mutant once (and stops the run if it does not
+    compile); it may be None. `test_fails(test)` runs one named test and says
+    whether it failed. Every named test is run, even after one has failed,
+    and the case is caught only if all of them failed. When `failing_tests`
+    is given, it returns the names of every test that failed in the whole
+    file while the mutant is in place: the case is caught only when that set
+    is exactly the declared set, so an undeclared failure cannot hide.
+    Returns the names of the cases that survived."""
+    missed = []
+    for case in cases:
+        name, path, replacements, tests = case[:4]
+        appends = case[4] if len(case) > 4 else []
+        if parts and not any(part in name for part in parts):
+            continue
+        path = pathlib.Path(path)
+        touched = [path] + [pathlib.Path(other) for other, _ in appends]
+        saved = {each: each.read_bytes() for each in touched}
+        try:
+            text = saved[path].decode()
+            for old, new in replacements:
+                text = text.replace(old, new)
+            path.write_text(text)
+            for other, extra in appends:
+                other = pathlib.Path(other)
+                other.write_text(other.read_text() + extra)
+            planted(touched)
+            if prepare is not None:
+                prepare()
+            results = [(test, test_fails(test)) for test in tests]
+            actual = set(map(str, failing_tests())) if failing_tests is not None else None
+        finally:
+            for each, data in saved.items():
+                each.write_bytes(data)
+            restored(saved)
+        survivors = [test for test, failed in results if not failed]
+        declared = set(map(str, tests))
+        unexpected = sorted(actual - declared) if actual is not None else []
+        absent = sorted(declared - actual) if actual is not None else []
+        caught = bool(results) and not survivors and not unexpected and not absent
+        suffix = f" -> {', '.join(map(str, tests))}" if show_tests else ""
+        if caught:
+            print(f"caught: {name}{suffix}", flush=True)
+        else:
+            passed = ", ".join(map(str, survivors)) or "no test named"
+            print(f"SURVIVED: {name}{suffix} (still passing: {passed})", flush=True)
+            if unexpected:
+                print(f"  undeclared failures: {', '.join(unexpected)}", flush=True)
+            if absent:
+                print(f"  declared failures that did not fail: {', '.join(absent)}", flush=True)
+            missed.append(name)
+    return missed
+
+
+def cargo_compiles(cwd, args):
+    """A mutant that does not compile, or whose crate Cargo did not compile,
+    proves nothing: stop the run. Cargo must say what it compiles, so -q is
+    dropped."""
+    loud = [arg for arg in args if arg not in ("-q", "--quiet")]
+    build(["cargo", "test", "--locked", *loud, "--no-run"], cwd)
+
+
+def cargo_test_fails(cwd, args, name):
+    """Runs one test by its exact name; it must exist. If no build has
+    compiled the Rust mutant in place yet, one is made and checked first."""
+    if not _compiled and any(str(path).endswith(".rs") for path in _planted):
+        cargo_compiles(cwd, args)
+    result = run(["cargo", "test", "--locked", *args, "--", "--exact", name], cwd)
+    if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
+        raise SystemExit(f"no test {name} in {cwd}\n{result.stdout[-1500:]}{result.stderr[-1500:]}")
+    return result.returncode != 0
+
+
+def node_test_fails(test_file, name):
+    """Runs the node tests whose names match; the named test must run and
+    fail. A test file that does not load, or a name that no test has, stops
+    the run: a startup error proves nothing about the mutant."""
+    result = subprocess.run(
+        [
+            "node",
+            "--test",
+            "--test-reporter=tap",
+            f"--test-name-pattern={name}",
+            str(test_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    out = result.stdout
+    if "TAP version 13" not in out:
+        raise SystemExit(
+            f"{test_file} did not load: {(result.stderr or out).strip()[-1500:]}"
+        )
+    # The runner calls this with a name pattern, as `--test-name-pattern`
+    # does. Every test that matches must have run and failed: one that ran
+    # and passed, or no result at all, proves nothing about the mutant.
+    pattern = re.compile(name)
+    matched_subtest = False
+    results = []
+    for line in out.splitlines():
+        subtest = re.match(r"^\s*# Subtest: (.*)$", line)
+        if subtest:
+            if pattern.search(subtest.group(1)):
+                matched_subtest = True
+            continue
+        result_line = re.match(r"^\s*(not ok|ok) \d+ - (.*?)(?:\s+#.*)?$", line)
+        if result_line and pattern.search(result_line.group(2)):
+            results.append(result_line.group(1) == "not ok")
+    if results:
+        return all(results)
+    if matched_subtest:
+        raise SystemExit(f"no result for test {name!r} in {test_file}")
+    # A file that fails while loading reports itself as a failing test named
+    # after the file; anything else means the name matched nothing.
+    base = pathlib.Path(test_file).name
+    wrapper = None
+    for line in out.splitlines():
+        match = re.match(r"^\s*(not ok|ok) \d+ - (.*)$", line)
+        if match and match.group(2) in (str(test_file), base):
+            wrapper = match.group(1)
+            break
+    if wrapper == "not ok":
+        raise SystemExit(f"{test_file} did not load:\n{out.strip()[-1500:]}")
+    raise SystemExit(f"no test matches {name!r} in {test_file}")
+
+
+def node_test_failures(test_file):
+    """Runs every test in the file and returns the names that failed.
+
+    A file that does not load stops the run: its failure says nothing about
+    the mutant."""
+    result = subprocess.run(
+        ["node", "--test", "--test-reporter=tap", str(test_file)],
+        capture_output=True,
+        text=True,
+    )
+    out = result.stdout
+    if "TAP version 13" not in out:
+        raise SystemExit(
+            f"{test_file} did not load: {(result.stderr or out).strip()[-1500:]}"
+        )
+    failures = set()
+    for line in out.splitlines():
+        match = re.match(r"^\s*not ok \d+ - (.*?)(?:\s+#.*)?$", line)
+        if match:
+            failures.add(match.group(1))
+    return failures
+
+
+def main(groups, args=None, done="all falsifiers caught"):
+    """`groups`: [(cases, prepare, test_fails, flag or None, show_tests[,
+    failing_tests])]. A group with a flag runs only when that flag is given.
+    `failing_tests` is optional: when present, the whole test file must fail
+    exactly the declared tests. --check confirms every anchor; other
+    arguments filter cases by name."""
+    args = sys.argv[1:] if args is None else args
+    parts = [arg for arg in args if not arg.startswith("--")]
+    for cases, *_ in groups:
+        check(cases)
+    if "--check" in args:
+        print(f"all {sum(len(cases) for cases, *_ in groups)} anchors found once")
+        return
+    missed = []
+    for group in groups:
+        cases, prepare, test_fails, flag, show_tests = group[:5]
+        failing_tests = group[5] if len(group) > 5 else None
+        if flag is None or flag in args:
+            missed += falsify(cases, prepare, test_fails, parts, show_tests, failing_tests)
+    if missed:
+        raise SystemExit(f"{len(missed)} falsifier(s) survived: {missed}")
+    print(done)
