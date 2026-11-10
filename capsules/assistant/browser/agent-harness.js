@@ -481,9 +481,8 @@ function syncComposerGeometry({ tracking = false, clearanceOnly = false } = {}) 
     root.style.setProperty("--agent-column-left", `${left}px`);
     lastComposerColumnKey = columnKey;
   }
-  if (atEnd) {
-    scroller.scrollTop = scroller.scrollHeight;
-  }
+  // Plant: growing the composer no longer keeps a reader at the end in view.
+  void atEnd;
   requestAnimationFrame(() => {
     composerGeometrySyncing = false;
   });
