@@ -2236,8 +2236,9 @@ function remoteCarrierExitLabel(exit) {
 }
 
 function remoteCarrierExitSummary(exit) {
-  const name = String(exit?.display_name || exit?.label || "this contact").trim();
-  return `Websites see ${name}'s internet address.`;
+  const name = String(exit?.contact_name || "").trim();
+  return name ? `Websites see ${name}'s internet address.`
+    : "Websites see the address of the shared connection.";
 }
 
 function browserExitLabel(remoteExitId = selectedRemoteExitId) {

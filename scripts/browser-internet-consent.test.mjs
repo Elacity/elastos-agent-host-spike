@@ -83,7 +83,7 @@ async function fixture() {
       json({ok:true});return;
     }
     if (url.pathname === "/api/apps/browser/summary") {
-      json({net:{exit_provider:{remote_carrier_exits:[{id:"sasha-exit",display_name:"Sasha",allowed_for_principal:true}]}},engine_adapter:{adapters:[]},sessions:{schema:"elastos.browser.session-capacity/v1",status:"configured",fresh_start_allowed:true,recoverable_page:null}});return;
+      json({net:{exit_provider:{remote_carrier_exits:[{id:"sasha-exit",display_name:"A shared Exit",contact_name:"Sasha",allowed_for_principal:true},{id:"legacy-exit",display_name:"A service label",allowed_for_principal:true}]}},engine_adapter:{adapters:[]},sessions:{schema:"elastos.browser.session-capacity/v1",status:"configured",fresh_start_allowed:true,recoverable_page:null}});return;
     }
     if (url.pathname === "/api/apps/browser/open") {
       state.opens.push(input);json({schema:"elastos.browser.open-accepted/v1",status_url:"/api/apps/browser/open/fixture"});return;
@@ -128,6 +128,8 @@ test("Browser asks once, polls every two seconds and opens the requested page wi
       await frame.getByText("Websites see this Mac's internet address.",{exact:true}).waitFor();
       await frame.locator("#browser-exit").selectOption("sasha-exit");
       await frame.getByText("Websites see Sasha's internet address.",{exact:true}).waitFor();
+      await frame.locator("#browser-exit").selectOption("legacy-exit");
+      await frame.getByText("Websites see the address of the shared connection.",{exact:true}).waitFor();
       await frame.locator("#browser-exit").selectOption("");
       await frame.getByRole("button",{name:"Change in Settings",exact:true}).click();await settingsMessage(page);
       await frame.getByRole("button",{name:"Close Browser settings"}).click();
