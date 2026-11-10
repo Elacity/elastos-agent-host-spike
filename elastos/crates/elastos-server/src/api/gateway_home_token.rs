@@ -915,7 +915,17 @@ fn require_home_launch_token_value_from_expected_did(
                     "proofless home launch token is not exact Runtime-local device authority"
                 );
             }
-            crate::auth::ResolvedPrincipalRoot::verified_device_signer(&signer)
+            if crate::auth::stored_principal_record(auth_data_dir, expected_principal.as_str())?
+                .is_some()
+            {
+                crate::auth::ResolvedPrincipalRoot::resolve(
+                    data_dir,
+                    auth_data_dir,
+                    expected_principal.as_str(),
+                )?
+            } else {
+                crate::auth::ResolvedPrincipalRoot::verified_device_signer(&signer)
+            }
         }
     };
     Ok(RequiredHomeLaunchToken {
@@ -1295,6 +1305,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(checked.context.root().localhost_root(), expected_root);
+    }
+
+    #[test]
+    fn proofless_parent_token_uses_stored_device_record_before_witness_root() {
+        use sha2::Digest as _;
+        let parent = tempfile::tempdir().unwrap();
+        let child = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let principal_id = format!("device:{did}");
+        crate::auth::store_test_human_principal(parent.path(), &principal_id);
+        crate::auth::tests::mint_agent_record(parent.path(), &principal_id, None);
+        let context = local_home_launch_token_context(parent.path()).unwrap();
+        let token =
+            issue_home_launch_token_with_context(parent.path(), "marketplace", &context).unwrap();
+        let verified = require_home_launch_token_value_from_expected_did(
+            child.path(),
+            &token,
+            &["marketplace"],
+            did,
+            parent.path(),
+        )
+        .unwrap();
+        let expected_root = format!(
+            "localhost://UsersAI/{}",
+            hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12])
+        );
+        assert_eq!(verified.context.root().localhost_root(), expected_root);
+    }
+
+    #[test]
+    fn proofless_parent_token_without_record_uses_witness_device_root() {
+        use sha2::Digest as _;
+        let parent = tempfile::tempdir().unwrap();
+        let child = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(parent.path()).unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let token =
+            issue_home_launch_token_with_context(parent.path(), "marketplace", &context).unwrap();
+        let verified = require_home_launch_token_value_from_expected_did(
+            child.path(),
+            &token,
+            &["marketplace"],
+            did.clone(),
+            parent.path(),
+        )
+        .unwrap();
+        let principal_id = format!("device:{did}");
+        let expected_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12])
+        );
+        assert_eq!(verified.context.root().localhost_root(), expected_root);
     }
 
     #[test]
