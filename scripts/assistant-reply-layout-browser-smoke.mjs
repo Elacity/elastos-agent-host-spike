@@ -196,16 +196,17 @@ try {
   const frame = page.frames().find(candidate => candidate.url().includes("/apps/assistant/"));
 
   const input = room.locator("#agent-composer-input");
-  // Waits for a page condition. A deadline failure names the condition and
-  // the state that was still missing, so a loaded machine reports what never
-  // held instead of a bare timeout.
+  // Waits for a page condition. The page function returns a state object with
+  // an `ok` field, and a deadline failure names the condition and the state
+  // that was still missing, so a loaded machine reports what never held.
   const waitForCondition = async (label, fn, arg = null, timeout = 20000) => {
-    try {
-      await frame.waitForFunction(fn, arg, { timeout, polling: 50 });
-    } catch {
-      const seen = await frame.evaluate(fn, arg).catch(() => "the page threw");
-      assert.fail(`${label}, within ${timeout} ms: ${JSON.stringify(seen)}`);
+    const deadline = Date.now() + timeout;
+    let state = await frame.evaluate(fn, arg);
+    while (!state.ok && Date.now() < deadline) {
+      await page.waitForTimeout(50);
+      state = await frame.evaluate(fn, arg);
     }
+    assert.ok(state.ok, `${label}, within ${timeout} ms: ${JSON.stringify(state)}`);
   };
   // Polls until the newest block is at the end and fully above the composer;
   // then asserts on the last measurement. A finished reply reaches this state
@@ -240,9 +241,10 @@ try {
   // reply's own end pin and leave the room short of the end.
   const clearFollowUp = async () => {
     await input.fill("");
-    await waitForCondition("the composer returns to its resting height",
-      (height) => document.querySelector(".taskbar.is-agent-face").getBoundingClientRect().height <= height + 1,
-      composerRestHeight, 5000);
+    await waitForCondition("the composer returns to its resting height", (height) => {
+      const now = document.querySelector(".taskbar.is-agent-face").getBoundingClientRect().height;
+      return { ok: now <= height + 1, height: now, rest: height };
+    }, composerRestHeight, 5000);
   };
   // The streaming reply's painted text. A reply grows in the DOM as its
   // flushes paint; waiting for that growth makes each pushed group land on
@@ -254,7 +256,7 @@ try {
     await waitForCondition(`${label}: the reply paints the text just sent`, (chars) => {
       const body = document.querySelector(".agent-msg-agent.is-streaming .agent-msg-body");
       const now = body?.textContent.length ?? 0;
-      return now > chars ? true : { painted: now, before: chars };
+      return { ok: now > chars, painted: now, before: chars };
     }, before, 15000);
   };
   const seen = {};
@@ -288,7 +290,7 @@ try {
   // exist; the counts and marker widths are asserted next.
   await waitForCondition("the saved and the streamed reply each render a numbered list", () => {
     const lists = [...document.querySelectorAll(".agent-msg-agent ol.agent-md-list")];
-    return lists.length >= 2 ? true : { lists: lists.length, items: lists.map(list => list.children.length) };
+    return { ok: lists.length >= 2, lists: lists.length, items: lists.map(list => list.children.length) };
   }, null, 15000);
   const markers = await frame.evaluate(markerReport, ".agent-msg-agent ol.agent-md-list");
   assert.deepEqual(markers.map(list => list.items), [12, 25], `saved and streamed lists render: ${JSON.stringify(markers)}`);
@@ -344,8 +346,9 @@ try {
     };
     requestAnimationFrame(step);
   });
-  await waitForCondition("the room rests at the end with the status line showing",
-    () => window.__rest.stable >= 10, null, 10000);
+  await waitForCondition("the room rests at the end with the status line showing", () => ({
+    ok: window.__rest.stable >= 10, stable: window.__rest.stable, frames: window.__rest.frames,
+  }), null, 10000);
   const sent = fixture.runs.get("run-sent-1");
   assert.ok(sent, "the message started a run");
   const replyChunks = gardenReply.match(/[\s\S]{1,300}/g);
@@ -395,7 +398,7 @@ try {
   // The reader is at the settled end, so the button is gone.
   await waitForCondition("Jump to latest is hidden at the settled end", () => {
     const jump = document.querySelector("[data-agent-jump-latest]");
-    return jump?.hidden ? true : { hidden: false };
+    return { ok: Boolean(jump?.hidden), hidden: jump?.hidden };
   }, null, 5000);
   seen.sentReplyBehindFrames = follow.behindFrames;
 
@@ -468,7 +471,7 @@ try {
     await waitForCondition(`${label}: the room follows the start of the reply to the end`, () => {
       const scroller = document.querySelector("#agent-harness-stream");
       const fromEnd = Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight);
-      return fromEnd <= 8 ? true : { fromEnd,
+      return { ok: fromEnd <= 8, fromEnd,
         follow: scroller.classList.contains("is-follow-bottom"),
         jump: Boolean(document.querySelector("[data-agent-jump-latest]")?.hidden === false) };
     }, null, 10000);
