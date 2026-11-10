@@ -35,6 +35,9 @@ pub enum ProofBindingKind {
     DidKey,
     DidElastos,
     Essentials,
+    /// Runtime admission of an agent. No sign-in produces this kind.
+    /// The subject is the agent id and nothing else.
+    AgentAdmission,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +85,17 @@ impl ProofBinding {
         }
     }
 
+    /// Binds an agent admission to the agent id alone.
+    pub fn agent_admission(agent_id: &str, verified_at: u64) -> Self {
+        Self {
+            kind: ProofBindingKind::AgentAdmission,
+            subject: agent_id.to_string(),
+            chain_id: None,
+            verified_at,
+            passkey: None,
+        }
+    }
+
     pub fn id(&self) -> String {
         match self.kind {
             ProofBindingKind::PasskeyWebAuthn => {
@@ -111,6 +125,10 @@ impl ProofBinding {
             ProofBindingKind::DidKey => format!("proof:{}", self.subject),
             ProofBindingKind::DidElastos => format!("proof:{}", self.subject),
             ProofBindingKind::Essentials => format!("proof:essentials:{}", self.subject),
+            // Outside the `proof:` namespace every sign-in binding uses.
+            ProofBindingKind::AgentAdmission => {
+                format!("agent-admission:v2:{}", self.subject)
+            }
         }
     }
 }
@@ -1708,5 +1726,20 @@ mod tests {
         assert!(validate_did_recovery_proof(&proof)
             .unwrap_err()
             .contains("hex encoded"));
+    }
+
+    #[test]
+    fn agent_admission_subject_is_the_agent_id_alone() {
+        let agent_id = "agent:v2:0123456789abcdef0123456789abcdef";
+        let binding = ProofBinding::agent_admission(agent_id, 5);
+        assert_eq!(binding.kind, ProofBindingKind::AgentAdmission);
+        assert_eq!(binding.subject, agent_id);
+        assert_eq!(binding.chain_id, None);
+        assert_eq!(binding.passkey, None);
+        assert_eq!(binding.id(), format!("agent-admission:v2:{agent_id}"));
+        assert_eq!(
+            serde_json::to_value(binding.kind).unwrap(),
+            "agent_admission"
+        );
     }
 }
