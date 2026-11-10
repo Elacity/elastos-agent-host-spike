@@ -66,8 +66,62 @@ pub struct Runtime {
     running_capsules: RwLock<HashMap<String, RunningCapsuleInfo>>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
-    /// Per-launch manifest capability ceilings for capsule bridge requests.
-    bridge_manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+    /// What admission decided for each launched capsule, by capsule id.
+    admissions: Admissions,
+}
+
+/// What admission decided for one launched capsule: who its bridge calls act
+/// as, and the manifest's resource ceilings. The bridge acts with exactly
+/// this, and a capsule with no admission context is refused.
+#[derive(Debug, Clone)]
+pub(crate) struct AdmissionContext {
+    pub(crate) actor: Option<String>,
+    pub(crate) manifest_bounds: Vec<String>,
+}
+
+type Admissions = Arc<StdRwLock<HashMap<String, AdmissionContext>>>;
+
+/// The bridge hostcall the Runtime installs for component capsules. Each call
+/// acts with the caller's admission context and with nothing the caller says
+/// about itself.
+fn bridge_hostcall(
+    admissions: Admissions,
+    registry: Arc<ProviderRegistry>,
+    capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+    pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    data_dir: std::path::PathBuf,
+    handle: tokio::runtime::Handle,
+) -> BridgeHostcall {
+    Arc::new(move |line, capsule_id, _principal_id| {
+        let admission = admitted(&admissions, capsule_id)?;
+        let ctx = crate::resource_bridge::BridgeContext {
+            provider_registry: registry.clone(),
+            capability_manager: capability_manager.clone(),
+            pending_store: pending_store.clone(),
+            capsule_id: capsule_id.to_string(),
+            principal_id: admission.actor,
+            manifest_capabilities: admission.manifest_bounds,
+            data_dir: Some(data_dir.clone()),
+        };
+        let response = handle
+            .block_on(crate::resource_bridge::handle_component_resource_request(
+                line, ctx,
+            ))
+            .map_err(|err| err.to_string())?;
+        serde_json::to_string(&response).map_err(|err| err.to_string())
+    })
+}
+
+/// The admission context of a launched capsule, or the refusal.
+fn admitted(
+    admissions: &Admissions,
+    capsule_id: &str,
+) -> std::result::Result<AdmissionContext, String> {
+    let admission = admissions
+        .read()
+        .ok()
+        .and_then(|guard| guard.get(capsule_id).cloned());
+    admission.ok_or_else(|| format!("capsule '{capsule_id}' has no admission context"))
 }
 
 impl Runtime {
@@ -81,7 +135,7 @@ impl Runtime {
             provider_registry: RwLock::new(None),
             running_capsules: RwLock::new(HashMap::new()),
             component_provider: None,
-            bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            admissions: Arc::new(StdRwLock::new(HashMap::new())),
         }
     }
 
@@ -98,7 +152,7 @@ impl Runtime {
             provider_registry: RwLock::new(None),
             running_capsules: RwLock::new(HashMap::new()),
             component_provider,
-            bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            admissions: Arc::new(StdRwLock::new(HashMap::new())),
         }
     }
 
@@ -115,34 +169,14 @@ impl Runtime {
         data_dir: std::path::PathBuf,
     ) {
         if let Some(ref component) = self.component_provider {
-            let host_reg = registry.clone();
-            let host_cap_mgr = capability_manager.clone();
-            let host_pending = pending_store.clone();
-            let host_data_dir = data_dir.clone();
-            let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
-            let host_handle = tokio::runtime::Handle::current();
-            component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
-                let manifest_capabilities = host_manifest_capabilities
-                    .read()
-                    .ok()
-                    .and_then(|guard| guard.get(capsule_id).cloned())
-                    .unwrap_or_default();
-                let ctx = crate::resource_bridge::BridgeContext {
-                    provider_registry: host_reg.clone(),
-                    capability_manager: host_cap_mgr.clone(),
-                    pending_store: host_pending.clone(),
-                    capsule_id: capsule_id.to_string(),
-                    principal_id: principal_id.map(ToOwned::to_owned),
-                    manifest_capabilities,
-                    data_dir: Some(host_data_dir.clone()),
-                };
-                let response = host_handle
-                    .block_on(crate::resource_bridge::handle_component_resource_request(
-                        line, ctx,
-                    ))
-                    .map_err(|err| err.to_string())?;
-                serde_json::to_string(&response).map_err(|err| err.to_string())
-            }));
+            component.set_bus_hostcall(bridge_hostcall(
+                self.admissions.clone(),
+                registry.clone(),
+                capability_manager.clone(),
+                pending_store.clone(),
+                data_dir.clone(),
+                tokio::runtime::Handle::current(),
+            ));
             tracing::info!("Component resource bridge configured");
         }
 
@@ -320,11 +354,12 @@ impl Runtime {
 
         // Load capsule
         let mut handle = provider.load(path, manifest).await?;
-        if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
-            bounds.insert(
-                handle.id.0.clone(),
-                handle.manifest.resource_authority_bounds(),
-            );
+        if let Ok(mut admissions) = self.admissions.write() {
+            let admission = AdmissionContext {
+                actor: principal_id.clone(),
+                manifest_bounds: handle.manifest.resource_authority_bounds(),
+            };
+            admissions.insert(handle.id.0.clone(), admission);
         }
         if handle.manifest.is_component_capsule() {
             if let Some(ref component) = self.component_provider {
@@ -344,8 +379,8 @@ impl Runtime {
                 component.clear_bridge_principal(&handle.id).await;
             }
         }
-        if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
-            bounds.remove(&handle.id.0);
+        if let Ok(mut admissions) = self.admissions.write() {
+            admissions.remove(&handle.id.0);
         }
         start?;
 
@@ -566,6 +601,51 @@ pub(crate) mod tests {
         Component, ComponentImportSection, ComponentTypeRef as EncodedComponentTypeRef,
         ComponentTypeSection, InstanceType,
     };
+
+    /// ADMIT-missing: a bridge call from a capsule with no admission context is
+    /// refused before the bridge runs, so nothing is pending and no provider
+    /// can be reached. With a context, the same call reaches the bridge.
+    #[test]
+    fn bridge_hostcall_refuses_a_capsule_with_no_admission_context() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store =
+            Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log));
+        let admissions: Admissions = Arc::new(StdRwLock::new(HashMap::new()));
+        let data_dir = tempfile::tempdir().unwrap();
+        let hostcall = bridge_hostcall(
+            admissions.clone(),
+            Arc::new(ProviderRegistry::new()),
+            capability_manager,
+            pending_store.clone(),
+            data_dir.path().to_path_buf(),
+            rt.handle().clone(),
+        );
+        // Outside the bounds given below, so the control is answered at once
+        // instead of waiting for an approval.
+        let line = r#"{"id":7,"request":{"type":"request_capability","resource":"localhost://Local/Elsewhere/a.txt","action":"read"}}"#;
+
+        let refused = hostcall(line, "never-admitted", None).expect_err("no admission context");
+        assert_eq!(refused, "capsule 'never-admitted' has no admission context");
+        assert!(rt.block_on(pending_store.list_pending()).is_empty());
+
+        admissions.write().unwrap().insert(
+            "admitted".into(),
+            AdmissionContext {
+                actor: None,
+                manifest_bounds: vec!["localhost://Local/SharedByLocalUsersAndBots/Home/*".into()],
+            },
+        );
+        let answered = hostcall(line, "admitted", None).expect("an admitted capsule is answered");
+        let answered: serde_json::Value = serde_json::from_str(&answered).unwrap();
+        assert_eq!(answered["id"], 7, "{answered}");
+        assert!(rt.block_on(pending_store.list_pending()).is_empty());
+    }
 
     pub(crate) struct NoopComputeProvider;
 
