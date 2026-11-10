@@ -9830,13 +9830,14 @@ fn preflight_declared_principal_root_upgrade(
 ) -> anyhow::Result<PrincipalRootUpgradePreflight> {
     let state = load_auth_state(data_dir)?;
     let mut protections = std::collections::BTreeMap::new();
-    for protection in state.principal_root_protections {
-        validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
+    for protection in &state.principal_root_protections {
+        validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+        ensure_users_ai_protection_owner(&state, protection)?;
         let key = (
             protection.principal_id.clone(),
             protection.localhost_root.clone(),
         );
-        if protections.insert(key, protection).is_some() {
+        if protections.insert(key, protection.clone()).is_some() {
             anyhow::bail!("configured principal-root protections contain a duplicate binding");
         }
     }

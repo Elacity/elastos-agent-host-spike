@@ -128,6 +128,51 @@ fn agent_object_io_refuses_missing_protection_and_human_plaintext_still_works() 
     assert_eq!(std::fs::read(&human_path).unwrap(), b"human");
 }
 
+#[test]
+fn usersai_missing_agent_record_refuses_upgrade_preflight_without_migration() {
+    let (data, agent, _) = fixture();
+    let uri = format!("{}/Documents/plain.txt", agent.localhost_root);
+    let path = rooted_localhost_fs_path(data.path(), &uri).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"legacy plaintext").unwrap();
+    mutate_auth_state(data.path(), |state| {
+        state
+            .principals
+            .retain(|p| p.principal_id != agent.principal_id);
+        Ok(())
+    })
+    .unwrap();
+    let auth_path = auth_state_path(data.path()).unwrap();
+    let before = std::fs::read(&auth_path).unwrap();
+    let declarations = load_auth_state(data.path())
+        .unwrap()
+        .principal_root_protections
+        .into_iter()
+        .map(|p| PrincipalRootUpgradeDeclarationV1 {
+            inventory: if p.principal_id == agent.principal_id {
+                vec![PrincipalRootProtectedObjectDeclarationV1::exact(
+                    uri.clone(),
+                )]
+            } else {
+                vec![]
+            },
+            principal_id: p.principal_id,
+            localhost_root: p.localhost_root,
+        })
+        .collect::<Vec<_>>();
+    let error = preflight_declared_principal_root_upgrade(
+        data.path(),
+        &declarations,
+        PrincipalRootScanMode::Plan,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "UsersAI protection requires its stored Agent root");
+    assert_eq!(std::fs::read(&auth_path).unwrap(), before);
+    assert_eq!(std::fs::read(&path).unwrap(), b"legacy plaintext");
+}
+
+#[test]
 fn owner_root_absent_owner_refuses_before_object_open() {
     let (data, agent, protection) = fixture();
     let uri = format!("{}/Documents/note.txt", agent.localhost_root);
