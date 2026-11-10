@@ -316,13 +316,7 @@ pub async fn viewer_storage_get(
         Ok(metadata) if metadata.is_file() => {}
         _ => return (StatusCode::BAD_REQUEST, "viewer storage file unavailable").into_response(),
     }
-    match crate::auth::read_principal_root_object(
-        &state.data_dir,
-        &target.principal_id,
-        &target.localhost_root,
-        &target.object_uri,
-        &target.path,
-    ) {
+    match viewer_storage_read(&state.data_dir, &target) {
         Ok(bytes) => {
             let revision = crate::auth::principal_root_object_revision(
                 &target.principal_id,
@@ -366,15 +360,7 @@ pub async fn viewer_storage_put(
                 .into_response()
         }
     };
-    match crate::auth::write_principal_root_object_if_revision(
-        &state.data_dir,
-        &target.principal_id,
-        &target.localhost_root,
-        &target.object_uri,
-        &target.path,
-        body.as_ref(),
-        precondition,
-    ) {
+    match viewer_storage_write(&state.data_dir, &target, body.as_ref(), precondition) {
         Ok(()) => {
             let revision = crate::auth::principal_root_object_revision(
                 &target.principal_id,
@@ -693,8 +679,33 @@ fn append_viewer_library_audit(
 struct ViewerStorageTarget {
     path: PathBuf,
     principal_id: String,
-    localhost_root: String,
+    root: crate::auth::ResolvedPrincipalRoot,
     object_uri: String,
+}
+
+fn viewer_storage_read(data_dir: &FsPath, target: &ViewerStorageTarget) -> anyhow::Result<Vec<u8>> {
+    crate::auth::read_principal_root_object_resolved(
+        data_dir,
+        &target.root,
+        &target.object_uri,
+        &target.path,
+    )
+}
+
+fn viewer_storage_write(
+    data_dir: &FsPath,
+    target: &ViewerStorageTarget,
+    bytes: &[u8],
+    precondition: crate::auth::PrincipalRootObjectPrecondition<'_>,
+) -> anyhow::Result<()> {
+    crate::auth::write_principal_root_object_if_revision_resolved(
+        data_dir,
+        &target.root,
+        &target.object_uri,
+        &target.path,
+        bytes,
+        precondition,
+    )
 }
 
 fn require_viewer_library_launch_context(
@@ -786,11 +797,10 @@ fn viewer_storage_target_for_context(
         anyhow::bail!("viewer storage does not support .AppData/Agents/ (agent journals)");
     }
     let principal_id = context.principal_id().to_string();
-    let localhost_root = viewer_target_root(context);
     Ok(ViewerStorageTarget {
         path: dir.join(file_name),
         principal_id,
-        localhost_root,
+        root: context.root().clone(),
         object_uri,
     })
 }
@@ -861,6 +871,7 @@ fn principal_scoped_storage_uri(storage: &str, context: &HomeLaunchTokenContext)
     principal_scoped_storage_uri_for_root(storage, context.root().localhost_root())
 }
 
+#[cfg(test)]
 fn viewer_target_root(context: &HomeLaunchTokenContext) -> String {
     context.root().localhost_root().to_string()
 }
@@ -933,6 +944,7 @@ fn viewer_error_response(err: anyhow::Error) -> Response {
 #[cfg(test)]
 mod r4_root_tests {
     use super::*;
+    use crate::api::gateway::r3_stored_root_tests::verified_parent_device_context;
     use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
     use crate::auth::PrincipalKind;
 
@@ -959,6 +971,84 @@ mod r4_root_tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn parent_signed_viewer_storage_round_trips_under_parent_root() {
+        let dir = tempfile::tempdir().unwrap();
+        active_viewer(dir.path());
+        let (context, parent_root, child_root, token) =
+            verified_parent_device_context(dir.path(), "documents");
+        assert_eq!(context.root().localhost_root(), parent_root);
+        let state = GatewayState {
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            carrier_endpoint: None,
+            collaboration_discovery_service: None,
+            identity_manager: Arc::new(std::sync::OnceLock::new()),
+            cache_dir: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "null".parse().unwrap());
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("if-none-match", "*".parse().unwrap());
+        let route = (
+            "documents".into(),
+            "documents".into(),
+            "save".into(),
+            "note.md".into(),
+        );
+        let denied = viewer_storage_put(
+            State(state.clone()),
+            Path(route.clone()),
+            headers.clone(),
+            Bytes::from_static(b"parent bytes"),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let denied_body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&denied_body).contains("home launch token"));
+        let target = viewer_storage_target_for_context(
+            dir.path(),
+            &context,
+            "documents",
+            "documents",
+            "save",
+            "note.md",
+        )
+        .unwrap();
+        let child_uri = format!("{child_root}/Documents/note.md");
+        let child_path = rooted_localhost_fs_path(dir.path(), &child_uri).unwrap();
+        std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        std::fs::write(&child_path, b"child decoy").unwrap();
+        let written = viewer_storage_write(
+            dir.path(),
+            &target,
+            b"parent bytes",
+            crate::auth::PrincipalRootObjectPrecondition::Absent,
+        );
+        assert!(
+            written.is_ok(),
+            "verified parent storage write: {written:?}"
+        );
+        assert_eq!(
+            viewer_storage_read(dir.path(), &target).map_err(|error| error.to_string()),
+            Ok(b"parent bytes".to_vec())
+        );
+        let denied_read = viewer_storage_get(State(state), Path(route), headers).await;
+        assert_eq!(denied_read.status(), StatusCode::UNAUTHORIZED);
+        let parent_uri = format!("{parent_root}/Documents/note.md");
+        assert!(rooted_localhost_fs_path(dir.path(), &parent_uri)
+            .unwrap()
+            .is_file());
+        assert_eq!(std::fs::read(&child_path).unwrap(), b"child decoy");
+        assert!(!crate::auth::principal_object_io::reads(dir.path()).contains(&child_path));
+        assert!(!crate::auth::principal_object_io::writes(dir.path()).contains(&child_path));
     }
 
     #[test]
@@ -1011,7 +1101,8 @@ mod r4_root_tests {
         )
         .expect("R4 viewer request reaches stored Agent root");
         assert_eq!(
-            live_target.localhost_root, AGENT_ROOT,
+            live_target.root.localhost_root(),
+            AGENT_ROOT,
             "R4 viewer request root"
         );
         assert_eq!(
@@ -1034,7 +1125,11 @@ mod r4_root_tests {
             "note.md",
         )
         .expect("R4 viewer target reaches stored Agent root");
-        assert_eq!(target.localhost_root, AGENT_ROOT, "R4 viewer target root");
+        assert_eq!(
+            target.root.localhost_root(),
+            AGENT_ROOT,
+            "R4 viewer target root"
+        );
         assert_eq!(target.object_uri, format!("{AGENT_ROOT}/Documents/note.md"));
     }
 
