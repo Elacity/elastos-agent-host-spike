@@ -4969,6 +4969,32 @@ mod tests {
         );
     }
 
+    /// The shipped deadline bounds the timer itself, not only the error text:
+    /// a hung candidate must return within eight seconds of the five-second bound.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shipped_probe_returns_within_the_five_second_bound() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("hung-candidate");
+        std::fs::write(&bin, b"#!/bin/sh\nexec sleep 3600\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = std::time::Instant::now();
+        let error = verify_installed_binary_version(&bin, "0.1.0", VERSION_CHECK_TIMEOUT)
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            error.to_string().contains("timed out after 5 seconds"),
+            "{error:#}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "probe returned after {elapsed:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn version_check_times_out_when_a_child_retains_the_pipes() {
