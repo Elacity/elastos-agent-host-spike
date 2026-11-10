@@ -277,15 +277,19 @@ fn deadline_ticks(time: Duration) -> u64 {
     ((time.as_millis() / DEADLINE_TICK.as_millis()) as u64).max(1)
 }
 
-/// Keeps the cause Wasmtime gave (the outer error alone only says "error while
-/// executing") and names the ending of a run that a limit stopped.
+/// Leads with the cause Wasmtime gave (the root of its error chain: the outer
+/// error alone only says "error while executing"), names the ending of a run
+/// that a limit stopped, and keeps the outer text, the wasm backtrace, after it.
 fn run_error(stage: &str, err: wasmtime::Error) -> ElastosError {
     let ending = match err.downcast_ref::<Trap>() {
-        Some(Trap::Interrupt) => ENDING_EPOCH_DEADLINE,
-        Some(Trap::OutOfFuel) => ENDING_FUEL_EXHAUSTED,
-        _ => return ElastosError::Compute(format!("{stage}: {err:#}")),
+        Some(Trap::Interrupt) => format!(" (ending: {ENDING_EPOCH_DEADLINE})"),
+        Some(Trap::OutOfFuel) => format!(" (ending: {ENDING_FUEL_EXHAUSTED})"),
+        _ => String::new(),
     };
-    ElastosError::Compute(format!("{stage}: {err:#} (ending: {ending})"))
+    let mut chain: Vec<String> = err.chain().map(|link| link.to_string()).collect();
+    let cause = chain.pop().unwrap_or_default();
+    let context: String = chain.iter().map(|outer| format!("\n{outer}")).collect();
+    ElastosError::Compute(format!("{stage}: {cause}{ending}{context}"))
 }
 
 impl Default for ComponentProvider {
@@ -633,6 +637,11 @@ mod tests {
     /// `at_start` in its start function. `spin: false` gives the same
     /// component with no loop.
     fn lifecycle_component(spin: bool, at_start: bool) -> Component {
+        let engine = ComponentProvider::engine().expect("component engine");
+        Component::new(&engine, lifecycle_component_bytes(spin, at_start)).expect("compiles")
+    }
+
+    fn lifecycle_component_bytes(spin: bool, at_start: bool) -> Vec<u8> {
         let start = if spin && at_start {
             "(start $spin)"
         } else {
@@ -662,8 +671,7 @@ mod tests {
               (instance $lifecycle (export "run" (func $run)))
               (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#
         );
-        let engine = ComponentProvider::engine().expect("component engine");
-        Component::new(&engine, wat::parse_str(text).expect("component text")).expect("compiles")
+        wat::parse_str(text).expect("component text")
     }
 
     /// An activation with the given time limit and fuel that never runs out,
@@ -962,10 +970,11 @@ mod tests {
 
     fn assert_ended_by_the_deadline(result: Result<()>) {
         let err = result.expect_err("a loop that never ends must not finish");
+        let text = err.to_string();
+        let first_line = text.lines().next().unwrap_or_default();
         assert!(
-            err.to_string()
-                .ends_with("wasm trap: interrupt (ending: epoch-deadline)"),
-            "the ending must be the named deadline ending, was: {err}"
+            first_line.ends_with(": wasm trap: interrupt (ending: epoch-deadline)"),
+            "the first line must end with the cause and the named deadline ending, was: {text}"
         );
     }
 
@@ -1059,14 +1068,43 @@ mod tests {
         let err = result
             .expect_err("a loop that never ends must not finish")
             .to_string();
-        assert!(
-            err.starts_with("Compute error: Component lifecycle run failed: error while executing"),
-            "{err}"
+        assert_eq!(
+            err.lines().next(),
+            Some(
+                "Compute error: Component lifecycle run failed: \
+                 wasm trap: all fuel consumed by WebAssembly (ending: fuel-exhausted)"
+            )
         );
         assert!(
-            err.ends_with("wasm trap: all fuel consumed by WebAssembly (ending: fuel-exhausted)"),
-            "{err}"
+            err.contains("\nerror while executing at wasm backtrace"),
+            "the backtrace stays, after the cause: {err}"
         );
+    }
+
+    /// The same through the provider's own load and start, as a launch does it.
+    /// Follows the photo line's test of the same name.
+    #[tokio::test]
+    async fn fuel_exhaustion_reaches_the_caller_with_its_cause() {
+        let (_, mut manifest) = component_fixture();
+        manifest.entrypoint = "spin.component.wasm".into();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(&manifest.entrypoint),
+            lifecycle_component_bytes(true, false),
+        )
+        .unwrap();
+        let provider = ComponentProvider::new();
+        let handle = provider.load(dir.path(), manifest).await.unwrap();
+
+        let err = provider.start(&handle).await.unwrap_err().to_string();
+
+        let first_line = err.lines().next().unwrap_or_default();
+        assert!(
+            first_line.contains("Component lifecycle run failed: ")
+                && first_line.contains("all fuel consumed"),
+            "the cause must lead the message: {err}"
+        );
+        assert!(err.contains("wasm backtrace"), "the backtrace stays: {err}");
     }
 
     #[test]
@@ -1078,7 +1116,8 @@ mod tests {
         .to_string();
         assert_eq!(
             err,
-            "Compute error: Component lifecycle run failed: outer: wasm trap: wasm `unreachable` instruction executed"
+            "Compute error: Component lifecycle run failed: \
+             wasm trap: wasm `unreachable` instruction executed\nouter"
         );
     }
 
