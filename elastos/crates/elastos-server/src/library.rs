@@ -8742,15 +8742,6 @@ fn append_library_event_with_root(
     Ok(event)
 }
 
-// The rows call this resolving entry point. Production callers already hold a root.
-#[cfg(test)]
-fn read_library_events(data_dir: &Path, principal_id: &str) -> anyhow::Result<Vec<LibraryEvent>> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
-    read_library_events_with_root(data_dir, principal_id, &root)
-}
-
 fn read_library_events_with_root(
     data_dir: &Path,
     principal_id: &str,
@@ -8777,19 +8768,6 @@ fn read_library_events_with_root(
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).context("invalid library event entry"))
         .collect()
-}
-
-// The rows call this resolving entry point. Production callers already hold a root.
-#[cfg(test)]
-fn write_library_events(
-    data_dir: &Path,
-    principal_id: &str,
-    events: &[LibraryEvent],
-) -> anyhow::Result<()> {
-    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id)?
-        .localhost_root()
-        .to_string();
-    write_library_events_with_root(data_dir, principal_id, &root, events)
 }
 
 fn write_library_events_with_root(
@@ -11148,7 +11126,9 @@ mod r5a_tests {
                 .is_ok_and(|value| value["deleted_count"] == 1),
             "{result:?}"
         );
-        let events = read_library_events(agent.path(), r4_fixture::ID).unwrap();
+        let events =
+            read_library_events_with_root(agent.path(), r4_fixture::ID, r4_fixture::AGENT_ROOT)
+                .unwrap();
         assert_eq!(
             events.last().unwrap().uri,
             format!("{}/.Trash", r4_fixture::AGENT_ROOT)
@@ -11596,7 +11576,8 @@ mod r5a_tests {
             (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
         ] {
             let dir = home(kind);
-            write_library_events(dir.path(), r4_fixture::ID, &[event(root)]).unwrap();
+            write_library_events_with_root(dir.path(), r4_fixture::ID, root, &[event(root)])
+                .unwrap();
             let filter = format!("{root}/Documents/e.txt");
             let result = library_events(dir.path(), r4_fixture::ID, Some(&filter), None, None);
             assert!(
@@ -11629,76 +11610,126 @@ mod r5a_tests {
     }
 
     #[test]
-    fn library_event_read_uses_stored_root() {
-        for (kind, root) in [
-            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
-            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
-        ] {
-            let dir = home(kind);
-            write_library_events(dir.path(), r4_fixture::ID, &[event(root)]).unwrap();
-            let result = read_library_events(dir.path(), r4_fixture::ID);
-            assert!(
-                result.as_ref().is_ok_and(|values| values.len() == 1
-                    && values[0].uri == format!("{root}/Documents/e.txt")),
-                "{root}: {result:?}"
-            );
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
-        let bytes = format!(
-            "{}\n",
-            serde_json::to_string(&event(r4_fixture::HUMAN_ROOT)).unwrap()
+    fn append_library_event_uses_the_stored_agent_root() {
+        let agent = home(PrincipalKind::Agent);
+        let doc_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/e.txt";
+        let log_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/events.jsonl";
+        let result = append_library_event(
+            agent.path(),
+            r4_fixture::ID,
+            "note",
+            doc_uri,
+            json!({ "marker": "r5b-append" }),
         );
-        let id_path = seed_id_rule_file(dir.path(), &id_uri, bytes.as_bytes());
-        let result = read_library_events(dir.path(), r4_fixture::ID);
+        let log_path = rooted_localhost_fs_path(agent.path(), log_uri).unwrap();
+        let logged = crate::auth::read_principal_root_object(
+            agent.path(),
+            r4_fixture::ID,
+            "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478",
+            log_uri,
+            &log_path,
+        );
+        let text = logged
+            .as_ref()
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            .unwrap_or_default();
+        let id_root =
+            rooted_localhost_fs_path(agent.path(), "localhost://Users/b2caa01d2e3d5fb2ec0d1478")
+                .unwrap();
         assert!(
-            result
-                .as_ref()
-                .is_err_and(|e| e.to_string().contains("has no stored record")),
-            "{result:?}"
+            result.is_ok() && text.contains(doc_uri) && text.contains("\"op\":\"note\"") && !id_root.exists(),
+            "stored Agent append must land in the UsersAI event log and leave the id-rule path absent: result={result:?} id_rule_exists={} log={text}",
+            id_root.exists()
         );
-        assert_eq!(
-            std::fs::read(&id_path).unwrap_or_default(),
-            bytes.as_bytes()
-        );
-        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
-        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
-    }
 
-    #[test]
-    fn library_event_write_uses_stored_root() {
-        for (kind, root) in [
-            (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
-            (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
-        ] {
-            let dir = home(kind);
-            let uri = library_event_log_uri(root);
-            let result = write_library_events(dir.path(), r4_fixture::ID, &[event(root)]);
-            assert!(
-                result.is_ok()
-                    && rooted_localhost_fs_path(dir.path(), &uri)
-                        .unwrap()
-                        .is_file(),
-                "{root}: {result:?}"
-            );
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let id_uri = library_event_log_uri(r4_fixture::HUMAN_ROOT);
-        let id_path = seed_id_rule_file(dir.path(), &id_uri, b"id-rule event log");
-        let result =
-            write_library_events(dir.path(), r4_fixture::ID, &[event(r4_fixture::HUMAN_ROOT)]);
+        let absent = tempfile::tempdir().unwrap();
+        let id_log_uri = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/events.jsonl";
+        let id_path = seed_id_rule_file(absent.path(), id_log_uri, b"id-rule event log");
+        let refused = append_library_event(
+            absent.path(),
+            r4_fixture::ID,
+            "note",
+            doc_uri,
+            json!({ "marker": "r5b-append" }),
+        );
         assert!(
-            result
+            refused
                 .as_ref()
-                .is_err_and(|e| e.to_string().contains("has no stored record")),
-            "{result:?}"
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{refused:?}"
         );
         assert_eq!(
             std::fs::read(&id_path).unwrap_or_default(),
             b"id-rule event log"
         );
-        assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
-        assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
+        assert!(!principal_object_io::reads(absent.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(absent.path()).contains(&id_path));
+    }
+
+    #[test]
+    fn library_object_uses_the_stored_agent_root() {
+        let agent = home(PrincipalKind::Agent);
+        let dir_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents";
+        let child_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/child.txt";
+        let child_path = rooted_localhost_fs_path(agent.path(), child_uri).unwrap();
+        fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        crate::auth::write_principal_root_object(
+            agent.path(),
+            r4_fixture::ID,
+            "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478",
+            child_uri,
+            &child_path,
+            b"stored child",
+        )
+        .unwrap();
+        let listed = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::List {
+                principal_id: r4_fixture::ID.into(),
+                uri: Some(dir_uri.into()),
+            },
+        )
+        .unwrap();
+        let objects = listed["objects"].as_array().unwrap();
+        assert_eq!(objects.len(), 1, "{listed}");
+        assert_eq!(objects[0]["uri"], child_uri);
+        let stated = handle_library_request(
+            agent.path(),
+            ObjectProviderRequest::Stat {
+                principal_id: r4_fixture::ID.into(),
+                uri: child_uri.into(),
+            },
+        );
+        assert!(
+            stated
+                .as_ref()
+                .is_ok_and(|value| value["object"]["uri"] == child_uri),
+            "library_object must name the stored Agent root: {stated:?}"
+        );
+
+        let absent = tempfile::tempdir().unwrap();
+        let id_uri = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/child.txt";
+        let id_path = seed_id_rule_file(absent.path(), id_uri, b"id-rule child");
+        let refused = handle_library_request(
+            absent.path(),
+            ObjectProviderRequest::Stat {
+                principal_id: r4_fixture::ID.into(),
+                uri: id_uri.into(),
+            },
+        );
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("has no stored record")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&id_path).unwrap_or_default(),
+            b"id-rule child"
+        );
+        assert!(!principal_object_io::reads(absent.path()).contains(&id_path));
+        assert!(!principal_object_io::writes(absent.path()).contains(&id_path));
     }
 
     #[test]
