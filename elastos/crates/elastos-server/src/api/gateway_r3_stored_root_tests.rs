@@ -46,3 +46,43 @@ pub(super) fn seed(dir: &Path, relative: &str, bytes: &[u8]) -> PathBuf {
     std::fs::write(&path, bytes).unwrap();
     path
 }
+
+pub(in crate::api) fn verified_parent_device_context(
+    child_data_dir: &Path,
+    app: &str,
+) -> (HomeLaunchTokenContext, String, String, String) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(child_data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let (_, child_did) = elastos_identity::load_or_create_did(child_data_dir).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+    let parent_context =
+        super::gateway_home_token::local_home_launch_token_context(parent.path()).unwrap();
+    let token = super::gateway_home_token::issue_home_launch_token_with_context(
+        parent.path(),
+        app,
+        &parent_context,
+    )
+    .unwrap();
+    let verified =
+        super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+            child_data_dir,
+            &token,
+            &[app],
+            parent_did.clone(),
+            parent.path(),
+        )
+        .unwrap();
+    let root_for = |did: String| {
+        let digest = sha2::Sha256::digest(format!("device:{did}").as_bytes());
+        format!("localhost://Users/{}", hex::encode(&digest[..12]))
+    };
+    use sha2::Digest;
+    let parent_root = root_for(parent_did);
+    let child_root = root_for(child_did);
+    assert_eq!(verified.context.root().localhost_root(), parent_root);
+    (verified.context, parent_root, child_root, token)
+}

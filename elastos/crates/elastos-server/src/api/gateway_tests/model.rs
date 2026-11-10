@@ -784,8 +784,14 @@ async fn model_audit_failure_blocks_provider_invocation() {
     let provider = RecordingModelProvider::default();
     let app = gateway_router(model_test_state(dir.path(), provider.clone()).await);
     let token = issue_home_launch_token(dir.path(), "assistant").unwrap();
+    // The audit record cannot be written, while the launch token check can
+    // still read the auth store: the store's folder is read-only. (The token
+    // check reads the store before the audit step runs.)
+    use std::os::unix::fs::PermissionsExt as _;
     let auth_state_path = crate::auth::auth_state_path(dir.path()).unwrap();
-    std::fs::create_dir_all(&auth_state_path).unwrap();
+    let auth_dir = auth_state_path.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&auth_dir).unwrap();
+    std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
     let response = app
         .oneshot(post_model(
@@ -800,8 +806,40 @@ async fn model_audit_failure_blocks_provider_invocation() {
         ))
         .await
         .unwrap();
+    std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(provider.requests.lock().await.is_empty());
+}
+
+/// An auth store that cannot be read refuses a proofless launch token at the
+/// token check, before the audit step and before the provider. Until the
+/// token check consulted the store for a stored device record, this state
+/// reached the audit step and answered 500; the request was blocked either way.
+#[tokio::test]
+async fn model_request_with_an_unreadable_auth_store_is_refused_before_the_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = RecordingModelProvider::default();
+    let app = gateway_router(model_test_state(dir.path(), provider.clone()).await);
+    let token = issue_home_launch_token(dir.path(), "assistant").unwrap();
+    let auth_state_path = crate::auth::auth_state_path(dir.path()).unwrap();
+    std::fs::create_dir_all(&auth_state_path).unwrap();
+
+    let response = app
+        .oneshot(post_model(
+            token,
+            "runs_create",
+            json!({
+                "offer_id": "offer:flash-chat:pair-a",
+                "operation": "text.generate",
+                "request_id": "request-store-unreadable",
+                "input": {}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(provider.requests.lock().await.is_empty());
 }
 

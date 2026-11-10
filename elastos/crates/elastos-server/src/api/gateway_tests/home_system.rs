@@ -11098,15 +11098,8 @@ fn p2a_i_b_local_model_offer_unshared_for_provider_without_stored_record() {
             "updated_at": 0,
             "local_offer_ids": [MODEL_LOCAL_OFFER],
         });
-        crate::auth::write_principal_root_object(
-            dir.path(),
-            principal_id,
-            &localhost_root,
-            &object_uri,
-            &path,
-            &serde_json::to_vec_pretty(&state).unwrap(),
-        )
-        .unwrap();
+        // Plant the legacy path; the provider id has no stored record.
+        std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["local_offer_ids"], json!([MODEL_LOCAL_OFFER]));
