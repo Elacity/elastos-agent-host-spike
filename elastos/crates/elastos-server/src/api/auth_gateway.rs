@@ -8071,6 +8071,7 @@ mod tests {
     fn configured_principal_root_readiness_rejects_declared_plaintext() {
         let temp = tempfile::tempdir().unwrap();
         let principal_id = "person:local:startup-readiness";
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         let protection =
             crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
         let object_uri = format!(
