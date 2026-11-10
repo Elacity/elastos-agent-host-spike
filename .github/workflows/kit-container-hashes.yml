@@ -73,10 +73,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '26'
-      - name: Install the repository's pinned Playwright and its Chromium
+      # The headless shell only, as the repository's own CI installs it. The
+      # full Chrome download stalled on the first run of this job and held it
+      # to its time limit.
+      - name: Install the repository's pinned Playwright and its headless Chromium
+        timeout-minutes: 8
         run: |
           npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine
-          npx --prefix elastos/tools/browser-playwright-engine playwright install chromium --with-deps
+          npx --prefix elastos/tools/browser-playwright-engine playwright install chromium --with-deps --only-shell
       - name: Page tests (no browser)
         run: |
           node --test examples/photo-viewer/surface/photos.test.mjs
