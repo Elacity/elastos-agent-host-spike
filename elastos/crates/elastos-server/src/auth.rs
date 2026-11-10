@@ -6868,7 +6868,7 @@ pub fn commit_recovered_root_reassignment(
         updated_at,
     } = reassignment;
     validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
-    if recovered_localhost_root.starts_with("localhost://UsersAI/") {
+    if !recovered_localhost_root.starts_with("localhost://Users/") {
         anyhow::bail!("recovery kit requires a human root");
     }
     if protection.principal_id != recovered_principal_id
