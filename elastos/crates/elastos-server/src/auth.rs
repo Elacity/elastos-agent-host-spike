@@ -17574,17 +17574,82 @@ pub(crate) mod tests {
         .unwrap();
         let resolved =
             ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), id).unwrap();
-        let usersai = principal_kind_localhost_root(id, PrincipalKind::Agent);
+        let usersai = "localhost://UsersAI/81c212b19cae993c1b378f12";
         assert_eq!(resolved.localhost_root(), usersai);
-        let users = principal_kind_localhost_root(id, PrincipalKind::Human);
+        let users = "localhost://Users/81c212b19cae993c1b378f12";
         let uri = format!("{users}/notes.md");
         let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
-        let error = write_principal_root_object(data_dir.path(), id, &users, &uri, &path, b"no")
+        let error = write_principal_root_object(data_dir.path(), id, users, &uri, &path, b"no")
             .unwrap_err()
             .to_string();
         assert_eq!(
             error,
             "principal localhost root must be the record's own root for its kind"
         );
+    }
+
+    #[test]
+    fn own_device_id_with_stored_agent_record_resolves_stored_kind_first() {
+        use sha2::Digest as _;
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let principal_id = format!("device:{did}");
+        store_test_human_principal(data_dir.path(), &principal_id);
+        mint_agent_record(data_dir.path(), &principal_id, None);
+        let expected_root = format!(
+            "localhost://UsersAI/{}",
+            hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12])
+        );
+        let resolved =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &principal_id)
+                .unwrap();
+        assert_eq!(resolved.localhost_root(), expected_root);
+    }
+
+    #[test]
+    fn noncanonical_stored_human_root_is_used_by_resolve_and_string_io() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:stored-noncanonical-human";
+        store_test_human_principal(data_dir.path(), principal_id);
+        let root = "localhost://Users/stored-noncanonical-root";
+        assert_ne!(root, principal_localhost_root(principal_id));
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == principal_id)
+                .unwrap()
+                .localhost_root = root.to_string();
+            Ok(())
+        })
+        .unwrap();
+        let resolved =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), principal_id).unwrap();
+        assert_eq!(resolved.localhost_root(), root);
+        let uri = format!("{root}/Documents/stored.txt");
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_principal_root_object(
+            data_dir.path(),
+            principal_id,
+            root,
+            &uri,
+            &path,
+            b"stored root",
+        )
+        .unwrap();
+        assert_eq!(
+            read_principal_root_object(data_dir.path(), principal_id, root, &uri, &path).unwrap(),
+            b"stored root"
+        );
+        assert!(!rooted_localhost_fs_path(
+            data_dir.path(),
+            &format!(
+                "{}/Documents/stored.txt",
+                principal_localhost_root(principal_id)
+            ),
+        )
+        .unwrap()
+        .exists());
     }
 }
