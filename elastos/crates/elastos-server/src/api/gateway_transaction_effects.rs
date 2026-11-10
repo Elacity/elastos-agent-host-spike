@@ -3521,6 +3521,41 @@ mod approved_request_resume_tests {
         }
     }
 
+    /// A persisted Browser transaction authority reaches the Browser internet
+    /// check only with its principal's stored root. With no stored record it
+    /// is refused first: the reason names the root, not the internet
+    /// permission, and nothing under the id-rule folder is read or written.
+    #[tokio::test]
+    async fn a_browser_transaction_authority_with_no_stored_root_is_refused_first() {
+        use crate::auth::r4_fixture::{HUMAN_ROOT, ID};
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_gateway_state(dir.path(), Some(Arc::new(ProviderRegistry::new())));
+        // Real bytes where the principal-id rule would point.
+        let decoy = rooted_localhost_fs_path(
+            &state.data_dir,
+            &format!("{HUMAN_ROOT}/.AppData/ElastOS/Runtime/transaction-effects.json"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+        std::fs::write(&decoy, b"decoy").unwrap();
+        let authority = TransactionAuthorityBinding {
+            principal_id: ID.to_string(),
+            session_id: "auth:r4".to_string(),
+            proof_binding_id: Some("proof:r4".to_string()),
+            grant_id: "grant:r4".to_string(),
+            actor: BROWSER_CAPSULE_ID.to_string(),
+            launch_id: "launch:r4".to_string(),
+        };
+        let (status, reason) = transaction_chain_data(&state, &authority, json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(reason, "Wallet authority principal root unresolved");
+        assert!(crate::auth::principal_object_io::reads(&state.data_dir).is_empty());
+        assert!(crate::auth::principal_object_io::writes(&state.data_dir).is_empty());
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy");
+    }
+
     fn test_authority(
         principal_id: &str,
         session_id: &str,
