@@ -47,6 +47,19 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --no
 # This test code stands in for the Runtime's launch by CID, which does not exist yet.
 python3 -I "${VIEWER_DIR}/falsify-ph6-stand-in.py"
 
+# Surface: the render-only page against a fake fetch, each of its rules broken
+# in turn, then the page in real Chromium where Playwright's Chromium is
+# already installed. This gate does not install a browser; without one the
+# smoke is skipped with a clear line and the page tests above it still run.
+node --test "${VIEWER_DIR}/surface/photos.test.mjs"
+python3 -I "${VIEWER_DIR}/falsify-surface.py"
+export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
+if node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1; then
+    node "${VIEWER_DIR}/surface/photos-browser-smoke.mjs"
+else
+    echo "photo-viewer: Chromium smoke skipped: no Playwright Chromium at ${PLAYWRIGHT_DIR}"
+fi
+
 # Every refusal: break it, see its test fail, restore it.
 # The runner itself: a case is caught only when every named test fails.
 python3 -I "${VIEWER_DIR}/../capsule-kit/falsify/test_falsify_kit.py"
