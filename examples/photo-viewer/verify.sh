@@ -7,6 +7,28 @@ MANIFEST="${VIEWER_DIR}/capsule.json"
 WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
+# A part of this gate that could not run is never reported as "OK". Each such
+# part is noted here and named in the last line. With
+# ELASTOS_EXAMPLE_GATE_STRICT=1, which receipts use, a part that cannot run
+# stops the gate with an error instead.
+NOT_RUN=()
+not_run() { # <what did not run> <why>
+    if [[ "${ELASTOS_EXAMPLE_GATE_STRICT:-0}" == "1" ]]; then
+        echo "photo-viewer: $1 did not run ($2), and ELASTOS_EXAMPLE_GATE_STRICT=1 requires every part" >&2
+        exit 1
+    fi
+    echo "photo-viewer: $1 skipped: $2"
+    NOT_RUN+=("$1")
+}
+finish() { # <the line for a complete run>
+    if [[ ${#NOT_RUN[@]} -eq 0 ]]; then
+        echo "$1: OK"
+    else
+        local list; list="$(printf '%s; ' "${NOT_RUN[@]}")"
+        echo "$1: INCOMPLETE, the parts that ran passed; not run: ${list%; }"
+    fi
+}
+
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" photo-viewer
 
 # Restore the gate falsifier before Bash reads the branch it changes.
@@ -50,14 +72,15 @@ python3 -I "${VIEWER_DIR}/falsify-ph6-stand-in.py"
 # Surface: the render-only page against a fake fetch, each of its rules broken
 # in turn, then the page in real Chromium where Playwright's Chromium is
 # already installed. This gate does not install a browser; without one the
-# smoke is skipped with a clear line and the page tests above it still run.
+# smoke is skipped with a clear line, the page tests above it still run, and
+# the gate's last line says the smoke did not run.
 node --test "${VIEWER_DIR}/surface/photos.test.mjs"
 python3 -I "${VIEWER_DIR}/falsify-surface.py"
 export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
 if node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1; then
     node "${VIEWER_DIR}/surface/photos-browser-smoke.mjs"
 else
-    echo "photo-viewer: Chromium smoke skipped: no Playwright Chromium at ${PLAYWRIGHT_DIR}"
+    not_run "the browser smoke" "no Playwright Chromium at ${PLAYWRIGHT_DIR}"
 fi
 
 # Every refusal: break it, see its test fail, restore it.
@@ -65,4 +88,4 @@ fi
 python3 -I "${VIEWER_DIR}/../capsule-kit/falsify/test_falsify_kit.py"
 python3 -I "${VIEWER_DIR}/falsify.py" --runtime
 
-echo "photo-viewer capsule verification: OK"
+finish "photo-viewer capsule verification"

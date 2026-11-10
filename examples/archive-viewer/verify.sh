@@ -14,12 +14,39 @@
 #               build.
 # no argument   guest checks only. The lane gate runs this script with no
 #               argument, so it selects the full check through GATE_LIST.
+#
+# A run that leaves a part out (no --runtime, or no browser for the smoke)
+# does not end "OK": its last line names what did not run. With
+# ELASTOS_EXAMPLE_GATE_STRICT=1 it stops with an error instead.
 set -euo pipefail
 
 VIEWER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${VIEWER_DIR}/../.." && pwd)"
 WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+
+# A part of this gate that could not run is never reported as "OK". Each such
+# part is noted here and named in the last line. With
+# ELASTOS_EXAMPLE_GATE_STRICT=1, which receipts use, a part that cannot run
+# stops the gate with an error instead.
+NOT_RUN=()
+not_run() { # <what did not run> <why>
+    if [[ "${ELASTOS_EXAMPLE_GATE_STRICT:-0}" == "1" ]]; then
+        echo "archive-viewer: $1 did not run ($2), and ELASTOS_EXAMPLE_GATE_STRICT=1 requires every part" >&2
+        exit 1
+    fi
+    echo "archive-viewer: $1 skipped: $2"
+    NOT_RUN+=("$1")
+}
+finish() { # <the line for a complete run>
+    if [[ ${#NOT_RUN[@]} -eq 0 ]]; then
+        echo "$1: OK"
+    else
+        local list; list="$(printf '%s; ' "${NOT_RUN[@]}")"
+        echo "$1: INCOMPLETE, the parts that ran passed; not run: ${list%; }"
+    fi
+}
+
 
 host_log=""
 runtime_log=""
@@ -120,7 +147,7 @@ export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
 if node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1; then
     node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
 else
-    echo "archive-viewer: Chromium smoke skipped: no Playwright Chromium at ${PLAYWRIGHT_DIR}"
+    not_run "the browser smoke" "no Playwright Chromium at ${PLAYWRIGHT_DIR}"
 fi
 
 if [[ $RUNTIME -eq 1 ]]; then
@@ -152,7 +179,7 @@ if [[ $RUNTIME -eq 1 ]]; then
         grep -q '^caught: F43 ' "$runtime_log"
     fi
 else
-    echo "archive-viewer: guest checks only; pass --runtime for the component, host test and F3/F35/F36/F43"
+    not_run "the runtime path (the component, the host test and F3/F35/F36/F43)" "--runtime was not given"
 fi
 
-echo "archive-viewer verification: OK"
+finish "archive-viewer verification"
