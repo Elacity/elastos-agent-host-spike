@@ -2941,7 +2941,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       } catch {
         /* keep streamed prefix — canonical survives presentation failure */
       }
-      if (pinned) {
+      // Plant: the settled render is not followed.
+      if (false && pinned) {
         pinToEnd();
       }
       timings.t6 = Date.now();
