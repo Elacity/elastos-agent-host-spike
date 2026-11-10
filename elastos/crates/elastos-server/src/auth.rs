@@ -31,6 +31,58 @@ use sha2::{Digest, Sha256};
 
 use crate::host_lock::FileLock;
 
+/// Test-only record of principal-root object reads and writes, so a row can
+/// prove that an unresolved principal touches no path the id rule names.
+#[cfg(test)]
+pub(crate) mod principal_object_io {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Default)]
+    struct Ops {
+        reads: Vec<PathBuf>,
+        writes: Vec<PathBuf>,
+    }
+
+    static OPS: LazyLock<Mutex<HashMap<PathBuf, Ops>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn record(data_dir: &Path, path: &Path, write: bool) {
+        let mut ops = OPS.lock().unwrap();
+        let entry = ops.entry(data_dir.to_path_buf()).or_default();
+        if write {
+            entry.writes.push(path.to_path_buf());
+        } else {
+            entry.reads.push(path.to_path_buf());
+        }
+    }
+
+    pub(crate) fn record_read(data_dir: &Path, path: &Path) {
+        record(data_dir, path, false);
+    }
+
+    pub(crate) fn record_write(data_dir: &Path, path: &Path) {
+        record(data_dir, path, true);
+    }
+
+    pub(crate) fn reads(data_dir: &Path) -> Vec<PathBuf> {
+        OPS.lock()
+            .unwrap()
+            .get(data_dir)
+            .map(|ops| ops.reads.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn writes(data_dir: &Path) -> Vec<PathBuf> {
+        OPS.lock()
+            .unwrap()
+            .get(data_dir)
+            .map(|ops| ops.writes.clone())
+            .unwrap_or_default()
+    }
+}
+
 const AUTH_STATE_SCHEMA: &str = "elastos.auth.state/v1";
 pub(crate) const AUTH_SESSION_TTL_SECS: u64 = 12 * 60 * 60;
 const AUTH_STATE_ROOT: &str = "ElastOS/System/Auth";
@@ -72,7 +124,7 @@ const PRINCIPAL_ROOT_MIGRATION_CLEANUP_DIR: &str = "principal-root-migration-cle
 const PRINCIPAL_ROOT_LIFECYCLE_LOCK_FILE: &str = "principal-root-lifecycle.lock";
 const MAX_MIGRATION_CLEANUP_RECORDS: usize = 128;
 const MAX_PRINCIPAL_ROOT_INVENTORY_DECLARATIONS: usize = 128;
-const MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH: usize = 16;
+pub(crate) const MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH: usize = 16;
 const MAX_MIGRATION_OBJECTS: usize = 64;
 const MAX_MIGRATION_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MIGRATION_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -214,7 +266,7 @@ struct RegularFileIdentity {
 
 #[derive(Debug, Clone)]
 struct VerifiedAuthStateCacheEntry {
-    auth_state_identity: Option<RegularFileIdentity>,
+    auth_state_identity: Option<AuthStateFileIdentity>,
     activation_identity: Option<RegularFileIdentity>,
     runtime_device_key_identity: Option<RegularFileIdentity>,
     state: AuthState,
@@ -417,7 +469,60 @@ fn observe_optional_regular_file_identity(
     Ok(Some(regular_file_identity_from_metadata(&metadata, label)?))
 }
 
-fn observe_auth_state_file_identity(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuthStateFileIdentity {
+    file: RegularFileIdentity,
+    content_hash: [u8; 32],
+}
+
+/// The auth state file changed while it was read; the caller retries or skips the cache.
+#[derive(Debug)]
+struct AuthStateReadRace;
+
+impl std::fmt::Display for AuthStateReadRace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("auth state changed concurrently during readback")
+    }
+}
+
+impl std::error::Error for AuthStateReadRace {}
+
+fn read_auth_state_bytes(
+    data_dir: &Path,
+) -> anyhow::Result<Option<(Vec<u8>, AuthStateFileIdentity)>> {
+    let path = auth_state_path(data_dir)?;
+    let Some(before) = observe_optional_regular_file_identity(&path, "auth state")? else {
+        return Ok(None);
+    };
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Err(AuthStateReadRace.into()),
+        Err(err) => return Err(err).with_context(|| format!("failed to read {path:?}")),
+    };
+    let opened = regular_file_identity_from_metadata(&file.metadata()?, "auth state")?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {path:?}"))?;
+    let after = regular_file_identity_from_metadata(&file.metadata()?, "auth state")?;
+    if before != opened
+        || opened != after
+        || observe_optional_regular_file_identity(&path, "auth state")? != Some(after)
+    {
+        return Err(AuthStateReadRace.into());
+    }
+    let content_hash = Sha256::digest(&bytes).into();
+    Ok(Some((
+        bytes,
+        AuthStateFileIdentity {
+            file: after,
+            content_hash,
+        },
+    )))
+}
+
+/// Metadata of the auth state file, compared with an earlier stable, hashed read to detect
+/// any change since that read.
+fn observe_auth_state_file_metadata(
     data_dir: &Path,
 ) -> anyhow::Result<Option<RegularFileIdentity>> {
     observe_optional_regular_file_identity(&auth_state_path(data_dir)?, "auth state")
@@ -448,22 +553,29 @@ fn invalidate_verified_auth_state_cache(data_dir: &Path) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn invalidate_verified_auth_state_cache_for_test(data_dir: &Path) {
+    invalidate_verified_auth_state_cache(data_dir);
+}
+
 fn store_verified_auth_state_cache(
     data_dir: &Path,
-    auth_state_identity: Option<RegularFileIdentity>,
+    auth_state_identity: Option<AuthStateFileIdentity>,
     activation_identity: Option<RegularFileIdentity>,
     runtime_device_key_identity: Option<RegularFileIdentity>,
     state: &AuthState,
 ) {
     let key = auth_state_cache_key(data_dir);
     if let Ok(mut cache) = verified_auth_state_cache().lock() {
+        let mut state = state.clone();
+        normalize_principal_records(&mut state);
         cache.insert(
             key,
             VerifiedAuthStateCacheEntry {
                 auth_state_identity,
                 activation_identity,
                 runtime_device_key_identity,
-                state: state.clone(),
+                state,
             },
         );
     }
@@ -471,7 +583,7 @@ fn store_verified_auth_state_cache(
 
 fn take_verified_auth_state_cache_hit(
     data_dir: &Path,
-    auth_state_identity: Option<RegularFileIdentity>,
+    auth_state_identity: Option<AuthStateFileIdentity>,
     activation_identity: Option<RegularFileIdentity>,
     runtime_device_key_identity: Option<RegularFileIdentity>,
 ) -> Option<AuthState> {
@@ -486,6 +598,57 @@ fn take_verified_auth_state_cache_hit(
     } else {
         None
     }
+}
+
+#[cfg(test)]
+type AuthStateWriteHook = Box<dyn FnOnce(&Path) -> anyhow::Result<()> + Send>;
+#[cfg(test)]
+static AUTH_STATE_WRITE_HOOKS: OnceLock<Mutex<HashMap<PathBuf, AuthStateWriteHook>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn run_auth_state_write_hook(path: &Path) -> anyhow::Result<()> {
+    let hook = AUTH_STATE_WRITE_HOOKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .remove(path);
+    if let Some(hook) = hook {
+        hook(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+static AUDIT_SIGNATURE_VERIFICATIONS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+#[cfg(test)]
+fn audit_signature_count(data_dir: &Path) -> usize {
+    *AUDIT_SIGNATURE_VERIFICATIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(data_dir)
+        .unwrap_or(&0)
+}
+
+#[cfg(test)]
+fn record_audit_signature(data_dir: &Path) {
+    *AUDIT_SIGNATURE_VERIFICATIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .entry(data_dir.to_path_buf())
+        .or_default() += 1;
+}
+
+/// Releases the cache lock before the caller asserts, so a failed assertion cannot poison it.
+#[cfg(test)]
+fn verified_auth_state_cache_contains(data_dir: &Path) -> bool {
+    verified_auth_state_cache()
+        .lock()
+        .unwrap()
+        .contains_key(&auth_state_cache_key(data_dir))
 }
 
 #[cfg(test)]
@@ -552,7 +715,7 @@ fn run_verified_auth_state_cache_fill_hook(data_dir: &Path) -> anyhow::Result<()
 }
 
 #[cfg(test)]
-fn install_verified_auth_state_cache_hit_hook(
+pub(crate) fn install_verified_auth_state_cache_hit_hook(
     data_dir: &Path,
 ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
     let key = auth_state_cache_key(data_dir);
@@ -856,7 +1019,7 @@ pub struct StoredAuthSession {
     pub revoked_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditChainLinkV1 {
     pub schema: String,
     pub sequence: u64,
@@ -868,7 +1031,7 @@ pub struct AuditChainLinkV1 {
     pub signature: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditChainStateV1 {
     pub schema: String,
     pub activated_at: u64,
@@ -878,7 +1041,7 @@ pub struct AuditChainStateV1 {
     pub signature: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditChainAnchorV1 {
     pub schema: String,
     pub sequence: u64,
@@ -1234,7 +1397,7 @@ pub(crate) fn complete_guest_registration(
             }
             state.guest_registrations.push(record);
             // This same auth record is the pre-effect recovery owner.
-            save_auth_state(data_dir, state)?;
+            save_auth_state(data_dir, state, None)?;
             identity.cancel_challenge(ceremony_id);
             state.guest_registrations.len() - 1
         };
@@ -1419,21 +1582,23 @@ fn require_secure_owner_persistence(data_dir: &Path) -> anyhow::Result<()> {
         let auth = auth_state_path(data_dir)?;
         ensure_regular_auth_parent(data_dir, auth.parent().ok_or(OwnerEnrollmentDenied)?)?;
         let mut path = data_dir.to_path_buf();
-        let validate = |path: &Path| -> anyhow::Result<()> {
+        // The data root keeps its owner's group permissions (Ubuntu umask
+        // 002), as the installation writer admits it; auth paths stay strict.
+        let validate = |path: &Path, refused: u32| -> anyhow::Result<()> {
             let metadata = std::fs::symlink_metadata(path)?;
             if metadata.file_type().is_symlink()
                 || metadata.uid() != unsafe { libc::geteuid() }
-                || metadata.mode() & 0o022 != 0
+                || metadata.mode() & refused != 0
             {
                 return enrollment_denied();
             }
             Ok(())
         };
-        validate(&path)?;
+        validate(&path, 0o002)?;
         for component in auth.strip_prefix(data_dir)?.components() {
             path.push(component);
             if path.exists() {
-                validate(&path)?;
+                validate(&path, 0o022)?;
             }
         }
         Ok(())
@@ -2216,7 +2381,7 @@ pub(crate) fn complete_owner_enrollment_with_intent(
             };
             state.owner_enrollment = Some(record.clone());
             // The admission and exact candidate reach disk BEFORE credential effects.
-            save_auth_state(data_dir, state)?;
+            save_auth_state(data_dir, state, None)?;
         }
         let verification = match &record.phase {
             OwnerEnrollmentPhase::Verified { verification }
@@ -3813,6 +3978,48 @@ mod owner_enrollment_tests {
     }
 
     #[test]
+    fn owner_enrollment_nested_save_and_outer_save_cache_match_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let secret = random_secret_hex();
+        let mut identity = elastos_identity::IdentityManager::new(data.into()).unwrap();
+        let (_, options) = begin_owner_enrollment(
+            data,
+            &mut identity,
+            &local(&secret),
+            "nested-save",
+            now_ts(),
+        )
+        .unwrap()
+        .unwrap();
+        let response = owner_attestation_for_test(
+            &options.unwrap().public_key.challenge,
+            "localhost",
+            local(&secret).origin,
+        );
+        complete_owner_enrollment(
+            data,
+            &mut identity,
+            &local(&secret),
+            "nested-save",
+            Some(&response),
+            Some("Owner"),
+            now_ts(),
+        )
+        .unwrap();
+        assert!(verified_auth_state_cache_contains(data));
+        let before = audit_signature_count(data);
+        let cached = load_auth_state(data).unwrap();
+        assert_eq!(audit_signature_count(data), before);
+        invalidate_verified_auth_state_cache(data);
+        let fresh = load_auth_state(data).unwrap();
+        assert_eq!(
+            serde_json::to_value(cached).unwrap(),
+            serde_json::to_value(fresh).unwrap()
+        );
+    }
+
+    #[test]
     fn owner_enrollment_restart_recovers_exact_candidate_and_one_terminal_grant() {
         for fault in [
             OwnerEnrollmentTestFault::BeforeCredential,
@@ -4268,6 +4475,48 @@ fn unlock_auth_state_file(lock: FileLock) -> anyhow::Result<()> {
     lock.release().context("failed to unlock auth state")
 }
 
+// Only constructed from a verified load, before the mutation closure runs.
+pub(crate) struct AuditBaseline {
+    audit: Vec<RuntimeAuditEventV1>,
+    links: Vec<AuditChainLinkV1>,
+    anchor: Option<AuditChainAnchorV1>,
+    chain_state: Option<AuditChainStateV1>,
+    device_key_identity: Option<RegularFileIdentity>,
+}
+
+impl AuditBaseline {
+    fn new(state: &AuthState, device_key_identity: Option<RegularFileIdentity>) -> Self {
+        Self {
+            audit: state.audit.clone(),
+            links: state.audit_chain.clone(),
+            anchor: state.audit_chain_anchor.clone(),
+            chain_state: state.audit_chain_state.clone(),
+            device_key_identity,
+        }
+    }
+
+    fn trusted_prefix(&self, state: &AuthState) -> usize {
+        let offset = state
+            .audit_chain
+            .first()
+            .zip(self.links.first())
+            .and_then(|(next, old)| next.sequence.checked_sub(old.sequence))
+            .and_then(|offset| usize::try_from(offset).ok());
+        let Some(offset) = offset.filter(|offset| *offset < self.links.len()) else {
+            return 0;
+        };
+        state
+            .audit
+            .iter()
+            .zip(&state.audit_chain)
+            .zip(self.audit.iter().zip(&self.links).skip(offset))
+            .take_while(|((event, link), (old_event, old_link))| {
+                event == old_event && link == old_link
+            })
+            .count()
+    }
+}
+
 fn mutate_auth_state<T>(
     data_dir: &Path,
     mutation: impl FnOnce(&mut AuthState) -> anyhow::Result<T>,
@@ -4276,10 +4525,11 @@ fn mutate_auth_state<T>(
         .lock()
         .map_err(|_| anyhow!("auth state mutation lock poisoned"))?;
     let lock = lock_auth_state_file(open_auth_state_lock(data_dir)?)?;
-    let mut state = load_auth_state(data_dir)?;
+    let (mut state, device_key_identity) = load_auth_state_with_identity(data_dir)?;
+    let baseline = AuditBaseline::new(&state, device_key_identity);
     ensure_audit_chain_state(data_dir, &mut state)?;
     let value = mutation(&mut state)?;
-    save_auth_state(data_dir, &state)?;
+    save_auth_state(data_dir, &state, Some(&baseline))?;
     unlock_auth_state_file(lock)?;
     Ok(value)
 }
@@ -4483,6 +4733,13 @@ fn sync_parent_directory(_path: &Path) -> anyhow::Result<()> {
 }
 
 fn write_secret_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    write_secret_bytes_atomic(path, &serde_json::to_vec_pretty(value)?).map(|_| ())
+}
+
+fn write_secret_bytes_atomic(
+    path: &Path,
+    bytes: &[u8],
+) -> anyhow::Result<Option<RegularFileIdentity>> {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -4496,15 +4753,20 @@ fn write_secret_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Resu
         std::process::id(),
         unique
     ));
-    let result = (|| -> anyhow::Result<()> {
+    let result = (|| -> anyhow::Result<Option<RegularFileIdentity>> {
         let mut file = open_new_secret_file(&temp)?;
-        file.write_all(&serde_json::to_vec_pretty(value)?)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
-        drop(file);
         std::fs::rename(&temp, path)?;
         set_secret_file_permissions(path)?;
         sync_parent_directory(path)?;
-        Ok(())
+        #[cfg(test)]
+        run_auth_state_write_hook(path)?;
+        let held = regular_file_identity_from_metadata(&file.metadata()?, "secret state")?;
+        Ok(
+            (observe_optional_regular_file_identity(path, "secret state")? == Some(held))
+                .then_some(held),
+        )
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -4513,18 +4775,32 @@ fn write_secret_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Resu
 }
 
 pub fn load_auth_state(data_dir: &Path) -> anyhow::Result<AuthState> {
+    load_auth_state_with_identity(data_dir).map(|(state, _)| state)
+}
+
+fn load_auth_state_with_identity(
+    data_dir: &Path,
+) -> anyhow::Result<(AuthState, Option<RegularFileIdentity>)> {
     with_audit_chain_activation_lock(data_dir, || {
         for _ in 0..2 {
-            if let Some(state) = load_auth_state_locked_once(data_dir)? {
-                return Ok(state);
+            match load_auth_state_locked_once(data_dir) {
+                Ok(Some(state)) => return Ok(state),
+                Ok(None) => {}
+                Err(error) if error.is::<AuthStateReadRace>() => {
+                    invalidate_verified_auth_state_cache(data_dir);
+                }
+                Err(error) => return Err(error),
             }
         }
         anyhow::bail!("auth state changed concurrently while it was being verified")
     })
 }
 
-fn load_auth_state_locked_once(data_dir: &Path) -> anyhow::Result<Option<AuthState>> {
-    let initial_auth_state_identity = observe_auth_state_file_identity(data_dir)?;
+fn load_auth_state_locked_once(
+    data_dir: &Path,
+) -> anyhow::Result<Option<(AuthState, Option<RegularFileIdentity>)>> {
+    let disk = read_auth_state_bytes(data_dir)?;
+    let initial_auth_state_identity = disk.as_ref().map(|(_, identity)| *identity);
     let mut expected_activation_identity = observe_audit_chain_activation_file_identity(data_dir)?;
     let initial_runtime_device_key_identity = observe_runtime_device_key_file_identity(data_dir)?;
     if let Some(cached) = take_verified_auth_state_cache_hit(
@@ -4535,10 +4811,10 @@ fn load_auth_state_locked_once(data_dir: &Path) -> anyhow::Result<Option<AuthSta
     ) {
         #[cfg(test)]
         run_verified_auth_state_cache_hit_hook(data_dir)?;
-        let final_auth_state_identity = observe_auth_state_file_identity(data_dir)?;
+        let final_auth_state_identity = observe_auth_state_file_metadata(data_dir)?;
         let final_activation_identity = observe_audit_chain_activation_file_identity(data_dir)?;
         let final_runtime_device_key_identity = observe_runtime_device_key_file_identity(data_dir)?;
-        if final_auth_state_identity != initial_auth_state_identity
+        if final_auth_state_identity != initial_auth_state_identity.map(|identity| identity.file)
             || final_activation_identity != expected_activation_identity
             || final_runtime_device_key_identity != initial_runtime_device_key_identity
         {
@@ -4547,10 +4823,12 @@ fn load_auth_state_locked_once(data_dir: &Path) -> anyhow::Result<Option<AuthSta
         }
         let mut state = cached;
         prune_auth_state(&mut state, now_ts());
-        return Ok(Some(state));
+        return Ok(Some((state, initial_runtime_device_key_identity)));
     }
 
-    let stored_state = load_auth_state_unverified(data_dir)?;
+    let stored_state = disk
+        .map(|(bytes, _)| parse_auth_state(data_dir, &bytes))
+        .transpose()?;
     let state_was_present = stored_state.is_some();
     let mut state = stored_state.unwrap_or_default();
     let activation = load_audit_chain_activation_unlocked(data_dir)?;
@@ -4600,10 +4878,10 @@ fn load_auth_state_locked_once(data_dir: &Path) -> anyhow::Result<Option<AuthSta
     #[cfg(test)]
     run_verified_auth_state_cache_fill_hook(data_dir)?;
 
-    let final_auth_state_identity = observe_auth_state_file_identity(data_dir)?;
+    let final_auth_state_identity = observe_auth_state_file_metadata(data_dir)?;
     let final_activation_identity = observe_audit_chain_activation_file_identity(data_dir)?;
     let final_runtime_device_key_identity = observe_runtime_device_key_file_identity(data_dir)?;
-    if final_auth_state_identity != initial_auth_state_identity
+    if final_auth_state_identity != initial_auth_state_identity.map(|identity| identity.file)
         || final_activation_identity != expected_activation_identity
         || final_runtime_device_key_identity != initial_runtime_device_key_identity
     {
@@ -4618,7 +4896,7 @@ fn load_auth_state_locked_once(data_dir: &Path) -> anyhow::Result<Option<AuthSta
         &state,
     );
     prune_auth_state(&mut state, now_ts());
-    Ok(Some(state))
+    Ok(Some((state, initial_runtime_device_key_identity)))
 }
 
 fn auth_state_requires_audit_chain(state: &AuthState) -> bool {
@@ -4633,37 +4911,43 @@ fn auth_state_requires_audit_chain(state: &AuthState) -> bool {
 }
 
 fn load_auth_state_unverified(data_dir: &Path) -> anyhow::Result<Option<AuthState>> {
+    read_auth_state_bytes(data_dir)?
+        .map(|(bytes, _)| parse_auth_state(data_dir, &bytes))
+        .transpose()
+}
+
+fn parse_auth_state(data_dir: &Path, bytes: &[u8]) -> anyhow::Result<AuthState> {
     let path = auth_state_path(data_dir)?;
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).context("failed to inspect auth state"),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("auth state must be a regular non-symlink file");
-    }
-    let bytes = std::fs::read(&path).with_context(|| format!("failed to read {path:?}"))?;
-    let mut state: AuthState = serde_json::from_slice(&bytes)
+    let mut state: AuthState = serde_json::from_slice(bytes)
         .with_context(|| format!("failed to parse auth state {path:?}"))?;
     if state.schema != AUTH_STATE_SCHEMA {
         anyhow::bail!("unsupported auth state schema");
     }
     normalize_principal_records(&mut state);
-    Ok(Some(state))
+    Ok(state)
 }
 
 pub fn verify_auth_audit_chain_ready(data_dir: &Path) -> anyhow::Result<()> {
     load_auth_state(data_dir).map(|_| ())
 }
 
-pub(crate) fn save_auth_state(data_dir: &Path, state: &AuthState) -> anyhow::Result<()> {
+pub(crate) fn save_auth_state(
+    data_dir: &Path,
+    state: &AuthState,
+    baseline: Option<&AuditBaseline>,
+) -> anyhow::Result<()> {
+    // Every error path, including the gap before the checkpoint, leaves a cold cache.
+    invalidate_verified_auth_state_cache(data_dir);
     #[cfg(test)]
     consume_recovery_reassignment_test_fault(
         data_dir,
         RecoveryReassignmentTestFault::AuthStateSave,
     )?;
     with_audit_chain_activation_lock(data_dir, || {
-        verify_audit_chain(data_dir, state)?;
+        invalidate_verified_auth_state_cache(data_dir);
+        let device_key_identity = observe_runtime_device_key_file_identity(data_dir)?;
+        verify_audit_chain_from(data_dir, state, baseline)?;
+        let mut activation_identity = observe_audit_chain_activation_file_identity(data_dir)?;
         let path = auth_state_path(data_dir)?;
         if let Some(parent) = path.parent() {
             ensure_regular_auth_parent(data_dir, parent)?;
@@ -4688,7 +4972,13 @@ pub(crate) fn save_auth_state(data_dir: &Path, state: &AuthState) -> anyhow::Res
             }
             _ => {}
         }
-        write_secret_json_atomic(&path, state)?;
+        let bytes = serde_json::to_vec_pretty(state)?;
+        let written_identity = write_secret_bytes_atomic(&path, &bytes)?;
+        // Metadata sampled after rename alone cannot establish which bytes we wrote.
+        let readback = read_auth_state_bytes(data_dir).ok().flatten();
+        let published_identity = readback.and_then(|(published, identity)| {
+            (published == bytes && Some(identity.file) == written_identity).then_some(identity)
+        });
         #[cfg(test)]
         consume_recovery_reassignment_test_fault(
             data_dir,
@@ -4701,14 +4991,32 @@ pub(crate) fn save_auth_state(data_dir: &Path, state: &AuthState) -> anyhow::Res
                 .as_ref()
                 .is_none_or(|activation| activation.checkpoint != *checkpoint);
             if should_persist {
-                persist_audit_chain_activation_unlocked(
+                activation_identity = Some(persist_audit_chain_activation_unlocked(
                     data_dir,
                     chain_state.activated_at,
                     checkpoint,
-                )?;
+                )?);
             }
         }
-        invalidate_verified_auth_state_cache(data_dir);
+        // The write is durable here; an observation failure only leaves the cache cold.
+        if let Some(identity) = published_identity {
+            if state.schema == AUTH_STATE_SCHEMA
+                && (state.audit_chain_state.is_some() || !auth_state_requires_audit_chain(state))
+                && observe_auth_state_file_metadata(data_dir).ok() == Some(Some(identity.file))
+                && observe_audit_chain_activation_file_identity(data_dir).ok()
+                    == Some(activation_identity)
+                && observe_runtime_device_key_file_identity(data_dir).ok()
+                    == Some(device_key_identity)
+            {
+                store_verified_auth_state_cache(
+                    data_dir,
+                    Some(identity),
+                    activation_identity,
+                    device_key_identity,
+                    state,
+                );
+            }
+        }
         Ok(())
     })
 }
@@ -5044,6 +5352,7 @@ pub fn store_principal_root_protection(
 ) -> anyhow::Result<()> {
     validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
     mutate_auth_state(data_dir, |state| {
+        ensure_users_ai_protection_owner(state, &protection)?;
         state.principal_root_protections.retain(|stored| {
             stored.principal_id != protection.principal_id
                 || stored.localhost_root != protection.localhost_root
@@ -5053,19 +5362,43 @@ pub fn store_principal_root_protection(
     })
 }
 
+fn ensure_users_ai_protection_owner(
+    state: &AuthState,
+    protection: &PrincipalRootProtectionV1,
+) -> anyhow::Result<()> {
+    if protection
+        .localhost_root
+        .starts_with("localhost://UsersAI/")
+    {
+        let owner = state
+            .principals
+            .iter()
+            .find(|record| record.principal_id == protection.principal_id);
+        anyhow::ensure!(
+            owner.is_some_and(|record| {
+                record.kind == PrincipalKind::Agent
+                    && record.localhost_root == protection.localhost_root
+            }),
+            "UsersAI protection requires its stored Agent root"
+        );
+    }
+    Ok(())
+}
+
 pub fn load_principal_root_protection(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
 ) -> anyhow::Result<Option<PrincipalRootProtectionV1>> {
     let state = load_auth_state(data_dir)?;
-    let Some(protection) = state.principal_root_protections.into_iter().find(|stored| {
+    let Some(protection) = state.principal_root_protections.iter().find(|stored| {
         stored.principal_id == principal_id && stored.localhost_root == localhost_root
     }) else {
         return Ok(None);
     };
-    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
-    Ok(Some(protection))
+    validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+    ensure_users_ai_protection_owner(&state, protection)?;
+    Ok(Some(protection.clone()))
 }
 
 pub(crate) fn mark_recovery_kit_handed_to_person(
@@ -5350,6 +5683,8 @@ pub fn read_principal_root_object(
     object_uri: &str,
     path: &Path,
 ) -> anyhow::Result<Vec<u8>> {
+    #[cfg(test)]
+    principal_object_io::record_read(data_dir, path);
     validate_principal_root_object_binding_in_state(
         data_dir,
         principal_id,
@@ -5647,6 +5982,8 @@ pub fn write_principal_root_object(
     path: &Path,
     plaintext: &[u8],
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    principal_object_io::record_write(data_dir, path);
     write_principal_root_object_inner(
         data_dir,
         principal_id,
@@ -6801,7 +7138,6 @@ fn push_audit_event(
 
 fn ensure_audit_chain_state(data_dir: &Path, state: &mut AuthState) -> anyhow::Result<()> {
     if state.audit_chain_state.is_some() {
-        verify_audit_chain(data_dir, state)?;
         return Ok(());
     }
     if !state.audit.is_empty()
@@ -7010,6 +7346,17 @@ fn require_runtime_audit_signer(
 fn verify_audit_chain(data_dir: &Path, state: &AuthState) -> anyhow::Result<()> {
     #[cfg(test)]
     record_verify_audit_chain_call(data_dir);
+    verify_audit_chain_from(data_dir, state, None)
+}
+
+fn verify_audit_chain_from(
+    data_dir: &Path,
+    state: &AuthState,
+    baseline: Option<&AuditBaseline>,
+) -> anyhow::Result<()> {
+    let device_key_identity = observe_runtime_device_key_file_identity(data_dir)?;
+    let baseline = baseline.filter(|baseline| baseline.device_key_identity == device_key_identity);
+    let trusted_prefix = baseline.map_or(0, |baseline| baseline.trusted_prefix(state));
     if state.audit.is_empty()
         && state.audit_chain.is_empty()
         && state.audit_chain_state.is_none()
@@ -7027,18 +7374,22 @@ fn verify_audit_chain(data_dir: &Path, state: &AuthState) -> anyhow::Result<()> 
             &expected_runtime_did,
             "audit chain state",
         )?;
-        let payload = audit_chain_state_payload(
-            chain_state.activated_at,
-            chain_state.head_sequence,
-            &chain_state.head_hash,
-        )?;
-        crate::crypto::verify_domain_separated_signature(
-            &expected_runtime_did,
-            AUDIT_CHAIN_STATE_DOMAIN,
-            &payload,
-            &chain_state.signature,
-        )
-        .context("audit chain state signature is invalid")?;
+        if baseline.is_none_or(|baseline| baseline.chain_state.as_ref() != Some(chain_state)) {
+            let payload = audit_chain_state_payload(
+                chain_state.activated_at,
+                chain_state.head_sequence,
+                &chain_state.head_hash,
+            )?;
+            #[cfg(test)]
+            record_audit_signature(data_dir);
+            crate::crypto::verify_domain_separated_signature(
+                &expected_runtime_did,
+                AUDIT_CHAIN_STATE_DOMAIN,
+                &payload,
+                &chain_state.signature,
+            )
+            .context("audit chain state signature is invalid")?;
+        }
         let (head_sequence, head_hash) = state
             .audit_chain
             .last()
@@ -7070,18 +7421,21 @@ fn verify_audit_chain(data_dir: &Path, state: &AuthState) -> anyhow::Result<()> 
             &expected_runtime_did,
             "audit chain anchor",
         )?;
-        let payload = audit_chain_anchor_payload(anchor.sequence, &anchor.chain_hash)?;
-        crate::crypto::verify_domain_separated_signature(
-            &expected_runtime_did,
-            AUDIT_CHAIN_ANCHOR_DOMAIN,
-            &payload,
-            &anchor.signature,
-        )
-        .context("audit chain anchor signature is invalid")?;
+        if baseline.is_none_or(|baseline| baseline.anchor.as_ref() != Some(anchor)) {
+            let payload = audit_chain_anchor_payload(anchor.sequence, &anchor.chain_hash)?;
+            #[cfg(test)]
+            record_audit_signature(data_dir);
+            crate::crypto::verify_domain_separated_signature(
+                &expected_runtime_did,
+                AUDIT_CHAIN_ANCHOR_DOMAIN,
+                &payload,
+                &anchor.signature,
+            )
+            .context("audit chain anchor signature is invalid")?;
+        }
     }
     let mut previous: Option<&AuditChainLinkV1> = None;
-    for (event, link) in state.audit.iter().zip(&state.audit_chain) {
-        verify_audit_event_signature(event, &expected_runtime_did)?;
+    for (index, (event, link)) in state.audit.iter().zip(&state.audit_chain).enumerate() {
         if link.schema != AUDIT_CHAIN_SCHEMA || link.event_id != event.event_id {
             anyhow::bail!("audit chain event binding is invalid");
         }
@@ -7105,35 +7459,42 @@ fn verify_audit_chain(data_dir: &Path, state: &AuthState) -> anyhow::Result<()> 
         } else if link.sequence == 1 && link.previous_hash != AUDIT_CHAIN_GENESIS {
             anyhow::bail!("audit chain genesis is invalid");
         }
-        let event_hash = format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(serde_json::to_vec(event)?))
-        );
-        if link.event_hash != event_hash
-            || link.chain_hash
-                != audit_chain_hash(
-                    link.sequence,
-                    &link.event_id,
-                    &link.previous_hash,
-                    &link.event_hash,
-                )?
-        {
-            anyhow::bail!("audit chain hash is invalid");
+        if index >= trusted_prefix {
+            #[cfg(test)]
+            record_audit_signature(data_dir);
+            verify_audit_event_signature(event, &expected_runtime_did)?;
+            let event_hash = format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(serde_json::to_vec(event)?))
+            );
+            if link.event_hash != event_hash
+                || link.chain_hash
+                    != audit_chain_hash(
+                        link.sequence,
+                        &link.event_id,
+                        &link.previous_hash,
+                        &link.event_hash,
+                    )?
+            {
+                anyhow::bail!("audit chain hash is invalid");
+            }
+            let payload = audit_chain_signature_payload(
+                link.sequence,
+                &link.event_id,
+                &link.previous_hash,
+                &link.event_hash,
+                &link.chain_hash,
+            )?;
+            #[cfg(test)]
+            record_audit_signature(data_dir);
+            crate::crypto::verify_domain_separated_signature(
+                &expected_runtime_did,
+                AUDIT_CHAIN_DOMAIN,
+                &payload,
+                &link.signature,
+            )
+            .context("audit chain signature is invalid")?;
         }
-        let payload = audit_chain_signature_payload(
-            link.sequence,
-            &link.event_id,
-            &link.previous_hash,
-            &link.event_hash,
-            &link.chain_hash,
-        )?;
-        crate::crypto::verify_domain_separated_signature(
-            &expected_runtime_did,
-            AUDIT_CHAIN_DOMAIN,
-            &payload,
-            &link.signature,
-        )
-        .context("audit chain signature is invalid")?;
         previous = Some(link);
     }
     Ok(())
@@ -7176,10 +7537,10 @@ fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> Str
     }
 }
 
-/// The root a principal owns, chosen by the kind its stored record was minted
-/// with (A5-S3, rong-ruling-a5-s3-0025 C3). A legacy record with no kind field
-/// reads as Human; no data dir, a missing record, or a state that does not load
-/// refuses.
+/// The root a principal owns. Human records retain their stored root, including
+/// a migrated root; Agent records use the root of their minted kind (A5-S3,
+/// rong-ruling-a5-s3-0025 C3). A legacy record with no kind field reads as
+/// Human. A missing record or unreadable state refuses.
 pub(crate) fn principal_stored_localhost_root(
     data_dir: Option<&Path>,
     principal_id: &str,
@@ -7189,7 +7550,13 @@ pub(crate) fn principal_stored_localhost_root(
     let record = stored.map_err(|err| err.to_string())?.ok_or_else(|| {
         format!("principal '{principal_id}' has no stored record; its root cannot be chosen")
     })?;
-    Ok(principal_kind_localhost_root(principal_id, record.kind))
+    match record.kind {
+        PrincipalKind::Human if record.localhost_root.starts_with("localhost://Users/") => {
+            Ok(record.localhost_root)
+        }
+        PrincipalKind::Human => Err("stored human principal root is invalid".to_string()),
+        PrincipalKind::Agent => Ok(principal_kind_localhost_root(principal_id, record.kind)),
+    }
 }
 
 /// A principal's root, resolved once where the principal is bound (C6 P1,
@@ -7224,9 +7591,57 @@ impl ResolvedPrincipalRoot {
             .map_err(|err| anyhow!(err))
     }
 
+    /// The localhost root this principal owns. A remote principal owns no
+    /// localhost path, so it has the empty root: every path resolver refuses
+    /// an empty root, and no caller falls back to the principal-id rule.
+    pub(crate) fn localhost_root(&self) -> &str {
+        match &self.0 {
+            RootArm::Local(root) => root,
+            RootArm::Remote => "",
+        }
+    }
+
+    /// The device arm for a launch token whose signature already verified
+    /// against `did`, the Runtime's trusted signer. A subordinate Runtime
+    /// trusts its parent's DID without holding that device key, so this takes
+    /// the device root directly and MUST NOT call `resolve`.
+    pub(crate) fn verified_device_signer(did: &str) -> Self {
+        Self(RootArm::Local(principal_localhost_root(
+            PrincipalId::device_did(did).as_str(),
+        )))
+    }
+
+    /// The root that verified Recovery Kit material proves for its principal.
+    /// The kit's principal and root are verified and bound before this is
+    /// built, and the constructor accepts only the canonical root for that
+    /// principal, so a kit cannot name another principal's localhost path. The
+    /// import path uses it for the grant it issues before the recovered record
+    /// is committed.
+    pub(crate) fn verified_recovery_kit(
+        principal_id: &str,
+        localhost_root: &str,
+    ) -> anyhow::Result<Self> {
+        if localhost_root != principal_localhost_root(principal_id) {
+            anyhow::bail!("recovery kit root is not canonical for its principal");
+        }
+        Ok(Self(RootArm::Local(localhost_root.to_string())))
+    }
+
+    /// A recovered record already binds this kit to its stored root. The
+    /// importer's Human-kind gate owns eligibility for reassignment.
+    pub(crate) fn verified_stored_recovery_kit(
+        record: &PrincipalRecord,
+        kit: &RecoveryKitV1,
+    ) -> anyhow::Result<Self> {
+        if record.principal_id != kit.principal_id || record.localhost_root != kit.localhost_root {
+            anyhow::bail!("recovery kit does not match the stored principal root");
+        }
+        Ok(Self(RootArm::Local(kit.localhost_root.clone())))
+    }
+
     /// Test-only root for a fixture principal (A5-P2a-ii-0b's two
-    /// `from_verified_context` test constructors). Production's only
-    /// constructor is `resolve`.
+    /// `from_verified_context` test constructors). Production builds roots
+    /// through `resolve` or verified recovery material.
     #[cfg(test)]
     pub(crate) fn for_test_principal(principal_id: &str) -> Self {
         Self(RootArm::Local(format!("test-root/{principal_id}")))
@@ -7320,7 +7735,7 @@ fn object_uri_is_under_root(localhost_root: &str, object_uri: &str) -> bool {
 }
 
 /// The stored record for `principal_id`, or None when none is stored.
-fn stored_principal_record(
+pub(crate) fn stored_principal_record(
     data_dir: &Path,
     principal_id: &str,
 ) -> anyhow::Result<Option<PrincipalRecord>> {
@@ -7338,14 +7753,24 @@ fn stored_principal_kind(data_dir: &Path, principal_id: &str) -> anyhow::Result<
         .map_or(PrincipalKind::Human, |principal| principal.kind))
 }
 
-/// Binds an object URI to the root of the record's persisted kind, so an
-/// agent's `localhost://UsersAI/` root is accepted only for an agent record.
+/// Binds an object URI to the stored Human root or the minted Agent root.
 fn validate_principal_root_object_binding_in_state(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
     object_uri: &str,
 ) -> anyhow::Result<()> {
+    if let Some(record) = stored_principal_record(data_dir, principal_id)? {
+        if record.kind == PrincipalKind::Human {
+            if !record.localhost_root.starts_with("localhost://Users/")
+                || localhost_root != record.localhost_root
+                || !object_uri_is_under_root(localhost_root, object_uri)
+            {
+                anyhow::bail!("principal localhost root must be the stored human root");
+            }
+            return Ok(());
+        }
+    }
     let kind = stored_principal_kind(data_dir, principal_id)?;
     validate_principal_root_object_binding_for_kind(
         principal_id,
@@ -10482,7 +10907,7 @@ fn principal_root_file_mode(metadata: &std::fs::Metadata) -> u32 {
     }
 }
 
-fn ensure_no_symlink_components(data_dir: &Path, path: &Path) -> anyhow::Result<()> {
+pub(crate) fn ensure_no_symlink_components(data_dir: &Path, path: &Path) -> anyhow::Result<()> {
     let relative = path
         .strip_prefix(data_dir)
         .map_err(|_| anyhow!("principal-root object path escapes the Runtime data root"))?;
@@ -10615,7 +11040,7 @@ fn is_sha256_label(value: &str) -> bool {
     })
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -10692,10 +11117,52 @@ pub(crate) fn store_test_human_principal(data_dir: &Path, principal_id: &str) ->
     record
 }
 
+#[cfg(test)]
+pub(crate) mod r4_fixture {
+    use super::*;
+    pub const ID: &str = "person:local:r4";
+    pub const HUMAN_ROOT: &str = "localhost://Users/b2caa01d2e3d5fb2ec0d1478";
+    pub const AGENT_ROOT: &str = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478";
+
+    pub fn store(data_dir: &Path, kind: PrincipalKind) {
+        store_test_human_principal(data_dir, ID);
+        let root = match kind {
+            PrincipalKind::Human => HUMAN_ROOT,
+            PrincipalKind::Agent => AGENT_ROOT,
+        };
+        set_kind(data_dir, ID, kind, root);
+    }
+
+    pub fn remove(data_dir: &Path, principal_id: &str) {
+        mutate_auth_state(data_dir, |state| {
+            state
+                .principals
+                .retain(|record| record.principal_id != principal_id);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    pub fn set_kind(data_dir: &Path, principal_id: &str, kind: PrincipalKind, root: &str) {
+        // As in the auth Agent tests: change the stored fixture under the lock.
+        mutate_auth_state(data_dir, |state| {
+            let record = state
+                .principals
+                .iter_mut()
+                .find(|p| p.principal_id == principal_id)
+                .unwrap();
+            record.kind = kind;
+            record.localhost_root = root.to_string();
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
 /// The test protection written under a caller-named root, so a test can put
 /// an object under a root the human default does not name.
 #[cfg(test)]
-fn store_test_principal_root_protection_for(
+pub(crate) fn store_test_principal_root_protection_for(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
@@ -10799,6 +11266,70 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
+    fn r4_users_ai_protection_requires_agent_record_kind() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let human = store_test_human_principal(data_dir.path(), "person:local:r4-kind");
+        let mut protection =
+            store_test_principal_root_protection(data_dir.path(), &human.principal_id);
+        let agent_root = principal_kind_localhost_root(&human.principal_id, PrincipalKind::Agent);
+        mutate_auth_state(data_dir.path(), |state| {
+            let record = state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == human.principal_id)
+                .unwrap();
+            record.localhost_root = agent_root.clone();
+            Ok(())
+        })
+        .unwrap();
+        protection.localhost_root = agent_root.clone();
+        let error = store_principal_root_protection(data_dir.path(), protection.clone())
+            .expect_err("a Human record cannot own a UsersAI protection");
+        assert_eq!(
+            error.to_string(),
+            "UsersAI protection requires its stored Agent root"
+        );
+        assert!(
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &agent_root)
+                .unwrap()
+                .is_none()
+        );
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == human.principal_id)
+                .unwrap()
+                .kind = PrincipalKind::Agent;
+            Ok(())
+        })
+        .unwrap();
+        store_principal_root_protection(data_dir.path(), protection.clone()).unwrap();
+        assert_eq!(
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &agent_root)
+                .unwrap(),
+            Some(protection)
+        );
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == human.principal_id)
+                .unwrap()
+                .kind = PrincipalKind::Human;
+            Ok(())
+        })
+        .unwrap();
+        let error =
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &agent_root)
+                .expect_err("a stored UsersAI protection requires the current Agent kind");
+        assert_eq!(
+            error.to_string(),
+            "UsersAI protection requires its stored Agent root"
+        );
+    }
+
+    #[test]
     fn auth_state_lock_child_probe() {
         let Some(path) = std::env::var_os("ELASTOS_AUTH_LOCK_TEST_PATH") else {
             return;
@@ -10809,6 +11340,32 @@ pub(crate) mod tests {
             assert_eq!(probe.unwrap_err().kind(), ErrorKind::WouldBlock);
         } else {
             probe.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_persistence_accepts_group_writable_data_root_only() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let auth = auth_state_path(&data).unwrap();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(auth.parent().unwrap())
+            .unwrap();
+        let set = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set(&data, 0o770);
+        require_secure_owner_persistence(&data).unwrap();
+        set(&data, 0o777);
+        assert!(require_secure_owner_persistence(&data).is_err());
+        set(&data, 0o700);
+        if auth.parent().unwrap() != data {
+            set(auth.parent().unwrap(), 0o770);
+            assert!(require_secure_owner_persistence(&data).is_err());
         }
     }
 
@@ -10848,6 +11405,7 @@ pub(crate) mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         set_guest_registration_enabled(data_dir.path(), true, 20).unwrap();
 
+        invalidate_verified_auth_state_cache(data_dir.path());
         let verifies_before_first = verify_audit_chain_call_count(data_dir.path());
         let first = load_auth_state(data_dir.path()).unwrap();
         let verifies_after_first = verify_audit_chain_call_count(data_dir.path());
@@ -11080,6 +11638,7 @@ pub(crate) mod tests {
         let original_identity =
             regular_file_identity_from_metadata(&original_metadata, "auth state").unwrap();
 
+        invalidate_verified_auth_state_cache(data_dir.path());
         let verifies_before_prime = verify_audit_chain_call_count(data_dir.path());
         assert!(
             load_auth_state(data_dir.path())
@@ -11170,6 +11729,7 @@ pub(crate) mod tests {
         let original_identity =
             regular_file_identity_from_metadata(&original_metadata, "runtime device key").unwrap();
 
+        invalidate_verified_auth_state_cache(data_dir.path());
         let verifies_before_prime = verify_audit_chain_call_count(data_dir.path());
         assert!(
             load_auth_state(data_dir.path())
@@ -11304,7 +11864,7 @@ pub(crate) mod tests {
             )
             .unwrap(),
         );
-        save_auth_state(data_dir, &state).unwrap();
+        save_auth_state(data_dir, &state, None).unwrap();
         grant
     }
 
@@ -11315,8 +11875,356 @@ pub(crate) mod tests {
         )
     }
 
+    fn assert_own_write_cache_matches_disk(data: &Path) {
+        assert!(
+            verified_auth_state_cache_contains(data),
+            "own write must fill the verified cache"
+        );
+        let before = audit_signature_count(data);
+        let cached = load_auth_state(data).unwrap();
+        assert_eq!(audit_signature_count(data), before);
+        invalidate_verified_auth_state_cache(data);
+        let fresh = load_auth_state(data).unwrap();
+        assert_eq!(
+            serde_json::to_value(cached).unwrap(),
+            serde_json::to_value(fresh).unwrap()
+        );
+    }
+
     #[test]
-    fn refresh_fusion_halves_verified_passes_with_512_signed_events() {
+    fn cache_after_own_write_matches_fresh_full_load() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let mut grant = refresh_fixture(data, 511);
+        assert_own_write_cache_matches_disk(data);
+        append_audit_event(data, test_audit_event(512)).unwrap();
+        assert_own_write_cache_matches_disk(data);
+        append_audit_event(data, test_audit_event(513)).unwrap();
+        assert_own_write_cache_matches_disk(data);
+        grant.expires_at += 60;
+        renew_session_grant_with_audit(data, grant.clone(), refresh_audit(&grant, 514)).unwrap();
+        assert_own_write_cache_matches_disk(data);
+        set_guest_registration_enabled(data, true, now_ts()).unwrap();
+        assert_own_write_cache_matches_disk(data);
+        revoke_session_grant(data, &grant.session_id, now_ts()).unwrap();
+        assert_own_write_cache_matches_disk(data);
+    }
+
+    #[test]
+    fn concurrent_appends_keep_cache_coherent() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        refresh_fixture(data, 4);
+        std::thread::scope(|scope| {
+            for writer in 0..2 {
+                scope.spawn(move || {
+                    for index in 0..8 {
+                        append_audit_event(data, test_audit_event(100 + writer * 8 + index))
+                            .unwrap();
+                    }
+                });
+            }
+            scope.spawn(|| {
+                for _ in 0..16 {
+                    load_auth_state(data).unwrap();
+                }
+            });
+        });
+        // The last operation is a write, so the cache must hold exactly that write.
+        append_audit_event(data, test_audit_event(116)).unwrap();
+        assert_own_write_cache_matches_disk(data);
+        let state = load_auth_state(data).unwrap();
+        assert_eq!(state.audit.len(), 21);
+        for index in 100..=116 {
+            assert_eq!(
+                state
+                    .audit
+                    .iter()
+                    .filter(|event| event.event_id == format!("audit:test:{index}"))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn external_rewrite_after_own_write_is_fully_verified() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        refresh_fixture(data, 4);
+        append_audit_event(data, test_audit_event(5)).unwrap();
+        let path = auth_state_path(data).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        let changed = original.replacen("test event 1", "fake event 1", 1);
+        assert_ne!(original, changed);
+        assert_eq!(original.len(), changed.len());
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, changed).unwrap();
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let before = verify_audit_chain_call_count(data);
+        assert!(load_auth_state(data).is_err());
+        assert!(verify_audit_chain_call_count(data) > before);
+    }
+
+    #[test]
+    fn write_race_replacement_and_in_place_write_are_not_cached() {
+        for replace in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path();
+            refresh_fixture(data, 4);
+            AUTH_STATE_WRITE_HOOKS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap()
+                .insert(
+                    auth_state_path(data).unwrap(),
+                    Box::new(move |path| {
+                        let path = path.to_path_buf();
+                        let original = std::fs::read_to_string(&path)?;
+                        let changed = original.replacen("test event 1", "fake event 1", 1);
+                        assert_ne!(changed, original);
+                        let modified = std::fs::metadata(&path)?.modified()?;
+                        if replace {
+                            let replacement = path.with_extension("replacement");
+                            std::fs::write(&replacement, changed)?;
+                            std::fs::rename(replacement, &path)?;
+                        } else {
+                            let mut file = File::options().write(true).open(&path)?;
+                            file.write_all(changed.as_bytes())?;
+                            file.sync_all()?;
+                            file.set_modified(modified)?;
+                        }
+                        Ok(())
+                    }),
+                );
+            append_audit_event(data, test_audit_event(5)).unwrap();
+            assert!(!verified_auth_state_cache_contains(data));
+            let before = verify_audit_chain_call_count(data);
+            assert!(load_auth_state(data).is_err());
+            assert!(verify_audit_chain_call_count(data) > before);
+        }
+    }
+
+    #[test]
+    fn checked_save_rejects_edits_forgery_dropped_links_and_swapped_anchors() {
+        // Each case enters save with a verified baseline and must leave both files intact.
+        for case in 0..7 {
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path();
+            refresh_fixture(data, 512);
+            append_audit_event(data, test_audit_event(513)).unwrap();
+            let before = refresh_persisted_bytes(data);
+            let result = mutate_auth_state(data, |state| {
+                match case {
+                    0 => state.audit[3].reason = "edited retained event".into(),
+                    1 => {
+                        let event = sign_audit_event(data, test_audit_event(514))?;
+                        push_audit_event(data, state, event)?;
+                        state.audit_chain.last_mut().unwrap().signature = "forged".into();
+                    }
+                    2 => {
+                        state.audit.remove(3);
+                        state.audit_chain.remove(3);
+                    }
+                    3 => {
+                        state.audit.swap(3, 4);
+                        state.audit_chain.swap(3, 4);
+                    }
+                    4 => {
+                        state.audit_chain_anchor =
+                            Some(sign_audit_chain_anchor(data, 1, AUDIT_CHAIN_GENESIS)?);
+                    }
+                    5 => state.audit_chain_state.as_mut().unwrap().signature = "forged".into(),
+                    6 => {
+                        state.audit.pop();
+                        state.audit_chain.pop();
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(())
+            });
+            assert!(result.is_err(), "tamper case {case}");
+            assert_eq!(refresh_persisted_bytes(data), before, "tamper case {case}");
+        }
+    }
+
+    #[test]
+    fn device_key_change_during_mutation_forces_full_verify() {
+        let root = tempfile::tempdir().unwrap();
+        let replacement = tempfile::tempdir().unwrap();
+        let data = root.path();
+        refresh_fixture(data, 4);
+        elastos_identity::load_or_create_did(replacement.path()).unwrap();
+        let before = refresh_persisted_bytes(data);
+        assert!(mutate_auth_state(data, |_state| {
+            std::fs::copy(
+                elastos_identity::device_key_path(replacement.path()),
+                elastos_identity::device_key_path(data),
+            )?;
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(refresh_persisted_bytes(data), before);
+        assert!(load_auth_state(data).is_err());
+    }
+
+    #[test]
+    fn fault_after_auth_state_write_invalidates_cache_and_recovers_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        refresh_fixture(data, 4);
+        load_auth_state(data).unwrap();
+        let before = refresh_persisted_bytes(data);
+        inject_recovery_reassignment_test_fault(
+            data,
+            RecoveryReassignmentTestFault::AfterAuthStateWrite,
+        );
+        assert!(append_audit_event(data, test_audit_event(5)).is_err());
+        assert!(!verified_auth_state_cache_contains(data));
+        let interrupted = refresh_persisted_bytes(data);
+        assert_ne!(interrupted.0, before.0);
+        assert_eq!(interrupted.1, before.1);
+        let recovered = load_auth_state(data).unwrap();
+        assert_eq!(recovered.audit.last().unwrap().event_id, "audit:test:5");
+        let activation = load_audit_chain_activation(data).unwrap().unwrap();
+        assert_eq!(
+            Some(activation.checkpoint),
+            audit_chain_checkpoint(&recovered).unwrap()
+        );
+        assert_own_write_cache_matches_disk(data);
+    }
+
+    #[test]
+    fn rollback_to_older_signed_own_write_after_cache_fill_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        refresh_fixture(data, 4);
+        let older = refresh_persisted_bytes(data).0;
+        append_audit_event(data, test_audit_event(5)).unwrap();
+        assert_own_write_cache_matches_disk(data);
+        std::fs::write(auth_state_path(data).unwrap(), older).unwrap();
+        assert!(load_auth_state(data)
+            .unwrap_err()
+            .to_string()
+            .contains("rollback"));
+    }
+
+    #[test]
+    fn nested_bare_save_then_outer_baseline_save_keeps_cache_coherent() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        refresh_fixture(data, 4);
+        // Assert outside the closure: a panic under the mutation lock would poison it.
+        let nested = mutate_auth_state(data, |state| {
+            state.guest_registration_enabled = true;
+            save_auth_state(data, state, None)?;
+            let filled = verified_auth_state_cache_contains(data);
+            let cached = serde_json::to_value(load_auth_state(data)?)?;
+            invalidate_verified_auth_state_cache(data);
+            let fresh = serde_json::to_value(load_auth_state(data)?)?;
+            let event = sign_audit_event(data, test_audit_event(5))?;
+            push_audit_event(data, state, event)?;
+            Ok((filled, cached, fresh))
+        })
+        .unwrap();
+        assert!(nested.0, "nested save must fill the verified cache");
+        assert_eq!(nested.1, nested.2);
+        assert_own_write_cache_matches_disk(data);
+        assert_eq!(load_auth_state(data).unwrap().audit.len(), 5);
+    }
+
+    #[test]
+    fn append_at_cap_verifies_only_new_signatures() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        refresh_fixture(data, 512);
+        load_auth_state(data).unwrap();
+        let before = audit_signature_count(data);
+        append_audit_event(data, test_audit_event(513)).unwrap();
+        let checks = audit_signature_count(data) - before;
+        assert_eq!(checks, 4, "warm retained append signature checks");
+        let before = audit_signature_count(data);
+        load_auth_state(data).unwrap();
+        assert_eq!(audit_signature_count(data), before);
+        invalidate_verified_auth_state_cache(data);
+        load_auth_state(data).unwrap();
+        assert_eq!(audit_signature_count(data) - before, 1026);
+    }
+
+    #[test]
+    #[ignore = "manual Mac before/after measurement; timing is not an assertion"]
+    fn warm_library_sized_append_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path();
+        let mut state = AuthState::default();
+        ensure_audit_chain_state(data, &mut state).unwrap();
+        for index in 1..=512 {
+            let mut event = test_audit_event(index);
+            event.event_type = "object.provider.completed".into();
+            event.reason = "Library read completed ".repeat(20);
+            let event = sign_audit_event(data, event).unwrap();
+            let link = sign_audit_chain_link(data, state.audit_chain.last(), &event).unwrap();
+            state.audit.push(event);
+            state.audit_chain.push(link);
+        }
+        state.audit_chain_state = Some(
+            sign_audit_chain_state(
+                data,
+                state.audit_chain_state.as_ref().unwrap().activated_at,
+                state.audit_chain.last(),
+            )
+            .unwrap(),
+        );
+        save_auth_state(data, &state, None).unwrap();
+        load_auth_state(data).unwrap();
+        let mut next = 513;
+        let mut append = || {
+            let mut event = test_audit_event(next);
+            next += 1;
+            event.event_type = "object.provider.completed".into();
+            event.reason = "Library read completed ".repeat(20);
+            append_audit_event(data, event).unwrap();
+        };
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        }
+        let timed = |run: &mut dyn FnMut()| {
+            let start = std::time::Instant::now();
+            run();
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        let before = audit_signature_count(data);
+        let single: Vec<f64> = (0..21).map(|_| timed(&mut || append())).collect();
+        let signatures = (audit_signature_count(data) - before) / 21;
+        let op: Vec<f64> = (0..21)
+            .map(|_| {
+                timed(&mut || {
+                    append();
+                    append();
+                })
+            })
+            .collect();
+        let load: Vec<f64> = (0..21)
+            .map(|_| timed(&mut || drop(load_auth_state(data).unwrap())))
+            .collect();
+        println!(
+            "warm_library_append: bytes={} events={} n=21 append_median_ms={:.2} op_2_appends_median_ms={:.2} warm_load_median_ms={:.2} signatures_per_append={signatures}",
+            std::fs::metadata(auth_state_path(data).unwrap()).unwrap().len(),
+            load_auth_state(data).unwrap().audit.len(),
+            median(single),
+            median(op),
+            median(load),
+        );
+    }
+
+    #[test]
+    fn refresh_at_cap_verifies_only_new_signatures() {
         let root = tempfile::tempdir().unwrap();
         let data = root.path();
         let mut grant = refresh_fixture(data, 512);
@@ -11324,18 +12232,18 @@ pub(crate) mod tests {
         assert_eq!(initial.principals.len(), 1);
         assert_eq!(initial.sessions.len(), 3);
         grant.expires_at += 60;
-        let before = verify_audit_chain_call_count(data);
+        let before = audit_signature_count(data);
         renew_session_grant(data, grant.clone()).unwrap();
         append_audit_event(data, refresh_audit(&grant, 513)).unwrap();
-        let separate = verify_audit_chain_call_count(data) - before;
-        assert_eq!(separate, 6);
+        let separate = audit_signature_count(data) - before;
+        assert_eq!(separate, 4);
         let prior = load_auth_state(data).unwrap(); // verify and warm for the fused operation
         grant.expires_at += 60;
-        let before = verify_audit_chain_call_count(data);
+        let before = audit_signature_count(data);
         renew_session_grant_with_audit(data, grant.clone(), refresh_audit(&grant, 514)).unwrap();
-        let fused = verify_audit_chain_call_count(data) - before;
-        assert_eq!(fused, 3);
-        println!("refresh_fusion: retained_events=512 separate_verifies={separate} fused_verifies={fused}");
+        let fused = audit_signature_count(data) - before;
+        assert_eq!(fused, 4);
+        println!("refresh_signatures: retained_events=512 separate={separate} fused={fused}");
         let after = load_auth_state(data).unwrap();
         assert_eq!(
             serde_json::to_value(&after.sessions[0].grant).unwrap(),
@@ -12322,7 +13230,7 @@ pub(crate) mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let mut state = AuthState::default();
         ensure_audit_chain_state(data_dir.path(), &mut state).unwrap();
-        save_auth_state(data_dir.path(), &state).unwrap();
+        save_auth_state(data_dir.path(), &state, None).unwrap();
         for index in 1..=3 {
             let event = sign_audit_event(data_dir.path(), test_audit_event(index)).unwrap();
             push_audit_event(data_dir.path(), &mut state, event).unwrap();
@@ -12333,7 +13241,7 @@ pub(crate) mod tests {
             sign_audit_chain_state(data_dir.path(), activated_at, state.audit_chain.last())
                 .unwrap(),
         );
-        save_auth_state(data_dir.path(), &state).unwrap();
+        save_auth_state(data_dir.path(), &state, None).unwrap();
 
         let retained = load_auth_state(data_dir.path()).unwrap();
         let anchor = retained.audit_chain_anchor.as_ref().unwrap();
@@ -12349,7 +13257,7 @@ pub(crate) mod tests {
             sign_audit_chain_state(data_dir.path(), activated_at, truncated.audit_chain.last())
                 .unwrap(),
         );
-        let err = save_auth_state(data_dir.path(), &truncated)
+        let err = save_auth_state(data_dir.path(), &truncated, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not continue from its retained anchor"));
@@ -15642,12 +16550,13 @@ pub(crate) mod tests {
         // The valid row: once the record is Human again, the same file and
         // its protection serve its own root.
         mutate_auth_state(data_dir.path(), |state| {
-            state
+            let record = state
                 .principals
                 .iter_mut()
                 .find(|principal| principal.principal_id == human.principal_id)
-                .unwrap()
-                .kind = PrincipalKind::Human;
+                .unwrap();
+            record.kind = PrincipalKind::Human;
+            record.localhost_root = root.clone();
             Ok(())
         })
         .unwrap();
@@ -16102,6 +17011,28 @@ pub(crate) mod tests {
             ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), "person:local:nobody");
         assert!(resolved.is_err());
         assert!(!data_dir.path().join("identity").exists());
+    }
+
+    /// R1: the recovery constructor accepts only the canonical root for its
+    /// principal, so verified kit material cannot name another principal's
+    /// localhost path. The import caller refuses the same mismatch earlier;
+    /// this row calls the constructor directly, so removing its compare alone
+    /// turns the second assertion red.
+    #[test]
+    fn resolved_recovery_kit_root_refuses_a_non_canonical_root() {
+        let principal = "person:local:recovery-fixture";
+        let canonical = principal_localhost_root(principal);
+        assert!(
+            ResolvedPrincipalRoot::verified_recovery_kit(principal, &canonical).is_ok(),
+            "the principal's canonical root is accepted"
+        );
+        let other = principal_localhost_root("person:local:recovery-other");
+        assert_ne!(other, canonical);
+        let refused = ResolvedPrincipalRoot::verified_recovery_kit(principal, &other).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "recovery kit root is not canonical for its principal"
+        );
     }
 
     #[test]

@@ -301,6 +301,7 @@ impl CollaborationHistoryService {
                         ProviderCarrierRoute::PeerDid {
                             peer_did: peer.endpoint_did.clone(),
                             timeout_ms: Some(PEER_TIMEOUT.as_millis() as u64),
+                            reply_wait_ms: None,
                         },
                     ),
                 }),
@@ -461,6 +462,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        crate::auth::store_test_human_principal(root.path(), PRINCIPAL);
         crate::auth::store_test_principal_root_protection(root.path(), PRINCIPAL);
         let product = test_chat_product_port(root.path(), network, conversation);
         let authority = test_authority();

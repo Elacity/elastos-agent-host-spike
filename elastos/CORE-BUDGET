@@ -1,0 +1,16 @@
+# Runtime core size budget: the most code lines elastos/crates/elastos-runtime may hold.
+#
+# scripts/core-size.py counts the crate as code only: no tests (files only test code reaches,
+# unreached tests/ files, and items behind a test cfg), no comment-only lines, no blank
+# lines. The goal is a core of about 10,000 lines.
+#
+# The verdict fails when the count is above this number, or more than 50 below it. Until the
+# M1 hardening pass the core-size CI job is advisory (CORE_BUDGET_MODE=advisory): a failed
+# verdict is a warning and the job passes. After it the mode is enforce and the job fails.
+# Refusals (exit 2) fail the job in both modes.
+#
+# To grow the core, raise this number in the same pull request as the code, so reviewers
+# see the growth and decide on it. When the core shrinks more than 50 lines below the
+# budget, lower this number to the new count in the same pull request, so freed room cannot
+# be spent again. Measure with: python3 scripts/core-size.py
+9893

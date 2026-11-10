@@ -216,6 +216,7 @@ impl CapsuleManager {
             &manifest.name,
             cid.as_deref(),
             trust_level,
+            None,
         );
 
         tracing::info!(

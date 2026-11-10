@@ -50,6 +50,8 @@ const INVITE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_OBJECTS: usize = 500;
 pub(crate) const MAX_OBJECT_BODY_LEN: usize = 2_000;
 const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
+/// What Chat says when someone tries to send an empty file.
+pub(crate) const EMPTY_FILE_REFUSAL: &str = "Empty files can't be sent.";
 pub const ATTACHMENT_UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
 pub const ROOM_ACCESS_CAPABILITY: &str = "room.access";
 
@@ -147,6 +149,14 @@ pub struct SessionView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationObjectView {
     pub seq: u64,
+    /// The verified Community envelope id (`sha256:…`). Present only on
+    /// Community rows; local-room rows have no envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// The Community conversation the row belongs to; a link opened from the
+    /// row cites it with `message_id`. Present only on Community rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     pub sender: String,
     /// Profile attribution for collaboration senders. `Some(true)`: the
     /// sender's verified device is bound to an accepted signed Profile head
@@ -3092,6 +3102,60 @@ pub(crate) fn collaboration_latest_remote_message_seq(
     })
 }
 
+/// The verified people a configured Community poll lists, without a session,
+/// as (Profile DID, signed Profile display name): the people a Chat profile
+/// card can act on, named as the card names them.
+pub(crate) fn collaboration_verified_members(
+    data_dir: &Path,
+    network_id: &str,
+    conversation_id: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let scope = collaboration_object_scope(network_id, conversation_id)?;
+    with_expired_read_state(data_dir, |state| {
+        Ok(participant_views_from_state(state, None, Some(&scope))
+            .into_iter()
+            .filter_map(|participant| Some((participant.member_did?, participant.display_name)))
+            .collect())
+    })
+}
+
+/// One verified Community text row, found by its envelope id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CollaborationTextRow {
+    pub(crate) sender_profile_did: String,
+    pub(crate) sender_display_name: String,
+    pub(crate) body: String,
+}
+
+/// The verified Community text row `message_id` in this scope, when one exists
+/// and its sender's Profile attribution verifies.
+pub(crate) fn collaboration_text_row(
+    data_dir: &Path,
+    network_id: &str,
+    conversation_id: &str,
+    message_id: &str,
+) -> anyhow::Result<Option<CollaborationTextRow>> {
+    let scope = collaboration_object_scope(network_id, conversation_id)?;
+    with_expired_read_state(data_dir, |state| {
+        Ok(state
+            .objects
+            .iter()
+            .filter(|item| {
+                item.collaboration_scope.as_ref() == Some(&scope)
+                    && item.event_id == message_id
+                    && item.kind == ConversationObjectKind::Text
+            })
+            .find_map(|item| {
+                let profile = verified_collaboration_sender_profile(item)?;
+                Some(CollaborationTextRow {
+                    sender_profile_did: item.sender_member_did.clone()?,
+                    sender_display_name: profile.display_name.clone(),
+                    body: item.body.clone()?,
+                })
+            }))
+    })
+}
+
 pub(crate) fn collaboration_room_poll(
     data_dir: &Path,
     token: &str,
@@ -3405,7 +3469,7 @@ pub fn append_attachment_object_with_transport(
     let file_name = normalize_file_name(file_name);
     let mime_type = normalize_mime_type(mime_type);
     if bytes.is_empty() {
-        anyhow::bail!("attachment must not be empty");
+        anyhow::bail!(EMPTY_FILE_REFUSAL);
     }
     if bytes.len() > MAX_ATTACHMENT_BYTES {
         anyhow::bail!("attachment exceeds {} bytes", MAX_ATTACHMENT_BYTES);
@@ -3455,7 +3519,7 @@ pub fn start_attachment_upload(
     let file_name = normalize_file_name(file_name);
     let mime_type = normalize_mime_type(mime_type);
     if size_bytes == 0 {
-        anyhow::bail!("attachment must not be empty");
+        anyhow::bail!(EMPTY_FILE_REFUSAL);
     }
     if size_bytes > MAX_ATTACHMENT_BYTES as u64 {
         anyhow::bail!("attachment exceeds {} bytes", MAX_ATTACHMENT_BYTES);
@@ -4670,10 +4734,19 @@ fn object_view_from_record(
             session.member_did.is_some() && session.member_did == object.sender_member_did
         })
         .and(object.delivery_state);
+    let (message_id, conversation_id) = match &object.collaboration_scope {
+        Some(scope) => (
+            Some(object.event_id.clone()),
+            Some(scope.conversation_id.clone()),
+        ),
+        None => (None, None),
+    };
     ConversationObjectView {
         delivery_state,
         sender_profile_verified,
         seq: object.seq,
+        message_id,
+        conversation_id,
         sender: verified_sender_profile
             .map(|profile| profile.display_name.clone())
             .unwrap_or(object.sender),
@@ -8031,6 +8104,15 @@ mod tests {
         .unwrap();
         assert_eq!(second_feed.objects.len(), 1);
         assert_eq!(second_feed.objects[0].seq, second.seq);
+        // Community rows name their verified envelope; Chat links cite it.
+        assert_eq!(
+            second_feed.objects[0].message_id.as_deref(),
+            Some(second_hash.as_str())
+        );
+        assert_eq!(
+            second_feed.objects[0].conversation_id.as_deref(),
+            Some("conversation-two")
+        );
         assert_eq!(second_feed.objects[0].sender_profile_verified, Some(true));
         assert_eq!(second_feed.objects[0].sender, "Remote");
         assert_eq!(second_feed.participants.len(), 1);
@@ -8044,6 +8126,10 @@ mod tests {
 
         let legacy_feed = conversation_feed(tmp.path(), &session.token, 0).unwrap();
         assert_eq!(legacy_feed.objects.len(), 2);
+        assert!(legacy_feed
+            .objects
+            .iter()
+            .all(|object| object.message_id.is_none() && object.conversation_id.is_none()));
         assert!(legacy_feed
             .objects
             .iter()

@@ -180,8 +180,13 @@ pub async fn run_open(uri: String, browser: bool, port: Option<u16>) -> anyhow::
         elastos_server::content::prepare_capsule_from_content_provider(&content_registry, &cid)
             .await?;
     let addr = crate::choose_local_open_addr(port)?;
-    let runtime = crate::create_runtime("/tmp/elastos/storage").await?;
-    crate::serve_web_capsule(runtime, capsule_dir, &addr, browser, None).await
+    open_capsule_dir(capsule_dir, &addr, browser).await
+}
+
+/// Serves a fetched shared capsule on Runtime storage under the Home.
+async fn open_capsule_dir(capsule_dir: PathBuf, addr: &str, browser: bool) -> anyhow::Result<()> {
+    let runtime = crate::create_runtime(crate::default_data_dir().join("storage")).await?;
+    crate::serve_web_capsule(runtime, capsule_dir, addr, browser, None).await
 }
 
 async fn open_release_object_if_applicable(
@@ -292,5 +297,38 @@ fn print_json_field(label: &str, value: Option<&serde_json::Value>) {
         if !value.trim().is_empty() {
             println!("{label}{value}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::home_cmd::{tests::HOME_CMD_ENV_LOCK, ScopedEnvVar};
+
+    /// `elastos open` must fetch the capsule through ipfs-provider first, so
+    /// this enters at the step that opens storage, with HOME in a temp dir and
+    /// a file where the Home storage directory belongs.
+    #[tokio::test]
+    async fn open_defaults_storage_to_home() {
+        // As `main` does, so a planted default reaches the assertion, not a
+        // missing-provider panic in the serve path.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let _home = ScopedEnvVar::set("HOME", home.clone());
+        let _xdg = ScopedEnvVar::set("XDG_DATA_HOME", home.join(".local/share"));
+        #[cfg(target_os = "macos")]
+        let storage = home.join("Library/Application Support/elastos/storage");
+        #[cfg(not(target_os = "macos"))]
+        let storage = home.join(".local/share/elastos/storage");
+        std::fs::create_dir_all(storage.parent().unwrap()).unwrap();
+        std::fs::write(&storage, b"not a directory").unwrap();
+        let open = super::open_capsule_dir(temp.path().to_path_buf(), "127.0.0.1:0", false);
+        let deadline = std::time::Duration::from_secs(60);
+        // A spawned task turns any panic past the storage step into an outcome.
+        let outcome = tokio::time::timeout(deadline, tokio::spawn(open)).await;
+        let expected = format!("cannot open storage {}", storage.display());
+        let refused = matches!(&outcome, Ok(Ok(Err(e))) if e.to_string().contains(&expected));
+        assert!(refused, "want {expected:?}; got {outcome:?}");
     }
 }

@@ -35,6 +35,9 @@ pub enum AuditEvent {
         capsule_name: String,
         cid: Option<String>,
         trust_level: TrustLevel,
+        /// `did:key` of the trusted key that verified this capsule, when one did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer_did: Option<String>,
     },
 
     /// Capsule stopped
@@ -355,6 +358,7 @@ impl AuditLog {
         capsule_name: &str,
         cid: Option<&str>,
         trust_level: TrustLevel,
+        signer_did: Option<&str>,
     ) {
         self.emit(AuditEvent::CapsuleLaunch {
             timestamp: SecureTimestamp::now(),
@@ -362,6 +366,7 @@ impl AuditLog {
             capsule_name: capsule_name.to_string(),
             cid: cid.map(String::from),
             trust_level,
+            signer_did: signer_did.map(String::from),
         });
     }
 
@@ -710,6 +715,7 @@ mod tests {
             capsule_name: "test-capsule".to_string(),
             cid: Some("Qm123".to_string()),
             trust_level: TrustLevel::Trusted,
+            signer_did: Some("did:key:zTest".to_string()),
         };
 
         let json = serde_json::to_string(&event).unwrap();
@@ -721,7 +727,7 @@ mod tests {
     fn test_audit_log_memory() {
         let log = AuditLog::new();
         log.runtime_start("0.1.0");
-        log.capsule_launch("cap-1", "test", None, TrustLevel::Untrusted);
+        log.capsule_launch("cap-1", "test", None, TrustLevel::Untrusted, None);
         log.capsule_stop("cap-1", StopReason::Completed);
         log.runtime_stop();
         // No panic = success (memory-only log doesn't persist)
@@ -734,7 +740,7 @@ mod tests {
 
         let log = AuditLog::with_file(&log_path).unwrap();
         log.runtime_start("0.1.0");
-        log.capsule_launch("cap-1", "test", None, TrustLevel::Trusted);
+        log.capsule_launch("cap-1", "test", None, TrustLevel::Trusted, None);
 
         // Read back the log
         let content = std::fs::read_to_string(&log_path).unwrap();

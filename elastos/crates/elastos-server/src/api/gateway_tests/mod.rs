@@ -224,6 +224,12 @@ impl Provider for HolderFixture {
     }
 }
 
+/// Makes the gateway at `dir` a node that serves publisher content (a seed):
+/// only a seed answers the raw CID routes to callers without a session.
+fn serve_as_seed(dir: &std::path::Path) {
+    std::fs::create_dir_all(elastos_common::localhost::publisher_artifacts_path(dir)).unwrap();
+}
+
 /// Gateway state over the real Content provider, a local store holding
 /// `local_files` (CID, exact path, bytes), and a holder that answers every read.
 async fn verified_store_state(
@@ -1059,6 +1065,7 @@ mod marketplace;
 mod model;
 #[cfg(target_os = "macos")]
 mod model_installed_fixture;
+mod r3_stored_roots;
 mod recovery;
 #[cfg(unix)]
 mod remote_engine;

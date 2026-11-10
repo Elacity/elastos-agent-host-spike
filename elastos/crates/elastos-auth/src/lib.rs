@@ -706,7 +706,10 @@ fn validate_principal_root_common(
 }
 
 fn validate_principal_localhost_root(localhost_root: &str) -> Result<(), String> {
-    let Some(root_segment) = localhost_root.strip_prefix("localhost://Users/") else {
+    let Some(root_segment) = localhost_root
+        .strip_prefix("localhost://Users/")
+        .or_else(|| localhost_root.strip_prefix("localhost://UsersAI/"))
+    else {
         return Err("localhost_root must be a principal-owned localhost user root".to_string());
     };
     if root_segment.is_empty()
@@ -1498,6 +1501,17 @@ mod tests {
         let err = validate_principal_root_protection(&protection)
             .expect_err("shared Users/self roots must not validate");
         assert!(err.contains("principal-owned localhost user root"));
+    }
+
+    #[test]
+    fn principal_root_protection_accepts_agent_root() {
+        let mut protection = principal_root_protection();
+        protection.localhost_root = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478".into();
+        validate_principal_root_protection(&protection).unwrap();
+        protection.localhost_root.push_str("/Documents");
+        assert!(validate_principal_root_protection(&protection).is_err());
+        protection.localhost_root = "localhost://UsersAI/self".into();
+        assert!(validate_principal_root_protection(&protection).is_err());
     }
 
     #[test]

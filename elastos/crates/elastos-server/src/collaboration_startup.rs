@@ -1138,6 +1138,12 @@ mod tests {
         use crate::collaboration_presence_grant::{
             set_presence_grant, store_test_profile, PresenceDecision,
         };
+        if crate::auth::stored_principal_record(data_dir, principal)
+            .unwrap()
+            .is_none()
+        {
+            crate::auth::store_test_human_principal(data_dir, principal);
+        }
         crate::auth::store_test_principal_root_protection(data_dir, principal);
         let (key, _) = generate_keypair();
         let profile = crate::collaboration_profile_authority::signed_profile_document_for_test(
