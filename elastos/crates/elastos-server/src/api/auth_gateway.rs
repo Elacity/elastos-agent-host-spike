@@ -3051,8 +3051,47 @@ async fn recovery_kit_import_inner(
             format!("invalid recovery kit: {err}"),
         );
     }
+    let recovered = if input.reassign_to_current_principal {
+        match recovered_principal_record_for_import(&state.data_dir, &kit.principal_id) {
+            Ok(record) => record,
+            Err(_) => {
+                return fail_recovery_kit_request(
+                    state,
+                    &context,
+                    &principal,
+                    "auth.recovery_kit.import.rejected",
+                    "recovered principal root is not canonical for the recovered principal",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    if recovered
+        .as_ref()
+        .is_some_and(|record| record.kind != crate::auth::PrincipalKind::Human)
+    {
+        return fail_recovery_kit_request(
+            state,
+            &context,
+            &principal,
+            "auth.recovery_kit.import.rejected",
+            "recovered recovery kit requires a human principal",
+        );
+    }
     if input.reassign_to_current_principal
-        && kit.localhost_root != crate::auth::principal_localhost_root(&kit.principal_id)
+        && !recovered.as_ref().map_or_else(
+            || {
+                // A fresh Home has no recovered record. Verified Kit material
+                // supplies its Human root until reassignment stores the record.
+                crate::auth::ResolvedPrincipalRoot::verified_recovery_kit(
+                    &kit.principal_id,
+                    &kit.localhost_root,
+                )
+                .is_ok()
+            },
+            |record| record.localhost_root == kit.localhost_root,
+        )
     {
         return fail_recovery_kit_request(
             state,
@@ -3139,10 +3178,15 @@ async fn recovery_kit_import_inner(
             &state.data_dir,
             crate::auth::RecoveryReassignmentTestFault::TokenPreparation,
         )?;
-        let root = crate::auth::ResolvedPrincipalRoot::verified_recovery_kit(
-            &kit.principal_id,
-            &kit.localhost_root,
-        )?;
+        let root = match recovered.as_ref() {
+            Some(record) => {
+                crate::auth::ResolvedPrincipalRoot::verified_stored_recovery_kit(record, &kit)?
+            }
+            None => crate::auth::ResolvedPrincipalRoot::verified_recovery_kit(
+                &kit.principal_id,
+                &kit.localhost_root,
+            )?,
+        };
         let home_token = issue_home_launch_token_for_verified_grant(
             &state.data_dir,
             HOME_CAPSULE_ID,
@@ -3229,6 +3273,26 @@ async fn recovery_kit_import_inner(
         home_token: None,
         system_token: None,
     })
+}
+
+#[cfg(test)]
+static RECOVERED_PRINCIPAL_LOOKUP_FAILURES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+fn recovered_principal_record_for_import(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<Option<crate::auth::PrincipalRecord>> {
+    #[cfg(test)]
+    if RECOVERED_PRINCIPAL_LOOKUP_FAILURES
+        .lock()
+        .expect("recovered principal lookup fault lock")
+        .remove(data_dir)
+    {
+        anyhow::bail!("injected recovered principal lookup failure");
+    }
+    crate::auth::stored_principal_record(data_dir, principal_id)
 }
 
 fn create_recovery_kit_for_principal(
@@ -7693,6 +7757,117 @@ mod tests {
             assert!(added.iter().all(|e| e.result != "ok"), "{keep_users_root}");
             let counts = |s: &crate::auth::AuthState| (s.principals.len(), s.sessions.len());
             assert_eq!(counts(&after), counts(&before), "{keep_users_root}");
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_kit_reassignment_uses_the_recovered_stored_root_and_kind() {
+        use crate::auth::{r4_fixture, PrincipalKind};
+        const HUMAN_ROOT: &str = r4_fixture::HUMAN_ROOT;
+        const MIGRATED_ROOT: &str = "localhost://Users/migrated-r4-human";
+        for (kind, root, remove_recovered, lookup_error, accepted) in [
+            (
+                PrincipalKind::Agent,
+                r4_fixture::AGENT_ROOT,
+                false,
+                false,
+                false,
+            ),
+            (PrincipalKind::Human, MIGRATED_ROOT, false, false, true),
+            (PrincipalKind::Human, HUMAN_ROOT, true, false, true),
+            (PrincipalKind::Human, HUMAN_ROOT, false, false, true),
+            (PrincipalKind::Human, HUMAN_ROOT, false, true, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = test_gateway_state(temp.path());
+            let credential = test_credential();
+            let origin = "https://elastos.elacitylabs.com";
+            seed_test_passkey_principal(
+                &state,
+                &credential,
+                origin,
+                crate::auth::RuntimePrincipalRole::Admin,
+            );
+            store_test_credential(temp.path(), credential.clone());
+            let grant = issue_passkey_session_grant(
+                &state,
+                "identity-test",
+                &credential,
+                origin,
+                true,
+                "recovery importer",
+            )
+            .unwrap();
+            let current =
+                crate::auth::load_principal_for_proof_binding(temp.path(), &grant.proof_binding_id)
+                    .unwrap();
+            r4_fixture::store(temp.path(), kind);
+            r4_fixture::set_kind(temp.path(), r4_fixture::ID, kind, root);
+            let kit = create_recovery_kit_for_principal(r4_fixture::ID, root, None, 1_800_000_000)
+                .unwrap();
+            if !remove_recovered {
+                let archive = crate::auth::recovery_archive_from_kit(temp.path(), &kit).unwrap();
+                let protection = protection_from_recovery_kit(
+                    &kit,
+                    None,
+                    RecoveryKitDelivery::HandedToPerson,
+                    1_800_000_000,
+                    Some(archive),
+                )
+                .unwrap();
+                crate::auth::store_principal_root_protection(temp.path(), protection).unwrap();
+            }
+            if remove_recovered {
+                r4_fixture::remove(temp.path(), r4_fixture::ID);
+            }
+            if lookup_error {
+                RECOVERED_PRINCIPAL_LOOKUP_FAILURES
+                    .lock()
+                    .unwrap()
+                    .insert(temp.path().to_path_buf());
+            }
+            let before = crate::auth::load_auth_state(temp.path()).unwrap();
+            let result = recovery_kit_import_inner(
+                &state,
+                &home_token_headers(&grant.home_token),
+                RecoveryKitMaterialImport {
+                    principal_id: current.principal_id,
+                    localhost_root: current.localhost_root,
+                    reassign_to_current_principal: true,
+                    kit,
+                    did_recovery_proof: None,
+                },
+            )
+            .await;
+            let after = crate::auth::load_auth_state(temp.path()).unwrap();
+            if accepted {
+                let response = result.unwrap();
+                assert_eq!(response.status, "reassigned");
+                assert_eq!(response.localhost_root, root);
+                assert!(after
+                    .principals
+                    .iter()
+                    .any(|p| { p.principal_id == r4_fixture::ID && p.localhost_root == root }));
+                assert!(after.audit[before.audit.len()..].iter().any(|e| {
+                    e.event_type == "auth.recovery_kit.reassigned" && e.result == "ok"
+                }));
+            } else {
+                assert!(
+                    result.is_err(),
+                    "kind={kind:?}, lookup_error={lookup_error}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&after.principals).unwrap(),
+                    serde_json::to_value(&before.principals).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(&after.sessions).unwrap(),
+                    serde_json::to_value(&before.sessions).unwrap()
+                );
+                assert!(after.audit[before.audit.len()..]
+                    .iter()
+                    .all(|e| e.result != "ok"));
+            }
         }
     }
 

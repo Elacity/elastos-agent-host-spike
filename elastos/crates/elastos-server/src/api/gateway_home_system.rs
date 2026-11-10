@@ -2117,12 +2117,12 @@ mod discovery_summary_tests {
 
         assert_eq!(fixture.store.snapshot().unwrap().contacts().len(), 1);
         let response_read = fixture.store.read_only_snapshot().unwrap();
-        let context = HomeLaunchTokenContext::for_test(
-            fixture.store.principal_id().to_string(),
-            "session".to_string(),
-            Some("proof".to_string()),
-            "grant".to_string(),
+        let principal = crate::auth::store_test_human_principal(
+            fixture.store.data_root(),
+            fixture.store.principal_id(),
         );
+        let context =
+            stored_passkey_principal_context(fixture.store.data_root(), &principal).unwrap();
         let authority = ConfiguredContactAuthority {
             profile: fixture.local_profile.clone(),
             store: fixture.store.clone(),
@@ -2280,14 +2280,10 @@ mod discovery_summary_tests {
         fs::create_dir_all(&data_root).unwrap();
         fs::set_permissions(&data_root, fs::Permissions::from_mode(0o700)).unwrap();
         let principal_id = "person:local:legacy-people-ignore".to_string();
+        let record = crate::auth::store_test_human_principal(&data_root, &principal_id);
         let protection =
             crate::auth::store_test_principal_root_protection(&data_root, &principal_id);
-        let context = HomeLaunchTokenContext::for_test(
-            principal_id.clone(),
-            "session".to_string(),
-            Some("proof".to_string()),
-            "grant".to_string(),
-        );
+        let context = stored_passkey_principal_context(&data_root, &record).unwrap();
         let legacy_path = home_services_peer_contacts_path(&data_root, &context).unwrap();
         let legacy_state = HomeServicesPeerContactsState {
             schema: HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string(),
@@ -2904,7 +2900,7 @@ pub(super) async fn services_offer_update(
 fn home_services_selection_state_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/.AppData/ElastOS/Home/services-state.json",
-        crate::auth::principal_localhost_root(context.principal_id())
+        context.root().localhost_root()
     )
 }
 
@@ -2935,7 +2931,7 @@ fn home_services_default_selection_state(
     HomeServicesSelectionState {
         schema: HOME_SERVICES_STATE_SCHEMA.to_string(),
         principal_id: context.principal_id().to_string(),
-        localhost_root: crate::auth::principal_localhost_root(context.principal_id()),
+        localhost_root: context.root().localhost_root().to_string(),
         updated_at: 0,
         local_offer_ids: BTreeSet::new(),
         remote_offer_ids: BTreeSet::new(),
@@ -3043,7 +3039,7 @@ fn home_state_write_error(err: anyhow::Error, path: &std::path::Path) -> anyhow:
 fn home_services_requests_state_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/.AppData/ElastOS/Home/services-requests.json",
-        crate::auth::principal_localhost_root(context.principal_id())
+        context.root().localhost_root()
     )
 }
 
@@ -3061,7 +3057,7 @@ fn home_services_default_requests_state(
     HomeServicesRequestsState {
         schema: HOME_SERVICES_REQUESTS_SCHEMA.to_string(),
         principal_id: context.principal_id().to_string(),
-        localhost_root: crate::auth::principal_localhost_root(context.principal_id()),
+        localhost_root: context.root().localhost_root().to_string(),
         updated_at: 0,
         requests: BTreeMap::new(),
         catalog_last_response_at: BTreeMap::new(),
@@ -6839,7 +6835,7 @@ fn home_browser_principal_id(context: &HomeLaunchTokenContext) -> String {
 }
 
 fn home_browser_localhost_root(context: &HomeLaunchTokenContext) -> String {
-    crate::auth::principal_localhost_root(context.principal_id())
+    context.root().localhost_root().to_string()
 }
 
 fn home_desktop_uri(context: &HomeLaunchTokenContext) -> String {
@@ -9371,5 +9367,135 @@ mod home_events_pacing_tests {
                 snapshots.load(Ordering::SeqCst)
             );
         }
+    }
+}
+
+/// R2 rows: the Home state surfaces read the root the context resolved, and a
+/// principal with no stored record is refused instead of served from the
+/// principal-id rule.
+#[cfg(test)]
+mod stored_root_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn state_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        (temp, data_dir)
+    }
+
+    #[test]
+    fn an_unstored_principal_is_refused_instead_of_served_from_the_id_rule_root() {
+        let (_temp, data_dir) = state_dir();
+        let principal_id = "person:local:no-stored-record";
+        let context = HomeLaunchTokenContext::for_test(principal_id, "session", None, "grant");
+        assert!(
+            crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id)
+                .unwrap_err()
+                .to_string()
+                .contains("has no stored record"),
+            "the fixture principal has no stored record"
+        );
+        // The id rule names a root this Home accepts, so a served result would
+        // prove the surface fell back to it.
+        let id_rule_root = crate::auth::principal_localhost_root(principal_id);
+        assert!(elastos_common::localhost::rooted_localhost_fs_path(
+            &data_dir,
+            &format!("{id_rule_root}/.AppData/ElastOS/Home/services-state.json"),
+        )
+        .is_some());
+        assert!(home_services_selection_state_path(&data_dir, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid Services state root"));
+        assert!(home_services_requests_state_path(&data_dir, &context).is_err());
+        assert!(home_active_shell_state_path(&data_dir, &context).is_err());
+    }
+
+    #[test]
+    fn a_stored_principal_keeps_todays_services_state_results() {
+        let (_temp, data_dir) = state_dir();
+        let principal_id = "person:local:stored-home-state";
+        let record = crate::auth::store_test_human_principal(&data_dir, principal_id);
+        let _protection =
+            crate::auth::store_test_principal_root_protection(&data_dir, principal_id);
+        let context = stored_passkey_principal_context(&data_dir, &record).unwrap();
+        let expected_path = elastos_common::localhost::rooted_localhost_fs_path(
+            &data_dir,
+            &format!(
+                "{}/.AppData/ElastOS/Home/services-state.json",
+                record.localhost_root
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            home_services_selection_state_path(&data_dir, &context).unwrap(),
+            expected_path,
+            "today's path is under the principal's stored root"
+        );
+        let default_state = home_services_selection_state(&data_dir, &context).unwrap();
+        assert_eq!(default_state.principal_id, principal_id);
+        assert_eq!(default_state.localhost_root, record.localhost_root);
+        let mut state = default_state;
+        state.updated_at = 12_345;
+        state
+            .local_offer_ids
+            .insert(crate::api::gateway::MODEL_LOCAL_OFFER.to_string());
+        home_save_services_selection_state(&data_dir, &context, &state).unwrap();
+        let reloaded = home_services_selection_state(&data_dir, &context).unwrap();
+        assert_eq!(reloaded.updated_at, 12_345);
+        assert!(reloaded
+            .local_offer_ids
+            .contains(crate::api::gateway::MODEL_LOCAL_OFFER));
+        assert_eq!(reloaded.localhost_root, record.localhost_root);
+        assert!(home_active_shell_state(&data_dir, &context)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            home_services_requests_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            record.localhost_root
+        );
+    }
+
+    /// R2 M1: an Agent's stored `UsersAI/` root reaches the default Services
+    /// states. A Human control cannot see this, because a Human's stored root
+    /// equals the principal-id rule's root. The expected suffix is the SHA-256
+    /// prefix of the fixed test id, written as a literal.
+    #[test]
+    fn a_stored_agent_root_reaches_the_services_default_states() {
+        let (_temp, data_dir) = state_dir();
+        let principal_id = "person:local:stored-agent-home-state";
+        let expected_root = "localhost://UsersAI/e2ebe568bb792f09d6da1893";
+        crate::auth::store_test_human_principal(&data_dir, principal_id);
+        crate::auth::tests::mint_agent_record(&data_dir, principal_id, None);
+        assert_eq!(
+            crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id).unwrap(),
+            expected_root
+        );
+        let record = crate::auth::load_auth_state(&data_dir)
+            .unwrap()
+            .principals
+            .into_iter()
+            .find(|principal| principal.principal_id == principal_id)
+            .unwrap();
+        let context = stored_passkey_principal_context(&data_dir, &record).unwrap();
+        assert_eq!(context.root().localhost_root(), expected_root);
+        assert_eq!(
+            home_services_selection_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            expected_root
+        );
+        assert_eq!(
+            home_services_requests_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            expected_root
+        );
     }
 }

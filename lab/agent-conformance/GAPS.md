@@ -796,9 +796,10 @@ scope and the same invocation's VERSIONS.json keep these limits visible.
 | `run_leaves_no_live_grant` | AC-021-GRANTS | Shell-authorized view of every session's live grants, filtered by Runtime for exhausted, revoked and expired grants. |
 
 `run_leaves_no_live_grant` is ignored with `blocked: AC-021-GRANTS`. When
-explicitly selected, it reuses the granted-read journey and requires a global
-live-grant result before the Home can pass. The normal journeys report this
-check as BLOCKED, including when the shell's own list is empty.
+explicitly selected, it reuses the granted-read journey and requires an empty
+global live-grant result before the Home can pass. The normal journeys print
+`BLOCKED(AC-021-GRANTS:leftover)` while the scoped view holds a run's live
+grants, and `pending:0 grants:0` only when that view is empty.
 
 Runtime owns the grant lifetime. A `once` approval sets `max_uses = 1`
 (`elastos/crates/elastos-server/src/api/handlers/capability.rs:335`). The first
@@ -811,20 +812,22 @@ The `run` client attaches shell and client sessions
 (`elastos/crates/elastos-server/src/runtime_control.rs:917`), then returns from
 `run_local` without a detach or grant-revoke call (`run_cmd.rs:264`). Thus client
 exit alone does not end its grants or prove their absence. The shell can see
-all pending requests (`api/handlers/capability.rs:244`), but the current list
-selects grants by the caller's session (`api/handlers/capability.rs:433`). Its
-rows describe granted requests; they are not a global inventory of remaining
-allowances. Audit events provide supporting history only.
+all pending requests (`api/handlers/capability.rs:244`). The plain list selects
+grants by the caller's session; the scoped view lists every session's live
+grants. A plain response is not a global inventory of remaining allowances.
+Audit events provide supporting history only.
 
-The Runtime change that flips this check is a shell-authorized view of every
-session's live grants, with exhausted, revoked and expired grants filtered by
-Runtime. The fixture expects the existing list response to identify that view
-with `scope: "all_sessions_live"` and `capabilities: []`. A session-local or
-unmarked response stays BLOCKED. A global nonempty list fails with `live grant
-leftover`. This is a future response contract, not a claim that Runtime exposes
-it today. Client callers retain their own-session view. This lane changes zero
-Runtime routes and performs zero revocations. F-cleanup-grant is deferred until
-this blocker closes; the synthetic scope falsifier tests honest grading only.
+The check uses the shell-authorized view of every session's live grants, with
+exhausted, revoked and expired grants filtered by Runtime. The fixture asks
+that view by `?scope=all_sessions_live` and requires the marker
+`scope: "all_sessions_live"`. An unmarked response stays
+`BLOCKED(AC-021-GRANTS)`; a scoped list that holds the run's live grants
+reports `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)`. Only an empty
+scoped list reports `pending:0 grants:0`, and only `run_leaves_no_live_grant`
+requires it. Client callers retain their own-session view. This lane changes
+zero Runtime routes and performs zero revocations. F-cleanup-grant is deferred
+until this blocker closes; the fixture's own grants are not evidence that
+Runtime ends a run's grants.
 
 Before tests, `run.sh` uses the existing report executable to check earlier
 `target/home-*` roots. It selects only those direct children (two-second limit)
