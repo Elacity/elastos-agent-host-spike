@@ -58,6 +58,76 @@ fn owner_root_cipher_round_trip_uses_principal_object_io() {
 }
 
 #[test]
+fn agent_object_io_refuses_missing_protection_and_human_plaintext_still_works() {
+    let (data, agent, _) = fixture();
+    let uri = format!("{}/Documents/note.txt", agent.localhost_root);
+    let path = rooted_localhost_fs_path(data.path(), &uri).unwrap();
+    write_principal_root_object(
+        data.path(),
+        &agent.principal_id,
+        &agent.localhost_root,
+        &uri,
+        &path,
+        b"before",
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    mutate_auth_state(data.path(), |state| {
+        state
+            .principal_root_protections
+            .retain(|p| p.principal_id != agent.principal_id);
+        Ok(())
+    })
+    .unwrap();
+    let read_error = read_principal_root_object(
+        data.path(),
+        &agent.principal_id,
+        &agent.localhost_root,
+        &uri,
+        &path,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(read_error, "Agent root has no stored protection");
+    let write_error = write_principal_root_object(
+        data.path(),
+        &agent.principal_id,
+        &agent.localhost_root,
+        &uri,
+        &path,
+        b"after",
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(write_error, "Agent root has no stored protection");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let human = store_test_human_principal(data.path(), "person:local:control");
+    let human_uri = format!("{}/Documents/control.txt", human.localhost_root);
+    let human_path = rooted_localhost_fs_path(data.path(), &human_uri).unwrap();
+    write_principal_root_object(
+        data.path(),
+        &human.principal_id,
+        &human.localhost_root,
+        &human_uri,
+        &human_path,
+        b"human",
+    )
+    .unwrap();
+    assert_eq!(
+        read_principal_root_object(
+            data.path(),
+            &human.principal_id,
+            &human.localhost_root,
+            &human_uri,
+            &human_path
+        )
+        .unwrap(),
+        b"human"
+    );
+    assert_eq!(std::fs::read(&human_path).unwrap(), b"human");
+}
+
 fn owner_root_absent_owner_refuses_before_object_open() {
     let (data, agent, protection) = fixture();
     let uri = format!("{}/Documents/note.txt", agent.localhost_root);

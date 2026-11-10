@@ -6001,6 +6001,11 @@ fn read_principal_root_object_locked(
 ) -> anyhow::Result<Vec<u8>> {
     let Some(protection) = load_principal_root_protection(data_dir, principal_id, localhost_root)?
     else {
+        if stored_principal_record(data_dir, principal_id)?
+            .is_some_and(|record| record.kind == PrincipalKind::Agent)
+        {
+            anyhow::bail!("Agent root has no stored protection");
+        }
         let (mut file, _) = open_principal_root_object_file(path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
@@ -6521,6 +6526,12 @@ fn write_principal_root_object_locked(
         }
     }
     let protection = load_principal_root_protection(data_dir, principal_id, localhost_root)?;
+    if protection.is_none()
+        && stored_principal_record(data_dir, principal_id)?
+            .is_some_and(|record| record.kind == PrincipalKind::Agent)
+    {
+        anyhow::bail!("Agent root has no stored protection");
+    }
     if options.require_protection && protection.is_none() {
         anyhow::bail!("protected principal-root object requires active principal-root protection");
     }
