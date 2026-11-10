@@ -15,6 +15,11 @@ type Snapshot = std::collections::BTreeMap<PathBuf, SnapshotEntry>;
 /// The production controller passes [`crate::update::VERSION_CHECK_TIMEOUT`].
 const TEST_PROBE_DEADLINE: Duration = Duration::from_secs(60);
 
+/// A crash candidate must get time to start under the same load. The previous
+/// start failure this fixture builds is the assertion; a starved candidate must
+/// not be mistaken for a hung one.
+const TEST_READY_BUDGET: Duration = Duration::from_secs(30);
+
 struct PrivateFixture {
     _root: tempfile::TempDir,
     data: PathBuf,
@@ -3855,7 +3860,7 @@ async fn dead_previous_start() -> (PrivateFixture, Vec<(PathBuf, Vec<u8>)>) {
         request,
         fetch,
         old,
-    } = restart_scenario(crash_candidate, 0, Some(Duration::from_secs(3))).await;
+    } = restart_scenario(crash_candidate, 0, Some(TEST_READY_BUDGET)).await;
     fixture.file(&fixture.data.join("previous-fail"), b"", 0o600);
     let result = crate::update::run_restarting_update(
         &fixture.data,
