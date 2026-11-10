@@ -9046,6 +9046,11 @@ mod tests {
             }
         }
         let absent = tempfile::tempdir().unwrap();
+        let decoy = super::r5a_tests::id_rule_decoy(
+            absent.path(),
+            "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/id-rule.txt",
+            b"id-rule roots",
+        );
         let result = super::handle_library_request(
             absent.path(),
             super::ObjectProviderRequest::Roots {
@@ -9058,6 +9063,7 @@ mod tests {
                 .is_err_and(|error| error.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        decoy.untouched();
     }
 
     #[test]
@@ -11055,6 +11061,38 @@ mod r5a_tests {
         path
     }
 
+    pub(super) struct IdRuleDecoy<'a> {
+        dir: &'a Path,
+        path: PathBuf,
+        bytes: &'a [u8],
+    }
+
+    impl IdRuleDecoy<'_> {
+        pub(super) fn untouched(&self) {
+            assert_eq!(
+                std::fs::read(&self.path).unwrap_or_default(),
+                self.bytes,
+                "decoy bytes"
+            );
+            assert!(
+                !principal_object_io::reads(self.dir).contains(&self.path),
+                "decoy read"
+            );
+            assert!(
+                !principal_object_io::writes(self.dir).contains(&self.path),
+                "decoy write"
+            );
+        }
+    }
+
+    pub(super) fn id_rule_decoy<'a>(dir: &'a Path, uri: &str, bytes: &'a [u8]) -> IdRuleDecoy<'a> {
+        IdRuleDecoy {
+            dir,
+            path: seed_id_rule_file(dir, uri, bytes),
+            bytes,
+        }
+    }
+
     #[test]
     fn list_uses_the_stored_agent_root_end_to_end() {
         let agent = home(PrincipalKind::Agent);
@@ -11082,6 +11120,11 @@ mod r5a_tests {
         .unwrap();
         assert_eq!(listed["uri"], r4_fixture::HUMAN_ROOT);
         let absent = tempfile::tempdir().unwrap();
+        let decoy = id_rule_decoy(
+            absent.path(),
+            "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/id-rule.txt",
+            b"id-rule list",
+        );
         let result = handle_library_request(
             absent.path(),
             ObjectProviderRequest::List {
@@ -11095,6 +11138,7 @@ mod r5a_tests {
                 .is_err_and(|error| error.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        decoy.untouched();
     }
 
     #[test]
@@ -11143,6 +11187,11 @@ mod r5a_tests {
         .unwrap();
         assert_eq!(emptied["deleted_count"], 0);
         let absent = tempfile::tempdir().unwrap();
+        let decoy = id_rule_decoy(
+            absent.path(),
+            "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.Trash/id-rule.txt",
+            b"id-rule trash",
+        );
         let result = handle_library_request(
             absent.path(),
             ObjectProviderRequest::EmptyTrash {
@@ -11155,6 +11204,7 @@ mod r5a_tests {
                 .is_err_and(|error| error.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        decoy.untouched();
     }
 
     #[test]
@@ -11276,6 +11326,7 @@ mod r5a_tests {
         }
         let absent = tempfile::tempdir().unwrap();
         let uri = format!("{}/R5a/write.json", r4_fixture::HUMAN_ROOT);
+        let decoy = id_rule_decoy(absent.path(), &uri, b"id-rule json");
         let result = write_runtime_json(absent.path(), r4_fixture::ID, &uri, &json!({}));
         assert!(
             result
@@ -11283,6 +11334,7 @@ mod r5a_tests {
                 .is_err_and(|error| error.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        decoy.untouched();
     }
 
     #[test]
@@ -11312,9 +11364,7 @@ mod r5a_tests {
         }
         let absent = tempfile::tempdir().unwrap();
         let uri = format!("{}/R5a/read.json", r4_fixture::HUMAN_ROOT);
-        let path = rooted_localhost_fs_path(absent.path(), &uri).unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, br#"{"site":4}"#).unwrap();
+        let decoy = id_rule_decoy(absent.path(), &uri, br#"{"site":4}"#);
         let result = read_runtime_json::<Value>(absent.path(), r4_fixture::ID, &uri);
         assert!(
             result.is_err(),
@@ -11326,6 +11376,7 @@ mod r5a_tests {
                 .is_err_and(|error| error.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        decoy.untouched();
     }
 
     #[derive(Clone)]
@@ -11373,19 +11424,14 @@ mod r5a_tests {
         let absent = tempfile::tempdir().unwrap();
         let dir_uri = format!("{}/{LIBRARY_RUNTIME_DIR}/Published", r4_fixture::HUMAN_ROOT);
         let uri = format!("{dir_uri}/r5a.json");
-        let path = rooted_localhost_fs_path(absent.path(), &uri).unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "schema": "elastos.library.publish/v1",
-                "object_uri": format!("{}/Documents/r5a.txt", r4_fixture::HUMAN_ROOT),
-                "cid": "cid-r5a", "published_at": 1,
-                "receipt": {}, "availability": {},
-            }))
-            .unwrap(),
-        )
+        let bytes = serde_json::to_vec(&json!({
+            "schema": "elastos.library.publish/v1",
+            "object_uri": format!("{}/Documents/r5a.txt", r4_fixture::HUMAN_ROOT),
+            "cid": "cid-r5a", "published_at": 1,
+            "receipt": {}, "availability": {},
+        }))
         .unwrap();
+        let decoy = id_rule_decoy(absent.path(), &uri, &bytes);
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let writer = WarningWriter(warnings.clone());
         let subscriber = tracing_subscriber::fmt()
@@ -11405,6 +11451,7 @@ mod r5a_tests {
                 && warning.contains("has no stored record"),
             "{warning}"
         );
+        decoy.untouched();
     }
 
     fn trash(root: &str) -> LibraryTrashRecord {
@@ -11853,6 +11900,11 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
+        let decoy = id_rule_decoy(
+            dir.path(),
+            "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/ChatAttach/8fef004934571f09cf782aad202bffc7b697cb5556927323270becfd7073c080.json",
+            b"id-rule attach",
+        );
         let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
         assert!(
             result
@@ -11860,6 +11912,7 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        decoy.untouched();
     }
 
     #[test]
@@ -11876,6 +11929,7 @@ mod r5a_tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
+        let decoy = id_rule_decoy(dir.path(), r4_fixture::HUMAN_ROOT, b"id-rule space");
         let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
         assert!(
             result
@@ -11883,6 +11937,7 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "{result:?}"
         );
+        decoy.untouched();
     }
 
     #[test]
@@ -11906,6 +11961,7 @@ mod r5a_tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let uri = format!("{}/Documents/a.txt", r4_fixture::HUMAN_ROOT);
+        let decoy = id_rule_decoy(dir.path(), &uri, b"id-rule target");
         let result = library_target(dir.path(), r4_fixture::ID, &uri);
         assert!(
             result
@@ -11913,6 +11969,7 @@ mod r5a_tests {
                 .is_err_and(|e| e.to_string().contains("has no stored record")),
             "unstored Library target must refuse"
         );
+        decoy.untouched();
     }
 
     const UNSTORED_INDEX: &[u8] = br#"{"schema":"elastos.library.published-cids/v1","publications":{"k":{"any_peer":true,"cids":["bafy-r5b-unstored"],"principal_id":"person:local:r4"}}}"#;
