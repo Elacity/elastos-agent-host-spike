@@ -7291,12 +7291,9 @@ pub(super) fn migrate_legacy_services_peer_contacts(
     if !legacy_path.is_file() {
         return Ok(());
     }
-    let principal_id = home_browser_principal_id(context);
-    let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &legacy_uri,
         &legacy_path,
     ) {
@@ -7322,10 +7319,9 @@ pub(super) fn migrate_legacy_services_peer_contacts(
     if let Some(parent) = new_path.parent() {
         crate::auth::create_owner_only_dir_all(data_dir, parent)?;
     }
-    crate::auth::write_principal_root_object(
+    crate::auth::write_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_services_peer_contacts_uri(context),
         &new_path,
         &serde_json::to_vec_pretty(&state)?,
@@ -9583,6 +9579,55 @@ mod stored_root_tests {
             hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
         );
         let child_uri = format!("{child_root}/.AppData/ElastOS/Home/browser-state.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_peer_contacts_migration_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let legacy_uri = legacy_home_services_peer_contacts_uri(&context);
+        let legacy_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &legacy_uri).unwrap();
+        crate::auth::create_owner_only_dir_all(&data_dir, legacy_path.parent().unwrap()).unwrap();
+        let legacy = HomeServicesPeerContactsState {
+            schema: LEGACY_HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string(),
+            principal_id: context.principal_id().to_string(),
+            localhost_root: context.root().localhost_root().to_string(),
+            updated_at: 7,
+            contacts: BTreeMap::new(),
+        };
+        crate::auth::write_principal_root_object_resolved(
+            &data_dir,
+            context.root(),
+            &legacy_uri,
+            &legacy_path,
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        migrate_legacy_services_peer_contacts(&data_dir, &context).unwrap();
+        let new_uri = home_services_peer_contacts_uri(&context);
+        let new_path = home_services_peer_contacts_path(&data_dir, &context).unwrap();
+        let bytes = crate::auth::read_principal_root_object_resolved(
+            &data_dir,
+            context.root(),
+            &new_uri,
+            &new_path,
+        )
+        .unwrap();
+        let migrated: HomeServicesPeerContactsState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(migrated.schema, HOME_SERVICES_PEER_CONTACTS_SCHEMA);
+        assert_eq!(migrated.updated_at, 7);
+        assert!(!legacy_path.exists());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/services-peer-contacts.json");
         let child_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
         assert!(!child_path.exists());
