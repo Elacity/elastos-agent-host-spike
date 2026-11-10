@@ -17582,33 +17582,31 @@ pub(crate) mod tests {
         let binding =
             ProofBinding::evm_account(20, "0x2222222222222222222222222222222222222222", now);
         let record = upsert_principal_for_binding(data_dir.path(), binding, now).unwrap();
-        let agent = mutate_auth_state(data_dir.path(), |state| {
-            let stored = state
-                .principals
-                .iter_mut()
-                .find(|principal| principal.principal_id == record.principal_id)
-                .unwrap();
-            stored.kind = PrincipalKind::Agent;
-            let agent = stored.clone();
-            Ok(agent)
-        })
-        .unwrap();
-        let mut reloaded = load_auth_state(data_dir.path()).unwrap();
-        normalize_principal_records(&mut reloaded);
-        let stored = reloaded
+        let users = record.localhost_root.clone();
+        plant_principal_kind(
+            data_dir.path(),
+            &record.principal_id,
+            PrincipalKind::Agent,
+            None,
+        );
+        let loaded = load_auth_state(data_dir.path()).unwrap();
+        let stored = loaded
             .principals
-            .into_iter()
+            .iter()
             .find(|principal| principal.principal_id == record.principal_id)
             .unwrap();
         assert_eq!(stored.kind, PrincipalKind::Agent);
-        let sha = hex::encode(&Sha256::digest(agent.principal_id.as_bytes())[..12]);
-        let expected = format!("localhost://UsersAI/{sha}");
         assert_eq!(
-            principal_kind_localhost_root(&agent.principal_id, PrincipalKind::Agent),
-            expected
+            stored.localhost_root, users,
+            "a quarantined record stays as stored"
         );
-        assert_eq!(stored.localhost_root, expected);
-        assert!(!stored.localhost_root.starts_with("localhost://Users/"));
+        assert_eq!(
+            quarantine_reason(&loaded, &record.principal_id),
+            Some("agent kind binding mismatch")
+        );
+        let error = principal_stored_localhost_root(Some(data_dir.path()), &record.principal_id)
+            .unwrap_err();
+        assert!(error.contains("quarantined agent record"), "{error}");
     }
 
     /// Each kind's own root only; the other kind's root is refused.
@@ -17771,19 +17769,23 @@ pub(crate) mod tests {
         principal_id: &str,
         root: Option<&str>,
     ) -> PrincipalRecord {
-        let agent = mutate_auth_state(data_dir, |state| {
-            let stored = state
-                .principals
-                .iter_mut()
-                .find(|principal| principal.principal_id == principal_id)
-                .expect("test principal is stored");
-            stored.kind = PrincipalKind::Agent;
-            stored.localhost_root = root.map(str::to_string).unwrap_or_else(|| {
-                principal_kind_localhost_root(&stored.principal_id, stored.kind)
-            });
-            Ok(stored.clone())
-        })
-        .unwrap();
+        // A kind-only Agent record is malformed. Plant it in the file. The
+        // production save refuses to create one.
+        let path = auth_state_path(data_dir).unwrap();
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let record = value["principals"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["principal_id"] == principal_id)
+            .expect("test principal is stored");
+        let root = root
+            .map(str::to_string)
+            .unwrap_or_else(|| principal_kind_localhost_root(principal_id, PrincipalKind::Agent));
+        record["kind"] = serde_json::json!("agent");
+        record["localhost_root"] = serde_json::json!(root);
+        let agent: PrincipalRecord = serde_json::from_value(record.clone()).unwrap();
+        write_auth_state_value(data_dir, &value);
         assert_eq!(
             stored_principal_kind(data_dir, principal_id).unwrap(),
             PrincipalKind::Agent
@@ -17826,9 +17828,9 @@ pub(crate) mod tests {
             &path,
         )
         .expect_err("an Agent record must not read a Users/ root");
-        assert_eq!(
-            err.to_string(),
-            "principal localhost root must be the record's own root for its kind"
+        assert!(
+            err.to_string().contains("quarantined agent record"),
+            "{err}"
         );
         assert_eq!(
             principal_root_object_opens(data_dir.path()),
@@ -17848,17 +17850,12 @@ pub(crate) mod tests {
 
         // The valid row: once the record is Human again, the same file and
         // its protection serve its own root.
-        mutate_auth_state(data_dir.path(), |state| {
-            let record = state
-                .principals
-                .iter_mut()
-                .find(|principal| principal.principal_id == human.principal_id)
-                .unwrap();
-            record.kind = PrincipalKind::Human;
-            record.localhost_root = root.clone();
-            Ok(())
-        })
-        .unwrap();
+        plant_principal_kind(
+            data_dir.path(),
+            &human.principal_id,
+            PrincipalKind::Human,
+            Some(&root),
+        );
         assert_eq!(
             read_protected_principal_root_object(
                 data_dir.path(),
@@ -17975,13 +17972,11 @@ pub(crate) mod tests {
                 localhost_root: root,
             }
         }
-        const WANT: &str = "principal localhost root must be the record's own root for its kind";
-        // :9024/:9204 pass the Agent root, so :9035/:9224 refuse a Users/ URI.
-        const OUTSIDE: &str = "principal-root object URI is outside the principal root";
+        const WANT: &str = "quarantined agent record: agent kind binding mismatch";
         fn outside(result: anyhow::Result<()>) -> anyhow::Result<()> {
-            let error = result.expect_err("a Users/ URI is outside the UsersAI root");
-            assert_eq!(error.to_string(), OUTSIDE);
-            Err(anyhow!(WANT))
+            let error = result.expect_err("a quarantined agent record is refused");
+            assert!(error.to_string().contains(WANT), "{error}");
+            Err(error)
         }
         let mut failed = Vec::<String>::new();
         // Runs one row: the body drives the named function; this asserts the
@@ -17998,8 +17993,8 @@ pub(crate) mod tests {
                 };
                 let before_record = record(&site);
                 let before_file = std::fs::read(&site.path).unwrap();
-                let error = body(&mut site).expect_err("an Agent record owns no Users/ root");
-                assert_eq!(error.to_string(), WANT);
+                let error = body(&mut site).expect_err("a quarantined agent record is refused");
+                assert!(error.to_string().contains(WANT), "{error}");
                 assert_eq!(std::fs::read(&site.path).unwrap(), before_file);
                 assert_eq!(record(&site), before_record);
             })) {
@@ -18199,9 +18194,9 @@ pub(crate) mod tests {
         )
         .expect_err("an Agent record owns no Users/ root");
         for error in [read.expect_err("the read refuses first"), inspect] {
-            assert_eq!(
-                error.to_string(),
-                "principal localhost root must be the record's own root for its kind"
+            assert!(
+                error.to_string().contains("quarantined agent record"),
+                "{error}"
             );
         }
         assert_eq!(
@@ -18220,18 +18215,17 @@ pub(crate) mod tests {
             "the refused inspection left the file untouched"
         );
 
-        // The same record under its own kind's root reaches the file.
-        assert_eq!(
-            read_protected_principal_root_object(
-                data_dir.path(),
-                &agent.principal_id,
-                &agent.localhost_root,
-                &format!("{}/Documents/a.txt", agent.localhost_root),
-                &path,
-            )
-            .unwrap(),
-            None,
-            "the protection covers UsersAI/, so the read answers after the guard"
+        let own = read_protected_principal_root_object(
+            data_dir.path(),
+            &agent.principal_id,
+            &agent.localhost_root,
+            &format!("{}/Documents/a.txt", agent.localhost_root),
+            &path,
+        )
+        .expect_err("a quarantined agent record is not read");
+        assert!(
+            own.to_string().contains("quarantined agent record"),
+            "{own}"
         );
     }
 
@@ -18267,24 +18261,22 @@ pub(crate) mod tests {
             "localhost://Users/d81978bb3081a4adbfa39b2a"
         );
 
-        mutate_auth_state(auth_dir.path(), |state| {
-            let stored = state
-                .principals
-                .iter_mut()
-                .find(|record| record.principal_id == id)
-                .unwrap();
-            stored.kind = PrincipalKind::Agent;
-            stored.localhost_root = "localhost://UsersAI/d81978bb3081a4adbfa39b2a".into();
-            Ok(())
-        })
-        .unwrap();
-        let resolved =
-            ResolvedPrincipalRoot::resolve(runtime_dir.path(), auth_dir.path(), id).unwrap();
-        assert_eq!(
-            resolved.localhost_root(),
-            "localhost://UsersAI/d81978bb3081a4adbfa39b2a"
+        plant_principal_kind(
+            auth_dir.path(),
+            id,
+            PrincipalKind::Agent,
+            Some("localhost://UsersAI/d81978bb3081a4adbfa39b2a"),
         );
-
+        let error = ResolvedPrincipalRoot::resolve(runtime_dir.path(), auth_dir.path(), id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("quarantined agent record"), "{error}");
+        plant_principal_kind(
+            auth_dir.path(),
+            id,
+            PrincipalKind::Human,
+            Some("localhost://Users/d81978bb3081a4adbfa39b2a"),
+        );
         mutate_auth_state(auth_dir.path(), |state| {
             state.principals.retain(|record| record.principal_id != id);
             Ok(())
@@ -18343,23 +18335,10 @@ pub(crate) mod tests {
     #[test]
     fn resolved_root_of_a_stored_agent_is_usersai_never_users() {
         let (data_dir, auth_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let now = now_ts();
-        let binding =
-            ProofBinding::evm_account(20, "0x3333333333333333333333333333333333333333", now);
-        let record = upsert_principal_for_binding(auth_dir.path(), binding, now).unwrap();
-        let id = record.principal_id.clone();
-        mutate_auth_state(auth_dir.path(), |state| {
-            let stored = state
-                .principals
-                .iter_mut()
-                .find(|p| p.principal_id == id)
-                .unwrap();
-            stored.kind = PrincipalKind::Agent;
-            Ok(())
-        })
-        .unwrap();
+        insert_test_agent(auth_dir.path());
+        let id = TEST_AGENT_ID;
         let resolved =
-            ResolvedPrincipalRoot::resolve(data_dir.path(), auth_dir.path(), &id).unwrap();
+            ResolvedPrincipalRoot::resolve(data_dir.path(), auth_dir.path(), id).unwrap();
         let agent = principal_kind_localhost_root(&id, PrincipalKind::Agent);
         let agent_uri = format!("{agent}/Documents/a.txt");
         assert!(resolved.owns_object_uri(&agent_uri).is_ok());
