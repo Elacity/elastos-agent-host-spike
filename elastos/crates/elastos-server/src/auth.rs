@@ -21,7 +21,8 @@ use elastos_common::localhost::rooted_localhost_fs_path;
 use elastos_runtime::auth::{
     validate_principal_root_protection, AuthChallengeV1, AuthSessionGrantV1, PrincipalId,
     PrincipalRootProtectionV1, PrincipalRootProtectorKind, PrincipalRootRecoveryArchiveV1,
-    ProofBinding, RecoveryKitV1, RuntimeAuditEventV1, DEFAULT_PRINCIPAL_ROOT_CIPHER,
+    ProofBinding, ProofBindingKind, RecoveryKitV1, RuntimeAuditEventV1,
+    DEFAULT_PRINCIPAL_ROOT_CIPHER,
 };
 use hkdf::Hkdf;
 use rand::RngCore;
@@ -5034,10 +5035,160 @@ pub fn verify_auth_audit_chain_ready(data_dir: &Path) -> anyhow::Result<()> {
     load_auth_state(data_dir).map(|_| ())
 }
 
+/// A later PR names one of these when it changes an AgentAdmission record.
+/// None of the five is implemented, so passing one does not authorize a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentAdmissionOperation {
+    Create,
+    DisplayName,
+    Retire,
+    PackageMove,
+    OwnerKeyRewrap,
+}
+
+fn unimplemented_agent_admission_operations() -> &'static [AgentAdmissionOperation] {
+    &[
+        AgentAdmissionOperation::Create,
+        AgentAdmissionOperation::DisplayName,
+        AgentAdmissionOperation::Retire,
+        AgentAdmissionOperation::PackageMove,
+        AgentAdmissionOperation::OwnerKeyRewrap,
+    ]
+}
+
+fn agent_admission_permit_clause(permit: Option<AgentAdmissionOperation>) -> String {
+    let known = unimplemented_agent_admission_operations().len();
+    match permit {
+        None => format!("{known} named operations exist and none is authorized"),
+        Some(AgentAdmissionOperation::Create) => {
+            format!("permit create is not an operation yet ({known} named)")
+        }
+        Some(AgentAdmissionOperation::DisplayName) => {
+            format!("permit display-name change is not an operation yet ({known} named)")
+        }
+        Some(AgentAdmissionOperation::Retire) => {
+            format!("permit retire is not an operation yet ({known} named)")
+        }
+        Some(AgentAdmissionOperation::PackageMove) => {
+            format!("permit package move is not an operation yet ({known} named)")
+        }
+        Some(AgentAdmissionOperation::OwnerKeyRewrap) => {
+            format!("permit owner-key re-wrap is not an operation yet ({known} named)")
+        }
+    }
+}
+
+fn is_agent_admission_record(record: &PrincipalRecord) -> bool {
+    record.proof_binding.kind == ProofBindingKind::AgentAdmission
+}
+
+/// Compares an AgentAdmission binding, including its subject.
+fn agent_admission_binding_same(before: &ProofBinding, after: &ProofBinding) -> bool {
+    before == after
+}
+
+fn agent_admission_record_same(before: &PrincipalRecord, after: &PrincipalRecord) -> bool {
+    if !agent_admission_binding_same(&before.proof_binding, &after.proof_binding) {
+        return false;
+    }
+    let mut after = after.clone();
+    after.proof_binding = before.proof_binding.clone();
+    before == &after
+}
+
+fn agent_admission_change_reason(
+    before: &[PrincipalRecord],
+    after: &[PrincipalRecord],
+) -> Option<&'static str> {
+    // The proof binding id stays on the record when a later write changes the
+    // principal id, so it identifies the record across that change. Two
+    // records can share a principal id; the binding id does not.
+    for old in before
+        .iter()
+        .filter(|record| is_agent_admission_record(record))
+    {
+        let Some(new) = after
+            .iter()
+            .find(|record| record.proof_binding_id == old.proof_binding_id)
+        else {
+            return Some("agent admission record removed");
+        };
+        if new.principal_id != old.principal_id {
+            return Some("agent admission id change");
+        }
+        if new.owner != old.owner {
+            return Some("agent admission owner change");
+        }
+        if !agent_admission_binding_same(&old.proof_binding, &new.proof_binding) {
+            return Some("agent admission binding change");
+        }
+        if new.localhost_root != old.localhost_root {
+            return Some("agent admission root change");
+        }
+        if new.kind != old.kind {
+            return Some("agent admission kind change");
+        }
+        if !agent_admission_record_same(old, new) {
+            return Some("agent admission record change");
+        }
+    }
+    if after.iter().any(|record| {
+        is_agent_admission_record(record)
+            && !before.iter().any(|old| {
+                is_agent_admission_record(old) && old.proof_binding_id == record.proof_binding_id
+            })
+    }) {
+        return Some("new agent admission record");
+    }
+    None
+}
+
+fn principals_before_save(
+    data_dir: &Path,
+    after: &[PrincipalRecord],
+) -> anyhow::Result<Vec<PrincipalRecord>> {
+    let Some((bytes, _)) = read_auth_state_bytes(data_dir)? else {
+        return Ok(Vec::new());
+    };
+    match serde_json::from_slice::<AuthState>(&bytes) {
+        Ok(state) => Ok(state.principals),
+        // A person-only save may replace a file this process cannot parse.
+        // A save that carries an AgentAdmission record cannot, because the
+        // record on disk was not visible to the guard.
+        Err(_) if !after.iter().any(is_agent_admission_record) => Ok(Vec::new()),
+        Err(error) => Err(error)
+            .context("agent admission record change refused: auth state could not be read"),
+    }
+}
+
+fn refuse_agent_admission_changes(
+    data_dir: &Path,
+    after: &AuthState,
+    permit: Option<AgentAdmissionOperation>,
+) -> anyhow::Result<()> {
+    let before = principals_before_save(data_dir, &after.principals)?;
+    if let Some(reason) = agent_admission_change_reason(&before, &after.principals) {
+        anyhow::bail!(
+            "agent admission record change refused: {reason} ({})",
+            agent_admission_permit_clause(permit)
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn save_auth_state(
     data_dir: &Path,
     state: &AuthState,
     baseline: Option<&AuditBaseline>,
+) -> anyhow::Result<()> {
+    save_auth_state_allowing(data_dir, state, baseline, None)
+}
+
+pub(crate) fn save_auth_state_allowing(
+    data_dir: &Path,
+    state: &AuthState,
+    baseline: Option<&AuditBaseline>,
+    permit: Option<AgentAdmissionOperation>,
 ) -> anyhow::Result<()> {
     // Every error path, including the gap before the checkpoint, leaves a cold cache.
     invalidate_verified_auth_state_cache(data_dir);
@@ -5046,8 +5197,13 @@ pub(crate) fn save_auth_state(
         data_dir,
         RecoveryReassignmentTestFault::AuthStateSave,
     )?;
+    // Every production save of auth-state.json comes through here.
+    // Create, display-name change, retire, package move, and owner-key
+    // re-wrap are named above. None of them exists yet, so every change to
+    // an AgentAdmission record is refused and this function writes nothing.
     with_audit_chain_activation_lock(data_dir, || {
         invalidate_verified_auth_state_cache(data_dir);
+        refuse_agent_admission_changes(data_dir, state, permit)?;
         let device_key_identity = observe_runtime_device_key_file_identity(data_dir)?;
         verify_audit_chain_from(data_dir, state, baseline)?;
         let mut activation_identity = observe_audit_chain_activation_file_identity(data_dir)?;
