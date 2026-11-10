@@ -276,7 +276,7 @@ const WALLET_PRICE_IDS: &[(&str, &str)] = &[
 pub(crate) const ROOM_SESSION_COOKIE: &str = "room-session";
 pub(crate) const BROWSER_SESSION_COOKIE: &str = "browser-session";
 pub(crate) const HOME_SESSION_COOKIE: &str = "home-session";
-const HOME_LAUNCH_TOKEN_DOMAIN: &str = "elastos.home.launch.v4";
+use crate::auth::HOME_LAUNCH_TOKEN_DOMAIN;
 const HOME_LAUNCH_TOKEN_TTL_SECS: u64 = 12 * 60 * 60;
 const HOME_BROWSER_STATE_SCHEMA: &str = "elastos.home.browser-state/v1";
 const HOME_BROWSER_STATE_MAX_BYTES: usize = 64 * 1024;

@@ -284,7 +284,7 @@ pub(in crate::api) fn local_home_launch_token_context(
         .as_str()
         .to_string();
     Ok(HomeLaunchTokenContext::resolved(
-        crate::auth::ResolvedPrincipalRoot::verified_device_signer(&did),
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal_id)?,
         principal_id,
         format!("local:{}", uuid_like_token()),
         None,
@@ -850,12 +850,8 @@ fn require_home_launch_token_value_from_expected_did(
     let envelope: HomeLaunchTokenEnvelope = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("invalid home launch token payload"))?;
     let expected_dids = vec![expected_did];
-    crate::crypto::verify_signed_json_envelope_against_dids(
-        &bytes,
-        HOME_LAUNCH_TOKEN_DOMAIN,
-        &expected_dids,
-    )
-    .map_err(|err| anyhow::anyhow!("invalid home launch token: {}", err))?;
+    let signer = crate::auth::VerifiedLaunchTokenSigner::verify(&bytes, &expected_dids)
+        .map_err(|err| anyhow::anyhow!("invalid home launch token: {}", err))?;
     envelope.payload.launch_context.validate()?;
     if !valid_home_launch_id(&envelope.payload.launch_id) {
         anyhow::bail!("home launch token has an invalid launch id");
@@ -919,7 +915,7 @@ fn require_home_launch_token_value_from_expected_did(
                     "proofless home launch token is not exact Runtime-local device authority"
                 );
             }
-            crate::auth::ResolvedPrincipalRoot::verified_device_signer(&expected_dids[0])
+            crate::auth::ResolvedPrincipalRoot::verified_device_signer(&signer)
         }
     };
     Ok(RequiredHomeLaunchToken {
@@ -1200,6 +1196,105 @@ mod tests {
         envelope.signer_did = signer_did;
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&envelope).unwrap())
+    }
+
+    fn device_root_decoy(data_dir: &std::path::Path, principal_id: &str) -> std::path::PathBuf {
+        use sha2::Digest as _;
+        let root = hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12]);
+        let uri = format!("localhost://Users/{root}/marker.txt");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"decoy").unwrap();
+        path
+    }
+
+    #[test]
+    fn r8_bad_signature_refuses_device_witness_and_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(data_dir.path()).unwrap();
+        let token =
+            issue_home_launch_token_with_context(data_dir.path(), "marketplace", &context).unwrap();
+        let mut envelope = decode_launch_token(&token);
+        envelope.signature = "00".to_string();
+        let bad = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&envelope).unwrap());
+        let decoy = device_root_decoy(data_dir.path(), context.principal_id());
+        let (_, expected_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let error = require_home_launch_token_value_from_expected_did(
+            data_dir.path(),
+            &bad,
+            &["marketplace"],
+            expected_did,
+            data_dir.path(),
+        )
+        .expect_err("bad signature must yield no witness or resolved root")
+        .to_string();
+        assert!(error.contains("invalid home launch token:"), "{error}");
+        assert!(crate::auth::principal_object_io::reads(data_dir.path()).is_empty());
+        assert!(crate::auth::principal_object_io::writes(data_dir.path()).is_empty());
+        assert_eq!(std::fs::read(decoy).unwrap(), b"decoy");
+    }
+
+    #[test]
+    fn r8_wrong_signer_refuses_device_witness_and_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let child = tempfile::tempdir().unwrap();
+        let parent_context = local_home_launch_token_context(parent.path()).unwrap();
+        let token =
+            issue_home_launch_token_with_context(parent.path(), "marketplace", &parent_context)
+                .unwrap();
+        let (_, child_did) = elastos_identity::load_or_create_did(child.path()).unwrap();
+        let decoy = device_root_decoy(child.path(), parent_context.principal_id());
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&token)
+            .unwrap();
+        assert!(
+            crate::auth::VerifiedLaunchTokenSigner::verify(
+                &bytes,
+                std::slice::from_ref(&child_did)
+            )
+            .is_err(),
+            "wrong signer must yield no witness"
+        );
+        let error = require_home_launch_token_value_from_expected_did(
+            child.path(),
+            &token,
+            &["marketplace"],
+            child_did,
+            child.path(),
+        )
+        .expect_err("wrong signer must yield no witness or resolved root")
+        .to_string();
+        assert!(error.contains("Signer DID mismatch"), "{error}");
+        assert!(crate::auth::principal_object_io::reads(child.path()).is_empty());
+        assert!(crate::auth::principal_object_io::writes(child.path()).is_empty());
+        assert_eq!(std::fs::read(decoy).unwrap(), b"decoy");
+    }
+
+    #[test]
+    fn r8_local_launch_uses_this_runtime_device_root() {
+        use sha2::Digest as _;
+        let data_dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(data_dir.path()).unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let principal = format!("device:{did}");
+        let expected_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&sha2::Sha256::digest(principal.as_bytes())[..12])
+        );
+        assert_eq!(context.principal_id(), principal);
+        assert_eq!(context.root().localhost_root(), expected_root);
+        let token =
+            issue_home_launch_token_with_context(data_dir.path(), "marketplace", &context).unwrap();
+        let checked = require_home_launch_token_value_from_expected_did(
+            data_dir.path(),
+            &token,
+            &["marketplace"],
+            did,
+            data_dir.path(),
+        )
+        .unwrap();
+        assert_eq!(checked.context.root().localhost_root(), expected_root);
     }
 
     #[test]
