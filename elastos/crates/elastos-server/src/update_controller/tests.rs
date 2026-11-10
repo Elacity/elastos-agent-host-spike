@@ -3438,6 +3438,57 @@ async fn restarting_update_uses_the_explicit_controller_probe_deadline() {
     owner.controller.stop_child().await.unwrap();
 }
 
+/// A candidate whose `--version` answers more slowly than the shipped five
+/// seconds, but inside the deadline the caller passes, is accepted.
+#[tokio::test]
+async fn controller_accepts_a_candidate_whose_version_probe_takes_six_seconds() {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        ..
+    } = restart_scenario(
+        |_| {
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/sleep 6; printf 'elastos 0.7.1\\n'; exit 0; fi\n{}",
+                fixture_home_exec("RESTART_FIXTURE_ROLE=candidate RESTART_FIXTURE_VERSION=0.7.1")
+            )
+        },
+        0,
+        None,
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let result = crate::update::run_restarting_update_with_deadline(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
+    owner.controller.publish_apply_result(&result).unwrap();
+    result.unwrap();
+    // The probe really took six seconds; acceptance cannot skip it.
+    assert!(
+        started.elapsed() >= Duration::from_secs(6),
+        "accepted after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(owner.starts, [RestartPhase::CandidateStartClaimed]);
+    let projected = status(&fixture.data).unwrap().unwrap();
+    assert_eq!(projected.phase, "updated");
+    assert_eq!(projected.current_version, "0.7.1");
+    assert_eq!(
+        fs::read(fixture.data.join("candidate-starts")).unwrap(),
+        b"start\n"
+    );
+    assert!(fixture.data.join("candidate-ready").exists());
+    assert_no_recovery_files(&fixture);
+    owner.controller.stop_child().await.unwrap();
+}
+
 /// A rollback start as slow as Home on a busy Jetson still restores the previous Home.
 #[tokio::test]
 async fn real_controller_rollback_start_taking_45_seconds_restores_previous_home() {
