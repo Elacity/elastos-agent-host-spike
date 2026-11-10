@@ -17693,4 +17693,56 @@ pub(crate) mod tests {
         );
         assert!(!path.exists());
     }
+
+    #[test]
+    fn own_device_string_io_refuses_wrong_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let principal_id = format!("device:{did}");
+        let wrong_root = "localhost://Users/wrong-device-root";
+        let uri = format!("{wrong_root}/notes.md");
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        let error = write_principal_root_object(
+            data_dir.path(),
+            &principal_id,
+            wrong_root,
+            &uri,
+            &path,
+            b"wrong",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "principal localhost root must be the verified device root"
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn own_device_string_io_refuses_out_of_root_uri() {
+        use sha2::Digest as _;
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let principal_id = format!("device:{did}");
+        let root = format!(
+            "localhost://Users/{}",
+            hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12])
+        );
+        let uri = "localhost://Users/another-device/notes.md";
+        let path = rooted_localhost_fs_path(data_dir.path(), uri).unwrap();
+        let error = write_principal_root_object(
+            data_dir.path(),
+            &principal_id,
+            &root,
+            uri,
+            &path,
+            b"wrong",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "principal localhost root must be the verified device root"
+        );
+        assert!(!path.exists());
+    }
 }
