@@ -356,7 +356,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "elastos-common"
-version = "0.8.0"
+version = "2.0.0"
 dependencies = [
  "hex",
  "libc",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "elastos-compute"
-version = "0.8.0"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "elastos-common",
