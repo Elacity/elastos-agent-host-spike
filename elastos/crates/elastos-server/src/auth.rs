@@ -3518,7 +3518,7 @@ mod owner_recovery_tests {
     #[test]
     fn agent_admission_guard_control_owner_recovery_of_a_person_succeeds() {
         let mut home = home();
-        insert_principal_into_auth_file(home.root.path(), &test_agent_record(TEST_AGENT_ID));
+        insert_test_agent(home.root.path());
         let code = arm(&home);
         let response = begin(&mut home, &code).unwrap();
         let kit = home.kit.clone();
@@ -5166,6 +5166,9 @@ fn parse_auth_state(data_dir: &Path, bytes: &[u8]) -> anyhow::Result<AuthState> 
     if state.schema != AUTH_STATE_SCHEMA {
         anyhow::bail!("unsupported auth state schema");
     }
+    if let Some(reason) = agent_admission_state_violation(&state.principals) {
+        anyhow::bail!("agent admission record invalid: {reason}");
+    }
     normalize_principal_records(&mut state);
     Ok(state)
 }
@@ -5235,21 +5238,17 @@ fn agent_admission_record_same(before: &PrincipalRecord, after: &PrincipalRecord
     before == &after
 }
 
-fn records_share_key(records: &[PrincipalRecord], key: impl Fn(&PrincipalRecord) -> &str) -> bool {
-    records.iter().enumerate().any(|(index, record)| {
-        let value = key(record);
-        records
-            .iter()
-            .skip(index + 1)
-            .any(|other| key(other) == value)
-    })
-}
-
-/// Duplicate keys in the after-state. A second passkey for one person may
-/// share that person's principal id. An AgentAdmission record may not share
-/// a principal id with any record, and no two records may share a binding id.
+/// Duplicate keys in the after-state. Two human records may share a principal
+/// id or a binding id: a person can hold two passkeys, and test setup stores
+/// the same human twice. An AgentAdmission record may not share either key
+/// with any record, and two of them may not share a root.
 fn agent_admission_duplicate_reason(after: &[PrincipalRecord]) -> Option<&'static str> {
-    if records_share_key(after, |record| record.proof_binding_id.as_str()) {
+    if after.iter().enumerate().any(|(index, record)| {
+        after.iter().skip(index + 1).any(|other| {
+            other.proof_binding_id == record.proof_binding_id
+                && (is_agent_admission_record(record) || is_agent_admission_record(other))
+        })
+    }) {
         return Some("duplicate proof binding id");
     }
     if after.iter().enumerate().any(|(index, record)| {
@@ -5392,7 +5391,51 @@ fn refuse_agent_admission_changes(
             agent_admission_permit_clause(permit)
         );
     }
+    if let Some(reason) = agent_admission_state_violation(&after.principals) {
+        anyhow::bail!("agent admission record invalid: {reason}");
+    }
     Ok(())
+}
+
+fn agent_admission_record_violation(
+    records: &[PrincipalRecord],
+    record: &PrincipalRecord,
+) -> Option<&'static str> {
+    if !is_agent_admission_record(record) {
+        return None;
+    }
+    if record.kind != PrincipalKind::Agent {
+        return Some("agent admission kind invalid");
+    }
+    if validate_agent_id(&record.principal_id).is_err() {
+        return Some("agent admission id invalid");
+    }
+    if record.proof_binding.subject != record.principal_id {
+        return Some("agent admission subject mismatch");
+    }
+    if record.localhost_root
+        != principal_kind_localhost_root(&record.principal_id, PrincipalKind::Agent)
+    {
+        return Some("agent admission root mismatch");
+    }
+    let owner_is_person = record.owner.as_deref().is_some_and(|owner| {
+        records.iter().any(|stored| {
+            !std::ptr::eq(stored, record)
+                && stored.principal_id == owner
+                && stored.kind == PrincipalKind::Human
+                && !is_agent_admission_record(stored)
+        })
+    });
+    if !owner_is_person {
+        return Some("agent admission owner missing");
+    }
+    None
+}
+
+fn agent_admission_state_violation(records: &[PrincipalRecord]) -> Option<&'static str> {
+    records
+        .iter()
+        .find_map(|record| agent_admission_record_violation(records, record))
 }
 
 pub(crate) fn save_auth_state(
@@ -11946,7 +11989,37 @@ fn admit_passkey_principal_as_agent(
         serde_json::json!({"name": "agent-host", "registry_cid": "bafyrecord"});
     principal["proof_binding"]["kind"] = serde_json::json!("agent_admission");
     principal["proof_binding"]["subject"] = serde_json::json!(agent_id);
+    value["principals"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(test_person_record(principal_id)).unwrap());
     write_auth_state_value(data_dir, &value);
+}
+
+#[cfg(test)]
+fn test_person_record(principal_id: &str) -> PrincipalRecord {
+    PrincipalRecord {
+        principal_id: principal_id.to_string(),
+        proof_binding_id: format!("test-binding:{principal_id}"),
+        proof_binding: ProofBinding::evm_account(21, &format!("0x{}", "1".repeat(40)), 5),
+        display_name: String::new(),
+        initial_profile_display_name: None,
+        role: RuntimePrincipalRole::Guest,
+        localhost_root: principal_kind_localhost_root(principal_id, PrincipalKind::Human),
+        kind: PrincipalKind::Human,
+        created_at: 5,
+        updated_at: 5,
+        owner: None,
+        request_id: None,
+        agent_host_package: None,
+        retired_at: None,
+    }
+}
+
+#[cfg(test)]
+fn insert_test_agent(data_dir: &Path) {
+    store_test_human_principal(data_dir, "person:local:owner");
+    insert_principal_into_auth_file(data_dir, &test_agent_record(TEST_AGENT_ID));
 }
 
 #[cfg(test)]
@@ -18483,6 +18556,7 @@ pub(crate) mod tests {
             now,
         )
         .unwrap();
+        store_test_human_principal(data_dir.path(), "person:local:owner");
         let agent = test_agent_record(TEST_AGENT_ID);
         insert_principal_into_auth_file(data_dir.path(), &agent);
         let loaded = load_auth_state(data_dir.path()).unwrap();
@@ -18667,7 +18741,7 @@ pub(crate) mod tests {
             now,
         )
         .unwrap();
-        insert_principal_into_auth_file(data_dir.path(), &test_agent_record(TEST_AGENT_ID));
+        insert_test_agent(data_dir.path());
         data_dir
     }
 
@@ -18754,6 +18828,74 @@ pub(crate) mod tests {
             !auth_state_path(data_dir.path()).unwrap().exists(),
             "new agent admission record was refused"
         );
+    }
+
+    fn write_state_file(data_dir: &Path, state: &AuthState) -> Vec<u8> {
+        let path = auth_state_path(data_dir).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = serde_json::to_vec_pretty(state).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        invalidate_verified_auth_state_cache(data_dir);
+        bytes
+    }
+
+    fn invalid_agent_state(edit: impl FnOnce(&mut PrincipalRecord)) -> AuthState {
+        let mut state = AuthState::default();
+        state
+            .principals
+            .push(test_person_record("person:local:owner"));
+        let mut agent = test_agent_record(TEST_AGENT_ID);
+        agent.owner = Some("person:local:owner".to_string());
+        edit(&mut agent);
+        state.principals.push(agent);
+        state
+    }
+
+    fn assert_invalid_agent_refused(reason: &str, edit: impl FnOnce(&mut PrincipalRecord)) {
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = invalid_agent_state(edit);
+        let before = write_state_file(data_dir.path(), &state);
+        let saved = save_auth_state(data_dir.path(), &state, None).unwrap_err();
+        assert!(
+            saved.to_string().contains(reason),
+            "{reason} on save: {saved}"
+        );
+        assert_eq!(
+            std::fs::read(auth_state_path(data_dir.path()).unwrap()).unwrap(),
+            before,
+            "{reason} on save"
+        );
+        let loaded = load_auth_state(data_dir.path()).unwrap_err();
+        assert!(
+            loaded.to_string().contains(reason),
+            "{reason} on load: {loaded}"
+        );
+    }
+
+    #[test]
+    fn agent_admission_subject_must_equal_the_principal_id() {
+        assert_invalid_agent_refused("agent admission subject mismatch", |agent| {
+            agent.proof_binding.subject = "agent:v2:ffffffffffffffffffffffffffffffff".to_string();
+        });
+    }
+
+    #[test]
+    fn agent_admission_record_shape_is_refused_on_save_and_load() {
+        assert_invalid_agent_refused("agent admission kind invalid", |agent| {
+            agent.kind = PrincipalKind::Human;
+        });
+        assert_invalid_agent_refused("agent admission id invalid", |agent| {
+            agent.principal_id = "person:local:not-agent".to_string();
+            agent.proof_binding.subject = agent.principal_id.clone();
+            agent.localhost_root =
+                principal_kind_localhost_root(&agent.principal_id, PrincipalKind::Agent);
+        });
+        assert_invalid_agent_refused("agent admission root mismatch", |agent| {
+            agent.localhost_root = "localhost://UsersAI/000000000000000000000000".to_string();
+        });
+        assert_invalid_agent_refused("agent admission owner missing", |agent| {
+            agent.owner = Some("person:local:missing".to_string());
+        });
     }
 
     fn refuse_duplicate_agent_records(
@@ -18888,7 +19030,7 @@ pub(crate) mod tests {
             now,
         )
         .unwrap();
-        insert_principal_into_auth_file(data_dir.path(), &test_agent_record(TEST_AGENT_ID));
+        insert_test_agent(data_dir.path());
         sign_in_passkey(data_dir.path()).expect("passkey sign-in of a person succeeds");
     }
 
@@ -18923,7 +19065,7 @@ pub(crate) mod tests {
     fn agent_admission_guard_control_reassignment_of_a_person_succeeds() {
         let data_dir = tempfile::tempdir().unwrap();
         let (reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
-        insert_principal_into_auth_file(data_dir.path(), &test_agent_record(TEST_AGENT_ID));
+        insert_test_agent(data_dir.path());
         upsert_principal_for_binding_as_role(
             data_dir.path(),
             passkey_binding_with_credential("credential-home-admin", 1, 10, 10),
