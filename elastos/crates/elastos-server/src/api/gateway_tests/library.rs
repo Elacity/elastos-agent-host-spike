@@ -8622,7 +8622,7 @@ async fn test_runtime_custody_buy_fails_before_effects_when_fresh_availability_i
 
 #[tokio::test]
 async fn r4_runtime_custody_buy_loads_agent_profile() {
-    const AGENT_ROOT: &str = "localhost://UsersAI/bcc3d29f8ca3acb6b983a085";
+    let root = crate::auth::valid_agent::ROOT;
     let _guard = protected_content_gateway_mock_test_guard().lock().await;
     let dir = tempfile::tempdir().unwrap();
     crate::protected_content_runtime::tests::write_device_key(dir.path(), 0x5a);
@@ -8639,60 +8639,35 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
     set_mock_protected_content_purchase_native();
     reset_mock_chain_raw_requests();
 
-    let buyer = passkey_authority_with_name_role_credential(
-        dir.path(),
-        Some("buyer"),
-        crate::auth::RuntimePrincipalRole::Admin,
-        "r4-buyer-agent",
-    );
-    provision_signed_profile(dir.path(), &buyer, "buyer");
-    assert_eq!(
-        buyer.principal_id,
-        "person:local:e8e0cb09b0580620ff24feff5184f5d3"
-    );
+    let agent = crate::auth::valid_agent::plant(dir.path());
+    let principal_id = agent.principal_id.clone();
+    crate::auth::store_test_principal_root_protection_for(dir.path(), &principal_id, root);
     let account_id = wallet_provider
         .provider
-        .seed_managed_evm_account_for_principal(&buyer.principal_id)
+        .seed_managed_evm_account_for_principal(&principal_id)
         .await;
     set_mock_wallet_transaction_default(
         &wallet_provider.provider,
-        &buyer.principal_id,
+        &principal_id,
         "eip155:8453",
         &account_id,
         10,
     )
     .await;
-    let human_root = crate::auth::principal_localhost_root(&buyer.principal_id);
-    let uri = format!("{human_root}/Documents/r4-buy");
-    let input = runtime_custody_creator_test_input(&buyer.principal_id, &uri, 0x97, &account_id);
+    let uri = format!("{root}/Documents/r4-buy");
+    let input = runtime_custody_creator_test_input(&principal_id, &uri, 0x97, &account_id);
     let facts = seed_completed_runtime_custody_mint(dir.path(), &input);
     seed_runtime_custody_creator_listing_for_buy(
         dir.path(),
-        &buyer.principal_id,
+        &principal_id,
         &facts,
         MOCK_MANAGED_EVM_ADDRESS,
         true,
     );
-    let human_profile =
-        crate::collaboration_profile_authority::profile_authority_path(dir.path(), &human_root)
-            .unwrap();
-    std::fs::remove_file(human_profile).unwrap();
-    crate::auth::r4_fixture::set_kind(
+    let agent_profile = crate::collaboration_profile_authority::test_plant_profile_authority(
         dir.path(),
-        &buyer.principal_id,
-        crate::auth::PrincipalKind::Agent,
-        AGENT_ROOT,
-    );
-    crate::auth::store_test_principal_root_protection_for(
-        dir.path(),
-        &buyer.principal_id,
-        AGENT_ROOT,
-    );
-    let agent_profile = crate::collaboration_profile_authority::update_profile_authority(
-        dir.path(),
-        &buyer.principal_id,
-        AGENT_ROOT,
-        &buyer.proof_binding_id,
+        &principal_id,
+        root,
         "buyer",
         None,
         crate::auth::now_ts(),
@@ -8701,13 +8676,26 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
     assert!(
         crate::collaboration_profile_authority::load_profile_authority(
             dir.path(),
-            &buyer.principal_id,
-            AGENT_ROOT,
+            &principal_id,
+            root,
         )
         .unwrap()
         .is_some()
     );
-    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &buyer);
+    let now = crate::auth::now_ts();
+    let grant = elastos_runtime::auth::AuthSessionGrantV1 {
+        schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: format!("grant:{}", uuid_like_token()),
+        session_id: format!("auth:{}", uuid_like_token()),
+        principal_id: principal_id.clone(),
+        proof_binding_id: agent.proof_binding_id.clone(),
+        issued_at: now,
+        expires_at: now + 12 * 60 * 60,
+        apps: vec![LIBRARY_CAPSULE_ID.to_string()],
+    };
+    crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+    let token =
+        issue_home_launch_token_for_auth_grant(dir.path(), LIBRARY_CAPSULE_ID, &grant).unwrap();
     let runtime_authority =
         runtime_wallet_authority_for_app_token(dir.path(), LIBRARY_CAPSULE_ID, &token);
     let registry = state.provider_registry.as_ref().unwrap().clone();
@@ -8716,7 +8704,7 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
         &runtime_authority,
         registry,
         crate::protected_content_runtime::RuntimeCustodyBuyInput {
-            principal_id: buyer.principal_id.clone(),
+            principal_id,
             mint_id: hex::encode(facts.mint_id.as_bytes()),
         },
     )
@@ -8726,7 +8714,7 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
     assert_eq!(
         error.to_string(),
         crate::protected_content_runtime::RUNTIME_CUSTODY_PURCHASE_PENDING_MESSAGE,
-        "R4 buyer loaded the Agent profile under {AGENT_ROOT}"
+        "R4 buyer loaded the Agent profile under {root}"
     );
 }
 

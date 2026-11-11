@@ -877,8 +877,9 @@ mod tests {
 
     #[tokio::test]
     async fn r4_presence_pass_uses_agent_root() {
-        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
-        const AGENT_ROOT: &str = "localhost://UsersAI/5dca74bd48d800a148776e87";
+        // The pass walks passkey principals only, so a valid agent is not in
+        // that list. This row drives the two functions the pass calls for a
+        // valid agent: the stored root, then the profile at that root.
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         {
@@ -887,6 +888,53 @@ mod tests {
         }
         elastos_identity::load_or_create_did(dir.path()).unwrap();
         let now = crate::auth::now_ts();
+        let agent = crate::auth::valid_agent::plant(dir.path());
+        let root = crate::auth::valid_agent::ROOT;
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            &agent.principal_id,
+            root,
+        );
+        let profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+            dir.path(),
+            &agent.principal_id,
+            root,
+            "R4 Agent",
+            None,
+            now,
+        )
+        .unwrap();
+        assert_eq!(profile.document().display_name, "R4 Agent");
+        assert_eq!(
+            runtime_presence_principal_root(dir.path(), &agent.principal_id).unwrap(),
+            root
+        );
+        assert!(
+            crate::collaboration_profile_authority::load_profile_authority(
+                dir.path(),
+                &agent.principal_id,
+                root,
+            )
+            .unwrap()
+            .is_some()
+        );
+        let path = crate::collaboration_profile_authority::profile_authority_path(dir.path(), root)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let opened = crate::collaboration_profile_authority::load_profile_authority(
+            dir.path(),
+            &agent.principal_id,
+            root,
+        );
+        assert!(
+            matches!(&opened, Err(error) if error.to_string() == "profile authority bundle must be a regular file"),
+            "R4 presence looked up the Agent profile under {root}: {opened:?}"
+        );
+
+        // A passkey id cannot be an agent id. Kind Agent on it is quarantined,
+        // and the pass returns that error instead of a Users profile.
+        const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
         let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
             elastos_runtime::auth::PasskeyWebAuthnBinding {
                 credential_id: "r4-presence-agent".into(),
@@ -913,36 +961,8 @@ mod tests {
             dir.path(),
             ID,
             crate::auth::PrincipalKind::Agent,
-            AGENT_ROOT,
+            "localhost://UsersAI/5dca74bd48d800a148776e87",
         );
-        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, AGENT_ROOT);
-        let record = crate::auth::stored_principal_record(dir.path(), ID)
-            .unwrap()
-            .unwrap();
-        let _profile = crate::collaboration_profile_authority::update_profile_authority(
-            dir.path(),
-            ID,
-            AGENT_ROOT,
-            &record.proof_binding_id,
-            "R4 Agent",
-            None,
-            now,
-        )
-        .unwrap();
-        assert!(
-            crate::collaboration_profile_authority::load_profile_authority(
-                dir.path(),
-                ID,
-                AGENT_ROOT,
-            )
-            .unwrap()
-            .is_some()
-        );
-        let path =
-            crate::collaboration_profile_authority::profile_authority_path(dir.path(), AGENT_ROOT)
-                .unwrap();
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
         let chat = crate::collaboration_product::test_chat_product_port(
             dir.path(),
             "r4-agent-root",
@@ -954,8 +974,10 @@ mod tests {
         .unwrap();
         let result = publish_runtime_owned_presence_pass(dir.path(), &port, now).await;
         assert!(
-            matches!(&result, Err(error) if error.to_string() == "profile authority bundle must be a regular file"),
-            "R4 presence looked up the Agent profile under {AGENT_ROOT}: {result:?}"
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("quarantined agent record")),
+            "a passkey id stored as Agent is quarantined before a Users profile: {result:?}"
         );
     }
 
@@ -977,7 +999,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             store(dir.path(), kind);
             assert_eq!(
-                runtime_presence_principal_root(dir.path(), ID).unwrap(),
+                runtime_presence_principal_root(
+                    dir.path(),
+                    crate::auth::r4_fixture::principal_id(kind)
+                )
+                .unwrap(),
                 expected,
                 "R4 runtime presence root"
             );
