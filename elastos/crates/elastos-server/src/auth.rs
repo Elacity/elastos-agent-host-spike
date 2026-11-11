@@ -6373,6 +6373,27 @@ pub fn set_principal_display_name(
     })
 }
 
+/// Test setup for a session the save guard refuses. Production
+/// `store_session_grant` still goes through the guard.
+#[cfg(test)]
+pub(crate) fn plant_session_grant(data_dir: &Path, grant: AuthSessionGrantV1) {
+    let path = auth_state_path(data_dir).unwrap();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    if !value.get("sessions").is_some_and(Value::is_array) {
+        value["sessions"] = serde_json::json!([]);
+    }
+    let sessions = value["sessions"].as_array_mut().unwrap();
+    sessions.retain(|stored| stored["grant"]["session_id"] != grant.session_id);
+    sessions.push(
+        serde_json::to_value(StoredAuthSession {
+            grant,
+            revoked_at: None,
+        })
+        .unwrap(),
+    );
+    write_auth_state_value(data_dir, &value);
+}
+
 pub fn store_session_grant(data_dir: &Path, grant: AuthSessionGrantV1) -> anyhow::Result<()> {
     mutate_auth_state(data_dir, |state| {
         refuse_named_quarantine(state, &grant.principal_id)?;
@@ -12899,9 +12920,36 @@ pub(crate) fn store_test_principal_root_protection_for(
         created_at,
         updated_at: created_at,
     };
+    // The save guard refuses an agent-root protection under every permit.
+    // A row that needs the map entry writes it into the file, the same way a
+    // planted principal is written. The production store still refuses.
+    let loaded = load_auth_state(data_dir).unwrap();
+    let agent_root = loaded.principals.iter().any(|record| {
+        record.localhost_root == protection.localhost_root
+            && (record.kind == PrincipalKind::Agent
+                || record.proof_binding.kind == ProofBindingKind::AgentAdmission)
+    });
+    if agent_root {
+        let path = auth_state_path(data_dir).unwrap();
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if !value
+            .get("principal_root_protections")
+            .is_some_and(Value::is_array)
+        {
+            value["principal_root_protections"] = serde_json::json!([]);
+        }
+        let entries = value["principal_root_protections"].as_array_mut().unwrap();
+        entries.retain(|stored| {
+            stored["principal_id"] != protection.principal_id
+                || stored["localhost_root"] != protection.localhost_root
+        });
+        entries.push(serde_json::to_value(&protection).unwrap());
+        write_auth_state_value(data_dir, &value);
+        return protection;
+    }
     // The production store refuses a quarantined principal. A row that plants
     // one still needs the map entry, so this helper writes that entry itself.
-    if quarantine_reason(&load_auth_state(data_dir).unwrap(), principal_id).is_some() {
+    if quarantine_reason(&loaded, principal_id).is_some() {
         mutate_auth_state(data_dir, |state| {
             state.principal_root_protections.retain(|stored| {
                 stored.principal_id != protection.principal_id
@@ -19679,6 +19727,174 @@ pub(crate) mod tests {
             "{error}"
         );
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
+    }
+
+    fn every_agent_permit() -> [Option<AgentAdmissionOperation>; 6] {
+        [
+            None,
+            Some(AgentAdmissionOperation::Create),
+            Some(AgentAdmissionOperation::DisplayName),
+            Some(AgentAdmissionOperation::Retire),
+            Some(AgentAdmissionOperation::PackageMove),
+            Some(AgentAdmissionOperation::OwnerKeyRewrap),
+        ]
+    }
+
+    fn bare_protection(
+        principal_id: &str,
+        root: &str,
+        updated_at: u64,
+    ) -> PrincipalRootProtectionV1 {
+        PrincipalRootProtectionV1 {
+            schema: elastos_runtime::auth::PRINCIPAL_ROOT_PROTECTION_SCHEMA.to_string(),
+            principal_id: principal_id.to_string(),
+            localhost_root: root.to_string(),
+            data_key_id: "key-r7".to_string(),
+            crypto: elastos_runtime::auth::PrincipalRootCryptoProfileV1::default(),
+            protectors: Vec::new(),
+            created_at: 1,
+            updated_at,
+        }
+    }
+
+    fn bare_session(principal_id: &str, session_id: &str) -> StoredAuthSession {
+        let now = now_ts();
+        StoredAuthSession {
+            grant: AuthSessionGrantV1 {
+                schema: AuthSessionGrantV1::SCHEMA.to_string(),
+                grant_id: format!("grant:{session_id}"),
+                session_id: session_id.to_string(),
+                principal_id: principal_id.to_string(),
+                proof_binding_id: "proof:r7".to_string(),
+                issued_at: now,
+                expires_at: now.saturating_add(600),
+                apps: vec!["home".to_string()],
+            },
+            revoked_at: None,
+        }
+    }
+
+    fn agent_root_in(state: &AuthState) -> String {
+        state
+            .principals
+            .iter()
+            .find(|record| record.principal_id == TEST_AGENT_ID)
+            .unwrap()
+            .localhost_root
+            .clone()
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_an_added_agent_root_protection() {
+        for permit in every_agent_permit() {
+            let data_dir = person_file_with_agent();
+            let before = auth_state_file_bytes(data_dir.path());
+            let mut state = load_auth_state(data_dir.path()).unwrap();
+            let root = agent_root_in(&state);
+            state
+                .principal_root_protections
+                .push(bare_protection(TEST_AGENT_ID, &root, 1));
+            let error = save_auth_state_allowing(data_dir.path(), &state, None, permit)
+                .expect_err("an added agent root protection was refused");
+            assert!(
+                error.to_string().contains("agent root protection added"),
+                "{permit:?}: {error}"
+            );
+            assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{permit:?}");
+        }
+        let data_dir = person_file_with_agent();
+        let mut state = load_auth_state(data_dir.path()).unwrap();
+        let human = state
+            .principals
+            .iter()
+            .find(|record| record.kind == PrincipalKind::Human)
+            .unwrap();
+        let (id, root) = (human.principal_id.clone(), human.localhost_root.clone());
+        state
+            .principal_root_protections
+            .push(bare_protection(&id, &root, 1));
+        save_auth_state(data_dir.path(), &state, None)
+            .expect("a person root protection still saves");
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_changed_agent_root_protection() {
+        for permit in every_agent_permit() {
+            let data_dir = person_file_with_agent();
+            let root = agent_root_in(&load_auth_state(data_dir.path()).unwrap());
+            store_test_principal_root_protection_for(data_dir.path(), TEST_AGENT_ID, &root);
+            let before = auth_state_file_bytes(data_dir.path());
+            let mut state = load_auth_state(data_dir.path()).unwrap();
+            let protection = state
+                .principal_root_protections
+                .iter_mut()
+                .find(|stored| stored.localhost_root == root)
+                .unwrap();
+            protection.updated_at = protection.updated_at.saturating_add(1);
+            let error = save_auth_state_allowing(data_dir.path(), &state, None, permit)
+                .expect_err("a changed agent root protection was refused");
+            assert!(
+                error.to_string().contains("agent root protection changed"),
+                "{permit:?}: {error}"
+            );
+            assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{permit:?}");
+        }
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_removed_agent_root_protection() {
+        for permit in every_agent_permit() {
+            let data_dir = person_file_with_agent();
+            let root = agent_root_in(&load_auth_state(data_dir.path()).unwrap());
+            store_test_principal_root_protection_for(data_dir.path(), TEST_AGENT_ID, &root);
+            let before = auth_state_file_bytes(data_dir.path());
+            let mut state = load_auth_state(data_dir.path()).unwrap();
+            let removed = state
+                .principal_root_protections
+                .iter()
+                .any(|stored| stored.localhost_root == root);
+            assert!(removed, "the planted agent root protection is in the save");
+            state
+                .principal_root_protections
+                .retain(|stored| stored.localhost_root != root);
+            let error = save_auth_state_allowing(data_dir.path(), &state, None, permit)
+                .expect_err("a removed agent root protection was refused");
+            assert!(
+                error.to_string().contains("agent root protection removed"),
+                "{permit:?}: {error}"
+            );
+            assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{permit:?}");
+        }
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_an_added_agent_session() {
+        for permit in every_agent_permit() {
+            let data_dir = person_file_with_agent();
+            let before = auth_state_file_bytes(data_dir.path());
+            let mut state = load_auth_state(data_dir.path()).unwrap();
+            state
+                .sessions
+                .push(bare_session(TEST_AGENT_ID, "auth:r7-agent"));
+            let error = save_auth_state_allowing(data_dir.path(), &state, None, permit)
+                .expect_err("an added agent session was refused");
+            assert!(
+                error.to_string().contains("agent session added"),
+                "{permit:?}: {error}"
+            );
+            assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{permit:?}");
+        }
+        let data_dir = person_file_with_agent();
+        let mut state = load_auth_state(data_dir.path()).unwrap();
+        let human = state
+            .principals
+            .iter()
+            .find(|record| record.kind == PrincipalKind::Human)
+            .unwrap()
+            .principal_id
+            .clone();
+        state.sessions.push(bare_session(&human, "auth:r7-person"));
+        save_auth_state(data_dir.path(), &state, None).expect("a person session still saves");
     }
 
     #[test]

@@ -1063,7 +1063,7 @@ mod r4_root_tests {
             .unwrap()
             .unwrap()
             .proof_binding_id;
-        crate::auth::store_session_grant(
+        crate::auth::plant_session_grant(
             dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
                 schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
@@ -1075,8 +1075,7 @@ mod r4_root_tests {
                 expires_at: now + 600,
                 apps: vec!["documents".into()],
             },
-        )
-        .unwrap();
+        );
         let root =
             crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), AGENT_ID).unwrap();
         let context = HomeLaunchTokenContext::resolved(

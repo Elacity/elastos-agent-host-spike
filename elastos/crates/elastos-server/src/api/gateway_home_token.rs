@@ -1472,7 +1472,7 @@ mod tests {
             expires_at: now + 600,
             apps: vec!["marketplace".into()],
         };
-        crate::auth::store_session_grant(home.path(), grant.clone()).unwrap();
+        crate::auth::plant_session_grant(home.path(), grant.clone());
         let token =
             issue_home_launch_token_for_auth_grant(home.path(), "marketplace", &grant).unwrap();
         let verified = require_home_launch_token_value_from_expected_did(

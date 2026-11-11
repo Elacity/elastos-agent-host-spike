@@ -8700,7 +8700,7 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
         expires_at: now + 12 * 60 * 60,
         apps: vec![LIBRARY_CAPSULE_ID.to_string()],
     };
-    crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+    crate::auth::plant_session_grant(dir.path(), grant.clone());
     let token =
         issue_home_launch_token_for_auth_grant(dir.path(), LIBRARY_CAPSULE_ID, &grant).unwrap();
     let runtime_authority =
