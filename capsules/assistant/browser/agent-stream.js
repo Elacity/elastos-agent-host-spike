@@ -159,7 +159,7 @@ function observeTranscript(scroller, content) {
   document.addEventListener("touchend", releaseTouch, { passive: true });
   document.addEventListener("touchcancel", releaseTouch, { passive: true });
   document.addEventListener("keydown", event => {
-    if (event.defaultPrevented || event.target.closest?.("input, textarea, select, [contenteditable]")) return;
+    if (event.defaultPrevented) return;
     if (event.target !== document.body && !scroller.contains(event.target)) return;
     if (["PageUp", "Home", "ArrowUp", "PageDown", "End", "ArrowDown", " "].includes(event.key)) {
       heldKeys.add(event.key);
