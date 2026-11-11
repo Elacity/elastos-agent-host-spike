@@ -1913,7 +1913,10 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_no_action_writes_the_cache_outside_the_guarded_saves(self):
         sources = {path.name: path.read_text() for path in WORKFLOWS}
-        self.assertEqual(set(sources), {"canary-holder-linux.yml", "ci.yml", "release-package.yml"})
+        self.assertEqual(
+            set(sources),
+            {"canary-holder-linux.yml", "ci.yml", "examples-nightly.yml", "release-package.yml"},
+        )
         validate_no_indirect_cache_writers(sources)
         node = "      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\n        with:\n"
         save = "      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4\n"
