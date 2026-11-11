@@ -10,8 +10,7 @@ use crate::collaboration_direct_messages::DirectApiError;
 async fn r8d_child_direct_messages_are_refused_at_the_profile_gate() {
     let person = passkey_person(CHAT_ROOM_CAPSULE_ID);
     let child = person.child.path();
-    let state = state_with_discovery(child).await;
-    let service = state.collaboration_discovery_service.clone().unwrap();
+    let service = discovery_service(child).await;
     let authority =
         load_configured_contact_authority_for_context(child, &person.ctx, Some(&service)).unwrap();
     assert!(authority.is_none(), "the child builds no direct authority");
@@ -21,5 +20,5 @@ async fn r8d_child_direct_messages_are_refused_at_the_profile_gate() {
         DirectApiError::Authority.to_string(),
         "direct message authority is unavailable"
     );
-    assert_no_bytes_on_child(&person);
+    person.assert_child_holds_only(&[]);
 }

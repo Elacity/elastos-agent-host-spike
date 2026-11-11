@@ -123,7 +123,7 @@ fn seed_parent_profile(
 
 /// A gateway state whose Discovery service runs on the child's own device
 /// key, as production does. No relay is reachable.
-pub(super) async fn state_with_discovery(dir: &std::path::Path) -> GatewayState {
+async fn state_with_discovery(dir: &std::path::Path) -> GatewayState {
     let (trusted_key, _) = generate_keypair();
     let network =
         super::home_system::configured_discovery_network_profile_for_test(&trusted_key, "r8c");
@@ -142,7 +142,7 @@ pub(super) async fn state_with_discovery(dir: &std::path::Path) -> GatewayState 
 
 /// Every regular file under the data directory's person roots, as paths
 /// relative to the data directory.
-pub(super) fn files_under_roots(data_dir: &std::path::Path) -> Vec<String> {
+fn files_under_roots(data_dir: &std::path::Path) -> Vec<String> {
     fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;

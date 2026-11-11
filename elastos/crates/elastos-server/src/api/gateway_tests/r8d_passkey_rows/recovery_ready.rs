@@ -20,5 +20,5 @@ fn r8d_child_recovery_readiness_is_answered_for_the_passkey_person() {
     let stored =
         crate::auth::load_principal_root_protection(person.parent.path(), PERSON, ROOT).unwrap();
     assert!(stored.is_some(), "the parent stores the protection");
-    assert_no_bytes_on_child(&person);
+    person.assert_child_holds_only(&[]);
 }

@@ -9905,9 +9905,7 @@ mod r8c_child_rows {
 /// the row calls both. Its control is the R8c control row above.
 #[cfg(test)]
 mod r8d_passkey_rows {
-    use super::super::gateway_tests::r8d_passkey_rows::{
-        assert_no_bytes_on_child, passkey_person, refusal, PERSON, ROOT,
-    };
+    use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, refusal, PERSON, ROOT};
     use super::*;
     use crate::collaboration_profile_authority as authority;
 
@@ -9932,7 +9930,7 @@ mod r8d_passkey_rows {
         let on_parent = authority::require_profile_authority_passkey_binding(parent, PERSON, proof);
         assert_eq!(refusal(on_parent), None);
         // Nothing was written on the child and the parent's Profile is as it was.
-        assert_no_bytes_on_child(&person);
+        person.assert_child_holds_only(&[]);
         let kept = authority::load_profile_authority(parent, PERSON, ROOT).unwrap();
         let name = kept.map(|profile| profile.document().display_name.clone());
         assert_eq!(name.as_deref(), Some("Parent Person"));

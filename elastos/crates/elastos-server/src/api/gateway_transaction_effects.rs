@@ -4651,15 +4651,17 @@ mod r8c_child_rows {
 }
 
 /// R8d evidence row for the transaction effect store, for a parent passkey
-/// person on a child Runtime. The store is loaded through
-/// `complete_runtime_transaction_effect`, then loaded and saved by the
-/// private functions the wallet routes call, with the id the verified
-/// authority carries. Its control is the R8c control row above.
+/// person on a child Runtime. The wallet authority is built as the Wallet
+/// send route builds it: a token whose actor is the Wallet capsule, then
+/// `runtime_wallet_authority` (gateway_wallet_send.rs:10-15). The store is
+/// loaded through `complete_runtime_transaction_effect` with an effect id
+/// that does not exist, which is not a call the send route makes; then it is
+/// loaded and saved by the private functions the wallet routes reach, with
+/// the id the verified authority carries. The save is one level below the
+/// routes. Its control is the R8c control row above.
 #[cfg(test)]
 mod r8d_passkey_rows {
-    use super::super::gateway_tests::r8d_passkey_rows::{
-        assert_no_bytes_on_child, passkey_person, PERSON, ROOT,
-    };
+    use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, PERSON, ROOT};
     use super::*;
 
     #[tokio::test]
@@ -4669,20 +4671,11 @@ mod r8d_passkey_rows {
         let authority = runtime_wallet_authority(child, &person.required).unwrap();
         assert_eq!(authority.root.localhost_root(), ROOT);
         assert_eq!(authority.verified_context().principal_id(), PERSON);
-        let state = GatewayState {
-            provider_registry: None,
-            collaboration_chat_product_port: None,
-            collaboration_presence_product_port: None,
-            carrier_endpoint: None,
-            collaboration_discovery_service: None,
-            browser_internet: Default::default(),
-            identity_manager: Arc::new(OnceLock::new()),
-            cache_dir: child.to_path_buf(),
-            data_dir: child.to_path_buf(),
-        };
+        let state = person.child_state();
         // Load. The store's location is resolved in the parent's auth state
-        // (`wallet_principal_root`), so the route gets as far as looking the
-        // effect up in an empty store.
+        // (`wallet_principal_root`). No store file exists, so the load returns
+        // an empty store before any storage check, and the lookup finds no
+        // such effect.
         let lookup = RuntimeTransactionLookup::EffectId("r8d-unknown-effect");
         let by_route =
             complete_runtime_transaction_effect(&state, &authority, lookup, None, None).await;
@@ -4696,6 +4689,8 @@ mod r8d_passkey_rows {
         let store = load_transaction_effect_store(&state, PERSON).unwrap();
         assert_eq!(store.principal_id, PERSON);
         assert!(store.effects.is_empty());
+        // The loads made nothing on the child: the store's folder is not there.
+        person.assert_child_holds_only(&[]);
         // Save. The location resolves the same way; the write then checks the
         // id against the child's own auth state, which stores no record.
         let saved = save_transaction_effect_store(&state, &store);
@@ -4710,10 +4705,7 @@ mod r8d_passkey_rows {
         );
         // The refused save made the store's folder under the person's root on
         // the child and wrote no file into it.
-        let folder = format!("{ROOT}/.AppData/ElastOS/Runtime");
-        let folder = rooted_localhost_fs_path(child, &folder).unwrap();
-        assert!(folder.is_dir(), "the refused save left its folder");
-        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
-        assert_no_bytes_on_child(&person);
+        person
+            .assert_child_holds_only(&["Users/ecee74316e460e2874b8b6d0/.AppData/ElastOS/Runtime/"]);
     }
 }

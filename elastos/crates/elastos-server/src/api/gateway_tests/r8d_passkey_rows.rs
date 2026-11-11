@@ -12,13 +12,14 @@
 //! environment variable. Each row calls the functions the handler calls after
 //! it has verified the token, with the context the production verifier built.
 
-use super::r8c_child_rows::{files_under_roots, state_with_discovery};
 use super::*;
 use crate::api::gateway::gateway_home_token::{
     require_home_launch_token_value_from_expected_did_for_test as verify_on_child,
     RequiredHomeLaunchToken, TestHomeLaunchAuthDataDir,
 };
 use crate::auth::{PasskeySessionPurpose, PasskeySessionRequest, ResolvedPrincipalRoot};
+use crate::collaboration_discovery_runtime::CollaborationDiscoveryService;
+use elastos_runtime::signature::{generate_keypair, SigningKey};
 
 mod cli_context;
 mod direct_messages;
@@ -171,36 +172,123 @@ pub(in crate::api) fn passkey_person(app: &str) -> PasskeyPerson {
         required,
         _auth: auth,
     };
-    assert_child_holds_nothing(&person);
-    person
-}
-
-/// The child stores no record, no protection and no bytes for the person, and
-/// it reads the parent's auth state.
-fn assert_child_holds_nothing(person: &PasskeyPerson) {
-    let child = person.child.path();
-    let record = crate::auth::stored_principal_record(child, PERSON).unwrap();
-    assert!(record.is_none(), "the child stores no record");
-    let protection = crate::auth::load_principal_root_protection(child, PERSON, ROOT).unwrap();
-    assert!(protection.is_none(), "the child stores no protection");
-    assert_eq!(files_under_roots(child), Vec::<String>::new());
-    assert_eq!(
-        home_launch_auth_data_dir(child),
-        person.parent.path().to_path_buf()
-    );
-    let on_parent = files_under_roots(person.parent.path());
+    let on_parent = tree(person.parent.path());
     assert!(
         on_parent.contains(&PROFILE_FILE.to_string()),
         "{on_parent:?}"
     );
+    person.assert_child_holds_only(&[]);
+    person
+}
+
+/// Every file under `dir`, and every folder with nothing in it (shown with a
+/// trailing `/`), as paths relative to `dir`. A link is listed, not followed.
+/// An entry that cannot be read fails the row.
+fn tree(dir: &std::path::Path) -> Vec<String> {
+    fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+        let mut entries = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            entries += 1;
+            if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+                walk(base, &path, out);
+            } else {
+                out.push(path.strip_prefix(base).unwrap().display().to_string());
+            }
+        }
+        if entries == 0 && dir != base {
+            out.push(format!("{}/", dir.strip_prefix(base).unwrap().display()));
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// What a child holds before any row touches it, each with its reason.
+const CHILD_OWN: &[&str] = &[
+    // The lock file a read of the child's auth state leaves. It holds no
+    // state: there is no `auth-state.json` beside it.
+    "ElastOS/System/Auth/audit-chain-required.json.lock",
+    // The child's own device key, made by `load_or_create_did`.
+    "identity/device.key",
+    // The identity store's lock file, made with the key.
+    "identity/identity.lock",
+];
+
+impl PasskeyPerson {
+    /// The whole child data directory holds exactly `CHILD_OWN` plus `also`,
+    /// and the child's auth state holds no record, no protection and no
+    /// session at all, so none for the person. Every problem is reported.
+    pub(in crate::api) fn assert_child_holds_only(&self, also: &[&str]) {
+        let child = self.child.path();
+        let mut problems = Vec::new();
+        let mut expected: Vec<String> = CHILD_OWN
+            .iter()
+            .chain(also)
+            .map(|s| s.to_string())
+            .collect();
+        expected.sort();
+        let state = crate::auth::load_auth_state(child).unwrap();
+        let found = tree(child);
+        if found != expected {
+            problems.push(format!(
+                "the child data directory holds {found:#?}, expected exactly {expected:#?}"
+            ));
+        }
+        if !state.principals.is_empty() {
+            problems.push("the child's auth state stores a record".to_string());
+        }
+        if !state.principal_root_protections.is_empty() {
+            problems.push("the child's auth state stores a protection record".to_string());
+        }
+        if !state.sessions.is_empty() {
+            problems.push("the child's auth state stores a session".to_string());
+        }
+        if home_launch_auth_data_dir(child) != self.parent.path() {
+            problems.push("the child no longer reads the parent's auth state".to_string());
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// A gateway state on the child's data directory. Built by hand so that
+    /// nothing is written into the directory.
+    pub(in crate::api) fn child_state(&self) -> GatewayState {
+        let dir = self.child.path().to_path_buf();
+        GatewayState {
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            carrier_endpoint: None,
+            collaboration_discovery_service: None,
+            browser_internet: Default::default(),
+            identity_manager: Arc::new(std::sync::OnceLock::new()),
+            cache_dir: dir.clone(),
+            data_dir: dir,
+        }
+    }
+}
+
+/// A Discovery service on the directory's own device key, as production
+/// builds it. No relay is reachable. Nothing is written into the directory.
+pub(in crate::api) async fn discovery_service(
+    dir: &std::path::Path,
+) -> CollaborationDiscoveryService {
+    let (trusted_key, _) = generate_keypair();
+    let network =
+        super::home_system::configured_discovery_network_profile_for_test(&trusted_key, "r8d");
+    let (device_key, _) = elastos_identity::load_or_create_did(dir).unwrap();
+    CollaborationDiscoveryService::new(
+        SigningKey::from_bytes(&device_key.to_bytes()),
+        network,
+        Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+    )
+    .await
+    .unwrap()
 }
 
 /// The refusal text, with its whole cause chain, or None when the call passed.
 pub(in crate::api) fn refusal<T>(result: anyhow::Result<T>) -> Option<String> {
     result.err().map(|error| format!("{error:#}"))
-}
-
-/// No person bytes reached the child, under this root or any other.
-pub(in crate::api) fn assert_no_bytes_on_child(person: &PasskeyPerson) {
-    assert_eq!(files_under_roots(person.child.path()), Vec::<String>::new());
 }

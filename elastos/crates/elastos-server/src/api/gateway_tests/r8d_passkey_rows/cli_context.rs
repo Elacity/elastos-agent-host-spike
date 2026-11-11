@@ -33,5 +33,5 @@ fn r8d_child_home_cli_context_rebuilds_with_the_passkey_persons_root() {
     );
     drop(own);
     assert_eq!(refusal(alone).as_deref(), Some("auth session not found"));
-    assert_no_bytes_on_child(&person);
+    person.assert_child_holds_only(&[]);
 }

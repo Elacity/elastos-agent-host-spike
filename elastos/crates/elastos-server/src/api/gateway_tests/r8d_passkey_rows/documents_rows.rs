@@ -31,5 +31,5 @@ async fn r8d_child_documents_summary_and_create_under_the_passkey_persons_root()
     assert_eq!(summary, refused);
     let created = documents(child, "create", json!({"title": "R8d note"})).await;
     assert_eq!(created, refused);
-    assert_no_bytes_on_child(&person);
+    person.assert_child_holds_only(&[]);
 }

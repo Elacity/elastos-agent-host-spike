@@ -40,5 +40,5 @@ fn r8d_child_library_lists_writes_and_reads_under_the_passkey_persons_root() {
     for (op, request) in steps {
         assert_eq!(library(child, op, request), refused, "op {op}");
     }
-    assert_no_bytes_on_child(&person);
+    person.assert_child_holds_only(&[]);
 }

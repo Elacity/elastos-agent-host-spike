@@ -22,5 +22,5 @@ fn r8d_child_room_card_and_authority_read_the_passkey_persons_profile() {
     let name = card.map(|card| card.display_name);
     assert_eq!(name.as_deref(), Some("Parent Person"));
     assert!(trusted_chat_room_profile_authority(parent, &person.ctx).is_ok());
-    assert_no_bytes_on_child(&person);
+    person.assert_child_holds_only(&[]);
 }

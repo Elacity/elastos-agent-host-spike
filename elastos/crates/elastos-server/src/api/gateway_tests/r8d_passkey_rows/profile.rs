@@ -36,5 +36,5 @@ fn r8d_child_profile_load_reads_the_passkey_persons_profile() {
     let summary = identity_summary(parent, &person.ctx);
     assert_eq!(summary["profile_readiness"]["status"], "ready");
     assert_eq!(summary["profile"]["display_name"], "Parent Person");
-    assert_no_bytes_on_child(&person);
+    person.assert_child_holds_only(&[]);
 }

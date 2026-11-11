@@ -7,14 +7,15 @@
 use super::*;
 use crate::collaboration_presence_grant as grant;
 
-fn presence_state(dir: &std::path::Path) -> GatewayState {
+fn presence_state(person: &PasskeyPerson) -> GatewayState {
+    let dir = person.child.path();
     let chat = crate::collaboration_product::test_chat_product_port(dir, "r8d", "community");
     let presence = crate::collaboration_presence::CollaborationPresenceProductPort::new(
         chat.test_core().clone(),
     )
     .unwrap()
     .with_presence_authority(grant::test_authority());
-    let mut state = test_state(dir);
+    let mut state = person.child_state();
     state.collaboration_chat_product_port = Some(chat);
     state.collaboration_presence_product_port = Some(presence);
     state
@@ -24,7 +25,7 @@ fn presence_state(dir: &std::path::Path) -> GatewayState {
 async fn r8d_child_presence_request_and_grant_are_refused_for_the_passkey_person() {
     let person = passkey_person(CHAT_ROOM_CAPSULE_ID);
     let child = person.child.path();
-    let state = presence_state(child);
+    let state = presence_state(&person);
     // The request first reads the Profile on the child and finds none.
     let asked = request_community_presence(&state, &person.ctx, true);
     assert_eq!(
@@ -43,5 +44,5 @@ async fn r8d_child_presence_request_and_grant_are_refused_for_the_passkey_person
     assert_eq!(refusal(read).as_deref(), Some(NO_STORED_RECORD));
     let open = grant::open_request_at(child, PERSON, &scope);
     assert_eq!(refusal(open).as_deref(), Some(NO_STORED_RECORD));
-    assert_no_bytes_on_child(&person);
+    person.assert_child_holds_only(&[]);
 }
