@@ -13,6 +13,8 @@ use super::super::r3_stored_root_tests::verified_parent_device_context;
 use super::*;
 use elastos_runtime::signature::{generate_keypair, SigningKey};
 
+mod profile;
+
 /// A child Runtime's data directory and the parent-signed device person.
 struct Child {
     dir: tempfile::TempDir,
