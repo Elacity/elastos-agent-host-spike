@@ -5464,7 +5464,7 @@ fn refuse_unreadable_auth_state(data_dir: &Path, error: impl std::fmt::Display) 
     let named = auth_state_path(data_dir)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| AUTH_STATE_FILE.to_string());
-    anyhow!("auth state save refused: auth state file {named} could not be read: {error}")
+    anyhow!("auth state save refused: auth state file {named} could not be parsed: {error}")
 }
 
 /// Bytes of an auth state file the guard can parse. A missing file is the
@@ -19719,7 +19719,7 @@ pub(crate) mod tests {
         assert!(
             text.starts_with("auth state save refused:")
                 && text.contains("auth-state.json")
-                && text.contains("could not be read"),
+                && text.contains("could not be parsed"),
             "auth state save refused: the file is named: {text}"
         );
         assert_eq!(
