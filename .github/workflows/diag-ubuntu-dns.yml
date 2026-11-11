@@ -1,0 +1,68 @@
+# Diagnostic only, on this branch only. It asks one question: can a GitHub-hosted
+# runner look up Ubuntu's package servers, by its own resolver and by a public one?
+# It checks out nothing, reads no secret and changes nothing. Not for merge.
+name: Diagnose Ubuntu package server lookup
+on:
+  push:
+    branches: [ci/diag-ubuntu-dns]
+permissions: {}
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 6
+    steps:
+      - name: resolver in use
+        run: |
+          cat /etc/resolv.conf || true
+          resolvectl status 2>/dev/null | grep -E "DNS Servers|Current DNS|DNS Domain" || true
+      - name: lookups by resolver
+        run: |
+          for r in default 168.63.129.16 1.1.1.1 8.8.8.8; do
+            for h in archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com github.com registry.npmjs.org; do
+              if [ "$r" = default ]; then a=$(dig +short +time=4 +tries=1 "$h" A | tail -1); else a=$(dig +short +time=4 +tries=1 "@$r" "$h" A | tail -1); fi
+              echo "resolver=$r host=$h answer=${a:-NONE}"
+            done
+          done
+      - name: status codes from the default resolver
+        run: |
+          for h in archive.ubuntu.com azure.archive.ubuntu.com github.com; do
+            dig +time=4 +tries=1 "$h" A | grep -E "status:|SERVER:|Query time" | tr '\n' ' '; echo " <- $h"
+          done
+      - name: apt-get update as the runner ships it
+        run: |
+          set +e
+          sudo apt-get update 2>&1 | tail -8
+          echo "apt exit=${PIPESTATUS[0]}"
+  container-default:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    container:
+      image: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+    steps:
+      - name: container resolver, lookup and apt
+        shell: bash
+        run: |
+          set +e
+          cat /etc/resolv.conf
+          for h in archive.ubuntu.com security.ubuntu.com github.com; do echo "getent $h: $(getent hosts "$h" | head -1 || true)"; done
+          apt-get update -qq 2>&1 | tail -6
+          echo "apt exit=${PIPESTATUS[0]}"
+  container-public-dns:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    container:
+      image: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+      options: --dns 1.1.1.1 --dns 8.8.8.8
+    steps:
+      - name: container with a public resolver, lookup and apt
+        shell: bash
+        run: |
+          set +e
+          cat /etc/resolv.conf
+          for h in archive.ubuntu.com security.ubuntu.com github.com; do echo "getent $h: $(getent hosts "$h" | head -1 || true)"; done
+          apt-get update -qq 2>&1 | tail -6
+          echo "apt exit=${PIPESTATUS[0]}"
