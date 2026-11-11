@@ -268,6 +268,31 @@ impl PasskeyPerson {
             data_dir: dir,
         }
     }
+
+    /// Request headers for one of the child's real route handlers.
+    ///
+    /// On a real child the handler verifies the parent-signed token against
+    /// the parent's DID, which it reads from a process environment variable
+    /// (see the module comment). These rows set no environment variable, so
+    /// the handler here expects the child's own DID. The token in these
+    /// headers therefore carries the same person, session, proof binding,
+    /// grant and Home projection as the parent-signed one, and is signed by
+    /// the child's own key. Only the signature differs: the verifier's steps
+    /// after the signature check are the same, and the context it builds is
+    /// asserted equal to the one built from the parent-signed token.
+    pub(in crate::api) fn route_headers(&self, app: &str) -> HeaderMap {
+        let child = self.child.path();
+        let token =
+            issue_home_projection_launch_token_with_context(child, app, app, &self.ctx).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("localhost:61180"));
+        headers.insert("origin", HeaderValue::from_static("null"));
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        let verified = require_home_launch_token_binding(child, &headers, &[app]).unwrap();
+        assert_eq!(verified.context, self.ctx);
+        assert_eq!(verified.launch_context, self.required.launch_context);
+        headers
+    }
 }
 
 /// A Discovery service on the directory's own device key, as production
