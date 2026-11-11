@@ -4394,7 +4394,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             store(dir.path(), kind);
             assert_eq!(
-                super::runtime_custody_buyer_root(dir.path(), ID).unwrap(),
+                super::runtime_custody_buyer_root(
+                    dir.path(),
+                    crate::auth::r4_fixture::principal_id(kind)
+                )
+                .unwrap(),
                 expected,
                 "R4 buyer profile root"
             );

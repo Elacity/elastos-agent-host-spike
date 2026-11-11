@@ -1480,9 +1480,7 @@ mod tests {
         crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
         crate::esp_binding::EspRequestBinding,
     ) {
-        use crate::auth::r4_fixture::set_kind;
         const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
-        const AGENT_ROOT: &str = "localhost://UsersAI/5dca74bd48d800a148776e87";
         const HUMAN_ROOT: &str = "localhost://Users/5dca74bd48d800a148776e87";
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -1490,52 +1488,69 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         }
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
         let fixture = fixture_at(dir.path());
-        let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
-            elastos_runtime::auth::PasskeyWebAuthnBinding {
-                credential_id: "r4-presence-agent".into(),
-                public_key: "r4-key".into(),
-                sign_count: 1,
-                user_verified: true,
-                origin: "https://elastos.elacitylabs.com".into(),
-                rp_id: "elastos.elacitylabs.com".into(),
-                created_at: NOW,
-                last_used_at: NOW,
-                revoked_at: None,
-            },
-        );
-        let record = crate::auth::upsert_principal_for_binding_as_role_named(
-            dir.path(),
-            binding,
-            ID.into(),
-            crate::auth::RuntimePrincipalRole::Admin,
-            Some("R6"),
-            NOW,
-        )
-        .unwrap();
-        let root = if kind == crate::auth::PrincipalKind::Agent {
-            AGENT_ROOT
+        let (principal_id, profile) = if kind == crate::auth::PrincipalKind::Agent {
+            let agent = crate::auth::valid_agent::plant(dir.path());
+            let root = crate::auth::valid_agent::ROOT;
+            crate::auth::store_test_principal_root_protection_for(
+                dir.path(),
+                &agent.principal_id,
+                root,
+            );
+            let profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+                dir.path(),
+                &agent.principal_id,
+                root,
+                "R6",
+                None,
+                NOW,
+            )
+            .unwrap();
+            (agent.principal_id, profile)
         } else {
-            HUMAN_ROOT
+            let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+                elastos_runtime::auth::PasskeyWebAuthnBinding {
+                    credential_id: "r4-presence-agent".into(),
+                    public_key: "r4-key".into(),
+                    sign_count: 1,
+                    user_verified: true,
+                    origin: "https://elastos.elacitylabs.com".into(),
+                    rp_id: "elastos.elacitylabs.com".into(),
+                    created_at: NOW,
+                    last_used_at: NOW,
+                    revoked_at: None,
+                },
+            );
+            let record = crate::auth::upsert_principal_for_binding_as_role_named(
+                dir.path(),
+                binding,
+                ID.into(),
+                crate::auth::RuntimePrincipalRole::Admin,
+                Some("R6"),
+                NOW,
+            )
+            .unwrap();
+            crate::auth::r4_fixture::set_kind(dir.path(), ID, kind, HUMAN_ROOT);
+            crate::auth::store_test_principal_root_protection_for(dir.path(), ID, HUMAN_ROOT);
+            let profile = crate::collaboration_profile_authority::update_profile_authority(
+                dir.path(),
+                ID,
+                HUMAN_ROOT,
+                &record.proof_binding_id,
+                "R6",
+                None,
+                NOW,
+            )
+            .unwrap();
+            (ID.to_string(), profile)
         };
-        set_kind(dir.path(), ID, kind, root);
-        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, root);
-        let profile = crate::collaboration_profile_authority::update_profile_authority(
-            dir.path(),
-            ID,
-            root,
-            &record.proof_binding_id,
-            "R6",
-            None,
-            NOW,
-        )
-        .unwrap();
         let authority = crate::collaboration_presence_grant::test_authority();
         let port = fixture.presence.with_presence_authority(authority.clone());
         crate::collaboration_presence_grant::set_presence_grant(
             &authority,
             dir.path(),
-            ID,
+            &principal_id,
             &profile.document().profile_did,
             &port.presence_scope(),
             crate::collaboration_presence_grant::PresenceDecision::Always,
@@ -1546,7 +1561,7 @@ mod tests {
         let granted = crate::collaboration_presence_grant::presence_grant(
             &authority,
             dir.path(),
-            ID,
+            &principal_id,
             &profile.document().profile_did,
             &port.presence_scope(),
             crate::collaboration_presence_grant::PresencePublisher::Runtime,
@@ -1554,7 +1569,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut operation = presence_request_binding("r6-own", ID, &profile).unwrap();
+        let mut operation = presence_request_binding("r6-own", &principal_id, &profile).unwrap();
         operation.request_id = granted.bind_request_id("r6-own");
         (dir, port, profile, operation)
     }
@@ -1611,9 +1626,13 @@ mod tests {
             crate::auth::PrincipalKind::Agent,
             crate::auth::PrincipalKind::Human,
         ] {
-            let (_dir, port, profile, _) = r6_own_presence_case(kind).await;
+            let (_dir, port, profile, operation) = r6_own_presence_case(kind).await;
             let result = port
-                .retire_denied_current_presence(ID, &profile.document().profile_did, NOW)
+                .retire_denied_current_presence(
+                    &operation.principal,
+                    &profile.document().profile_did,
+                    NOW,
+                )
                 .await;
             assert!(
                 result,
