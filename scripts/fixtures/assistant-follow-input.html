@@ -218,6 +218,7 @@
     document.body.append(control);
     control.scrollTop = control.scrollHeight;
     content.style.height = "2700px";
+    control.scrollTop = control.scrollHeight;
     await waitFor("the unpinned control received the growth", () => control.scrollHeight === 2700);
     result.controlGap = control.scrollHeight - control.clientHeight - control.scrollTop;
     expect(result.controlGap === 100, "control without pin stays 100px short");
