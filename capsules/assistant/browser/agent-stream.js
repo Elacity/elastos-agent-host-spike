@@ -141,7 +141,7 @@ function observeTranscript(scroller, content) {
     touchY = y;
   }, { passive: true });
   scroller.addEventListener("pointerdown", () => {
-    dragging = true;
+    dragging = false;
     readerInput();
   });
   const releasePointer = () => {
