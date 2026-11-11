@@ -414,17 +414,17 @@ mod r3_tests {
         }))
         .unwrap();
         let result = save_assistant_workspace(dir.path(), &context, request);
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            NEEDS_PROTECTION,
-            "R3 assistant write reaches UsersAI protection gate"
-        );
         let writes = crate::auth::principal_object_io::writes(dir.path());
         assert!(
             writes.iter().any(|path| path.ends_with(
                 "UsersAI/ba287e12925d9408db0f24e3/.AppData/ElastOS/Assistant/workspace.json"
             )),
             "R3 assistant write records the stored-root object: {writes:?}"
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            NEEDS_PROTECTION,
+            "R3 assistant write reaches UsersAI protection gate"
         );
     }
 

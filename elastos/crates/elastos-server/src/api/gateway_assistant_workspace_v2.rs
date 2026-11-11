@@ -438,17 +438,17 @@ mod r3_tests {
             migration_revision: Some(initial["migration_revision"].as_str().unwrap().into()),
         };
         let result = save(dir.path(), &context, request);
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            NEEDS_PROTECTION,
-            "R3 v2 write reaches UsersAI protection gate"
-        );
         let writes = crate::auth::principal_object_io::writes(dir.path());
         assert!(
             writes.iter().any(|path| path.ends_with(
                 "UsersAI/ba287e12925d9408db0f24e3/.AppData/ElastOS/Assistant/workspace-v2.json"
             )),
             "R3 v2 write records the stored-root object: {writes:?}"
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            NEEDS_PROTECTION,
+            "R3 v2 write reaches UsersAI protection gate"
         );
     }
 
