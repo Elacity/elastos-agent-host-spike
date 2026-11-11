@@ -1440,32 +1440,53 @@ mod tests {
 
     #[test]
     fn proofless_parent_token_uses_stored_device_record_before_witness_root() {
-        use sha2::Digest as _;
+        // A device id is not an agent id. Kind Agent on that record is
+        // quarantined, so the proofless context refuses before the witness root.
         let parent = tempfile::tempdir().unwrap();
-        let child = tempfile::tempdir().unwrap();
         let (_, did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
         let principal_id = format!("device:{did}");
         crate::auth::store_test_human_principal(parent.path(), &principal_id);
         crate::auth::tests::mint_agent_record(parent.path(), &principal_id, None);
-        let context = local_home_launch_token_context(parent.path()).unwrap();
+        let error = local_home_launch_token_context(parent.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("quarantined agent record"),
+            "a device id cannot carry an agent binding, so the witness root is not used: {error}"
+        );
+
+        // The stored-root half uses a valid agent. The token is issued and
+        // checked through the same launch functions, and the root is the hand literal.
+        let home = tempfile::tempdir().unwrap();
+        let child = tempfile::tempdir().unwrap();
+        let (_, signer) = elastos_identity::load_or_create_did(home.path()).unwrap();
+        let agent = crate::auth::valid_agent::plant(home.path());
+        let now = crate::auth::now_ts();
+        let grant = elastos_runtime::auth::AuthSessionGrantV1 {
+            schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:agent-root".into(),
+            session_id: "session:agent-root".into(),
+            principal_id: agent.principal_id.clone(),
+            proof_binding_id: agent.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec!["marketplace".into()],
+        };
+        crate::auth::store_session_grant(home.path(), grant.clone()).unwrap();
         let token =
-            issue_home_launch_token_with_context(parent.path(), "marketplace", &context).unwrap();
+            issue_home_launch_token_for_auth_grant(home.path(), "marketplace", &grant).unwrap();
         let verified = require_home_launch_token_value_from_expected_did(
             child.path(),
             &token,
             &["marketplace"],
-            did,
-            parent.path(),
+            signer,
+            home.path(),
         )
         .unwrap();
-        let expected_root = format!(
-            "localhost://UsersAI/{}",
-            hex::encode(&sha2::Sha256::digest(principal_id.as_bytes())[..12])
-        );
         assert_eq!(
             verified.context.root().localhost_root(),
-            expected_root,
-            "stored device record must win before witness root"
+            crate::auth::valid_agent::ROOT,
+            "stored agent record must win before a witness root"
         );
     }
 
