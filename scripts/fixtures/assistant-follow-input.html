@@ -59,14 +59,20 @@
   // Wait for the state the next assertion needs, instead of a fixed pause. A
   // loaded page reaches that state late; a page with the behaviour removed
   // never does, and the deadline records the condition that never held.
+  const timings = (result.timings = []);
   const waitFor = async (label, test, timeoutMs = 15000) => {
-    const deadline = performance.now() + timeoutMs;
+    const started = performance.now();
+    const deadline = started + timeoutMs;
+    const done = value => {
+      timings.push({ wait: label, ms: Math.round(performance.now() - started), ok: Boolean(value) });
+      return value;
+    };
     for (;;) {
       const value = test();
-      if (value) return value;
+      if (value) return done(value);
       if (performance.now() > deadline) {
         (result.waitTimeouts ||= []).push(label);
-        return null;
+        return done(null);
       }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
@@ -75,10 +81,11 @@
   // until the scroll, the follow pin and the Jump button have all stopped
   // changing for longer than that, so every assertion reads a settled page.
   const settle = async (label = "the transcript stopped changing") => {
+    const started = performance.now();
     const state = () => [s.scrollTop, s.scrollHeight, s.clientHeight, c.offsetHeight,
       s.classList.contains("is-follow-bottom"), !viewport.querySelector("[data-agent-jump-latest]").hidden].join(":");
     let last = state();
-    let changedAt = performance.now();
+    let changedAt = started;
     const deadline = changedAt + 15000;
     for (;;) {
       // Poll on a timer. Playwright's own waits and every loop here must not
@@ -87,9 +94,13 @@
       await delay(25);
       const now = state();
       if (now !== last) { last = now; changedAt = performance.now(); }
-      else if (performance.now() - changedAt >= 200) return;
+      else if (performance.now() - changedAt >= 200) {
+        timings.push({ settle: label, ms: Math.round(performance.now() - started), ok: true });
+        return;
+      }
       if (performance.now() > deadline) {
         (result.waitTimeouts ||= []).push(`${label}: never stopped changing`);
+        timings.push({ settle: label, ms: Math.round(performance.now() - started), ok: false });
         return;
       }
     }
@@ -157,6 +168,7 @@
     s.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: b.right - 3, clientY: b.bottom - 14 }));
   };
   const reset = async () => {
+    result.case = "reset";
     getSelection().removeAllRanges();
     document.activeElement.blur();
     s.style.height = "400px";
@@ -176,6 +188,7 @@
     return snap();
   };
   const heldGrowth = async label => {
+    result.case = label;
     await settle(`${label}: the reader position settled`);
     const held = await waitFor(`${label}: a reader above the end keeps their place`, () => {
       const state = snap();
@@ -186,6 +199,7 @@
     expect(held.fromEnd > 8 && !held.follow && held.jump && after.top === held.top, label);
   };
   const followingGrowth = async label => {
+    result.case = label;
     await settle(`${label}: the room reached its resting position`);
     const held = await waitFor(`${label}: a following room rests at the end`, () => {
       const state = snap();
@@ -231,6 +245,8 @@
     }
     await reset();
     const native = async (phase, extra = {}, element = s) => {
+      const nativeStarted = performance.now();
+      result.step = `native ${phase}`;
       const firstEvent = events.length;
       const before = snap();
       const box = element.getBoundingClientRect();
@@ -263,6 +279,7 @@
           `trusted ${extra.key} with requested modifiers received`);
       }
       (result.inputEvidence ||= []).push({ phase, extra, before, after: snap(), events: received });
+      timings.push({ native: `${phase} ${JSON.stringify(extra)}`, ms: Math.round(performance.now() - nativeStarted), ok: true });
     };
     const events = [];
     for (const name of ["keydown", "keyup", "pointerdown", "pointerup", "wheel", "scroll", "scrollend"]) {
