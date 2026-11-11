@@ -935,7 +935,7 @@ export function updateJumpToLatestVisibility() {
     return;
   }
   const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-  btn.hidden = transcriptFollow?.atEnd || distance <= READER_AT_END_PX;
+  btn.hidden = false;
 }
 
 function commitAgentReply(session, answer, thinking = "", { partial = false, quiet = false, progress = null, run = null, turn = null } = {}) {
