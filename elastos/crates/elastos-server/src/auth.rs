@@ -5463,13 +5463,146 @@ fn guard_readable_auth_bytes(data_dir: &Path) -> anyhow::Result<Option<Vec<u8>>>
     Ok(Some(bytes))
 }
 
-fn principals_before_save(data_dir: &Path) -> anyhow::Result<Vec<PrincipalRecord>> {
+struct AuthFactsBeforeSave {
+    principals: Vec<PrincipalRecord>,
+    protections: Vec<PrincipalRootProtectionV1>,
+    sessions: Vec<StoredAuthSession>,
+}
+
+fn auth_facts_before_save(data_dir: &Path) -> anyhow::Result<AuthFactsBeforeSave> {
     let Some(bytes) = guard_readable_auth_bytes(data_dir)? else {
-        return Ok(Vec::new());
+        return Ok(AuthFactsBeforeSave {
+            principals: Vec::new(),
+            protections: Vec::new(),
+            sessions: Vec::new(),
+        });
     };
     let state: AuthState = serde_json::from_slice(&bytes)
         .map_err(|error| refuse_unreadable_auth_state(data_dir, error))?;
-    Ok(state.principals)
+    Ok(AuthFactsBeforeSave {
+        principals: state.principals,
+        protections: state.principal_root_protections,
+        sessions: state.sessions,
+    })
+}
+
+fn record_is_agent_store(record: &PrincipalRecord) -> bool {
+    record.kind == PrincipalKind::Agent || is_agent_admission_record(record)
+}
+
+fn agent_root_protection_change_reason(
+    before_principals: &[PrincipalRecord],
+    after_principals: &[PrincipalRecord],
+    before: &[PrincipalRootProtectionV1],
+    after: &[PrincipalRootProtectionV1],
+) -> Option<&'static str> {
+    let mut roots: Vec<&str> = before_principals
+        .iter()
+        .chain(after_principals)
+        .filter(|record| record_is_agent_store(record))
+        .map(|record| record.localhost_root.as_str())
+        .collect();
+    roots.sort_unstable();
+    roots.dedup();
+    let watched = |protection: &PrincipalRootProtectionV1| {
+        roots.iter().any(|root| *root == protection.localhost_root)
+    };
+    let before: Vec<&PrincipalRootProtectionV1> =
+        before.iter().filter(|item| watched(item)).collect();
+    let after: Vec<&PrincipalRootProtectionV1> =
+        after.iter().filter(|item| watched(item)).collect();
+    let mut used = vec![false; before.len()];
+    let mut added = false;
+    let mut changed = false;
+    for protection in &after {
+        if let Some(index) = before
+            .iter()
+            .enumerate()
+            .find(|(index, old)| !used[*index] && *old == protection)
+            .map(|(index, _)| index)
+        {
+            used[index] = true;
+            continue;
+        }
+        if let Some(index) = before
+            .iter()
+            .enumerate()
+            .find(|(index, old)| {
+                !used[*index]
+                    && old.principal_id == protection.principal_id
+                    && old.localhost_root == protection.localhost_root
+            })
+            .map(|(index, _)| index)
+        {
+            used[index] = true;
+            changed = true;
+            continue;
+        }
+        added = true;
+    }
+    if changed {
+        return Some("agent root protection changed");
+    }
+    if added {
+        return Some("agent root protection added");
+    }
+    if used.iter().any(|seen| !seen) {
+        return Some("agent root protection removed");
+    }
+    None
+}
+
+fn stored_session_same(before: &StoredAuthSession, after: &StoredAuthSession) -> bool {
+    before.grant == after.grant && before.revoked_at == after.revoked_at
+}
+
+/// Adds and changes are refused. Removing an agent session is not: the
+/// rule names add and change.
+fn agent_session_change_reason(
+    before_principals: &[PrincipalRecord],
+    after_principals: &[PrincipalRecord],
+    before: &[StoredAuthSession],
+    after: &[StoredAuthSession],
+) -> Option<&'static str> {
+    let mut ids: Vec<&str> = before_principals
+        .iter()
+        .chain(after_principals)
+        .filter(|record| record_is_agent_store(record))
+        .map(|record| record.principal_id.as_str())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let agent_session =
+        |session: &StoredAuthSession| ids.iter().any(|id| *id == session.grant.principal_id);
+    for session in after {
+        if !agent_session(session) {
+            continue;
+        }
+        match before
+            .iter()
+            .find(|old| old.grant.session_id == session.grant.session_id)
+        {
+            None => return Some("agent session added"),
+            Some(old) if !stored_session_same(old, session) => {
+                return Some("agent session changed")
+            }
+            Some(_) => {}
+        }
+    }
+    for old in before {
+        if !agent_session(old) {
+            continue;
+        }
+        if let Some(session) = after
+            .iter()
+            .find(|session| session.grant.session_id == old.grant.session_id)
+        {
+            if !stored_session_same(old, session) {
+                return Some("agent session changed");
+            }
+        }
+    }
+    None
 }
 
 fn kind_and_binding_disagree(record: &PrincipalRecord) -> Option<&'static str> {
@@ -5530,15 +5663,17 @@ fn refuse_agent_admission_changes(
     after: &AuthState,
     permit: Option<AgentAdmissionOperation>,
 ) -> anyhow::Result<()> {
-    let before = principals_before_save(data_dir)?;
+    // Per-field validation of a permitted change arrives with the first slice
+    // that permits one. Every permit refuses these stores today.
+    let before = auth_facts_before_save(data_dir)?;
     let disk_raw = disk_quarantined_raw(data_dir)?;
-    if let Some(reason) = kind_binding_save_disagreement(&before, after, &disk_raw) {
+    if let Some(reason) = kind_binding_save_disagreement(&before.principals, after, &disk_raw) {
         anyhow::bail!(
             "agent admission record change refused: {reason} ({})",
             agent_admission_permit_clause(permit)
         );
     }
-    if let Some(reason) = agent_admission_change_reason(&before, &after.principals) {
+    if let Some(reason) = agent_admission_change_reason(&before.principals, &after.principals) {
         anyhow::bail!(
             "agent admission record change refused: {reason} ({})",
             agent_admission_permit_clause(permit)
@@ -5546,6 +5681,28 @@ fn refuse_agent_admission_changes(
     }
     if quarantined_raw_changed(data_dir, after)? {
         return refuse_quarantined_agent_change(permit, &after.principals);
+    }
+    if let Some(reason) = agent_root_protection_change_reason(
+        &before.principals,
+        &after.principals,
+        &before.protections,
+        &after.principal_root_protections,
+    ) {
+        anyhow::bail!(
+            "agent admission protection change refused: {reason} ({})",
+            agent_admission_permit_clause(permit)
+        );
+    }
+    if let Some(reason) = agent_session_change_reason(
+        &before.principals,
+        &after.principals,
+        &before.sessions,
+        &after.sessions,
+    ) {
+        anyhow::bail!(
+            "agent admission session change refused: {reason} ({})",
+            agent_admission_permit_clause(permit)
+        );
     }
     Ok(())
 }
@@ -5582,7 +5739,7 @@ fn canonical_json(values: &[Value]) -> Vec<Vec<u8>> {
 }
 
 /// The raw principal values on disk that this save must keep. A file that
-/// exists and cannot be parsed is refused, the same way `principals_before_save`
+/// exists and cannot be parsed is refused, the same way `auth_facts_before_save`
 /// refuses it. A missing file has nothing to keep.
 fn disk_quarantined_raw(data_dir: &Path) -> anyhow::Result<Vec<Value>> {
     let Some(bytes) = guard_readable_auth_bytes(data_dir)? else {
