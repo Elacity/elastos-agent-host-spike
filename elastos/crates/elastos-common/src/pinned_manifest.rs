@@ -543,7 +543,8 @@ mod tests {
     /// The pinned type runs the ordinary `validate()`, so a manifest that
     /// pins a requirement and also states asks is held to the ask rules: a
     /// valid one parses, an ask with no action is refused, and asks beside
-    /// capabilities are refused, each as `Invalid` with the ordinary text.
+    /// capabilities are refused, each as `Invalid` with the very text the
+    /// ordinary type gives for the same manifest without its pin.
     #[test]
     fn a_pinned_manifest_with_asks_is_held_to_the_ask_rules() {
         let with = |extra: serde_json::Value| {
@@ -562,8 +563,12 @@ mod tests {
                 "asks_conflict:",
             ),
         ] {
+            let unpinned: CapsuleManifest =
+                serde_json::from_slice(&manifest(extra.clone())).unwrap();
+            let ordinary = unpinned.validate().unwrap_err();
+            assert!(ordinary.starts_with(expected), "{ordinary}");
             match refusal(&with(extra)) {
-                PinnedManifestError::Invalid(text) => assert!(text.starts_with(expected), "{text}"),
+                PinnedManifestError::Invalid(text) => assert_eq!(text, ordinary),
                 other => panic!("{expected} {other:?}"),
             }
         }
@@ -605,9 +610,10 @@ mod tests {
         );
         // One derive in the file, on the error type; none on the struct.
         // What this check covers: the top-level items of this one file. The
-        // field is private to this module, so code in another file cannot
-        // read it; a child module declared in this file could, and would
-        // have to be added here to be seen.
+        // field is private, so only this module and its child modules can
+        // read it. This file declares no child module today; one, written
+        // here or in a file of its own, would have to be added to this check
+        // to be seen.
         let derives: Vec<&str> = code().filter(|line| line.starts_with("#[derive")).collect();
         assert_eq!(derives, ["#[derive(Debug, Clone, PartialEq, Eq)]"]);
         let field_uses: Vec<&str> = code()

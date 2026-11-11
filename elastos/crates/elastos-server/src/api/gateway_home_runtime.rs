@@ -1971,6 +1971,7 @@ mod tests {
         // The cause, and not only the outcome: Home's reader finds no
         // manifest in the installed folder.
         let installed = data_dir.join("capsules/pinned-fixture");
+        assert!(installed.join("capsule.json").is_file());
         assert!(
             crate::api::capsule_inventory::load_capsule_manifest(&installed, "pinned-fixture")
                 .is_none()
