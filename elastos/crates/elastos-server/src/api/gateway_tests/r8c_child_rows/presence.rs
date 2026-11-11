@@ -44,16 +44,26 @@ async fn presence_steps(steps: &mut Steps, state: &GatewayState, ctx: &HomeLaunc
     // The stored-file functions the two calls above reach, with the same id.
     let id = ctx.principal_id();
     let direct = grant::state(&state.data_dir, id, &scope);
-    steps.step("presence grant file read (presence_grant::state)", direct);
+    steps.step_where(
+        "presence grant file read (presence_grant::state): requested",
+        direct,
+        |mode| *mode == Some("requested"),
+    );
     let open = grant::open_request_at(&state.data_dir, id, &scope);
     let open = steps.step("open presence request (open_request_at)", open);
-    let Some(at) = open.flatten() else {
+    let open = open.flatten();
+    // The request made above must be open: the answer and the last read
+    // below run only on an open request.
+    steps.check("the presence request is open", open.is_some(), &open);
+    let Some(at) = open else {
         steps.not_reached("set the presence grant", "no open request to answer");
         return;
     };
     let action = format!("community-presence-always:{at}");
-    let answered = answer_community_presence_request(state, ctx, &action).await;
-    steps.step("set the presence grant (answer: always)", answered.unwrap());
+    let answered = answer_community_presence_request(state, ctx, &action)
+        .await
+        .unwrap_or_else(|| Err(anyhow::anyhow!("{action} is not a presence action")));
+    steps.step("set the presence grant (answer: always)", answered);
     let read = community_presence_state(state, ctx);
     steps.check("read presence state: always", read == Some("always"), &read);
 }
