@@ -64,33 +64,39 @@ try {
     const browserSession = native ? await browser.newBrowserCDPSession() : null;
     const browserPid = native ? (await browserSession.send("SystemInfo.getProcessInfo")).processInfo.find(p => p.type === "browser").id : null;
     const driverErrors = [];
+    const inputSteps = [];
+    const step = async (label, work) => {
+      const started = performance.now();
+      await work();
+      inputSteps.push({ label, ms: Math.round(performance.now() - started) });
+    };
     page.on("console", message => { if (message.type() === "error") driverErrors.push(message.text()); });
     await page.exposeFunction("driveInput", async request => {
       const b = request.rect;
       if (native) {
         await run(binary, ["--input", String(browserPid), JSON.stringify(request)], { timeout: 5000 });
       } else if (request.phase === "wheel") {
-        await page.mouse.move(b.x + 120, b.y + 180);
+        await step("wheel move", () => page.mouse.move(b.x + 120, b.y + 180));
         for (const delta of request.deltas) {
-          await page.mouse.wheel(0, delta);
+          await step(`wheel ${delta}`, () => page.mouse.wheel(0, delta));
           await page.waitForTimeout(request.gapMs || 20);
         }
       } else if (["hold", "release"].includes(request.phase)) {
-        await page.mouse.move(b.x + b.width - (request.content ? 40 : 3), b.y + b.height - 14);
-        if (request.phase === "hold") await page.mouse.down();
-        else await page.mouse.up();
+        await step(`${request.phase} move`, () => page.mouse.move(b.x + b.width - (request.content ? 40 : 3), b.y + b.height - 14));
+        await step(`${request.phase} ${request.phase === "hold" ? "down" : "up"}`,
+          () => request.phase === "hold" ? page.mouse.down() : page.mouse.up());
       } else if (request.phase === "key") {
-        await page.keyboard.press(request.key);
+        await step(`key ${request.key}`, () => page.keyboard.press(request.key));
       } else {
         const selection = request.phase === "select";
         const back = request.phase === "drag-back";
         const x = selection ? b.x + 8 : b.x + b.width - 3;
         const y = selection ? b.y + b.height / 2 : b.y + (back ? 14 : b.height - 14);
-        await page.mouse.move(x, y);
-        await page.mouse.down();
-        await page.mouse.move(selection ? b.x + b.width - 8 : x,
-          selection ? y : b.y + (back ? b.height - 14 : 36), { steps: 16 });
-        await page.mouse.up();
+        await step(`${request.phase} move`, () => page.mouse.move(x, y));
+        await step(`${request.phase} down`, () => page.mouse.down());
+        await step(`${request.phase} drag`, () => page.mouse.move(selection ? b.x + b.width - 8 : x,
+          selection ? y : b.y + (back ? b.height - 14 : 36), { steps: 16 }));
+        await step(`${request.phase} up`, () => page.mouse.up());
       }
     });
     await page.addInitScript(() => {
@@ -139,7 +145,9 @@ try {
         new Promise(done => setTimeout(() => done({ evaluate: "no answer within 10000 ms" }), 10000)),
       ]);
       console.error(`report wait timed out mode=${mode || "normal"} after ${reportTimeout} ms ` +
-        JSON.stringify({ nodeDateNow: Date.now(), nodePerformanceNow: Math.round(performance.now()), ...diagnostics }));
+        JSON.stringify({ nodeDateNow: Date.now(), nodePerformanceNow: Math.round(performance.now()),
+          driverSteps: inputSteps.slice(-14), slowDriverSteps: inputSteps.slice(-40).sort((a, b) => b.ms - a.ms).slice(0, 6),
+          ...diagnostics }));
       throw error;
     }
     record({ engine: "Chromium", input: native ? "CGEvent" : "Playwright", driverErrors, ...await page.evaluate(() => window.__report) });
