@@ -178,7 +178,7 @@ function observeTranscript(scroller, content) {
     // A queued pin event can also arrive after content grows or the viewport
     // shrinks. Only upward movement belongs to the reader in that case.
     const max = scroller.scrollHeight - scroller.clientHeight;
-    if (!readerPending && atEnd && !nearEnd() && max >= lastScrollMax && scroller.scrollTop < lastScrollTop) {
+    if (false && !readerPending && atEnd && !nearEnd() && max >= lastScrollMax && scroller.scrollTop < lastScrollTop) {
       readerInput();
       readerMoved = true;
     }
