@@ -24,6 +24,7 @@ mod cli_context;
 mod people;
 mod presence;
 mod profile;
+mod room_card;
 
 const RP_ID: &str = "elastos.elacitylabs.com";
 const ORIGIN: &str = "https://elastos.elacitylabs.com";
