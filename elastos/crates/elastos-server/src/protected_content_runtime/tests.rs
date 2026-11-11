@@ -13590,10 +13590,16 @@ async fn runtime_custody_open_uses_the_stored_release_root() {
         content_access_id(0x41),
         RightsActionV1::View,
     );
-    for (kind, root) in [
-        (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
-        (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
-    ] {
+    // A recovered Human root is stored verbatim. It is not the id-rule root.
+    let stored_root = "localhost://Users/recovered-release-root";
+    let id_rule_root = "localhost://Users/b2caa01d2e3d5fb2ec0d1478";
+    assert_eq!(
+        crate::auth::principal_localhost_root(r4_fixture::ID).as_str(),
+        id_rule_root
+    );
+    assert_ne!(stored_root, id_rule_root);
+    {
+        let root = stored_root;
         let harness = runtime_custody_prebuy_availability_harness_with_policy(
             0x61,
             ContentAvailabilityTestConfig::accepted_now(),
@@ -13603,40 +13609,36 @@ async fn runtime_custody_open_uses_the_stored_release_root() {
         let data_dir = &harness.data_dir;
         write_library_publish_test_composition(data_dir);
         elastos_identity::load_or_create_did(data_dir).unwrap();
-        let (principal_id, profile, proof) = if kind == PrincipalKind::Agent {
-            let agent = crate::auth::valid_agent::plant(data_dir);
-            crate::auth::store_test_principal_root_protection_for(
-                data_dir,
-                &agent.principal_id,
-                root,
-            );
-            let profile = crate::collaboration_profile_authority::test_plant_profile_authority(
-                data_dir,
-                &agent.principal_id,
-                root,
-                "R7 viewer",
-                None,
-                crate::auth::now_ts(),
-            )
-            .unwrap();
-            (agent.principal_id, profile, agent.proof_binding_id)
-        } else {
-            let proof =
-                store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7-open");
-            r4_fixture::set_kind(data_dir, r4_fixture::ID, kind, root);
-            crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
-            let profile = crate::collaboration_profile_authority::update_profile_authority(
-                data_dir,
-                r4_fixture::ID,
-                root,
-                &proof,
-                "R7 viewer",
-                None,
-                crate::auth::now_ts(),
-            )
-            .unwrap();
-            (r4_fixture::ID.to_string(), profile, proof)
-        };
+        let proof = store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7-open");
+        crate::auth::store_test_principal_root_protection_for(
+            data_dir,
+            r4_fixture::ID,
+            id_rule_root,
+        );
+        let decoy = crate::collaboration_profile_authority::update_profile_authority(
+            data_dir,
+            r4_fixture::ID,
+            id_rule_root,
+            &proof,
+            "id-rule decoy",
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        r4_fixture::set_kind(data_dir, r4_fixture::ID, PrincipalKind::Human, stored_root);
+        crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            data_dir,
+            r4_fixture::ID,
+            root,
+            &proof,
+            "R7 viewer",
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        assert_ne!(profile.document().profile_did, decoy.document().profile_did);
+        let principal_id = r4_fixture::ID.to_string();
         let mint = runtime_mint_journal(data_dir)
             .load(harness.mint_id)
             .unwrap();
@@ -13691,9 +13693,42 @@ async fn runtime_custody_open_uses_the_stored_release_root() {
             result.is_err(),
             "fixture custody provider refuses after assembly"
         );
+        let requests = custody.requests().await;
         assert!(
-            !custody.requests().await.is_empty(),
+            !requests.is_empty(),
             "{root}: release assembly did not reach custody: {result:?}"
+        );
+        let stored_key = *ProfileIdentityV1::from_did_key(&profile.document().profile_did)
+            .unwrap()
+            .public_key_bytes();
+        let decoy_key = *ProfileIdentityV1::from_did_key(&decoy.document().profile_did)
+            .unwrap()
+            .public_key_bytes();
+        let names_key = |key: [u8; 32]| {
+            requests.iter().any(|request| {
+                let Some(bytes) = request
+                    .get("signed_runtime_release_operation")
+                    .and_then(Value::as_array)
+                else {
+                    return false;
+                };
+                let operation: Vec<u8> = bytes
+                    .iter()
+                    .filter_map(|byte| byte.as_u64().map(|value| value as u8))
+                    .collect();
+                operation.len() == bytes.len()
+                    && operation
+                        .windows(key.len())
+                        .any(|window| window == key.as_slice())
+            })
+        };
+        assert!(
+            names_key(stored_key),
+            "custody request did not name the stored root localhost://Users/recovered-release-root"
+        );
+        assert!(
+            !names_key(decoy_key),
+            "custody request named the id-rule root localhost://Users/b2caa01d2e3d5fb2ec0d1478"
         );
         r4_fixture::remove(data_dir, &principal_id);
         let missing =
