@@ -129,3 +129,92 @@ async fn state_with_discovery(dir: &std::path::Path) -> GatewayState {
     state.collaboration_discovery_service = Some(service);
     state
 }
+
+/// Every regular file under the data directory's person roots, as paths
+/// relative to the data directory.
+fn files_under_roots(data_dir: &std::path::Path) -> Vec<String> {
+    fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(base, &path, out);
+            } else {
+                out.push(path.strip_prefix(base).unwrap().display().to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for top in ["Users", "UsersAI"] {
+        walk(data_dir, &data_dir.join(top), &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// One row's steps, in order. The row fails only after every step ran, so
+/// its failure text carries each step's outcome.
+struct Steps {
+    row: &'static str,
+    lines: Vec<String>,
+    refused: usize,
+}
+
+impl Steps {
+    fn new(row: &'static str) -> Self {
+        Self {
+            row,
+            lines: Vec::new(),
+            refused: 0,
+        }
+    }
+
+    fn step<T, E: std::fmt::Display>(&mut self, name: &str, result: Result<T, E>) -> Option<T> {
+        match result {
+            Ok(value) => {
+                self.lines.push(format!("PASS    {name}"));
+                Some(value)
+            }
+            Err(error) => {
+                self.refused += 1;
+                self.lines.push(format!("REFUSED {name}: {error:#}"));
+                None
+            }
+        }
+    }
+
+    fn check(&mut self, name: &str, holds: bool, seen: &dyn std::fmt::Debug) {
+        if holds {
+            self.lines.push(format!("PASS    {name}"));
+        } else {
+            self.refused += 1;
+            self.lines.push(format!("FAILED  {name}: saw {seen:?}"));
+        }
+    }
+
+    fn not_reached(&mut self, name: &str, why: &str) {
+        self.lines.push(format!("SKIPPED {name}: {why}"));
+    }
+
+    /// The bytes landed under `root` and nowhere else.
+    fn only_under(&mut self, data_dir: &std::path::Path, root: &str, relative: &str) {
+        let prefix = format!("{}/", root.trim_start_matches("localhost://"));
+        let files = files_under_roots(data_dir);
+        let landed = files.contains(&format!("{prefix}{relative}"));
+        self.check(&format!("{relative} is under {root}"), landed, &files);
+        let strays: Vec<_> = files.iter().filter(|f| !f.starts_with(&prefix)).collect();
+        self.check(
+            "nothing is under any other root",
+            strays.is_empty(),
+            &strays,
+        );
+    }
+
+    fn finish(self) {
+        let report = format!("R8C {}\n{}", self.row, self.lines.join("\n"));
+        println!("{report}");
+        assert!(self.refused == 0, "{report}");
+    }
+}
