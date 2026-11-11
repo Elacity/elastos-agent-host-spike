@@ -4454,3 +4454,112 @@ mod approved_request_resume_tests {
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 }
+
+/// R8c evidence rows for the transaction effect store. The load goes through
+/// `complete_runtime_transaction_effect` (line 984). The store is then loaded
+/// and saved by the private functions the wallet routes call, with the id the
+/// verified authority carries, as lines 601-603 and 699 do.
+#[cfg(test)]
+mod r8c_child_rows {
+    use super::super::gateway_home_token::{
+        issue_home_launch_token_for_auth_grant,
+        require_home_launch_token_value_from_expected_did_for_test as verify,
+    };
+    use super::super::r3_stored_root_tests::verified_parent_device_context;
+    use super::*;
+
+    async fn load_and_save(
+        dir: &Path,
+        authority: &RuntimeWalletAuthority,
+        root: &str,
+    ) -> Result<(), String> {
+        let state = GatewayState {
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            carrier_endpoint: None,
+            collaboration_discovery_service: None,
+            identity_manager: Arc::new(OnceLock::new()),
+            cache_dir: dir.to_path_buf(),
+            data_dir: dir.to_path_buf(),
+        };
+        let lookup = RuntimeTransactionLookup::EffectId("r8c-unknown-effect");
+        let mut refused = Vec::new();
+        match complete_runtime_transaction_effect(&state, authority, lookup, None, None).await {
+            Err((StatusCode::NOT_FOUND, _)) => {}
+            Err((status, text)) => refused.push(format!("load by the route: {status} {text}")),
+            Ok(_) => refused.push("an unknown effect completed".to_string()),
+        }
+        let id = authority.verified_context().principal_id();
+        let store = load_transaction_effect_store(&state, id);
+        if let Err((status, text)) = &store {
+            refused.push(format!("load: {status} {text}"));
+        }
+        let store = store.unwrap_or_else(|_| RuntimeTransactionEffectStore::empty(id));
+        if let Err((status, text)) = save_transaction_effect_store(&state, &store) {
+            refused.push(format!("save: {status} {text}"));
+        }
+        if !refused.is_empty() {
+            return Err(refused.join("; "));
+        }
+        let uri = format!("{root}/{TRANSACTION_EFFECT_STORE_RELATIVE_PATH}");
+        if !rooted_localhost_fs_path(dir, &uri).is_some_and(|path| path.is_file()) {
+            return Err(format!("no effect store at {uri}"));
+        }
+        let roots = std::fs::read_dir(dir.join("Users")).unwrap().count();
+        if roots != 1 {
+            return Err(format!("{roots} roots hold files, expected one"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
+    async fn r8c_child_transaction_effects_load_and_save_under_the_parent_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let (context, parent_root, _, token) =
+            verified_parent_device_context(dir.path(), WALLET_CAPSULE_ID);
+        let parent_did = context.principal_id().trim_start_matches("device:");
+        // The parent's own auth store is gone with the helper; it held no record.
+        let parent_store = tempfile::tempdir().unwrap();
+        let apps = [WALLET_CAPSULE_ID];
+        let required = verify(
+            dir.path(),
+            &token,
+            &apps,
+            parent_did.into(),
+            parent_store.path(),
+        );
+        let authority = runtime_wallet_authority(dir.path(), &required.unwrap()).unwrap();
+        assert_eq!(authority.root.localhost_root(), parent_root);
+        let outcome = load_and_save(dir.path(), &authority, &parent_root).await;
+        assert_eq!(outcome, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn r8c_control_transaction_effects_load_and_save_under_the_stored_persons_root() {
+        let dir = tempfile::tempdir().unwrap();
+        verified_parent_device_context(dir.path(), WALLET_CAPSULE_ID);
+        let record =
+            crate::auth::store_test_human_principal(dir.path(), "person:local:r8c-wallet-control");
+        let now = now_ts();
+        let grant = elastos_runtime::auth::AuthSessionGrantV1 {
+            schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:r8c-wallet-control".to_string(),
+            session_id: "auth:r8c-wallet-control".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec![WALLET_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+        let token =
+            issue_home_launch_token_for_auth_grant(dir.path(), WALLET_CAPSULE_ID, &grant).unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let required = verify(dir.path(), &token, &[WALLET_CAPSULE_ID], did, dir.path());
+        let authority = runtime_wallet_authority(dir.path(), &required.unwrap()).unwrap();
+        let outcome = load_and_save(dir.path(), &authority, &record.localhost_root).await;
+        assert_eq!(outcome, Ok(()));
+    }
+}
