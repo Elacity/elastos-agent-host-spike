@@ -37,8 +37,9 @@ fn library_steps(steps: &mut Steps, dir: &std::path::Path, ctx: &HomeLaunchToken
         "read a file (op read)",
         library(dir, ctx, "read", json!({"uri": uri})),
     );
-    let same = read.is_some_and(|read| read["data"] == json!(data));
-    steps.check("the read returns the written bytes", same, &uri);
+    let read = read.map(|read| read["data"].clone());
+    let same = read == Some(json!(data));
+    steps.check("the read returns the written bytes", same, &read);
     let listed = library(
         dir,
         ctx,
@@ -47,8 +48,10 @@ fn library_steps(steps: &mut Steps, dir: &std::path::Path, ctx: &HomeLaunchToken
     )
     .map(|list| list["objects"].to_string());
     let listed = steps.step("list the folder (op list)", listed);
-    let shown = listed.is_some_and(|objects| objects.contains("r8c-note.txt"));
-    steps.check("the folder list shows the file", shown, &uri);
+    let shown = listed
+        .as_deref()
+        .is_some_and(|objects| objects.contains("r8c-note.txt"));
+    steps.check("the folder list shows the file", shown, &listed);
     steps.only_under(dir, &root, "Documents/r8c-note.txt");
 }
 
