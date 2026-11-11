@@ -319,6 +319,12 @@ pub struct StandIn {
     admitted_on: Vec<Handle>,
 }
 
+impl Default for StandIn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StandIn {
     pub fn new() -> Self {
         Self {
@@ -1913,7 +1919,7 @@ impl StandIn {
         handle: Handle,
         instance: InstanceId,
     ) -> Result<(), (u16, String)> {
-        if self.admitted_on.iter().any(|admitted| *admitted == handle) {
+        if self.admitted_on.contains(&handle) {
             return Ok(());
         }
         let call = self.ledger.open_call(instance);

@@ -401,18 +401,17 @@ after this operator recipe is accepted. Open blockers retain their BLOCKED grade
 Task 019 uses the production shell-authenticated approval routes through the
 one controller in `tests/common/grants.rs`. The root is
 `localhost://Public/agent-conformance-grants`. The manifest declares
-`localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`.
-The ungranted read stays outside the Public pattern. The fixture denies the
-pending `elastos://net/stream` request, and provider execution stays outside
-that row. The Public pattern permits a request; the operator supplies the grant.
+`localhost://Public/agent-conformance-grants/*`. The ungranted read stays
+outside the Public pattern. A manifest that declares `elastos://net/stream` is
+refused at validation, so provider execution stays outside every row. The
+Public pattern permits a request; the operator supplies the grant.
 
 The controller reads only the fixture's `attach_secret` field into memory and
 attaches once with scope `shell` at the port owned by `Operator`. The secret,
 session token and returned grant tokens stay in memory. The controller uses
 `GET /api/capability/pending`, matches resource/action/reason exactly against
 `fixtures/grants.json`, and posts one `once` grant for the listed read. Every
-other pending request receives the fixture denial reason; a pending
-`elastos://net/stream` request receives `fixture denies unlisted elastos://net/stream`.
+other pending request receives the fixture denial reason.
 Ambiguous matches are denied before any grant is selected. The Runtime mints the
 grant for the requesting session (`api/handlers/capability.rs:339-346`); the
 observed guest invocation checks that the requesting client can use it.
@@ -519,16 +518,27 @@ remain refused.
 The deny-only probe requests `read` on the synthetic resource in
 `fixtures/ungranted-read.txt`, or `execute` on `elastos://net/stream` from
 `fixtures/ungranted-network.txt`. The ungranted read stays outside the Public
-pattern. The manifest declares `elastos://net/stream`. The fixture denies that
-pending request, and provider execution stays outside that row. The Runtime
+pattern. The manifest declares only
+`localhost://Public/agent-conformance-grants/*`. An app capsule cannot declare
+`elastos://net/stream`, so this lab no longer shows a live pending network
+request that the fixture then denies. `declared_network_manifest_is_refused`
+proves instead that putting that capability back is refused at validation with
+`app capsules cannot request system-only backend capability "elastos://net/stream"; use the product/provider contract instead`.
+That row calls the Runtime's manifest validation through the lab library; it
+attempts no launch. Whether an app-legal declared `elastos://` resource would
+restore the retired pending-then-denied journey is not investigated. Validation
+admits any `elastos://` resource outside the system-only list
+(`localhost.rs:36-56`, `manifest.rs:647-666`), and whether the Bus then holds
+such a request for the fixture to deny is a run question that no row measures.
+Provider execution stays outside every row. The Runtime
 owns resource authority. The read's manifest refusal returns through the guest's Bus
 call and lifecycle to `elastos run`. The live wrapper uses
 `Component capsule denied: BusError::Internal("capsule manifest does not declare authority for <resource>")`
-for that read. The network row uses
-`Component capsule denied: BusError::Denied("fixture denies unlisted elastos://net/stream")`.
-`undeclared_network_manifest_is_refused` stages the same probe manifest without
-`elastos://net/stream` and requires the manifest refusal
-`Internal("capsule manifest does not declare authority for elastos://net/stream")`.
+for that read. `undeclared_network_manifest_is_refused` stages the shipped probe
+manifest, which does not declare `elastos://net/stream`, and requires the
+manifest refusal
+`Internal("capsule manifest does not declare authority for elastos://net/stream")`
+when the probe requests it anyway.
 The default build uses `BusError::Unavailable` with the AC-002-ARGS reason.
 The probe returns immediately after the
 request, including unexpected success, so this check performs no provider
