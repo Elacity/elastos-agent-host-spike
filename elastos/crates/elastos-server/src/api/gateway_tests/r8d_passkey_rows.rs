@@ -20,6 +20,8 @@ use crate::api::gateway::gateway_home_token::{
 };
 use crate::auth::{PasskeySessionPurpose, PasskeySessionRequest, ResolvedPrincipalRoot};
 
+mod profile;
+
 const RP_ID: &str = "elastos.elacitylabs.com";
 const ORIGIN: &str = "https://elastos.elacitylabs.com";
 const CREDENTIAL: &str = "r8d-parent-passkey";

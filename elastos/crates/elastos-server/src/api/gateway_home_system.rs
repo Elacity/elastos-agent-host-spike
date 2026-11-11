@@ -9897,3 +9897,44 @@ mod r8c_child_rows {
         assert_eq!(roots, 1, "only the stored person's root holds files");
     }
 }
+
+/// R8d evidence row for Profile update, for a parent passkey person on a
+/// child Runtime. `people_profile_update` (line 2521) first calls
+/// `require_profile_authority_passkey_binding` with its own data directory
+/// and then reaches the private `update_profile_for_context` (line 8608);
+/// the row calls both. Its control is the R8c control row above.
+#[cfg(test)]
+mod r8d_passkey_rows {
+    use super::super::gateway_tests::r8d_passkey_rows::{
+        assert_no_bytes_on_child, passkey_person, refusal, PERSON, ROOT,
+    };
+    use super::*;
+    use crate::collaboration_profile_authority as authority;
+
+    #[test]
+    fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
+        let person = passkey_person(PEOPLE_CAPSULE_ID);
+        let child = person.child.path();
+        let proof = person.ctx.proof_binding_id();
+        // The token carries the passkey proof binding. The gate looks that
+        // binding up in the auth state of the data directory it is handed,
+        // which is the child's own, and the child stores no such binding.
+        let gate = authority::require_profile_authority_passkey_binding(
+            child,
+            &home_browser_principal_id(&person.ctx),
+            proof,
+        );
+        assert_eq!(refusal(gate).as_deref(), Some("proof binding not found"));
+        let updated = update_profile_for_context(child, &person.ctx, "R8d Person");
+        assert_eq!(refusal(updated).as_deref(), Some("proof binding not found"));
+        // The same gate, handed the parent's data directory, accepts them.
+        let parent = person.parent.path();
+        let on_parent = authority::require_profile_authority_passkey_binding(parent, PERSON, proof);
+        assert_eq!(refusal(on_parent), None);
+        // Nothing was written on the child and the parent's Profile is as it was.
+        assert_no_bytes_on_child(&person);
+        let kept = authority::load_profile_authority(parent, PERSON, ROOT).unwrap();
+        let name = kept.map(|profile| profile.document().display_name.clone());
+        assert_eq!(name.as_deref(), Some("Parent Person"));
+    }
+}
