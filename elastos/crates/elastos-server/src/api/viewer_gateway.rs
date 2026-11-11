@@ -1209,8 +1209,8 @@ mod r4_root_tests {
 /// is built for the person's root.
 #[cfg(test)]
 mod r8d_passkey_rows {
-    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{passkey_person, ROOT};
     use super::*;
+    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{passkey_person, ROOT};
 
     const DOCUMENTS: &str = "documents";
 
@@ -1258,10 +1258,7 @@ mod r8d_passkey_rows {
             "r8d-note.md",
         )
         .unwrap_or_else(|error| panic!("{error:#}"));
-        assert_eq!(
-            target.object_uri,
-            format!("{ROOT}/Documents/r8d-note.md")
-        );
+        assert_eq!(target.object_uri, format!("{ROOT}/Documents/r8d-note.md"));
         let bytes = b"r8d child viewer note".to_vec();
         viewer_storage_write(
             child,

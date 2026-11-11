@@ -10059,14 +10059,12 @@ mod r8d_passkey_rows {
         )
         .unwrap_or_else(|error| panic!("{error:#}"));
         let second = b"r8d second image".to_vec();
-        home_save_background_image(
+        home_save_background_image(child, &person.ctx, "background-image.jpg", second.clone())
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        let earlier = person_path(
             child,
-            &person.ctx,
-            "background-image.jpg",
-            second.clone(),
-        )
-        .unwrap_or_else(|error| panic!("{error:#}"));
-        let earlier = person_path(child, ".AppData/ElastOS/Home/Appearance/background-image.png");
+            ".AppData/ElastOS/Home/Appearance/background-image.png",
+        );
         assert!(
             !earlier.exists(),
             "the earlier image is removed: {}",
@@ -10114,8 +10112,7 @@ mod r8d_passkey_rows {
     fn r8d_child_browser_state_save_for_the_passkey_person() {
         let person = passkey_person(HOME_CAPSULE_ID);
         let child = person.child.path();
-        let update: HomeBrowserStateUpdate =
-            serde_json::from_value(serde_json::json!({})).unwrap();
+        let update: HomeBrowserStateUpdate = serde_json::from_value(serde_json::json!({})).unwrap();
         let saved = home_save_browser_state(child, &person.ctx, update)
             .unwrap_or_else(|error| panic!("{error:#}"));
         assert_eq!(saved.schema, HOME_BROWSER_STATE_SCHEMA);

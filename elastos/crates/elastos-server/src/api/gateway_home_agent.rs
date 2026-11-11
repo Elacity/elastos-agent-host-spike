@@ -377,9 +377,7 @@ mod r3_tests {
 /// `home_agent_workspace_put` calls after the token is verified.
 #[cfg(test)]
 mod r8d_passkey_rows {
-    use super::super::gateway_tests::r8d_passkey_rows::{
-        passkey_person, refusal, PasskeyPerson,
-    };
+    use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, refusal, PasskeyPerson};
     use super::super::r3_stored_root_tests::NEEDS_PROTECTION;
     use super::*;
 
