@@ -1865,9 +1865,13 @@ only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
 recovery list (`PROVIDER_TARGETS` in `examples/agent-host/falsify.py`) names
 five files of this lane: `src/lib.rs`, `tests/common/mod.rs`,
-`fixtures/wc001-core/capsule.json`, `.gitignore` and `README.md`. F-CI4h
+`fixtures/wc001-core/capsule.json`, `.gitignore` and `README.md`, and a sixth
+outside it: `elastos/crates/elastos-bundle-identity/src/lib.rs`, where the
+identity code lives since it moved there, text for text. F-CI4h
 edits this lane's `.gitignore`, F-CI4i edits this file, and every other entry
-edits one of the first three. Task 014 moved the key-material scan, byte for
+edits one of the first three or the sixth. Where this file says below that
+an entry edits `src/lib.rs`, the edit is in the sixth file if the code it
+names moved. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
 `new` and tests unchanged. Task 019's entries edit only `src/lib.rs`
