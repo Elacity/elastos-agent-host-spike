@@ -21,6 +21,7 @@ use crate::api::gateway::gateway_home_token::{
 use crate::auth::{PasskeySessionPurpose, PasskeySessionRequest, ResolvedPrincipalRoot};
 
 mod cli_context;
+mod direct_messages;
 mod people;
 mod presence;
 mod profile;
