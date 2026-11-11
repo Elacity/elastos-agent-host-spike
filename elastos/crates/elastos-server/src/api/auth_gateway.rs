@@ -7832,7 +7832,34 @@ mod tests {
                     Some(archive),
                 )
                 .unwrap();
-                crate::auth::store_principal_root_protection(temp.path(), protection).unwrap();
+                if kind == PrincipalKind::Agent {
+                    // Setup used to store this through the production store.
+                    // That store now refuses an agent root protection. The
+                    // reassignment still needs the entry in the file.
+                    let refused = crate::auth::store_principal_root_protection(
+                        temp.path(),
+                        protection.clone(),
+                    )
+                    .expect_err("the production store refuses an added agent root protection");
+                    assert_eq!(
+                        refused.to_string(),
+                        "agent admission protection change refused: agent root protection added (5 named operations exist and none is authorized)"
+                    );
+                    crate::auth::plant_principal_root_protection(temp.path(), &protection);
+                    assert!(
+                        crate::auth::load_auth_state(temp.path())
+                            .unwrap()
+                            .principal_root_protections
+                            .iter()
+                            .any(|stored| {
+                                stored.principal_id == r4_fixture::principal_id(kind)
+                                    && stored.localhost_root == root
+                            }),
+                        "the agent root protection is stored for the reassignment"
+                    );
+                } else {
+                    crate::auth::store_principal_root_protection(temp.path(), protection).unwrap();
+                }
             }
             if remove_recovered {
                 r4_fixture::remove(temp.path(), r4_fixture::principal_id(kind));

@@ -12854,6 +12854,31 @@ pub(crate) mod r4_fixture {
     }
 }
 
+/// Writes one protection into the auth file. The save guard refuses an
+/// agent store's protection under every permit, so a row that needs the map
+/// entry writes it here. The production store still goes through the guard.
+#[cfg(test)]
+pub(crate) fn plant_principal_root_protection(
+    data_dir: &Path,
+    protection: &PrincipalRootProtectionV1,
+) {
+    let path = auth_state_path(data_dir).unwrap();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    if !value
+        .get("principal_root_protections")
+        .is_some_and(Value::is_array)
+    {
+        value["principal_root_protections"] = serde_json::json!([]);
+    }
+    let entries = value["principal_root_protections"].as_array_mut().unwrap();
+    entries.retain(|stored| {
+        stored["principal_id"] != protection.principal_id
+            || stored["localhost_root"] != protection.localhost_root
+    });
+    entries.push(serde_json::to_value(protection).unwrap());
+    write_auth_state_value(data_dir, &value);
+}
+
 /// The test protection written under a caller-named root, so a test can put
 /// an object under a root the human default does not name.
 #[cfg(test)]
@@ -12954,21 +12979,7 @@ pub(crate) fn store_test_principal_root_protection_for(
                 || record.proof_binding.kind == ProofBindingKind::AgentAdmission)
     });
     if agent_root {
-        let path = auth_state_path(data_dir).unwrap();
-        let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        if !value
-            .get("principal_root_protections")
-            .is_some_and(Value::is_array)
-        {
-            value["principal_root_protections"] = serde_json::json!([]);
-        }
-        let entries = value["principal_root_protections"].as_array_mut().unwrap();
-        entries.retain(|stored| {
-            stored["principal_id"] != protection.principal_id
-                || stored["localhost_root"] != protection.localhost_root
-        });
-        entries.push(serde_json::to_value(&protection).unwrap());
-        write_auth_state_value(data_dir, &value);
+        plant_principal_root_protection(data_dir, &protection);
         return protection;
     }
     // The production store refuses a quarantined principal. A row that plants
@@ -13044,11 +13055,9 @@ pub(crate) mod tests {
                 .contains("quarantined agent record: agent kind binding mismatch"),
             "{quarantined}"
         );
-        mutate_auth_state(data_dir.path(), |state| {
-            state.principal_root_protections.push(protection.clone());
-            Ok(())
-        })
-        .unwrap();
+        // The production store already refused this entry. The load below
+        // needs it in the file, so the row writes the file directly.
+        plant_principal_root_protection(data_dir.path(), &protection);
         plant_principal_kind(
             data_dir.path(),
             &human.principal_id,
