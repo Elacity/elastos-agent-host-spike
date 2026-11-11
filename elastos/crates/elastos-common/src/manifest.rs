@@ -94,6 +94,13 @@ pub struct CapsuleManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentDeclaration>,
 
+    /// The most this capsule may ever ask for: each entry is a resource and
+    /// the actions on it. A ceiling only: an ask grants nothing. Skipped when
+    /// empty so every existing signing message is unchanged; an older Runtime
+    /// refuses the field (`deny_unknown_fields`), failing closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<ManifestAsk>,
+
     /// Capabilities this capsule needs from other capsules (URI list)
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -187,6 +194,7 @@ impl ModelContentMetadata {
             || manifest.provides.is_some()
             || !manifest.requires.is_empty()
             || !manifest.capabilities.is_empty()
+            || !manifest.asks.is_empty()
             || !manifest.interfaces.is_empty()
             || manifest.permissions.host_process
             || manifest.permissions.guest_network
@@ -431,6 +439,12 @@ impl CapsuleManifest {
     /// covers localhost/object storage authority. Both are upper bounds only;
     /// explicit Runtime grants and audit still decide actual use.
     pub fn resource_authority_bounds(&self) -> Vec<String> {
+        // One ceiling, not two: until the bridge reads `asks`, a manifest
+        // that has them is bounded to nothing. Decided here as well as in
+        // `validate()`, so that it holds for every caller of this function.
+        if !self.asks.is_empty() {
+            return Vec::new();
+        }
         let mut bounds = BTreeSet::new();
         bounds.extend(self.capabilities.iter().cloned());
         bounds.extend(self.permissions.storage.iter().cloned());
@@ -626,7 +640,11 @@ impl CapsuleManifest {
             }
         }
 
-        for cap in &self.capabilities {
+        // An ask's resource passes the same checks as a capability: one
+        // loop, so `asks` is never a way round a role rule. Every ask's
+        // resource is therefore checked here, before any ask's actions.
+        let asked = self.asks.iter().map(|ask| &ask.resource);
+        for cap in self.capabilities.iter().chain(asked) {
             if !is_allowed_uri_scheme(cap) {
                 return Err(format!(
                     "unsupported URI scheme in capability \"{}\"; allowed: elastos://, localhost://",
@@ -652,6 +670,7 @@ impl CapsuleManifest {
         }
 
         self.validate_interfaces()?;
+        self.validate_asks()?;
 
         for storage in &self.permissions.storage {
             if !is_allowed_uri_scheme(storage) {
@@ -676,6 +695,44 @@ impl CapsuleManifest {
             }
         }
 
+        Ok(())
+    }
+
+    /// Each ask in the list's order, then the rule that a manifest has one
+    /// ceiling: `asks`, or `capabilities` and storage permissions, not both.
+    fn validate_asks(&self) -> Result<(), String> {
+        let mut resources = BTreeSet::new();
+        for ask in &self.asks {
+            if ask.actions.is_empty() {
+                return Err(format!(
+                    "ask_invalid: the ask for \"{}\" lists no action",
+                    ask.resource
+                ));
+            }
+            let mut actions = BTreeSet::new();
+            for action in &ask.actions {
+                if !actions.insert(*action) {
+                    return Err(format!(
+                        "ask_invalid: the ask for \"{}\" repeats the action \"{}\"",
+                        ask.resource,
+                        action.as_str()
+                    ));
+                }
+            }
+            if !resources.insert(ask.resource.as_str()) {
+                return Err(format!(
+                    "ask_invalid: \"{}\" is asked for twice",
+                    ask.resource
+                ));
+            }
+        }
+        let other_ceiling = !self.capabilities.is_empty() || !self.permissions.storage.is_empty();
+        if !self.asks.is_empty() && other_ceiling {
+            return Err(
+                "asks_conflict: a manifest with asks may not also declare capabilities or storage permissions"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 
@@ -961,6 +1018,61 @@ fn validate_json_schema(kind: &str, schema: Option<&Value>) -> Result<(), String
         return Ok(());
     }
     Err(format!("{} schema must be a JSON object or boolean", kind))
+}
+
+/// One entry of a manifest's `asks`: a resource and the actions asked on it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestAsk {
+    pub resource: String,
+    pub actions: Vec<AskAction>,
+}
+
+/// The Runtime's six action words. They are spelled here because the
+/// Runtime's own `Action` lives in a crate that depends on this one; a test
+/// in that crate fails if the two lists differ.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase", try_from = "String")]
+pub enum AskAction {
+    Read,
+    Write,
+    Execute,
+    Message,
+    Delete,
+    Admin,
+}
+
+impl AskAction {
+    pub const ALL: [AskAction; 6] = [
+        AskAction::Read,
+        AskAction::Write,
+        AskAction::Execute,
+        AskAction::Message,
+        AskAction::Delete,
+        AskAction::Admin,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AskAction::Read => "read",
+            AskAction::Write => "write",
+            AskAction::Execute => "execute",
+            AskAction::Message => "message",
+            AskAction::Delete => "delete",
+            AskAction::Admin => "admin",
+        }
+    }
+}
+
+impl TryFrom<String> for AskAction {
+    type Error = String;
+
+    fn try_from(word: String) -> Result<Self, Self::Error> {
+        AskAction::ALL
+            .into_iter()
+            .find(|action| action.as_str() == word)
+            .ok_or_else(|| format!("ask_invalid: \"{word}\" is not a Runtime action"))
+    }
 }
 
 /// What a capsule's signer declares about it as an agent.
@@ -3328,5 +3440,289 @@ mod tests {
         );
         assert!(manifest.provides.is_some());
         assert!(manifest.validate().is_ok());
+    }
+
+    // ---- `asks` (upstream #464): a signed ceiling that grants nothing ----
+
+    fn asks_fixture(role: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut value = serde_json::json!({"schema":"elastos.capsule/v1", "name":"asks-fixture", "version":"0.1.0", "role":role, "type":"data", "entrypoint":"index.html"});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        value
+    }
+
+    fn asks_manifest(extra: serde_json::Value) -> CapsuleManifest {
+        serde_json::from_value(asks_fixture("app", extra)).unwrap()
+    }
+
+    #[test]
+    fn asks_parse_validate_and_round_trip() {
+        let manifest = asks_manifest(serde_json::json!({"asks":[
+            {"resource":"elastos://did/*","actions":["read","message"]},
+            {"resource":"localhost://Users/self/Documents/*","actions":["read","write","delete"]},
+        ]}));
+        manifest.validate().unwrap();
+        assert_eq!(manifest.asks.len(), 2);
+        assert_eq!(
+            manifest.asks[0].actions,
+            vec![AskAction::Read, AskAction::Message]
+        );
+        let again: CapsuleManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(again.asks, manifest.asks);
+    }
+
+    #[test]
+    fn an_empty_asks_list_is_the_same_manifest_as_no_asks_key() {
+        let without = asks_manifest(serde_json::json!({}));
+        let with_empty = asks_manifest(serde_json::json!({"asks":[]}));
+        let text = serde_json::to_string(&without).unwrap();
+        assert_eq!(serde_json::to_string(&with_empty).unwrap(), text);
+        assert!(
+            !text.contains("\"asks\""),
+            "an empty asks list must not be serialised: {text}"
+        );
+    }
+
+    #[test]
+    fn an_ask_with_no_action_a_repeated_action_or_a_repeated_resource_is_ask_invalid() {
+        for (asks, expected) in [
+            (
+                serde_json::json!([{"resource":"elastos://did/*","actions":[]}]),
+                "ask_invalid: the ask for \"elastos://did/*\" lists no action",
+            ),
+            (
+                serde_json::json!([{"resource":"elastos://did/*","actions":["read","read"]}]),
+                "ask_invalid: the ask for \"elastos://did/*\" repeats the action \"read\"",
+            ),
+            (
+                serde_json::json!([
+                    {"resource":"elastos://did/*","actions":["read"]},
+                    {"resource":"elastos://did/*","actions":["write"]},
+                ]),
+                "ask_invalid: \"elastos://did/*\" is asked for twice",
+            ),
+        ] {
+            let manifest = asks_manifest(serde_json::json!({ "asks": asks }));
+            assert_eq!(manifest.validate().unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn an_unknown_action_word_is_refused_by_name_when_the_manifest_is_parsed() {
+        for word in ["edit", "Read", "READ", ""] {
+            let value = asks_fixture(
+                "app",
+                serde_json::json!({"asks":[{"resource":"elastos://did/*","actions":[word]}]}),
+            );
+            let error = serde_json::from_value::<CapsuleManifest>(value)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("ask_invalid: \"{word}\" is not a Runtime action")),
+                "{word:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ask_with_an_unknown_key_is_refused() {
+        let value = asks_fixture(
+            "app",
+            serde_json::json!({"asks":[{"resource":"elastos://did/*","actions":["read"],"grant":true}]}),
+        );
+        let error = serde_json::from_value::<CapsuleManifest>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `grant`"), "{error}");
+    }
+
+    #[test]
+    fn an_asks_resource_passes_the_checks_a_capability_passes() {
+        let bad_scheme = asks_manifest(
+            serde_json::json!({"asks":[{"resource":"https://example.org/*","actions":["read"]}]}),
+        );
+        assert!(bad_scheme
+            .validate()
+            .unwrap_err()
+            .contains("unsupported URI scheme"));
+        for role in ["app", "viewer", "content"] {
+            for scheme in ["exit", "net"] {
+                let value = asks_fixture(
+                    role,
+                    serde_json::json!({"asks":[{"resource":format!("elastos://{scheme}/*"),"actions":["read"]}]}),
+                );
+                let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+                assert!(
+                    manifest
+                        .validate()
+                        .unwrap_err()
+                        .contains("system-only backend"),
+                    "{role} {scheme}"
+                );
+            }
+            let service = "localhost://ElastOS/SystemServices/IPFS/*";
+            let value = asks_fixture(
+                role,
+                serde_json::json!({"asks":[{"resource":service,"actions":["read"]}]}),
+            );
+            let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+            assert!(
+                manifest
+                    .validate()
+                    .unwrap_err()
+                    .contains("runtime system-service storage"),
+                "{role}"
+            );
+        }
+    }
+
+    #[test]
+    fn asks_with_capabilities_or_storage_is_asks_conflict() {
+        let ask = serde_json::json!([{"resource":"elastos://did/*","actions":["read"]}]);
+        for other in [
+            serde_json::json!({"capabilities":["elastos://did/*"]}),
+            serde_json::json!({"permissions":{"storage":["localhost://Users/self/Documents/*"]}}),
+        ] {
+            let mut extra = serde_json::json!({ "asks": ask });
+            extra
+                .as_object_mut()
+                .unwrap()
+                .extend(other.as_object().unwrap().clone());
+            let error = asks_manifest(extra).validate().unwrap_err();
+            assert!(error.starts_with("asks_conflict:"), "{error}");
+        }
+    }
+
+    #[test]
+    fn an_ask_that_is_invalid_and_also_conflicts_is_reported_as_ask_invalid() {
+        let manifest = asks_manifest(serde_json::json!({
+            "capabilities":["elastos://did/*"],
+            "asks":[{"resource":"elastos://did/*","actions":[]}],
+        }));
+        let error = manifest.validate().unwrap_err();
+        assert!(error.starts_with("ask_invalid:"), "{error}");
+    }
+
+    /// The order between two asks that are each wrong in a different way:
+    /// the resources of all asks are checked first (in the one loop they
+    /// share with capabilities), then each ask's actions in the list's order.
+    #[test]
+    fn every_asks_resource_is_checked_before_any_asks_actions() {
+        let manifest = asks_manifest(serde_json::json!({"asks":[
+            {"resource":"elastos://did/*","actions":[]},
+            {"resource":"https://example.org/*","actions":["read"]},
+        ]}));
+        let error = manifest.validate().unwrap_err();
+        assert!(error.contains("unsupported URI scheme"), "{error}");
+        let manifest = asks_manifest(serde_json::json!({"asks":[
+            {"resource":"elastos://did/*","actions":[]},
+            {"resource":"elastos://did/second/*","actions":["read","read"]},
+        ]}));
+        assert_eq!(
+            manifest.validate().unwrap_err(),
+            "ask_invalid: the ask for \"elastos://did/*\" lists no action"
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_asks_has_empty_bounds_whatever_else_it_holds() {
+        let asks_only = asks_manifest(
+            serde_json::json!({"asks":[{"resource":"elastos://did/*","actions":["read"]}]}),
+        );
+        assert_eq!(asks_only.resource_authority_bounds(), Vec::<String>::new());
+        // Not a valid manifest; the bounds function itself must still
+        // give nothing, whoever calls it.
+        let with_capability = asks_manifest(serde_json::json!({
+            "capabilities":["elastos://did/*"],
+            "permissions":{"storage":["localhost://Users/self/Documents/*"]},
+            "asks":[{"resource":"elastos://did/*","actions":["read"]}],
+        }));
+        assert!(with_capability.validate().is_err());
+        assert_eq!(
+            with_capability.resource_authority_bounds(),
+            Vec::<String>::new()
+        );
+        let no_asks = asks_manifest(serde_json::json!({"capabilities":["elastos://did/*"]}));
+        assert_eq!(
+            no_asks.resource_authority_bounds(),
+            vec!["elastos://did/*".to_string()]
+        );
+    }
+
+    /// The folder signature is over the manifest serialised again from the
+    /// parsed type. These digests were captured from the unchanged code
+    /// before `asks` existed, so a new field that serialised when empty
+    /// would break every existing signature and turn this row red.
+    #[test]
+    fn shipped_manifests_keep_the_signing_message_they_had_before_asks() {
+        for (manifest_json, digest_before) in [
+            (
+                include_str!("../../../../capsules/assistant/capsule.json"),
+                "9ca8a068abdea6b3f82547b754cb90bd5a05ca827d7c527cdbc918350aecdba0",
+            ),
+            (
+                include_str!("../../../../capsules/archive-manager/capsule.json"),
+                "80d8a9ea60871fd1769ec2afae59ae714318f19b875dfb5d694bddfead91417e",
+            ),
+            (
+                include_str!("../../../../capsules/availability-provider/capsule.json"),
+                "7685bb38410aca8a33d9dac66d6fc48afd20bb641624fb90b56e834a324a7f0f",
+            ),
+        ] {
+            let mut manifest: CapsuleManifest = serde_json::from_str(manifest_json).unwrap();
+            manifest.signature = None;
+            let signed_text = serde_json::to_string(&manifest).unwrap();
+            let digest: String = Sha256::digest(signed_text.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            assert_eq!(digest, digest_before, "{}", manifest.name);
+        }
+    }
+
+    #[test]
+    fn model_content_with_an_ask_is_not_passive() {
+        let passive: CapsuleManifest = serde_json::from_value(model_content_fixture()).unwrap();
+        passive.validate().unwrap();
+        let mut value = model_content_fixture();
+        value["asks"] = serde_json::json!([{"resource":"elastos://did/*","actions":["read"]}]);
+        let with_ask: CapsuleManifest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            with_ask.validate().unwrap_err(),
+            "model_content requires passive content/data without execution authority"
+        );
+    }
+
+    #[test]
+    fn the_six_ask_action_words_are_lowercase_and_distinct() {
+        let words: Vec<&str> = AskAction::ALL
+            .iter()
+            .map(|action| action.as_str())
+            .collect();
+        assert_eq!(
+            words,
+            ["read", "write", "execute", "message", "delete", "admin"]
+        );
+        for action in AskAction::ALL {
+            assert_eq!(
+                serde_json::to_string(&action).unwrap(),
+                format!("\"{}\"", action.as_str())
+            );
+        }
+        // No wildcard arm: a variant added to the type stops this compiling
+        // until it is given its place, and that place must be in `ALL`.
+        let place = |action: AskAction| match action {
+            AskAction::Read => 0,
+            AskAction::Write => 1,
+            AskAction::Execute => 2,
+            AskAction::Message => 3,
+            AskAction::Delete => 4,
+            AskAction::Admin => 5,
+        };
+        let places: Vec<usize> = AskAction::ALL.into_iter().map(place).collect();
+        assert_eq!(places, [0, 1, 2, 3, 4, 5]);
     }
 }

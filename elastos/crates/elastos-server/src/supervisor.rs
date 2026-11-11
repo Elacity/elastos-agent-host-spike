@@ -2040,6 +2040,79 @@ mod tests {
         .unwrap()
     }
 
+    /// A capsule folder the supervisor already holds. With a capability alone,
+    /// the loaded manifest's ceiling is that capability (the control). With
+    /// asks beside the capability, and with asks alone, the ceiling is empty
+    /// and a request for that resource is refused: the bounds function decides
+    /// it, whatever else the manifest holds.
+    #[tokio::test]
+    async fn a_loaded_manifest_with_asks_has_an_empty_ceiling() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "asks-fixture";
+        let capsule_dir = temp.path().join("capsules").join(name);
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-asks-test\n").unwrap();
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            name.to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-asks-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            temp.path().to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let capability = serde_json::json!(["elastos://did/*"]);
+        let asks = serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]);
+        let mut ceilings = Vec::new();
+        for (capabilities, asks) in [
+            (capability.clone(), serde_json::json!([])),
+            (capability, asks.clone()),
+            (serde_json::json!([]), asks),
+        ] {
+            let manifest = serde_json::json!({
+                "schema": "elastos.capsule/v1", "name": name, "version": "0.1.0",
+                "role": "app", "type": "data", "entrypoint": "index.html",
+                "capabilities": capabilities, "asks": asks,
+            });
+            std::fs::write(
+                capsule_dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let (_, loaded) = supervisor.load_capsule_manifest(name).await.unwrap();
+            let ceiling = loaded.resource_authority_bounds();
+            let allowed = crate::resource_bridge::manifest_allows_resource(
+                &ceiling,
+                "elastos://did/key",
+                None,
+                None,
+            );
+            ceilings.push((ceiling, allowed));
+        }
+        assert_eq!(
+            ceilings,
+            vec![
+                (vec!["elastos://did/*".to_string()], true),
+                (Vec::new(), false),
+                (Vec::new(), false),
+            ]
+        );
+    }
+
     /// The supervisor's launch of a capsule it already holds stops at its
     /// manifest parse when the manifest pins a requirement. The serde text is
     /// under the context line, so the whole chain is read (`{:#}`).

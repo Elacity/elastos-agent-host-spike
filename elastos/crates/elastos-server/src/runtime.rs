@@ -679,6 +679,102 @@ pub(crate) mod tests {
         }
     }
 
+    /// The map the launch entry fills: capsule id to ceiling.
+    type Ceilings = Arc<StdRwLock<HashMap<String, Vec<String>>>>;
+
+    /// Records, when a capsule starts, the ceiling the launch entry filled for it.
+    #[derive(Default)]
+    struct CeilingReadingProvider {
+        ceilings: std::sync::OnceLock<Ceilings>,
+        seen: std::sync::Mutex<Vec<Option<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl ComputeProvider for CeilingReadingProvider {
+        async fn load(&self, _path: &Path, manifest: CapsuleManifest) -> Result<CapsuleHandle> {
+            Ok(CapsuleHandle {
+                id: CapsuleId::new("ceiling-capsule"),
+                manifest,
+                args: Vec::new(),
+            })
+        }
+
+        async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
+            let ceilings = self.ceilings.get().unwrap().read().unwrap();
+            let ceiling = ceilings.get(&handle.id.0).cloned();
+            self.seen.lock().unwrap().push(ceiling);
+            Ok(())
+        }
+
+        async fn stop(&self, _handle: &CapsuleHandle) -> Result<()> {
+            Ok(())
+        }
+
+        async fn status(&self, _handle: &CapsuleHandle) -> Result<CapsuleStatus> {
+            Ok(CapsuleStatus::Running)
+        }
+
+        async fn info(&self, handle: &CapsuleHandle) -> Result<CapsuleInfo> {
+            Ok(CapsuleInfo {
+                id: handle.id.clone(),
+                name: handle.manifest.name.clone(),
+                status: CapsuleStatus::Running,
+                memory_used_mb: 0,
+            })
+        }
+
+        fn supports(&self, _capsule_type: &CapsuleType) -> bool {
+            true
+        }
+    }
+
+    /// The launch entry fills a capsule's ceiling from the bounds function: a
+    /// capability is its ceiling (the control), and a manifest whose only
+    /// authority field is asks is started with an empty one.
+    #[tokio::test]
+    async fn the_launch_entry_starts_a_manifest_with_only_asks_under_an_empty_ceiling() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let provider = Arc::new(CeilingReadingProvider::default());
+        let runtime = Runtime::new(storage, provider.clone());
+        assert!(provider
+            .ceilings
+            .set(runtime.bridge_manifest_capabilities.clone())
+            .is_ok());
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        let dir = temp_dir.path().join("asks-launch");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"vm image bytes").unwrap();
+        let mut with_capability = unsigned_manifest();
+        with_capability.capsule_type = CapsuleType::MicroVM;
+        with_capability.entrypoint = "rootfs.ext4".to_string();
+        let mut with_asks = with_capability.clone();
+        with_capability.capabilities = vec!["elastos://did/*".to_string()];
+        with_asks.asks = vec![elastos_common::ManifestAsk {
+            resource: "elastos://did/*".to_string(),
+            actions: vec![elastos_common::AskAction::Read],
+        }];
+        for manifest in [with_capability, with_asks] {
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            runtime.run_local(&dir, Vec::new()).await.unwrap();
+        }
+        assert_eq!(
+            *provider.seen.lock().unwrap(),
+            vec![Some(vec!["elastos://did/*".to_string()]), Some(Vec::new())]
+        );
+    }
+
     /// A manifest whose requirement carries a `cid`: a pin. Only
     /// `PinnedManifest` reads one; every start path parses the ordinary
     /// manifest type, which refuses the key.
@@ -773,6 +869,7 @@ pub(crate) mod tests {
             window_policy: None,
             model_content: None,
             agent: None,
+            asks: Vec::new(),
             signature: None,
         }
     }

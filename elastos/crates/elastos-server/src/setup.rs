@@ -2035,6 +2035,7 @@ fn installed_component_capsule_metadata_stale_reason(
             || manifest.provides.is_some()
             || !manifest.requires.is_empty()
             || !manifest.capabilities.is_empty()
+            || !manifest.asks.is_empty()
             || !manifest.interfaces.is_empty()
             || manifest.permissions.host_process
             || manifest.permissions.guest_network
@@ -7018,6 +7019,37 @@ pub(crate) mod tests {
         assert!(
             installed_component_capsule_metadata_stale_reason("kubo", &component, tmp.path())
                 .is_some()
+        );
+    }
+
+    /// Installed content states no asks: the same metadata that is admitted
+    /// without one is refused as not passive with one, and for that reason,
+    /// not because the ask itself is malformed.
+    #[test]
+    fn installed_content_metadata_with_an_ask_is_not_passive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut component = provider_component_with_capsule_metadata();
+        component.provider_runtime = None;
+        let mut manifest = serde_json::json!({
+            "schema": "elastos.capsule/v1", "name": "kubo", "version": "0.40.1",
+            "role": "content", "type": "data", "projections": ["content"],
+            "entrypoint": "ipfs"
+        });
+        fs::write(tmp.path().join("ipfs"), b"packaged kubo").unwrap();
+        let reason = |manifest: &serde_json::Value| {
+            fs::write(
+                tmp.path().join("capsule.json"),
+                serde_json::to_vec(manifest).unwrap(),
+            )
+            .unwrap();
+            installed_component_capsule_metadata_stale_reason("kubo", &component, tmp.path())
+        };
+        assert_eq!(reason(&manifest), None);
+        manifest["asks"] =
+            serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]);
+        assert_eq!(
+            reason(&manifest).as_deref(),
+            Some("capsule metadata must be passive content/data")
         );
     }
 
