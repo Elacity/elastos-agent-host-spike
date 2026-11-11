@@ -45,7 +45,7 @@ let host = null;
 let streamFollowCleanup = null;
 
 /* A reader within this distance of the end is at the end. */
-export const READER_AT_END_PX = 8;
+export const READER_AT_END_PX = 0;
 let transcriptFollow = null;
 export function pinTranscriptToEnd(scroller) {
   if (!scroller) return 0;
