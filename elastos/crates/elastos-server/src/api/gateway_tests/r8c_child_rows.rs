@@ -16,6 +16,7 @@ use elastos_runtime::signature::{generate_keypair, SigningKey};
 mod people;
 mod presence;
 mod profile;
+mod room_card;
 
 /// A child Runtime's data directory and the parent-signed device person.
 struct Child {
