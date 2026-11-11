@@ -57,28 +57,37 @@ try {
     await run("swiftc", ["-O", "-module-cache-path", resolve(output, "module-cache"), "-o", binary,
       resolve(root, "scripts/fixtures/assistant-follow-input-webkit.swift")], { timeout: 60000 });
   }
+  const timings = {}, launchStarted = performance.now();
   browser = await chromium.launch({ headless: !native, args: native ? ["--force-renderer-accessibility"] : [], ignoreDefaultArgs: ["--hide-scrollbars"],
     ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
-  // Chromium's first page in a fresh browser ran at 7-8 frames a second under
-  // four-core load while the second page of the same run reached 68, and each
-  // Playwright mouse event on that first page returned after a fixed 5 s
-  // input-ack timeout, so the page's own state arrived after its waits had
-  // expired. The first page here is a throwaway: this check measures the
-  // module's follow behaviour, not Chromium's first-page startup.
-  const warmup = await browser.newPage({ viewport: { width: 800, height: 600 } });
-  await warmup.setContent('<style>body{margin:0;height:2000px}</style><div style="height:2000px">warm</div>');
-  await warmup.evaluate(() => new Promise(done => {
-    let n = 0;
-    const tick = () => (++n >= 2 ? done() : requestAnimationFrame(tick));
-    requestAnimationFrame(tick);
-  }));
-  await warmup.mouse.move(400, 300);
-  await warmup.mouse.down();
-  await warmup.mouse.move(400, 100, { steps: 2 });
-  await warmup.mouse.up();
-  await warmup.close();
+  timings.launch = Math.round(performance.now() - launchStarted);
+  // Workaround: the diagnostic logs show the failing first pages at 26 and 14
+  // frames a second against 68 and 60 on the second page of the same browser,
+  // one mouse move near 5 s and one drag near 10 s against keys of 2-11 ms;
+  // the logs cannot tell first-page startup from the first interval after it.
+  let warmup, warmupStep = "page open", warmupTimer; const warmupStarted = performance.now();
+  try {
+    await Promise.race([
+      (async () => {
+        warmup = await browser.newPage({ viewport: { width: 800, height: 600 } });
+        warmupStep = "setContent"; await warmup.setContent('<style>body{margin:0;height:2000px}</style><div style="height:2000px">warm</div>');
+        warmupStep = "two frames"; await warmup.evaluate(() => new Promise(done => {
+          let n = 0; const tick = () => (++n >= 2 ? done() : requestAnimationFrame(tick)); requestAnimationFrame(tick);
+        }));
+        warmupStep = "mouse drag";
+        await warmup.mouse.move(400, 300); await warmup.mouse.down();
+        await warmup.mouse.move(400, 100, { steps: 2 }); await warmup.mouse.up();
+      })(),
+      new Promise((_, fail) => { warmupTimer = setTimeout(() => fail(new Error(`did not settle in 20s at ${warmupStep}`)), 20000); }),
+    ]);
+  } catch (error) {
+    console.error(`follow-input: warm-up page ${error.message}; measuring without it`);
+  } finally {
+    clearTimeout(warmupTimer); await Promise.race([Promise.resolve(warmup?.close()).catch(() => {}), new Promise(done => setTimeout(done, 5000))]);
+    timings.warmup = Math.round(performance.now() - warmupStarted);
+  }
   for (const mode of modes) {
-    const page = await browser.newPage({ viewport: native ? null : { width: 800, height: 600 } });
+    const modeStarted = performance.now(), page = await browser.newPage({ viewport: native ? null : { width: 800, height: 600 } });
     const browserSession = native ? await browser.newBrowserCDPSession() : null;
     const browserPid = native ? (await browserSession.send("SystemInfo.getProcessInfo")).processInfo.find(p => p.type === "browser").id : null;
     const driverErrors = [];
@@ -123,6 +132,7 @@ try {
     await page.waitForFunction(() => window.__report, null, { timeout: matrix ? 180000 : 55000 });
     record({ engine: "Chromium", input: native ? "CGEvent" : "Playwright", driverErrors, ...await page.evaluate(() => window.__report) });
     await page.close();
+    timings[mode || "normal"] = Math.round(performance.now() - modeStarted);
   }
   await browser.close(); browser = null;
   if (native) {
@@ -151,7 +161,7 @@ try {
   } else {
     assert.deepEqual(reports.flatMap(r => r.failures.map(f => `${r.engine} fallback=${r.fallback} swallow=${r.swallow}: ${f}`)), []);
   }
-  console.log(`PASS Assistant follow input: ${reports.length} engine/settlement runs`);
+  console.error(`follow-input timings ms ${JSON.stringify(timings)}`); console.log(`PASS Assistant follow input: ${reports.length} engine/settlement runs`);
 } finally {
   await browser?.close();
   server.close();
