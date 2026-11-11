@@ -705,7 +705,25 @@ function geometry() {
   };
 }
 
+// A cold font cache lays text out in the fallback face, a warm cache in Inter,
+// and the two have different metrics. Load the family each document uses and
+// let that document's font state settle before reading boxes, so every
+// document measured after this point finds the face in the cache and lays out
+// in the same face a warm run uses.
+async function waitForDocumentFonts(target) {
+  await target.evaluate(async () => {
+    const family = getComputedStyle(document.body).fontFamily.split(",")[0].trim();
+    if (family) {
+      // A face the document does not declare rejects here; the measurement
+      // then uses the same fallback it always did.
+      await document.fonts.load(`16px ${family}`).catch(() => null);
+    }
+    await document.fonts.ready;
+  });
+}
+
 async function measure(frame, label) {
+  await waitForDocumentFonts(frame);
   const metrics = await frame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX });
   const shape = await frame.evaluate(geometry);
   return { surface: label, ...metrics, geometry: shape };
@@ -851,6 +869,7 @@ async function measureCapsuleFrame(page, target) {
   if (!capsuleFrame) {
     return { capsule: null, capsuleLayout: null };
   }
+  await waitForDocumentFonts(capsuleFrame);
   return {
     capsule: await capsuleFrame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX }).catch(() => null),
     capsuleLayout: await capsuleFrame.evaluate(() => ({
