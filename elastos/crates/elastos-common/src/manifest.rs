@@ -194,6 +194,7 @@ impl ModelContentMetadata {
             || manifest.provides.is_some()
             || !manifest.requires.is_empty()
             || !manifest.capabilities.is_empty()
+            || !manifest.asks.is_empty()
             || !manifest.interfaces.is_empty()
             || manifest.permissions.host_process
             || manifest.permissions.guest_network
@@ -3645,6 +3646,19 @@ mod tests {
                 .collect();
             assert_eq!(digest, digest_before, "{}", manifest.name);
         }
+    }
+
+    #[test]
+    fn model_content_with_an_ask_is_not_passive() {
+        let passive: CapsuleManifest = serde_json::from_value(model_content_fixture()).unwrap();
+        passive.validate().unwrap();
+        let mut value = model_content_fixture();
+        value["asks"] = serde_json::json!([{"resource":"elastos://did/*","actions":["read"]}]);
+        let with_ask: CapsuleManifest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            with_ask.validate().unwrap_err(),
+            "model_content requires passive content/data without execution authority"
+        );
     }
 
     #[test]

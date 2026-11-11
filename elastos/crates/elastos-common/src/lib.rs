@@ -24,11 +24,12 @@ pub use error::{ElastosError, Result};
 pub use free_space::{require_free_space, NotEnoughFreeSpace, FREE_SPACE_RESERVE_BYTES};
 pub use manifest::{
     elastos_bus_v1_wit_sha256, validate_model_content_path, AffordanceApprovalMode,
-    AffordanceAuditMode, AffordanceRisk, AgentDeclaration, AgentKind, CapsuleAffordanceDescriptor,
-    CapsuleExecution, CapsuleInterfaceDescriptor, CapsuleManifest, CapsuleProjection,
-    CapsuleRequirement, CapsuleRole, CapsuleRuntimeAbi, CapsuleType, CapsuleWindowPolicy,
-    MicroVmConfig, ModelContentMetadata, Permissions, ProviderAuthority, ProviderCapabilitySchema,
-    RequirementKind, ResourceLimits, ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V1_WORLD, SCHEMA_V1,
+    AffordanceAuditMode, AffordanceRisk, AgentDeclaration, AgentKind, AskAction,
+    CapsuleAffordanceDescriptor, CapsuleExecution, CapsuleInterfaceDescriptor, CapsuleManifest,
+    CapsuleProjection, CapsuleRequirement, CapsuleRole, CapsuleRuntimeAbi, CapsuleType,
+    CapsuleWindowPolicy, ManifestAsk, MicroVmConfig, ModelContentMetadata, Permissions,
+    ProviderAuthority, ProviderCapabilitySchema, RequirementKind, ResourceLimits,
+    ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V1_WORLD, SCHEMA_V1,
 };
 use sha2::{Digest, Sha256};
 pub use timestamp::{SecureTimestamp, CLOCK_SKEW_TOLERANCE_SECS};
