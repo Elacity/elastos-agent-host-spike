@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photos</title>
+<link rel="stylesheet" href="./photos.css">
+<script type="module" src="./main.js"></script>
+</head>
+<body>
+<main>
+  <figure>
+    <img id="photo" alt="">
+    <figcaption id="caption"></figcaption>
+  </figure>
+  <nav aria-label="Slideshow">
+    <button id="previous" type="button">Previous</button>
+    <button id="pause" type="button">Pause</button>
+    <button id="next" type="button">Next</button>
+  </nav>
+  <p id="status" role="status"></p>
+  <section aria-labelledby="skipped-title">
+    <h2 id="skipped-title" hidden>Not shown</h2>
+    <ul id="skipped"></ul>
+  </section>
+</main>
+</body>
+</html>

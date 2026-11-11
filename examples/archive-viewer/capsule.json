@@ -1,0 +1,26 @@
+{
+  "schema": "elastos.capsule/v1",
+  "name": "archive-viewer",
+  "version": "0.1.0",
+  "description": "List one ZIP archive and show its small text entries by grant, within fixed read, inflate and output caps. Read-only: it extracts nothing and has no display of its own.",
+  "author": "local-development",
+  "role": "app",
+  "type": "wasm",
+  "runtime_abi": "elastos.component/v1",
+  "bus_contract": "elastos:bus@v1",
+  "wit_world_sha256": "7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2",
+  "execution": "component",
+  "projections": ["facts"],
+  "entrypoint": "archive-viewer.component.wasm",
+  "permissions": {
+    "storage": [
+      "localhost://Users/self/*",
+      "localhost://Users/self/.AppData/App/archive-viewer/*"
+    ]
+  },
+  "resources": {
+    "memory_mb": 16,
+    "cpu_shares": 10,
+    "gpu": false
+  }
+}

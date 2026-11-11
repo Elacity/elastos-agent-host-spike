@@ -1,0 +1,22 @@
+[package]
+name = "archive-viewer-host-test"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Host tests only: run the built archive-viewer component inside the Runtime's
+# own ComponentProvider (Wasmtime, fuel and memory limits) with a fake bridge,
+# and measure the fuel of the worst archives within the caps.
+
+[dev-dependencies]
+# The shared harness: bridge, ComponentProvider run, admission check, fuel runner.
+capsule-v1-host-test = { path = "../../capsule-kit/v1-host-test" }
+elastos-common = { path = "../../../elastos/crates/elastos-common" }
+# The decompressor, for deflated fixtures (the same version the guest uses).
+miniz_oxide = "0.9.1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# Keep this harness outside the main ElastOS Cargo workspace.
+[workspace]
