@@ -13,6 +13,7 @@ use super::super::r3_stored_root_tests::verified_parent_device_context;
 use super::*;
 use elastos_runtime::signature::{generate_keypair, SigningKey};
 
+mod cli_context;
 mod direct_messages;
 mod documents_rows;
 mod library_rows;
