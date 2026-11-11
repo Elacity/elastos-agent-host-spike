@@ -286,7 +286,10 @@ async fn test_browser_open_missing_and_forged_tokens_stay_generic_at_the_front_d
         assert!(consumer["policyRefusalMessage"]
             .as_str()
             .is_some_and(|message| !message.is_empty()));
-        assert_eq!(consumer["message"], consumer["policyRefusalMessage"], "{uri}");
+        assert_eq!(
+            consumer["message"], consumer["policyRefusalMessage"],
+            "{uri}"
+        );
     }
 }
 
