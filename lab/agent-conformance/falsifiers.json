@@ -497,8 +497,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/src/report.rs",
-          "old": "probe\n            .bundle_lab_cid\n            .parse::<capsule_identity::LabCid>()\n            .is_ok()",
-          "new": "(!probe.bundle_lab_cid.is_empty())"
+          "old": "probe\n            .bundle_lab_cid\n            .parse::<capsule_identity::LabCid>()\n            .is_err()",
+          "new": "probe.bundle_lab_cid.is_empty()"
         }
       ],
       "tests": [
@@ -1588,6 +1588,22 @@
           "file": "../../lab/agent-conformance/probe/capsule.json",
           "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
           "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\"]"
+        }
+      ],
+      "tests": [
+        "declared_network_manifest_is_refused"
+      ]
+    },
+    {
+      "id": "F-net-declared-stage",
+      "title": "stage the shipped manifest where the declaring manifest belongs",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "    capabilities.retain(|capability| capability.as_str() != Some(\"elastos://net/stream\"));\n    capabilities.push(json!(\"elastos://net/stream\"));",
+          "new": "    capabilities.retain(|capability| capability.as_str() != Some(\"elastos://net/stream\"));"
         }
       ],
       "tests": [
