@@ -77,6 +77,41 @@
       await new Promise(resolve => setTimeout(resolve, 20));
     }
   };
+  // Diagnosis: a pinned-state wait that expires can mean the pin was late, not
+  // wrong. Keep sampling fromEnd, the follow class and the frame counter until
+  // the page pins or its 120 s budget is spent, and put every sample in the
+  // report the runner carries.
+  let pinSampleBudget = 120000;
+  const samplePin = async (label, started) => {
+    const watch = { label, waitedMs: Math.round(performance.now() - started), pinnedAt: null, samples: [] };
+    if (pinSampleBudget <= 0) {
+      watch.pinnedAt = "not sampled: 120 s budget used";
+      (result.pinSamples ||= []).push(watch);
+      return;
+    }
+    const begun = performance.now();
+    for (;;) {
+      const state = snap();
+      const sample = { at: Math.round(performance.now() - started), fromEnd: state.fromEnd,
+        follow: state.follow, frames: heartbeat.frames };
+      watch.samples.push(sample);
+      console.log(`follow-diag pin ${JSON.stringify({ label, ...sample })}`);
+      if (state.fromEnd === 0) { watch.pinnedAt = sample.at; break; }
+      if (performance.now() - begun >= pinSampleBudget) {
+        watch.pinnedAt = `never within ${Math.round(pinSampleBudget / 1000)} s`;
+        break;
+      }
+      await delay(500);
+    }
+    pinSampleBudget -= Math.round(performance.now() - begun);
+    (result.pinSamples ||= []).push(watch);
+  };
+  const waitPinned = async (label, test) => {
+    const started = performance.now();
+    const state = await waitFor(label, test);
+    if (!state) await samplePin(label, started);
+    return state;
+  };
   // The module settles a reader gesture 150 ms after its last movement. Wait
   // until the scroll, the follow pin and the Jump button have all stopped
   // changing for longer than that, so every assertion reads a settled page.
@@ -202,7 +237,7 @@
   const followingGrowth = async label => {
     result.case = label;
     await settle(`${label}: the room reached its resting position`);
-    const held = await waitFor(`${label}: a following room rests at the end`, () => {
+    const held = await waitPinned(`${label}: a following room rests at the end`, () => {
       const state = snap();
       return state.follow && !state.jump && state.fromEnd <= 8 ? state : null;
     }) || snap();
@@ -237,7 +272,7 @@
       resize();
       // Deliver a queued pin's scroll notification before ResizeObserver can pin.
       s.dispatchEvent(new Event("scroll"));
-      const after = await waitFor(`${label}: the room stayed at the end`, () => {
+      const after = await waitPinned(`${label}: the room stayed at the end`, () => {
         const state = snap();
         return state.follow && !state.jump && state.fromEnd <= 8 ? state : null;
       }) || snap();
@@ -349,7 +384,7 @@
     // follow it restores instead of holding a fixed 220 ms.
     await reset(); key(document.querySelector("#message"), "PageUp");
     s.scrollBy(0, -1); s.dispatchEvent(new Event("scrollend"));
-    const quietGap = await waitFor("the 1 px reader position returned to the end", () => {
+    const quietGap = await waitPinned("the 1 px reader position returned to the end", () => {
       const state = snap();
       return state.follow && state.fromEnd <= 8 ? state : null;
     }) || snap();
@@ -366,7 +401,7 @@
     await waitFor("the 150 px growth was laid out", () => c.offsetHeight === 2750);
     const duringHoldGrowth = snap();
     await native("release");
-    const heldSettled = await waitFor("the stationary press restored the end", () => {
+    const heldSettled = await waitPinned("the stationary press restored the end", () => {
       const state = snap();
       return state.fromEnd === 0 && state.follow && !state.jump ? state : null;
     }) || snap();

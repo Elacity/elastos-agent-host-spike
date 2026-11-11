@@ -20,6 +20,7 @@ const run = promisify(execFile);
 const ref = process.env.ASSISTANT_FOLLOW_REF;
 const matrix = process.env.ASSISTANT_FOLLOW_MATRIX === "1";
 const native = process.env.ASSISTANT_FOLLOW_WEBKIT === "1";
+const noWarmup = process.env.FOLLOW_DIAG_NO_WARMUP === "1";
 const modes = process.env.ASSISTANT_FOLLOW_MODES
   ? process.env.ASSISTANT_FOLLOW_MODES.split(",").map(mode => mode === "normal" ? "" : mode)
   : native ? ["", "fallback", "swallow"] : ["", "fallback"];
@@ -71,24 +72,23 @@ try {
       : ["--disable-threaded-scrolling", "--disable-smooth-scrolling", "--disable-features=ScrollUnification"],
     ignoreDefaultArgs: ["--hide-scrollbars"],
     ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
-  // Chromium's first page in a fresh browser ran at 7-8 frames a second under
-  // four-core load while the second page of the same run reached 68, and each
-  // Playwright mouse event on that first page returned after a fixed 5 s
-  // input-ack timeout, so the page's own state arrived after its waits had
-  // expired. The first page here is a throwaway: this check measures the
-  // module's follow behaviour, not Chromium's first-page startup.
-  const warmup = await browser.newPage({ viewport: { width: 800, height: 600 } });
-  await warmup.setContent('<style>body{margin:0;height:2000px}</style><div style="height:2000px">warm</div>');
-  await warmup.evaluate(() => new Promise(done => {
-    let n = 0;
-    const tick = () => (++n >= 2 ? done() : requestAnimationFrame(tick));
-    requestAnimationFrame(tick);
-  }));
-  await warmup.mouse.move(400, 300);
-  await warmup.mouse.down();
-  await warmup.mouse.move(400, 100, { steps: 2 });
-  await warmup.mouse.up();
-  await warmup.close();
+  // FOLLOW_DIAG_NO_WARMUP=1 makes the first measured page the browser's first
+  // page, so a diagnostic run can test whether the warm-up hides a first-page
+  // defect.
+  if (!noWarmup) {
+    const warmup = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    await warmup.setContent('<style>body{margin:0;height:2000px}</style><div style="height:2000px">warm</div>');
+    await warmup.evaluate(() => new Promise(done => {
+      let n = 0;
+      const tick = () => (++n >= 2 ? done() : requestAnimationFrame(tick));
+      requestAnimationFrame(tick);
+    }));
+    await warmup.mouse.move(400, 300);
+    await warmup.mouse.down();
+    await warmup.mouse.move(400, 100, { steps: 2 });
+    await warmup.mouse.up();
+    await warmup.close();
+  }
   for (const mode of modes) {
     const page = await browser.newPage({ viewport: native ? null : { width: 800, height: 600 } });
     const browserSession = native ? await browser.newBrowserCDPSession() : null;
@@ -100,7 +100,10 @@ try {
       await work();
       inputSteps.push({ label, ms: Math.round(performance.now() - started) });
     };
-    page.on("console", message => { if (message.type() === "error") driverErrors.push(message.text()); });
+    page.on("console", message => {
+      if (message.type() === "error") driverErrors.push(message.text());
+      else if (message.text().startsWith("follow-diag ")) console.error(message.text());
+    });
     await page.exposeFunction("driveInput", async request => {
       const b = request.rect;
       if (native) {
@@ -152,7 +155,9 @@ try {
     // Poll on a timer. Playwright polls a waitForFunction on animation frames
     // by default, and a loaded renderer starves that loop: the report was set
     // but never read, which is how a run died at the bound.
-    const reportTimeout = matrix ? 180000 : 120000;
+    // A pinned-state wait that expires can spend 15 s waiting and 120 s more
+    // sampling for a late pin, so the bound covers that plus the page's work.
+    const reportTimeout = (matrix ? 180000 : 120000) + 120000;
     try {
       await page.waitForFunction(() => window.__report, null, { polling: 100, timeout: reportTimeout });
     } catch (error) {
@@ -169,6 +174,7 @@ try {
           lastWaitTimeout: window.__fixture?.waitTimeouts?.at(-1) ?? null,
           waitTimeoutCount: window.__fixture?.waitTimeouts?.length ?? 0,
           waitTimeouts: window.__fixture?.waitTimeouts ?? [],
+          pinSamples: window.__fixture?.pinSamples ?? [],
           timingCount: window.__fixture?.timings?.length ?? 0,
           slowest: (window.__fixture?.timings ?? []).slice().sort((a, b) => b.ms - a.ms).slice(0, 12),
           lastTiming: (window.__fixture?.timings ?? []).slice(-6),
