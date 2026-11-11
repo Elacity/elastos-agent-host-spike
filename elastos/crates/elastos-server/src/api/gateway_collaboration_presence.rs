@@ -932,8 +932,9 @@ mod tests {
             "R4 presence looked up the Agent profile under {root}: {opened:?}"
         );
 
-        // A passkey id cannot be an agent id. Kind Agent on it is quarantined,
-        // and the pass returns that error instead of a Users profile.
+        // A passkey id cannot be an agent id. Kind Agent on it is quarantined.
+        // The pass calls wallet_principal_root, which returns one generic
+        // refusal. Resolve, the call underneath, still names the quarantine.
         const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
         let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
             elastos_runtime::auth::PasskeyWebAuthnBinding {
@@ -963,6 +964,14 @@ mod tests {
             crate::auth::PrincipalKind::Agent,
             "localhost://UsersAI/5dca74bd48d800a148776e87",
         );
+        let auth_dir = super::super::gateway_home_token::home_launch_auth_data_dir(dir.path());
+        let cause = crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), &auth_dir, ID);
+        assert!(
+            cause.as_ref().is_err_and(|error| {
+                error.to_string() == "quarantined agent record: agent kind binding mismatch"
+            }),
+            "a passkey id stored as Agent is quarantined before a Users profile: {cause:?}"
+        );
         let chat = crate::collaboration_product::test_chat_product_port(
             dir.path(),
             "r4-agent-root",
@@ -973,11 +982,11 @@ mod tests {
         )
         .unwrap();
         let result = publish_runtime_owned_presence_pass(dir.path(), &port, now).await;
-        assert!(
-            result
-                .as_ref()
-                .is_err_and(|error| error.to_string().contains("quarantined agent record")),
-            "a passkey id stored as Agent is quarantined before a Users profile: {result:?}"
+        let refusal = result.expect_err("the pass refuses the quarantined passkey agent");
+        assert_eq!(
+            refusal.to_string(),
+            "Wallet authority principal root unresolved",
+            "the pass returns the wallet root refusal for that quarantined record"
         );
     }
 
