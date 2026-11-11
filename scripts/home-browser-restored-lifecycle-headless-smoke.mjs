@@ -22,6 +22,10 @@ let releaseBrowserWindowCloseTerminal;
 const browserWindowCloseTerminalGate = new Promise((resolveGate) => {
   releaseBrowserWindowCloseTerminal = resolveGate;
 });
+let releaseBrowserInternetEnd;
+const browserInternetEndGate = new Promise((resolveGate) => {
+  releaseBrowserInternetEnd = resolveGate;
+});
 
 const state = {
   phase: "placeholder",
@@ -433,9 +437,13 @@ async function handleApi(req, res, url) {
     return true;
   }
   if (url.pathname === "/api/apps/browser/internet") {
+    if (!requireToken(req, browserRefreshedToken, res)) {
+      return true;
+    }
     if (req.method === "POST") {
       assert((await readBody(req))?.action === "end", "Browser close sends an action object");
       state.internetEnds += 1;
+      await browserInternetEndGate;
     }
     json(res,200,{status:req.method === "GET" ? "granted" : "ended"}); return true;
   }
@@ -937,6 +945,13 @@ try {
     "nonterminal Browser close removed the shell or taskbar entry",
   );
   releaseBrowserWindowCloseTerminal();
+  await waitFor(() => state.internetEnds === 1, 5_000, "Browser launch internet End");
+  assert(
+    await restoredGui.locator('.window[data-target="browser"]').count() === 1 &&
+      await restoredTaskbarButton.getAttribute("data-open-windows") === "1",
+    "Home keeps the Browser window until its launch internet End succeeds",
+  );
+  releaseBrowserInternetEnd();
   await waitFor(
     async () =>
       await restoredGui.locator('.window[data-target="browser"]').count() === 0,

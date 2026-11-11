@@ -1075,7 +1075,12 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             get(home_background_image),
         )
         .route("/api/apps/home/runtime/ensure", post(home_runtime_ensure))
-        .route("/api/apps/home/launch", post(home_launch))
+        .route(
+            "/api/apps/home/launch",
+            post(|state, headers, input| async move {
+                home_launch(state, headers, input, &crate::setup::detect_platform()).await
+            }),
+        )
         .route("/api/apps/home/external-link", post(home_external_link))
         .route(
             "/api/apps/home/shared-content/check",

@@ -105,8 +105,8 @@ pub(super) async fn append_inbox_requests(
         notifications.entries.push(card);
     }
     if let Some(card) = gateway_browser_internet::notification(state, context) {
-        notifications.unread_count += 1;
-        notifications.attention_count += 1;
+        notifications.unread_count += usize::from(!card.read);
+        notifications.attention_count += usize::from(card.severity == "attention");
         notifications.entries.push(card);
     }
     append_wallet_approval_notifications(notifications, wallet_approvals);

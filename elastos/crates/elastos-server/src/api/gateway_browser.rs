@@ -469,7 +469,7 @@ pub(super) async fn browser_app_summary(
     }
     // This flag describes Runtime's request parser, never a guest capability.
     engine_adapter["display_attach_supported"] = serde_json::json!(true);
-    let net = browser_net_summary(state.provider_registry.as_ref(), context.principal_id()).await;
+    let net = browser_net_summary(&state, &context).await;
     let wallet_accounts = system_wallet_accounts_summary(&state, &authority).await;
     let wallet_status = if wallet_accounts.linked_count > 0 {
         "configured"
