@@ -19156,7 +19156,10 @@ pub(crate) mod tests {
             quarantine_reason(&loaded, TEST_AGENT_ID),
             Some("agent admission request id missing")
         );
-        assert_eq!(loaded.quarantined_raw.as_slice(), &[planted.clone()]);
+        assert_eq!(
+            loaded.quarantined_raw.as_slice(),
+            std::slice::from_ref(&planted)
+        );
         mutate_auth_state(data_dir.path(), |state| {
             state
                 .principals
