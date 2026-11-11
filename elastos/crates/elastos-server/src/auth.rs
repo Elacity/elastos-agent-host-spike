@@ -5472,12 +5472,72 @@ fn principals_before_save(data_dir: &Path) -> anyhow::Result<Vec<PrincipalRecord
     Ok(state.principals)
 }
 
+fn kind_and_binding_disagree(record: &PrincipalRecord) -> Option<&'static str> {
+    let agent_kind = record.kind == PrincipalKind::Agent;
+    let agent_binding = is_agent_admission_record(record);
+    if agent_kind && !agent_binding {
+        return Some("agent kind binding mismatch");
+    }
+    if agent_binding && !agent_kind {
+        return Some("agent admission kind invalid");
+    }
+    None
+}
+
+/// A mismatched record loaded as quarantined raw may be saved unchanged.
+/// Any other disagreement is a save refusal, in both directions.
+fn carried_unchanged_quarantine(
+    disk_raw: &[Value],
+    after: &AuthState,
+    record: &PrincipalRecord,
+) -> bool {
+    disk_raw.iter().any(|raw| {
+        after.quarantined_raw.iter().any(|kept| kept == raw)
+            && serde_json::from_value::<PrincipalRecord>(raw.clone())
+                .ok()
+                .as_ref()
+                == Some(record)
+    })
+}
+
+fn kind_binding_save_disagreement(
+    before: &[PrincipalRecord],
+    after: &AuthState,
+    disk_raw: &[Value],
+) -> Option<&'static str> {
+    for record in &after.principals {
+        let Some(reason) = kind_and_binding_disagree(record) else {
+            continue;
+        };
+        if carried_unchanged_quarantine(disk_raw, after, record) {
+            continue;
+        }
+        // An existing admission record keeps the field reasons (kind change,
+        // and the rest). This check is the one the pairing does not see.
+        let paired_admission = before
+            .iter()
+            .any(|old| old.principal_id == record.principal_id && is_agent_admission_record(old));
+        if paired_admission && is_agent_admission_record(record) {
+            continue;
+        }
+        return Some(reason);
+    }
+    None
+}
+
 fn refuse_agent_admission_changes(
     data_dir: &Path,
     after: &AuthState,
     permit: Option<AgentAdmissionOperation>,
 ) -> anyhow::Result<()> {
     let before = principals_before_save(data_dir)?;
+    let disk_raw = disk_quarantined_raw(data_dir)?;
+    if let Some(reason) = kind_binding_save_disagreement(&before, after, &disk_raw) {
+        anyhow::bail!(
+            "agent admission record change refused: {reason} ({})",
+            agent_admission_permit_clause(permit)
+        );
+    }
     if let Some(reason) = agent_admission_change_reason(&before, &after.principals) {
         anyhow::bail!(
             "agent admission record change refused: {reason} ({})",
@@ -19413,6 +19473,55 @@ pub(crate) mod tests {
             b"not-json",
             "a save over an unreadable auth state wrote nothing"
         );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_kind_agent_without_the_binding() {
+        let data_dir = person_file_with_agent();
+        let before = auth_state_file_bytes(data_dir.path());
+        let error = mutate_auth_state(data_dir.path(), |state| {
+            let person = state
+                .principals
+                .iter_mut()
+                .find(|record| {
+                    record.kind == PrincipalKind::Human && !is_agent_admission_record(record)
+                })
+                .unwrap();
+            person.kind = PrincipalKind::Agent;
+            Ok(())
+        })
+        .expect_err("kind Agent without the AgentAdmission binding was refused");
+        assert!(
+            error.to_string().contains("agent kind binding mismatch"),
+            "{error}"
+        );
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before);
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_the_binding_without_kind_agent() {
+        let data_dir = person_file_with_agent();
+        let before = auth_state_file_bytes(data_dir.path());
+        let error = mutate_auth_state(data_dir.path(), |state| {
+            let person = state
+                .principals
+                .iter_mut()
+                .find(|record| {
+                    record.kind == PrincipalKind::Human && !is_agent_admission_record(record)
+                })
+                .unwrap();
+            let binding =
+                ProofBinding::agent_admission("agent:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 5);
+            person.proof_binding_id = binding.id();
+            person.proof_binding = binding;
+            Ok(())
+        })
+        .expect_err("the AgentAdmission binding without kind Agent was refused");
+        assert!(
+            error.to_string().contains("agent admission kind invalid"),
+            "{error}"
+        );
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
 
     #[test]
