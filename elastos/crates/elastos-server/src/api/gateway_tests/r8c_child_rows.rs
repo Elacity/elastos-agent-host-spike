@@ -14,6 +14,7 @@ use super::*;
 use elastos_runtime::signature::{generate_keypair, SigningKey};
 
 mod people;
+mod presence;
 mod profile;
 
 /// A child Runtime's data directory and the parent-signed device person.
