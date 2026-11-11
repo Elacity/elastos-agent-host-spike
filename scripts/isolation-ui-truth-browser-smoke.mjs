@@ -6,8 +6,11 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve, relative, isAbsolute, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+// A DOM wait fails on a wrong page, not on a slow runner: same predicate, more time.
+const BROWSER_WAIT_TIMEOUT_MS = browserWaitTimeoutMs();
 const { chromium } = await importProductSmokePlaywright();
 const cid = `bafybei${"a".repeat(52)}`;
 const requests = [];
@@ -180,7 +183,7 @@ try {
   for (let i = 0; !libraryApp() && i < 50; i++) await page.waitForTimeout(100);
   for (const load of ["first load", "reload"]) {
     if (load === "reload") await libraryApp().evaluate(() => location.reload());
-    await libraryApp().waitForFunction(() => window.uiPreferences?.some(p => p.theme === "light"), null, { timeout: 5000 })
+    await libraryApp().waitForFunction(() => window.uiPreferences?.some(p => p.theme === "light"), null, { timeout: BROWSER_WAIT_TIMEOUT_MS })
       .catch(() => assert.fail(`Library window gets the light theme on ${load}`));
   }
   await page.waitForTimeout(2700); // Home protects a new window from the opening pointer's close click.
@@ -217,9 +220,9 @@ try {
       target: "wallet-metamask", title: "MetaMask", attach_kind: "iframe",
       route: `/apps/wallet-metamask/?home_origin=${encodeURIComponent(homeOrigin)}#home_token=fixture-metamask` },
   }, "*"), origin);
-  await frame().locator('.window[data-target="wallet-metamask"]').waitFor({ timeout: 5000 })
+  await frame().locator('.window[data-target="wallet-metamask"]').waitFor({ timeout: BROWSER_WAIT_TIMEOUT_MS })
     .catch(() => assert.fail("Wallet rail Connect opens the MetaMask connector window"));
-  await frame().locator("#wallet-rail").waitFor({ state: "hidden", timeout: 5000 })
+  await frame().locator("#wallet-rail").waitFor({ state: "hidden", timeout: BROWSER_WAIT_TIMEOUT_MS })
     .catch(() => assert.fail("Wallet rail closes when Connect opens the connector window"));
   assert.equal(await frame().locator('.window[data-target="wallet-metamask"]').isVisible(), true, "Connector window is visible");
   await page.waitForTimeout(2700);

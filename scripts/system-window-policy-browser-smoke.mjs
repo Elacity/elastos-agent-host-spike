@@ -4,6 +4,10 @@ import { readFile } from "node:fs/promises";
 import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
 import { extname } from "node:path";
 import test from "node:test";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
+
+// A DOM wait fails on a wrong page, not on a slow runner: same predicate, more time.
+const BROWSER_WAIT_TIMEOUT_MS = browserWaitTimeoutMs();
 
 const { chromium } = await importProductSmokePlaywright();
 const origin = "https://system-window.test";
@@ -212,7 +216,7 @@ try {
     const system = await f.currentSystem();
     await system.fill('#recovery-password', 'fixture-unsaved-draft');
     await f.shell.evaluate(() => fixture.windows.openTarget('system', {query:{settings:'about'}}));
-    await system.waitForSelector('.settings-content.active[data-settings="about"]', {timeout:3000});
+    await system.waitForSelector('.settings-content.active[data-settings="about"]', { timeout: BROWSER_WAIT_TIMEOUT_MS });
     assert.equal(await f.shell.locator('.window-frame').count(), 1);
     assert.equal(await system.inputValue('#recovery-password'), 'fixture-unsaved-draft');
     await f.shell.evaluate(() => fixture.windows.openTarget('system', {query:{settings:'security', recovery:'import'}}));
@@ -228,7 +232,7 @@ try {
         fixture.saveResult = 'pending';
         fixture.windows.openSystemRecoverySave().then(ok => { fixture.saveResult = ok; });
       });
-      await f.shell.waitForFunction(() => fixture.saveResult !== 'pending', null, {timeout:5000});
+      await f.shell.waitForFunction(() => fixture.saveResult !== 'pending', null, { timeout: BROWSER_WAIT_TIMEOUT_MS });
       return f.shell.evaluate(() => fixture.saveResult);
     }
     assert.equal(await save(), true);
