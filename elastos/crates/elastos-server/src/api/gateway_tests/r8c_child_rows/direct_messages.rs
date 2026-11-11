@@ -81,6 +81,27 @@ async fn direct_steps(
 }
 
 #[tokio::test]
+#[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
+async fn r8c_child_direct_messages_register_read_and_send_under_the_parent_root() {
+    let child = child(CHAT_ROOM_CAPSULE_ID);
+    let dir = child.dir.path();
+    let state = state_with_discovery(dir).await;
+    let service = state.collaboration_discovery_service.clone().unwrap();
+    let mut steps = Steps::new("direct messages: parent-signed device, child Runtime");
+    let launched = direct_authority_for(dir, &child.ctx, &service).map(|_| ());
+    steps.step("as launched: direct authority for the context", launched);
+    let profile = seed_parent_profile(&child);
+    let by_route = direct_authority_for(dir, &child.ctx, &service);
+    let by_route = steps.step("seeded Profile: direct authority for the context", by_route);
+    let authority = by_route.or_else(|| {
+        let built = configured_contact_authority_from_profile(dir, &child.ctx, &service, profile);
+        steps.step("seeded Profile handed to the route's constructor", built)
+    });
+    direct_steps(&mut steps, &service, &child.ctx, authority, None).await;
+    steps.finish();
+}
+
+#[tokio::test]
 async fn r8c_control_direct_messages_register_read_and_send_under_the_stored_persons_root() {
     let control = control(CHAT_ROOM_CAPSULE_ID);
     let dir = control.dir.path();
