@@ -8,11 +8,15 @@
 //! no way to take the ordinary manifest out.
 
 use crate::cid_form::cid_form;
-use crate::manifest::CapsuleManifest;
+use crate::manifest::{CapsuleManifest, CapsuleRole, CapsuleType};
+use std::collections::BTreeSet;
+use std::fmt;
 
 /// A pin is not a package root in its one spelling, is not a JSON string, or
 /// sits on a requirement whose kind is not `capsule`.
 pub const PIN_FORM_INVALID: &str = "pin_form_invalid";
+/// In a manifest with a pin: two requirements share a name, or two pin one CID.
+pub const REQUIREMENT_DUPLICATE: &str = "requirement_duplicate";
 
 /// Why [`PinnedManifest::parse`] refused. The three cases stay apart because
 /// a caller answers them differently.
@@ -22,8 +26,9 @@ pub enum PinnedManifestError {
     Unparsed(String),
     /// The ordinary manifest's `validate()` refuses it. Its text.
     Invalid(String),
-    /// A pin is refused: [`PIN_FORM_INVALID`], with the requirement's name
-    /// (empty when it has none).
+    /// A pin is refused: [`PIN_FORM_INVALID`] or [`REQUIREMENT_DUPLICATE`],
+    /// with the requirement's name (empty when it has none; for a CID pinned
+    /// twice, the second requirement that pins it).
     Pin {
         code: &'static str,
         requirement: String,
@@ -62,21 +67,43 @@ impl PinnedManifest {
         &self.manifest.name
     }
 
+    pub fn role(&self) -> &CapsuleRole {
+        &self.manifest.role
+    }
+
+    pub fn capsule_type(&self) -> &CapsuleType {
+        &self.manifest.capsule_type
+    }
+
     /// Requirement name and CID text of each pin, in the manifest's order.
     pub fn pins(&self) -> &[(String, String)] {
         &self.pins
     }
 }
 
+/// The name and the pins only: the manifest inside is not printed.
+impl fmt::Debug for PinnedManifest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PinnedManifest")
+            .field("name", &self.manifest.name)
+            .field("pins", &self.pins)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Takes each `requires[i].cid` out of `value` and checks it. Anything that
 /// is not the expected shape is left as it is, for the strict parse to refuse
-/// in its own words.
+/// in its own words. Every pin's form is checked first, in the manifest's
+/// order; the duplicate checks (names, then CIDs) run only after that, and
+/// only when there is a pin.
 fn take_pins(value: &mut serde_json::Value) -> Result<Vec<(String, String)>, PinnedManifestError> {
     let refused = |code, requirement: &str| PinnedManifestError::Pin {
         code,
         requirement: requirement.to_string(),
     };
     let mut pins = Vec::new();
+    let mut names = Vec::new();
     let requires = value
         .get_mut("requires")
         .and_then(|list| list.as_array_mut());
@@ -86,6 +113,7 @@ fn take_pins(value: &mut serde_json::Value) -> Result<Vec<(String, String)>, Pin
         };
         let name = object.get("name").and_then(|name| name.as_str());
         let name = name.unwrap_or_default().to_string();
+        names.push(name.clone());
         let Some(cid) = object.remove("cid") else {
             continue;
         };
@@ -94,6 +122,17 @@ fn take_pins(value: &mut serde_json::Value) -> Result<Vec<(String, String)>, Pin
             Some(text) if on_a_capsule => pins.push((name, text.to_string())),
             _ => return Err(refused(PIN_FORM_INVALID, &name)),
         }
+    }
+    if pins.is_empty() {
+        return Ok(pins);
+    }
+    let mut seen = BTreeSet::new();
+    if let Some(repeated) = names.iter().find(|name| !seen.insert(name.as_str())) {
+        return Err(refused(REQUIREMENT_DUPLICATE, repeated));
+    }
+    let mut seen = BTreeSet::new();
+    if let Some((name, _)) = pins.iter().find(|(_, cid)| !seen.insert(cid.as_str())) {
+        return Err(refused(REQUIREMENT_DUPLICATE, name));
     }
     Ok(pins)
 }
@@ -128,7 +167,7 @@ mod tests {
     }
 
     fn refusal(bytes: &[u8]) -> PinnedManifestError {
-        PinnedManifest::parse(bytes).err().expect("a refusal")
+        PinnedManifest::parse(bytes).expect_err("a refusal")
     }
 
     fn pin_refusal(bytes: &[u8]) -> (&'static str, String) {
@@ -217,6 +256,33 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_name_or_a_cid_pinned_twice_is_requirement_duplicate() {
+        let unpinned = json!({"name": "viewer", "kind": "capsule"});
+        let same_name = requires(json!([pinned("viewer", ROOT_A), unpinned]));
+        assert_eq!(
+            pin_refusal(&same_name),
+            (REQUIREMENT_DUPLICATE, "viewer".to_string())
+        );
+        let same_cid = requires(json!([pinned("first", ROOT_A), pinned("second", ROOT_A)]));
+        assert_eq!(
+            pin_refusal(&same_cid),
+            (REQUIREMENT_DUPLICATE, "second".to_string())
+        );
+    }
+
+    /// Every pin's form is checked before any duplicate: the malformed pin
+    /// is the last requirement, after two that share a name.
+    #[test]
+    fn a_malformed_pin_is_reported_before_a_duplicate() {
+        let bytes = requires(json!([
+            pinned("viewer", ROOT_A),
+            {"name": "viewer", "kind": "capsule"},
+            pinned("last", "bafy")
+        ]));
+        assert_eq!(pin_refusal(&bytes), (PIN_FORM_INVALID, "last".to_string()));
+    }
+
+    #[test]
     fn pins_keep_the_order_of_the_manifest() {
         let bytes = requires(json!([
             pinned("m", ROOT_C),
@@ -255,6 +321,20 @@ mod tests {
     }
 
     #[test]
+    fn requirement_names_must_be_unique_only_when_there_is_a_pin() {
+        let twice = json!({"name": "viewer", "kind": "capsule"});
+        let without_a_pin = requires(json!([twice.clone(), twice.clone()]));
+        let ordinary: CapsuleManifest = serde_json::from_slice(&without_a_pin).unwrap();
+        ordinary.validate().unwrap();
+        assert!(PinnedManifest::parse(&without_a_pin).is_ok());
+        let with_a_pin = requires(json!([twice.clone(), twice, pinned("other", ROOT_A)]));
+        assert_eq!(
+            pin_refusal(&with_a_pin),
+            (REQUIREMENT_DUPLICATE, "viewer".to_string())
+        );
+    }
+
+    #[test]
     fn the_three_refusals_stay_apart() {
         let invalid = manifest(json!({"entrypoint": "/index.html"}));
         assert!(matches!(refusal(&invalid), PinnedManifestError::Invalid(_)));
@@ -264,6 +344,28 @@ mod tests {
         ));
         let pin = requires(json!([pinned("viewer", "not-a-root")]));
         assert!(matches!(refusal(&pin), PinnedManifestError::Pin { .. }));
+    }
+
+    #[test]
+    fn the_role_and_the_type_are_the_manifests() {
+        let data = PinnedManifest::parse(&manifest(json!({}))).unwrap();
+        assert_eq!(data.role(), &CapsuleRole::App);
+        assert_eq!(data.capsule_type(), &CapsuleType::Data);
+        let wasm = manifest(json!({"role": "viewer", "type": "wasm", "entrypoint": "app.wasm"}));
+        let wasm = PinnedManifest::parse(&wasm).unwrap();
+        assert_eq!(wasm.role(), &CapsuleRole::Viewer);
+        assert_eq!(wasm.capsule_type(), &CapsuleType::Wasm);
+    }
+
+    #[test]
+    fn debug_prints_the_name_and_the_pins_and_not_the_manifest_inside() {
+        let bytes = manifest(json!({
+            "description": "MARKER-IN-THE-DESCRIPTION",
+            "requires": [pinned("viewer", ROOT_A)]
+        }));
+        let printed = format!("{:?}", PinnedManifest::parse(&bytes).unwrap());
+        assert!(printed.contains("pin-fixture") && printed.contains(ROOT_A));
+        assert!(!printed.contains("MARKER"), "{printed}");
     }
 
     /// The crate has no compile-fail harness, so this is a check of the
@@ -283,6 +385,12 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("impl"))
             .collect();
-        assert_eq!(impls, ["impl PinnedManifest {"]);
+        assert_eq!(
+            impls,
+            [
+                "impl PinnedManifest {",
+                "impl fmt::Debug for PinnedManifest {"
+            ]
+        );
     }
 }
