@@ -97,7 +97,7 @@ function observeTranscript(scroller, content) {
       lastScrollMax = scroller.scrollHeight - scroller.clientHeight;
       // A stationary press can span reply growth. Restore its follow and pin;
       // a reader who was already away keeps that position.
-      atEnd = readerMoved ? nearEnd() : readerWasFollowing || nearEnd();
+      atEnd = readerMoved ? false : readerWasFollowing || nearEnd();
       if (!readerMoved && atEnd) pinTranscriptToEnd(scroller);
       showFollow();
     }, 150);
