@@ -309,3 +309,22 @@ pub async fn run_capsule(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    /// The `capsule` command reads the manifest through this one function
+    /// (the command itself needs a running Runtime and supervisor, so the
+    /// row is on the function). A pinned manifest is refused by its parse.
+    #[test]
+    fn the_capsule_commands_manifest_parse_refuses_a_pinned_requirement() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("capsule.json"), PINNED).unwrap();
+        let error = load_capsule_manifest(directory.path(), "pinned-fixture").unwrap_err();
+        let expected = "Invalid capsule manifest for 'pinned-fixture': unknown field `cid`";
+        assert!(error.to_string().starts_with(expected), "{error}");
+    }
+}

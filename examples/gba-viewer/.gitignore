@@ -1,0 +1,4 @@
+*
+!/.gitignore
+!/verify.sh
+!/verify_empty_test.py

@@ -5030,6 +5030,7 @@ mod tests {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: data_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
@@ -5291,6 +5292,7 @@ mod tests {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: data_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
@@ -7812,9 +7814,14 @@ mod tests {
                 crate::auth::load_principal_for_proof_binding(temp.path(), &grant.proof_binding_id)
                     .unwrap();
             r4_fixture::store(temp.path(), kind);
-            r4_fixture::set_kind(temp.path(), r4_fixture::ID, kind, root);
-            let kit = create_recovery_kit_for_principal(r4_fixture::ID, root, None, 1_800_000_000)
-                .unwrap();
+            r4_fixture::set_kind(temp.path(), r4_fixture::principal_id(kind), kind, root);
+            let kit = create_recovery_kit_for_principal(
+                r4_fixture::principal_id(kind),
+                root,
+                None,
+                1_800_000_000,
+            )
+            .unwrap();
             if !remove_recovered {
                 let archive = crate::auth::recovery_archive_from_kit(temp.path(), &kit).unwrap();
                 let protection = protection_from_recovery_kit(
@@ -7825,10 +7832,37 @@ mod tests {
                     Some(archive),
                 )
                 .unwrap();
-                crate::auth::store_principal_root_protection(temp.path(), protection).unwrap();
+                if kind == PrincipalKind::Agent {
+                    // Setup used to store this through the production store.
+                    // That store now refuses an agent root protection. The
+                    // reassignment still needs the entry in the file.
+                    let refused = crate::auth::store_principal_root_protection(
+                        temp.path(),
+                        protection.clone(),
+                    )
+                    .expect_err("the production store refuses an added agent root protection");
+                    assert_eq!(
+                        refused.to_string(),
+                        "agent admission protection change refused: agent root protection added (5 named operations exist and none is authorized)"
+                    );
+                    crate::auth::plant_principal_root_protection(temp.path(), &protection);
+                    assert!(
+                        crate::auth::load_auth_state(temp.path())
+                            .unwrap()
+                            .principal_root_protections
+                            .iter()
+                            .any(|stored| {
+                                stored.principal_id == r4_fixture::principal_id(kind)
+                                    && stored.localhost_root == root
+                            }),
+                        "the agent root protection is stored for the reassignment"
+                    );
+                } else {
+                    crate::auth::store_principal_root_protection(temp.path(), protection).unwrap();
+                }
             }
             if remove_recovered {
-                r4_fixture::remove(temp.path(), r4_fixture::ID);
+                r4_fixture::remove(temp.path(), r4_fixture::principal_id(kind));
             }
             if lookup_error {
                 RECOVERED_PRINCIPAL_LOOKUP_FAILURES
@@ -7854,10 +7888,9 @@ mod tests {
                 let response = result.unwrap();
                 assert_eq!(response.status, "reassigned");
                 assert_eq!(response.localhost_root, root);
-                assert!(after
-                    .principals
-                    .iter()
-                    .any(|p| { p.principal_id == r4_fixture::ID && p.localhost_root == root }));
+                assert!(after.principals.iter().any(|p| {
+                    p.principal_id == r4_fixture::principal_id(kind) && p.localhost_root == root
+                }));
                 assert!(after.audit[before.audit.len()..].iter().any(|e| {
                     e.event_type == "auth.recovery_kit.reassigned" && e.result == "ok"
                 }));
@@ -8203,20 +8236,17 @@ mod tests {
 
     #[test]
     fn configured_readiness_refuses_recordless_usersai_protection() {
+        // The protection belongs to a valid agent. save_auth_state refuses to
+        // remove an admission record, so the record is dropped by a direct edit.
+        // The readiness check then sees a UsersAI protection with no principal.
         let temp = tempfile::tempdir().unwrap();
-        let principal_id = "agent:recordless-readiness";
-        crate::auth::store_test_human_principal(temp.path(), principal_id);
-        let record = crate::auth::tests::mint_agent_record(temp.path(), principal_id, None);
+        let agent = crate::auth::valid_agent::plant(temp.path());
         crate::auth::store_test_principal_root_protection_for(
             temp.path(),
-            principal_id,
-            &record.localhost_root,
+            &agent.principal_id,
+            &agent.localhost_root,
         );
-        let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
-        state
-            .principals
-            .retain(|record| record.principal_id != principal_id);
-        crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
+        crate::auth::r4_fixture::remove(temp.path(), &agent.principal_id);
         let error = verify_configured_principal_roots_ready(temp.path())
             .expect_err("record-less UsersAI protection must be refused");
         assert!(

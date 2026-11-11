@@ -945,7 +945,7 @@ fn viewer_error_response(err: anyhow::Error) -> Response {
 mod r4_root_tests {
     use super::*;
     use crate::api::gateway::r3_stored_root_tests::verified_parent_device_context;
-    use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+    use crate::auth::r4_fixture::{store, AGENT_ID, AGENT_ROOT, HUMAN_ROOT, ID};
     use crate::auth::PrincipalKind;
 
     fn active_viewer(data_dir: &FsPath) {
@@ -986,6 +986,7 @@ mod r4_root_tests {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: dir.path().to_path_buf(),
             data_dir: dir.path().to_path_buf(),
@@ -1058,25 +1059,28 @@ mod r4_root_tests {
         active_viewer(dir.path());
         elastos_identity::load_or_create_did(dir.path()).unwrap();
         let now = crate::auth::now_ts();
-        let proof_binding_id = format!("test-binding:{ID}");
-        crate::auth::store_session_grant(
+        let proof_binding_id = crate::auth::stored_principal_record(dir.path(), AGENT_ID)
+            .unwrap()
+            .unwrap()
+            .proof_binding_id;
+        crate::auth::plant_session_grant(
             dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
                 schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
                 grant_id: "grant:r4-viewer".into(),
                 session_id: "session:r4-viewer".into(),
-                principal_id: ID.into(),
+                principal_id: AGENT_ID.into(),
                 proof_binding_id: proof_binding_id.clone(),
                 issued_at: now,
                 expires_at: now + 600,
                 apps: vec!["documents".into()],
             },
-        )
-        .unwrap();
-        let root = crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), ID).unwrap();
+        );
+        let root =
+            crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), AGENT_ID).unwrap();
         let context = HomeLaunchTokenContext::resolved(
             root,
-            ID.into(),
+            AGENT_ID.into(),
             "session:r4-viewer".into(),
             Some(proof_binding_id),
             "grant:r4-viewer".into(),
@@ -1168,11 +1172,15 @@ mod r4_root_tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             store(dir.path(), kind);
-            let root =
-                crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), ID).unwrap();
+            let root = crate::auth::ResolvedPrincipalRoot::resolve(
+                dir.path(),
+                dir.path(),
+                crate::auth::r4_fixture::principal_id(kind),
+            )
+            .unwrap();
             let context = HomeLaunchTokenContext::resolved(
                 root,
-                ID.to_string(),
+                crate::auth::r4_fixture::principal_id(kind).to_string(),
                 "session".into(),
                 None,
                 "grant".into(),

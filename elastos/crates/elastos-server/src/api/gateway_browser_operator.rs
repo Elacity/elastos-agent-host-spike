@@ -659,10 +659,17 @@ pub(in crate::api::gateway) async fn revoke_admission(
         };
         record.phase = "revoked";
         if let Some(token) = &record.token {
-            service
+            if service
                 .capabilities
                 .revoke(*token.id(), "Browser owner revoked admission")
-                .await;
+                .await
+                .is_err()
+            {
+                return failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "revocation_persistence_failed",
+                );
+            }
         }
         service
             .pending
@@ -722,7 +729,13 @@ pub(in crate::api::gateway) async fn return_page_to_owner(
             service
                 .capabilities
                 .revoke(*token.id(), "Browser owner reclaimed input")
-                .await;
+                .await
+                .map_err(|_| {
+                    failure(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "revocation_persistence_failed",
+                    )
+                })?;
             service
                 .pending
                 .revoke_request_by(&id, "Revoked by user", Settler::Shell)
@@ -862,10 +875,17 @@ pub(in crate::api::gateway) async fn operator_input(
     if !accepted {
         record.phase = "revoked";
         if let Some(token) = &record.token {
-            service
+            if service
                 .capabilities
                 .revoke(*token.id(), "Browser input outcome uncertain")
-                .await;
+                .await
+                .is_err()
+            {
+                return failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "revocation_persistence_failed",
+                );
+            }
         }
         service
             .pending

@@ -459,6 +459,10 @@ enum Commands {
 
     /// Install Home
     Setup {
+        /// Turn on Browser on a supported Linux host (asks for administrator access)
+        #[arg(long, conflicts_with_all = ["profile", "with", "without", "list", "prerequisites_only", "media_tools_dir", "isolated"])]
+        browser: bool,
+
         /// Developer: install a named components.json profile instead of `home`
         #[arg(long, hide = true)]
         profile: Option<String>,
@@ -1586,6 +1590,7 @@ async fn run() -> anyhow::Result<()> {
         }
 
         Commands::Setup {
+            browser,
             profile,
             with,
             without,
@@ -1594,6 +1599,10 @@ async fn run() -> anyhow::Result<()> {
             media_tools_dir,
             isolated,
         } => {
+            if browser {
+                setup::enable_browser().await?;
+                return Ok(());
+            }
             if isolated {
                 setup::choose_isolated_collaboration()?;
             }
@@ -2605,6 +2614,25 @@ mod tests {
     }
 
     #[test]
+    fn linux_browser_opt_in_is_an_explicit_setup_command() {
+        let cli = super::Cli::try_parse_from(["elastos", "setup", "--browser"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(super::Commands::Setup { browser: true, .. })
+        ));
+        for option in [
+            "--list",
+            "--isolated",
+            "--prerequisites-only",
+            "--profile=home",
+            "--with=browser",
+            "--without=browser",
+        ] {
+            assert!(super::Cli::try_parse_from(["elastos", "setup", "--browser", option]).is_err());
+        }
+    }
+
+    #[test]
     fn home_browser_cli_preserves_terminal_default_and_probe_options() {
         assert!(super::Cli::try_parse_from(["elastos"])
             .unwrap()
@@ -2712,5 +2740,34 @@ mod tests {
         ] {
             assert!(super::Cli::try_parse_from(argv).is_err(), "{argv:?}");
         }
+    }
+
+    const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    /// The web-serve entry, called directly: through `run`, `serve` or
+    /// `share` an earlier parse of the same type would stop first. It
+    /// returns its own parse's error before it sets up any server.
+    #[tokio::test]
+    async fn serve_web_capsule_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            elastos_storage::providers::LocalFSProvider::new(directory.path().join("storage"))
+                .await
+                .unwrap();
+        let runtime = elastos_server::runtime::Runtime::with_providers_and_component(
+            std::sync::Arc::new(storage),
+            Vec::new(),
+            None,
+        );
+        let capsule = directory.path().join("capsule");
+        fs::create_dir_all(&capsule).unwrap();
+        fs::write(capsule.join("capsule.json"), PINNED).unwrap();
+        let error = super::serve_web_capsule(runtime, capsule, "127.0.0.1:0", false, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().starts_with("unknown field `cid`"),
+            "{error}"
+        );
     }
 }
