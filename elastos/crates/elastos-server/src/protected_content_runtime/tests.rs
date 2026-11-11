@@ -13820,19 +13820,15 @@ async fn runtime_custody_open_for_an_agent_is_refused_before_custody() {
         },
     )
     .await;
+    let error = result.unwrap_err();
     assert_eq!(
-        result.unwrap_err().to_string(),
+        error.to_string(),
         "Runtime custody viewer release approval is unavailable"
     );
     assert!(custody.requests().await.is_empty());
     // v1: an agent has no proof that can authorise a release; see the identity design, open question on agents and protected content.
-    let refused = crate::collaboration_profile_authority::require_profile_authority_passkey_binding(
-        data_dir,
-        &agent.principal_id,
-        Some(&agent.proof_binding_id),
-    );
-    assert_eq!(
-        refused.unwrap_err().to_string(),
-        "proof-bound passkey session required"
+    assert!(
+        format!("{:#}", error).contains("proof-bound passkey session required"),
+        "the refusal carries its cause: {error:#}"
     );
 }

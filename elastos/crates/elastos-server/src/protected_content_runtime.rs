@@ -6378,7 +6378,12 @@ pub(crate) async fn open_runtime_custody_viewer(
         now,
     ) {
         Ok(operation) => operation,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(
+                line = line!(),
+                error = ?error,
+                "Runtime custody viewer release failed closed"
+            );
             let _ = settle_runtime_custody_viewer_cleanup(
                 data_dir,
                 registry.clone(),
@@ -6388,7 +6393,7 @@ pub(crate) async fn open_runtime_custody_viewer(
                 open_pending.clone(),
             )
             .await;
-            return Err(release_unavailable_missing!()());
+            return Err(error.context(RUNTIME_CUSTODY_RELEASE_APPROVAL_UNAVAILABLE_MESSAGE));
         }
     };
     let selected = vec![
