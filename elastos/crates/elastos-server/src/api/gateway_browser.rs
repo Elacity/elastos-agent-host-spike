@@ -5295,10 +5295,17 @@ mod r4_root_tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             store(dir.path(), kind);
-            let root =
-                super::super::gateway_home_token::wallet_principal_root(dir.path(), ID).unwrap();
-            let (disk, descriptor) =
-                browser_profile_launch_descriptor(dir.path(), ID, &root).unwrap();
+            let root = super::super::gateway_home_token::wallet_principal_root(
+                dir.path(),
+                crate::auth::r4_fixture::principal_id(kind),
+            )
+            .unwrap();
+            let (disk, descriptor) = browser_profile_launch_descriptor(
+                dir.path(),
+                crate::auth::r4_fixture::principal_id(kind),
+                &root,
+            )
+            .unwrap();
             let uri = format!("{expected}/BrowserProfiles/default/profile.ext4");
             assert_eq!(descriptor["uri"], uri, "R4 Browser profile root");
             assert_eq!(disk, rooted_localhost_fs_path(dir.path(), &uri).unwrap());
