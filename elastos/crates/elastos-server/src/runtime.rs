@@ -719,6 +719,7 @@ pub(crate) mod tests {
             window_policy: None,
             model_content: None,
             agent: None,
+            asks: Vec::new(),
             signature: None,
         }
     }
