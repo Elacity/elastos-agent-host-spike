@@ -389,10 +389,12 @@ fn seed_completed_runtime_custody_mint(
     let content_id =
         crate::protected_content_runtime::runtime_protected_content_id(draft.encrypted_content())
             .unwrap();
+    let publisher_root =
+        crate::auth::principal_stored_localhost_root(Some(data_dir), &input.principal_id).unwrap();
     let publisher_profile_did = crate::collaboration_profile_authority::load_profile_authority(
         data_dir,
         &input.principal_id,
-        &crate::auth::principal_localhost_root(&input.principal_id),
+        &publisher_root,
     )
     .unwrap()
     .unwrap()
@@ -8625,6 +8627,11 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
     let root = crate::auth::valid_agent::ROOT;
     let _guard = protected_content_gateway_mock_test_guard().lock().await;
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     crate::protected_content_runtime::tests::write_device_key(dir.path(), 0x5a);
     let (state, wallet_provider) = wallet_chain_test_state_with_observer(dir.path()).await;
     state
@@ -8642,6 +8649,24 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
     let agent = crate::auth::valid_agent::plant(dir.path());
     let principal_id = agent.principal_id.clone();
     crate::auth::store_test_principal_root_protection_for(dir.path(), &principal_id, root);
+    let agent_profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+        dir.path(),
+        &principal_id,
+        root,
+        "buyer",
+        None,
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    assert!(
+        crate::collaboration_profile_authority::load_profile_authority(
+            dir.path(),
+            &principal_id,
+            root,
+        )
+        .unwrap()
+        .is_some()
+    );
     let account_id = wallet_provider
         .provider
         .seed_managed_evm_account_for_principal(&principal_id)
@@ -8663,24 +8688,6 @@ async fn r4_runtime_custody_buy_loads_agent_profile() {
         &facts,
         MOCK_MANAGED_EVM_ADDRESS,
         true,
-    );
-    let agent_profile = crate::collaboration_profile_authority::test_plant_profile_authority(
-        dir.path(),
-        &principal_id,
-        root,
-        "buyer",
-        None,
-        crate::auth::now_ts(),
-    )
-    .unwrap();
-    assert!(
-        crate::collaboration_profile_authority::load_profile_authority(
-            dir.path(),
-            &principal_id,
-            root,
-        )
-        .unwrap()
-        .is_some()
     );
     let now = crate::auth::now_ts();
     let grant = elastos_runtime::auth::AuthSessionGrantV1 {
