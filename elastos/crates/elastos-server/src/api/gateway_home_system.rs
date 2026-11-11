@@ -10106,4 +10106,72 @@ mod r8d_passkey_rows {
         let expected = under_person(relative);
         person.assert_child_holds_only(&[expected.as_str()]);
     }
+
+    /// Entry: `home_save_browser_state` (line 7177) with an empty update.
+    /// Today the child's write leaves the Home browser state as plain JSON
+    /// with the person's id and root.
+    #[test]
+    fn r8d_child_browser_state_save_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        let update: HomeBrowserStateUpdate =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let saved = home_save_browser_state(child, &person.ctx, update)
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(saved.schema, HOME_BROWSER_STATE_SCHEMA);
+        let relative = ".AppData/ElastOS/Home/browser-state.json";
+        assert_eq!(
+            plain_json(&person_path(child, relative)),
+            serde_json::json!({
+                "schema": HOME_BROWSER_STATE_SCHEMA,
+                "principal_id": PERSON,
+                "localhost_root": ROOT,
+                "layout": null,
+                "session": null,
+                "recent_targets": [],
+            })
+        );
+        let expected = under_person(relative);
+        person.assert_child_holds_only(&[expected.as_str()]);
+    }
+
+    /// Entry: `home_save_services_selection_state` (line 3004) with the
+    /// person's default state. Today the child's write leaves that state as
+    /// plain JSON, byte for byte.
+    #[test]
+    fn r8d_child_services_selection_save_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        let state = home_services_default_selection_state(&person.ctx);
+        home_save_services_selection_state(child, &person.ctx, &state)
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        let relative = ".AppData/ElastOS/Home/services-state.json";
+        assert_eq!(
+            std::fs::read(person_path(child, relative)).unwrap(),
+            serde_json::to_vec_pretty(&state).unwrap(),
+            "{relative} holds the state it was given"
+        );
+        let expected = under_person(relative);
+        person.assert_child_holds_only(&[expected.as_str()]);
+    }
+
+    /// Entry: `home_save_services_requests_state` (line 3104) with the
+    /// person's default state. Today the child's write leaves that state as
+    /// plain JSON, byte for byte.
+    #[test]
+    fn r8d_child_services_requests_save_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        let state = home_services_default_requests_state(&person.ctx);
+        home_save_services_requests_state(child, &person.ctx, &state)
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        let relative = ".AppData/ElastOS/Home/services-requests.json";
+        assert_eq!(
+            std::fs::read(person_path(child, relative)).unwrap(),
+            serde_json::to_vec_pretty(&state).unwrap(),
+            "{relative} holds the state it was given"
+        );
+        let expected = under_person(relative);
+        person.assert_child_holds_only(&[expected.as_str()]);
+    }
 }
