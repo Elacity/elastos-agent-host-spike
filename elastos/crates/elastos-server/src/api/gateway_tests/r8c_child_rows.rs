@@ -8,9 +8,17 @@
 //! test binary: they verify against the signer in a process-wide environment
 //! variable. Each row therefore calls the functions the handler calls after
 //! it has verified the token, with the context the production verifier built.
+//!
+//! The sign-in store. A real child reads the parent's: the parent sets
+//! `ELASTOS_HOME_LAUNCH_TRUSTED_AUTH_DATA_DIR` when it starts the child
+//! (runtime_control.rs:1336-1339) and `home_launch_auth_data_dir` reads it
+//! (gateway_home_token.rs:1253). The child fixture sets no process variable;
+//! it points the test-only thread-local that function checks first (lines
+//! 1249-1252) at the parent's data directory, which only the test thread
+//! sees. The control reads its own store, as before.
 
-use super::super::r3_stored_root_tests::verified_parent_device_context;
 use super::*;
+use crate::api::gateway::gateway_home_token::{self as home_token, TestHomeLaunchAuthDataDir};
 use elastos_runtime::signature::{generate_keypair, SigningKey};
 
 mod cli_context;
@@ -29,21 +37,53 @@ struct Child {
     ctx: HomeLaunchTokenContext,
     parent_root: String,
     child_root: String,
+    /// The parent's data directory, kept for as long as the child reads it.
+    _parent: tempfile::TempDir,
+    _auth: TestHomeLaunchAuthDataDir,
 }
 
+/// The parent signs a Home launch token for its own device person and the
+/// child verifies it against the parent's DID and sign-in store: the calls
+/// `verified_parent_device_context` makes, with the parent's directory kept.
 fn child(app: &str) -> Child {
     let dir = tempfile::tempdir().unwrap();
-    let (ctx, parent_root, child_root, _token) = verified_parent_device_context(dir.path(), app);
-    let stored = crate::auth::stored_principal_record(dir.path(), ctx.principal_id()).unwrap();
-    assert!(
-        stored.is_none(),
-        "the child stores no record for the parent"
-    );
+    let parent = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let (_, child_did) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+    let on_parent = home_token::local_home_launch_token_context(parent.path()).unwrap();
+    let token =
+        home_token::issue_home_launch_token_with_context(parent.path(), app, &on_parent).unwrap();
+    let ctx = home_token::require_home_launch_token_value_from_expected_did_for_test(
+        dir.path(),
+        &token,
+        &[app],
+        parent_did.clone(),
+        parent.path(),
+    )
+    .unwrap()
+    .context;
+    let root_of = |did: &str| crate::auth::principal_localhost_root(&format!("device:{did}"));
+    let (parent_root, child_root) = (root_of(&parent_did), root_of(&child_did));
+    assert_eq!(ctx.root().localhost_root(), parent_root);
+    for (store, whose) in [(dir.path(), "child"), (parent.path(), "parent")] {
+        let stored = crate::auth::stored_principal_record(store, ctx.principal_id()).unwrap();
+        assert!(stored.is_none(), "the {whose} stores no record for them");
+    }
+    // From here on the child reads the parent's sign-in store.
+    let auth = set_test_home_launch_auth_data_dir(parent.path());
+    assert_eq!(home_launch_auth_data_dir(dir.path()), parent.path());
     Child {
         dir,
         ctx,
         parent_root,
         child_root,
+        _parent: parent,
+        _auth: auth,
     }
 }
 
