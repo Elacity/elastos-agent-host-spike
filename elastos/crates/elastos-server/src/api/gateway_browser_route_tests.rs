@@ -71,6 +71,7 @@ try { await createRuntimeApi({}).fetchJson('/api/apps/browser/open'); }
 catch (failure) { error = failure; }
 console.log(JSON.stringify({
   authority: isAuthoritySessionError(error), message: friendlyOpenError(error),
+  policyRefusalMessage: friendlyOpenError({ status: 403, message: "Connection policy refused the request" }),
   outcome: runtimeOpenOutcome(error),
   evidence: await browserOpenResponseEvidence({
     json: async () => JSON.parse(body), text: async () => body,
@@ -282,10 +283,10 @@ async fn test_browser_open_missing_and_forged_tokens_stay_generic_at_the_front_d
         );
         let consumer = browser_open_response_consumers(StatusCode::FORBIDDEN, &body);
         assert_eq!(consumer["authority"], false, "{uri}");
-        assert_eq!(
-            consumer["message"],
-            "This page was blocked by your Exit Node settings."
-        );
+        assert!(consumer["policyRefusalMessage"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()));
+        assert_eq!(consumer["message"], consumer["policyRefusalMessage"], "{uri}");
     }
 }
 

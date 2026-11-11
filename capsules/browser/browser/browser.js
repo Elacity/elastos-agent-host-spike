@@ -900,7 +900,7 @@ async function closeRuntimePage(
 }
 
 function runtimeOwnedFailureSummary(_kind) {
-  return "This page cannot be shown. Browser is closing it. Type a website address to try again.";
+  return "This page stopped working. Close this Browser window, then open Browser again.";
 }
 
 async function failRuntimeOwnedPage(kind, message) {
