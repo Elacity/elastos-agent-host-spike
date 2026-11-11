@@ -631,9 +631,9 @@ The tests are in `tests/parse.rs`.
 
 Four lab crates outside this lane have a path dependency on this crate. Each
 manifest is listed below with what that crate uses: `pins` (its tests pin a
-printed lab CID), `parse` (it reads a printed lab CID with `LabCid`'s parse,
-makes values with `encode_entries`, or names bundles with `checked_bundle`,
-and pins none), or `both`.
+printed lab CID), `parse` (it uses this crate's parse, encode, naming or
+signing calls and pins none: `LabCid`'s parse, `encode_entries`,
+`checked_bundle`, `sign_bundle`), or `both`.
 
 ```text
 lab/agent-conformance/Cargo.toml  parse
@@ -649,7 +649,7 @@ lab/wasm-capsule/tools/Cargo.toml  pins
 - `lab/plan-approval` (`plan-approval`), a dev-dependency: its tests include
   `lab/agent-conformance/tests/common/signed_bundle.rs` by path
   (`src/lib.rs`), which names a bundle with `checked_bundle` and signs it with
-  `sign_bundle`. It pins no lab CID and parses none.
+  `sign_bundle`. It pins no lab CID; it names and signs bundles only.
 - `lab/wasm-capsule` (wasm-capsule-lab), the `capsule` package, a
   dev-dependency: its tests pin two lab CIDs (`tests/common/mod.rs`,
   `tests/bundle.rs`) and parse a printed one (`tests/run.rs`).
