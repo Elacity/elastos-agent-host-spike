@@ -9810,3 +9810,153 @@ mod stored_root_tests {
         );
     }
 }
+
+/// R8c evidence rows for Profile update. `people_profile_update` (line 2521)
+/// first calls `require_profile_authority_passkey_binding` and then the
+/// private `update_profile_for_context` (line 8608); these rows call both.
+/// The child row expects the gate and the update to pass and the Profile to
+/// land under the parent root. For the parent device both refuse with
+/// `proof-bound passkey session required` today, before any write.
+#[cfg(test)]
+mod r8c_child_rows {
+    use super::super::r3_stored_root_tests::verified_parent_device_context;
+    use super::*;
+    use elastos_runtime::auth::{PasskeyWebAuthnBinding, ProofBinding};
+
+    fn update(
+        dir: &std::path::Path,
+        context: &HomeLaunchTokenContext,
+        root: &str,
+    ) -> Result<(), String> {
+        let gate =
+            crate::collaboration_profile_authority::require_profile_authority_passkey_binding(
+                dir,
+                &home_browser_principal_id(context),
+                context.proof_binding_id(),
+            );
+        let updated = update_profile_for_context(dir, context, "R8c Person");
+        let identity = match (gate, updated) {
+            (Ok(()), Ok(identity)) => identity,
+            (gate, updated) => {
+                let gate = gate.err().map(|err| format!("{err:#}"));
+                let updated = updated.err().map(|err| format!("{err:#}"));
+                return Err(format!(
+                    "route gate at line 2531: {gate:?}; update_profile_for_context: {updated:?}"
+                ));
+            }
+        };
+        let name = identity.profile.map(|profile| profile.display_name);
+        if name.as_deref() != Some("R8c Person") {
+            return Err(format!("Profile name after update: {name:?}"));
+        }
+        let path = home_profile_authority_path(dir, context).unwrap();
+        let uri = format!("{root}/.AppData/ElastOS/Profile/profile-authority.json");
+        if !path.is_file() || Some(path) != rooted_localhost_fs_path(dir, &uri) {
+            return Err(format!("Profile bytes are not at {uri}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
+    fn r8c_child_profile_update_passes_the_passkey_gate_and_writes_under_the_parent_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let (context, parent_root, _, _) =
+            verified_parent_device_context(dir.path(), PEOPLE_CAPSULE_ID);
+        assert_eq!(update(dir.path(), &context, &parent_root), Ok(()));
+        let roots = std::fs::read_dir(dir.path().join("Users")).unwrap().count();
+        assert_eq!(roots, 1, "only the parent root holds files");
+    }
+
+    #[test]
+    fn r8c_control_profile_update_writes_under_the_stored_persons_root() {
+        let dir = tempfile::tempdir().unwrap();
+        verified_parent_device_context(dir.path(), PEOPLE_CAPSULE_ID);
+        let now = now_ts();
+        let binding = ProofBinding::passkey_webauthn(PasskeyWebAuthnBinding {
+            credential_id: "r8c-control".to_string(),
+            public_key: "r8c-control-public-key".to_string(),
+            sign_count: 1,
+            user_verified: true,
+            origin: "https://elastos.elacitylabs.com".to_string(),
+            rp_id: "elastos.elacitylabs.com".to_string(),
+            created_at: now,
+            last_used_at: now,
+            revoked_at: None,
+        });
+        let record = crate::auth::upsert_principal_for_binding_as_role_named(
+            dir.path(),
+            binding,
+            "person:local:r8c-control".to_string(),
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("Stored Person"),
+            now,
+        )
+        .unwrap();
+        crate::auth::store_test_principal_root_protection(dir.path(), &record.principal_id);
+        let context = stored_passkey_principal_context(dir.path(), &record).unwrap();
+        assert_eq!(update(dir.path(), &context, &record.localhost_root), Ok(()));
+        let roots = std::fs::read_dir(dir.path().join("Users")).unwrap().count();
+        assert_eq!(roots, 1, "only the stored person's root holds files");
+    }
+}
+
+/// R8d evidence row for Profile update, for a parent passkey person on a
+/// child Runtime. `people_profile_update` (line 2521) first calls
+/// `require_profile_authority_passkey_binding` with its own data directory
+/// (line 2532). For this person it returns there with 403 (line 2538) and
+/// never reaches the private `update_profile_for_context` (line 8608). The
+/// row calls the gate, the route, and then the private function directly.
+/// Its control is the R8c control row above.
+#[cfg(test)]
+mod r8d_passkey_rows {
+    use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, refusal, PERSON, ROOT};
+    use super::*;
+    use crate::collaboration_profile_authority as authority;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
+        let person = passkey_person(PEOPLE_CAPSULE_ID);
+        let child = person.child.path();
+        let proof = person.ctx.proof_binding_id();
+        // The token carries the passkey proof binding. The gate looks that
+        // binding up in the auth state of the data directory it is handed,
+        // which is the child's own, and the child stores no such binding.
+        let gate = authority::require_profile_authority_passkey_binding(
+            child,
+            &home_browser_principal_id(&person.ctx),
+            proof,
+        );
+        assert_eq!(refusal(gate).as_deref(), Some("proof binding not found"));
+        // The route itself, with a token the child's own key signed (see
+        // `route_headers`). It stops at the gate.
+        let request: PeopleProfileUpdateRequest =
+            serde_json::from_value(serde_json::json!({"display_name": "R8d Person"})).unwrap();
+        let answer = people_profile_update(
+            State(person.child_state()),
+            person.route_headers(PEOPLE_CAPSULE_ID),
+            Json(request),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), "proof binding not found");
+        // Not reached by the route for this person. Called directly, the
+        // private update refuses at its own call of the same gate
+        // (collaboration_profile_authority.rs:316).
+        let updated = update_profile_for_context(child, &person.ctx, "R8d Person");
+        assert_eq!(refusal(updated).as_deref(), Some("proof binding not found"));
+        // The same gate, handed the parent's data directory, accepts them.
+        let parent = person.parent.path();
+        let on_parent = authority::require_profile_authority_passkey_binding(parent, PERSON, proof);
+        assert_eq!(refusal(on_parent), None);
+        // The child holds what it held before and the parent's Profile is as
+        // it was.
+        person.assert_child_holds_only(&[]);
+        let kept = authority::load_profile_authority(parent, PERSON, ROOT).unwrap();
+        let name = kept.map(|profile| profile.document().display_name.clone());
+        assert_eq!(name.as_deref(), Some("Parent Person"));
+    }
+}
