@@ -712,7 +712,10 @@ function geometry() {
 // in the same face a warm run uses.
 async function waitForDocumentFonts(target) {
   await target.evaluate(async () => {
-    const family = getComputedStyle(document.body).fontFamily.split(",")[0].trim();
+    // A frame that is still parsing has no body yet; measure the family the
+    // parsed text uses and keep the wait harmless there.
+    const styled = document.body || document.documentElement;
+    const family = getComputedStyle(styled).fontFamily.split(",")[0].trim();
     if (family) {
       // A face the document does not declare rejects here; the measurement
       // then uses the same fallback it always did.
@@ -869,7 +872,9 @@ async function measureCapsuleFrame(page, target) {
   if (!capsuleFrame) {
     return { capsule: null, capsuleLayout: null };
   }
-  await waitForDocumentFonts(capsuleFrame);
+  // A frame that is still navigating has no document to settle; the capsule
+  // measurements below already record null in that case.
+  await waitForDocumentFonts(capsuleFrame).catch(() => null);
   return {
     capsule: await capsuleFrame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX }).catch(() => null),
     capsuleLayout: await capsuleFrame.evaluate(() => ({
