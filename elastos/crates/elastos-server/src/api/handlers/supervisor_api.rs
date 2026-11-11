@@ -372,7 +372,7 @@ mod tests {
 
         let principal = supervisor_launch_principal_from_input(Some(dir.path()), &input).unwrap();
 
-        assert_eq!(principal.as_deref(), Some(context.principal_id.as_str()));
+        assert_eq!(principal.as_deref(), Some(context.principal_id()));
     }
 
     #[test]

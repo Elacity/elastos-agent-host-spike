@@ -423,7 +423,7 @@ async fn viewer_library_object(
     if viewer == "documents" {
         crate::library::refuse_linked_library_object(
             &state.data_dir,
-            &context.principal_id,
+            context.principal_id(),
             &request.uri,
         )?;
     }

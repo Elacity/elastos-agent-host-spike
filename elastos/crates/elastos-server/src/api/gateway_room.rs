@@ -1327,7 +1327,7 @@ fn room_session_authorization(
     launch: &RequiredHomeLaunchToken,
 ) -> crate::room_service::RoomSessionAuthorization {
     crate::room_service::RoomSessionAuthorization {
-        principal_id: launch.context.principal_id.clone(),
+        principal_id: launch.context.principal_id().to_string(),
         session_id: launch.context.session_id.clone(),
         proof_binding_id: launch.context.proof_binding_id.clone(),
         grant_id: launch.context.grant_id.clone(),
@@ -2379,7 +2379,7 @@ pub(super) async fn chat_room_attach_library(
     let publication = match crate::library::chat_attach_publication(
         &data_dir,
         &registry,
-        &context.principal_id,
+        context.principal_id(),
         &request_id,
         &uri,
         if_revision.as_deref(),
@@ -2400,7 +2400,7 @@ pub(super) async fn chat_room_attach_library(
     let (post, name) =
         community_file_post(&publication.name, publication.size_bytes, &publication.cid);
     let size_bytes = publication.size_bytes;
-    let principal_id = context.principal_id;
+    let principal_id = context.principal_id().to_string();
     let now = now_ts();
     let posted = tokio::task::spawn_blocking(move || {
         let operation = crate::collaboration_product::chat_message_request_binding(

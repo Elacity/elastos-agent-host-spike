@@ -309,7 +309,7 @@ pub(super) async fn answer(
             &state.data_dir,
             &Consent::Refused {
                 request_id: id.into(),
-                by_principal_id: launch.context.principal_id.clone(),
+                by_principal_id: launch.context.principal_id().to_string(),
                 at: now_ts(),
             },
         )?;
@@ -335,7 +335,7 @@ pub(super) async fn answer(
     )?;
     ensure_admin_context(&state.data_dir, &launch.context)?;
     let capability = manager.grant(
-        &launch.context.principal_id,
+        launch.context.principal_id(),
         ResourceId::new(RESOURCE),
         Action::Execute,
         TokenConstraints::default(),
@@ -350,7 +350,7 @@ pub(super) async fn answer(
         &Consent::Granted {
             token_id: capability.id().to_string(),
             owner: InternetOwner {
-                principal_id: launch.context.principal_id.clone(),
+                principal_id: launch.context.principal_id().to_string(),
                 proof_binding_id,
             },
             at: now_ts(),
@@ -526,7 +526,7 @@ pub(super) async fn effect(
             || live
                 .instances
                 .values()
-                .filter(|instance| instance.principal_id == context.principal_id)
+                .filter(|instance| instance.principal_id == context.principal_id())
                 .count()
                 < 256,
         "Close an existing Browser instance before opening another"
@@ -535,13 +535,13 @@ pub(super) async fn effect(
         .instances
         .entry(launch.into())
         .or_insert_with(|| Instance {
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             session_id: context.session_id.clone(),
             cancel: watch::channel(false).0,
             copies: Arc::new(watch::channel(0).0),
         });
     anyhow::ensure!(
-        instance.principal_id == context.principal_id
+        instance.principal_id == context.principal_id()
             && instance.session_id == context.session_id
             && !*instance.cancel.borrow(),
         "Browser instance authority has ended"
@@ -550,7 +550,7 @@ pub(super) async fn effect(
     let stopped = cancelled.clone();
     let data = state.data_dir.clone();
     let session = context.session_id.clone();
-    let principal = context.principal_id.clone();
+    let principal = context.principal_id().to_string();
     let path = ended_path(&data, launch);
     let fence = live.fence.narrow(move || {
         if *stopped.borrow()
@@ -710,7 +710,7 @@ async fn action_inner(
             &state.data_dir,
             &Consent::Revoked {
                 token_id: token_id.clone(),
-                by_principal_id: launch.context.principal_id.clone(),
+                by_principal_id: launch.context.principal_id().to_string(),
                 at: now_ts(),
             },
         )?;

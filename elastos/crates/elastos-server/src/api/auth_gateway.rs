@@ -4556,14 +4556,14 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
     }
     if !bitcoin_message_has_resource(
         &input.message,
-        &format!("elastos://principal/{}", context.principal_id),
+        &format!("elastos://principal/{}", context.principal_id()),
     ) {
         anyhow::bail!("Bitcoin wallet proof is not bound to this runtime principal");
     }
 
     let session =
         crate::auth::load_active_session_grant(&state.data_dir, &context.session_id, now)?;
-    if session.principal_id != context.principal_id
+    if session.principal_id != context.principal_id()
         || session.proof_binding_id != session_proof_binding_id
         || session.grant_id != context.grant_id
     {
@@ -4575,7 +4575,7 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
     let principal = crate::auth::upsert_principal_for_binding_as_role(
         &state.data_dir,
         binding,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
         session_principal.role,
         now,
     )?;
@@ -4597,7 +4597,7 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.wallet.linked",
-            principal_id: Some(context.principal_id.clone()),
+            principal_id: Some(context.principal_id().to_string()),
             proof_binding_id: Some(principal.proof_binding_id.clone()),
             session_id: Some(context.session_id.clone()),
             challenge_id: Some(challenge_id),

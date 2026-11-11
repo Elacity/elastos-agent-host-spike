@@ -1301,7 +1301,7 @@ pub(in crate::api::gateway) async fn execute_browser_open(
                     reconcile_dispatched_browser_launch_failure(
                         state,
                         &launch_reservation,
-                        &context.principal_id,
+                        context.principal_id(),
                         authority.verified_context().launch_id(),
                         &engine_stream_id,
                         stream_cleanup.clone(),
