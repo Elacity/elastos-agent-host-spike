@@ -14,6 +14,7 @@ use super::*;
 use elastos_runtime::signature::{generate_keypair, SigningKey};
 
 mod direct_messages;
+mod library_rows;
 mod people;
 mod presence;
 mod profile;
