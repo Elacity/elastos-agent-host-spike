@@ -165,11 +165,13 @@ fn files_under_roots(data_dir: &std::path::Path) -> Vec<String> {
 }
 
 /// One row's steps, in order. The row fails only after every step ran, so
-/// its failure text carries each step's outcome.
+/// its failure text carries each step's outcome. A row passes only when
+/// every step ran and passed: a skipped step fails the row.
 struct Steps {
     row: &'static str,
     lines: Vec<String>,
     refused: usize,
+    skipped: usize,
 }
 
 impl Steps {
@@ -178,9 +180,12 @@ impl Steps {
             row,
             lines: Vec::new(),
             refused: 0,
+            skipped: 0,
         }
     }
 
+    /// The call answered. It does not look at the answer: use `step_where`
+    /// when the answer carries a value the row depends on.
     fn step<T, E: std::fmt::Display>(&mut self, name: &str, result: Result<T, E>) -> Option<T> {
         match result {
             Ok(value) => {
@@ -195,6 +200,25 @@ impl Steps {
         }
     }
 
+    /// The call answered and `expected` holds for its answer. An answer that
+    /// misses `expected` is recorded as failed and is not handed on.
+    fn step_where<T: std::fmt::Debug, E: std::fmt::Display>(
+        &mut self,
+        name: &str,
+        result: Result<T, E>,
+        expected: impl FnOnce(&T) -> bool,
+    ) -> Option<T> {
+        match result {
+            Ok(value) if expected(&value) => self.step(name, Ok::<T, E>(value)),
+            Ok(value) => {
+                self.refused += 1;
+                self.lines.push(format!("FAILED  {name}: saw {value:?}"));
+                None
+            }
+            Err(error) => self.step(name, Err(error)),
+        }
+    }
+
     fn check(&mut self, name: &str, holds: bool, seen: &dyn std::fmt::Debug) {
         if holds {
             self.lines.push(format!("PASS    {name}"));
@@ -204,7 +228,9 @@ impl Steps {
         }
     }
 
+    /// A step that could not run. It fails the row in `finish`.
     fn not_reached(&mut self, name: &str, why: &str) {
+        self.skipped += 1;
         self.lines.push(format!("SKIPPED {name}: {why}"));
     }
 
@@ -225,6 +251,27 @@ impl Steps {
     fn finish(self) {
         let report = format!("R8C {}\n{}", self.row, self.lines.join("\n"));
         println!("{report}");
-        assert!(self.refused == 0, "{report}");
+        assert!(self.refused == 0 && self.skipped == 0, "{report}");
     }
+}
+
+/// The collector itself: an answer that misses its predicate fails the row.
+#[test]
+#[should_panic(expected = "R8C collector: a wrong value\nFAILED  an answer of false: saw false")]
+fn steps_fail_when_an_answer_misses_its_predicate() {
+    let mut steps = Steps::new("collector: a wrong value");
+    let handed_on = steps.step_where("an answer of false", Ok::<_, String>(false), |value| *value);
+    assert_eq!(handed_on, None);
+    steps.finish();
+}
+
+/// The collector itself: a step that was skipped fails the row.
+#[test]
+#[should_panic(
+    expected = "R8C collector: a skipped step\nSKIPPED a later step: nothing to run it on"
+)]
+fn steps_fail_when_a_step_was_skipped() {
+    let mut steps = Steps::new("collector: a skipped step");
+    steps.not_reached("a later step", "nothing to run it on");
+    steps.finish();
 }

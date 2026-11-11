@@ -41,8 +41,14 @@ fn r8c_child_profile_load_reads_the_profile_under_the_parent_root() {
     let child = child(PEOPLE_CAPSULE_ID);
     let dir = child.dir.path();
     let mut steps = Steps::new("profile load: parent-signed device, child Runtime");
-    let empty = load_profile_authority_for_context(dir, &child.ctx).map(|found| found.is_none());
-    steps.step("as launched, no Profile yet: load answers", empty);
+    // No Profile is stored yet: the load answers `Ok(None)`.
+    let empty = load_profile_authority_for_context(dir, &child.ctx)
+        .map(|found| found.map(|profile| profile.document().profile_did.clone()));
+    steps.step_where(
+        "as launched, no Profile yet: the load answers none",
+        empty,
+        Option::is_none,
+    );
     let seeded = seed_parent_profile(&child);
     let expected = seeded.document().profile_did.clone();
     load_steps(&mut steps, dir, &child.ctx, &expected);
