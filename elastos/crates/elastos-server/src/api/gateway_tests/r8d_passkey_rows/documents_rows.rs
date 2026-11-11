@@ -4,19 +4,12 @@
 
 use super::*;
 
-async fn documents(dir: &std::path::Path, op: &str, mut request: Value) -> Result<Value, String> {
+async fn documents(dir: &std::path::Path, op: &str, mut request: Value) -> Value {
     request["op"] = json!(op);
     request["principal_id"] = json!(PERSON);
     let provider =
         crate::documents::DocumentsProvider::new(dir.to_path_buf(), std::sync::Weak::new());
-    let response = provider
-        .send_raw(&request)
-        .await
-        .map_err(|error| error.to_string())?;
-    if response["status"] == "ok" {
-        return Ok(response["data"].clone());
-    }
-    Err(format!("{} {}", response["code"], response["message"]))
+    provider.send_raw(&request).await.unwrap()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -25,8 +18,13 @@ async fn r8d_child_documents_summary_and_create_under_the_passkey_persons_root()
     assert_eq!(person.ctx.principal_id(), PERSON);
     let child = person.child.path();
     // Documents resolves the root again from the id, with the child's own
-    // data directory as the auth store (documents.rs:742).
-    let refused = Err(format!("\"documents_error\" \"{NO_STORED_RECORD}\""));
+    // data directory as the auth store (documents.rs:742). The whole answer
+    // is these three fields.
+    let refused = json!({
+        "status": "error",
+        "code": "documents_error",
+        "message": NO_STORED_RECORD,
+    });
     let summary = documents(child, "summary", json!({})).await;
     assert_eq!(summary, refused);
     let created = documents(child, "create", json!({"title": "R8d note"})).await;

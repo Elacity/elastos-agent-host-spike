@@ -5,17 +5,10 @@
 
 use super::*;
 
-fn library(dir: &std::path::Path, op: &str, mut request: Value) -> Result<Value, String> {
+fn library(dir: &std::path::Path, op: &str, mut request: Value) -> Value {
     request["op"] = json!(op);
     request["principal_id"] = json!(PERSON);
-    let response = crate::library::handle_object_provider_raw_request(dir, &request);
-    if response["status"] == "ok" {
-        return Ok(response["data"].clone());
-    }
-    Err(format!(
-        "{} {} {}",
-        response["code"], response["message"], response["detail"]
-    ))
+    crate::library::handle_object_provider_raw_request(dir, &request)
 }
 
 #[test]
@@ -26,8 +19,13 @@ fn r8d_child_library_lists_writes_and_reads_under_the_passkey_persons_root() {
     let uri = format!("{ROOT}/Documents/r8d-note.txt");
     let data = base64::engine::general_purpose::STANDARD.encode(b"r8d library bytes");
     // The Library resolves the root again from the id, with the child's own
-    // data directory as the auth store (library.rs:1334 and 3977).
-    let refused = Err(format!("\"library_error\" \"{NO_STORED_RECORD}\" null"));
+    // data directory as the auth store (library.rs:1334 and 3977). The whole
+    // answer is these three fields: no `detail`, no `reason`, no `data`.
+    let refused = json!({
+        "status": "error",
+        "code": "library_error",
+        "message": NO_STORED_RECORD,
+    });
     let steps = [
         ("list", json!({})),
         (
