@@ -4840,6 +4840,7 @@ fn add_library_archive_source_bytes(
 ) -> anyhow::Result<()> {
     if !fs::metadata(&target.path)?.is_dir() {
         let content = crate::auth::principal_root_object_content_bound(
+            data_dir,
             principal_id,
             &target.localhost_root,
             &target.uri,

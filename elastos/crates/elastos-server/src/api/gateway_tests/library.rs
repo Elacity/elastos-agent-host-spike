@@ -7057,6 +7057,7 @@ async fn archive_content_bound_never_undercounts() {
     let bound = |uri: &str, data_key_id: Option<&str>| {
         let path = rooted_localhost_fs_path(dir.path(), uri).unwrap();
         crate::auth::principal_root_object_content_bound(
+            dir.path(),
             &authority.principal_id,
             &root,
             uri,

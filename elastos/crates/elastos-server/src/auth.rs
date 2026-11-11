@@ -1955,6 +1955,7 @@ pub(crate) fn complete_owner_recovery(
         anyhow::bail!("recovery kit root does not match its principal");
     }
     mutate_auth_state(data_dir, |state| {
+        authorize_principal_protection(state, &kit.principal_id)?;
         let now = now_ts();
         require_owner_recovery(state, client, now)?;
         normalize_principal_records(state);
@@ -3385,7 +3386,9 @@ mod owner_recovery_tests {
 
             if case == "agent-admin" {
                 assert!(
-                    error.to_string().contains("does not match an admin"),
+                    error
+                        .to_string()
+                        .contains("quarantined agent record: agent kind binding mismatch"),
                     "{error}"
                 );
             }
@@ -6145,12 +6148,18 @@ pub fn is_auth_session_active(data_dir: &Path, session_id: &str, now: u64) -> an
     }))
 }
 
+/// One gate for every protection-map read and write that names a principal.
+fn authorize_principal_protection(state: &AuthState, principal_id: &str) -> anyhow::Result<()> {
+    refuse_named_quarantine(state, principal_id)
+}
+
 pub fn store_principal_root_protection(
     data_dir: &Path,
     protection: PrincipalRootProtectionV1,
 ) -> anyhow::Result<()> {
     validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
     mutate_auth_state(data_dir, |state| {
+        authorize_principal_protection(state, &protection.principal_id)?;
         ensure_users_ai_protection_owner(state, &protection)?;
         state.principal_root_protections.retain(|stored| {
             stored.principal_id != protection.principal_id
@@ -6190,6 +6199,7 @@ pub fn load_principal_root_protection(
     localhost_root: &str,
 ) -> anyhow::Result<Option<PrincipalRootProtectionV1>> {
     let state = load_auth_state(data_dir)?;
+    authorize_principal_protection(&state, principal_id)?;
     let Some(protection) = state.principal_root_protections.iter().find(|stored| {
         stored.principal_id == principal_id && stored.localhost_root == localhost_root
     }) else {
@@ -6208,6 +6218,7 @@ pub(crate) fn mark_recovery_kit_handed_to_person(
 ) -> anyhow::Result<()> {
     verify_recovery_kit_material(kit)?;
     mutate_auth_state(data_dir, |state| {
+        authorize_principal_protection(state, &kit.principal_id)?;
         let protection = state
             .principal_root_protections
             .iter_mut()
@@ -6648,12 +6659,19 @@ fn read_protected_principal_root_object_file(
 /// than three quarters of its length: the base64 ciphertext's share. Anything
 /// else counts its whole length, since a plaintext file is read whole.
 pub(crate) fn principal_root_object_content_bound(
+    data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
     object_uri: &str,
     path: &Path,
     data_key_id: Option<&str>,
 ) -> anyhow::Result<u64> {
+    validate_principal_root_object_binding_in_state(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+    )?;
     let (mut file, len) = open_principal_root_object_file(path)?;
     let expected = PrincipalRootObjectExpectation {
         principal_id,
@@ -6748,6 +6766,12 @@ pub(crate) fn protect_legacy_plaintext_principal_root_object(
     object_uri: &str,
     path: &Path,
 ) -> anyhow::Result<Vec<u8>> {
+    validate_principal_root_object_binding_in_state(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+    )?;
     let too_large = || {
         anyhow!(
             "{PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED}: {} is not encrypted and is larger \
@@ -7652,6 +7676,7 @@ pub fn ensure_recovered_root_reassignable(
 ) -> anyhow::Result<()> {
     let mut state = load_auth_state(data_dir)?;
     normalize_principal_records(&mut state);
+    authorize_principal_protection(&state, recovered_principal_id)?;
     ensure_recovered_root_reassignable_in_state(
         &state,
         proof_binding_id,
@@ -7925,6 +7950,7 @@ fn ensure_recovered_root_reassignable_in_state(
     recovered_localhost_root: &str,
     recovered_data_key_id: &str,
 ) -> anyhow::Result<()> {
+    authorize_principal_protection(state, recovered_principal_id)?;
     let current = state
         .principals
         .iter()
@@ -12458,7 +12484,21 @@ pub(crate) fn store_test_principal_root_protection_for(
         created_at,
         updated_at: created_at,
     };
-    store_principal_root_protection(data_dir, protection.clone()).unwrap();
+    // The production store refuses a quarantined principal. A row that plants
+    // one still needs the map entry, so this helper writes that entry itself.
+    if quarantine_reason(&load_auth_state(data_dir).unwrap(), principal_id).is_some() {
+        mutate_auth_state(data_dir, |state| {
+            state.principal_root_protections.retain(|stored| {
+                stored.principal_id != protection.principal_id
+                    || stored.localhost_root != protection.localhost_root
+            });
+            state.principal_root_protections.push(protection.clone());
+            Ok(())
+        })
+        .unwrap();
+    } else {
+        store_principal_root_protection(data_dir, protection.clone()).unwrap();
+    }
     protection
 }
 
@@ -12509,12 +12549,19 @@ pub(crate) mod tests {
             PrincipalKind::Agent,
             None,
         );
-        store_principal_root_protection(data_dir.path(), protection.clone()).unwrap();
-        assert_eq!(
-            load_principal_root_protection(data_dir.path(), &human.principal_id, &agent_root)
-                .unwrap(),
-            Some(protection)
+        let quarantined = store_principal_root_protection(data_dir.path(), protection.clone())
+            .expect_err("a quarantined record cannot store a UsersAI protection");
+        assert!(
+            quarantined
+                .to_string()
+                .contains("quarantined agent record: agent kind binding mismatch"),
+            "{quarantined}"
         );
+        mutate_auth_state(data_dir.path(), |state| {
+            state.principal_root_protections.push(protection.clone());
+            Ok(())
+        })
+        .unwrap();
         plant_principal_kind(
             data_dir.path(),
             &human.principal_id,
@@ -12527,6 +12574,83 @@ pub(crate) mod tests {
         assert_eq!(
             error.to_string(),
             "UsersAI protection requires its stored Agent root"
+        );
+    }
+
+    /// One row for each production function that names a principal and still
+    /// reached a protection, a recovery record, or an object without the
+    /// quarantine reason. The protection rows share `authorize_principal_protection`.
+    /// The object rows share `validate_principal_root_object_binding_in_state`.
+    /// Owner recovery calls the same protection gate.
+    #[test]
+    fn quarantined_principal_is_refused_for_protection_and_recovery() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let human =
+            store_test_human_principal(data_dir.path(), "person:local:quarantine-protection");
+        let root = human.localhost_root.clone();
+        let protection =
+            store_test_principal_root_protection_for(data_dir.path(), &human.principal_id, &root);
+        let kit = recovery_kit_from_archive(
+            data_dir.path(),
+            protection.protectors[0].archive.as_ref().unwrap(),
+        )
+        .unwrap();
+        plant_principal_kind(
+            data_dir.path(),
+            &human.principal_id,
+            PrincipalKind::Agent,
+            None,
+        );
+        let reason = "quarantined agent record: agent kind binding mismatch";
+        let refuse = |label: &str, result: anyhow::Result<()>| {
+            let error = result.expect_err(label);
+            assert!(error.to_string().contains(reason), "{label}: {error}");
+        };
+        refuse(
+            "protection store",
+            store_principal_root_protection(data_dir.path(), protection.clone()).map(|_| ()),
+        );
+        refuse(
+            "protection load",
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &root).map(|_| ()),
+        );
+        refuse(
+            "recovery kit handoff",
+            mark_recovery_kit_handed_to_person(data_dir.path(), &kit, None, now_ts()),
+        );
+        refuse(
+            "recovered root check",
+            ensure_recovered_root_reassignable(
+                data_dir.path(),
+                "missing-binding",
+                &human.principal_id,
+                &root,
+                &protection.data_key_id,
+            ),
+        );
+        let object = format!("{root}/notes.md");
+        refuse(
+            "legacy plaintext protection",
+            protect_legacy_plaintext_principal_root_object(
+                data_dir.path(),
+                &human.principal_id,
+                &root,
+                &object,
+                data_dir.path(),
+            )
+            .map(|_| ()),
+        );
+        refuse(
+            "object content bound",
+            principal_root_object_content_bound(
+                data_dir.path(),
+                &human.principal_id,
+                &root,
+                &object,
+                data_dir.path(),
+                None,
+            )
+            .map(|_| ()),
         );
     }
 
@@ -17842,10 +17966,22 @@ pub(crate) mod tests {
             b"human note",
             "the refused reads left the file untouched"
         );
-        assert_eq!(
-            load_principal_root_protection(data_dir.path(), &human.principal_id, &root).unwrap(),
-            Some(protection),
-            "the refusals keep the current protection"
+        let protection_error =
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &root)
+                .expect_err("a quarantined principal cannot load its protection");
+        assert!(
+            protection_error
+                .to_string()
+                .contains("quarantined agent record"),
+            "{protection_error}"
+        );
+        assert!(
+            load_auth_state(data_dir.path())
+                .unwrap()
+                .principal_root_protections
+                .iter()
+                .any(|stored| stored == &protection),
+            "the refusal leaves the stored protection in place"
         );
 
         // The valid row: once the record is Human again, the same file and
@@ -18172,7 +18308,7 @@ pub(crate) mod tests {
         let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"human note").unwrap();
-        let protection =
+        let _protection =
             store_test_principal_root_protection_for(data_dir.path(), &human.principal_id, &root);
         let agent = mint_agent_record(data_dir.path(), &human.principal_id, None);
         assert_eq!(agent.kind, PrincipalKind::Agent);
@@ -18199,10 +18335,14 @@ pub(crate) mod tests {
                 "{error}"
             );
         }
-        assert_eq!(
-            load_principal_root_protection(data_dir.path(), &human.principal_id, &root).unwrap(),
-            Some(protection),
-            "the refusal keeps the protection the Agent read would reach"
+        let protection_error =
+            load_principal_root_protection(data_dir.path(), &human.principal_id, &root)
+                .expect_err("a quarantined principal cannot load its protection");
+        assert!(
+            protection_error
+                .to_string()
+                .contains("quarantined agent record"),
+            "{protection_error}"
         );
         let state_after = serde_json::to_value(load_auth_state(data_dir.path()).unwrap()).unwrap();
         assert_eq!(
