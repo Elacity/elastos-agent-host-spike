@@ -22,6 +22,7 @@ use crate::auth::{PasskeySessionPurpose, PasskeySessionRequest, ResolvedPrincipa
 
 mod cli_context;
 mod direct_messages;
+mod documents_rows;
 mod library_rows;
 mod people;
 mod presence;
