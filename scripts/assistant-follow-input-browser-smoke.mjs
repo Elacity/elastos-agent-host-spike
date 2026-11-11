@@ -71,6 +71,24 @@ try {
       : ["--disable-threaded-scrolling", "--disable-smooth-scrolling", "--disable-features=ScrollUnification"],
     ignoreDefaultArgs: ["--hide-scrollbars"],
     ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
+  // Chromium's first page in a fresh browser ran at 7-8 frames a second under
+  // four-core load while the second page of the same run reached 68, and each
+  // Playwright mouse event on that first page returned after a fixed 5 s
+  // input-ack timeout, so the page's own state arrived after its waits had
+  // expired. The first page here is a throwaway: this check measures the
+  // module's follow behaviour, not Chromium's first-page startup.
+  const warmup = await browser.newPage({ viewport: { width: 800, height: 600 } });
+  await warmup.setContent('<style>body{margin:0;height:2000px}</style><div style="height:2000px">warm</div>');
+  await warmup.evaluate(() => new Promise(done => {
+    let n = 0;
+    const tick = () => (++n >= 2 ? done() : requestAnimationFrame(tick));
+    requestAnimationFrame(tick);
+  }));
+  await warmup.mouse.move(400, 300);
+  await warmup.mouse.down();
+  await warmup.mouse.move(400, 100, { steps: 2 });
+  await warmup.mouse.up();
+  await warmup.close();
   for (const mode of modes) {
     const page = await browser.newPage({ viewport: native ? null : { width: 800, height: 600 } });
     const browserSession = native ? await browser.newBrowserCDPSession() : null;
