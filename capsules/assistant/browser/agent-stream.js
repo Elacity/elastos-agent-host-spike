@@ -140,7 +140,8 @@ function observeTranscript(scroller, content) {
     if (y !== touchY) readerInput();
     touchY = y;
   }, { passive: true });
-  scroller.addEventListener("pointerdown", () => {
+  scroller.addEventListener("pointerdown", event => {
+    if (event.target !== scroller) return;
     dragging = true;
     readerInput();
   });
