@@ -53,9 +53,9 @@
 //! name, absolute path, mtime, mode, owner or symlink target. The CIDv1 bytes
 //! and the base32 text are one marked copy. Since M2 part B that copy, the
 //! walk and the encoder live in the workspace crate `elastos-bundle-identity`;
-//! this crate depends on it and re-exports its public names. (The Runtime's
-//! `cid` crate lives only in `elastos-server` and `elastos-namespace`, which
-//! neither of the two links.)
+//! this crate depends on it and re-exports its public names. (In the Runtime's
+//! workspace the `cid` crate is used only by `elastos-server` and
+//! `elastos-namespace`; neither this crate nor that one links it.)
 //!
 //! # One naming path
 //!

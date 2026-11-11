@@ -191,12 +191,15 @@ encoder, one decoder). Since M2 part B it lives, with the walk and the rest
 of the identity code, in the workspace crate `elastos-bundle-identity`
 (`elastos/crates/elastos-bundle-identity/src/lib.rs`), moved there text for
 text. This crate re-exports that crate's public names and has no encoder of
-its own; `cid_bytes`, the encoder and the decoder are private there and are
-reached through `LabCid`'s printing and parsing. The Runtime's `cid`
-0.11 crate lives only in `elastos-server` and `elastos-namespace`, which the
-lab does not link, and any new crate here would make the locks of
-`lab/wasm-capsule` and `lab/agent-conformance` (both path-depend on this
-crate) stale. So the lab adds no crate.
+its own. `cid_bytes`, the base32 printer (`printed_cid`) and the base32
+decoder (`decode_base32`) are private there and are reached through
+`LabCid`'s printing and parsing; the two functions that build the tree,
+`encode_entries` and `encode_listed_files`, are public there and re-exported
+here. In the Runtime's workspace the `cid` 0.11 crate is used only by
+`elastos-server` and `elastos-namespace`, which neither this crate nor the
+identity crate links. The move added one dependency here, the identity crate
+itself; the lockfiles of the crates that path-depend on this one gained its
+entry with it.
 
 Each profile setting has a named test and a falsifier (`tests/encoding.rs`;
 every pin is also recomputed by the Python block above, written from these
@@ -1761,8 +1764,9 @@ them with its cause.
 ```
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
 src/lib.rs               the re-export of the identity crate's public names
-                         (checked_bundle, lab_cid, check_name and its checked form;
-                         the encoder and the walk behind them are private in
+                         (checked_bundle, lab_cid, check_name and its checked form,
+                         encode_entries, encode_listed_files; the walk and the
+                         tree builder behind them are in
                          elastos/crates/elastos-bundle-identity), and this
                          crate's own: the test-key signature, the shared digest,
                          the lab package record and the lab variant binding
