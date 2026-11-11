@@ -57,7 +57,17 @@ try {
     await run("swiftc", ["-O", "-module-cache-path", resolve(output, "module-cache"), "-o", binary,
       resolve(root, "scripts/fixtures/assistant-follow-input-webkit.swift")], { timeout: 60000 });
   }
-  browser = await chromium.launch({ headless: !native, args: native ? ["--force-renderer-accessibility"] : [], ignoreDefaultArgs: ["--hide-scrollbars"],
+  // Keep scrolling and its events on the main thread. With threaded scroll,
+  // Chromium commits a scroll offset on the compositor, and a starved
+  // compositor under four-core load held that commit for tens of seconds: the
+  // module pinned the room and scrollTop still read the old offset, so the
+  // queued-pin cases read fromEnd 100 with follow true and a native drag read
+  // a position it had already left. The page's timers ran at their normal
+  // rate the whole time. The check asserts main-thread follow state, not
+  // compositor scheduling.
+  browser = await chromium.launch({ headless: !native,
+    args: native ? ["--force-renderer-accessibility"] : ["--disable-threaded-scrolling", "--disable-smooth-scrolling"],
+    ignoreDefaultArgs: ["--hide-scrollbars"],
     ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
   for (const mode of modes) {
     const page = await browser.newPage({ viewport: native ? null : { width: 800, height: 600 } });
@@ -94,8 +104,14 @@ try {
         const y = selection ? b.y + b.height / 2 : b.y + (back ? 14 : b.height - 14);
         await step(`${request.phase} move`, () => page.mouse.move(x, y));
         await step(`${request.phase} down`, () => page.mouse.down());
+        // Two moves make a drag, not a click. Each extra move costs a CDP
+        // acknowledgement, and a starved browser charged 4.4 s for one during
+        // a drag (70 s for sixteen): the gesture then finished after its
+        // assertions had waited, and the drag itself was lost. The assertions
+        // read the position and follow state after the gesture, so the number
+        // of intermediate positions does not change what they test.
         await step(`${request.phase} drag`, () => page.mouse.move(selection ? b.x + b.width - 8 : x,
-          selection ? y : b.y + (back ? b.height - 14 : 36), { steps: 16 }));
+          selection ? y : b.y + (back ? b.height - 14 : 36), { steps: 2 }));
         await step(`${request.phase} up`, () => page.mouse.up());
       }
     });
