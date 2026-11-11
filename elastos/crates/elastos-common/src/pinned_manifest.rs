@@ -9,6 +9,7 @@
 
 use crate::cid_form::cid_form;
 use crate::manifest::{CapsuleManifest, CapsuleRole, CapsuleType};
+use serde::de::{Deserialize, Deserializer, Error, MapAccess, SeqAccess, Visitor};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -52,6 +53,9 @@ impl PinnedManifest {
         if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) {
             pins = take_pins(&mut value)?;
             if !pins.is_empty() {
+                // The value has already merged a key written twice; the
+                // ordinary parse refuses one, so refuse it from the bytes.
+                serde_json::from_slice::<NoRepeatedKey>(bytes).map_err(unparsed)?;
                 without_pins = Some(value);
             }
         }
@@ -135,6 +139,63 @@ fn take_pins(value: &mut serde_json::Value) -> Result<Vec<(String, String)>, Pin
         return Err(refused(REQUIREMENT_DUPLICATE, name));
     }
     Ok(pins)
+}
+
+/// Reads any JSON and refuses an object that has one key twice, at any
+/// depth. A manifest with a pin is read from a JSON value, where the later of
+/// two equal keys has silently replaced the earlier; the ordinary parse reads
+/// the bytes and refuses a repeated field. This keeps that refusal.
+struct NoRepeatedKey;
+
+impl<'de> Deserialize<'de> for NoRepeatedKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Walk;
+        impl<'de> Visitor<'de> for Walk {
+            type Value = NoRepeatedKey;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("JSON with no key written twice in one object")
+            }
+
+            // A scalar has no keys.
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(NoRepeatedKey)
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(NoRepeatedKey)
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(NoRepeatedKey)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(NoRepeatedKey)
+            }
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(NoRepeatedKey)
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(NoRepeatedKey)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut list: A) -> Result<Self::Value, A::Error> {
+                while list.next_element::<NoRepeatedKey>()?.is_some() {}
+                Ok(NoRepeatedKey)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut object: A) -> Result<Self::Value, A::Error> {
+                let mut seen = BTreeSet::new();
+                while let Some(key) = object.next_key::<String>()? {
+                    if seen.contains(&key) {
+                        return Err(A::Error::custom(format!("duplicate key `{key}`")));
+                    }
+                    seen.insert(key);
+                    object.next_value::<NoRepeatedKey>()?;
+                }
+                Ok(NoRepeatedKey)
+            }
+        }
+        deserializer.deserialize_any(Walk)
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +429,63 @@ mod tests {
         assert!(!printed.contains("MARKER"), "{printed}");
     }
 
+    /// A manifest with a pin is read from a JSON value, which keeps only the
+    /// later of two equal keys. The ordinary parse refuses a field written
+    /// twice, and so does this type: at the top level, inside a requirement
+    /// (where a second `cid` would otherwise replace the first unseen), and
+    /// in a nested object. The control is the same manifest with one key.
+    #[test]
+    fn a_key_written_twice_in_a_manifest_with_a_pin_is_refused() {
+        let text = String::from_utf8(requires(json!([pinned("viewer", ROOT_A)]))).unwrap();
+        assert!(PinnedManifest::parse(text.as_bytes()).is_ok());
+        let entrypoint = "\"entrypoint\": \"index.html\"";
+        let cid = format!("\"cid\": \"{ROOT_A}\"");
+        let nested = "\"requires\": [";
+        for (what, repeated, key) in [
+            (
+                "a top-level field",
+                text.replace(
+                    entrypoint,
+                    &format!("\"entrypoint\": \"other.html\", {entrypoint}"),
+                ),
+                "entrypoint",
+            ),
+            (
+                "a pin",
+                text.replace(&cid, &format!("\"cid\": \"not-a-root\", {cid}")),
+                "cid",
+            ),
+            (
+                "a key of a nested object",
+                text.replace(
+                    nested,
+                    &format!("\"resources\": {{\"x\": 1, \"x\": 2}}, {nested}"),
+                ),
+                "x",
+            ),
+        ] {
+            assert_ne!(repeated, text, "{what}: the fixture was not changed");
+            match refusal(repeated.as_bytes()) {
+                PinnedManifestError::Unparsed(error) => {
+                    assert!(
+                        error.contains(&format!("duplicate key `{key}`")),
+                        "{what}: {error}"
+                    )
+                }
+                other => panic!("{what}: {other:?}"),
+            }
+        }
+        // Without a pin the ordinary parse answers, in its own words.
+        let pinless = requires(json!([{"name": "viewer", "kind": "capsule"}]));
+        let pinless = String::from_utf8(pinless).unwrap();
+        let pinless = pinless.replace(entrypoint, &format!("\"entrypoint\": \"a\", {entrypoint}"));
+        assert_eq!(
+            refusal(pinless.as_bytes()),
+            PinnedManifestError::Unparsed(ordinary_error(pinless.as_bytes()))
+        );
+        assert!(ordinary_error(pinless.as_bytes()).contains("duplicate field `entrypoint`"));
+    }
+
     /// The crate has no compile-fail harness, so this is a check of the
     /// source text: the manifest inside is a private field, the type derives
     /// nothing, and no public function or conversion hands the manifest out.
@@ -389,7 +507,8 @@ mod tests {
             impls,
             [
                 "impl PinnedManifest {",
-                "impl fmt::Debug for PinnedManifest {"
+                "impl fmt::Debug for PinnedManifest {",
+                "impl<'de> Deserialize<'de> for NoRepeatedKey {"
             ]
         );
     }
