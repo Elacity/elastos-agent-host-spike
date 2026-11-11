@@ -319,7 +319,7 @@
     await reset(); focusMessage();
     // Cancel only the default movement, after the module has seen the real key.
     // System WebKit also has this no-movement case on a focused message button.
-    const preventArrow = event => { if (event.key === "ArrowUp") event.preventDefault(); };
+    const preventArrow = () => {};
     document.addEventListener("keydown", preventArrow);
     events.length = 0;
     const beforeArrow = s.scrollTop;
