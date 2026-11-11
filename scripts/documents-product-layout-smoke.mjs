@@ -982,6 +982,11 @@ async function run() {
       assert(!(await manualPage.locator("#confirm-modal.open").count()), "New must not ask.");
       await manualPage.locator("#title-input").fill("Fresh");
       await manualPage.locator("#editor").fill("A new idea.");
+      // Beta keeps this draft only if the page already marks the new document
+      // unsaved when it is clicked: keepUnsavedCurrent reads state.dirty. Wait
+      // for that state instead of clicking into a pause.
+      await manualPage.waitForFunction(() => document.getElementById("save-button")?.classList.contains("has-unsaved") &&
+        document.getElementById("title-input")?.value === "Fresh", null, { timeout: BROWSER_WAIT_TIMEOUT_MS });
       await manualPage.locator('.document-list-item[data-doc-did="doc-beta"]').click();
       await manualPage.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
       assert(await manualPage.locator("#editor").inputValue() === "# Beta\n\nFirst manual edit.",
