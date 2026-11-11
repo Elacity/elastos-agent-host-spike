@@ -325,7 +325,7 @@
         }
       ],
       "tests": [
-        "ungranted_network_is_refused"
+        "undeclared_network_manifest_is_refused"
       ]
     },
     {
@@ -793,8 +793,8 @@
         },
         {
           "file": "../../lab/agent-conformance/probe/capsule.json",
-          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\"]",
-          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
         }
       ],
       "tests": [
@@ -1579,35 +1579,19 @@
       ]
     },
     {
-      "id": "F-net-undeclared",
-      "title": "stage the declared manifest for the undeclared network refusal",
+      "id": "F-net-declared",
+      "title": "declare the system-only network capability in the probe manifest",
       "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "agent_conformance::identity::stage_probe(&home, &bytes, manifest, label)",
-          "new": "agent_conformance::identity::stage_probe(&home, &bytes, MANIFEST, label)"
+          "file": "../../lab/agent-conformance/probe/capsule.json",
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\"]"
         }
       ],
       "tests": [
-        "undeclared_network_manifest_is_refused"
-      ]
-    },
-    {
-      "id": "F-net-reason",
-      "title": "give the declared network request the read denial reason",
-      "command": "agent-conformance",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/agent-conformance/tests/common/grants.rs",
-          "old": "                let reason = if field(request, \"resource\")? == \"elastos://net/stream\" {\n                    \"fixture denies unlisted elastos://net/stream\".to_owned()\n                } else {\n                    self.fixture.deny_reason.clone()\n                };",
-          "new": "                let reason = self.fixture.deny_reason.clone();"
-        }
-      ],
-      "tests": [
-        "ungranted_network_is_refused"
+        "declared_network_manifest_is_refused"
       ]
     }
   ]

@@ -144,7 +144,7 @@ the retained-root marker. Their exact edits and named tests are in
 Task 003 adds these rows to the same table:
 
 - `ungranted_effect_is_refused`: runs the read build against the ready fixture operator. Requires a nonzero exit and the lifecycle error `Internal("capsule manifest does not declare authority for localhost://Public/agent-conformance-ungranted/outside-fixture.txt")` inside the Runtime's component-failure wrapper.
-- `ungranted_network_is_refused`: the manifest declares `elastos://net/stream`. The request is pending, and the fixture denies it with `fixture denies unlisted elastos://net/stream`. Provider execution stays outside this row.
+- `declared_network_manifest_is_refused`: a probe manifest that declares `elastos://net/stream` is refused at validation with `app capsules cannot request system-only backend capability "elastos://net/stream"; use the product/provider contract instead`. The shipped probe manifest, with its one Public capability, is accepted.
 - `undeclared_network_manifest_is_refused`: stages the same probe bundle with a manifest whose capabilities omit `elastos://net/stream`. The manifest refuses the request, and its reason names that resource: `Internal("capsule manifest does not declare authority for elastos://net/stream")`. No fixture denial and no grant are involved.
 - `default_activation_refuses_without_selector`: runs the default build and requires the AC-002-ARGS unavailable reason through the guest lifecycle.
 - `ungranted_model_call_is_refused`: BLOCKED (RT3), with the Runtime change in GAPS.md.
@@ -163,9 +163,10 @@ the bytes. Bundle-CID admission stays separate.
 
 The earlier no-operator rows stop before the storage constructor. The new live
 rows reach the existing AC-006-STORAGE exception, recorded in GAPS.md. The
-ungranted read stays outside the Public pattern. The manifest declares
-`elastos://net/stream`, the fixture denies that pending request, and provider
-execution stays outside that row. The guest returns the Bus error,
+ungranted read stays outside the Public pattern. The manifest declares only
+`localhost://Public/agent-conformance-grants/*`; a manifest that declares
+`elastos://net/stream` is refused at validation, so this lab no longer shows a
+pending network request for the fixture to deny. The guest returns the Bus error,
 and the harness requires both the nonzero exit and the exact reason. An
 unexpected grant returns success without any provider invoke, causing the
 refusal test to fail while keeping the probe free of real effects. Every live
@@ -290,8 +291,7 @@ once with scope `shell` at the operator's loopback port, then services pending
 requests during the existing process collection loop. Resource, action and
 reason must match an entry in `fixtures/grants.json` exactly. The entry supplies
 `once` or `session`; this fixture selects `once`. Every other request receives
-`fixture denies unlisted read`; a pending `elastos://net/stream` request
-receives `fixture denies unlisted elastos://net/stream`. An ambiguous match
+`fixture denies unlisted read`. An ambiguous match
 denies the whole pending snapshot with a reason. A consumed entry also refuses
 a later matching request.
 
@@ -330,9 +330,9 @@ Runtime contract gap.
 
 The new selectors share the existing probe source, manifest, build staging,
 import checks and two-build SHA-256 checks. The manifest declares
-`localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`.
-The ungranted read stays outside the Public pattern. The fixture denies the
-pending network request, and provider execution stays outside that row.
+`localhost://Public/agent-conformance-grants/*`. The ungranted read stays
+outside the Public pattern. A declared `elastos://net/stream` is refused at
+validation, so provider execution stays outside every row.
 `Public` is the file-backed fixture root. The controller writes the seed
 through Runtime before the guest runs; Runtime owns the stored representation. The guest expects its bytes independently of the
 seed fixture and keeps them inside the capsule.

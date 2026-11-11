@@ -130,8 +130,47 @@ fn ungranted_effect_is_refused() {
 }
 
 #[test]
-fn ungranted_network_is_refused() {
-    exercise_fixture_read(Effect::Network, false);
+fn declared_network_manifest_is_refused() {
+    // An app capsule may not declare a system-only backend capability. This
+    // row proves that putting `elastos://net/stream` back into the probe's
+    // manifest is refused at validation, before any request reaches the Bus,
+    // and that the shipped manifest is otherwise a valid app capsule.
+    let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
+    let bytes = build_probe(Effect::Network, 1);
+    let entrypoint = "agent-conformance-probe.component.wasm";
+
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(MANIFEST).expect("probe manifest is JSON");
+    let capabilities = manifest["capabilities"]
+        .as_array_mut()
+        .expect("probe manifest lists capabilities");
+    capabilities.retain(|capability| capability.as_str() != Some("elastos://net/stream"));
+    capabilities.push(json!("elastos://net/stream"));
+    let declared = serde_json::to_vec(&manifest).expect("declaring manifest is JSON");
+
+    let bundle = tempfile::TempDir::new().expect("throwaway declaring bundle root");
+    std::fs::write(bundle.path().join("capsule.json"), &declared)
+        .expect("write the declaring manifest");
+    std::fs::write(bundle.path().join(entrypoint), &bytes)
+        .expect("write the declaring probe component");
+    let refusal = match capsule_identity::checked_bundle(bundle.path()) {
+        Ok(_) => panic!("a declared system-only capability was accepted at validation"),
+        Err(refusal) => refusal,
+    };
+    match refusal {
+        capsule_identity::Refusal::ManifestInvalid(text) => assert_eq!(
+            text,
+            "app capsules cannot request system-only backend capability \"elastos://net/stream\"; use the product/provider contract instead"
+        ),
+        other => panic!("expected a manifest validation refusal, got {other}"),
+    }
+
+    let probe = tempfile::TempDir::new().expect("throwaway probe bundle root");
+    std::fs::write(probe.path().join("capsule.json"), MANIFEST).expect("write the probe manifest");
+    std::fs::write(probe.path().join(entrypoint), &bytes).expect("write the probe component");
+    if let Err(refusal) = capsule_identity::checked_bundle(probe.path()) {
+        panic!("the shipped probe manifest is a valid app capsule; validation said: {refusal}");
+    }
 }
 
 #[test]
@@ -594,18 +633,8 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
             !stderr.contains("capsule manifest does not declare authority"),
             "the pending request is refused by the fixture"
         );
-        // The declared network row is denied by the fixture, and its reason
-        // names that request. Read rows keep the fixture's read reason.
-        let reason = match effect {
-            Effect::Network => "fixture denies unlisted elastos://net/stream",
-            _ => controller.deny_reason(),
-        };
-        if matches!(effect, Effect::Network) {
-            assert!(
-                !stderr.contains("fixture denies unlisted read"),
-                "the network denial names the network resource"
-            );
-        }
+        // The fixture denies the pending request, and its reason names it.
+        let reason = controller.deny_reason();
         assert_output_refusal(output, effect, &format!("Denied(\"{reason}\")"));
     }
     let seeded = std::str::from_utf8(include_bytes!("../fixtures/granted-bytes.txt")).unwrap();
@@ -620,11 +649,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         .check_report(
             match outcome {
                 ReadOutcome::Granted => "granted_read_succeeds",
-                ReadOutcome::Denied => match effect {
-                    Effect::SiblingRead => "ungranted_sibling_read_is_refused",
-                    Effect::Network => "ungranted_network_is_refused",
-                    _ => unreachable!("denied report name follows the effect"),
-                },
+                ReadOutcome::Denied => "ungranted_sibling_read_is_refused",
                 ReadOutcome::NoPolicy => "no_policy_file_does_not_mean_allow",
                 ReadOutcome::Instances | ReadOutcome::Cancel | ReadOutcome::Kill => {
                     unreachable!("instances checked above")
