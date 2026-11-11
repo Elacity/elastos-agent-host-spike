@@ -991,6 +991,33 @@ mod tests {
         input
     }
 
+    /// The share code reads a viewer's manifest as loose JSON, so a pin in it
+    /// does not stop the copy. It copies the viewer's files and that is all
+    /// it does: it takes no Runtime, no provider and no launcher, so it has
+    /// nothing to start a capsule with.
+    #[test]
+    fn share_bundle_copies_a_viewer_whose_manifest_pins_a_requirement() {
+        let viewer = viewer_with_entrypoint("browser/index.html");
+        std::fs::write(
+            viewer.path().join("capsule.json"),
+            serde_json::json!({
+                "entrypoint": "browser/index.html",
+                "requires": [{
+                    "name": "viewer", "kind": "capsule",
+                    "cid": "bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let input = share_input();
+        let (bundle, _) =
+            build_share_bundle_with_viewer_dir(input.path(), "notes", 1, None, None, viewer.path())
+                .unwrap();
+        assert!(bundle.path().join("index.html").is_file());
+        assert!(bundle.path().join("app.js").is_file());
+    }
+
     #[test]
     fn share_bundle_copies_viewer_from_manifest_entrypoint() {
         let viewer = viewer_with_entrypoint("browser/index.html");
