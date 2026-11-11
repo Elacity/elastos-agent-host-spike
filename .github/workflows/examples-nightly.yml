@@ -35,6 +35,17 @@ jobs:
     name: ${{ matrix.gate.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    defaults:
+      run:
+        # Named on purpose. Only an explicit `bash` runs with pipefail; the
+        # default shell does not, and then a gate that fails behind `tee`
+        # would be reported as passed (this workflow's first run did that).
+        shell: bash
+    env:
+      # The gates' mutation runner reads cargo's own "Compiling <crate>" lines
+      # to know that a mutant was really built. Colour codes hide those lines
+      # from it, and it then stops the gate: "no test can be scored".
+      CARGO_TERM_COLOR: never
     strategy:
       # One gate's failure says nothing about the others: let each finish.
       fail-fast: false
@@ -61,10 +72,28 @@ jobs:
       - name: Run the gate
         env:
           GATE: ${{ matrix.gate.run }}
+          CARGO_TERM_COLOR: never
         run: |
+          # The command's own exit code, not the pipe's last command's.
+          capture() {
+            local code
+            set +e
+            bash -c "$1" 2>&1 | tee "$2"
+            code=${PIPESTATUS[0]}
+            set -e
+            return "$code"
+          }
+          # Self-check first: a command that fails must come back as its own
+          # exit code, or this step could never show a red gate.
+          check=0
+          capture 'echo "self-check: this command exits 7"; exit 7' selfcheck.log || check=$?
+          if [ "$check" -ne 7 ]; then
+            echo "this step cannot see a failed gate: the self-check came back as $check, not 7" >&2
+            exit 1
+          fi
           start=$(date +%s)
           status=0
-          bash -c "$GATE" 2>&1 | tee gate.log || status=$?
+          capture "$GATE" gate.log || status=$?
           seconds=$(( $(date +%s) - start ))
           {
             echo "### ${{ matrix.gate.name }}"
@@ -78,6 +107,6 @@ jobs:
       - name: The gate left the source as it found it
         if: always()
         run: |
-          rm -f gate.log
+          rm -f gate.log selfcheck.log
           git status --porcelain
           test -z "$(git status --porcelain)"
