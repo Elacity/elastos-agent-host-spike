@@ -12560,7 +12560,9 @@ pub(crate) mod r4_fixture {
 
     pub fn store(data_dir: &Path, kind: PrincipalKind) {
         match kind {
-            PrincipalKind::Human => store_test_human_principal(data_dir, ID),
+            PrincipalKind::Human => {
+                store_test_human_principal(data_dir, ID);
+            }
             // A stored Agent root needs the admission record. set_kind does not write one.
             PrincipalKind::Agent => {
                 super::valid_agent::plant(data_dir);

@@ -9785,7 +9785,7 @@ mod stored_root_tests {
         let principal_id = planted.principal_id;
         let expected_root = crate::auth::valid_agent::ROOT;
         assert_eq!(
-            crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id).unwrap(),
+            crate::auth::principal_stored_localhost_root(Some(&data_dir), &principal_id).unwrap(),
             expected_root
         );
         let record = crate::auth::load_auth_state(&data_dir)
