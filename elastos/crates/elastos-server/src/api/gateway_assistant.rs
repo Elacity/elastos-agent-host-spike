@@ -386,7 +386,10 @@ mod r3_tests {
         let (_dir, context) = fixture(true);
         assert_eq!(
             assistant_workspace_uri(&context),
-            "localhost://UsersAI/12f27c37e15084ebad04eaa4/.AppData/ElastOS/Assistant/workspace.json",
+            format!(
+                "{}/.AppData/ElastOS/Assistant/workspace.json",
+                super::super::r3_stored_root_tests::AGENT_ROOT
+            ),
             "R3 assistant URI uses UsersAI"
         );
     }

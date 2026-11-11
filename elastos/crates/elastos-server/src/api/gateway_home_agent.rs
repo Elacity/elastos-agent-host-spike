@@ -230,7 +230,10 @@ mod r3_tests {
         let (_dir, context) = fixture(true);
         assert_eq!(
             home_agent_workspace_uri(&context),
-            "localhost://UsersAI/12f27c37e15084ebad04eaa4/.AppData/ElastOS/HomeAgent/workspace.json",
+            format!(
+                "{}/.AppData/ElastOS/HomeAgent/workspace.json",
+                super::super::r3_stored_root_tests::AGENT_ROOT
+            ),
             "R3 home_agent URI uses UsersAI"
         );
     }
