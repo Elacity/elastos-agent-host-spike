@@ -2040,6 +2040,48 @@ mod tests {
         .unwrap()
     }
 
+    /// The supervisor's launch of a capsule it already holds stops at its
+    /// manifest parse when the manifest pins a requirement. The serde text is
+    /// under the context line, so the whole chain is read (`{:#}`).
+    #[tokio::test]
+    async fn the_supervisors_launch_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        use crate::runtime::tests::{write_fixture_capsule, PINNED_MANIFEST};
+        let temp = tempfile::tempdir().unwrap();
+        let capsule_dir = write_fixture_capsule(&temp.path().join("capsules"), PINNED_MANIFEST);
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-pinned-test\n").unwrap();
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "pinned-fixture".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-pinned-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            temp.path().to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let error = supervisor
+            .launch_capsule("pinned-fixture", serde_json::json!({}), None)
+            .await
+            .unwrap_err();
+        let chain = format!("{error:#}");
+        let expected = "parsing capsule.json for 'pinned-fixture': unknown field `cid`";
+        assert!(chain.starts_with(expected), "{chain}");
+        assert!(supervisor.running.read().await.is_empty());
+    }
+
     fn dead_vm_capsule(handle: &str, route: ProviderRoute) -> RunningCapsule {
         let capsule_dir = tempfile::tempdir().unwrap().keep();
         let socket_dir = tempfile::tempdir().unwrap().keep();

@@ -890,6 +890,13 @@ mod tests {
     }
 
     async fn create_test_handler() -> (RequestHandler, CapsuleId) {
+        create_test_handler_with(ResolverConfig::default(), Arc::new(NullFetcher)).await
+    }
+
+    async fn create_test_handler_with(
+        resolver_config: ResolverConfig,
+        fetcher: Arc<dyn elastos_namespace::ContentFetcher>,
+    ) -> (RequestHandler, CapsuleId) {
         let compute = Arc::new(MockComputeProvider);
         let store = Arc::new(CapabilityStore::new());
         let audit_log = Arc::new(AuditLog::new());
@@ -915,9 +922,9 @@ mod tests {
         ));
 
         let content_resolver = Arc::new(ContentResolver::new(
-            ResolverConfig::default(),
+            resolver_config,
             audit_log.clone(),
-            Arc::new(NullFetcher),
+            fetcher,
         ));
 
         let handler = RequestHandler::new(
@@ -1044,6 +1051,75 @@ mod tests {
             }
             _ => panic!("Expected invalid_input error, got {:?}", response),
         }
+    }
+
+    /// A stand-in for the gateway: the same bytes for any URL.
+    struct FixedFetcher(Vec<u8>);
+
+    #[async_trait::async_trait]
+    impl elastos_namespace::ContentFetcher for FixedFetcher {
+        async fn fetch_url(&self, _url: &str) -> Result<Vec<u8>, elastos_namespace::FetchError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A gzip archive holding `manifest` as `capsule.json` and an entrypoint:
+    /// the one shape in which the launch-by-CID handler looks for a manifest.
+    fn fetched_bundle(manifest: &str) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, content) in [
+            ("capsule.json", manifest.as_bytes()),
+            ("app.wasm", &b"wasm"[..]),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(content.len() as u64);
+            header.set_cksum();
+            archive.append_data(&mut header, path, content).unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// The shell's launch-by-CID handler fetches first and parses second. For
+    /// a fetched bundle whose manifest pins a requirement, the parse step's
+    /// error comes back as `internal_error`, naming the key, and the handler
+    /// does not go on to launch. The same bundle without the pin gets past
+    /// that step (the control).
+    #[tokio::test]
+    async fn launch_by_cid_stops_at_the_manifest_parse_for_a_pinned_requirement() {
+        let pinned = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+        let pin = r#","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy""#;
+        let unpinned = pinned.replace(pin, "");
+        assert_ne!(unpinned, pinned);
+        let mut responses = Vec::new();
+        for manifest in [pinned, unpinned.as_str()] {
+            let config = ResolverConfig {
+                ipfs_gateways: vec!["http://gateway.invalid".to_string()],
+                enable_cache: false,
+                ..ResolverConfig::default()
+            };
+            let fetcher = Arc::new(FixedFetcher(fetched_bundle(manifest)));
+            let (handler, shell_id) = create_test_handler_with(config, fetcher).await;
+            let request = RuntimeRequest::LaunchCapsule {
+                cid: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_string(),
+                config: LaunchConfig::default(),
+            };
+            responses.push(handler.handle(&shell_id, request).await);
+        }
+        match &responses[0] {
+            RuntimeResponse::Error { code, message } => {
+                assert_eq!(code, "internal_error");
+                let expected = "Invalid fetched capsule manifest: unknown field `cid`";
+                assert!(message.starts_with(expected), "{message}");
+            }
+            other => panic!("a pinned manifest got past the parse step: {other:?}"),
+        }
+        assert!(
+            !matches!(&responses[1], RuntimeResponse::Error { .. }),
+            "the control did not get past the parse step: {:?}",
+            responses[1]
+        );
     }
 
     #[tokio::test]

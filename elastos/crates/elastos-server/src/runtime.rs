@@ -679,6 +679,60 @@ pub(crate) mod tests {
         }
     }
 
+    /// A manifest whose requirement carries a `cid`: a pin. Only
+    /// `PinnedManifest` reads one; every start path parses the ordinary
+    /// manifest type, which refuses the key.
+    pub(crate) const PINNED_MANIFEST: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"microvm","entrypoint":"rootfs.ext4","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    /// The same manifest with the pin taken out: the control of each row.
+    pub(crate) fn unpinned_manifest() -> String {
+        let pin = r#","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy""#;
+        assert_eq!(PINNED_MANIFEST.matches(pin).count(), 1);
+        PINNED_MANIFEST.replace(pin, "")
+    }
+
+    /// Writes a capsule folder holding `manifest` and its entrypoint file.
+    pub(crate) fn write_fixture_capsule(parent: &Path, manifest: &str) -> PathBuf {
+        let dir = parent.join("pinned-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"vm image bytes").unwrap();
+        std::fs::write(dir.join("capsule.json"), manifest).unwrap();
+        dir
+    }
+
+    /// The launch entry stops at its own manifest parse for a pinned
+    /// manifest, before a compute provider loads anything. The same manifest
+    /// without the pin is loaded, so the pin is what stops it.
+    #[tokio::test]
+    async fn the_launch_entry_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let loads = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(
+            storage,
+            Arc::new(CountingComputeProvider {
+                loads: loads.clone(),
+            }),
+        );
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        let dir = write_fixture_capsule(temp_dir.path(), PINNED_MANIFEST);
+        let error = runtime.run_local(&dir, Vec::new()).await.unwrap_err();
+        let expected = "Invalid manifest: Failed to parse capsule.json: unknown field `cid`";
+        assert!(error.to_string().starts_with(expected), "{error}");
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        write_fixture_capsule(temp_dir.path(), &unpinned_manifest());
+        runtime.run_local(&dir, Vec::new()).await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
     pub(crate) async fn test_runtime() -> (Runtime, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
