@@ -3690,10 +3690,10 @@ mod tests {
         let mut value = model_content_fixture();
         value["asks"] = serde_json::json!([{"resource":"elastos://did/*","actions":["read"]}]);
         let with_ask: CapsuleManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(
-            with_ask.validate().unwrap_err(),
-            "model_content requires passive content/data without execution authority"
-        );
+        // Compared as a `Result`, so that when the rule is missing the
+        // failure shows the rule's own message as what was expected.
+        let expected = "model_content requires passive content/data without execution authority";
+        assert_eq!(with_ask.validate(), Err(expected.to_string()));
     }
 
     #[test]
@@ -3713,7 +3713,9 @@ mod tests {
             );
         }
         // No wildcard arm: a variant added to the type stops this compiling
-        // until it is given its place, and that place must be in `ALL`.
+        // until it is given an arm here, which points whoever adds it at the
+        // list. It does not prove the new variant was added to `ALL`: with a
+        // seventh arm and `ALL` left at six, this still passes.
         let place = |action: AskAction| match action {
             AskAction::Read => 0,
             AskAction::Write => 1,

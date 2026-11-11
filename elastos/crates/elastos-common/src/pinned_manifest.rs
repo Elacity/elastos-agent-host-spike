@@ -540,6 +540,52 @@ mod tests {
         assert_eq!(pin_refusal(&two), (REQUIREMENT_DUPLICATE, String::new()));
     }
 
+    /// The pinned type runs the ordinary `validate()`, so a manifest that
+    /// pins a requirement and also states asks is held to the ask rules: a
+    /// valid one parses, an ask with no action is refused, and asks beside
+    /// capabilities are refused, each as `Invalid` with the very text the
+    /// ordinary type gives for the same manifest without its pin.
+    #[test]
+    fn a_pinned_manifest_with_asks_is_held_to_the_ask_rules() {
+        // One requirement, with or without its pin, and the same extra fields.
+        let with = |requirement: serde_json::Value, extra: &serde_json::Value| {
+            let mut value = json!({ "requires": [requirement] });
+            let extra = extra.as_object().expect("extra fields as an object");
+            value
+                .as_object_mut()
+                .expect("an object")
+                .extend(extra.clone());
+            manifest(value)
+        };
+        let with_pin = |extra: &serde_json::Value| with(pinned("viewer", ROOT_A), extra);
+        let without_pin =
+            |extra: &serde_json::Value| with(json!({"name": "viewer", "kind": "capsule"}), extra);
+        let ask = |actions: serde_json::Value| json!([{"resource": "elastos://did/*", "actions": actions}]);
+        let fine = PinnedManifest::parse(&with_pin(&json!({"asks": ask(json!(["read"]))})))
+            .expect("a pinned manifest with a valid ask parses");
+        assert_eq!(fine.pins().len(), 1);
+        for (extra, expected) in [
+            (json!({"asks": ask(json!([]))}), "ask_invalid:"),
+            (
+                json!({"asks": ask(json!(["read"])), "capabilities": ["elastos://did/*"]}),
+                "asks_conflict:",
+            ),
+        ] {
+            let unpinned: CapsuleManifest = serde_json::from_slice(&without_pin(&extra))
+                .expect("without its pin it parses as the ordinary type");
+            let ordinary = unpinned
+                .validate()
+                .expect_err("the ordinary type refuses it");
+            // The code at the start says which rule refused; the whole text
+            // is then compared.
+            assert!(ordinary.starts_with(expected), "{ordinary}");
+            match refusal(&with_pin(&extra)) {
+                PinnedManifestError::Invalid(text) => assert_eq!(text, ordinary),
+                other => panic!("{expected} {other:?}"),
+            }
+        }
+    }
+
     /// The crate has no compile-fail harness, so this is a check of the
     /// source text: the manifest inside is a private field, the type derives
     /// nothing, and no public function or conversion hands the manifest out.
@@ -574,9 +620,13 @@ mod tests {
                 "let manifest: CapsuleManifest = match without_pins {",
             ]
         );
-        // One derive in the file, on the error type; none on the struct. (An
-        // impl in another file could not read the field: it is private to
-        // this module.)
+        // One derive in the file, on the error type; none on the struct.
+        // What this check covers: the top-level items of this one file. The
+        // field is private, so only this module and its child modules can
+        // read it. The production text above declares no child module today.
+        // This test module is one: it is left out of the scan and can read
+        // the field. Any other module below this one, written here or in a
+        // file of its own, would have to be added to this check to be seen.
         let derives: Vec<&str> = code().filter(|line| line.starts_with("#[derive")).collect();
         assert_eq!(derives, ["#[derive(Debug, Clone, PartialEq, Eq)]"]);
         let field_uses: Vec<&str> = code()
