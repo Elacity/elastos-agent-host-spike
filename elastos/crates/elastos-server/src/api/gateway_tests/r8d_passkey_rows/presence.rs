@@ -21,7 +21,7 @@ fn presence_state(person: &PasskeyPerson) -> GatewayState {
     state
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn r8d_child_presence_request_and_grant_are_refused_for_the_passkey_person() {
     let person = passkey_person(CHAT_ROOM_CAPSULE_ID);
     let child = person.child.path();

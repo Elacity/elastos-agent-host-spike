@@ -8,7 +8,7 @@ use crate::api::gateway::gateway_home_system::{
     people_contact_request_create, PeopleContactRequestCreate,
 };
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn r8d_child_contacts_are_refused_at_the_profile_gate() {
     let person = passkey_person(PEOPLE_CAPSULE_ID);
     let child = person.child.path();

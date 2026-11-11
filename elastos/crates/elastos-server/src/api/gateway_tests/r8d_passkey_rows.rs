@@ -7,10 +7,29 @@
 //! Each row asserts what the code does today. The controls are the eleven
 //! `r8c_control_*` rows: the same calls for a person the child itself stores.
 //!
-//! As in R8c, the real HTTP handlers cannot be driven with the parent's token
-//! from this test binary: they verify against the signer in a process-wide
-//! environment variable. Each row calls the functions the handler calls after
-//! it has verified the token, with the context the production verifier built.
+//! What stands in for a real child, and where it differs:
+//!
+//! - The parent's auth directory. A real child gets it from the process
+//!   environment variable `ELASTOS_HOME_LAUNCH_TRUSTED_AUTH_DATA_DIR`, which
+//!   the parent sets when it starts the child (runtime_control.rs:1336-1339)
+//!   and `home_launch_auth_data_dir` reads (gateway_home_token.rs:1253).
+//!   Every thread of the child sees it. These rows set no process environment
+//!   variable. They use the test-only thread-local the same function checks
+//!   first (gateway_home_token.rs:1249-1252, set at 1288-1293), which only
+//!   the thread that set it sees. Every call a row makes therefore stays on
+//!   the test thread: the async rows run on a current-thread runtime, and the
+//!   closing check asserts the function still answers the parent's directory.
+//! - The signer. A real child's routes verify a launch token against the
+//!   parent's DID, read from the process environment variable
+//!   `ELASTOS_HOME_LAUNCH_TRUSTED_SIGNER_DID` (gateway.rs:1363-1369, set at
+//!   runtime_control.rs:1332-1335). The fixture hands the parent's DID to the
+//!   same verifier through its test entry. The two rows that call a real
+//!   route handler cannot do that; see `route_headers`.
+//! - The person's record. Production enrollment writes it after a WebAuthn
+//!   ceremony. The fixture writes it with
+//!   `upsert_principal_for_binding_as_role_named` and a made-up public key,
+//!   and stores test protection. The grant, the token and the Profile write
+//!   are the production calls.
 
 use super::*;
 use crate::api::gateway::gateway_home_token::{
@@ -55,8 +74,8 @@ pub(in crate::api) struct PasskeyPerson {
     pub(in crate::api) parent: tempfile::TempDir,
     pub(in crate::api) ctx: HomeLaunchTokenContext,
     pub(in crate::api) required: RequiredHomeLaunchToken,
-    /// Keeps the child reading the parent's auth state for the row's body, as
-    /// `ELASTOS_HOME_LAUNCH_TRUSTED_AUTH_DATA_DIR` does on a real child.
+    /// Keeps `home_launch_auth_data_dir` answering the parent's directory on
+    /// this thread for the row's body. See the module comment.
     _auth: TestHomeLaunchAuthDataDir,
 }
 
@@ -70,7 +89,8 @@ fn owner_only_dir() -> tempfile::TempDir {
     dir
 }
 
-/// What the parent stores for the person, then a production sign-in.
+/// What the parent stores for the person (a stand-in for enrollment), then
+/// the production grant call a passkey sign-in ends in.
 fn sign_in_on_parent(parent: &std::path::Path) -> AuthSessionGrantV1 {
     let now = crate::auth::now_ts();
     let binding = ProofBinding::passkey_webauthn(PasskeyWebAuthnBinding {

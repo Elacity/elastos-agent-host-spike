@@ -8,7 +8,7 @@ use crate::api::gateway::gateway_room::{
     chat_direct_conversations, ChatDirectConversationReadOptions,
 };
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn r8d_child_direct_messages_are_refused_at_the_profile_gate() {
     let person = passkey_person(CHAT_ROOM_CAPSULE_ID);
     let child = person.child.path();

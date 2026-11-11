@@ -4664,7 +4664,7 @@ mod r8d_passkey_rows {
     use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, PERSON, ROOT};
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_transaction_effects_load_and_save_under_the_passkey_persons_root() {
         let person = passkey_person(WALLET_CAPSULE_ID);
         let child = person.child.path();
