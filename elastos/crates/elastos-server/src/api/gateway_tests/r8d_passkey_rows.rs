@@ -24,6 +24,7 @@ mod cli_context;
 mod people;
 mod presence;
 mod profile;
+mod recovery_ready;
 mod room_card;
 
 const RP_ID: &str = "elastos.elacitylabs.com";
