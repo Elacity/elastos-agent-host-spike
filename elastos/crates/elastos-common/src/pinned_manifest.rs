@@ -303,6 +303,11 @@ mod tests {
                 "a list",
                 json!({"name": "kubo", "kind": "capsule", "cid": [ROOT_A]}),
             ),
+            ("no kind", json!({"name": "kubo", "cid": ROOT_A})),
+            (
+                "a kind that is not a string",
+                json!({"name": "kubo", "kind": 5, "cid": ROOT_A}),
+            ),
             (
                 "a raw leaf",
                 pinned(
@@ -328,6 +333,17 @@ mod tests {
         assert_eq!(
             pin_refusal(&same_cid),
             (REQUIREMENT_DUPLICATE, "second".to_string())
+        );
+        // Both at once: names are checked before CIDs, so the repeated name
+        // is the answer ("second" would be the CID check's).
+        let both = requires(json!([
+            pinned("first", ROOT_A),
+            pinned("second", ROOT_A),
+            {"name": "first", "kind": "capsule"}
+        ]));
+        assert_eq!(
+            pin_refusal(&both),
+            (REQUIREMENT_DUPLICATE, "first".to_string())
         );
     }
 
@@ -486,6 +502,44 @@ mod tests {
         assert!(ordinary_error(pinless.as_bytes()).contains("duplicate field `entrypoint`"));
     }
 
+    /// Where the pinned path is stricter than the ordinary parse, on purpose.
+    /// A map-typed field (`providers`) may repeat a key in the ordinary
+    /// parse, which keeps the later value. Beside a pin the same repeat is
+    /// refused, because the walker refuses a repeated key at any depth.
+    #[test]
+    fn a_repeated_key_in_a_map_field_is_refused_only_beside_a_pin() {
+        let open = "\"requires\": [";
+        let repeat = format!("\"providers\": {{\"storage\": \"a\", \"storage\": \"b\"}}, {open}");
+        let with = |list: serde_json::Value| {
+            let text = String::from_utf8(requires(list)).unwrap();
+            assert_eq!(text.matches(open).count(), 1);
+            text.replace(open, &repeat)
+        };
+        let pinless = with(json!([{"name": "viewer", "kind": "capsule"}]));
+        let ordinary: CapsuleManifest = serde_json::from_slice(pinless.as_bytes()).unwrap();
+        assert_eq!(ordinary.providers.unwrap()["storage"], "b");
+        match refusal(with(json!([pinned("viewer", ROOT_A)])).as_bytes()) {
+            PinnedManifestError::Unparsed(error) => {
+                assert!(error.contains("duplicate key `storage`"), "{error}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A requirement whose name is not a string, beside a pin: it counts as
+    /// the empty name. Alone it reaches the strict parse, which refuses the
+    /// name in its own words; two of them are a duplicate of the empty name.
+    #[test]
+    fn a_requirement_without_a_string_name_counts_as_the_empty_name() {
+        let nameless = json!({"name": 7, "kind": "capsule", "cid": ROOT_A});
+        assert!(matches!(
+            refusal(&requires(json!([nameless.clone()]))),
+            PinnedManifestError::Unparsed(_)
+        ));
+        let two = requires(json!([nameless, {"kind": "capsule"}]));
+        assert_eq!(pin_refusal(&two), (REQUIREMENT_DUPLICATE, String::new()));
+    }
+
     /// The crate has no compile-fail harness, so this is a check of the
     /// source text: the manifest inside is a private field, the type derives
     /// nothing, and no public function or conversion hands the manifest out.
@@ -499,6 +553,44 @@ mod tests {
         for line in production.lines().filter(|line| line.contains("pub fn")) {
             assert!(!line.contains("CapsuleManifest"), "{line}");
         }
+        // A signature broken over lines, a generic return or a conversion
+        // would still have to name the type or touch the field. So: every
+        // code line that names the type, and every use of the field, is
+        // one of these, and each field use reads one of three plain fields.
+        let code = || {
+            production
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.starts_with("//"))
+        };
+        let naming: Vec<&str> = code()
+            .filter(|line| line.contains("CapsuleManifest"))
+            .collect();
+        assert_eq!(
+            naming,
+            [
+                "use crate::manifest::{CapsuleManifest, CapsuleRole, CapsuleType};",
+                "manifest: CapsuleManifest,",
+                "let manifest: CapsuleManifest = match without_pins {",
+            ]
+        );
+        // One derive in the file, on the error type; none on the struct. (An
+        // impl in another file could not read the field: it is private to
+        // this module.)
+        let derives: Vec<&str> = code().filter(|line| line.starts_with("#[derive")).collect();
+        assert_eq!(derives, ["#[derive(Debug, Clone, PartialEq, Eq)]"]);
+        let field_uses: Vec<&str> = code()
+            .filter(|line| line.contains("self.manifest"))
+            .collect();
+        assert_eq!(
+            field_uses,
+            [
+                "&self.manifest.name",
+                "&self.manifest.role",
+                "&self.manifest.capsule_type",
+                ".field(\"name\", &self.manifest.name)",
+            ]
+        );
         let impls: Vec<&str> = production
             .lines()
             .filter(|line| line.starts_with("impl"))
