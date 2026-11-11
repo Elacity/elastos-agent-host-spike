@@ -22,6 +22,7 @@ use crate::auth::{PasskeySessionPurpose, PasskeySessionRequest, ResolvedPrincipa
 
 mod cli_context;
 mod people;
+mod presence;
 mod profile;
 
 const RP_ID: &str = "elastos.elacitylabs.com";
