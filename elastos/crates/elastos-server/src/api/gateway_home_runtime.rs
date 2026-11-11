@@ -1945,6 +1945,35 @@ mod tests {
         assert_eq!(body["error"], "failed to load signing key");
     }
 
+    /// Home's launch of an installed capsule whose manifest pins a
+    /// requirement: Home's reader finds no manifest, so there is no Runtime
+    /// launch and nothing is started or written for one. (There is no
+    /// control here: the same capsule without the pin would start a real
+    /// Runtime from this test.)
+    #[tokio::test]
+    async fn a_pinned_manifest_gets_no_runtime_launch_from_home() {
+        use crate::runtime::tests::{write_fixture_capsule, PINNED_MANIFEST};
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path();
+        write_fixture_capsule(&data_dir.join("capsules"), PINNED_MANIFEST);
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::json!({
+                "external": { "pinned-fixture": {
+                    "install_path": "capsules/pinned-fixture", "platforms": {}
+                } },
+                "capsules": {}, "profiles": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let context = HomeLaunchTokenContext::for_test("fixture", "fixture", None, "fixture");
+        let outcome = launch_runtime_backed_home_target(data_dir, "pinned-fixture", &context).await;
+        assert!(outcome.is_none());
+        assert!(!crate::runtime_control::home_runtime_coord_path(data_dir).exists());
+        assert!(!data_dir.join("managed-runtimes").exists());
+    }
+
     #[tokio::test]
     async fn native_shell_metadata_refuses_generic_home_launch_before_runtime_start() {
         let directory = tempfile::tempdir().unwrap();

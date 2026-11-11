@@ -4,6 +4,7 @@ pub mod browser_protocol;
 #[cfg(unix)]
 pub mod browser_vm_seed;
 pub mod chat_protocol;
+mod cid_form;
 pub mod collaboration_protocol;
 mod error;
 mod free_space;
@@ -12,6 +13,7 @@ pub mod localhost;
 mod manifest;
 #[cfg(unix)]
 pub mod owned_removal;
+mod pinned_manifest;
 #[cfg(unix)]
 pub mod process_lifetime;
 pub mod protected_content;
@@ -20,6 +22,7 @@ pub mod test_fixtures;
 pub mod timestamp;
 mod types;
 
+pub use cid_form::cid_form;
 pub use error::{ElastosError, Result};
 pub use free_space::{require_free_space, NotEnoughFreeSpace, FREE_SPACE_RESERVE_BYTES};
 pub use manifest::{
@@ -30,6 +33,9 @@ pub use manifest::{
     CapsuleWindowPolicy, ManifestAsk, MicroVmConfig, ModelContentMetadata, Permissions,
     ProviderAuthority, ProviderCapabilitySchema, RequirementKind, ResourceLimits,
     ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V1_WORLD, SCHEMA_V1,
+};
+pub use pinned_manifest::{
+    PinnedManifest, PinnedManifestError, PIN_FORM_INVALID, REQUIREMENT_DUPLICATE,
 };
 use sha2::{Digest, Sha256};
 pub use timestamp::{SecureTimestamp, CLOCK_SKEW_TOLERANCE_SECS};
