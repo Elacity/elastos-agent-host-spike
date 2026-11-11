@@ -110,7 +110,32 @@ try {
     // Poll on a timer. Playwright polls a waitForFunction on animation frames
     // by default, and a loaded renderer starves that loop: the report was set
     // but never read, which is how a run died at the bound.
-    await page.waitForFunction(() => window.__report, null, { polling: 100, timeout: matrix ? 180000 : 120000 });
+    const reportTimeout = matrix ? 180000 : 120000;
+    try {
+      await page.waitForFunction(() => window.__report, null, { polling: 100, timeout: reportTimeout });
+    } catch (error) {
+      // Diagnosis only: a page that never writes its report must say where it
+      // stopped and whether its clock and timers still advance. Bounded, so a
+      // wedged renderer cannot hold this run past the runner's own limit.
+      const diagnostics = await Promise.race([
+        page.evaluate(() => ({
+          report: Boolean(window.__report),
+          phase: window.__fixture?.phase ?? null,
+          lastCheck: window.__fixture?.lastCheck ?? null,
+          lastWaitTimeout: window.__fixture?.waitTimeouts?.at(-1) ?? null,
+          waitTimeoutCount: window.__fixture?.waitTimeouts?.length ?? 0,
+          visibilityState: document.visibilityState,
+          hidden: document.hidden,
+          dateNow: Date.now(),
+          performanceNow: performance.now(),
+          heartbeat: window.__heartbeat ?? null,
+        })).catch(inner => ({ evaluateFailed: String(inner.message || inner) })),
+        new Promise(done => setTimeout(() => done({ evaluate: "no answer within 10000 ms" }), 10000)),
+      ]);
+      console.error(`report wait timed out mode=${mode || "normal"} after ${reportTimeout} ms ` +
+        JSON.stringify({ nodeDateNow: Date.now(), nodePerformanceNow: Math.round(performance.now()), ...diagnostics }));
+      throw error;
+    }
     record({ engine: "Chromium", input: native ? "CGEvent" : "Playwright", driverErrors, ...await page.evaluate(() => window.__report) });
     await page.close();
   }

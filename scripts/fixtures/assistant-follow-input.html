@@ -44,6 +44,14 @@
   s.classList.add("is-live-streaming");
   mod.ensureJumpToLatest();
   const result = { userAgent: navigator.userAgent, matrix, phase: "done", fallback, swallow, nativeScrollend: "onscrollend" in s, cases: {}, failures: [] };
+  // Diagnosis: keep the live result reachable and count timer ticks, so a
+  // script that never sees a report can say how far this page got and whether
+  // its timers were still advancing.
+  window.__fixture = result;
+  const heartbeat = { ticks: 0, firstAt: Date.now(), lastAt: Date.now() };
+  window.__heartbeat = heartbeat;
+  const beat = () => { heartbeat.ticks++; heartbeat.lastAt = Date.now(); setTimeout(beat, 100); };
+  setTimeout(beat, 100);
   window.addEventListener("error", event => result.failures.push(event.message));
   window.addEventListener("unhandledrejection", event => result.failures.push(String(event.reason)));
   const snap = () => ({ top: s.scrollTop, fromEnd: s.scrollHeight - s.clientHeight - s.scrollTop,
@@ -87,6 +95,7 @@
     }
   };
   const expect = (ok, label) => {
+    result.lastCheck = label;
     result.checks ||= {};
     result.checks[label] = Boolean(ok);
     if (!ok) result.failures.push(label);
