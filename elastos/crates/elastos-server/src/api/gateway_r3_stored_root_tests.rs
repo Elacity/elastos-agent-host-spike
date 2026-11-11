@@ -1,7 +1,8 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-pub(super) const AGENT_ROOT: &str = "localhost://UsersAI/12f27c37e15084ebad04eaa4";
+pub(super) const AGENT_ID: &str = crate::auth::valid_agent::ID;
+pub(super) const AGENT_ROOT: &str = crate::auth::valid_agent::ROOT;
 pub(super) const HUMAN_ROOT: &str = "localhost://Users/9a4eeb39460adc93f6028346";
 pub(super) const NEEDS_PROTECTION: &str =
     "protected principal-root object requires active principal-root protection";
@@ -14,15 +15,16 @@ pub(super) fn fixture(agent: bool) -> (tempfile::TempDir, HomeLaunchTokenContext
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let id = if agent {
-        "person:local:r3-agent"
+        AGENT_ID
     } else {
         "person:local:r3-human"
     };
-    crate::auth::store_test_human_principal(dir.path(), id);
     if agent {
-        let record = crate::auth::tests::mint_agent_record(dir.path(), id, Some(AGENT_ROOT));
+        let record = crate::auth::valid_agent::plant(dir.path());
+        assert_eq!(record.principal_id, AGENT_ID);
         assert_eq!(record.localhost_root, AGENT_ROOT);
     } else {
+        crate::auth::store_test_human_principal(dir.path(), id);
         crate::auth::store_test_principal_root_protection(dir.path(), id);
     }
     let root = crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), id).unwrap();
@@ -41,7 +43,9 @@ pub(super) fn fixture(agent: bool) -> (tempfile::TempDir, HomeLaunchTokenContext
 }
 
 pub(super) fn seed(dir: &Path, relative: &str, bytes: &[u8]) -> PathBuf {
-    let path = dir.join("UsersAI/12f27c37e15084ebad04eaa4").join(relative);
+    let path = dir
+        .join(AGENT_ROOT.strip_prefix("localhost://").unwrap())
+        .join(relative);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, bytes).unwrap();
     path

@@ -4840,6 +4840,7 @@ fn add_library_archive_source_bytes(
 ) -> anyhow::Result<()> {
     if !fs::metadata(&target.path)?.is_dir() {
         let content = crate::auth::principal_root_object_content_bound(
+            data_dir,
             principal_id,
             &target.localhost_root,
             &target.uri,
@@ -9035,7 +9036,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             r4_fixture::store(dir.path(), kind);
             let request = super::ObjectProviderRequest::Roots {
-                principal_id: r4_fixture::ID.into(),
+                principal_id: r4_fixture::principal_id(kind).into(),
             };
             let roots = super::handle_library_request(dir.path(), request).unwrap();
             let roots = roots["roots"].as_array().unwrap();
@@ -11048,7 +11049,11 @@ mod r5a_tests {
             PrincipalKind::Agent => r4_fixture::AGENT_ROOT,
             PrincipalKind::Human => r4_fixture::HUMAN_ROOT,
         };
-        crate::auth::store_test_principal_root_protection_for(dir.path(), r4_fixture::ID, root);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            r4_fixture::principal_id(kind),
+            root,
+        );
         dir
     }
 
@@ -11099,7 +11104,7 @@ mod r5a_tests {
         let result = handle_library_request(
             agent.path(),
             ObjectProviderRequest::List {
-                principal_id: r4_fixture::ID.into(),
+                principal_id: r4_fixture::AGENT_ID.into(),
                 uri: None,
             },
         );
@@ -11148,7 +11153,7 @@ mod r5a_tests {
         let agent_path = rooted_localhost_fs_path(agent.path(), &agent_uri).unwrap();
         fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
         fs::write(&agent_path, b"agent trash").unwrap();
-        let id_uri = format!("{}/.Trash/id-rule.txt", r4_fixture::HUMAN_ROOT);
+        let id_uri = format!("{}/.Trash/id-rule.txt", r4_fixture::USERS_ROOT);
         let id_path = rooted_localhost_fs_path(agent.path(), &id_uri).unwrap();
         fs::create_dir_all(id_path.parent().unwrap()).unwrap();
         fs::write(&id_path, b"id-rule trash").unwrap();
@@ -11156,7 +11161,7 @@ mod r5a_tests {
         let result = handle_library_request(
             agent.path(),
             ObjectProviderRequest::EmptyTrash {
-                principal_id: r4_fixture::ID.into(),
+                principal_id: r4_fixture::AGENT_ID.into(),
             },
         );
         assert!(!agent_path.exists(), "agent Trash was not emptied");
@@ -11170,9 +11175,12 @@ mod r5a_tests {
                 .is_ok_and(|value| value["deleted_count"] == 1),
             "{result:?}"
         );
-        let events =
-            read_library_events_with_root(agent.path(), r4_fixture::ID, r4_fixture::AGENT_ROOT)
-                .unwrap();
+        let events = read_library_events_with_root(
+            agent.path(),
+            r4_fixture::AGENT_ID,
+            r4_fixture::AGENT_ROOT,
+        )
+        .unwrap();
         assert_eq!(
             events.last().unwrap().uri,
             format!("{}/.Trash", r4_fixture::AGENT_ROOT)
@@ -11209,20 +11217,20 @@ mod r5a_tests {
 
     #[test]
     fn empty_trash_refuses_a_published_item_and_removes_the_stored_trash_record() {
-        let kept_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.Trash/kept.txt";
-        let kept_record_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Trash/b605da9f2eae10055cf347d3ed96a4ba45473f0424162deada39c157593183ee.json";
-        let kept_publish_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Published/b605da9f2eae10055cf347d3ed96a4ba45473f0424162deada39c157593183ee.json";
+        let kept_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.Trash/kept.txt";
+        let kept_record_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Trash/67c813840358c4bc6efeda65bfea75253e63368879b3379ebdcc9d58e619dd5a.json";
+        let kept_publish_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Published/67c813840358c4bc6efeda65bfea75253e63368879b3379ebdcc9d58e619dd5a.json";
         let agent = home(PrincipalKind::Agent);
         let kept_path = rooted_localhost_fs_path(agent.path(), kept_uri).unwrap();
         fs::create_dir_all(kept_path.parent().unwrap()).unwrap();
         fs::write(&kept_path, b"kept-published").unwrap();
         write_trash_record(
             agent.path(),
-            r4_fixture::ID,
+            r4_fixture::AGENT_ID,
             &LibraryTrashRecord {
                 schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
                 trash_uri: kept_uri.into(),
-                original_uri: "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/kept.txt"
+                original_uri: "localhost://UsersAI/ba287e12925d9408db0f24e3/Documents/kept.txt"
                     .into(),
                 original_name: "kept.txt".into(),
                 trashed_at: 1,
@@ -11236,7 +11244,7 @@ mod r5a_tests {
         );
         write_runtime_json(
             agent.path(),
-            r4_fixture::ID,
+            r4_fixture::AGENT_ID,
             kept_publish_uri,
             &json!({
                 "schema": "elastos.library.publish/v1",
@@ -11251,7 +11259,7 @@ mod r5a_tests {
         let refused = handle_library_request(
             agent.path(),
             ObjectProviderRequest::EmptyTrash {
-                principal_id: r4_fixture::ID.into(),
+                principal_id: r4_fixture::AGENT_ID.into(),
             },
         );
         assert!(
@@ -11272,19 +11280,19 @@ mod r5a_tests {
             "refused EmptyTrash removed the trash record"
         );
 
-        let gone_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.Trash/gone.txt";
-        let gone_record_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/Trash/0b1925bc2079697007485433e75b96a9b2edb8a01b43588e85beb67896710b80.json";
+        let gone_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.Trash/gone.txt";
+        let gone_record_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Trash/42219106f7950cf45eb9ef46f0c5877ada10af75dafa1aab66abc21bd5ec9456.json";
         let clear = home(PrincipalKind::Agent);
         let gone_path = rooted_localhost_fs_path(clear.path(), gone_uri).unwrap();
         fs::create_dir_all(gone_path.parent().unwrap()).unwrap();
         fs::write(&gone_path, b"gone-trash").unwrap();
         write_trash_record(
             clear.path(),
-            r4_fixture::ID,
+            r4_fixture::AGENT_ID,
             &LibraryTrashRecord {
                 schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
                 trash_uri: gone_uri.into(),
-                original_uri: "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/gone.txt"
+                original_uri: "localhost://UsersAI/ba287e12925d9408db0f24e3/Documents/gone.txt"
                     .into(),
                 original_name: "gone.txt".into(),
                 trashed_at: 1,
@@ -11299,7 +11307,7 @@ mod r5a_tests {
         let emptied = handle_library_request(
             clear.path(),
             ObjectProviderRequest::EmptyTrash {
-                principal_id: r4_fixture::ID.into(),
+                principal_id: r4_fixture::AGENT_ID.into(),
             },
         )
         .unwrap();
@@ -11319,7 +11327,12 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let uri = format!("{root}/.AppData/LocalHost/.Runtime/Library/R5a/write.json");
-            let result = write_runtime_json(dir.path(), r4_fixture::ID, &uri, &json!({"site": 3}));
+            let result = write_runtime_json(
+                dir.path(),
+                r4_fixture::principal_id(kind),
+                &uri,
+                &json!({"site": 3}),
+            );
             assert!(result.is_ok(), "{root}: {result:?}");
             let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
             assert!(path.is_file(), "{uri}");
@@ -11349,14 +11362,15 @@ mod r5a_tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             crate::auth::write_principal_root_object(
                 dir.path(),
-                r4_fixture::ID,
+                r4_fixture::principal_id(kind),
                 root,
                 &uri,
                 &path,
                 br#"{"site":4}"#,
             )
             .unwrap();
-            let result: anyhow::Result<Value> = read_runtime_json(dir.path(), r4_fixture::ID, &uri);
+            let result: anyhow::Result<Value> =
+                read_runtime_json(dir.path(), r4_fixture::principal_id(kind), &uri);
             assert!(
                 result.as_ref().is_ok_and(|value| value["site"] == 4),
                 "{uri}: {result:?}"
@@ -11410,14 +11424,14 @@ mod r5a_tests {
             });
             crate::auth::write_principal_root_object(
                 dir.path(),
-                r4_fixture::ID,
+                r4_fixture::principal_id(kind),
                 root,
                 &uri,
                 &path,
                 &serde_json::to_vec(&record).unwrap(),
             )
             .unwrap();
-            let records = publish_records(dir.path(), r4_fixture::ID);
+            let records = publish_records(dir.path(), r4_fixture::principal_id(kind));
             assert_eq!(records.len(), 1, "{root}");
             assert_eq!(records[0].object_uri, format!("{root}/Documents/r5a.txt"));
         }
@@ -11472,7 +11486,7 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let record = trash(root);
-            let result = write_trash_record(dir.path(), r4_fixture::ID, &record);
+            let result = write_trash_record(dir.path(), r4_fixture::principal_id(kind), &record);
             let uri = trash_record_uri(root, &record.trash_uri);
             assert!(
                 result.is_ok()
@@ -11512,8 +11526,12 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let record = trash(root);
-            write_trash_record(dir.path(), r4_fixture::ID, &record).unwrap();
-            let result = read_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+            write_trash_record(dir.path(), r4_fixture::principal_id(kind), &record).unwrap();
+            let result = read_trash_record(
+                dir.path(),
+                r4_fixture::principal_id(kind),
+                &record.trash_uri,
+            );
             assert!(
                 result
                     .as_ref()
@@ -11546,11 +11564,15 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let record = trash(root);
-            write_trash_record(dir.path(), r4_fixture::ID, &record).unwrap();
+            write_trash_record(dir.path(), r4_fixture::principal_id(kind), &record).unwrap();
             let uri = trash_record_uri(root, &record.trash_uri);
             let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
             assert!(path.is_file(), "{uri}");
-            let result = remove_trash_record(dir.path(), r4_fixture::ID, &record.trash_uri);
+            let result = remove_trash_record(
+                dir.path(),
+                r4_fixture::principal_id(kind),
+                &record.trash_uri,
+            );
             assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
         }
         let dir = tempfile::tempdir().unwrap();
@@ -11590,8 +11612,12 @@ mod r5a_tests {
             let dir = home(kind);
             let record = published(root);
             let uri = publish_record_uri(root, &record.object_uri);
-            write_runtime_json(dir.path(), r4_fixture::ID, &uri, &record).unwrap();
-            let result = read_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+            write_runtime_json(dir.path(), r4_fixture::principal_id(kind), &uri, &record).unwrap();
+            let result = read_publish_record(
+                dir.path(),
+                r4_fixture::principal_id(kind),
+                &record.object_uri,
+            );
             assert!(
                 result
                     .as_ref()
@@ -11625,7 +11651,7 @@ mod r5a_tests {
             let dir = home(kind);
             let record = published(root);
             let uri = publish_record_uri(root, &record.object_uri);
-            let result = write_publish_record(dir.path(), r4_fixture::ID, &record);
+            let result = write_publish_record(dir.path(), r4_fixture::principal_id(kind), &record);
             assert!(
                 result.is_ok()
                     && rooted_localhost_fs_path(dir.path(), &uri)
@@ -11685,10 +11711,14 @@ mod r5a_tests {
             let dir = home(kind);
             let record = published(root);
             let uri = publish_record_uri(root, &record.object_uri);
-            write_runtime_json(dir.path(), r4_fixture::ID, &uri, &record).unwrap();
+            write_runtime_json(dir.path(), r4_fixture::principal_id(kind), &uri, &record).unwrap();
             let path = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
             assert!(path.is_file(), "{uri}");
-            let result = remove_publish_record(dir.path(), r4_fixture::ID, &record.object_uri);
+            let result = remove_publish_record(
+                dir.path(),
+                r4_fixture::principal_id(kind),
+                &record.object_uri,
+            );
             assert!(result.is_ok() && !path.exists(), "{uri}: {result:?}");
         }
         let dir = tempfile::tempdir().unwrap();
@@ -11728,10 +11758,21 @@ mod r5a_tests {
             (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
         ] {
             let dir = home(kind);
-            write_library_events_with_root(dir.path(), r4_fixture::ID, root, &[event(root)])
-                .unwrap();
+            write_library_events_with_root(
+                dir.path(),
+                r4_fixture::principal_id(kind),
+                root,
+                &[event(root)],
+            )
+            .unwrap();
             let filter = format!("{root}/Documents/e.txt");
-            let result = library_events(dir.path(), r4_fixture::ID, Some(&filter), None, None);
+            let result = library_events(
+                dir.path(),
+                r4_fixture::principal_id(kind),
+                Some(&filter),
+                None,
+                None,
+            );
             assert!(
                 result
                     .as_ref()
@@ -11764,11 +11805,11 @@ mod r5a_tests {
     #[test]
     fn append_library_event_uses_the_stored_agent_root() {
         let agent = home(PrincipalKind::Agent);
-        let doc_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/e.txt";
-        let log_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/.AppData/LocalHost/.Runtime/Library/events.jsonl";
+        let doc_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/Documents/e.txt";
+        let log_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/events.jsonl";
         let result = append_library_event(
             agent.path(),
-            r4_fixture::ID,
+            r4_fixture::AGENT_ID,
             "note",
             doc_uri,
             json!({ "marker": "r5b-append" }),
@@ -11776,8 +11817,8 @@ mod r5a_tests {
         let log_path = rooted_localhost_fs_path(agent.path(), log_uri).unwrap();
         let logged = crate::auth::read_principal_root_object(
             agent.path(),
-            r4_fixture::ID,
-            "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478",
+            r4_fixture::AGENT_ID,
+            "localhost://UsersAI/ba287e12925d9408db0f24e3",
             log_uri,
             &log_path,
         );
@@ -11786,9 +11827,7 @@ mod r5a_tests {
             .ok()
             .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
             .unwrap_or_default();
-        let id_root =
-            rooted_localhost_fs_path(agent.path(), "localhost://Users/b2caa01d2e3d5fb2ec0d1478")
-                .unwrap();
+        let id_root = rooted_localhost_fs_path(agent.path(), r4_fixture::USERS_ROOT).unwrap();
         assert!(
             result.is_ok() && text.contains(doc_uri) && text.contains("\"op\":\"note\"") && !id_root.exists(),
             "stored Agent append must land in the UsersAI event log and leave the id-rule path absent: result={result:?} id_rule_exists={} log={text}",
@@ -11822,14 +11861,14 @@ mod r5a_tests {
     #[test]
     fn library_object_uses_the_stored_agent_root() {
         let agent = home(PrincipalKind::Agent);
-        let dir_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents";
-        let child_uri = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478/Documents/child.txt";
+        let dir_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/Documents";
+        let child_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/Documents/child.txt";
         let child_path = rooted_localhost_fs_path(agent.path(), child_uri).unwrap();
         fs::create_dir_all(child_path.parent().unwrap()).unwrap();
         crate::auth::write_principal_root_object(
             agent.path(),
-            r4_fixture::ID,
-            "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478",
+            r4_fixture::AGENT_ID,
+            "localhost://UsersAI/ba287e12925d9408db0f24e3",
             child_uri,
             &child_path,
             b"stored child",
@@ -11838,7 +11877,7 @@ mod r5a_tests {
         let listed = handle_library_request(
             agent.path(),
             ObjectProviderRequest::List {
-                principal_id: r4_fixture::ID.into(),
+                principal_id: r4_fixture::AGENT_ID.into(),
                 uri: Some(dir_uri.into()),
             },
         )
@@ -11849,7 +11888,7 @@ mod r5a_tests {
         let stated = handle_library_request(
             agent.path(),
             ObjectProviderRequest::Stat {
-                principal_id: r4_fixture::ID.into(),
+                principal_id: r4_fixture::AGENT_ID.into(),
                 uri: child_uri.into(),
             },
         );
@@ -11891,7 +11930,8 @@ mod r5a_tests {
             (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
         ] {
             let dir = home(kind);
-            let result = chat_attach_binding_uri(dir.path(), r4_fixture::ID, "r5b-attach");
+            let result =
+                chat_attach_binding_uri(dir.path(), r4_fixture::principal_id(kind), "r5b-attach");
             assert!(
                 result.as_ref().is_ok_and(|uri| uri.starts_with(&format!(
                     "{root}/.AppData/LocalHost/.Runtime/Library/ChatAttach/"
@@ -11922,7 +11962,7 @@ mod r5a_tests {
             (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
         ] {
             let dir = home(kind);
-            let result = localhost_space_pointer_object(dir.path(), r4_fixture::ID);
+            let result = localhost_space_pointer_object(dir.path(), r4_fixture::principal_id(kind));
             assert!(
                 result.as_ref().is_ok_and(|object| object.uri == root),
                 "{root}: {result:?}"
@@ -11948,7 +11988,7 @@ mod r5a_tests {
         ] {
             let dir = home(kind);
             let uri = format!("{root}/Documents/a.txt");
-            let result = library_target(dir.path(), r4_fixture::ID, &uri);
+            let result = library_target(dir.path(), r4_fixture::principal_id(kind), &uri);
             assert!(
                 result.as_ref().is_ok_and(|target| target.uri == uri),
                 "{root}: {}",

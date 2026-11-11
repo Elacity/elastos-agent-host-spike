@@ -386,7 +386,10 @@ mod r3_tests {
         let (_dir, context) = fixture(true);
         assert_eq!(
             assistant_workspace_uri(&context),
-            "localhost://UsersAI/12f27c37e15084ebad04eaa4/.AppData/ElastOS/Assistant/workspace.json",
+            format!(
+                "{}/.AppData/ElastOS/Assistant/workspace.json",
+                super::super::r3_stored_root_tests::AGENT_ROOT
+            ),
             "R3 assistant URI uses UsersAI"
         );
     }
@@ -411,6 +414,13 @@ mod r3_tests {
         }))
         .unwrap();
         let result = save_assistant_workspace(dir.path(), &context, request);
+        let writes = crate::auth::principal_object_io::writes(dir.path());
+        assert!(
+            writes.iter().any(|path| path.ends_with(
+                "UsersAI/ba287e12925d9408db0f24e3/.AppData/ElastOS/Assistant/workspace.json"
+            )),
+            "R3 assistant write records the stored-root object: {writes:?}"
+        );
         assert_eq!(
             result.unwrap_err().to_string(),
             NEEDS_PROTECTION,

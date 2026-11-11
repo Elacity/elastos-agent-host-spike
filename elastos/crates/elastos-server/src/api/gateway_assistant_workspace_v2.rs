@@ -364,7 +364,7 @@ pub(super) fn preserve_legacy_home_agent(
 #[cfg(test)]
 mod r3_tests {
     use super::super::r3_stored_root_tests::{
-        fixture, seed, verified_parent_device_context, NEEDS_PROTECTION,
+        fixture, seed, verified_parent_device_context, AGENT_ID, AGENT_ROOT, NEEDS_PROTECTION,
     };
     use super::*;
 
@@ -372,14 +372,17 @@ mod r3_tests {
     fn agent_location_uses_stored_root() {
         let (dir, context) = fixture(true);
         let (uri, path) = object_location(dir.path(), &context, RELATIVE_PATH).unwrap();
-        assert_eq!(uri,
-            "localhost://UsersAI/12f27c37e15084ebad04eaa4/.AppData/ElastOS/Assistant/workspace-v2.json",
-            "R3 v2 location uses UsersAI");
+        assert_eq!(
+            uri,
+            format!("{AGENT_ROOT}/.AppData/ElastOS/Assistant/workspace-v2.json"),
+            "R3 v2 location uses UsersAI"
+        );
         assert_eq!(
             path,
-            dir.path().join(
-                "UsersAI/12f27c37e15084ebad04eaa4/.AppData/ElastOS/Assistant/workspace-v2.json"
-            )
+            dir.path().join(format!(
+                "{}/.AppData/ElastOS/Assistant/workspace-v2.json",
+                AGENT_ROOT.strip_prefix("localhost://").unwrap()
+            ))
         );
     }
 
@@ -403,15 +406,18 @@ mod r3_tests {
     #[test]
     fn agent_legacy_identity_uses_stored_root() {
         let (dir, context) = fixture(true);
+        let browser_state = format!(
+            r#"{{
+            "schema":"elastos.home.browser-state/v1", "principal_id":"{AGENT_ID}",
+            "localhost_root":"{AGENT_ROOT}",
+            "session":{{"windows":[],"agent":{{"draft":"legacy agent"}}}},
+            "layout":null,"recent_targets":[]
+        }}"#
+        );
         seed(
             dir.path(),
             ".AppData/ElastOS/Home/browser-state.json",
-            br#"{
-            "schema":"elastos.home.browser-state/v1", "principal_id":"person:local:r3-agent",
-            "localhost_root":"localhost://UsersAI/12f27c37e15084ebad04eaa4",
-            "session":{"windows":[],"agent":{"draft":"legacy agent"}},
-            "layout":null,"recent_targets":[]
-        }"#,
+            browser_state.as_bytes(),
         );
         let result = legacy_home_agent(dir.path(), &context).map_err(|err| err.to_string());
         assert_eq!(
@@ -432,6 +438,13 @@ mod r3_tests {
             migration_revision: Some(initial["migration_revision"].as_str().unwrap().into()),
         };
         let result = save(dir.path(), &context, request);
+        let writes = crate::auth::principal_object_io::writes(dir.path());
+        assert!(
+            writes.iter().any(|path| path.ends_with(
+                "UsersAI/ba287e12925d9408db0f24e3/.AppData/ElastOS/Assistant/workspace-v2.json"
+            )),
+            "R3 v2 write records the stored-root object: {writes:?}"
+        );
         assert_eq!(
             result.unwrap_err().to_string(),
             NEEDS_PROTECTION,

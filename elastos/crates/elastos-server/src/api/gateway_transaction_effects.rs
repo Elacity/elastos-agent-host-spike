@@ -3504,7 +3504,9 @@ mod approved_request_resume_tests {
             let state = test_gateway_state(dir.path(), None);
             std::fs::create_dir_all(&state.data_dir).unwrap();
             store(&state.data_dir, kind);
-            let (actual, uri, path) = transaction_effect_location(&state, ID).unwrap();
+            let (actual, uri, path) =
+                transaction_effect_location(&state, crate::auth::r4_fixture::principal_id(kind))
+                    .unwrap();
             assert_eq!(actual, expected, "R4 transaction effect root");
             assert_eq!(
                 uri,
@@ -3514,10 +3516,13 @@ mod approved_request_resume_tests {
                 path,
                 rooted_localhost_fs_path(&state.data_dir, &uri).unwrap()
             );
-            assert!(load_transaction_effect_store(&state, ID)
-                .unwrap()
-                .effects
-                .is_empty());
+            assert!(load_transaction_effect_store(
+                &state,
+                crate::auth::r4_fixture::principal_id(kind)
+            )
+            .unwrap()
+            .effects
+            .is_empty());
         }
     }
 

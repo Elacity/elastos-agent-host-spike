@@ -1860,16 +1860,17 @@ mod tests {
     /// A5-S3a-2: a stored Agent owns UsersAI/self only; a Human owns no UsersAI root.
     #[test]
     fn a_stored_agent_is_scoped_to_its_own_usersai_root() {
-        let id = "agent:local:scoped";
-        let temp = stored_human_dir(id);
-        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
+        let root = crate::auth::valid_agent::ROOT;
         let (want, dir) = (format!("{root}/a.md"), Some(temp.path()));
         assert!(root.starts_with("localhost://UsersAI/"), "{root}");
         let scope = |uri: &str| scope_current_user_alias(uri, Some(id), dir);
         let not_area = |area: &str| format!("{area} is not this principal's root area");
         assert_eq!(scope("localhost://UsersAI/self/a.md").unwrap(), want);
         assert_eq!(scope(&want).unwrap(), want);
-        let human_root = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let human_root = format!("{}/a.md", crate::auth::valid_agent::USERS_ROOT);
         for uri in ["localhost://Users/self/a.md", &human_root] {
             assert_eq!(scope(uri).unwrap_err(), not_area("Users"));
         }
@@ -1889,13 +1890,13 @@ mod tests {
     /// so the same id's Users root is refused with a data dir present.
     #[test]
     fn the_protected_path_refuses_a_stored_agent_the_users_root_of_its_id() {
-        let id = "agent:local:protected";
-        let temp = stored_human_dir(id);
-        crate::auth::tests::mint_agent_record(temp.path(), id, None);
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
         let mut ctx = bridge_context();
         ctx.principal_id = Some(id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
-        let path = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let path = format!("{}/a.md", crate::auth::valid_agent::USERS_ROOT);
         let request = serde_json::json!({"path": path, "content": "x"});
         let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
         assert_eq!(refused["code"], "principal_context_required", "{refused}");
@@ -1955,9 +1956,10 @@ mod tests {
     /// UsersAI root storage instead of dispatching it.
     #[tokio::test]
     async fn usersai_root_storage_takes_the_protected_path() {
-        let id = "agent:local:protected-ai";
-        let temp = stored_human_dir(id);
-        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
+        let root = crate::auth::valid_agent::ROOT;
         let mut ctx = bridge_context();
         ctx.principal_id = Some(id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
