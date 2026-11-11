@@ -1165,6 +1165,7 @@ mod model;
 mod model_installed_fixture;
 mod r3_stored_roots;
 mod r8c_child_rows;
+pub(super) mod r8d_passkey_rows;
 mod recovery;
 #[cfg(unix)]
 mod remote_engine;
