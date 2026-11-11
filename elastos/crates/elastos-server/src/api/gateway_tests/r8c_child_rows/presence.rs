@@ -84,6 +84,7 @@ async fn r8c_child_presence_request_and_grant_under_the_parent_root() {
         asked == Err(PROFILE_REQUIRED.to_string()),
         &asked,
     );
+    // Seeded state: a child cannot produce it today; the test writes it.
     seed_parent_profile(&child);
     presence_steps(&mut steps, &state, &child.ctx).await;
     steps.only_under(dir, &child.parent_root, GRANT_FILE);

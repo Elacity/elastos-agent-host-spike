@@ -72,12 +72,16 @@ async fn r8c_child_contacts_load_and_add_under_the_parent_root() {
         launched,
         Option::is_none,
     );
+    // Seeded state: a child cannot produce it today; the test writes it.
     let profile = seed_parent_profile(&child);
     let seeded =
         load().and_then(|found| found.ok_or_else(|| anyhow::anyhow!("none: Profile required")));
     let by_route = steps.step("seeded Profile: contact authority for the context", seeded);
     // The same constructor the route uses, handed the seeded Profile, so the
-    // contact store's own storage calls are reached too.
+    // contact store's own storage calls are reached too. It answers because
+    // the seed lists this Runtime's own device on the Profile; the
+    // constructor refuses a Profile that does not
+    // (collaboration_contact_store.rs:914-916).
     let authority = by_route.or_else(|| {
         let built = configured_contact_authority_from_profile(dir, &child.ctx, &service, profile);
         steps.step("seeded Profile handed to the route's constructor", built)

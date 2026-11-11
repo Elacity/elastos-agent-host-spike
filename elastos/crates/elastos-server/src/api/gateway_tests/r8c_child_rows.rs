@@ -79,7 +79,15 @@ fn control(app: &str) -> Control {
 
 /// Test-only arrangement: protection for the parent root and a signed Profile
 /// under it, written through the newer storage family. It lets a row reach
-/// the storage calls that sit behind the Profile gate.
+/// the storage calls that sit behind the Profile gate. A child cannot
+/// produce this state today: this person's Profile update stops at the
+/// passkey gate, as the Profile update row shows. The test writes it.
+///
+/// The Profile lists this child Runtime's own device as its endpoint. The
+/// contact store's constructor refuses a Profile that does not list the
+/// local device (collaboration_contact_store.rs:914-916), so the two "handed
+/// to the route's constructor" steps (contacts, direct messages) answer
+/// because of this choice.
 fn seed_parent_profile(
     child: &Child,
 ) -> crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument {

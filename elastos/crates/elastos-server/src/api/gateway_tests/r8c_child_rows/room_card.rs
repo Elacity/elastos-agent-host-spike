@@ -40,6 +40,7 @@ fn r8c_child_room_card_and_authority_read_the_parent_roots_profile() {
         empty,
         Option::is_none,
     );
+    // Seeded state: a child cannot produce it today; the test writes it.
     let seeded = seed_parent_profile(&child);
     let did = seeded.document().profile_did.clone();
     card_steps(&mut steps, dir, &child.ctx, &did);

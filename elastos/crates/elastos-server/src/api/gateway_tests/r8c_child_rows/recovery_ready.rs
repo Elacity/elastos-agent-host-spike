@@ -37,6 +37,7 @@ fn r8c_child_recovery_readiness_with_a_profile_under_the_protected_parent_root()
         &launched,
     );
     // With protection and a Profile under the root, readiness reads the Profile.
+    // Seeded state: a child cannot produce it today; the test writes it.
     seed_parent_profile(&child);
     let seeded = readiness(dir, &child.ctx);
     steps.check(

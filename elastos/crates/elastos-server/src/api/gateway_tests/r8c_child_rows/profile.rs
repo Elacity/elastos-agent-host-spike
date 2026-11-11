@@ -49,6 +49,7 @@ fn r8c_child_profile_load_reads_the_profile_under_the_parent_root() {
         empty,
         Option::is_none,
     );
+    // Seeded state: a child cannot produce it today; the test writes it.
     let seeded = seed_parent_profile(&child);
     let expected = seeded.document().profile_did.clone();
     load_steps(&mut steps, dir, &child.ctx, &expected);
