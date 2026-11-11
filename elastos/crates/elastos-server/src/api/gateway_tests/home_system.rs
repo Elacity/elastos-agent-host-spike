@@ -5445,7 +5445,7 @@ async fn test_home_summary_and_events_include_browser_wallet_approvals() {
     let summary_json: serde_json::Value = serde_json::from_slice(&summary_body).unwrap();
     assert_eq!(summary_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        summary_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&summary_json["notifications"], "wallet_approval_request")[0]["title"],
         "Transaction approval request"
     );
 

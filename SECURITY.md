@@ -46,7 +46,8 @@ journeys tested on that device.
 A new or updated Home starts with Browser internet access off. The Home owner
 allows this computer's internet connection for Browser from the current Inbox
 request with a passkey. Runtime binds that approval to its request ID and expiry.
-Browser Settings offers Off and opens System for passkey confirmation. Runtime
+Browser Settings offers Manage in Inbox. Inbox confirms Turn Off and requires
+a passkey. Runtime
 stores the consent decision separately from the capability token; the decision,
 Inbox and Browser responses contain no token bytes.
 
@@ -63,7 +64,7 @@ grant generation, cancels Runtime-owned byte copies and acknowledges completion.
 A provider fetch or Chain call accepted before Stop can still finish. A remote
 engine can take longer to close, while Runtime has already stopped its copies.
 An accepted Carrier invocation can keep Stop pending until its reply arrives.
-System keeps Retry Stop available until Runtime confirms cleanup.
+Inbox keeps Turn Off available to retry until Runtime confirms cleanup.
 
 The approval display still has the [trusted-display gap (#178)](https://github.com/elastos/elastos-runtime/issues/178).
 Home renders the request and starts the passkey ceremony; WebAuthn does not prove

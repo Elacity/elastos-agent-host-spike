@@ -71,6 +71,7 @@ try { await createRuntimeApi({}).fetchJson('/api/apps/browser/open'); }
 catch (failure) { error = failure; }
 console.log(JSON.stringify({
   authority: isAuthoritySessionError(error), message: friendlyOpenError(error),
+  policyRefusalMessage: friendlyOpenError({ status: 403, message: "Connection policy refused the request" }),
   outcome: runtimeOpenOutcome(error),
   evidence: await browserOpenResponseEvidence({
     json: async () => JSON.parse(body), text: async () => body,
@@ -282,9 +283,12 @@ async fn test_browser_open_missing_and_forged_tokens_stay_generic_at_the_front_d
         );
         let consumer = browser_open_response_consumers(StatusCode::FORBIDDEN, &body);
         assert_eq!(consumer["authority"], false, "{uri}");
+        assert!(consumer["policyRefusalMessage"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()));
         assert_eq!(
-            consumer["message"],
-            "This page was blocked by your Exit Node settings."
+            consumer["message"], consumer["policyRefusalMessage"],
+            "{uri}"
         );
     }
 }
@@ -4351,7 +4355,7 @@ async fn test_browser_personal_sign_queues_wallet_inbox_approval() {
     let inbox_json: serde_json::Value = serde_json::from_slice(&inbox_body).unwrap();
     assert_eq!(inbox_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        inbox_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&inbox_json["notifications"], "wallet_approval_request")[0]["title"],
         "Browser signature request"
     );
 }
@@ -4452,7 +4456,7 @@ async fn test_browser_typed_data_sign_queues_wallet_inbox_approval() {
     let inbox_json: serde_json::Value = serde_json::from_slice(&inbox_body).unwrap();
     assert_eq!(inbox_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        inbox_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&inbox_json["notifications"], "wallet_approval_request")[0]["title"],
         "Browser typed data signature request"
     );
 }
@@ -5142,7 +5146,7 @@ async fn test_browser_eth_send_transaction_queues_wallet_inbox_approval() {
     let inbox_json: serde_json::Value = serde_json::from_slice(&inbox_body).unwrap();
     assert_eq!(inbox_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        inbox_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&inbox_json["notifications"], "wallet_approval_request")[0]["title"],
         "Transaction approval request"
     );
 }
@@ -10848,25 +10852,211 @@ async fn internet_allow(app: &Router, dir: &std::path::Path, browser: &str, inbo
     assert_eq!(status, StatusCode::OK, "{result}");
 }
 
-async fn internet_stop(app: &Router, dir: &std::path::Path, system: &str) {
-    let (_, granted) = internet_route(app, system, "/api/apps/browser/internet", None).await;
+async fn internet_stop(app: &Router, dir: &std::path::Path, inbox: &str) {
+    let (_, granted) = internet_route(app, inbox, "/api/apps/browser/internet", None).await;
     let step = gateway_passkey_step_up::issue_passkey_step_up_token_for_test(
         dir,
-        system,
-        SYSTEM_CAPSULE_ID,
+        inbox,
+        INBOX_CAPSULE_ID,
         "browser.internet.revoke",
         &granted["request"],
     )
     .unwrap();
     let (status, result) = internet_route(
         app,
-        system,
-        "/api/apps/browser/internet",
-        Some(json!({"action":"revoke","step_up_token":step})),
+        inbox,
+        "/api/apps/inbox/actions",
+        Some(json!({"action_id":format!("browser-internet-turn-off:{}",granted["request"]["grant_id"].as_str().unwrap()),"step_up_token":step})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{result}");
-    assert_eq!(result["status"], "revoked");
+    let (_, current) = internet_route(app, inbox, "/api/apps/browser/internet", None).await;
+    assert_eq!(current["status"], "revoked");
+}
+
+async fn internet_home_launch_token(
+    state: &GatewayState,
+    home: &str,
+    target: &str,
+    platform: &str,
+) -> String {
+    let request = test_browser_request("localhost:61180", "http://localhost:61180")
+        .header("x-elastos-home-token", home)
+        .body(Body::empty())
+        .unwrap();
+    let Json(launch) = home_launch(
+        State(state.clone()),
+        request.headers().clone(),
+        Json(HomeLaunchRequest {
+            target: target.to_string(),
+            query: BTreeMap::new(),
+        }),
+        platform,
+    )
+    .await
+    .unwrap_or_else(|(status, error)| panic!("Home launch failed: {status} {}", error.0["error"]));
+    let route = url::Url::parse(&format!("http://localhost:61180{}", launch.route)).unwrap();
+    form_urlencoded::parse(route.fragment().unwrap().as_bytes())
+        .find(|(key, _)| key == "home_token")
+        .unwrap()
+        .1
+        .into_owned()
+}
+
+#[tokio::test]
+async fn browser_internet_end_accepts_only_its_home_launched_browser_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let home = app_token_for_authority(dir.path(), HOME_CAPSULE_ID, &owner);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let state = internet_test_state(dir.path());
+    // These launch fixtures use web projections so home_launch needs no Runtime process.
+    for target in [BROWSER_CAPSULE_ID, SYSTEM_CAPSULE_ID, "assistant"] {
+        let path = dir
+            .path()
+            .join("capsules")
+            .join(target)
+            .join("capsule.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["type"] = json!("web-projection");
+        manifest["runtime_abi"] = json!("elastos.runtime-projection/v1");
+        manifest["bus_contract"] = json!("elastos.runtime-projection/v1");
+        manifest["execution"] = json!("web-projection");
+        manifest["projections"] = json!(["web"]);
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+    let app = gateway_router(state.clone());
+    let browser =
+        internet_home_launch_token(&state, &home, BROWSER_CAPSULE_ID, "darwin-arm64").await;
+    let second = internet_home_launch_token(&state, &home, BROWSER_CAPSULE_ID, "linux-arm64").await;
+    let system = internet_home_launch_token(&state, &home, SYSTEM_CAPSULE_ID, "darwin-arm64").await;
+    let direct_system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &owner);
+    let assistant = internet_home_launch_token(&state, &home, "assistant", "darwin-arm64").await;
+    let launch =
+        require_carried_home_launch_token(dir.path(), &browser, &[BROWSER_CAPSULE_ID]).unwrap();
+    assert_eq!(launch.launch_context.authority_actor, HOME_CAPSULE_ID);
+    assert_eq!(launch.launch_context.executable_actor, BROWSER_CAPSULE_ID);
+    assert_eq!(launch.launch_context.selected_resource, BROWSER_CAPSULE_ID);
+    internet_allow(&app, dir.path(), &browser, &inbox).await;
+    let first_authority =
+        runtime_wallet_authority_for_app_token(dir.path(), BROWSER_CAPSULE_ID, &browser);
+    let second_authority =
+        runtime_wallet_authority_for_app_token(dir.path(), BROWSER_CAPSULE_ID, &second);
+    assert_ne!(
+        first_authority.verified_context().launch_id(),
+        second_authority.verified_context().launch_id()
+    );
+    let first_effect =
+        gateway_browser_internet::effect_for_authority(&state, &first_authority, false)
+            .await
+            .unwrap();
+    let second_effect =
+        gateway_browser_internet::effect_for_authority(&state, &second_authority, false)
+            .await
+            .unwrap();
+    let consent = std::fs::read(dir.path().join("browser-internet.json")).unwrap();
+
+    // Age the real Home projection using this isolated fixture's signing key.
+    let codec = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut envelope: Value = serde_json::from_slice(&codec.decode(&browser).unwrap()).unwrap();
+    let now = now_ts();
+    envelope["payload"]["iat"] = json!(now - HOME_LAUNCH_TOKEN_TTL_SECS - 1);
+    envelope["payload"]["exp"] = json!(now - 1);
+    let (key, _) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let (signature, signer) = crate::crypto::domain_separated_sign(
+        &key,
+        HOME_LAUNCH_TOKEN_DOMAIN,
+        serde_json::to_string(&envelope["payload"])
+            .unwrap()
+            .as_bytes(),
+    );
+    envelope["signature"] = json!(signature);
+    envelope["signer_did"] = json!(signer);
+    let expired = codec.encode(serde_json::to_vec(&envelope).unwrap());
+    assert_eq!(
+        require_carried_home_launch_token(dir.path(), &expired, &[BROWSER_CAPSULE_ID])
+            .unwrap_err()
+            .to_string(),
+        "home launch token expired"
+    );
+    let foreign_dir = tempfile::tempdir().unwrap();
+    let foreign = app_token_for_authority(
+        foreign_dir.path(),
+        BROWSER_CAPSULE_ID,
+        &passkey_authority(foreign_dir.path()),
+    );
+    for (case, token, origin) in [
+        ("System", &system, "null"),
+        ("direct System", &direct_system, "null"),
+        ("Home", &home, "http://localhost:61180"),
+        ("Assistant", &assistant, "null"),
+        ("expired", &expired, "null"),
+        ("foreign Home", &foreign, "null"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", origin)
+                    .method("POST")
+                    .uri("/api/apps/browser/internet")
+                    .header("x-elastos-home-token", token)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"action":"end"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error(), "{case} end accepted");
+        assert!(
+            first_effect.fence.enter().await.is_ok(),
+            "{case} ended Browser"
+        );
+        assert!(
+            second_effect.fence.enter().await.is_ok(),
+            "{case} ended another Browser"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("browser-internet.json")).unwrap(),
+            consent
+        );
+    }
+    for _ in 0..2 {
+        let (status, result) = internet_route(
+            &app,
+            &browser,
+            "/api/apps/browser/internet",
+            Some(json!({"action":"end"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["status"], "ended");
+    }
+    assert!(*first_effect.cancelled.borrow());
+    assert!(first_effect.fence.enter().await.is_err());
+    assert!(
+        gateway_browser_internet::effect_for_authority(&state, &first_authority, false)
+            .await
+            .is_err()
+    );
+    assert!(!*second_effect.cancelled.borrow());
+    assert!(second_effect.fence.enter().await.is_ok());
+    assert!(
+        gateway_browser_internet::effect_for_authority(&state, &second_authority, false)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("browser-internet.json")).unwrap(),
+        consent
+    );
+    let (status, summary) = internet_route(&app, &inbox, "/api/apps/browser/internet", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary["status"], "granted");
+    internet_stop(&app, dir.path(), &inbox).await;
+    assert!(
+        *second_effect.cancelled.borrow(),
+        "Inbox stops the remaining launch"
+    );
 }
 
 #[tokio::test]
@@ -10875,7 +11065,7 @@ async fn browser_internet_allow_is_bound_to_current_request_and_consent_has_no_t
     let authority = passkey_authority(dir.path());
     let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
     let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
-    let system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &authority);
+    let inbox_revoke = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
     let app = gateway_router(internet_test_state(dir.path()));
     let (_, a) = internet_route(
         &app,
@@ -10929,7 +11119,7 @@ async fn browser_internet_allow_is_bound_to_current_request_and_consent_has_no_t
     assert!(value.get("token").is_none());
     assert!(!record.contains(&secret));
     assert!(!record.contains(&token_a));
-    internet_stop(&app, dir.path(), &system).await;
+    internet_stop(&app, dir.path(), &inbox_revoke).await;
     let (status, _) = internet_route(
         &app,
         &browser,
@@ -10992,7 +11182,7 @@ async fn internet_stop_barrier(before: bool) {
     let authority = passkey_authority(dir.path());
     let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
     let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
-    let system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &authority);
+    let inbox_revoke = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
     let mut state = internet_test_state(dir.path());
     seed_test_browser_capsules(dir.path());
     let registry = Arc::new(ProviderRegistry::new());
@@ -11046,7 +11236,7 @@ async fn internet_stop_barrier(before: bool) {
     tokio::time::timeout(Duration::from_secs(5), provider.paused.notified())
         .await
         .unwrap();
-    internet_stop(&app, dir.path(), &system).await;
+    internet_stop(&app, dir.path(), &inbox_revoke).await;
     provider.resume.notify_one();
     let (status, _) = tokio::time::timeout(Duration::from_secs(5), call)
         .await
@@ -11089,7 +11279,7 @@ async fn browser_internet_stop_cancels_copies_and_refuses_racing_registration() 
     let owner = passkey_authority(dir.path());
     let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &owner);
     let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
-    let system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &owner);
+    let inbox_revoke = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let state = internet_test_state(dir.path());
     let app = gateway_router(state.clone());
     internet_allow(&app, dir.path(), &browser, &inbox).await;
@@ -11127,7 +11317,7 @@ async fn browser_internet_stop_cancels_copies_and_refuses_racing_registration() 
             break;
         }
     }
-    internet_stop(&app, dir.path(), &system).await;
+    internet_stop(&app, dir.path(), &inbox_revoke).await;
     let mut byte = [0u8; 1];
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), guest.read(&mut byte))
@@ -11170,7 +11360,7 @@ async fn browser_internet_cancelled_stop_keeps_copies_for_retry() {
     let owner = passkey_authority(dir.path());
     let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &owner);
     let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
-    let system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &owner);
+    let inbox_revoke = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let state = internet_test_state(dir.path());
     let app = gateway_router(state.clone());
     internet_allow(&app, dir.path(), &browser, &inbox).await;
@@ -11180,17 +11370,18 @@ async fn browser_internet_cancelled_stop_keeps_copies_for_retry() {
         .await
         .unwrap();
     let (dispatch, copy) = effect.register_copy().await.unwrap();
-    let (_, granted) = internet_route(&app, &system, "/api/apps/browser/internet", None).await;
+    let (_, granted) =
+        internet_route(&app, &inbox_revoke, "/api/apps/browser/internet", None).await;
     let step = gateway_passkey_step_up::issue_passkey_step_up_token_for_test(
         dir.path(),
-        &system,
-        SYSTEM_CAPSULE_ID,
+        &inbox_revoke,
+        INBOX_CAPSULE_ID,
         "browser.internet.revoke",
         &granted["request"],
     )
     .unwrap();
     let app_stop = app.clone();
-    let token_stop = system.clone();
+    let token_stop = inbox_revoke.clone();
     let stop = tokio::spawn(async move {
         internet_route(
             &app_stop,
@@ -11216,13 +11407,14 @@ async fn browser_internet_cancelled_stop_keeps_copies_for_retry() {
     let _ = stop.await;
     drop(dispatch);
     let recorded = std::fs::read(dir.path().join("browser-internet.json")).unwrap();
-    let (_, pending) = internet_route(&app, &system, "/api/apps/browser/internet", None).await;
+    let (_, pending) =
+        internet_route(&app, &inbox_revoke, "/api/apps/browser/internet", None).await;
     assert_eq!(
         pending["stop_pending"], true,
         "System can retry unfinished cleanup"
     );
     let app_retry = app.clone();
-    let token_retry = system.clone();
+    let token_retry = inbox_revoke.clone();
     let (status, _) = internet_route(
         &app,
         &browser,
@@ -11253,7 +11445,7 @@ async fn browser_internet_cancelled_stop_keeps_copies_for_retry() {
     retry.abort();
     let _ = retry.await;
     let app_retry = app.clone();
-    let token_retry = system.clone();
+    let token_retry = inbox_revoke.clone();
     let mut retry = tokio::spawn(async move {
         internet_route(
             &app_retry,
@@ -11296,7 +11488,13 @@ async fn browser_internet_guest_cannot_answer_and_ending_one_launch_keeps_home_c
     let guest_inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &guest);
     let state = internet_test_state(dir.path());
     let app = gateway_router(state.clone());
-    let (_, pending) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    let (_, pending) = internet_route(
+        &app,
+        &browser,
+        "/api/apps/browser/internet",
+        Some(json!({"action":"request"})),
+    )
+    .await;
     for action in ["allow", "deny"] {
         let (status,_) = internet_route(&app,&guest_inbox,"/api/apps/inbox/actions",Some(json!({"action_id":format!("browser-internet-{action}:{}",pending["request"]["request_id"].as_str().unwrap())}))).await;
         assert_ne!(status, StatusCode::OK);
@@ -11341,7 +11539,7 @@ async fn browser_internet_stop_reports_failed_revoke_list_and_survives_restart()
     let owner = passkey_authority(dir.path());
     let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &owner);
     let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
-    let system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &owner);
+    let inbox_revoke = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let store_path = dir.path().join("fixture-capabilities");
     let store = Arc::new(
         CapabilityStore::with_persistence(&store_path)
@@ -11359,18 +11557,19 @@ async fn browser_internet_stop_reports_failed_revoke_list_and_survives_restart()
     let app = gateway_router(state);
     internet_allow(&app, dir.path(), &browser, &inbox).await;
     std::fs::create_dir(store_path.join("revoked_tokens")).unwrap();
-    let (_, granted) = internet_route(&app, &system, "/api/apps/browser/internet", None).await;
+    let (_, granted) =
+        internet_route(&app, &inbox_revoke, "/api/apps/browser/internet", None).await;
     let step = gateway_passkey_step_up::issue_passkey_step_up_token_for_test(
         dir.path(),
-        &system,
-        SYSTEM_CAPSULE_ID,
+        &inbox_revoke,
+        INBOX_CAPSULE_ID,
         "browser.internet.revoke",
         &granted["request"],
     )
     .unwrap();
     let (status, result) = internet_route(
         &app,
-        &system,
+        &inbox_revoke,
         "/api/apps/browser/internet",
         Some(json!({"action":"revoke","step_up_token":step})),
     )
@@ -11391,7 +11590,7 @@ async fn browser_internet_stop_reports_failed_revoke_list_and_survives_restart()
     std::fs::remove_dir(store_path.join("revoked_tokens")).unwrap();
     let (_, retry) = internet_route(
         &app,
-        &system,
+        &inbox_revoke,
         "/api/apps/browser/internet",
         Some(json!({"action":"revoke"})),
     )
@@ -11531,4 +11730,261 @@ async fn review559_legacy_net_routes_are_gone_with_or_without_a_grant() {
             assert_eq!(status, StatusCode::GONE, "{operation} grant={granted}");
         }
     }
+}
+
+#[tokio::test]
+async fn browser_internet_decisions_stay_in_inbox_as_read_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let inbox_revoke = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let app = gateway_router(internet_test_state(dir.path()));
+    let (_, pending) = internet_route(
+        &app,
+        &browser,
+        "/api/apps/browser/internet",
+        Some(json!({"action":"request"})),
+    )
+    .await;
+    let (_, summary) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+    let entry = summary["notifications"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "browser_internet_request")
+        .unwrap();
+    let notification_id = entry["id"].clone();
+    assert_eq!(entry["title"], "Allow Browser to use the internet?");
+    assert_eq!(entry["body"], "Browser opens websites using this computer's internet connection, or another connection you chose in Browser settings. Websites can see that connection's address. You can turn this off at any time here in Inbox.");
+    assert_eq!(summary["notifications"]["unread_count"], 1);
+    let action = format!(
+        "browser-internet-deny:{}",
+        pending["request"]["request_id"].as_str().unwrap()
+    );
+    let (status, _) = internet_route(
+        &app,
+        &inbox,
+        "/api/apps/inbox/actions",
+        Some(json!({"action_id":action})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for expected in ["refused", "granted", "revoked"] {
+        if expected == "granted" {
+            internet_allow(&app, dir.path(), &browser, &inbox).await;
+        }
+        if expected == "revoked" {
+            let (status, _) = internet_route(
+                &app,
+                &inbox_revoke,
+                "/api/apps/browser/internet",
+                Some(json!({"action":"revoke"})),
+            )
+            .await;
+            assert_ne!(status, StatusCode::OK);
+            internet_stop(&app, dir.path(), &inbox_revoke).await;
+        }
+        let record: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("browser-internet.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["status"], expected);
+        let (_, summary) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+        let entries = summary["notifications"]["entries"].as_array().unwrap();
+        let entry = entries
+            .iter()
+            .find(|e| e["kind"] == "browser_internet_decision")
+            .expect("decided Browser permission stays in Inbox");
+        assert_eq!(
+            entry["id"], notification_id,
+            "the selected request keeps its identity after the answer"
+        );
+        assert_eq!(entry["read"], true);
+        assert_eq!(entry["severity"], "info");
+        assert_eq!(entry["created_at"], record["at"]);
+        assert!(entry["action_ref"]["action_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("browser-internet-"));
+        let body = entry["body"].as_str().unwrap();
+        assert_eq!(
+            body,
+            match expected {
+                "granted" => "Browser can open websites. Allowed with your passkey.",
+                "refused" => "Browser cannot open websites. Not allowed.",
+                _ => "Browser cannot open websites. Turned off.",
+            }
+        );
+        assert_eq!(summary["notifications"]["unread_count"], 0);
+        assert_eq!(summary["notifications"]["attention_count"], 0);
+        assert!(!entries
+            .iter()
+            .any(|e| e["kind"] == "browser_internet_request"));
+    }
+}
+
+#[tokio::test]
+async fn browser_internet_summary_never_creates_or_renews_a_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let app = gateway_router(internet_test_state(dir.path()));
+    let (_, fresh) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    assert_eq!(fresh["status"], "off", "restoring a window is read-only");
+    assert!(!dir.path().join("browser-internet.json").exists());
+    let (_, pending) = internet_route(
+        &app,
+        &browser,
+        "/api/apps/browser/internet",
+        Some(json!({"action":"request"})),
+    )
+    .await;
+    assert_eq!(pending["status"], "requested");
+    let path = dir.path().join("browser-internet.json");
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["expires_at"] = json!(0);
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let (_, expired) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    assert_eq!(expired["status"], "requested");
+    assert_eq!(expired["request"], Value::Null);
+    let (_, summary) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+    assert_eq!(summary["notifications"]["unread_count"], 0);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap(),
+        record
+    );
+}
+
+#[tokio::test]
+async fn browser_internet_grant_identifies_the_answered_request_for_continuation() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let app = gateway_router(internet_test_state(dir.path()));
+    let (_, pending) = internet_route(
+        &app,
+        &browser,
+        "/api/apps/browser/internet",
+        Some(json!({"action":"request"})),
+    )
+    .await;
+    internet_allow(&app, dir.path(), &browser, &inbox).await;
+    let (_, granted) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    assert_eq!(granted["status"], "granted");
+    assert_eq!(granted["request_id"], pending["request"]["request_id"]);
+    let path = dir.path().join("browser-internet.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("request_id");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let (_, older_grant) = internet_route(&app, &browser, "/api/apps/browser/internet", None).await;
+    assert_eq!(
+        older_grant["status"], "granted",
+        "existing grants remain valid"
+    );
+    assert_eq!(older_grant["request_id"], Value::Null);
+}
+
+#[tokio::test]
+async fn browser_internet_inbox_manages_exact_grant_and_optional_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let browser = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &owner);
+    let inbox = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let system = app_token_for_authority(dir.path(), SYSTEM_CAPSULE_ID, &owner);
+    let state = internet_test_state(dir.path());
+    let app = gateway_router(state.clone());
+    internet_allow(&app, dir.path(), &browser, &inbox).await;
+    let (_, summary) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+    let entry = summary["notifications"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "browser-internet:permission")
+        .unwrap();
+    let action = entry["action_ref"]["action_id"]
+        .as_str()
+        .expect("active grant has Turn Off")
+        .to_string();
+    assert!(action.starts_with("browser-internet-turn-off:"));
+    let (_, granted) = internet_route(&app, &inbox, "/api/apps/browser/internet", None).await;
+    for actor in [&browser, &system] {
+        let step = gateway_passkey_step_up::issue_passkey_step_up_token_for_test(
+            dir.path(),
+            actor,
+            if actor == &browser {
+                BROWSER_CAPSULE_ID
+            } else {
+                SYSTEM_CAPSULE_ID
+            },
+            "browser.internet.revoke",
+            &granted["request"],
+        )
+        .unwrap();
+        let (status, _) = internet_route(
+            &app,
+            actor,
+            "/api/apps/browser/internet",
+            Some(json!({"action":"revoke","step_up_token":step})),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK, "only Inbox may revoke");
+    }
+    let (status, _) = internet_route(
+        &app,
+        &inbox,
+        "/api/apps/inbox/actions",
+        Some(json!({"action_id":action})),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "Turn Off requires passkey");
+    let step = gateway_passkey_step_up::issue_passkey_step_up_token_for_test(
+        dir.path(),
+        &inbox,
+        INBOX_CAPSULE_ID,
+        "browser.internet.revoke",
+        &granted["request"],
+    )
+    .unwrap();
+    let (status, _) = internet_route(
+        &app,
+        &inbox,
+        "/api/apps/inbox/actions",
+        Some(json!({"action_id":"browser-internet-turn-off:stale","step_up_token":step})),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "stale grant cannot revoke");
+    let (status, result) = internet_route(
+        &app,
+        &inbox,
+        "/api/apps/inbox/actions",
+        Some(json!({"action_id":action,"step_up_token":step})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (_, off) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+    let entry = off["notifications"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "browser-internet:permission")
+        .unwrap();
+    assert_eq!(entry["body"], "Browser cannot open websites. Turned off.");
+    assert_eq!(entry["action_ref"]["action_id"], "browser-internet-request");
+    assert_eq!(off["notifications"]["unread_count"], 0);
+    internet_allow(&app, dir.path(), &inbox, &inbox).await;
+    // Removing the optional app hides the retained record without changing it.
+    std::fs::rename(
+        dir.path().join("capsules/browser"),
+        dir.path().join("uninstalled-browser"),
+    )
+    .unwrap();
+    let (_, absent) = internet_route(&app, &inbox, "/api/apps/inbox/summary", None).await;
+    assert!(!absent["notifications"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["id"] == "browser-internet:permission"));
 }

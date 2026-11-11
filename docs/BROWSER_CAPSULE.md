@@ -420,8 +420,8 @@ the role; the UI follows that one role and fails closed on mismatched signaling.
 
 Browser internet starts off on both new and updated Homes. The current Inbox
 card states what the owner permits and how to stop it. Allow needs a passkey and
-is bound to Runtime's request ID and expiry. Browser Settings offers Off, which
-opens System for passkey confirmation. Stop blocks later dispatch and cancels
+is bound to Runtime's request ID and expiry. Browser Settings offers Manage in
+Inbox. Inbox confirms Turn Off and requires a passkey. Stop blocks later dispatch and cancels
 Runtime-owned streams; calls already accepted by a provider can finish. Home's
 approval display still has the trusted-display gap tracked in #178, as described
 in SECURITY.md.

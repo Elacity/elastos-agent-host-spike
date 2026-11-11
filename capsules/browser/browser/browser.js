@@ -1,3 +1,4 @@
+import { startBrowser } from "./browser-startup.js?v=browser-20261110c";
 import { observeBrowserStage, createBrowserFrameFence } from "./browser-resize.js?v=browser-20261031d";
 import { createBrowserLocationController } from "./browser-location.js?v=browser-20260523b";
 import {
@@ -8,7 +9,7 @@ import {
   normalizeUrl,
   sameBrowserStreamTarget,
   visibleAddressForUrl,
-} from "./browser-runtime-api.js?v=browser-20261109a";
+} from "./browser-runtime-api.js?v=browser-20261110b";
 import {
   createBrowserClipboardBridge,
 } from "./browser-clipboard.js?v=browser-20261022d";
@@ -28,7 +29,7 @@ import {
   isAuthoritySessionError,
   isMissingRuntimePageError,
   requestedDisplayMode,
-} from "./browser-status.js?v=browser-20261101d";
+} from "./browser-status.js?v=browser-20261110b";
 import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261101d";
 import { engineChoiceHidden, renderServiceSelection } from "./browser-service-selection.js?v=browser-20261015a";
 
@@ -57,9 +58,9 @@ const GUARANTEE_MECHANISM_MICROVM = "mechanism_microvm";
 const GUARANTEE_OPERATOR_RBI = "operator_rbi";
 const GUARANTEE_POLICY_WEBVIEW = "policy_webview";
 const LOCAL_EXIT_LABEL = "This device";
-const LOCAL_EXIT_SUMMARY = "Use this device's Exit Node for Browser traffic.";
+const LOCAL_EXIT_SUMMARY = "Websites can see this computer's internet address.";
 const DEFAULT_ENGINE_LABEL = "Automatic";
-const DEFAULT_ENGINE_SUMMARY = "Runtime chooses a compatible Browser Engine.";
+const DEFAULT_ENGINE_SUMMARY = "Browser chooses where to display pages.";
 const BROWSER_WINDOW_CLOSE_REQUEST_TYPE =
   "elastos.browser.window-close.request/v1";
 const BROWSER_WINDOW_CLOSE_RESULT_TYPE =
@@ -171,40 +172,138 @@ let currentRemoteExitId = "";
 
 function openInternetControl(target, query = {}) {
   if (!homeParentOrigin || window.top === window) {
-    showStatus(`Open ${target === "inbox" ? "Inbox" : "System Security"} from Home to change Browser internet access.`, { sticky:true });
+    showStatus("Open Inbox from Home to change Browser internet access.", { sticky:true });
     return;
   }
   window.top.postMessage({ type:"home:open-target", homeToken:launchToken, target, query }, homeParentOrigin);
 }
 
-function checkBrowserInternet() {
-  return browserInternetGranted(fetchJson, granted => {
-    browserInternetAllowed = granted;
-    setLoading(document.body.dataset.loading === "true");
-    const panel = document.querySelector("#browser-internet-request");
-    if (panel) panel.hidden = granted;
-    const choice = document.querySelector("#browser-internet");
-    if (choice) choice.value = granted ? "on" : "off";
-    if (!granted) {
+const explicitBrowserOpen = params.get("browser_restore") !== "1"
+  && !["reload", "back_forward"].includes(performance.getEntriesByType("navigation")[0]?.type);
+let browserInternetPollingActive = true;
+let browserInternetPollTimer = 0;
+let finishInternetPollWait = null;
+let currentInternetConsent = null;
+let pendingInternetNavigation = null;
+let internetContinuationUrl = null;
+let internetRequestPromise = null;
+let internetRequestedUrl = "";
+
+function stopInternetPolling() {
+  browserInternetPollingActive = false;
+  pendingInternetNavigation = null;
+  internetContinuationUrl = null;
+  window.clearTimeout(browserInternetPollTimer);
+  finishInternetPollWait?.();
+}
+window.addEventListener("pagehide", stopInternetPolling);
+window.addEventListener("beforeunload", stopInternetPolling);
+
+function renderInternetConsent(consent) {
+  const previousConsent = currentInternetConsent;
+  currentInternetConsent = consent;
+  const allowed = consent?.status === "granted";
+  const expired = consent?.status === "requested" && !consent.request;
+  const off = expired || ["refused", "revoked"].includes(consent?.status);
+  if (off || (pendingInternetNavigation && consent?.status === "requested"
+      && consent.request?.request_id !== pendingInternetNavigation.requestId)) {
+    pendingInternetNavigation = null;
+  }
+  browserInternetAllowed = allowed;
+  renderPanel.hidden = !allowed;
+  statusNode.hidden = !allowed;
+  setLoading(allowed && document.body.dataset.loading === "true");
+  document.querySelector("#browser-internet-request").hidden = allowed;
+  document.querySelector("#browser-internet-value").textContent = `Internet access: ${allowed ? "Allowed" : "Off"}`;
+  if (allowed) {
+    if (previousConsent && previousConsent.status !== "granted" && !currentPage &&
+        !pendingInternetNavigation && !internetContinuationUrl) {
       setLoading(false);
-      showStatus("Browser needs the Home owner's permission. Review the request in Inbox, then open Browser after approval.", {sticky:true});
+      showStatus("");
+      addressInput.focus();
     }
-  });
+    return;
+  }
+  window.clearTimeout(statusTimer);
+  statusNode.dataset.visible = "false";
+  const waiting = consent?.status === "requested" && !expired;
+  document.querySelector("#browser-internet-heading").textContent = off
+    ? "Internet access is off for Browser." : waiting
+    ? "Waiting for your answer in Inbox." : "Browser can't open websites yet";
+  const hint = document.querySelector("#browser-internet-hint");
+  hint.hidden = off || waiting;
+  hint.textContent = "Type a website address to open it.";
+  const button = document.querySelector("#browser-internet-review");
+  button.hidden = !off && !waiting;
+  button.textContent = off ? "Open Inbox" : "Show Request";
+  button.dataset.off = String(off);
 }
 
-document.querySelector("#browser-internet-review")?.addEventListener("click", async () => {
-  try {
-    await fetchJson("/api/apps/browser/internet", {method:"POST",body:{action:"request"}});
-    openInternetControl("inbox");
-  } catch (error) { showStatus(friendlyOpenError(error), {sticky:true}); }
+function showInternetRequest() {
+  openInternetControl("inbox", { notification_id: "browser-internet:permission" });
+}
+
+async function requestInternetNavigation(value) {
+  if (!browserInternetPollingActive) return;
+  if (["refused", "revoked"].includes(currentInternetConsent?.status)) {
+    showInternetRequest();
+    return;
+  }
+  // The URL belongs only to this live window; Home persists no continuation.
+  internetRequestedUrl = normalizeUrl(value);
+  if (pendingInternetNavigation) pendingInternetNavigation.url = internetRequestedUrl;
+  if (internetRequestPromise) return internetRequestPromise;
+  internetRequestPromise = (async () => {
+    const consent = await fetchJson("/api/apps/browser/internet", {method:"POST",body:{action:"request"}});
+    if (!browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
+    renderInternetConsent(consent);
+    pendingInternetNavigation = {
+      url: internetRequestedUrl, requestId: consent.request_id || consent.request?.request_id,
+      expiresAt: consent.request?.expires_at || 0,
+    };
+    if (consent.status !== "granted") showInternetRequest();
+  })();
+  try { await internetRequestPromise; }
+  finally { internetRequestPromise = null; }
+}
+
+async function checkBrowserInternet(initialUrl) {
+  let firstRead = true;
+  while (browserInternetPollingActive && !homeWindowCloseInFlight && !homeWindowTerminalCloseConfirmed) {
+    const granted = await browserInternetGranted(fetchJson, (allowed, consent) => {
+      if (browserInternetPollingActive) renderInternetConsent(consent);
+    });
+    if (!browserInternetPollingActive || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return false;
+    if (granted) {
+      const pending = pendingInternetNavigation;
+      pendingInternetNavigation = null;
+      if (firstRead) return true;
+      if (!pending || currentInternetConsent.request_id !== pending.requestId || (pending.expiresAt && pending.expiresAt * 1000 <= Date.now())) return false;
+      internetContinuationUrl = pending.url;
+      return true;
+    }
+    if (firstRead && explicitBrowserOpen && !["refused", "revoked"].includes(currentInternetConsent?.status)) {
+      await requestInternetNavigation(initialUrl);
+    }
+    firstRead = false;
+    await new Promise(resolve => {
+      finishInternetPollWait = resolve;
+      browserInternetPollTimer = window.setTimeout(resolve, 2000);
+    });
+    finishInternetPollWait = null;
+  }
+  return false;
+}
+
+document.querySelector("#browser-internet-review")?.addEventListener("click", event => {
+  if (event.currentTarget.dataset.off === "true") {
+    showInternetRequest();
+  } else {
+    showInternetRequest();
+  }
 });
-document.querySelector("#browser-internet-retry")?.addEventListener("click", () => {
-  checkBrowserInternet().then(granted => granted ? requestRuntimeOpen(addressInput.value) : null).catch(error => showStatus(friendlyOpenError(error), {sticky:true}));
-});
-document.querySelector("#browser-internet")?.addEventListener("change", async event => {
-  const turnOff = event.target.value === "off";
-  await checkBrowserInternet().catch(error => showStatus(friendlyOpenError(error), {sticky:true}));
-  openInternetControl(turnOff ? "system" : "inbox", turnOff ? {settings:"security"} : {});
+document.querySelector("#browser-internet-settings")?.addEventListener("click", () => {
+  showInternetRequest();
 });
 
 function setSettingsOpen(open) {
@@ -269,7 +368,7 @@ function showStatus(message, { sticky = false } = {}) {
     });
     statusNode.append(copyButton);
   }
-  statusNode.dataset.visible = "true";
+  statusNode.dataset.visible = message ? "true" : "false";
   if (!sticky) {
     statusTimer = window.setTimeout(() => {
       statusNode.dataset.visible = "false";
@@ -443,7 +542,7 @@ function requestFreshRuntimeAuthority(error) {
 
 function setLoading(loading) {
   document.body.dataset.loading = loading ? "true" : "false";
-  addressInput.disabled = loading || !browserInternetAllowed;
+  addressInput.disabled = loading;
   if (engineSelect) {
     engineSelect.disabled = loading;
   }
@@ -454,7 +553,7 @@ function setLoading(loading) {
     profileResetButton.disabled = loading;
   }
   if (profileResetCommit) profileResetCommit.disabled = loading;
-  renderEmpty.hidden = true;
+  renderEmpty.hidden = loading || Boolean(currentPage);
   refreshButton.disabled = loading || !currentPage;
   updateNavState();
 }
@@ -732,7 +831,7 @@ const runtimePageCleanup = createRuntimePageCleanupController({
   onPending: (owner, _outcome, failure) => {
     if (failure && sameRuntimePageOwner(currentRuntimePageOwner(), owner)) {
       showStatus(
-        `${runtimeOwnedFailureSummary(failure.kind)} Runtime cleanup is pending; the existing page remains owned and no replacement will open until Runtime confirms a terminal close.`,
+        runtimeOwnedFailureSummary(failure.kind),
         { sticky: true },
       );
     }
@@ -800,20 +899,8 @@ async function closeRuntimePage(
   });
 }
 
-function runtimeOwnedFailureSummary(kind) {
-  if (kind === "display_status") {
-    return "Browser display status failed.";
-  }
-  if (kind === "malformed_response") {
-    return "Browser received an invalid Runtime display response.";
-  }
-  if (kind === "timeout") {
-    return "Browser display timed out.";
-  }
-  if (kind === "no_first_frame") {
-    return "The Browser Engine started, but no video frame arrived.";
-  }
-  return "Browser display signaling failed.";
+function runtimeOwnedFailureSummary(_kind) {
+  return "This page stopped working. Close this Browser window, then open Browser again.";
 }
 
 async function failRuntimeOwnedPage(kind, message) {
@@ -830,7 +917,7 @@ async function failRuntimeOwnedPage(kind, message) {
   stopPageHeartbeat();
   closeRemoteDisplay();
   showStatus(
-    `${runtimeOwnedFailureSummary(kind)} Runtime cleanup is pending; the existing page remains owned and no replacement will open until Runtime confirms a terminal close.`,
+    runtimeOwnedFailureSummary(kind),
     { sticky: true },
   );
   return runtimePageCleanup.fail(owner, {
@@ -2080,35 +2167,8 @@ function selectedBrowserEngine(summary = browserSummary) {
 
 function browserEngineKindLabel(engine) {
   const substrate = String(engine?.backing_substrate || "").toLowerCase();
-  if (substrate === "remote_operator_vm") {
-    return "Mac Browser Engine";
-  }
-  if (substrate === "local_microvm") {
-    const marker = `${engine?.id || ""} ${engine?.engine || ""}`.toLowerCase();
-    return marker.includes("jetson") || marker.includes("crosvm")
-      ? "Jetson Browser Engine"
-      : "MicroVM Browser Engine";
-  }
-  if (substrate === "host_policy_webview") {
-    return "Device Browser Engine";
-  }
-  if (substrate === "operator_rbi") {
-    return "Remote Browser Engine";
-  }
-  const marker = `${engine?.id || ""} ${engine?.engine || ""}`.toLowerCase();
-  if (marker.includes("jetson") || marker.includes("crosvm")) {
-    return "Jetson Browser Engine";
-  }
-  if (marker.includes("mac") || marker.includes("vz") || marker.includes("darwin")) {
-    return "Mac Browser Engine";
-  }
-  if (marker.includes("microvm") || marker.includes("chromium")) {
-    return "MicroVM Browser Engine";
-  }
-  if (marker.includes("hosted") || marker.includes("remote")) {
-    return "Remote Browser Engine";
-  }
-  return "Browser Engine";
+  if (["remote_operator_vm", "operator_rbi"].includes(substrate)) return "Another computer";
+  return ["local_microvm", "host_policy_webview"].includes(substrate) ? "This computer" : "Page display";
 }
 
 function browserEngineLabel(adapterId = selectedBrowserEngineId) {
@@ -2118,14 +2178,14 @@ function browserEngineLabel(adapterId = selectedBrowserEngineId) {
   const engine = visibleBrowserEngines(browserSummary).find(
     (candidate) => candidate.id === adapterId,
   );
-  return engine ? `${browserEngineKindLabel(engine)}: ${engine.id}` : `Browser Engine: ${adapterId}`;
+  return engine ? engine.display_name || engine.label || browserEngineKindLabel(engine) : "Selected page display";
 }
 
 function browserEngineSummary(engine) {
   if (!engine) {
     return DEFAULT_ENGINE_SUMMARY;
   }
-  return `${browserEngineLabel(engine.id)}. Runs the page in an isolated Browser Engine; network access uses the selected Exit Node.`;
+  return `${browserEngineLabel(engine.id)}. Displays pages using the connection you chose below.`;
 }
 
 function updateSettingsTitle() {
@@ -2138,23 +2198,12 @@ function updateSettingsTitle() {
 }
 
 function remoteCarrierExitLabel(exit) {
-  const id = String(exit?.id || "").trim();
-  const grant = String(exit?.grant_id || "").trim();
-  const displayName = String(exit?.display_name || exit?.label || "").trim();
-  const label = displayName || id || grant || "shared Exit Node";
-  const marker = `${id} ${grant}`.toLowerCase();
-  const kind = marker.includes("seed") ? "Seed Exit Node" : "Shared Exit Node";
-  return `${kind}: ${label}`;
+  const name = String(exit?.contact_name || exit?.display_name || exit?.label || "").trim();
+  return name || "Another connection";
 }
 
-function remoteCarrierExitSummary(exit) {
-  const label = remoteCarrierExitLabel(exit);
-  const remaining = Number(exit?.accounting?.active_streams_remaining);
-  const quota =
-    Number.isFinite(remaining) && remaining >= 0
-      ? ` ${remaining} stream${remaining === 1 ? "" : "s"} available.`
-      : "";
-  return `${label}.${quota}`;
+function remoteCarrierExitSummary(_exit) {
+  return "Websites can see the address of the connection Browser uses.";
 }
 
 function browserExitLabel(remoteExitId = selectedRemoteExitId) {
@@ -2164,7 +2213,7 @@ function browserExitLabel(remoteExitId = selectedRemoteExitId) {
   const exit = visibleRemoteCarrierExits(browserSummary).find(
     (candidate) => candidate.id === remoteExitId,
   );
-  return exit ? remoteCarrierExitLabel(exit) : "Shared Exit Node";
+  return exit ? remoteCarrierExitLabel(exit) : "Another connection";
 }
 
 function syncExitSelect(summary) {
@@ -2177,12 +2226,12 @@ function syncExitSelect(summary) {
     selectedId: selectedRemoteExitId,
     defaultLabel: LOCAL_EXIT_LABEL,
     labelForService: remoteCarrierExitLabel,
-    unavailableLabel: "Selected Exit Node (unavailable)",
+    unavailableLabel: "Selected connection (unavailable)",
   });
   const summaryText = selectedExit
     ? remoteCarrierExitSummary(selectedExit)
     : selectedRemoteExitId
-    ? "Your selected Exit Node is unavailable. Choose another Exit Node to change where Browser traffic exits."
+    ? "The selected connection is unavailable. Choose another connection."
     : LOCAL_EXIT_SUMMARY;
   if (exitSummaryNode) {
     exitSummaryNode.textContent = summaryText;
@@ -2199,12 +2248,12 @@ function syncEngineSelect(summary) {
     services: engines,
     selectedId: selectedBrowserEngineId,
     defaultLabel: DEFAULT_ENGINE_LABEL,
-    labelForService: (engine) => `${browserEngineKindLabel(engine)}: ${engine.id}`,
-    unavailableLabel: "Selected Browser Engine (unavailable)",
+    labelForService: (engine) => engine.display_name || engine.label || browserEngineKindLabel(engine),
+    unavailableLabel: "Selected page display (unavailable)",
   });
   if (engineSummaryNode) {
     engineSummaryNode.textContent = selectedBrowserEngineId && !selectedEngine
-      ? "Your selected Browser Engine is unavailable. Choose another Engine to change where the page runs."
+      ? "The selected page display is unavailable. Choose another display."
       : browserEngineSummary(selectedEngine);
   }
   const hidden = engineChoiceHidden(engines, selectedBrowserEngineId);
@@ -2431,7 +2480,7 @@ async function requestRuntimeOpen(value, { history = "push" } = {}) {
     if (previousPage?.page_id || stalePage?.page_id) {
       showStatus(
         isExitSwitch
-          ? "Closing current Browser session before switching Exit Node..."
+          ? "Closing the current page before changing connection..."
           : isEngineSwitch
             ? "Closing current Browser session before switching Browser Engine..."
           : "Closing previous Browser page...",
@@ -2522,7 +2571,7 @@ async function requestRuntimeOpen(value, { history = "push" } = {}) {
     }
     openSettlement.page = openedPage;
     if (remoteExitId && response?.stream_session?.backend !== remoteExitId) {
-      throw new Error("Browser could not use the selected Exit Node.");
+      throw new Error("Browser could not use the selected connection.");
     }
     currentPage = openedPage;
     resetPageInputDelivery();
@@ -2607,6 +2656,7 @@ async function requestRuntimeOpen(value, { history = "push" } = {}) {
 }
 
 async function navigateAddress(value) {
+  if (!browserInternetAllowed) return requestInternetNavigation(value);
   const nextUrl = normalizeUrl(value);
   const currentUrl = currentBrowserUrl();
   const crossStreamTarget = !sameBrowserStreamTarget(currentUrl, nextUrl);
@@ -2676,7 +2726,13 @@ async function navigateBrowser(command) {
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   clearAddressDraft();
-  navigateAddress(addressInput.value).catch(() => {});
+  navigateAddress(addressInput.value).catch(error => {
+    if (!browserInternetAllowed) {
+      const hint = document.querySelector("#browser-internet-hint");
+      hint.hidden = false;
+      hint.textContent = friendlyOpenError(error);
+    }
+  });
 });
 
 addressInput.addEventListener("input", markAddressDraftEdited);
@@ -2713,7 +2769,12 @@ settingsButton?.addEventListener("click", (event) => {
   const willOpen = Boolean(settingsPanel?.hidden);
   setSettingsOpen(willOpen);
   if (willOpen) {
-    void fetchBrowserSummary().catch((error) => {
+    void Promise.all([
+      fetchBrowserSummary(),
+      browserInternetGranted(fetchJson, granted => {
+        document.querySelector("#browser-internet-value").textContent = `Internet access: ${granted ? "Allowed" : "Off"}`;
+      }),
+    ]).catch((error) => {
       showStatus(friendlyOpenError(error), { sticky: true });
     });
   }
@@ -2952,6 +3013,15 @@ async function attachRecoveredDisplay(summary, owner) {
     initial_offer: result.initial_offer, audio_offer: result.audio_offer };
 }
 
+async function continueRestoredInternetNavigation() {
+  if (!internetContinuationUrl || !browserInternetAllowed || !browserInternetPollingActive ||
+      currentPage?.recovery_state !== "active" || !runtimeViewerOwnerActive(restoredViewerOwner)) return;
+  const url = internetContinuationUrl;
+  internetContinuationUrl = null;
+  // Use address-bar navigation, including its existing replacement/close arbitration.
+  return navigateAddress(url);
+}
+
 async function restoreRuntimePageViewer(summary) {
   if (unloadCleanupStarted || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed || currentPage) return true;
   const sessions = summary?.sessions;
@@ -3053,22 +3123,37 @@ window.addEventListener("pagehide", (event) => {
   releaseRuntimePageForUnload();
 });
 
-const requestedStartupUrl = params.get("url");
-const initialUrl = requestedStartupUrl || DEFAULT_URL;
-addressInput.value = initialUrl;
-setLoading(true);
-showStatus("Browser is checking its Engine. Wait, or reopen Browser from Home to retry.", { sticky: true });
-checkBrowserInternet().then(granted => granted ? fetchBrowserSummary({ remoteServices: false }) : null)
-  .then(async (summary) => {
-    if (!summary) return;
-    if (await restoreRuntimePageViewer(summary)) return;
-    return requestRuntimeOpen(initialUrl, { history: "replace" });
-  })
-  .catch((error) => {
-    if (unloadCleanupStarted || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed) return;
-    if (isAuthoritySessionError(error) && requestHomeRelaunch(friendlyOpenError(error))) {
-      return;
-    }
-    setLoading(false);
-    showStatus(friendlyOpenError(error), { sticky: true });
-  });
+function watchInternetPermission() {
+  if (!browserInternetPollingActive) return;
+  browserInternetPollTimer = window.setTimeout(async () => {
+    try {
+      await browserInternetGranted(fetchJson, (_allowed, consent) => {
+        if (browserInternetPollingActive) renderInternetConsent(consent);
+      });
+    } catch (_) { /* Keep the last Runtime state until the next read succeeds. */ }
+    watchInternetPermission();
+  }, 2000);
+}
+startBrowser({
+  params,
+  DEFAULT_URL,
+  addressInput,
+  setLoading,
+  showStatus,
+  checkBrowserInternet,
+  watchInternetPermission,
+  fetchBrowserSummary,
+  restoreRuntimePageViewer,
+  continueRestoredInternetNavigation,
+  explicitBrowserOpen,
+  requestRuntimeOpen,
+  isAuthoritySessionError,
+  requestHomeRelaunch,
+  friendlyOpenError,
+  get browserInternetPollingActive() { return browserInternetPollingActive; },
+  get homeWindowCloseInFlight() { return homeWindowCloseInFlight; },
+  get homeWindowTerminalCloseConfirmed() { return homeWindowTerminalCloseConfirmed; },
+  get internetContinuationUrl() { return internetContinuationUrl; },
+  get unloadCleanupStarted() { return unloadCleanupStarted; },
+  set internetContinuationUrl(value) { internetContinuationUrl = value; },
+});
