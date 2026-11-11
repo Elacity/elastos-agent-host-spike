@@ -85,9 +85,10 @@ jobs:
           }
           # Self-check first: a command that fails must come back as its own
           # exit code, or this step could never show a red gate. It checks
-          # `capture`; it does not check the last line of this step, which
-          # hands the gate's code on. That line is `exit "$status"` and must
-          # stay so.
+          # `capture`; it does not check the two places below that carry the
+          # gate's own code: `capture "$GATE" gate.log || status=$?`, which
+          # stores it, and the last line, `exit "$status"`, which hands it
+          # on. Both must stay as they are.
           check=0
           capture 'echo "self-check: this command exits 7"; exit 7' selfcheck.log || check=$?
           if [ "$check" -ne 7 ]; then
