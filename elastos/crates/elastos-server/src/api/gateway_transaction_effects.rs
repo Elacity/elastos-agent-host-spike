@@ -4564,6 +4564,7 @@ mod r8c_child_rows {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(OnceLock::new()),
             cache_dir: dir.to_path_buf(),
             data_dir: dir.to_path_buf(),
