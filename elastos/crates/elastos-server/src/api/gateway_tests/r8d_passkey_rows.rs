@@ -20,6 +20,7 @@ use crate::api::gateway::gateway_home_token::{
 };
 use crate::auth::{PasskeySessionPurpose, PasskeySessionRequest, ResolvedPrincipalRoot};
 
+mod cli_context;
 mod profile;
 
 const RP_ID: &str = "elastos.elacitylabs.com";
