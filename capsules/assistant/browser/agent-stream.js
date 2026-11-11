@@ -55,7 +55,7 @@ export function pinTranscriptToEnd(scroller) {
 }
 
 export function followTranscriptToEnd(scroller) {
-  if (transcriptFollow?.atEnd) return pinTranscriptToEnd(scroller);
+  if (transcriptFollow) return pinTranscriptToEnd(scroller);
   return scroller?.scrollTop || 0;
 }
 
