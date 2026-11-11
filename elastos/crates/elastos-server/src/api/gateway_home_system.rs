@@ -9899,9 +9899,10 @@ mod r8c_child_rows {
 }
 
 /// R8d evidence rows for Home saves and Profile update, for a parent passkey
-/// person on a child Runtime. Each save row calls the private function its
-/// route calls after the token is verified, then records the result, the
-/// whole child data directory and whether the file's bytes are the input.
+/// person on a child Runtime. Each save row calls a private function that the
+/// route uses, from the context of the person's verified launch token, then
+/// records the result, the whole child data directory and whether the file's
+/// bytes are the input. The route's own steps before that call do not run.
 ///
 /// The Profile row: `people_profile_update` (line 2521) first calls
 /// `require_profile_authority_passkey_binding` with its own data directory
@@ -9927,8 +9928,9 @@ mod r8d_passkey_rows {
         child.join(under_person(relative))
     }
 
-    /// The file's bytes, parsed as JSON. The row's proof that the save left
-    /// the bytes readable as written.
+    /// The file's bytes, parsed as JSON. The caller compares the parsed value
+    /// with the expected object; that comparison shows the file is plain JSON,
+    /// because bytes in a sealed envelope also parse as JSON.
     fn plain_json(path: &std::path::Path) -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(path).unwrap())
             .unwrap_or_else(|error| panic!("{} is not plain JSON: {error}", path.display()))
@@ -9997,59 +9999,67 @@ mod r8d_passkey_rows {
         assert_eq!(name.as_deref(), Some("Parent Person"));
     }
 
-    /// Entry: `home_save_background_image` (line 8519) with the first name in
-    /// `HOME_BACKGROUND_IMAGE_FILES`. Today the child's write leaves the image
-    /// bytes as given under the person's root, and no protection record is
-    /// needed.
+    /// Entry: `home_save_background_image` (line 8519) with the name
+    /// `background-image.png`. Today the child's write leaves the image bytes
+    /// as given under the person's root.
     #[test]
     fn r8d_child_background_image_save_for_the_passkey_person() {
-        let person = passkey_person(HOME_CAPSULE_ID);
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
         let child = person.child.path();
         let bytes = b"r8d child background image".to_vec();
-        let file_name = HOME_BACKGROUND_IMAGE_FILES[0].0;
+        let file_name = "background-image.png";
         let saved = home_save_background_image(child, &person.ctx, file_name, bytes.clone())
             .unwrap_or_else(|error| panic!("{error:#}"));
-        assert_eq!(saved.schema, HOME_APPEARANCE_SCHEMA);
-        assert_eq!(
-            saved.background_overlay_enabled,
-            HOME_BACKGROUND_OVERLAY_DEFAULT
-        );
+        assert_eq!(saved.schema, "elastos.home.appearance/v1");
+        assert!(!saved.background_overlay_enabled);
         let image_url = saved
             .background_image_url
             .expect("the summary names the image");
+        // The scope part is fixed for this person. The `v` part is the image
+        // file's modification time in nanoseconds, so it changes per run.
+        let (fixed, version) = image_url
+            .split_once("&v=")
+            .unwrap_or_else(|| panic!("{image_url}"));
+        assert_eq!(
+            fixed,
+            "/api/apps/home/appearance/background-image?scope=ecee74316e460e28"
+        );
         assert!(
-            image_url.starts_with("/api/apps/home/appearance/background-image?scope="),
-            "{image_url}"
+            version.bytes().all(|byte| byte.is_ascii_digit()),
+            "{version}"
         );
         let relative = format!(".AppData/ElastOS/Home/Appearance/{file_name}");
         assert_saved(child, &relative, &bytes, &person);
     }
 
-    /// Entry: `home_save_background_overlay` (line 8495). Today the child's
-    /// write leaves the overlay settings as a plain JSON object.
+    /// Entry: `home_save_background_overlay` (line 8495) with opacity 0.4,
+    /// which is not the default. Today the child's write leaves the overlay
+    /// settings as a plain JSON object.
     #[test]
     fn r8d_child_background_overlay_save_for_the_passkey_person() {
-        let person = passkey_person(HOME_CAPSULE_ID);
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
         let child = person.child.path();
-        let saved = home_save_background_overlay(child, &person.ctx, true, 0.55)
+        let saved = home_save_background_overlay(child, &person.ctx, true, 0.4)
             .unwrap_or_else(|error| panic!("{error:#}"));
         assert!(saved.background_overlay_enabled);
-        assert_eq!(saved.background_overlay_opacity, 0.55);
+        assert_eq!(saved.background_overlay_opacity, 0.4);
         let relative = ".AppData/ElastOS/Home/Appearance/background-overlay.json";
         assert_eq!(
             plain_json(&person_path(child, relative)),
-            serde_json::json!({"enabled": true, "opacity": 0.55})
+            serde_json::json!({"enabled": true, "opacity": 0.4})
         );
         let expected = under_person(relative);
         person.assert_child_holds_only(&[expected.as_str()]);
     }
 
-    /// A later image upload removes the image already there before it writes
-    /// the new one. Today the new image sits under the person's root and the
-    /// earlier one is gone.
+    /// A later image upload: both calls succeed, the first file is gone and
+    /// the second file is present under the person's root. By reading,
+    /// `home_save_background_image` calls `remove_home_background_images`
+    /// (line 8529) before `write_principal_root_object_resolved` (line 8530);
+    /// this row does not show that order.
     #[test]
     fn r8d_child_background_image_replace_for_the_passkey_person() {
-        let person = passkey_person(HOME_CAPSULE_ID);
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
         let child = person.child.path();
         home_save_background_image(
             child,
@@ -10091,11 +10101,11 @@ mod r8d_passkey_rows {
         assert_eq!(
             plain_json(&person_path(child, relative)),
             serde_json::json!({
-                "schema": HOME_APPEARANCE_PREFERENCES_SCHEMA,
+                "schema": "elastos.home.appearance.preferences/v1",
                 "revision": 1,
-                "theme": HOME_APPEARANCE_DEFAULT_THEME,
-                "accent": HOME_APPEARANCE_DEFAULT_ACCENT,
-                "accent_custom": HOME_APPEARANCE_DEFAULT_ACCENT_CUSTOM,
+                "theme": "dark",
+                "accent": "blue",
+                "accent_custom": "#4f7fff",
                 "dock_auto_hide": false,
                 "sounds": true,
                 "focus_mode": false,
@@ -10115,12 +10125,12 @@ mod r8d_passkey_rows {
         let update: HomeBrowserStateUpdate = serde_json::from_value(serde_json::json!({})).unwrap();
         let saved = home_save_browser_state(child, &person.ctx, update)
             .unwrap_or_else(|error| panic!("{error:#}"));
-        assert_eq!(saved.schema, HOME_BROWSER_STATE_SCHEMA);
+        assert_eq!(saved.schema, "elastos.home.browser-state/v1");
         let relative = ".AppData/ElastOS/Home/browser-state.json";
         assert_eq!(
             plain_json(&person_path(child, relative)),
             serde_json::json!({
-                "schema": HOME_BROWSER_STATE_SCHEMA,
+                "schema": "elastos.home.browser-state/v1",
                 "principal_id": PERSON,
                 "localhost_root": ROOT,
                 "layout": null,
@@ -10133,40 +10143,63 @@ mod r8d_passkey_rows {
     }
 
     /// Entry: `home_save_services_selection_state` (line 3004) with the
-    /// person's default state. Today the child's write leaves that state as
-    /// plain JSON, byte for byte.
+    /// person's default state. This row calls the storage function directly;
+    /// the route (`services_offer_update`, line 2664) calls it at line 2888
+    /// after it reads the Home state, checks the offer and builds the state,
+    /// and those steps do not run here. Today the child's write leaves that
+    /// state as plain JSON.
     #[test]
     fn r8d_child_services_selection_save_for_the_passkey_person() {
-        let person = passkey_person(HOME_CAPSULE_ID);
+        let person = passkey_person(SERVICES_CAPSULE_ID);
         let child = person.child.path();
         let state = home_services_default_selection_state(&person.ctx);
         home_save_services_selection_state(child, &person.ctx, &state)
             .unwrap_or_else(|error| panic!("{error:#}"));
         let relative = ".AppData/ElastOS/Home/services-state.json";
         assert_eq!(
-            std::fs::read(person_path(child, relative)).unwrap(),
-            serde_json::to_vec_pretty(&state).unwrap(),
-            "{relative} holds the state it was given"
+            plain_json(&person_path(child, relative)),
+            serde_json::json!({
+                "schema": "elastos.services.state/v1",
+                "principal_id": PERSON,
+                "localhost_root": ROOT,
+                "updated_at": 0,
+                "local_offer_ids": [],
+                "remote_offer_ids": [],
+                "remote_offer_requests": {},
+                "model_catalog_requests": {},
+            })
         );
         let expected = under_person(relative);
         person.assert_child_holds_only(&[expected.as_str()]);
     }
 
     /// Entry: `home_save_services_requests_state` (line 3104) with the
-    /// person's default state. Today the child's write leaves that state as
-    /// plain JSON, byte for byte.
+    /// person's default state. This row calls the storage function directly.
+    /// By reading, no route reaches this save for this person on a child
+    /// today: `home_services_sync_access_requests` returns with no known peer
+    /// (lines 4897-4899) before its save, and
+    /// `home_services_record_access_decision` returns "service request not
+    /// found" (line 5450) before its save (line 5549). Today the child's
+    /// write leaves that state as plain JSON.
     #[test]
     fn r8d_child_services_requests_save_for_the_passkey_person() {
-        let person = passkey_person(HOME_CAPSULE_ID);
+        let person = passkey_person(SERVICES_CAPSULE_ID);
         let child = person.child.path();
         let state = home_services_default_requests_state(&person.ctx);
         home_save_services_requests_state(child, &person.ctx, &state)
             .unwrap_or_else(|error| panic!("{error:#}"));
         let relative = ".AppData/ElastOS/Home/services-requests.json";
         assert_eq!(
-            std::fs::read(person_path(child, relative)).unwrap(),
-            serde_json::to_vec_pretty(&state).unwrap(),
-            "{relative} holds the state it was given"
+            plain_json(&person_path(child, relative)),
+            serde_json::json!({
+                "schema": "elastos.services.requests/v1",
+                "principal_id": PERSON,
+                "localhost_root": ROOT,
+                "updated_at": 0,
+                "requests": {},
+                "catalog_last_response_at": {},
+                "pending_model_catalogs": {},
+            })
         );
         let expected = under_person(relative);
         person.assert_child_holds_only(&[expected.as_str()]);
