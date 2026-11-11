@@ -58,9 +58,9 @@ const GUARANTEE_MECHANISM_MICROVM = "mechanism_microvm";
 const GUARANTEE_OPERATOR_RBI = "operator_rbi";
 const GUARANTEE_POLICY_WEBVIEW = "policy_webview";
 const LOCAL_EXIT_LABEL = "This device";
-const LOCAL_EXIT_SUMMARY = "Websites see this Mac's internet address.";
+const LOCAL_EXIT_SUMMARY = "Websites can see this computer's internet address.";
 const DEFAULT_ENGINE_LABEL = "Automatic";
-const DEFAULT_ENGINE_SUMMARY = "Runtime chooses a compatible Browser Engine.";
+const DEFAULT_ENGINE_SUMMARY = "Browser chooses where to display pages.";
 const BROWSER_WINDOW_CLOSE_REQUEST_TYPE =
   "elastos.browser.window-close.request/v1";
 const BROWSER_WINDOW_CLOSE_RESULT_TYPE =
@@ -200,6 +200,7 @@ window.addEventListener("pagehide", stopInternetPolling);
 window.addEventListener("beforeunload", stopInternetPolling);
 
 function renderInternetConsent(consent) {
+  const previousConsent = currentInternetConsent;
   currentInternetConsent = consent;
   const allowed = consent?.status === "granted";
   const expired = consent?.status === "requested" && !consent.request;
@@ -209,11 +210,20 @@ function renderInternetConsent(consent) {
     pendingInternetNavigation = null;
   }
   browserInternetAllowed = allowed;
+  renderPanel.hidden = !allowed;
   statusNode.hidden = !allowed;
   setLoading(allowed && document.body.dataset.loading === "true");
   document.querySelector("#browser-internet-request").hidden = allowed;
   document.querySelector("#browser-internet-value").textContent = `Internet access: ${allowed ? "Allowed" : "Off"}`;
-  if (allowed) return;
+  if (allowed) {
+    if (previousConsent && previousConsent.status !== "granted" && !currentPage &&
+        !pendingInternetNavigation && !internetContinuationUrl) {
+      setLoading(false);
+      showStatus("");
+      addressInput.focus();
+    }
+    return;
+  }
   window.clearTimeout(statusTimer);
   statusNode.dataset.visible = "false";
   const waiting = consent?.status === "requested" && !expired;
@@ -222,7 +232,7 @@ function renderInternetConsent(consent) {
     ? "Waiting for your answer in Inbox." : "Browser can't open websites yet";
   const hint = document.querySelector("#browser-internet-hint");
   hint.hidden = off || waiting;
-  hint.textContent = "Enter a website and press Go.";
+  hint.textContent = "Type a website address to open it.";
   const button = document.querySelector("#browser-internet-review");
   button.hidden = !off && !waiting;
   button.textContent = off ? "Open Inbox" : "Show Request";
@@ -543,7 +553,7 @@ function setLoading(loading) {
     profileResetButton.disabled = loading;
   }
   if (profileResetCommit) profileResetCommit.disabled = loading;
-  renderEmpty.hidden = true;
+  renderEmpty.hidden = loading || Boolean(currentPage);
   refreshButton.disabled = loading || !currentPage;
   updateNavState();
 }
@@ -821,7 +831,7 @@ const runtimePageCleanup = createRuntimePageCleanupController({
   onPending: (owner, _outcome, failure) => {
     if (failure && sameRuntimePageOwner(currentRuntimePageOwner(), owner)) {
       showStatus(
-        `${runtimeOwnedFailureSummary(failure.kind)} Runtime cleanup is pending; the existing page remains owned and no replacement will open until Runtime confirms a terminal close.`,
+        runtimeOwnedFailureSummary(failure.kind),
         { sticky: true },
       );
     }
@@ -889,20 +899,8 @@ async function closeRuntimePage(
   });
 }
 
-function runtimeOwnedFailureSummary(kind) {
-  if (kind === "display_status") {
-    return "Browser display status failed.";
-  }
-  if (kind === "malformed_response") {
-    return "Browser received an invalid Runtime display response.";
-  }
-  if (kind === "timeout") {
-    return "Browser display timed out.";
-  }
-  if (kind === "no_first_frame") {
-    return "The Browser Engine started, but no video frame arrived.";
-  }
-  return "Browser display signaling failed.";
+function runtimeOwnedFailureSummary(_kind) {
+  return "This page cannot be shown. Browser is closing it. Type a website address to try again.";
 }
 
 async function failRuntimeOwnedPage(kind, message) {
@@ -919,7 +917,7 @@ async function failRuntimeOwnedPage(kind, message) {
   stopPageHeartbeat();
   closeRemoteDisplay();
   showStatus(
-    `${runtimeOwnedFailureSummary(kind)} Runtime cleanup is pending; the existing page remains owned and no replacement will open until Runtime confirms a terminal close.`,
+    runtimeOwnedFailureSummary(kind),
     { sticky: true },
   );
   return runtimePageCleanup.fail(owner, {
@@ -2169,35 +2167,8 @@ function selectedBrowserEngine(summary = browserSummary) {
 
 function browserEngineKindLabel(engine) {
   const substrate = String(engine?.backing_substrate || "").toLowerCase();
-  if (substrate === "remote_operator_vm") {
-    return "Mac Browser Engine";
-  }
-  if (substrate === "local_microvm") {
-    const marker = `${engine?.id || ""} ${engine?.engine || ""}`.toLowerCase();
-    return marker.includes("jetson") || marker.includes("crosvm")
-      ? "Jetson Browser Engine"
-      : "MicroVM Browser Engine";
-  }
-  if (substrate === "host_policy_webview") {
-    return "Device Browser Engine";
-  }
-  if (substrate === "operator_rbi") {
-    return "Remote Browser Engine";
-  }
-  const marker = `${engine?.id || ""} ${engine?.engine || ""}`.toLowerCase();
-  if (marker.includes("jetson") || marker.includes("crosvm")) {
-    return "Jetson Browser Engine";
-  }
-  if (marker.includes("mac") || marker.includes("vz") || marker.includes("darwin")) {
-    return "Mac Browser Engine";
-  }
-  if (marker.includes("microvm") || marker.includes("chromium")) {
-    return "MicroVM Browser Engine";
-  }
-  if (marker.includes("hosted") || marker.includes("remote")) {
-    return "Remote Browser Engine";
-  }
-  return "Browser Engine";
+  if (["remote_operator_vm", "operator_rbi"].includes(substrate)) return "Another computer";
+  return ["local_microvm", "host_policy_webview"].includes(substrate) ? "This computer" : "Page display";
 }
 
 function browserEngineLabel(adapterId = selectedBrowserEngineId) {
@@ -2207,14 +2178,14 @@ function browserEngineLabel(adapterId = selectedBrowserEngineId) {
   const engine = visibleBrowserEngines(browserSummary).find(
     (candidate) => candidate.id === adapterId,
   );
-  return engine ? `${browserEngineKindLabel(engine)}: ${engine.id}` : `Browser Engine: ${adapterId}`;
+  return engine ? engine.display_name || engine.label || browserEngineKindLabel(engine) : "Selected page display";
 }
 
 function browserEngineSummary(engine) {
   if (!engine) {
     return DEFAULT_ENGINE_SUMMARY;
   }
-  return `${browserEngineLabel(engine.id)}. Runs the page in an isolated Browser Engine; network access uses the selected Exit Node.`;
+  return `${browserEngineLabel(engine.id)}. Displays pages using the connection you chose below.`;
 }
 
 function updateSettingsTitle() {
@@ -2227,19 +2198,12 @@ function updateSettingsTitle() {
 }
 
 function remoteCarrierExitLabel(exit) {
-  const id = String(exit?.id || "").trim();
-  const grant = String(exit?.grant_id || "").trim();
-  const displayName = String(exit?.display_name || exit?.label || "").trim();
-  const label = displayName || id || grant || "shared Exit Node";
-  const marker = `${id} ${grant}`.toLowerCase();
-  const kind = marker.includes("seed") ? "Seed Exit Node" : "Shared Exit Node";
-  return `${kind}: ${label}`;
+  const name = String(exit?.contact_name || exit?.display_name || exit?.label || "").trim();
+  return name || "Another connection";
 }
 
-function remoteCarrierExitSummary(exit) {
-  const name = String(exit?.contact_name || "").trim();
-  return name ? `Websites see ${name}'s internet address.`
-    : "Websites see the address of the shared connection.";
+function remoteCarrierExitSummary(_exit) {
+  return "Websites can see the address of the connection Browser uses.";
 }
 
 function browserExitLabel(remoteExitId = selectedRemoteExitId) {
@@ -2249,7 +2213,7 @@ function browserExitLabel(remoteExitId = selectedRemoteExitId) {
   const exit = visibleRemoteCarrierExits(browserSummary).find(
     (candidate) => candidate.id === remoteExitId,
   );
-  return exit ? remoteCarrierExitLabel(exit) : "Shared Exit Node";
+  return exit ? remoteCarrierExitLabel(exit) : "Another connection";
 }
 
 function syncExitSelect(summary) {
@@ -2262,12 +2226,12 @@ function syncExitSelect(summary) {
     selectedId: selectedRemoteExitId,
     defaultLabel: LOCAL_EXIT_LABEL,
     labelForService: remoteCarrierExitLabel,
-    unavailableLabel: "Selected Exit Node (unavailable)",
+    unavailableLabel: "Selected connection (unavailable)",
   });
   const summaryText = selectedExit
     ? remoteCarrierExitSummary(selectedExit)
     : selectedRemoteExitId
-    ? "Your selected Exit Node is unavailable. Choose another Exit Node to change where Browser traffic exits."
+    ? "The selected connection is unavailable. Choose another connection."
     : LOCAL_EXIT_SUMMARY;
   if (exitSummaryNode) {
     exitSummaryNode.textContent = summaryText;
@@ -2284,12 +2248,12 @@ function syncEngineSelect(summary) {
     services: engines,
     selectedId: selectedBrowserEngineId,
     defaultLabel: DEFAULT_ENGINE_LABEL,
-    labelForService: (engine) => `${browserEngineKindLabel(engine)}: ${engine.id}`,
-    unavailableLabel: "Selected Browser Engine (unavailable)",
+    labelForService: (engine) => engine.display_name || engine.label || browserEngineKindLabel(engine),
+    unavailableLabel: "Selected page display (unavailable)",
   });
   if (engineSummaryNode) {
     engineSummaryNode.textContent = selectedBrowserEngineId && !selectedEngine
-      ? "Your selected Browser Engine is unavailable. Choose another Engine to change where the page runs."
+      ? "The selected page display is unavailable. Choose another display."
       : browserEngineSummary(selectedEngine);
   }
   const hidden = engineChoiceHidden(engines, selectedBrowserEngineId);
@@ -2516,7 +2480,7 @@ async function requestRuntimeOpen(value, { history = "push" } = {}) {
     if (previousPage?.page_id || stalePage?.page_id) {
       showStatus(
         isExitSwitch
-          ? "Closing current Browser session before switching Exit Node..."
+          ? "Closing the current page before changing connection..."
           : isEngineSwitch
             ? "Closing current Browser session before switching Browser Engine..."
           : "Closing previous Browser page...",
@@ -2607,7 +2571,7 @@ async function requestRuntimeOpen(value, { history = "push" } = {}) {
     }
     openSettlement.page = openedPage;
     if (remoteExitId && response?.stream_session?.backend !== remoteExitId) {
-      throw new Error("Browser could not use the selected Exit Node.");
+      throw new Error("Browser could not use the selected connection.");
     }
     currentPage = openedPage;
     resetPageInputDelivery();

@@ -11,7 +11,7 @@ pub(super) const RESOURCE: &str = "elastos://browser/internet";
 pub(super) const GRANT_OPERATION: &str = "browser.internet.grant";
 pub(super) const REVOKE_OPERATION: &str = "browser.internet.revoke";
 pub(super) const CONSENT_TEXT: &str =
-    "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. You can turn this off here in Inbox.";
+    "Browser opens websites using this computer's internet connection, or another connection you chose in Browser settings. Websites can see that connection's address. You can turn this off at any time here in Inbox.";
 const RECORD: &str = "browser-internet.json";
 const TOKEN: &str = "browser-internet-token.json";
 const REQUEST_TTL: u64 = 1800;

@@ -7,7 +7,7 @@ import {makeSystemSummary,makeAppearanceRecord,inertSystemApiResponse} from "./s
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const root = new URL("../", import.meta.url);
-const consentText = "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. You can turn this off here in Inbox.";
+const consentText = "Browser opens websites using this computer's internet connection, or another connection you chose in Browser settings. Websites can see that connection's address. You can turn this off at any time here in Inbox.";
 const hostScript = `window.messages=[];window.approvals=[];window.passkeyAllowed=true;window.holdPasskey=false;
 window.showFixtureApp=(target,query={})=>{
   for(const frame of document.querySelectorAll('iframe')) frame.hidden=true;
@@ -32,9 +32,9 @@ addEventListener('message',e=>{
 async function screen(page, name) {
   if (!process.env.BROWSER_INTERNET_SCREENSHOTS || page.viewportSize().width !== 1280) return;
   mkdirSync(process.env.BROWSER_INTERNET_SCREENSHOTS,{recursive:true});
-  for (const frame of page.frames().slice(1)) await frame.evaluate(() => window.elastosTheme?.set("light"));
+  for (const frame of page.frames().slice(1)) await frame.evaluate(theme => window.elastosTheme?.set(theme), process.env.BROWSER_INTERNET_SCREEN_THEME || "light");
   await page.waitForTimeout(250);
-  await page.screenshot({path:`${process.env.BROWSER_INTERNET_SCREENSHOTS}/${name}.png`});
+  await page.screenshot({path:`${process.env.BROWSER_INTERNET_SCREENSHOTS}/${process.env.BROWSER_INTERNET_SCREEN_THEME === "dark" ? "dark-" : ""}${name}.png`});
 }
 async function fixture() {
   const state = {consent:"off", expired:false, grantedRequestId:"fixture", requests:0, reads:0, opens:[], actions:[]};
@@ -137,6 +137,59 @@ test("Browser permission instructions point to Inbox",()=>{
   assert.doesNotMatch(source,/System Security/);
 });
 
+test("revoking permission hides the old website and allowing restores the render panel", async () => {
+ const f=await fixture();const browser=await chromium.launch({headless:true});
+ try {
+  f.state.consent="granted";const page=await browser.newPage();
+  const opening=page.waitForResponse(r=>r.url().endsWith("/api/apps/browser/open"));await page.goto(f.url);await opening;
+  const frame=page.frameLocator("iframe");
+  await frame.locator("#browser-render-panel").evaluate(e=>{const old=document.createElement("div");old.id="old-website";old.textContent="Old website";e.append(old);});
+  f.state.consent="revoked";await frame.getByRole("button",{name:"Open Inbox",exact:true}).waitFor({timeout:5000});
+  assert.equal(await frame.locator("#old-website").isVisible(),false);
+  f.state.consent="granted";await frame.locator("#browser-internet-request").waitFor({state:"hidden",timeout:5000});
+  assert.equal(await frame.locator("#browser-render-panel").isVisible(),true);await page.close();
+ } finally {await browser.close();await f.close();}
+});
+test("Allow after denial shows the empty hint and focuses the address without navigating", async () => {
+ const f=await fixture();const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage({viewport:{width:1280,height:844}});await page.goto(f.url);const frame=page.frameLocator("iframe");
+  await frame.getByRole("button",{name:"Show Request",exact:true}).waitFor();f.state.consent="refused";
+  await frame.getByRole("button",{name:"Open Inbox",exact:true}).waitFor({timeout:5000});
+  f.state.consent="granted";
+  await frame.locator("#browser-render-empty").getByText("Type a website address to open it.",{exact:true}).waitFor({timeout:5000});
+  assert.equal(await frame.locator("#browser-url").evaluate(e=>e===document.activeElement),true);
+  await page.waitForTimeout(2200);assert.equal(f.state.opens.length,0);assert.equal(f.state.requests,1);
+  await screen(page,"browser-empty-allowed");await page.close();
+ } finally {await browser.close();await f.close();}
+});
+test("Inbox decision dates and keyboard focus are readable in light and dark themes", async () => {
+ const f=await fixture();const browser=await chromium.launch({headless:true});
+ try {
+  f.state.consent="granted";
+  for(const theme of ["light","dark"]) {
+   const page=await browser.newPage({viewport:{width:1280,height:844}});await page.goto(f.url+"?app=inbox");const frame=page.frameLocator("iframe");
+   const off=frame.getByRole("button",{name:"Turn Off",exact:true});await off.waitFor();
+   await off.evaluate((e,theme)=>window.elastosTheme.set(theme),theme);
+   const expected=await off.evaluate(()=>new Date(1794312000*1000).toLocaleString(undefined,{dateStyle:"medium",timeStyle:"short"}));
+   assert.match(await frame.locator("#entry-detail .entry-body").innerText(),new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")));
+   await off.focus();await page.keyboard.press("Tab");await page.keyboard.press("Shift+Tab");
+   const focus=await off.evaluate(e=>({focused:e===document.activeElement,width:getComputedStyle(e).outlineWidth,style:getComputedStyle(e).outlineStyle,offset:getComputedStyle(e).outlineOffset,color:getComputedStyle(e).outlineColor}));
+   assert.equal(focus.focused,true);assert.equal(focus.width,"2px");assert.equal(focus.style,"solid");assert.equal(focus.offset,"2px");assert.notEqual(focus.color,"rgba(0, 0, 0, 0)");
+   if(process.env.BROWSER_INTERNET_SCREENSHOTS)await page.screenshot({path:process.env.BROWSER_INTERNET_SCREENSHOTS+"/inbox-focus-"+theme+".png"});
+   await page.close();
+  }
+ } finally {await browser.close();await f.close();}
+});
+test("permission flow copy uses plain connection names and an existing address control",()=>{
+ for(const path of ["capsules/browser/browser/index.html","capsules/browser/browser/browser.js","capsules/browser/browser/browser-startup.js","capsules/browser/browser/browser-status.js","capsules/browser/browser/browser-remote-display.js"]) {
+  const text=readFileSync(new URL(path,root),"utf8");assert.doesNotMatch(text,/press Go|this Mac's internet address|Exit Node|Browser exit node/);
+ }
+ const source=readFileSync(new URL("capsules/browser/browser/browser.js",root),"utf8");
+ assert.match(source,/Websites can see this computer's internet address/);
+ assert.match(source,/Websites can see the address of the connection Browser uses/);
+});
+
 test("Browser asks once, polls every two seconds and opens the requested page without a click", async () => {
   const f=await fixture();const browser=await chromium.launch({headless:true});
   try {
@@ -157,11 +210,11 @@ test("Browser asks once, polls every two seconds and opens the requested page wi
       await frame.getByRole("button",{name:"Browser settings",exact:true}).click();
       assert.equal(await frame.locator("#browser-internet").count(),0);
       await frame.getByText("Internet access: Off",{exact:true}).waitFor();
-      await frame.getByText("Websites see this Mac's internet address.",{exact:true}).waitFor();
+      await frame.getByText("Websites can see this computer's internet address.",{exact:true}).waitFor();
       await frame.locator("#browser-exit").selectOption("sasha-exit");
-      await frame.getByText("Websites see Sasha's internet address.",{exact:true}).waitFor();
+      await frame.getByText("Websites can see the address of the connection Browser uses.",{exact:true}).waitFor();
       await frame.locator("#browser-exit").selectOption("legacy-exit");
-      await frame.getByText("Websites see the address of the shared connection.",{exact:true}).waitFor();
+      await frame.getByText("Websites can see the address of the connection Browser uses.",{exact:true}).waitFor();
       await frame.locator("#browser-exit").selectOption("");
       await frame.getByRole("button",{name:"Manage in Inbox",exact:true}).click();await inboxMessage(page);
       await frame.getByRole("button",{name:"Close Browser settings"}).click();
@@ -175,7 +228,7 @@ test("Browser asks once, polls every two seconds and opens the requested page wi
         frame.getByRole("button",{name:"Browser settings",exact:true}).click(),
       ]);
       await frame.getByText("Internet access: Allowed",{exact:true}).waitFor();
-      await frame.getByText("Pages go out through",{exact:true}).waitFor();await frame.getByText("Websites see this Mac's internet address.",{exact:true}).waitFor();
+      await frame.getByText("Pages go out through",{exact:true}).waitFor();await frame.getByText("Websites can see this computer's internet address.",{exact:true}).waitFor();
       await screen(page,"browser-settings");
       assert.equal(f.state.opens.length,1,"refresh does not repeat the open");
       f.state.consent="revoked";

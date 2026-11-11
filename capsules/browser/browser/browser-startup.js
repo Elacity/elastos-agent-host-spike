@@ -15,7 +15,7 @@ export function startBrowser(state) {
       if (!state.browserInternetPollingActive || state.homeWindowCloseInFlight || state.homeWindowTerminalCloseConfirmed) return;
       if (!state.internetContinuationUrl && !state.explicitBrowserOpen) {
         state.setLoading(false);
-        state.showStatus("Enter a website and press Go.");
+        state.showStatus("Type a website address to open it.");
         return;
       }
       const url = state.internetContinuationUrl || initialUrl;

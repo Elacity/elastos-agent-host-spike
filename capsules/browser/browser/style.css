@@ -355,8 +355,20 @@ select {
   display: none;
 }
 
-.browser-render-empty {
+.browser-render-panel[hidden],
+.browser-render-empty[hidden] {
   display: none;
+}
+
+.browser-render-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  background: var(--bg);
 }
 
 .browser-render-empty strong {

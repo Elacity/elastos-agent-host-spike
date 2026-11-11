@@ -11635,7 +11635,7 @@ async fn browser_internet_decisions_stay_in_inbox_as_read_history() {
         .unwrap();
     let notification_id = entry["id"].clone();
     assert_eq!(entry["title"], "Allow Browser to use the internet?");
-    assert_eq!(entry["body"], "Browser opens websites through this computer's internet connection, or through an Exit you approved. Websites can see that connection's address. You can turn this off here in Inbox.");
+    assert_eq!(entry["body"], "Browser opens websites using this computer's internet connection, or another connection you chose in Browser settings. Websites can see that connection's address. You can turn this off at any time here in Inbox.");
     assert_eq!(summary["notifications"]["unread_count"], 1);
     let action = format!(
         "browser-internet-deny:{}",

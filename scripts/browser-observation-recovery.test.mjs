@@ -358,3 +358,9 @@ for (const route of Object.keys(routes)) {
     });
   }
 }
+
+for (const kind of ["display_status", "malformed_response", "timeout", "no_first_frame", "signaling"]) test(`failed ${kind} explains pending close in plain words`, async()=>{
+ const h=harness();const result=await h.state.failRuntimeOwnedPage(kind,"fixture failure");
+ assert.equal(result.state,"pending");assert.equal(h.failures.length,1);
+ assert.equal(h.messages.at(-1),"This page cannot be shown. Browser is closing it. Type a website address to try again.");
+});

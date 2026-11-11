@@ -66,16 +66,16 @@
         </div>
         <p id="browser-internet-value" class="browser-settings-label">Internet access: Off</p>
         <button id="browser-internet-settings" class="browser-settings-action" type="button">Manage in Inbox</button>
-        <label class="browser-settings-label" for="browser-engine">Browser engine</label>
-        <select id="browser-engine" class="browser-select" aria-label="Browser engine" title="Browser engine">
+        <label class="browser-settings-label" for="browser-engine">Page display</label>
+        <select id="browser-engine" class="browser-select" aria-label="Page display" title="Page display">
           <option value="">Automatic</option>
         </select>
-        <p id="browser-engine-summary" class="browser-settings-hint">Select this device’s VM Engine or an approved remote Engine.</p>
+        <p id="browser-engine-summary" class="browser-settings-hint">Browser chooses where to display pages.</p>
         <label class="browser-settings-label browser-settings-label-spaced" for="browser-exit">Pages go out through</label>
-        <select id="browser-exit" class="browser-exit-select" aria-label="Browser exit node" title="Browser exit node">
+        <select id="browser-exit" class="browser-exit-select" aria-label="Pages go out through" title="Pages go out through">
           <option value="">This device</option>
         </select>
-        <p id="browser-exit-summary" class="browser-settings-hint">Websites see this Mac's internet address.</p>
+        <p id="browser-exit-summary" class="browser-settings-hint">Websites can see this computer's internet address.</p>
         <button id="browser-profile-reset" class="browser-settings-action browser-settings-danger" type="button" aria-label="Reset Browser profile" title="Reset Browser profile">
           Reset profile
         </button>
@@ -91,11 +91,11 @@
       <section class="browser-stage" aria-label="Web page">
         <section id="browser-internet-request" class="browser-settings-panel browser-internet-request" role="status" hidden>
           <h2 id="browser-internet-heading">Browser can't open websites yet</h2>
-          <p id="browser-internet-hint">Enter a website and press Go.</p>
+          <p id="browser-internet-hint">Type a website address to open it.</p>
           <button id="browser-internet-review" class="browser-settings-action" type="button" hidden>Show Request</button>
         </section>
         <div id="browser-render-panel" class="browser-render-panel" tabindex="0">
-          <div id="browser-render-empty" class="browser-render-empty" hidden></div>
+          <div id="browser-render-empty" class="browser-render-empty" hidden>Type a website address to open it.</div>
           <textarea
             id="browser-keyboard-capture"
             class="browser-keyboard-capture"

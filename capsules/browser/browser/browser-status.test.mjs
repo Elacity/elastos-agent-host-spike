@@ -14,7 +14,7 @@ test("destination policy denial preserves Browser authority and close ownership"
   error.status = 403;
   error.message = "private host blocked: localhost";
   assert.equal(isAuthoritySessionError(error), false);
-  assert.equal(friendlyOpenError(error), "This page was blocked by your Exit Node settings.");
+  assert.equal(friendlyOpenError(error), "This page was blocked by your connection settings.");
 
   error.payload.outcome.state = "cleanup_pending";
   error.payload.outcome.effects.vm_acquired = true;
@@ -62,7 +62,7 @@ test("exact front-door launch refusal bytes tell Browser to reopen from Home", a
     );
     assert.equal(refused.message, generic);
     assert.equal(isAuthoritySessionError(refused), false);
-    assert.equal(friendlyOpenError(refused), "This page was blocked by your Exit Node settings.");
+    assert.equal(friendlyOpenError(refused), "This page was blocked by your connection settings.");
   } finally {
     globalThis.fetch = previousFetch;
   }

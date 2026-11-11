@@ -260,6 +260,12 @@
       outline: none;
     }
 
+    .action-secondary:focus-visible,
+    .entry-action:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
     .entry-split {
       display: grid;
       grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
@@ -555,7 +561,13 @@
         gap: 8px;
       }
 
-      .entry-split {
+      .action-secondary:focus-visible,
+    .entry-action:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .entry-split {
         grid-template-columns: 1fr;
         grid-template-rows: minmax(160px, 42%) minmax(0, 1fr);
       }

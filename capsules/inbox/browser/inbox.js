@@ -116,7 +116,7 @@
     function inboxEntryText(entry, field, fallback) {
       const text = String(entry[field] || "").trim();
       if (entry.kind === "browser_internet_decision" && field === "body") {
-        const date = new Date(entry.created_at * 1000).toLocaleString();
+        const date = new Date(entry.created_at * 1000).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"});
         return `${text.replace(/\.$/, "")} on ${date}.`;
       }
       // Contact and service copy contains names chosen by people, which can
