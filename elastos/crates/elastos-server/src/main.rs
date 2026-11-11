@@ -2741,4 +2741,33 @@ mod tests {
             assert!(super::Cli::try_parse_from(argv).is_err(), "{argv:?}");
         }
     }
+
+    const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    /// The web-serve entry, called directly: through `run`, `serve` or
+    /// `share` an earlier parse of the same type would stop first. It
+    /// returns its own parse's error before it sets up any server.
+    #[tokio::test]
+    async fn serve_web_capsule_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            elastos_storage::providers::LocalFSProvider::new(directory.path().join("storage"))
+                .await
+                .unwrap();
+        let runtime = elastos_server::runtime::Runtime::with_providers_and_component(
+            std::sync::Arc::new(storage),
+            Vec::new(),
+            None,
+        );
+        let capsule = directory.path().join("capsule");
+        fs::create_dir_all(&capsule).unwrap();
+        fs::write(capsule.join("capsule.json"), PINNED).unwrap();
+        let error = super::serve_web_capsule(runtime, capsule, "127.0.0.1:0", false, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().starts_with("unknown field `cid`"),
+            "{error}"
+        );
+    }
 }

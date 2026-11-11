@@ -3927,6 +3927,7 @@ fn browser_vm_manifest(memory_mib: u32, vcpu_count: u8) -> CapsuleManifest {
         window_policy: None,
         model_content: None,
         agent: None,
+        asks: Vec::new(),
         signature: None,
     }
 }
