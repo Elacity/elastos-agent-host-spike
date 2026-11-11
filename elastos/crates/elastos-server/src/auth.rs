@@ -12388,7 +12388,7 @@ pub(crate) fn store_test_human_principal(data_dir: &Path, principal_id: &str) ->
 }
 
 #[cfg(test)]
-const TEST_AGENT_ID: &str = "agent:v2:0123456789abcdef0123456789abcdef";
+const TEST_AGENT_ID: &str = valid_agent::ID;
 
 #[cfg(test)]
 fn test_agent_record(agent_id: &str) -> PrincipalRecord {
@@ -12405,13 +12405,54 @@ fn test_agent_record(agent_id: &str) -> PrincipalRecord {
         kind: PrincipalKind::Agent,
         created_at: 5,
         updated_at: 5,
-        owner: Some("person:local:owner".to_string()),
+        owner: Some(valid_agent::OWNER_ID.to_string()),
         request_id: Some("request-1".to_string()),
         agent_host_package: Some(AgentHostPackage {
             name: "agent-host".to_string(),
             registry_cid: "bafyrecord".to_string(),
         }),
         retired_at: None,
+    }
+}
+
+/// The one stored agent the older root fixtures share. Each test has its own
+/// temp directory, so one id is enough. The root constant is the hand literal
+/// pinned by `agent_record_root_is_the_hand_computed_literal`.
+#[cfg(test)]
+pub(crate) mod valid_agent {
+    use super::*;
+
+    pub const ID: &str = "agent:v2:0123456789abcdef0123456789abcdef";
+    /// Hand SHA-256 of `ID`, first 12 bytes, under `UsersAI`.
+    pub const ROOT: &str = "localhost://UsersAI/ba287e12925d9408db0f24e3";
+    /// The same digest under `Users`. This is the id rule for `ID`.
+    pub const USERS_ROOT: &str = "localhost://Users/ba287e12925d9408db0f24e3";
+    pub const OWNER_ID: &str = "person:local:owner";
+
+    pub fn plant(data_dir: &Path) -> PrincipalRecord {
+        if stored_principal_record(data_dir, OWNER_ID)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            store_test_human_principal(data_dir, OWNER_ID);
+        }
+        if let Some(existing) = stored_principal_record(data_dir, ID).ok().flatten() {
+            return existing;
+        }
+        let record = super::test_agent_record(ID);
+        super::insert_principal_into_auth_file(data_dir, &record);
+        let state = load_auth_state(data_dir).expect("planted agent auth state loads");
+        assert!(
+            super::quarantine_reason(&state, ID).is_none(),
+            "planted agent is quarantined: {:?}",
+            super::quarantine_reason(&state, ID)
+        );
+        state
+            .principals
+            .into_iter()
+            .find(|principal| principal.principal_id == ID)
+            .expect("planted agent is stored")
     }
 }
 
@@ -12505,15 +12546,26 @@ pub(crate) mod r4_fixture {
     use super::*;
     pub const ID: &str = "person:local:r4";
     pub const HUMAN_ROOT: &str = "localhost://Users/b2caa01d2e3d5fb2ec0d1478";
-    pub const AGENT_ROOT: &str = "localhost://UsersAI/b2caa01d2e3d5fb2ec0d1478";
+    pub const AGENT_ID: &str = super::valid_agent::ID;
+    pub const AGENT_ROOT: &str = super::valid_agent::ROOT;
+    /// Id-rule root of `AGENT_ID`. A decoy placed here shows the stored root was used.
+    pub const USERS_ROOT: &str = super::valid_agent::USERS_ROOT;
+
+    pub fn principal_id(kind: PrincipalKind) -> &'static str {
+        match kind {
+            PrincipalKind::Human => ID,
+            PrincipalKind::Agent => AGENT_ID,
+        }
+    }
 
     pub fn store(data_dir: &Path, kind: PrincipalKind) {
-        store_test_human_principal(data_dir, ID);
-        let root = match kind {
-            PrincipalKind::Human => HUMAN_ROOT,
-            PrincipalKind::Agent => AGENT_ROOT,
-        };
-        set_kind(data_dir, ID, kind, root);
+        match kind {
+            PrincipalKind::Human => store_test_human_principal(data_dir, ID),
+            // A stored Agent root needs the admission record. set_kind does not write one.
+            PrincipalKind::Agent => {
+                super::valid_agent::plant(data_dir);
+            }
+        }
     }
 
     pub fn remove(data_dir: &Path, principal_id: &str) {
@@ -12529,8 +12581,9 @@ pub(crate) mod r4_fixture {
     }
 
     pub fn set_kind(data_dir: &Path, principal_id: &str, kind: PrincipalKind, root: &str) {
-        // Plant the stored kind. A kind Agent record without an admission
-        // binding is quarantined, so the production save refuses to write it.
+        // Rewrites kind and root on a record that is already stored. Kind Agent
+        // here has no admission binding, so load quarantines it. A stored-root
+        // fixture calls valid_agent::plant instead.
         super::plant_principal_kind(data_dir, principal_id, kind, Some(root));
     }
 }
@@ -18027,8 +18080,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// Makes the existing record for `principal_id` an Agent record that keeps
-    /// `root` as its stored root.
+    /// Makes an existing record kind Agent and sets its root. The id, binding,
+    /// owner, and package stay as they were, so the record is quarantined
+    /// unless that id was already a valid agent. Stored-root fixtures call
+    /// `valid_agent::plant`.
     pub(crate) fn mint_agent_record(
         data_dir: &Path,
         principal_id: &str,
@@ -18620,14 +18675,13 @@ pub(crate) mod tests {
         let id = TEST_AGENT_ID;
         let resolved =
             ResolvedPrincipalRoot::resolve(data_dir.path(), auth_dir.path(), id).unwrap();
-        let agent = principal_kind_localhost_root(id, PrincipalKind::Agent);
+        let agent = valid_agent::ROOT;
         let agent_uri = format!("{agent}/Documents/a.txt");
         assert!(resolved.owns_object_uri(&agent_uri).is_ok());
-        let users_uri = format!("{}/Documents/a.txt", principal_localhost_root(id));
+        let users_uri = format!("{}/Documents/a.txt", valid_agent::USERS_ROOT);
         assert!(resolved.owns_object_uri(&users_uri).is_err());
-        // A sibling agent under the same UsersAI parent stays outside this root.
-        let sibling =
-            principal_kind_localhost_root("person:local:sibling-agent", PrincipalKind::Agent);
+        // A sibling path under the same UsersAI parent stays outside this root.
+        let sibling = "localhost://UsersAI/000000000000000000000000";
         assert_ne!(sibling, agent);
         let sibling_uri = format!("{sibling}/Documents/a.txt");
         assert!(resolved.owns_object_uri(&sibling_uri).is_err());
