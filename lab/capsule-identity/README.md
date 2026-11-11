@@ -629,13 +629,15 @@ The tests are in `tests/parse.rs`.
 
 ## For a lab that uses the lab CID
 
-Three lab crates outside this lane have a path dependency on this crate. Each
+Four lab crates outside this lane have a path dependency on this crate. Each
 manifest is listed below with what that crate uses: `pins` (its tests pin a
-printed lab CID), `parse` (it reads a printed lab CID with `LabCid`'s parse, or
-makes values with `encode_entries`), or `both`.
+printed lab CID), `parse` (it reads a printed lab CID with `LabCid`'s parse,
+makes values with `encode_entries`, or names bundles with `checked_bundle`,
+and pins none), or `both`.
 
 ```text
 lab/agent-conformance/Cargo.toml  parse
+lab/plan-approval/Cargo.toml  parse
 lab/wasm-capsule/Cargo.toml  both
 lab/wasm-capsule/tools/Cargo.toml  pins
 ```
@@ -644,6 +646,10 @@ lab/wasm-capsule/tools/Cargo.toml  pins
   `parse::<LabCid>()` (`src/report.rs`), makes its synthetic values with
   `encode_entries`, and names bundles with `checked_bundle`. It pins no lab
   CID.
+- `lab/plan-approval` (`plan-approval`), a dev-dependency: its tests include
+  `lab/agent-conformance/tests/common/signed_bundle.rs` by path
+  (`src/lib.rs`), which names a bundle with `checked_bundle` and signs it with
+  `sign_bundle`. It pins no lab CID and parses none.
 - `lab/wasm-capsule` (wasm-capsule-lab), the `capsule` package, a
   dev-dependency: its tests pin two lab CIDs (`tests/common/mod.rs`,
   `tests/bundle.rs`) and parse a printed one (`tests/run.rs`).
@@ -651,7 +657,8 @@ lab/wasm-capsule/tools/Cargo.toml  pins
   `lab_cid` (re-exported as `bundle_identity`). The two pins above are of what
   it prints, so a change in what `lab_cid` prints reaches it through them.
 
-Read at `b75ffefdb`. `every_lab_cid_consumer_is_in_the_adoption_note`
+Read at `b75ffefdb`; `lab/plan-approval` read at `03f4c3f5`.
+`every_lab_cid_consumer_is_in_the_adoption_note`
 (`tests/adoption.rs`) keeps the list true, and it reads no TOML itself. It
 lists every git-tracked `Cargo.toml` under `lab/`, at any depth, outside this
 lane (`git ls-files`), and asks Cargo's own reader about each one:
