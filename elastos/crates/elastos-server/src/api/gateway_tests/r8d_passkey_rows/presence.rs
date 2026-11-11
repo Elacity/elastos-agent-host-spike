@@ -1,8 +1,11 @@
 //! Row 6, presence. Entries: `request_community_presence`
 //! (gateway_collaboration_presence.rs:310) and `community_presence_state`
-//! (line 299), called by `chat_room_community_presence_request` and Chat;
-//! plus the stored-file functions they reach, `presence_grant::state` and
-//! `open_request_at`.
+//! (line 299), called by `chat_room_community_presence_request` and Chat.
+//! For this person both stop where they read the Profile (line 287) and
+//! reach no grant-file function. The row then calls two grant-file functions
+//! directly: `presence_grant::state`, which `community_presence_state` calls
+//! once a Profile is read (line 304), and `open_request_at`, which the
+//! answer and Inbox-card functions call (lines 436 and 477).
 
 use super::*;
 use crate::collaboration_presence_grant as grant;
@@ -26,15 +29,19 @@ async fn r8d_child_presence_request_and_grant_are_refused_for_the_passkey_person
     let person = passkey_person(CHAT_ROOM_CAPSULE_ID);
     let child = person.child.path();
     let state = presence_state(&person);
-    // The request first reads the Profile on the child and finds none.
+    // Building the test Community port wrote nothing into the child.
+    person.assert_child_holds_only(&[]);
+    // The request reads the Profile on the child, finds none and stops.
     let asked = request_community_presence(&state, &person.ctx, true);
     assert_eq!(
         refusal(asked).as_deref(),
         Some("Create your Profile before choosing how Community shows you.")
     );
+    // The state read stops at the same place and hides the reason.
     assert_eq!(community_presence_state(&state, &person.ctx), None);
-    // Behind the Profile read, the grant file looks the person's root up in
-    // the child's own auth state (collaboration_presence_grant.rs:233).
+    // Called directly, not through the two functions above: each grant-file
+    // function looks the person's root up in the child's own auth state
+    // (collaboration_presence_grant.rs:233).
     let scope = state
         .collaboration_presence_product_port
         .as_ref()

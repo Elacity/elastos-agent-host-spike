@@ -9901,16 +9901,18 @@ mod r8c_child_rows {
 /// R8d evidence row for Profile update, for a parent passkey person on a
 /// child Runtime. `people_profile_update` (line 2521) first calls
 /// `require_profile_authority_passkey_binding` with its own data directory
-/// and then reaches the private `update_profile_for_context` (line 8608);
-/// the row calls both. Its control is the R8c control row above.
+/// (line 2532). For this person it returns there with 403 (line 2538) and
+/// never reaches the private `update_profile_for_context` (line 8608). The
+/// row calls the gate, the route, and then the private function directly.
+/// Its control is the R8c control row above.
 #[cfg(test)]
 mod r8d_passkey_rows {
     use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, refusal, PERSON, ROOT};
     use super::*;
     use crate::collaboration_profile_authority as authority;
 
-    #[test]
-    fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
         let person = passkey_person(PEOPLE_CAPSULE_ID);
         let child = person.child.path();
         let proof = person.ctx.proof_binding_id();
@@ -9923,13 +9925,32 @@ mod r8d_passkey_rows {
             proof,
         );
         assert_eq!(refusal(gate).as_deref(), Some("proof binding not found"));
+        // The route itself, with a token the child's own key signed (see
+        // `route_headers`). It stops at the gate.
+        let request: PeopleProfileUpdateRequest =
+            serde_json::from_value(serde_json::json!({"display_name": "R8d Person"})).unwrap();
+        let answer = people_profile_update(
+            State(person.child_state()),
+            person.route_headers(PEOPLE_CAPSULE_ID),
+            Json(request),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), "proof binding not found");
+        // Not reached by the route for this person. Called directly, the
+        // private update refuses at its own call of the same gate
+        // (collaboration_profile_authority.rs:316).
         let updated = update_profile_for_context(child, &person.ctx, "R8d Person");
         assert_eq!(refusal(updated).as_deref(), Some("proof binding not found"));
         // The same gate, handed the parent's data directory, accepts them.
         let parent = person.parent.path();
         let on_parent = authority::require_profile_authority_passkey_binding(parent, PERSON, proof);
         assert_eq!(refusal(on_parent), None);
-        // Nothing was written on the child and the parent's Profile is as it was.
+        // The child holds what it held before and the parent's Profile is as
+        // it was.
         person.assert_child_holds_only(&[]);
         let kept = authority::load_profile_authority(parent, PERSON, ROOT).unwrap();
         let name = kept.map(|profile| profile.document().display_name.clone());
