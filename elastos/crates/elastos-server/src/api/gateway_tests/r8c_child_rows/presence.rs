@@ -7,6 +7,9 @@ use super::*;
 use crate::collaboration_presence_grant as grant;
 
 const GRANT_FILE: &str = ".AppData/ElastOS/Home/community-presence.json";
+/// What a presence request answers before a Profile is stored
+/// (gateway_collaboration_presence.rs:287).
+const PROFILE_REQUIRED: &str = "Create your Profile before choosing how Community shows you.";
 
 fn presence_state(dir: &std::path::Path) -> GatewayState {
     let chat = crate::collaboration_product::test_chat_product_port(dir, "r8c", "community");
@@ -62,8 +65,15 @@ async fn r8c_child_presence_request_and_grant_under_the_parent_root() {
     let dir = child.dir.path();
     let state = presence_state(dir);
     let mut steps = Steps::new("presence: parent-signed device, child Runtime");
+    // No Profile is stored yet: the request must answer exactly that one is
+    // required. Any other answer, or a granted request, fails this step.
     let asked = request_community_presence(&state, &child.ctx, true);
-    steps.step("as launched: request a presence grant", asked);
+    let asked = asked.map_err(|error| format!("{error:#}"));
+    steps.check(
+        "as launched, no Profile yet: the request answers that a Profile is required",
+        asked == Err(PROFILE_REQUIRED.to_string()),
+        &asked,
+    );
     seed_parent_profile(&child);
     presence_steps(&mut steps, &state, &child.ctx).await;
     steps.only_under(dir, &child.parent_root, GRANT_FILE);

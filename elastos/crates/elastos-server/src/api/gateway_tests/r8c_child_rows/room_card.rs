@@ -30,9 +30,16 @@ fn r8c_child_room_card_and_authority_read_the_parent_roots_profile() {
     let child = child(CHAT_ROOM_CAPSULE_ID);
     let dir = child.dir.path();
     let mut steps = Steps::new("room profile card: parent-signed device, child Runtime");
+    // No Profile is stored yet: the projection answers `Ok(None)`, which its
+    // callers turn into their Profile-required answer
+    // (gateway_home_system.rs:6557-6558). Anything else fails this step.
     let empty = home_room_profile_card_projection_for_context(dir, &child.ctx)
-        .and_then(|card| card.ok_or_else(|| anyhow::anyhow!("no card: Profile required")));
-    steps.step("as launched: room profile card", empty.map(|_| ()));
+        .map(|card| card.map(|card| card.profile_id));
+    steps.step_where(
+        "as launched, no Profile yet: the room profile card is none",
+        empty,
+        Option::is_none,
+    );
     let seeded = seed_parent_profile(&child);
     let did = seeded.document().profile_did.clone();
     card_steps(&mut steps, dir, &child.ctx, &did);

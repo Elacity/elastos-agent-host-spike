@@ -62,13 +62,20 @@ async fn r8c_child_contacts_load_and_add_under_the_parent_root() {
     let state = state_with_discovery(dir).await;
     let service = state.collaboration_discovery_service.clone().unwrap();
     let mut steps = Steps::new("contacts: parent-signed device, child Runtime");
-    let load = || {
-        load_configured_contact_authority_for_context(dir, &child.ctx, Some(&service))
-            .and_then(|found| found.ok_or_else(|| anyhow::anyhow!("none: Profile required")))
-    };
-    steps.step("as launched: contact authority for the context", load());
+    let load = || load_configured_contact_authority_for_context(dir, &child.ctx, Some(&service));
+    // No Profile is stored yet. The loader answers `Ok(None)`, which the
+    // route turns into its Profile-required answer
+    // (gateway_home_system.rs:815-819); anything else fails this step.
+    let launched = load().map(|found| found.map(|_| "a contact authority"));
+    steps.step_where(
+        "as launched, no Profile yet: the contact authority is none",
+        launched,
+        Option::is_none,
+    );
     let profile = seed_parent_profile(&child);
-    let by_route = steps.step("seeded Profile: contact authority for the context", load());
+    let seeded =
+        load().and_then(|found| found.ok_or_else(|| anyhow::anyhow!("none: Profile required")));
+    let by_route = steps.step("seeded Profile: contact authority for the context", seeded);
     // The same constructor the route uses, handed the seeded Profile, so the
     // contact store's own storage calls are reached too.
     let authority = by_route.or_else(|| {

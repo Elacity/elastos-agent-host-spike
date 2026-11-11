@@ -88,8 +88,16 @@ async fn r8c_child_direct_messages_register_read_and_send_under_the_parent_root(
     let state = state_with_discovery(dir).await;
     let service = state.collaboration_discovery_service.clone().unwrap();
     let mut steps = Steps::new("direct messages: parent-signed device, child Runtime");
-    let launched = direct_authority_for(dir, &child.ctx, &service).map(|_| ());
-    steps.step("as launched: direct authority for the context", launched);
+    // No Profile is stored yet: the loader `direct_authority` calls answers
+    // `Ok(None)`, which that function turns into its authority refusal
+    // (gateway_room.rs:285-291). Anything else fails this step.
+    let launched = load_configured_contact_authority_for_context(dir, &child.ctx, Some(&service))
+        .map(|found| found.map(|_| "a contact authority"));
+    steps.step_where(
+        "as launched, no Profile yet: the direct authority is none",
+        launched,
+        Option::is_none,
+    );
     let profile = seed_parent_profile(&child);
     let by_route = direct_authority_for(dir, &child.ctx, &service);
     let by_route = steps.step("seeded Profile: direct authority for the context", by_route);
