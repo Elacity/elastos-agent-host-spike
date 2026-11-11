@@ -74,6 +74,9 @@ pub(in crate::api) struct PasskeyPerson {
     pub(in crate::api) parent: tempfile::TempDir,
     pub(in crate::api) ctx: HomeLaunchTokenContext,
     pub(in crate::api) required: RequiredHomeLaunchToken,
+    /// The parent folder's files, as `tree` lists them when the row starts.
+    /// `assert_child_holds_only` compares the folder again at the end.
+    parent_tree: Vec<String>,
     /// Keeps `home_launch_auth_data_dir` answering the parent's directory on
     /// this thread for the row's body. See the module comment.
     _auth: TestHomeLaunchAuthDataDir,
@@ -185,18 +188,19 @@ pub(in crate::api) fn passkey_person(app: &str) -> PasskeyPerson {
     assert_eq!(ctx.grant_id(), grant.grant_id);
     let proof = ctx.proof_binding_id().unwrap();
     assert!(proof.starts_with("proof:passkey:"), "{proof}");
+    let on_parent = tree(parent.path());
+    assert!(
+        on_parent.contains(&PROFILE_FILE.to_string()),
+        "{on_parent:?}"
+    );
     let person = PasskeyPerson {
         child,
         parent,
         ctx,
         required,
+        parent_tree: on_parent,
         _auth: auth,
     };
-    let on_parent = tree(person.parent.path());
-    assert!(
-        on_parent.contains(&PROFILE_FILE.to_string()),
-        "{on_parent:?}"
-    );
     person.assert_child_holds_only(&[]);
     person
 }
@@ -239,8 +243,9 @@ const CHILD_OWN: &[&str] = &[
 
 impl PasskeyPerson {
     /// The whole child data directory holds exactly `CHILD_OWN` plus `also`,
-    /// and the child's auth state holds no record, no protection and no
-    /// session at all, so none for the person. Every problem is reported.
+    /// the parent data directory holds the same files it held when the row
+    /// started, and the child's auth state holds no record, no protection and
+    /// no session at all, so none for the person. Every problem is reported.
     pub(in crate::api) fn assert_child_holds_only(&self, also: &[&str]) {
         let child = self.child.path();
         let mut problems = Vec::new();
@@ -268,6 +273,13 @@ impl PasskeyPerson {
         }
         if home_launch_auth_data_dir(child) != self.parent.path() {
             problems.push("the child no longer reads the parent's auth state".to_string());
+        }
+        let parent_now = tree(self.parent.path());
+        if parent_now != self.parent_tree {
+            problems.push(format!(
+                "the parent data directory holds {parent_now:#?}, expected exactly {:#?}",
+                self.parent_tree
+            ));
         }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
