@@ -1236,9 +1236,12 @@ pub struct AuthState {
     #[serde(default)]
     pub guest_registration_enabled: bool,
     /// Malformed agent records kept from the file. Not stored. A save writes
-    /// the principal bytes it loaded and refuses to use the record.
+    /// each quarantined record from the JSON value it was loaded as.
     #[serde(skip)]
     quarantined: Vec<(String, &'static str)>,
+    /// That JSON value, one entry per quarantined record, in principal order.
+    #[serde(skip)]
+    quarantined_raw: Vec<Value>,
 }
 
 impl Default for AuthState {
@@ -1258,6 +1261,7 @@ impl Default for AuthState {
             audit_chain_anchor: None,
             guest_registration_enabled: false,
             quarantined: Vec::new(),
+            quarantined_raw: Vec::new(),
         }
     }
 }
@@ -5223,11 +5227,22 @@ fn load_auth_state_unverified(data_dir: &Path) -> anyhow::Result<Option<AuthStat
 
 fn parse_auth_state(data_dir: &Path, bytes: &[u8]) -> anyhow::Result<AuthState> {
     let path = auth_state_path(data_dir)?;
-    let mut state: AuthState = serde_json::from_slice(bytes)
+    let value: Value = serde_json::from_slice(bytes)
+        .with_context(|| format!("failed to parse auth state {path:?}"))?;
+    let raw_principals = value
+        .get("principals")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut state: AuthState = serde_json::from_value(value)
         .with_context(|| format!("failed to parse auth state {path:?}"))?;
     if state.schema != AUTH_STATE_SCHEMA {
         anyhow::bail!("unsupported auth state schema");
     }
+    if raw_principals.len() != state.principals.len() {
+        anyhow::bail!("failed to parse auth state {path:?}");
+    }
+    state.quarantined_raw = raw_principals;
     quarantine_malformed_agents(&mut state);
     normalize_principal_records(&mut state);
     Ok(state)
@@ -5608,18 +5623,19 @@ fn edit_malformed_agent(agent: &mut PrincipalRecord, case: usize) -> &'static st
 const MALFORMED_AGENT_CASES: usize = 10;
 
 fn quarantine_malformed_agents(state: &mut AuthState) {
-    let found: Vec<(String, &'static str)> = state
-        .principals
-        .iter()
-        .filter_map(|record| {
-            agent_admission_record_violation(&state.principals, record)
-                .map(|reason| (record.principal_id.clone(), reason))
-        })
-        .collect();
-    for (principal_id, reason) in &found {
-        note_quarantined_agent(principal_id, reason);
+    let raw_principals = std::mem::take(&mut state.quarantined_raw);
+    let mut found = Vec::new();
+    let mut kept = Vec::new();
+    for (record, raw) in state.principals.iter().zip(raw_principals) {
+        let Some(reason) = agent_admission_record_violation(&state.principals, record) else {
+            continue;
+        };
+        note_quarantined_agent(&record.principal_id, reason);
+        found.push((record.principal_id.clone(), reason));
+        kept.push(raw);
     }
     state.quarantined = found;
+    state.quarantined_raw = kept;
 }
 
 /// Kind Agent belongs on an AgentAdmission binding. The other direction, an
@@ -5695,6 +5711,54 @@ fn agent_admission_state_violation(records: &[PrincipalRecord]) -> Option<&'stat
         .find_map(|record| agent_admission_record_violation(records, record))
 }
 
+fn restore_quarantined_principal_values(
+    state: &AuthState,
+    value: &mut Value,
+) -> anyhow::Result<()> {
+    let principals = value
+        .get_mut("principals")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("quarantined agent record change refused"))?;
+    let mut used = vec![false; state.quarantined_raw.len()];
+    for entry in principals {
+        let id = entry
+            .get("principal_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if quarantine_reason(state, id).is_none() {
+            continue;
+        }
+        let Some(index) = state
+            .quarantined_raw
+            .iter()
+            .enumerate()
+            .find(|(index, raw)| {
+                !used[*index] && raw.get("principal_id").and_then(Value::as_str) == Some(id)
+            })
+            .map(|(index, _)| index)
+        else {
+            anyhow::bail!("quarantined agent record change refused");
+        };
+        used[index] = true;
+        *entry = state.quarantined_raw[index].clone();
+    }
+    if used.iter().any(|seen| !seen) {
+        anyhow::bail!("quarantined agent record change refused");
+    }
+    Ok(())
+}
+
+/// A save with no quarantined record is the struct encoding used today.
+/// A quarantined record is written from the JSON value it was loaded as.
+fn persisted_auth_state_bytes(state: &AuthState) -> anyhow::Result<Vec<u8>> {
+    if state.quarantined_raw.is_empty() {
+        return Ok(serde_json::to_vec_pretty(state)?);
+    }
+    let mut value = serde_json::to_value(state)?;
+    restore_quarantined_principal_values(state, &mut value)?;
+    Ok(serde_json::to_vec_pretty(&value)?)
+}
+
 pub(crate) fn save_auth_state(
     data_dir: &Path,
     state: &AuthState,
@@ -5750,7 +5814,7 @@ pub(crate) fn save_auth_state_allowing(
             }
             _ => {}
         }
-        let bytes = serde_json::to_vec_pretty(state)?;
+        let bytes = persisted_auth_state_bytes(state)?;
         let written_identity = write_secret_bytes_atomic(&path, &bytes)?;
         // Metadata sampled after rename alone cannot establish which bytes we wrote.
         let readback = read_auth_state_bytes(data_dir).ok().flatten();
@@ -18986,6 +19050,59 @@ pub(crate) mod tests {
             serde_json::to_vec(restored).unwrap(),
             serde_json::to_vec(&agent).unwrap(),
             "agent fields round trip byte for byte"
+        );
+    }
+
+    /// A malformed record keeps the JSON value it was loaded as, including an
+    /// unknown field. A save that renames the owner leaves that value equal.
+    #[test]
+    fn quarantined_record_keeps_the_json_value_it_was_loaded_as() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let person = store_test_human_principal(data_dir.path(), "person:local:kept-owner");
+        let mut agent = test_agent_record(TEST_AGENT_ID);
+        agent.owner = Some(person.principal_id.clone());
+        agent.request_id = Some("  ".to_string());
+        insert_principal_into_auth_file(data_dir.path(), &agent);
+        let path = auth_state_path(data_dir.path()).unwrap();
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let entry = value["principals"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["principal_id"] == TEST_AGENT_ID)
+            .unwrap();
+        entry["kept_field"] = serde_json::json!({"n": 1, "s": "kept"});
+        let planted = entry.clone();
+        write_auth_state_value(data_dir.path(), &value);
+        let loaded = load_auth_state(data_dir.path()).unwrap();
+        assert_eq!(
+            quarantine_reason(&loaded, TEST_AGENT_ID),
+            Some("agent admission request id missing")
+        );
+        assert_eq!(loaded.quarantined_raw.as_slice(), &[planted.clone()]);
+        mutate_auth_state(data_dir.path(), |state| {
+            state
+                .principals
+                .iter_mut()
+                .find(|record| record.principal_id == person.principal_id)
+                .unwrap()
+                .display_name = "Renamed owner".to_string();
+            Ok(())
+        })
+        .unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let principals = saved["principals"].as_array().unwrap();
+        let saved_agent = principals
+            .iter()
+            .find(|item| item["principal_id"] == TEST_AGENT_ID)
+            .unwrap();
+        assert_eq!(saved_agent, &planted);
+        assert_eq!(
+            principals
+                .iter()
+                .find(|item| item["principal_id"] == person.principal_id)
+                .unwrap()["display_name"],
+            "Renamed owner"
         );
     }
 
