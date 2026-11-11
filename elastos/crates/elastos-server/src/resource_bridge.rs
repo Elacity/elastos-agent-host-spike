@@ -1737,10 +1737,43 @@ mod tests {
         ));
     }
 
+    /// The production text of a source file: comment lines dropped, and
+    /// everything from its test module on left out.
+    fn production_text(source: &str) -> String {
+        let markers = ["\nmod tests {", "\npub(crate) mod tests {"];
+        let end = markers
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min();
+        source[..end.unwrap_or(source.len())]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every `.rs` file under `dir` that is not test code by its place.
+    fn production_files(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains("tests") || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                production_files(&path, found);
+            } else if name.ends_with(".rs") {
+                found.push(path);
+            }
+        }
+    }
+
     /// Every place that fills a capsule's ceiling asks the one function that
     /// decides it, and none of those files reads a manifest's capability list
-    /// itself. So a rule placed in that function (such as the empty ceiling of
-    /// a manifest with asks) holds wherever a capsule is started.
+    /// or storage permissions itself. So a rule placed in that function (such
+    /// as the empty ceiling of a manifest with asks) holds wherever a capsule
+    /// is started. And those four are the only production callers of that
+    /// function in the workspace's crates: a fifth has to be added here.
     #[test]
     fn every_place_that_fills_a_ceiling_asks_the_one_bounds_function() {
         for (file, source, fill) in [
@@ -1765,11 +1798,34 @@ mod tests {
                 "let manifest_capabilities = manifest.resource_authority_bounds();",
             ),
         ] {
-            let production = source.split("\nmod tests {").next().unwrap();
-            let production = production.split("\npub(crate) mod tests {").next().unwrap();
+            let production = production_text(source);
             assert_eq!(production.matches(fill).count(), 1, "{file}: {fill}");
-            assert!(!production.contains("manifest.capabilities"), "{file}");
+            for direct in ["manifest.capabilities", "permissions.storage"] {
+                assert!(!production.contains(direct), "{file} reads {direct}");
+            }
         }
+
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut callers = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            let calls = text.matches(".resource_authority_bounds()").count();
+            if calls > 0 {
+                let name = file.strip_prefix(crates).unwrap().to_string_lossy();
+                callers.push((name.into_owned(), calls));
+            }
+        }
+        callers.sort();
+        let expected = [
+            "elastos-server/src/capsule_cmd.rs",
+            "elastos-server/src/run_cmd.rs",
+            "elastos-server/src/runtime.rs",
+            "elastos-server/src/supervisor.rs",
+        ]
+        .map(|name| (name.to_string(), 1));
+        assert_eq!(callers, expected);
     }
 
     /// A temp data dir holding a stored Human record for `principal_id`.

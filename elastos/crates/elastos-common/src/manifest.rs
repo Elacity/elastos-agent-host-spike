@@ -641,7 +641,8 @@ impl CapsuleManifest {
         }
 
         // An ask's resource passes the same checks as a capability: one
-        // loop, so `asks` is never a way round a role rule.
+        // loop, so `asks` is never a way round a role rule. Every ask's
+        // resource is therefore checked here, before any ask's actions.
         let asked = self.asks.iter().map(|ask| &ask.resource);
         for cap in self.capabilities.iter().chain(asked) {
             if !is_allowed_uri_scheme(cap) {
@@ -3562,6 +3563,19 @@ mod tests {
                     "{role} {scheme}"
                 );
             }
+            let service = "localhost://ElastOS/SystemServices/IPFS/*";
+            let value = asks_fixture(
+                role,
+                serde_json::json!({"asks":[{"resource":service,"actions":["read"]}]}),
+            );
+            let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+            assert!(
+                manifest
+                    .validate()
+                    .unwrap_err()
+                    .contains("runtime system-service storage"),
+                "{role}"
+            );
         }
     }
 
@@ -3590,6 +3604,27 @@ mod tests {
         }));
         let error = manifest.validate().unwrap_err();
         assert!(error.starts_with("ask_invalid:"), "{error}");
+    }
+
+    /// The order between two asks that are each wrong in a different way:
+    /// the resources of all asks are checked first (in the one loop they
+    /// share with capabilities), then each ask's actions in the list's order.
+    #[test]
+    fn every_asks_resource_is_checked_before_any_asks_actions() {
+        let manifest = asks_manifest(serde_json::json!({"asks":[
+            {"resource":"elastos://did/*","actions":[]},
+            {"resource":"https://example.org/*","actions":["read"]},
+        ]}));
+        let error = manifest.validate().unwrap_err();
+        assert!(error.contains("unsupported URI scheme"), "{error}");
+        let manifest = asks_manifest(serde_json::json!({"asks":[
+            {"resource":"elastos://did/*","actions":[]},
+            {"resource":"elastos://did/second/*","actions":["read","read"]},
+        ]}));
+        assert_eq!(
+            manifest.validate().unwrap_err(),
+            "ask_invalid: the ask for \"elastos://did/*\" lists no action"
+        );
     }
 
     #[test]
@@ -3677,5 +3712,17 @@ mod tests {
                 format!("\"{}\"", action.as_str())
             );
         }
+        // No wildcard arm: a variant added to the type stops this compiling
+        // until it is given its place, and that place must be in `ALL`.
+        let place = |action: AskAction| match action {
+            AskAction::Read => 0,
+            AskAction::Write => 1,
+            AskAction::Execute => 2,
+            AskAction::Message => 3,
+            AskAction::Delete => 4,
+            AskAction::Admin => 5,
+        };
+        let places: Vec<usize> = AskAction::ALL.into_iter().map(place).collect();
+        assert_eq!(places, [0, 1, 2, 3, 4, 5]);
     }
 }
