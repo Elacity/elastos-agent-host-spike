@@ -325,7 +325,7 @@ mod tests {
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, Some(grant))
                 .unwrap();
 
-        assert_eq!(principal.as_deref(), Some(context.principal_id.as_str()));
+        assert_eq!(principal.as_deref(), Some(context.principal_id()));
     }
 
     #[test]

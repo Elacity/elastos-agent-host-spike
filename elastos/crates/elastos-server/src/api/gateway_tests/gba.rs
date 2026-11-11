@@ -330,7 +330,7 @@ async fn old_install_upgrade_encrypts_ucity_save_and_state_before_normal_round_t
     let state = library_test_state(dir.path()).await;
     let context = local_home_launch_token_context(dir.path()).unwrap();
     let protection =
-        crate::auth::store_test_principal_root_protection(dir.path(), &context.principal_id);
+        crate::auth::store_test_principal_root_protection(dir.path(), context.principal_id());
     let save_uri = format!(
         "{}/.AppData/LocalHost/GBA/ucity/rom-id.sav",
         protection.localhost_root
@@ -632,11 +632,11 @@ async fn gba_viewer_reads_only_compatible_library_objects_as_raw_bytes() {
     let app = gateway_router(library_test_state(dir.path()).await);
     let context = local_home_launch_token_context(dir.path()).unwrap();
     assert!(
-        crate::auth::stored_principal_record(dir.path(), &context.principal_id)
+        crate::auth::stored_principal_record(dir.path(), context.principal_id())
             .unwrap()
             .is_none()
     );
-    let principal_root = crate::auth::principal_localhost_root(&context.principal_id);
+    let principal_root = crate::auth::principal_localhost_root(context.principal_id());
 
     for (name, bytes) in [
         ("Library/Test.gba", b"gba bytes".as_slice()),
@@ -646,7 +646,7 @@ async fn gba_viewer_reads_only_compatible_library_objects_as_raw_bytes() {
         let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &uri).unwrap();
         crate::auth::write_principal_root_object(
             dir.path(),
-            &context.principal_id,
+            context.principal_id(),
             &principal_root,
             &uri,
             &path,
@@ -876,7 +876,7 @@ async fn viewer_storage_whitespace_root_cannot_reach_the_agents_area() {
         &context,
     )
     .unwrap();
-    let root = crate::auth::principal_localhost_root(&context.principal_id);
+    let root = crate::auth::principal_localhost_root(context.principal_id());
     let planted = |rest: &str| {
         elastos_common::localhost::rooted_localhost_fs_path(
             dir.path(),

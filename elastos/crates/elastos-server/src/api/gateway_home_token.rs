@@ -1350,7 +1350,7 @@ mod tests {
         let token = issue_home_launch_token(data_dir, &launch_context.executable_actor).unwrap();
         let mut envelope = decode_launch_token(&token);
         envelope.payload.launch_context = launch_context;
-        envelope.payload.principal_id = context.principal_id.clone();
+        envelope.payload.principal_id = context.principal_id().to_string();
         envelope.payload.session_id = context.session_id.clone();
         envelope.payload.proof_binding_id = context.proof_binding_id.clone();
         envelope.payload.grant_id = context.grant_id.clone();
@@ -1713,7 +1713,7 @@ mod tests {
         );
         let mut grant = elastos_runtime::auth::AuthSessionGrantV1 {
             schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             session_id: context.session_id.clone(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             grant_id: context.grant_id.clone(),
@@ -1778,7 +1778,7 @@ mod tests {
                 schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
                 grant_id: context.grant_id.clone(),
                 session_id: context.session_id.clone(),
-                principal_id: context.principal_id.clone(),
+                principal_id: context.principal_id().to_string(),
                 proof_binding_id: context.proof_binding_id.clone().unwrap(),
                 issued_at: now,
                 expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
@@ -1831,7 +1831,7 @@ mod tests {
                 schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
                 grant_id: system_context.grant_id.clone(),
                 session_id: system_context.session_id.clone(),
-                principal_id: system_context.principal_id.clone(),
+                principal_id: system_context.principal_id().to_string(),
                 proof_binding_id: system_context.proof_binding_id.clone().unwrap(),
                 issued_at: now,
                 expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
@@ -2034,7 +2034,7 @@ mod tests {
                 schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
                 grant_id: stored.grant_id.clone(),
                 session_id: stored.session_id.clone(),
-                principal_id: stored.principal_id.clone(),
+                principal_id: stored.principal_id().to_string(),
                 proof_binding_id: stored.proof_binding_id.clone().unwrap(),
                 issued_at: now,
                 expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
@@ -2278,7 +2278,7 @@ mod tests {
             HomeLaunchOriginPolicy::InternalShell,
         )
         .unwrap();
-        assert_eq!(parent_result.context.principal_id, context.principal_id);
+        assert_eq!(parent_result.context.principal_id(), context.principal_id());
 
         let mut browser_headers = headers;
         browser_headers.insert(axum::http::header::ORIGIN, "null".parse().unwrap());
@@ -2319,7 +2319,7 @@ mod tests {
                 schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
                 grant_id: context.grant_id.clone(),
                 session_id: context.session_id.clone(),
-                principal_id: context.principal_id.clone(),
+                principal_id: context.principal_id().to_string(),
                 proof_binding_id: context.proof_binding_id.clone().unwrap(),
                 issued_at: now,
                 expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
@@ -2379,8 +2379,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            authority.home_launch_context().principal_id,
-            context.principal_id
+            authority.home_launch_context().principal_id(),
+            context.principal_id()
         );
         assert_eq!(authority.home_launch_context().root(), context.root());
 

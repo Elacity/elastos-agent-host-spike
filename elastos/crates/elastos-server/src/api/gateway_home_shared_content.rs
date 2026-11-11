@@ -74,7 +74,7 @@ fn redeem_check(
     let index = checks.iter().position(|(id, _)| id == check_id)?;
     let (_, check) = checks.remove(index);
     (check.expires_at > now
-        && check.principal_id == home.principal_id
+        && check.principal_id == home.principal_id()
         && check.session_id == home.session_id)
         .then_some(check)
 }
@@ -459,7 +459,7 @@ pub(super) async fn home_shared_content_check(
     };
     extra["check_id"] = json!(remember_check(
         SharedContentCheck {
-            principal_id: home.principal_id.clone(),
+            principal_id: home.principal_id().to_string(),
             session_id: home.session_id.clone(),
             app_id: app.id,
             cid: cid.clone(),

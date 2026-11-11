@@ -1923,7 +1923,7 @@ mod tests {
         );
         let mut grant = elastos_runtime::auth::AuthSessionGrantV1 {
             schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             session_id: context.session_id.clone(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             grant_id: context.grant_id.clone(),

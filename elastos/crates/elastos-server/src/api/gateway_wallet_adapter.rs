@@ -316,7 +316,7 @@ mod tests {
                 .unwrap();
         let verified = authority.verified_context();
 
-        assert_eq!(verified.principal_id(), launch_context.principal_id);
+        assert_eq!(verified.principal_id(), launch_context.principal_id());
         assert_eq!(verified.session_id(), launch_context.session_id);
         assert_eq!(
             verified.proof_binding_id(),

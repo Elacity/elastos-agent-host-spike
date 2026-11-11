@@ -5414,7 +5414,7 @@ mod tests {
                     schema: AuthSessionGrantV1::SCHEMA.into(),
                     grant_id: context.grant_id.clone(),
                     session_id: context.session_id.clone(),
-                    principal_id: context.principal_id.clone(),
+                    principal_id: context.principal_id().to_string(),
                     proof_binding_id: context.proof_binding_id.clone().unwrap(),
                     issued_at: timestamp,
                     expires_at: timestamp + 3600,
@@ -5504,7 +5504,7 @@ mod tests {
                 let public = serde_json::to_string(readiness).unwrap();
                 for private in [
                     root.path().to_str().unwrap(),
-                    &context.principal_id,
+                    context.principal_id(),
                     "adapter",
                     "inference_ready",
                     "engine_warm",
@@ -5615,7 +5615,7 @@ mod tests {
                     schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
                     grant_id: context.grant_id.clone(),
                     session_id: context.session_id.clone(),
-                    principal_id: context.principal_id.clone(),
+                    principal_id: context.principal_id().to_string(),
                     proof_binding_id: context.proof_binding_id.clone().unwrap(),
                     issued_at: timestamp,
                     expires_at: timestamp + 3600,
@@ -5874,7 +5874,7 @@ mod tests {
                 unavailable_model_runtime_projection()
             );
             assert!(!catalog.to_string().contains(&record.operation_id));
-            assert!(!catalog.to_string().contains(&context().principal_id));
+            assert!(!catalog.to_string().contains(context().principal_id()));
             assert_eq!(
                 provider.calls.lock().unwrap().len(),
                 2,
@@ -6577,7 +6577,7 @@ mod tests {
                 .unwrap()
                 .load()
                 .unwrap()
-                .kept(&context().principal_id, &old.package_cid));
+                .kept(context().principal_id(), &old.package_cid));
             let released =
                 retention_intent(root.path(), &context(), &old.package_cid, false).unwrap();
             assert_eq!(released["kept"], false);
@@ -6683,7 +6683,7 @@ mod tests {
                 .load()
                 .unwrap();
             assert_eq!(state.retirement, None);
-            assert!(state.kept(&context().principal_id, &f.old.package_cid));
+            assert!(state.kept(context().principal_id(), &f.old.package_cid));
             assert_eq!(
                 load_operation(f.root.path(), &f.old.operation_id)
                     .unwrap()
@@ -6704,7 +6704,7 @@ mod tests {
                 operation_id: f.old.operation_id.clone(),
                 admission_id: f.old.operation_id.clone(),
                 phase: RetirementPhase::WithdrawalPending,
-                reclaim_principal: Some(context().principal_id),
+                reclaim_principal: Some(context().principal_id().to_string()),
             });
             inventory.save(&state).unwrap();
             drop(inventory);
@@ -6730,7 +6730,7 @@ mod tests {
                 .load()
                 .unwrap();
             assert_eq!(state.retirement, None);
-            assert!(state.kept(&context().principal_id, &f.old.package_cid));
+            assert!(state.kept(context().principal_id(), &f.old.package_cid));
             assert_eq!(
                 load_operation(f.root.path(), &f.old.operation_id)
                     .unwrap()
@@ -6797,8 +6797,8 @@ mod tests {
                 .load()
                 .unwrap();
             assert_eq!(state.retirement, None);
-            assert!(!state.kept(&context().principal_id, &f.old.package_cid));
-            assert!(state.kept(&context().principal_id, &f.pending.package_cid));
+            assert!(!state.kept(context().principal_id(), &f.old.package_cid));
+            assert!(state.kept(context().principal_id(), &f.pending.package_cid));
             assert_eq!(
                 load_operation(f.root.path(), &f.old.operation_id)
                     .unwrap()
@@ -6825,7 +6825,7 @@ mod tests {
                         && record.state == PreparationState::Admitted
                 })
                 .unwrap();
-            alias.request_binding.principal = foreign.principal_id.clone();
+            alias.request_binding.principal = foreign.principal_id().to_string();
             alias.operation_id = operation_id(alias).unwrap();
             inventory.save(&state).unwrap();
             drop(inventory);
@@ -6881,9 +6881,9 @@ mod tests {
             assert_eq!(retirement.phase, RetirementPhase::WithdrawalPending);
             assert_eq!(
                 retirement.reclaim_principal.as_deref(),
-                Some(context().principal_id.as_str())
+                Some(context().principal_id())
             );
-            assert!(state.kept(&context().principal_id, &f.old.package_cid));
+            assert!(state.kept(context().principal_id(), &f.old.package_cid));
             drop(inventory);
             let path = f.root.path().join("model-preparation/state.json");
             let before = std::fs::read(&path).unwrap();
@@ -6932,7 +6932,7 @@ mod tests {
                             && record.state == PreparationState::Admitted
                     })
                     .unwrap();
-                alias.request_binding.principal = requester.principal_id.clone();
+                alias.request_binding.principal = requester.principal_id().to_string();
                 alias.operation_id = operation_id(alias).unwrap();
                 inventory.save(&state).unwrap();
                 drop(inventory);
@@ -6957,10 +6957,10 @@ mod tests {
                 assert_eq!(retirement.phase, RetirementPhase::Withdrawn);
                 assert_eq!(
                     retirement.reclaim_principal.as_deref(),
-                    Some(requester.principal_id.as_str())
+                    Some(requester.principal_id())
                 );
-                assert_ne!(requester.principal_id, f.old.request_binding.principal);
-                assert!(state.kept(&requester.principal_id, &f.old.package_cid));
+                assert_ne!(requester.principal_id(), f.old.request_binding.principal);
+                assert!(state.kept(requester.principal_id(), &f.old.package_cid));
                 assert!(weights.is_file());
                 std::fs::set_permissions(&weights, std::fs::Permissions::from_mode(0o600)).unwrap();
                 let calls = f.model.calls.lock().unwrap().len();
@@ -7003,8 +7003,8 @@ mod tests {
                     .load()
                     .unwrap();
                 assert!(state.retirement.is_none());
-                assert!(!state.kept(&requester.principal_id, &f.old.package_cid));
-                assert!(state.kept(&context().principal_id, &f.pending.package_cid));
+                assert!(!state.kept(requester.principal_id(), &f.old.package_cid));
+                assert!(state.kept(context().principal_id(), &f.pending.package_cid));
                 assert!(!weights.exists());
                 assert_eq!(
                     f.model.calls.lock().unwrap().len(),
@@ -8538,7 +8538,7 @@ mod tests {
             assert_eq!(actual.extra, expected.extra);
             let current = Inventory::open(root.path(), false).unwrap().load().unwrap();
             assert_eq!(current.records, records);
-            assert!(current.kept(&context().principal_id, &record.package_cid));
+            assert!(current.kept(context().principal_id(), &record.package_cid));
             assert_eq!(
                 backend.calls.lock().unwrap().as_slice(),
                 [
@@ -9223,7 +9223,7 @@ server.serve_forever()
                         serde_json::json!({"schema":"elastos.model.input.text/v1","prompt":prompt});
                     let binding = RuntimeCreateBinding {
                         schema: RUNTIME_CREATE_BINDING_SCHEMA.into(),
-                        principal_id: ctx.principal_id.clone(),
+                        principal_id: ctx.principal_id().to_string(),
                         session_id: ctx.session_id.clone(),
                         capsule_id: "assistant".into(),
                         grant_id: ctx.grant_id.clone(),
@@ -9891,7 +9891,7 @@ server.serve_forever()
             let context = stored_context(root.path());
             let grant = AuthSessionGrantV1 {
                 schema: AuthSessionGrantV1::SCHEMA.into(),
-                principal_id: context.principal_id.clone(),
+                principal_id: context.principal_id().to_string(),
                 session_id: context.session_id.clone(),
                 proof_binding_id: context.proof_binding_id.clone().unwrap(),
                 grant_id: context.grant_id.clone(),
@@ -10052,7 +10052,7 @@ server.serve_forever()
                     .unwrap()
                     .load()
                     .unwrap()
-                    .kept(&context.principal_id, &cid));
+                    .kept(context.principal_id(), &cid));
             }
         }
     }
@@ -11880,7 +11880,7 @@ server.serve_forever()
             .unwrap()
             .load()
             .unwrap()
-            .kept(&context().principal_id, &record.package_cid));
+            .kept(context().principal_id(), &record.package_cid));
         let calls = backend.calls.lock().unwrap().clone();
         let path = root.path().join("model-preparation/state.json");
         let mut foreign = context();
@@ -13535,7 +13535,7 @@ server.serve_forever()
         let path = root.path().join("model-preparation/state.json");
         let saved = std::fs::read(&path).unwrap();
         let state: PreparationInventory = serde_json::from_slice(&saved).unwrap();
-        assert!(state.kept(&principal.principal_id, &cid));
+        assert!(state.kept(principal.principal_id(), &cid));
         assert_eq!(state.retention_claims.len(), 1);
         assert_eq!(state.records, vec![record.clone()]);
         assert_eq!(
@@ -13554,7 +13554,7 @@ server.serve_forever()
             .unwrap()
             .load()
             .unwrap()
-            .kept(&principal.principal_id, &cid));
+            .kept(principal.principal_id(), &cid));
     }
 
     #[test]
@@ -13582,7 +13582,7 @@ server.serve_forever()
                 .unwrap()
                 .load()
                 .unwrap()
-                .kept(&context().principal_id, cid));
+                .kept(context().principal_id(), cid));
             let cancelling = terminal.ends_with("cancel");
             let result = manage(
                 root.path(),
@@ -13609,7 +13609,10 @@ server.serve_forever()
             );
             assert_eq!(result.reserved_bytes, 0);
             let inventory = Inventory::open(root.path(), false).unwrap();
-            assert!(!inventory.load().unwrap().kept(&context().principal_id, cid));
+            assert!(!inventory
+                .load()
+                .unwrap()
+                .kept(context().principal_id(), cid));
             drop(inventory);
             let next = reserve(
                 root.path(),
@@ -13620,7 +13623,10 @@ server.serve_forever()
             .unwrap();
             assert_ne!(next.operation_id, record.operation_id);
             let inventory = Inventory::open(root.path(), false).unwrap();
-            assert!(inventory.load().unwrap().kept(&context().principal_id, cid));
+            assert!(inventory
+                .load()
+                .unwrap()
+                .kept(context().principal_id(), cid));
         }
     }
 
@@ -13645,7 +13651,7 @@ server.serve_forever()
                 assert!(inventory
                     .load()
                     .unwrap()
-                    .kept(&context().principal_id, &record.package_cid));
+                    .kept(context().principal_id(), &record.package_cid));
             }
             settle_failure(root.path(), &record.operation_id, true, false).unwrap();
             let settled = load_operation(root.path(), &record.operation_id).unwrap();
@@ -13662,7 +13668,7 @@ server.serve_forever()
             assert!(!inventory
                 .load()
                 .unwrap()
-                .kept(&context().principal_id, &record.package_cid));
+                .kept(context().principal_id(), &record.package_cid));
             assert_eq!(*backend.calls.lock().unwrap(), calls);
         }
     }
@@ -13688,7 +13694,7 @@ server.serve_forever()
                 retention_intent(root.path(), &principal, &record.package_cid, true).unwrap();
             assert_eq!(
                 reply["admitted"],
-                principal.principal_id == context().principal_id
+                principal.principal_id() == context().principal_id()
             );
             cancel(
                 root.path(),
@@ -13698,10 +13704,10 @@ server.serve_forever()
             .unwrap();
             let inventory = Inventory::open(root.path(), false).unwrap();
             let state = inventory.load().unwrap();
-            assert!(state.kept(&context().principal_id, &record.package_cid));
+            assert!(state.kept(context().principal_id(), &record.package_cid));
             assert_eq!(
-                state.kept(&principal.principal_id, &record.package_cid),
-                principal.principal_id == context().principal_id
+                state.kept(principal.principal_id(), &record.package_cid),
+                principal.principal_id() == context().principal_id()
             );
             assert_eq!(state.retention_claims.len(), 1);
             assert!(inventory.admitted(&record.operation_id).is_ok());
@@ -13853,7 +13859,7 @@ server.serve_forever()
         .unwrap();
         assert_eq!(
             saved["retention_claims"],
-            serde_json::json!([{"principal":second.principal_id,"cid":record.package_cid}])
+            serde_json::json!([{"principal":second.principal_id(),"cid":record.package_cid}])
         );
         assert_eq!(
             Inventory::open(root.path(), false)
@@ -13972,8 +13978,8 @@ server.serve_forever()
             serde_json::json!([claim, claim]),
             serde_json::json!(vec![claim.clone(); MAX_RECORDS + 1]),
             serde_json::json!([{"principal":"person:foreign","cid":record.package_cid}]),
-            serde_json::json!([{"principal":context().principal_id,"cid":foreign_cid}]),
-            serde_json::json!([{"principal":context().principal_id,"cid":record.package_cid,"keep":true}]),
+            serde_json::json!([{"principal":context().principal_id(),"cid":foreign_cid}]),
+            serde_json::json!([{"principal":context().principal_id(),"cid":record.package_cid,"keep":true}]),
             serde_json::Value::Null,
         ];
         let calls = backend.calls.lock().unwrap().clone();
@@ -14068,7 +14074,7 @@ server.serve_forever()
         assert_eq!(reused.state, PreparationState::Admitted);
         assert_eq!(reused.admission_id, record.operation_id);
         assert_eq!(reused.reserved_bytes, 0);
-        assert_eq!(reused.request_binding.principal, other.principal_id);
+        assert_eq!(reused.request_binding.principal, other.principal_id());
         assert_eq!(
             reused.request_binding.request_id,
             fixture_request_id(root.path(), "fresh", now().unwrap())
@@ -15493,13 +15499,13 @@ server.serve_forever()
             config["model_catalog"]["head_cid"].as_str().unwrap()
         );
         assert_eq!(reserved.request_binding.request_id, request_id);
-        assert_eq!(reserved.request_binding.principal, context.principal_id);
+        assert_eq!(reserved.request_binding.principal, context.principal_id());
         assert_eq!(reserved.request_binding.capsule, capsule);
         assert_eq!(
             reserved.request_binding,
             esp_request_binding(
                 request_id,
-                &context.principal_id,
+                context.principal_id(),
                 capsule,
                 Some(caller.interface),
                 &use_method.id,
