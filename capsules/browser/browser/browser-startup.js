@@ -11,7 +11,9 @@ export function startBrowser(state) {
   })
     .then(async (summary) => {
       if (!summary || !state.browserInternetPollingActive || state.homeWindowCloseInFlight || state.homeWindowTerminalCloseConfirmed) return;
-      if (await state.restoreRuntimePageViewer(summary)) return;
+      if (await state.restoreRuntimePageViewer(summary)) {
+        return state.continueRestoredInternetNavigation();
+      }
       if (!state.browserInternetPollingActive || state.homeWindowCloseInFlight || state.homeWindowTerminalCloseConfirmed) return;
       if (!state.internetContinuationUrl && !state.explicitBrowserOpen) {
         state.setLoading(false);

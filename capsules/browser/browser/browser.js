@@ -3013,6 +3013,15 @@ async function attachRecoveredDisplay(summary, owner) {
     initial_offer: result.initial_offer, audio_offer: result.audio_offer };
 }
 
+async function continueRestoredInternetNavigation() {
+  if (!internetContinuationUrl || !browserInternetAllowed || !browserInternetPollingActive ||
+      currentPage?.recovery_state !== "active" || !runtimeViewerOwnerActive(restoredViewerOwner)) return;
+  const url = internetContinuationUrl;
+  internetContinuationUrl = null;
+  // Use address-bar navigation, including its existing replacement/close arbitration.
+  return navigateAddress(url);
+}
+
 async function restoreRuntimePageViewer(summary) {
   if (unloadCleanupStarted || homeWindowCloseInFlight || homeWindowTerminalCloseConfirmed || currentPage) return true;
   const sessions = summary?.sessions;
@@ -3135,6 +3144,7 @@ startBrowser({
   watchInternetPermission,
   fetchBrowserSummary,
   restoreRuntimePageViewer,
+  continueRestoredInternetNavigation,
   explicitBrowserOpen,
   requestRuntimeOpen,
   isAuthoritySessionError,

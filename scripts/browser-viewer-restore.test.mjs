@@ -1,5 +1,5 @@
 import { startBrowser } from "../capsules/browser/browser/browser-startup.js";
-import { browserInternetGranted } from "../capsules/browser/browser/browser-runtime-api.js";
+import { browserInternetGranted, normalizeUrl, sameBrowserStreamTarget, isBrowserErrorUrl, visibleAddressForUrl } from "../capsules/browser/browser/browser-runtime-api.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -62,7 +62,7 @@ function harness() {
       display_session: { mode: 'webrtc_remote_display', width: 1280, height: 720, source: 'diagnostic-status', ice_servers: [{ credential_present: true }] } }; },
   });
   state.globalThis = state;
-  for (const name of ['resetPageInputDelivery', 'displayAttachRequestId', 'viewerDisplayAttachTimeoutMs', 'reuseDisplayAttachment', 'terminalDisplayAttachment', 'allocateDisplayAttachRetryId', 'markDisplayAttachRetryNeeded', 'displayAttachRequestForRecovery', 'currentRuntimePageOwner', 'runtimeViewerOwnerActive', 'recoverableRuntimePage', 'fetchPageStatus', 'attachRecoveredDisplay', 'restoreRuntimePageViewer', 'settleRemoteDisplayFailure']) {
+  for (const name of ['resetPageInputDelivery', 'displayAttachRequestId', 'viewerDisplayAttachTimeoutMs', 'reuseDisplayAttachment', 'terminalDisplayAttachment', 'allocateDisplayAttachRetryId', 'markDisplayAttachRetryNeeded', 'displayAttachRequestForRecovery', 'currentRuntimePageOwner', 'runtimeViewerOwnerActive', 'recoverableRuntimePage', 'fetchPageStatus', 'attachRecoveredDisplay', 'restoreRuntimePageViewer', 'continueRestoredInternetNavigation', 'settleRemoteDisplayFailure']) {
     vm.runInContext(declaration(name), state);
   }
   return { state, calls, failures, requests, restore: value => state.restoreRuntimePageViewer(value) };
@@ -329,6 +329,93 @@ for (const owned of [true, false]) for (const requestedUrl of ['', 'https://requ
   await startBrowser(h.state);
   assert.deepEqual(opens, owned ? [] : [requestedUrl || 'https://default.invalid/']);
 });
+
+function continuationHarness({ continuation = 'approved', cleanupPending = false } = {}) {
+  const h = harness(), value = summary(), navigations = [], opens = [];
+  if (cleanupPending) value.sessions.recoverable_page.state = 'cleanup_pending';
+  Object.assign(h.state, {
+    params: new URLSearchParams({url: 'https://requested.invalid/approved-new'}),
+    DEFAULT_URL: 'https://default.invalid/', addressInput: {blur() {}},
+    browserInternetAllowed: true, currentInternetConsent: null, pendingInternetNavigation: null,
+    internetRequestPromise: null, internetRequestedUrl: '', finishInternetPollWait: null,
+    browserInternetPollTimer: 0, browserInternetGranted, normalizeUrl, sameBrowserStreamTarget,
+    isBrowserErrorUrl, visibleAddressForUrl, clearAddressDraft() {}, statusTimer: 0,
+    statusNode: {firstChild: {}, dataset: {}},
+    fetchBrowserSummary: async () => value,
+    requestRuntimeOpen: async url => opens.push(url),
+    sendBrowserInput: async input => { navigations.push({page: h.state.currentPage.page_id, ...input}); return {accepted: true}; },
+    isAuthoritySessionError: () => false, friendlyOpenError: error => error.message,
+    showInternetRequest() {},
+    renderInternetConsent(consent) {
+      h.state.currentInternetConsent = consent;
+      h.state.browserInternetAllowed = consent.status === 'granted';
+    },
+  });
+  const fetch = h.state.fetchJson;
+  let reads = 0;
+  h.state.fetchJson = async (path, options) => {
+    if (path !== '/api/apps/browser/internet') return fetch(path, options);
+    if (options?.body?.action === 'request') return {status: 'requested', request: {
+      request_id: 'this-window', expires_at: Math.floor(Date.now()/1000) + (continuation === 'expired' ? -1 : 60),
+    }};
+    reads++;
+    return reads === 1 && continuation !== 'none' ? {status: 'off'} : {status: 'granted', request_id: 'this-window'};
+  };
+  h.state.window = {clearTimeout() {}, setTimeout(resolve) {
+    if (continuation === 'cancelled') h.state.pendingInternetNavigation = null;
+    queueMicrotask(resolve); return 1;
+  }};
+  for (const name of ['requestInternetNavigation', 'checkBrowserInternet', 'currentBrowserUrl', 'navigateAddress']) {
+    vm.runInContext(declaration(name), h.state);
+  }
+  return {...h, value, navigations, opens};
+}
+
+test('approved continuation navigates the real recovered page once through address navigation', async () => {
+  const h = continuationHarness();
+  await startBrowser(h.state);
+  assert.deepEqual(h.navigations, [{page: 'page-one', type: 'browser_command', command: 'navigate', url: 'https://requested.invalid/approved-new'}]);
+  assert.deepEqual(h.opens, []);
+  assert.equal(h.state.internetContinuationUrl, null);
+  assert.equal(h.state.currentPage.page_id, 'page-one');
+  await startBrowser(h.state);
+  assert.equal(h.navigations.length, 1);
+  assert.deepEqual(h.opens, []);
+});
+
+for (const continuation of ['none', 'expired', 'cancelled']) test(`${continuation} continuation with recoverable ownership never navigates`, async () => {
+  const h = continuationHarness({continuation});
+  await startBrowser(h.state);
+  assert.deepEqual(h.navigations, []);
+  assert.deepEqual(h.opens, []);
+  assert.equal(h.state.internetContinuationUrl, null);
+  // A later grant/recheck may restore ownership, but cannot resurrect the cancelled URL.
+  await startBrowser(h.state);
+  assert.equal(h.state.currentPage.page_id, 'page-one');
+  assert.deepEqual(h.navigations, []); assert.deepEqual(h.opens, []);
+});
+
+test('cleanup_pending retains ownership without consuming or navigating a continuation', async () => {
+  const h = continuationHarness({cleanupPending: true});
+  await startBrowser(h.state);
+  assert.equal(h.state.currentPage.recovery_state, 'cleanup_pending');
+  assert.equal(h.state.internetContinuationUrl, 'https://requested.invalid/approved-new');
+  assert.deepEqual(h.navigations, []); assert.deepEqual(h.opens, []);
+});
+
+for (const flag of ['unloadCleanupStarted', 'homeWindowCloseInFlight', 'homeWindowTerminalCloseConfirmed', 'permission-revoked', 'owner-replaced', 'cleanup-started']) {
+  test(`approved continuation cannot navigate when ${flag} during restore`, async () => {
+    const h = continuationHarness();
+    h.state.connectRemoteDisplay = async () => {
+      if (flag === 'permission-revoked') h.state.browserInternetAllowed = false;
+      else if (flag === 'owner-replaced') h.state.currentPageGeneration++;
+      else if (flag === 'cleanup-started') h.state.runtimePageCleanup.status = () => ({state: 'pending'});
+      else h.state[flag] = true;
+    };
+    await startBrowser(h.state);
+    assert.deepEqual(h.navigations, []); assert.deepEqual(h.opens, []);
+  });
+}
 
 test('fresh Dock startup shows a persistent status while Engine checks are pending', async () => {
   const h = harness(), pending = deferred(), opens = [], value = summary();
