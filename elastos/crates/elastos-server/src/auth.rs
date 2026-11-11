@@ -5441,22 +5441,35 @@ fn agent_admission_change_reason(
     agent_admission_paired_change_reason(before, after)
 }
 
-fn principals_before_save(
-    data_dir: &Path,
-    after: &[PrincipalRecord],
-) -> anyhow::Result<Vec<PrincipalRecord>> {
+fn refuse_unreadable_auth_state(data_dir: &Path, error: impl std::fmt::Display) -> anyhow::Error {
+    let named = auth_state_path(data_dir)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| AUTH_STATE_FILE.to_string());
+    anyhow!(
+        "agent admission record change refused: auth state file {named} could not be read: {error}"
+    )
+}
+
+/// Bytes of an auth state file the guard can parse. A missing file is the
+/// first run. A file that exists and cannot be parsed is refused: it is not
+/// treated as "no agents before".
+fn guard_readable_auth_bytes(data_dir: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     let Some((bytes, _)) = read_auth_state_bytes(data_dir)? else {
+        return Ok(None);
+    };
+    if let Err(error) = serde_json::from_slice::<AuthState>(&bytes) {
+        return Err(refuse_unreadable_auth_state(data_dir, error));
+    }
+    Ok(Some(bytes))
+}
+
+fn principals_before_save(data_dir: &Path) -> anyhow::Result<Vec<PrincipalRecord>> {
+    let Some(bytes) = guard_readable_auth_bytes(data_dir)? else {
         return Ok(Vec::new());
     };
-    match serde_json::from_slice::<AuthState>(&bytes) {
-        Ok(state) => Ok(state.principals),
-        // A person-only save may replace a file this process cannot parse.
-        // A save that carries an AgentAdmission record cannot, because the
-        // record on disk was not visible to the guard.
-        Err(_) if !after.iter().any(is_agent_admission_record) => Ok(Vec::new()),
-        Err(error) => Err(error)
-            .context("agent admission record change refused: auth state could not be read"),
-    }
+    let state: AuthState = serde_json::from_slice(&bytes)
+        .map_err(|error| refuse_unreadable_auth_state(data_dir, error))?;
+    Ok(state.principals)
 }
 
 fn refuse_agent_admission_changes(
@@ -5464,7 +5477,7 @@ fn refuse_agent_admission_changes(
     after: &AuthState,
     permit: Option<AgentAdmissionOperation>,
 ) -> anyhow::Result<()> {
-    let before = principals_before_save(data_dir, &after.principals)?;
+    let before = principals_before_save(data_dir)?;
     if let Some(reason) = agent_admission_change_reason(&before, &after.principals) {
         anyhow::bail!(
             "agent admission record change refused: {reason} ({})",
@@ -5508,18 +5521,15 @@ fn canonical_json(values: &[Value]) -> Vec<Vec<u8>> {
     bytes
 }
 
-/// The raw principal values on disk that this save must keep. A file this
-/// process cannot parse follows the person-only policy of `principals_before_save`.
-fn disk_quarantined_raw(data_dir: &Path, after: &AuthState) -> anyhow::Result<Vec<Value>> {
-    let Some((bytes, _)) = read_auth_state_bytes(data_dir)? else {
+/// The raw principal values on disk that this save must keep. A file that
+/// exists and cannot be parsed is refused, the same way `principals_before_save`
+/// refuses it. A missing file has nothing to keep.
+fn disk_quarantined_raw(data_dir: &Path) -> anyhow::Result<Vec<Value>> {
+    let Some(bytes) = guard_readable_auth_bytes(data_dir)? else {
         return Ok(Vec::new());
     };
-    if serde_json::from_slice::<AuthState>(&bytes).is_err() {
-        return unreadable_quarantine_raw(after);
-    }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
-        anyhow!("agent admission record change refused: auth state could not be read")
-    })?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| refuse_unreadable_auth_state(data_dir, error))?;
     let Some(entries) = value.get("principals").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
@@ -5527,7 +5537,7 @@ fn disk_quarantined_raw(data_dir: &Path, after: &AuthState) -> anyhow::Result<Ve
     for entry in entries {
         match serde_json::from_value::<PrincipalRecord>(entry.clone()) {
             Ok(record) => records.push(record),
-            Err(_) => return unreadable_quarantine_raw(after),
+            Err(error) => return Err(refuse_unreadable_auth_state(data_dir, error)),
         }
     }
     Ok(entries
@@ -5536,14 +5546,6 @@ fn disk_quarantined_raw(data_dir: &Path, after: &AuthState) -> anyhow::Result<Ve
         .filter(|(_, record)| agent_admission_record_violation(&records, record).is_some())
         .map(|(entry, _)| entry.clone())
         .collect())
-}
-
-fn unreadable_quarantine_raw(after: &AuthState) -> anyhow::Result<Vec<Value>> {
-    if after.quarantined_raw.is_empty() && !after.principals.iter().any(is_agent_admission_record) {
-        Ok(Vec::new())
-    } else {
-        anyhow::bail!("agent admission record change refused: auth state could not be read")
-    }
 }
 
 /// An in-memory edit of a malformed record is still a change. Unknown fields
@@ -5580,7 +5582,7 @@ fn quarantined_record_was_edited(state: &AuthState) -> bool {
 }
 
 fn quarantined_raw_changed(data_dir: &Path, after: &AuthState) -> anyhow::Result<bool> {
-    let disk = disk_quarantined_raw(data_dir, after)?;
+    let disk = disk_quarantined_raw(data_dir)?;
     Ok(
         canonical_json(&disk) != canonical_json(&after.quarantined_raw)
             || quarantined_record_was_edited(after),
@@ -19381,6 +19383,36 @@ pub(crate) mod tests {
             "{label}"
         );
         assert_eq!(auth_state_file_bytes(data_dir), before, "{label}");
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_save_over_an_unreadable_auth_state() {
+        // A missing file is still the first run: the human store creates it.
+        let first = tempfile::tempdir().unwrap();
+        assert!(!auth_state_path(first.path()).unwrap().exists());
+        store_test_human_principal(first.path(), "person:local:first");
+        assert!(auth_state_path(first.path()).unwrap().exists());
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let human = store_test_human_principal(data_dir.path(), "person:local:plain");
+        let mut loaded = load_auth_state(data_dir.path()).unwrap();
+        assert_eq!(loaded.principals[0].principal_id, human.principal_id);
+        loaded.principals[0].display_name = "Renamed".to_string();
+        let path = auth_state_path(data_dir.path()).unwrap();
+        std::fs::write(&path, b"not-json").unwrap();
+        invalidate_verified_auth_state_cache(data_dir.path());
+        let error = save_auth_state(data_dir.path(), &loaded, None)
+            .expect_err("a save over an unreadable auth state was refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("auth-state.json") && text.contains("could not be read"),
+            "a save over an unreadable auth state names the file: {text}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"not-json",
+            "a save over an unreadable auth state wrote nothing"
+        );
     }
 
     #[test]
