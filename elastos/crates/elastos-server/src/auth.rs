@@ -5515,16 +5515,28 @@ fn agent_root_protection_change_reason(
     before: &[PrincipalRootProtectionV1],
     after: &[PrincipalRootProtectionV1],
 ) -> Option<&'static str> {
-    let mut roots: Vec<&str> = before_principals
+    let stores: Vec<&PrincipalRecord> = before_principals
         .iter()
         .chain(after_principals)
         .filter(|record| record_is_agent_store(record))
+        .collect();
+    let mut roots: Vec<&str> = stores
+        .iter()
         .map(|record| record.localhost_root.as_str())
         .collect();
     roots.sort_unstable();
     roots.dedup();
+    let mut ids: Vec<&str> = stores
+        .iter()
+        .map(|record| record.principal_id.as_str())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    // A protection is watched when its root is an agent store's root, or its
+    // principal id is an agent store's id, whatever root the entry names.
     let watched = |protection: &PrincipalRootProtectionV1| {
         roots.iter().any(|root| *root == protection.localhost_root)
+            || ids.iter().any(|id| *id == protection.principal_id)
     };
     let before: Vec<&PrincipalRootProtectionV1> =
         before.iter().filter(|item| watched(item)).collect();
@@ -12969,14 +12981,14 @@ pub(crate) fn store_test_principal_root_protection_for(
         created_at,
         updated_at: created_at,
     };
-    // The save guard refuses an agent-root protection under every permit.
-    // A row that needs the map entry writes it into the file, the same way a
-    // planted principal is written. The production store still refuses.
+    // The save guard refuses a protection for an agent store's root or id
+    // under every permit. A row that needs the map entry writes it into the
+    // file. The production store still refuses.
     let loaded = load_auth_state(data_dir).unwrap();
     let agent_root = loaded.principals.iter().any(|record| {
-        record.localhost_root == protection.localhost_root
-            && (record.kind == PrincipalKind::Agent
-                || record.proof_binding.kind == ProofBindingKind::AgentAdmission)
+        record_is_agent_store(record)
+            && (record.localhost_root == protection.localhost_root
+                || record.principal_id == protection.principal_id)
     });
     if agent_root {
         plant_principal_root_protection(data_dir, &protection);
@@ -19852,6 +19864,46 @@ pub(crate) mod tests {
             .push(bare_protection(&id, &root, 1));
         save_auth_state(data_dir.path(), &state, None)
             .expect("a person root protection still saves");
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_protection_for_an_agent_id_under_a_non_agent_root() {
+        for permit in every_agent_permit() {
+            let data_dir = person_file_with_agent();
+            let before = auth_state_file_bytes(data_dir.path());
+            let mut state = load_auth_state(data_dir.path()).unwrap();
+            let human_root = state
+                .principals
+                .iter()
+                .find(|record| record.principal_id == valid_agent::OWNER_ID)
+                .unwrap()
+                .localhost_root
+                .clone();
+            let agent_root = agent_root_in(&state);
+            assert_eq!(
+                human_root, "localhost://Users/573918759285b7c3f6986149",
+                "{permit:?}"
+            );
+            assert_eq!(
+                agent_root, "localhost://UsersAI/ba287e12925d9408db0f24e3",
+                "{permit:?}"
+            );
+            state
+                .principal_root_protections
+                .push(bare_protection(TEST_AGENT_ID, &human_root, 1));
+            let error = save_auth_state_allowing(data_dir.path(), &state, None, permit)
+                .expect_err("a protection for an agent id under a non-agent root was refused");
+            let expected = match permit {
+                None => "agent admission protection change refused: agent root protection added (5 named operations exist and none is authorized)",
+                Some(AgentAdmissionOperation::Create) => "agent admission protection change refused: agent root protection added (permit create is not an operation yet (5 named))",
+                Some(AgentAdmissionOperation::DisplayName) => "agent admission protection change refused: agent root protection added (permit display-name change is not an operation yet (5 named))",
+                Some(AgentAdmissionOperation::Retire) => "agent admission protection change refused: agent root protection added (permit retire is not an operation yet (5 named))",
+                Some(AgentAdmissionOperation::PackageMove) => "agent admission protection change refused: agent root protection added (permit package move is not an operation yet (5 named))",
+                Some(AgentAdmissionOperation::OwnerKeyRewrap) => "agent admission protection change refused: agent root protection added (permit owner-key re-wrap is not an operation yet (5 named))",
+            };
+            assert_eq!(error.to_string(), expected, "{permit:?}");
+            assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{permit:?}");
+        }
     }
 
     #[test]
