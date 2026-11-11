@@ -263,6 +263,13 @@ mod r3_tests {
             NEEDS_PROTECTION,
             "R3 home_agent write reaches UsersAI protection gate"
         );
+        let writes = crate::auth::principal_object_io::writes(dir.path());
+        assert!(
+            writes.iter().any(|path| path.ends_with(
+                "UsersAI/ba287e12925d9408db0f24e3/.AppData/ElastOS/HomeAgent/workspace.json"
+            )),
+            "R3 home_agent write records the stored-root object: {writes:?}"
+        );
     }
 
     #[test]

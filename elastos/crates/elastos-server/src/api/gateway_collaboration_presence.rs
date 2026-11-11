@@ -876,10 +876,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r4_presence_pass_uses_agent_root() {
-        // The pass walks passkey principals only, so a valid agent is not in
-        // that list. This row drives the two functions the pass calls for a
-        // valid agent: the stored root, then the profile at that root.
+    async fn r4_agent_root_profile_is_read_and_the_pass_refuses_a_quarantined_passkey() {
+        // The pass itself cannot be driven with a valid agent. It walks
+        // `active_passkey_principals` inside `publish_runtime_owned_presence_pass`,
+        // and an agent record is not a passkey, so that loop never sees it.
+        // This row drives the two functions the pass calls for a valid agent:
+        // the stored root, then the profile at that root. The pass itself is
+        // driven afterwards with a passkey id stored as Agent, which load
+        // quarantines.
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         {
