@@ -13737,3 +13737,102 @@ async fn runtime_custody_open_uses_the_stored_release_root() {
         assert!(missing.unwrap_err().to_string().contains("unavailable"));
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_custody_open_for_an_agent_is_refused_before_custody() {
+    use crate::auth::r4_fixture;
+    let policy = policy_body_for(
+        media_identity(0x41).encrypted_content().clone(),
+        content_access_id(0x41),
+        RightsActionV1::View,
+    );
+    let harness = runtime_custody_prebuy_availability_harness_with_policy(
+        0x61,
+        ContentAvailabilityTestConfig::accepted_now(),
+        Some(policy.policy_identity().unwrap()),
+    )
+    .await;
+    let data_dir = &harness.data_dir;
+    write_library_publish_test_composition(data_dir);
+    elastos_identity::load_or_create_did(data_dir).unwrap();
+    let root = r4_fixture::AGENT_ROOT;
+    let agent = crate::auth::valid_agent::plant(data_dir);
+    crate::auth::store_test_principal_root_protection_for(data_dir, &agent.principal_id, root);
+    let profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+        data_dir,
+        &agent.principal_id,
+        root,
+        "R7 viewer",
+        None,
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    let mint = runtime_mint_journal(data_dir)
+        .load(harness.mint_id)
+        .unwrap();
+    persist_runtime_custody_purchase_for_mint(
+        data_dir,
+        &mint,
+        &agent.principal_id,
+        &profile.document().profile_did,
+        crate::auth::now_ts(),
+    );
+    let decrypt = PrepareOnlyCleanupDecryptProvider::with_expected_issuer_seed(0x61);
+    harness
+        .registry
+        .register_runtime_provider_target(PROTECTED_CONTENT_DECRYPT_PROVIDER_ID, decrypt)
+        .await
+        .unwrap();
+    harness
+        .registry
+        .register_sub_provider("wallet", Arc::new(LibraryReleaseWalletProvider))
+        .await
+        .unwrap();
+    let chain = RecordingProvider::new(
+        CHAIN_PROVIDER_ID,
+        ok_provider_response(json!({
+            "schema": CHAIN_PROTECTED_CONTENT_POLICY_SCHEMA_V1,
+            "policy_body": format!("0x{}", hex::encode(policy.canonical_bytes().unwrap())),
+        })),
+    );
+    harness
+        .registry
+        .register_sub_provider(CHAIN_PROVIDER_ID, chain)
+        .await
+        .unwrap();
+    let custody = RecordingProvider::new(CUSTODY_PROVIDER_ID, ok_provider_response(json!({})));
+    harness
+        .registry
+        .register_runtime_provider_target(CUSTODY_PROVIDER_ID, custody.clone())
+        .await
+        .unwrap();
+    let result = super::open_runtime_custody_viewer(
+        data_dir,
+        harness.registry.clone(),
+        super::RuntimeCustodyViewerOpenInput {
+            principal_id: agent.principal_id.clone(),
+            mint_id: hex::encode(harness.mint_id.as_bytes()),
+            launch_id: Some(TEST_VIEWER_LAUNCH_ID.to_string()),
+            proof_binding_id: Some(agent.proof_binding_id.clone()),
+            session_id: Some("runtime-session:alpha".to_string()),
+            grant_id: Some("grant:alpha".to_string()),
+        },
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Runtime custody viewer release approval is unavailable"
+    );
+    assert!(custody.requests().await.is_empty());
+    // v1: an agent has no proof that can authorise a release; see the identity design, open question on agents and protected content.
+    let refused = crate::collaboration_profile_authority::require_profile_authority_passkey_binding(
+        data_dir,
+        &agent.principal_id,
+        Some(&agent.proof_binding_id),
+    );
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "proof-bound passkey session required"
+    );
+}
