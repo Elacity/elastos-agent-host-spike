@@ -235,9 +235,12 @@ fn checked_bundle_fields_are_private() {
     // no constructor, From, Default or Deserialize makes one with another lab
     // CID or other entries, and nothing hands out a &mut to it or its parts.
     let code = library_code();
-    assert!(
-        code.contains("#![forbid(unsafe_code)]"),
-        "the crate does not forbid unsafe code"
+    // The library is two sources read together (the bundle identity crate
+    // and this one): each must carry the line, so the count is two.
+    assert_eq!(
+        code.matches("#![forbid(unsafe_code)]").count(),
+        2,
+        "each of the two crates forbids unsafe code"
     );
 
     let definition = library_item(&code, "pub struct CheckedBundle {");

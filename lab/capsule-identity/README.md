@@ -190,7 +190,9 @@ The CIDv1 bytes and the base32 text are one marked copy (`cid_bytes`, one
 encoder, one decoder). Since M2 part B it lives, with the walk and the rest
 of the identity code, in the workspace crate `elastos-bundle-identity`
 (`elastos/crates/elastos-bundle-identity/src/lib.rs`), moved there text for
-text; this crate re-exports it and has no encoder of its own. The Runtime's `cid`
+text. This crate re-exports that crate's public names and has no encoder of
+its own; `cid_bytes`, the encoder and the decoder are private there and are
+reached through `LabCid`'s printing and parsing. The Runtime's `cid`
 0.11 crate lives only in `elastos-server` and `elastos-namespace`, which the
 lab does not link, and any new crate here would make the locks of
 `lab/wasm-capsule` and `lab/agent-conformance` (both path-depend on this
@@ -1758,9 +1760,10 @@ them with its cause.
 
 ```
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
-src/lib.rs               the re-export of the identity code (checked_bundle, lab_cid,
-                         check_name and its checked form, the encoder, the walk:
-                         all in elastos/crates/elastos-bundle-identity), and this
+src/lib.rs               the re-export of the identity crate's public names
+                         (checked_bundle, lab_cid, check_name and its checked form;
+                         the encoder and the walk behind them are private in
+                         elastos/crates/elastos-bundle-identity), and this
                          crate's own: the test-key signature, the shared digest,
                          the lab package record and the lab variant binding
 fixtures/                content-sample, web-app, wc001-core, agent-host, provider,

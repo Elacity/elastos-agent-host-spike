@@ -51,9 +51,11 @@
 //!
 //! No empty directory is emitted. Nothing else enters a block: no folder
 //! name, absolute path, mtime, mode, owner or symlink target. The CIDv1 bytes
-//! and the base32 text are one marked lab copy in this crate, so the lab adds
-//! no crate (the Runtime's `cid` crate lives only in server crates the lab
-//! does not link, and a new crate would stale two consumer locks).
+//! and the base32 text are one marked copy. Since M2 part B that copy, the
+//! walk and the encoder live in the workspace crate `elastos-bundle-identity`;
+//! this crate depends on it and re-exports its public names. (The Runtime's
+//! `cid` crate lives only in `elastos-server` and `elastos-namespace`, which
+//! neither of the two links.)
 //!
 //! # One naming path
 //!
@@ -268,8 +270,8 @@ pub struct VariantBinding {
 /// Runtime server, which this lab does not link, so the lab keeps this one
 /// marked copy and calls it a lab proposal. It is the one message hash: the
 /// name signature and the package record both call it, each with its own
-/// domain. [`naming_hash`], which the encoder calls, remains the one naming
-/// hash.
+/// domain. `naming_hash` in `elastos-bundle-identity`, which the encoder
+/// calls, remains the one naming hash.
 pub fn domain_separated_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain.as_bytes());
