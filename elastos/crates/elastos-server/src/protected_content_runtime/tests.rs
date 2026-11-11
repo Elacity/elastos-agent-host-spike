@@ -13509,15 +13509,17 @@ fn runtime_media_source_uses_the_stored_principal_root() {
         }
         fs::write(&path, b"stored-root source").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        let actual = super::read_runtime_media_source(data_dir, r4_fixture::ID, &uri, &path);
+        let actual =
+            super::read_runtime_media_source(data_dir, r4_fixture::principal_id(kind), &uri, &path);
         assert_eq!(
             actual.as_ref().map(Vec::as_slice).unwrap_or(&[]),
             b"stored-root source",
             "{root}: {actual:?}"
         );
-        r4_fixture::remove(data_dir, r4_fixture::ID);
+        r4_fixture::remove(data_dir, r4_fixture::principal_id(kind));
         let error =
-            super::read_runtime_media_source(data_dir, r4_fixture::ID, &uri, &path).unwrap_err();
+            super::read_runtime_media_source(data_dir, r4_fixture::principal_id(kind), &uri, &path)
+                .unwrap_err();
         assert!(error.to_string().contains("input is invalid"), "{error}");
     }
 }
@@ -13533,27 +13535,48 @@ fn runtime_custody_profile_uses_the_stored_principal_root() {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         owner_only_dir(data_dir);
-        let proof = store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7");
-        r4_fixture::set_kind(data_dir, r4_fixture::ID, kind, root);
-        crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
-        let profile = crate::collaboration_profile_authority::update_profile_authority(
-            data_dir,
-            r4_fixture::ID,
-            root,
-            &proof,
-            "R7 profile",
-            None,
-            crate::auth::now_ts(),
-        )
-        .unwrap();
-        let actual = super::load_runtime_custody_profile_did(data_dir, r4_fixture::ID);
+        elastos_identity::load_or_create_did(data_dir).unwrap();
+        let (principal_id, profile) = if kind == PrincipalKind::Agent {
+            let agent = crate::auth::valid_agent::plant(data_dir);
+            crate::auth::store_test_principal_root_protection_for(
+                data_dir,
+                &agent.principal_id,
+                root,
+            );
+            let profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+                data_dir,
+                &agent.principal_id,
+                root,
+                "R7 profile",
+                None,
+                crate::auth::now_ts(),
+            )
+            .unwrap();
+            (agent.principal_id, profile)
+        } else {
+            let proof = store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7");
+            r4_fixture::set_kind(data_dir, r4_fixture::ID, kind, root);
+            crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
+            let profile = crate::collaboration_profile_authority::update_profile_authority(
+                data_dir,
+                r4_fixture::ID,
+                root,
+                &proof,
+                "R7 profile",
+                None,
+                crate::auth::now_ts(),
+            )
+            .unwrap();
+            (r4_fixture::ID.to_string(), profile)
+        };
+        let actual = super::load_runtime_custody_profile_did(data_dir, &principal_id);
         assert_eq!(
             actual.as_deref().unwrap_or(""),
             profile.document().profile_did.as_str(),
             "{root}: {actual:?}"
         );
-        r4_fixture::remove(data_dir, r4_fixture::ID);
-        let error = super::load_runtime_custody_profile_did(data_dir, r4_fixture::ID).unwrap_err();
+        r4_fixture::remove(data_dir, &principal_id);
+        let error = super::load_runtime_custody_profile_did(data_dir, &principal_id).unwrap_err();
         assert!(error.to_string().contains("unavailable"), "{error}");
     }
 }
@@ -13579,26 +13602,48 @@ async fn runtime_custody_open_uses_the_stored_release_root() {
         .await;
         let data_dir = &harness.data_dir;
         write_library_publish_test_composition(data_dir);
-        let proof = store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7-open");
-        r4_fixture::set_kind(data_dir, r4_fixture::ID, kind, root);
-        crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
-        let profile = crate::collaboration_profile_authority::update_profile_authority(
-            data_dir,
-            r4_fixture::ID,
-            root,
-            &proof,
-            "R7 viewer",
-            None,
-            crate::auth::now_ts(),
-        )
-        .unwrap();
+        elastos_identity::load_or_create_did(data_dir).unwrap();
+        let (principal_id, profile, proof) = if kind == PrincipalKind::Agent {
+            let agent = crate::auth::valid_agent::plant(data_dir);
+            crate::auth::store_test_principal_root_protection_for(
+                data_dir,
+                &agent.principal_id,
+                root,
+            );
+            let profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+                data_dir,
+                &agent.principal_id,
+                root,
+                "R7 viewer",
+                None,
+                crate::auth::now_ts(),
+            )
+            .unwrap();
+            (agent.principal_id, profile, agent.proof_binding_id)
+        } else {
+            let proof =
+                store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7-open");
+            r4_fixture::set_kind(data_dir, r4_fixture::ID, kind, root);
+            crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
+            let profile = crate::collaboration_profile_authority::update_profile_authority(
+                data_dir,
+                r4_fixture::ID,
+                root,
+                &proof,
+                "R7 viewer",
+                None,
+                crate::auth::now_ts(),
+            )
+            .unwrap();
+            (r4_fixture::ID.to_string(), profile, proof)
+        };
         let mint = runtime_mint_journal(data_dir)
             .load(harness.mint_id)
             .unwrap();
         persist_runtime_custody_purchase_for_mint(
             data_dir,
             &mint,
-            r4_fixture::ID,
+            &principal_id,
             &profile.document().profile_did,
             crate::auth::now_ts(),
         );
@@ -13632,7 +13677,7 @@ async fn runtime_custody_open_uses_the_stored_release_root() {
             .await
             .unwrap();
         let open_input = || super::RuntimeCustodyViewerOpenInput {
-            principal_id: r4_fixture::ID.to_string(),
+            principal_id: principal_id.clone(),
             mint_id: hex::encode(harness.mint_id.as_bytes()),
             launch_id: Some(TEST_VIEWER_LAUNCH_ID.to_string()),
             proof_binding_id: Some(proof.clone()),
@@ -13650,7 +13695,7 @@ async fn runtime_custody_open_uses_the_stored_release_root() {
             !custody.requests().await.is_empty(),
             "{root}: release assembly did not reach custody: {result:?}"
         );
-        r4_fixture::remove(data_dir, r4_fixture::ID);
+        r4_fixture::remove(data_dir, &principal_id);
         let missing =
             super::open_runtime_custody_viewer(data_dir, harness.registry.clone(), open_input())
                 .await;
