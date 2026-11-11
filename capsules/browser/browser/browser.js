@@ -368,7 +368,7 @@ function showStatus(message, { sticky = false } = {}) {
     });
     statusNode.append(copyButton);
   }
-  statusNode.dataset.visible = "true";
+  statusNode.dataset.visible = message ? "true" : "false";
   if (!sticky) {
     statusTimer = window.setTimeout(() => {
       statusNode.dataset.visible = "false";

@@ -160,6 +160,7 @@ test("Allow after denial shows the empty hint and focuses the address without na
   await frame.locator("#browser-render-empty").getByText("Type a website address to open it.",{exact:true}).waitFor({timeout:5000});
   assert.equal(await frame.locator("#browser-url").evaluate(e=>e===document.activeElement),true);
   await page.waitForTimeout(2200);assert.equal(f.state.opens.length,0);assert.equal(f.state.requests,1);
+  assert.equal(await frame.locator("#browser-status").evaluate(e=>e.textContent.trim()==="" && getComputedStyle(e).opacity!=="0"),false,"an empty status message must not leave a visible bubble");
   await screen(page,"browser-empty-allowed");await page.close();
  } finally {await browser.close();await f.close();}
 });
