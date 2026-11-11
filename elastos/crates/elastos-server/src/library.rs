@@ -11218,8 +11218,8 @@ mod r5a_tests {
     #[test]
     fn empty_trash_refuses_a_published_item_and_removes_the_stored_trash_record() {
         let kept_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.Trash/kept.txt";
-        let kept_record_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Trash/b605da9f2eae10055cf347d3ed96a4ba45473f0424162deada39c157593183ee.json";
-        let kept_publish_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Published/b605da9f2eae10055cf347d3ed96a4ba45473f0424162deada39c157593183ee.json";
+        let kept_record_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Trash/67c813840358c4bc6efeda65bfea75253e63368879b3379ebdcc9d58e619dd5a.json";
+        let kept_publish_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Published/67c813840358c4bc6efeda65bfea75253e63368879b3379ebdcc9d58e619dd5a.json";
         let agent = home(PrincipalKind::Agent);
         let kept_path = rooted_localhost_fs_path(agent.path(), kept_uri).unwrap();
         fs::create_dir_all(kept_path.parent().unwrap()).unwrap();
@@ -11281,7 +11281,7 @@ mod r5a_tests {
         );
 
         let gone_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.Trash/gone.txt";
-        let gone_record_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Trash/0b1925bc2079697007485433e75b96a9b2edb8a01b43588e85beb67896710b80.json";
+        let gone_record_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.AppData/LocalHost/.Runtime/Library/Trash/42219106f7950cf45eb9ef46f0c5877ada10af75dafa1aab66abc21bd5ec9456.json";
         let clear = home(PrincipalKind::Agent);
         let gone_path = rooted_localhost_fs_path(clear.path(), gone_uri).unwrap();
         fs::create_dir_all(gone_path.parent().unwrap()).unwrap();
