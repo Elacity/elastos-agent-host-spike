@@ -1066,6 +1066,7 @@ mod model;
 #[cfg(target_os = "macos")]
 mod model_installed_fixture;
 mod r3_stored_roots;
+mod r8c_child_rows;
 mod recovery;
 #[cfg(unix)]
 mod remote_engine;
