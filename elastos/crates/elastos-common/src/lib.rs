@@ -13,6 +13,7 @@ pub mod localhost;
 mod manifest;
 #[cfg(unix)]
 pub mod owned_removal;
+mod pinned_manifest;
 #[cfg(unix)]
 pub mod process_lifetime;
 pub mod protected_content;
@@ -32,6 +33,7 @@ pub use manifest::{
     MicroVmConfig, ModelContentMetadata, Permissions, ProviderAuthority, ProviderCapabilitySchema,
     RequirementKind, ResourceLimits, ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V1_WORLD, SCHEMA_V1,
 };
+pub use pinned_manifest::{PinnedManifest, PinnedManifestError, PIN_FORM_INVALID};
 use sha2::{Digest, Sha256};
 pub use timestamp::{SecureTimestamp, CLOCK_SKEW_TOLERANCE_SECS};
 pub use types::{CapsuleId, CapsuleStatus};

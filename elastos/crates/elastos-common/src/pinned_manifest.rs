@@ -1,0 +1,288 @@
+//! A manifest read together with the CIDs it pins.
+//!
+//! A capsule may pin a capsule it requires: `requires[i].cid`. The ordinary
+//! manifest type has no such key and refuses it, so no start path can read a
+//! pin and ignore it. This second type is the only reader of pins. It checks
+//! each pin, then reads everything else as an ordinary manifest, so every
+//! rule of the ordinary type holds here too. It starts nothing, and it gives
+//! no way to take the ordinary manifest out.
+
+use crate::cid_form::cid_form;
+use crate::manifest::CapsuleManifest;
+
+/// A pin is not a package root in its one spelling, is not a JSON string, or
+/// sits on a requirement whose kind is not `capsule`.
+pub const PIN_FORM_INVALID: &str = "pin_form_invalid";
+
+/// Why [`PinnedManifest::parse`] refused. The three cases stay apart because
+/// a caller answers them differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinnedManifestError {
+    /// Not JSON, or the ordinary manifest type refuses it. Serde's text.
+    Unparsed(String),
+    /// The ordinary manifest's `validate()` refuses it. Its text.
+    Invalid(String),
+    /// A pin is refused: [`PIN_FORM_INVALID`], with the requirement's name
+    /// (empty when it has none).
+    Pin {
+        code: &'static str,
+        requirement: String,
+    },
+}
+
+/// A manifest and the CIDs it pins. See the module text.
+pub struct PinnedManifest {
+    manifest: CapsuleManifest,
+    pins: Vec<(String, String)>,
+}
+
+impl PinnedManifest {
+    /// Reads `capsule.json` bytes. A manifest without a pin is read by the
+    /// ordinary parse from the same bytes, so its answer, error text
+    /// included, is the ordinary one.
+    pub fn parse(bytes: &[u8]) -> Result<Self, PinnedManifestError> {
+        let unparsed = |error: serde_json::Error| PinnedManifestError::Unparsed(error.to_string());
+        let mut pins = Vec::new();
+        let mut without_pins = None;
+        if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+            pins = take_pins(&mut value)?;
+            if !pins.is_empty() {
+                without_pins = Some(value);
+            }
+        }
+        let manifest: CapsuleManifest = match without_pins {
+            Some(value) => serde_json::from_value(value).map_err(unparsed)?,
+            None => serde_json::from_slice(bytes).map_err(unparsed)?,
+        };
+        manifest.validate().map_err(PinnedManifestError::Invalid)?;
+        Ok(Self { manifest, pins })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.manifest.name
+    }
+
+    /// Requirement name and CID text of each pin, in the manifest's order.
+    pub fn pins(&self) -> &[(String, String)] {
+        &self.pins
+    }
+}
+
+/// Takes each `requires[i].cid` out of `value` and checks it. Anything that
+/// is not the expected shape is left as it is, for the strict parse to refuse
+/// in its own words.
+fn take_pins(value: &mut serde_json::Value) -> Result<Vec<(String, String)>, PinnedManifestError> {
+    let refused = |code, requirement: &str| PinnedManifestError::Pin {
+        code,
+        requirement: requirement.to_string(),
+    };
+    let mut pins = Vec::new();
+    let requires = value
+        .get_mut("requires")
+        .and_then(|list| list.as_array_mut());
+    for requirement in requires.into_iter().flatten() {
+        let Some(object) = requirement.as_object_mut() else {
+            continue;
+        };
+        let name = object.get("name").and_then(|name| name.as_str());
+        let name = name.unwrap_or_default().to_string();
+        let Some(cid) = object.remove("cid") else {
+            continue;
+        };
+        let on_a_capsule = object.get("kind").and_then(|kind| kind.as_str()) == Some("capsule");
+        match cid.as_str().filter(|text| cid_form(text).is_some()) {
+            Some(text) if on_a_capsule => pins.push((name, text.to_string())),
+            _ => return Err(refused(PIN_FORM_INVALID, &name)),
+        }
+    }
+    Ok(pins)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Three package roots that Kubo 0.42.0 printed (`ipfs add --only-hash`):
+    // constants this code did not produce.
+    const ROOT_A: &str = "bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy";
+    const ROOT_B: &str = "bafybeialfcatqw2f3lxgz7epy2jarcfbv6sdz3kwmiurhjm3khj4lvtwdm";
+    const ROOT_C: &str = "bafybeibjgbkgok3255r5jguuyziq6an6z7rpng36r4vzkutlipc2zgltwu";
+
+    fn manifest(extra: serde_json::Value) -> Vec<u8> {
+        let mut value = json!({
+            "schema": "elastos.capsule/v1", "name": "pin-fixture", "version": "0.1.0",
+            "role": "app", "type": "data", "entrypoint": "index.html"
+        });
+        let extra = extra.as_object().unwrap().clone();
+        value.as_object_mut().unwrap().extend(extra);
+        serde_json::to_vec_pretty(&value).unwrap()
+    }
+
+    fn requires(list: serde_json::Value) -> Vec<u8> {
+        manifest(json!({ "requires": list }))
+    }
+
+    fn pinned(name: &str, cid: &str) -> serde_json::Value {
+        json!({"name": name, "kind": "capsule", "cid": cid})
+    }
+
+    fn refusal(bytes: &[u8]) -> PinnedManifestError {
+        PinnedManifest::parse(bytes).err().expect("a refusal")
+    }
+
+    fn pin_refusal(bytes: &[u8]) -> (&'static str, String) {
+        match refusal(bytes) {
+            PinnedManifestError::Pin { code, requirement } => (code, requirement),
+            other => panic!("expected a refused pin, got {other:?}"),
+        }
+    }
+
+    fn ordinary_error(bytes: &[u8]) -> String {
+        serde_json::from_slice::<CapsuleManifest>(bytes)
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn one_valid_pin_is_read_and_the_ordinary_type_refuses_the_same_bytes() {
+        let bytes = requires(json!([pinned("viewer", ROOT_A)]));
+        let parsed = PinnedManifest::parse(&bytes).unwrap();
+        assert_eq!(parsed.name(), "pin-fixture");
+        assert_eq!(parsed.pins(), [("viewer".to_string(), ROOT_A.to_string())]);
+        assert!(ordinary_error(&bytes).contains("unknown field `cid`"));
+    }
+
+    #[test]
+    fn every_rule_of_the_ordinary_type_holds_for_a_pinned_manifest() {
+        for (extra, expected) in [
+            (
+                json!({"schema": "elastos.capsule/v0"}),
+                "unsupported schema",
+            ),
+            (json!({"entrypoint": "../index.html"}), "path traversal"),
+            (
+                json!({"capabilities": ["elastos://net/*"]}),
+                "system-only backend",
+            ),
+        ] {
+            let mut value = json!({"requires": [pinned("viewer", ROOT_A)]});
+            let extra = extra.as_object().unwrap().clone();
+            value.as_object_mut().unwrap().extend(extra);
+            match refusal(&manifest(value)) {
+                PinnedManifestError::Invalid(text) => assert!(text.contains(expected), "{text}"),
+                other => panic!("{expected}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_pin_that_is_not_a_root_on_a_capsule_requirement_is_pin_form_invalid() {
+        for (what, requirement) in [
+            (
+                "on kind external",
+                json!({"name": "kubo", "kind": "external", "cid": ROOT_A}),
+            ),
+            (
+                "null",
+                json!({"name": "kubo", "kind": "capsule", "cid": null}),
+            ),
+            (
+                "a number",
+                json!({"name": "kubo", "kind": "capsule", "cid": 7}),
+            ),
+            (
+                "an object",
+                json!({"name": "kubo", "kind": "capsule", "cid": {"/": ROOT_A}}),
+            ),
+            (
+                "true",
+                json!({"name": "kubo", "kind": "capsule", "cid": true}),
+            ),
+            (
+                "a list",
+                json!({"name": "kubo", "kind": "capsule", "cid": [ROOT_A]}),
+            ),
+            (
+                "a raw leaf",
+                pinned(
+                    "kubo",
+                    "bafkreiexeojjebb246sivqmgnpofipuzhepe3t5c656s34piqcdkr5doxa",
+                ),
+            ),
+        ] {
+            let refusal = pin_refusal(&requires(json!([requirement])));
+            assert_eq!(refusal, (PIN_FORM_INVALID, "kubo".to_string()), "{what}");
+        }
+    }
+
+    #[test]
+    fn pins_keep_the_order_of_the_manifest() {
+        let bytes = requires(json!([
+            pinned("m", ROOT_C),
+            pinned("z", ROOT_A),
+            pinned("a", ROOT_B)
+        ]));
+        let parsed = PinnedManifest::parse(&bytes).unwrap();
+        let order: Vec<(&str, &str)> = parsed
+            .pins()
+            .iter()
+            .map(|(name, cid)| (name.as_str(), cid.as_str()))
+            .collect();
+        assert_eq!(order, [("m", ROOT_C), ("z", ROOT_A), ("a", ROOT_B)]);
+    }
+
+    #[test]
+    fn a_manifest_without_a_pin_gets_the_ordinary_answer_to_the_letter() {
+        let fine = requires(json!([{"name": "viewer", "kind": "capsule"}]));
+        assert!(PinnedManifest::parse(&fine).unwrap().pins().is_empty());
+        for bytes in [
+            b"{\n  \"schema\": \"elastos.capsule/v1\",\n".to_vec(),
+            manifest(json!({"cid": ROOT_A})),
+            manifest(json!({"name": 7})),
+            requires(json!("viewer")),
+            requires(json!([7])),
+        ] {
+            let expected = PinnedManifestError::Unparsed(ordinary_error(&bytes));
+            assert_eq!(refusal(&bytes), expected);
+            assert!(ordinary_error(&bytes).contains(" at line "));
+        }
+        let beside_a_pin = requires(json!([7, pinned("viewer", ROOT_A)]));
+        assert!(matches!(
+            refusal(&beside_a_pin),
+            PinnedManifestError::Unparsed(_)
+        ));
+    }
+
+    #[test]
+    fn the_three_refusals_stay_apart() {
+        let invalid = manifest(json!({"entrypoint": "/index.html"}));
+        assert!(matches!(refusal(&invalid), PinnedManifestError::Invalid(_)));
+        assert!(matches!(
+            refusal(b"not json"),
+            PinnedManifestError::Unparsed(_)
+        ));
+        let pin = requires(json!([pinned("viewer", "not-a-root")]));
+        assert!(matches!(refusal(&pin), PinnedManifestError::Pin { .. }));
+    }
+
+    /// The crate has no compile-fail harness, so this is a check of the
+    /// source text: the manifest inside is a private field, the type derives
+    /// nothing, and no public function or conversion hands the manifest out.
+    #[test]
+    fn nothing_hands_the_ordinary_manifest_out_of_a_pinned_one() {
+        let source = include_str!("pinned_manifest.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let declared = "/// A manifest and the CIDs it pins. See the module text.\n\
+                        pub struct PinnedManifest {\n    manifest: CapsuleManifest,\n";
+        assert_eq!(production.matches(declared).count(), 1);
+        for line in production.lines().filter(|line| line.contains("pub fn")) {
+            assert!(!line.contains("CapsuleManifest"), "{line}");
+        }
+        let impls: Vec<&str> = production
+            .lines()
+            .filter(|line| line.starts_with("impl"))
+            .collect();
+        assert_eq!(impls, ["impl PinnedManifest {"]);
+    }
+}
