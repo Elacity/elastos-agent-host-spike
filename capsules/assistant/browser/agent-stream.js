@@ -133,7 +133,6 @@ function observeTranscript(scroller, content) {
   scroller.addEventListener("touchstart", event => {
     touchY = event.touches[0].clientY;
     touching = true;
-    readerInput();
   }, { passive: true });
   scroller.addEventListener("touchmove", event => {
     const y = event.touches[0].clientY;
