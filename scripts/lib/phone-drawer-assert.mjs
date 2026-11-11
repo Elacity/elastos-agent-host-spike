@@ -4,9 +4,13 @@
 // runtime sets html[data-el-form-factor="phone"]; fixture hosts without the
 // shell set that attribute by hand through setPhoneFormFactor.
 
+import { browserWaitTimeoutMs } from "./browser-wait-timeout.mjs";
+
 export const PHONE_VIEWPORT = { width: 390, height: 844 };
 
-// Longer than --el-drawer-ms (420ms) so the slide has settled.
+// Longer than --el-drawer-ms (420ms) so the slide has settled. The drawer
+// checks below wait for the rest position instead; smokes that settle a
+// layout change of their own still use this.
 export const DRAWER_SETTLE_MS = 500;
 
 export async function setPhoneFormFactor(target, isPhone = true) {
@@ -46,6 +50,26 @@ function readDrawer(target, drawer, room) {
   }, { drawer, room });
 }
 
+// The slide is the only part of a drawer change that outlasts the click: the
+// state attribute, inert and aria-expanded flip in the handler, the transform
+// runs for --el-drawer-ms. Wait for the position the checks below require
+// instead of for a fixed time, so a slow machine measures at rest and a
+// drawer that never moves still fails.
+async function waitForDrawerRest(target, drawer, room, state) {
+  await target.waitForFunction(({ drawer, room, open }) => {
+    const drawerNode = document.querySelector(drawer);
+    const roomNode = document.querySelector(room);
+    if (!drawerNode || !roomNode) {
+      return false;
+    }
+    const drawerRight = Math.round(drawerNode.getBoundingClientRect().right);
+    const roomLeft = Math.round(roomNode.getBoundingClientRect().left);
+    return open
+      ? drawerRight > 200 && roomLeft >= drawerRight - 2
+      : drawerRight <= 0 && roomLeft === 0;
+  }, { drawer, room, open: state === "open" }, { timeout: browserWaitTimeoutMs() });
+}
+
 // Push drawer contract: content first with the sidebar off screen and inert; a
 // 44 px toggle slides it in and pushes the room aside; picking an item closes
 // it again.
@@ -57,7 +81,7 @@ export async function assertPhoneDrawer(page, target, { label, drawer, room, clo
     `${label} phone: sidebar toggle must be a 44 px collapsed control`, closed);
 
   await target.locator(`[data-el-drawer-toggle]`).first().click();
-  await page.waitForTimeout(DRAWER_SETTLE_MS);
+  await waitForDrawerRest(target, drawer, room, "open");
   const opened = await readDrawer(target, drawer, room);
   if (screenshot) {
     await page.screenshot({ path: screenshot });
@@ -66,7 +90,7 @@ export async function assertPhoneDrawer(page, target, { label, drawer, room, clo
     `${label} phone: the toggle must slide the sidebar in and push the content aside`, opened);
 
   await target.locator(closeTarget).first().click();
-  await page.waitForTimeout(DRAWER_SETTLE_MS);
+  await waitForDrawerRest(target, drawer, room, "closed");
   const picked = await readDrawer(target, drawer, room);
   check(picked.drawerRight <= 0 && picked.roomLeft === 0 && picked.toggle.expanded === "false",
     `${label} phone: picking an item must close the sidebar`, picked);
