@@ -1,0 +1,21 @@
+[package]
+name = "docs-viewer-bundle-test"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Tests only: pack the two docs-viewer capsules, name each by the CID of its
+# closure, sign a claim, and admit them with the photo viewer's bundle tool
+# (`examples/photo-viewer/bundle`, crate `capsule-bundle`) under a policy.
+
+[dev-dependencies]
+capsule-bundle = { path = "../../photo-viewer/bundle" }
+ed25519-dalek = "2.2"
+# The Runtime's own manifest type, to see what it accepts today.
+elastos-common = { path = "../../../elastos/crates/elastos-common" }
+serde_json = "1"
+tempfile = "3"
+
+# Keep this harness outside the main ElastOS Cargo workspace.
+[workspace]
