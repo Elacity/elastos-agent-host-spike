@@ -78,10 +78,10 @@ try {
         await warmup.mouse.move(400, 300); await warmup.mouse.down();
         await warmup.mouse.move(400, 100, { steps: 2 }); await warmup.mouse.up();
       })(),
-      new Promise((_, fail) => { warmupTimer = setTimeout(() => fail(new Error(`did not settle in 20s at ${warmupStep}`)), 20000); }),
+      new Promise((_, fail) => { warmupTimer = setTimeout(() => fail(new Error("did not settle in 20s")), 20000); }),
     ]);
   } catch (error) {
-    console.error(`follow-input: warm-up page ${error.message}; measuring without it`);
+    console.error(`follow-input: warm-up page ${error.message} at ${warmupStep}; measuring without it`);
   } finally {
     clearTimeout(warmupTimer); await Promise.race([Promise.resolve(warmup?.close()).catch(() => {}), new Promise(done => setTimeout(done, 5000))]);
     timings.warmup = Math.round(performance.now() - warmupStarted);
