@@ -7238,7 +7238,8 @@ async fn assert_browser_unproved_cleanup_retains_exact_ownership(
     let principal_id =
         runtime_wallet_authority_for_app_token(dir.path(), BROWSER_CAPSULE_ID, &owner_token)
             .home_launch_context()
-            .principal_id;
+            .principal_id()
+            .to_string();
     let close = app
         .clone()
         .oneshot(

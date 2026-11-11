@@ -1318,7 +1318,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1333,7 +1333,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
     );
     let _principal = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
     );
     let _session = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
@@ -1353,7 +1353,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["authority"]["signed_in"], true);
-    assert_eq!(payload["authority"]["principal_id"], context.principal_id);
+    assert_eq!(payload["authority"]["principal_id"], context.principal_id());
 }
 
 #[tokio::test]
@@ -1375,7 +1375,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1413,7 +1413,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1428,7 +1428,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
     );
     let _principal = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
     );
     let _session = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
@@ -9156,7 +9156,7 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
         &[CHAT_ROOM_CAPSULE_ID],
     )
     .expect("runtime launch grant validates for chat-room");
-    assert_eq!(grant_context.principal_id, authority.principal_id);
+    assert_eq!(grant_context.principal_id(), authority.principal_id);
 
     let summary = app
         .clone()
@@ -13328,7 +13328,7 @@ async fn gateway_context_resolves_a_person_stored_in_the_auth_store() {
         None,
         "grant:home-cli-test",
     );
-    assert_eq!(context.unwrap().principal_id, "person:home-cli-test");
+    assert_eq!(context.unwrap().principal_id(), "person:home-cli-test");
 }
 
 /// Proof-bound row (Rong 0344 L-1499-1): with a proof binding, the active
@@ -13367,7 +13367,7 @@ async fn gateway_context_checks_a_proof_bound_grant_in_the_auth_store() {
         .contains("auth session not found"));
     crate::auth::store_session_grant(auth.path(), grant).unwrap();
     let context = context_from().unwrap();
-    assert_eq!(context.principal_id, "person:home-cli-test");
+    assert_eq!(context.principal_id(), "person:home-cli-test");
     assert_eq!(
         context.proof_binding_id.as_deref(),
         Some("proof:passkey:home-cli-test")
