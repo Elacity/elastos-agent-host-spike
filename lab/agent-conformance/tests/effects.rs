@@ -132,9 +132,10 @@ fn ungranted_effect_is_refused() {
 #[test]
 fn declared_network_manifest_is_refused() {
     // An app capsule may not declare a system-only backend capability. This
-    // row proves that putting `elastos://net/stream` back into the probe's
-    // manifest is refused at validation, before any request reaches the Bus,
-    // and that the shipped manifest is otherwise a valid app capsule.
+    // row calls the Runtime's manifest validation through the lab library:
+    // putting `elastos://net/stream` back into the probe's manifest is refused
+    // there with the exact text below, and the shipped manifest is otherwise a
+    // valid app capsule. No launch is attempted in this row.
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
     let bytes = build_probe(Effect::Network, 1);
     let entrypoint = "agent-conformance-probe.component.wasm";
@@ -175,19 +176,13 @@ fn declared_network_manifest_is_refused() {
 
 #[test]
 fn undeclared_network_manifest_is_refused() {
-    // The same probe bundle, with the network capability removed from its
-    // manifest. The public read capability stays.
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(MANIFEST).expect("probe manifest is JSON");
-    let capabilities = manifest["capabilities"]
-        .as_array_mut()
-        .expect("probe manifest lists capabilities");
-    capabilities.retain(|capability| capability.as_str() != Some("elastos://net/stream"));
-    assert_eq!(capabilities.len(), 1, "the public read capability stays");
+    // The shipped probe manifest does not declare `elastos://net/stream`. With
+    // its one Public capability and an undeclared resource, this row is the
+    // network twin of `ungranted_effect_is_refused`.
     let output = assert_refusal_as(
         Effect::Network,
         "undeclared-network",
-        &serde_json::to_vec(&manifest).expect("stripped manifest is JSON"),
+        MANIFEST,
         "Internal(\"capsule manifest does not declare authority for elastos://net/stream\")",
     );
     assert_eq!(
@@ -649,7 +644,13 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         .check_report(
             match outcome {
                 ReadOutcome::Granted => "granted_read_succeeds",
-                ReadOutcome::Denied => "ungranted_sibling_read_is_refused",
+                ReadOutcome::Denied => {
+                    assert!(
+                        matches!(effect, Effect::SiblingRead),
+                        "the fixture denial row is the sibling read"
+                    );
+                    "ungranted_sibling_read_is_refused"
+                }
                 ReadOutcome::NoPolicy => "no_policy_file_does_not_mean_allow",
                 ReadOutcome::Instances | ReadOutcome::Cancel | ReadOutcome::Kill => {
                     unreachable!("instances checked above")

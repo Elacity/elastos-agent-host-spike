@@ -524,12 +524,19 @@ pattern. The manifest declares only
 request that the fixture then denies. `declared_network_manifest_is_refused`
 proves instead that putting that capability back is refused at validation with
 `app capsules cannot request system-only backend capability "elastos://net/stream"; use the product/provider contract instead`.
+That row calls the Runtime's manifest validation through the lab library; it
+attempts no launch. Whether an app-legal declared `elastos://` resource would
+restore the retired pending-then-denied journey is not investigated. Validation
+admits any `elastos://` resource outside the system-only list
+(`localhost.rs:36-56`, `manifest.rs:647-666`), and whether the Bus then holds
+such a request for the fixture to deny is a run question that no row measures.
 Provider execution stays outside every row. The Runtime
 owns resource authority. The read's manifest refusal returns through the guest's Bus
 call and lifecycle to `elastos run`. The live wrapper uses
 `Component capsule denied: BusError::Internal("capsule manifest does not declare authority for <resource>")`
-for that read. `undeclared_network_manifest_is_refused` stages the same probe
-manifest without `elastos://net/stream` and requires the manifest refusal
+for that read. `undeclared_network_manifest_is_refused` stages the shipped probe
+manifest, which does not declare `elastos://net/stream`, and requires the
+manifest refusal
 `Internal("capsule manifest does not declare authority for elastos://net/stream")`
 when the probe requests it anyway.
 The default build uses `BusError::Unavailable` with the AC-002-ARGS reason.
