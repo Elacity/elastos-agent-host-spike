@@ -186,8 +186,11 @@ with an empty, `.` or `..` part, two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
 claimed name by calling `lab_cid`; it computes no name of its own.
 
-The CIDv1 bytes and the base32 text are one marked lab copy inside
-`src/lib.rs` (`cid_bytes`, one encoder, one decoder). The Runtime's `cid`
+The CIDv1 bytes and the base32 text are one marked copy (`cid_bytes`, one
+encoder, one decoder). Since M2 part B it lives, with the walk and the rest
+of the identity code, in the workspace crate `elastos-bundle-identity`
+(`elastos/crates/elastos-bundle-identity/src/lib.rs`), moved there text for
+text; this crate re-exports it and has no encoder of its own. The Runtime's `cid`
 0.11 crate lives only in `elastos-server` and `elastos-namespace`, which the
 lab does not link, and any new crate here would make the locks of
 `lab/wasm-capsule` and `lab/agent-conformance` (both path-depend on this
@@ -1693,8 +1696,8 @@ Kubo's output. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
 `the_lab_cid_claim_stays_computed_by_the_lab` keeps this: these two sections
 and the module doc of `src/lib.rs` say the claim word for word, this section
-states the gate, and no `*.md` file of the lane outside `tests/` and no file
-under `src/` holds a phrase from its list of equality claims (`EQUALITY_CLAIMS` in
+states the gate, and no `*.md` file of the lane outside `tests/`, no file
+under `src/`, and no file under the identity crate's `src/` holds a phrase from its list of equality claims (`EQUALITY_CLAIMS` in
 `tests/common/mod.rs`), in any case and across line breaks. The scan reads
 every such file that git tracks or would track: an untracked file that git
 does not ignore counts, so a new doc is read before it is committed, and an
@@ -1730,12 +1733,14 @@ RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-id
 
 The package is its own workspace (empty `[workspace]` table) with its own
 `Cargo.lock`, so the Runtime's workspace never grows for it. Dependencies:
-`elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
+`elastos-bundle-identity` by path (the identity code: the walk and the
+encoder), `elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
 by path (read only, for the one `did:key` encoder and decoder), `hex` (since
-task 018 only the tests use it), `serde_json`, `sha2`, `ed25519-dalek` 2.1 with its `rand_core` feature, and
-`rustix` 1.1.4 with its `fs` feature, for safe `openat`, `fstat` and listing
-from a handle (`std` cannot open relative to a handle, and the crate forbids
-`unsafe`). Dev-dependencies: `tempfile` and `rand` 0.8 (the operating system's
+task 018 only the tests use it), `serde_json`, `sha2`, and `ed25519-dalek` 2.1 with its `rand_core` feature.
+`rustix` 1.1.4 with its `fs` feature (safe `openat`, `fstat` and listing
+from a handle: `std` cannot open relative to a handle, and both crates forbid
+`unsafe`) is the identity crate's dependency now; here it is a dev-dependency,
+for the tests that stage and swap entries. Dev-dependencies: `rustix`, `tempfile` and `rand` 0.8 (the operating system's
 generator in tests). There is no dependency on `elastos-server` or
 `elastos-runtime`. All resolve offline from the local cargo cache.
 `zerocopy` is locked at 0.8.62 because 0.8.63's derive crate is not in that
@@ -1753,9 +1758,11 @@ them with its cause.
 
 ```
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
-src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
-                         the encoder, the walk, the test-key signature, the shared
-                         digest, the lab package record and the lab variant binding
+src/lib.rs               the re-export of the identity code (checked_bundle, lab_cid,
+                         check_name and its checked form, the encoder, the walk:
+                         all in elastos/crates/elastos-bundle-identity), and this
+                         crate's own: the test-key signature, the shared digest,
+                         the lab package record and the lab variant binding
 fixtures/                content-sample, web-app, wc001-core, agent-host, provider,
                          model, provider-variant-a, provider-variant-b
 consumer-fixtures/       photo-stand-in-photo-set: the photo lane's PH6 fixture,
@@ -1768,7 +1775,8 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          the refusal asserts both signature checks share, the
                          key-material scan, the python3 -I run of README's blocks,
                          the cargo metadata scan for lab crates that use this one,
-                         the claim scan of the lane's docs and src/, the check
+                         the claim scan of the lane's docs and src/ and of the
+                         identity crate's src/, the check
                          of the falsifier list's inventory, the lab stand-in
                          launcher (StandInRuntime)
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's

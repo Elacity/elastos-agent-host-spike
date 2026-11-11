@@ -451,11 +451,15 @@ pub fn listing(parent: &Path) -> Vec<String> {
 /// The library's code without its comment lines, so a test that reads the
 /// code is never misled by a comment that names a call.
 pub fn library_code() -> String {
-    include_str!("../../src/lib.rs")
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    [
+        include_str!("../../../../elastos/crates/elastos-bundle-identity/src/lib.rs"),
+        include_str!("../../src/lib.rs"),
+    ]
+    .concat()
+    .lines()
+    .filter(|line| !line.trim_start().starts_with("//"))
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// One item of `code` (from [`library_code`]): the text from `head`, which
@@ -1105,10 +1109,48 @@ fn claim_scanned(path: &str) -> bool {
     (path.ends_with(".md") || path.starts_with("src/")) && !path.starts_with("tests/")
 }
 
+/// The bundle identity crate's folder, as a lane-relative path. The identity
+/// code and its doc comments live there, so the claim scan reads its `src/`.
+pub const IDENTITY_CRATE_DIR: &str = "../../elastos/crates/elastos-bundle-identity";
+
+/// That crate's library source, as the claim scan names it. The claim test
+/// requires it to have been read.
+pub const IDENTITY_CRATE_SOURCE: &str = "../../elastos/crates/elastos-bundle-identity/src/lib.rs";
+
+/// Every file under the bundle identity crate's `src/` that git tracks or
+/// would track, each as a lane-relative path. A git that cannot list that
+/// folder, or a name that is not UTF-8, is refused with its cause.
+pub fn identity_crate_sources() -> Result<Vec<String>, String> {
+    let crate_dir = lane_dir().join(IDENTITY_CRATE_DIR);
+    let listing = Command::new("git")
+        .args(["ls-files", "-z", "-c", "-o", "--exclude-standard", "src"])
+        .current_dir(&crate_dir)
+        .output()
+        .map_err(|error| format!("git cannot list {}: {error}", crate_dir.display()))?;
+    if !listing.status.success() {
+        return Err(format!(
+            "git could not list {} ({}): {}",
+            crate_dir.display(),
+            listing.status,
+            String::from_utf8_lossy(&listing.stderr)
+        ));
+    }
+    let mut sources = Vec::new();
+    for name in listing.stdout.split(|byte| *byte == 0) {
+        if name.is_empty() {
+            continue;
+        }
+        let name = std::str::from_utf8(name)
+            .map_err(|_| format!("a source name of the identity crate is not UTF-8: {name:?}"))?;
+        sources.push(format!("{IDENTITY_CRATE_DIR}/{name}"));
+    }
+    Ok(sources)
+}
+
 /// The files the claim scan reads: lane-relative paths that git tracks or
-/// would track (ignored files such as `target/` left out), sorted. A git that
-/// cannot run or fails, or a path that is not UTF-8, is refused with its
-/// cause.
+/// would track (ignored files such as `target/` left out), and
+/// [`identity_crate_sources`], sorted. A git that cannot run or fails, or a
+/// path that is not UTF-8, is refused with its cause.
 pub fn claim_scan_paths() -> Result<Vec<String>, String> {
     let output = Command::new("git")
         .args([
@@ -1136,6 +1178,7 @@ pub fn claim_scan_paths() -> Result<Vec<String>, String> {
             paths.push(path);
         }
     }
+    paths.extend(identity_crate_sources()?);
     paths.sort();
     paths.dedup();
     Ok(paths)
