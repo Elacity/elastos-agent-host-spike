@@ -129,6 +129,7 @@ function observeTranscript(scroller, content) {
   };
   scroller.addEventListener("wheel", event => {
     if (event.deltaY && !event.ctrlKey) readerInput();
+    if (event.deltaY > 0) { atEnd = true; showFollow(); }
   }, { passive: true });
   scroller.addEventListener("touchstart", event => {
     touchY = event.touches[0].clientY;
