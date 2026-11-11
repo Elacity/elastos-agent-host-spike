@@ -4,6 +4,7 @@ pub mod browser_protocol;
 #[cfg(unix)]
 pub mod browser_vm_seed;
 pub mod chat_protocol;
+mod cid_form;
 pub mod collaboration_protocol;
 mod error;
 mod free_space;
@@ -20,6 +21,7 @@ pub mod test_fixtures;
 pub mod timestamp;
 mod types;
 
+pub use cid_form::cid_form;
 pub use error::{ElastosError, Result};
 pub use free_space::{require_free_space, NotEnoughFreeSpace, FREE_SPACE_RESERVE_BYTES};
 pub use manifest::{
