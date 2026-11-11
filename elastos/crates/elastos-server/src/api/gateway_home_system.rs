@@ -9898,8 +9898,12 @@ mod r8c_child_rows {
     }
 }
 
-/// R8d evidence row for Profile update, for a parent passkey person on a
-/// child Runtime. `people_profile_update` (line 2521) first calls
+/// R8d evidence rows for Home saves and Profile update, for a parent passkey
+/// person on a child Runtime. Each save row calls the private function its
+/// route calls after the token is verified, then records the result, the
+/// whole child data directory and whether the file's bytes are the input.
+///
+/// The Profile row: `people_profile_update` (line 2521) first calls
 /// `require_profile_authority_passkey_binding` with its own data directory
 /// (line 2532). For this person it returns there with 403 (line 2538) and
 /// never reaches the private `update_profile_for_context` (line 8608). The
@@ -9907,9 +9911,45 @@ mod r8c_child_rows {
 /// Its control is the R8c control row above.
 #[cfg(test)]
 mod r8d_passkey_rows {
-    use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, refusal, PERSON, ROOT};
+    use super::super::gateway_tests::r8d_passkey_rows::{
+        passkey_person, refusal, PasskeyPerson, PERSON, ROOT,
+    };
     use super::*;
     use crate::collaboration_profile_authority as authority;
+
+    /// A path under the person's root, as `assert_child_holds_only` reports it.
+    fn under_person(relative: &str) -> String {
+        format!("{}/{relative}", ROOT.trim_start_matches("localhost://"))
+    }
+
+    /// The same path on disk, under `child`.
+    fn person_path(child: &std::path::Path, relative: &str) -> std::path::PathBuf {
+        child.join(under_person(relative))
+    }
+
+    /// The file's bytes, parsed as JSON. The row's proof that the save left
+    /// the bytes readable as written.
+    fn plain_json(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap())
+            .unwrap_or_else(|error| panic!("{} is not plain JSON: {error}", path.display()))
+    }
+
+    /// A saved file is the only entry beside what the fixture left, and its
+    /// bytes are `expected`.
+    fn assert_saved(
+        child: &std::path::Path,
+        relative: &str,
+        expected: &[u8],
+        person: &PasskeyPerson,
+    ) {
+        assert_eq!(
+            std::fs::read(person_path(child, relative)).unwrap(),
+            expected,
+            "{relative} holds the bytes the save was given"
+        );
+        let expected = under_person(relative);
+        person.assert_child_holds_only(&[expected.as_str()]);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
@@ -9955,5 +9995,115 @@ mod r8d_passkey_rows {
         let kept = authority::load_profile_authority(parent, PERSON, ROOT).unwrap();
         let name = kept.map(|profile| profile.document().display_name.clone());
         assert_eq!(name.as_deref(), Some("Parent Person"));
+    }
+
+    /// Entry: `home_save_background_image` (line 8519) with the first name in
+    /// `HOME_BACKGROUND_IMAGE_FILES`. Today the child's write leaves the image
+    /// bytes as given under the person's root, and no protection record is
+    /// needed.
+    #[test]
+    fn r8d_child_background_image_save_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        let bytes = b"r8d child background image".to_vec();
+        let file_name = HOME_BACKGROUND_IMAGE_FILES[0].0;
+        let saved = home_save_background_image(child, &person.ctx, file_name, bytes.clone())
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(saved.schema, HOME_APPEARANCE_SCHEMA);
+        assert_eq!(
+            saved.background_overlay_enabled,
+            HOME_BACKGROUND_OVERLAY_DEFAULT
+        );
+        let image_url = saved
+            .background_image_url
+            .expect("the summary names the image");
+        assert!(
+            image_url.starts_with("/api/apps/home/appearance/background-image?scope="),
+            "{image_url}"
+        );
+        let relative = format!(".AppData/ElastOS/Home/Appearance/{file_name}");
+        assert_saved(child, &relative, &bytes, &person);
+    }
+
+    /// Entry: `home_save_background_overlay` (line 8495). Today the child's
+    /// write leaves the overlay settings as a plain JSON object.
+    #[test]
+    fn r8d_child_background_overlay_save_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        let saved = home_save_background_overlay(child, &person.ctx, true, 0.55)
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        assert!(saved.background_overlay_enabled);
+        assert_eq!(saved.background_overlay_opacity, 0.55);
+        let relative = ".AppData/ElastOS/Home/Appearance/background-overlay.json";
+        assert_eq!(
+            plain_json(&person_path(child, relative)),
+            serde_json::json!({"enabled": true, "opacity": 0.55})
+        );
+        let expected = under_person(relative);
+        person.assert_child_holds_only(&[expected.as_str()]);
+    }
+
+    /// A later image upload removes the image already there before it writes
+    /// the new one. Today the new image sits under the person's root and the
+    /// earlier one is gone.
+    #[test]
+    fn r8d_child_background_image_replace_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        home_save_background_image(
+            child,
+            &person.ctx,
+            "background-image.png",
+            b"r8d first image".to_vec(),
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+        let second = b"r8d second image".to_vec();
+        home_save_background_image(
+            child,
+            &person.ctx,
+            "background-image.jpg",
+            second.clone(),
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+        let earlier = person_path(child, ".AppData/ElastOS/Home/Appearance/background-image.png");
+        assert!(
+            !earlier.exists(),
+            "the earlier image is removed: {}",
+            earlier.display()
+        );
+        let relative = ".AppData/ElastOS/Home/Appearance/background-image.jpg";
+        assert_saved(child, relative, &second, &person);
+    }
+
+    /// Entry: `home_save_appearance_preferences` (line 8330) with one field
+    /// set. Today the child's write leaves a plain JSON object with the
+    /// revision raised by one and the other fields at their defaults.
+    #[test]
+    fn r8d_child_appearance_preferences_save_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        let update: HomeAppearancePreferencesUpdate =
+            serde_json::from_value(serde_json::json!({"sounds": true})).unwrap();
+        let saved = home_save_appearance_preferences(child, &person.ctx, update)
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(saved.revision, 1);
+        assert!(saved.sounds);
+        let relative = ".AppData/ElastOS/Home/Appearance/preferences.json";
+        assert_eq!(
+            plain_json(&person_path(child, relative)),
+            serde_json::json!({
+                "schema": HOME_APPEARANCE_PREFERENCES_SCHEMA,
+                "revision": 1,
+                "theme": HOME_APPEARANCE_DEFAULT_THEME,
+                "accent": HOME_APPEARANCE_DEFAULT_ACCENT,
+                "accent_custom": HOME_APPEARANCE_DEFAULT_ACCENT_CUSTOM,
+                "dock_auto_hide": false,
+                "sounds": true,
+                "focus_mode": false,
+            })
+        );
+        let expected = under_person(relative);
+        person.assert_child_holds_only(&[expected.as_str()]);
     }
 }
