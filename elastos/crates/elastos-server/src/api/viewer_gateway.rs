@@ -1202,3 +1202,90 @@ mod r4_root_tests {
         }
     }
 }
+
+/// R8d evidence row for Viewer storage, for a parent passkey person on a
+/// child Runtime. Entry: `viewer_storage_write` (line 695) with the
+/// `Absent` precondition, which `viewer_storage_put` calls after the target
+/// is built for the person's root.
+#[cfg(test)]
+mod r8d_passkey_rows {
+    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{passkey_person, ROOT};
+    use super::*;
+
+    const DOCUMENTS: &str = "documents";
+
+    /// The `documents` viewer an installed Home carries: a manifest whose
+    /// storage grant is scoped to the person's root. No capsule bytes run.
+    fn documents_viewer(data_dir: &FsPath) {
+        let capsule = data_dir.join("capsules/documents");
+        std::fs::create_dir_all(capsule.join("browser")).unwrap();
+        std::fs::write(capsule.join("browser/index.html"), "viewer").unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            serde_json::to_vec(&json!({
+                "schema": "elastos.capsule/v1", "name": "documents", "version": "0.1.0",
+                "author": "elastos", "role": "viewer", "type": "wasm",
+                "entrypoint": "browser/index.html",
+                "permissions": {"storage": ["localhost://Users/self/Documents/*"]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&json!({"external": {"documents": {
+                "install_path": "capsules/documents", "platforms": {}
+            }}, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Today the child's viewer storage write with the `Absent` precondition
+    /// leaves the bytes as given under the person's root, and no protection
+    /// record is needed.
+    #[test]
+    fn r8d_child_viewer_storage_save_for_the_passkey_person() {
+        let person = passkey_person(DOCUMENTS);
+        let child = person.child.path();
+        documents_viewer(child);
+        let target = viewer_storage_target_for_context(
+            child,
+            &person.ctx,
+            DOCUMENTS,
+            DOCUMENTS,
+            "save",
+            "r8d-note.md",
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(
+            target.object_uri,
+            format!("{ROOT}/Documents/r8d-note.md")
+        );
+        let bytes = b"r8d child viewer note".to_vec();
+        viewer_storage_write(
+            child,
+            &target,
+            &bytes,
+            crate::auth::PrincipalRootObjectPrecondition::Absent,
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+        let relative = format!(
+            "{}/Documents/r8d-note.md",
+            ROOT.trim_start_matches("localhost://")
+        );
+        assert_eq!(
+            std::fs::read(child.join(&relative)).unwrap(),
+            bytes,
+            "{relative} holds the bytes it was given"
+        );
+        let expected = [
+            "capsules/documents/browser/index.html".to_string(),
+            "capsules/documents/capsule.json".to_string(),
+            "components.json".to_string(),
+            relative,
+        ];
+        let also: Vec<&str> = expected.iter().map(String::as_str).collect();
+        person.assert_child_holds_only(&also);
+    }
+}

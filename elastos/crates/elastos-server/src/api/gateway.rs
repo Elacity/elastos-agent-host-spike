@@ -1559,4 +1559,4 @@ fn home_error_response(err: anyhow::Error) -> Response {
 mod gateway_browser_tests;
 #[cfg(test)]
 #[path = "gateway_tests/mod.rs"]
-mod gateway_tests;
+pub(in crate::api) mod gateway_tests;
