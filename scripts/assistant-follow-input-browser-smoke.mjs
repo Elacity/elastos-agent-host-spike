@@ -57,16 +57,18 @@ try {
     await run("swiftc", ["-O", "-module-cache-path", resolve(output, "module-cache"), "-o", binary,
       resolve(root, "scripts/fixtures/assistant-follow-input-webkit.swift")], { timeout: 60000 });
   }
-  // Keep scrolling and its events on the main thread. With threaded scroll,
-  // Chromium commits a scroll offset on the compositor, and a starved
-  // compositor under four-core load held that commit for tens of seconds: the
-  // module pinned the room and scrollTop still read the old offset, so the
-  // queued-pin cases read fromEnd 100 with follow true and a native drag read
-  // a position it had already left. The page's timers ran at their normal
-  // rate the whole time. The check asserts main-thread follow state, not
-  // compositor scheduling.
+  // Keep the scroll offset and its events on the main thread. With threaded
+  // scroll and scroll unification, Chromium commits a scroll offset on the
+  // compositor, and a starved compositor under four-core load held that
+  // commit past the 15 s waits: the module pinned the room and scrollTop
+  // still read the old offset (fromEnd 100 with follow true), while a later
+  // read saw the pin applied, and each Playwright mouse event returned after
+  // a fixed 5 s input-ack timeout. The page's timers ran at their normal rate
+  // the whole time. The check asserts main-thread follow state, not compositor
+  // scheduling.
   browser = await chromium.launch({ headless: !native,
-    args: native ? ["--force-renderer-accessibility"] : ["--disable-threaded-scrolling", "--disable-smooth-scrolling"],
+    args: native ? ["--force-renderer-accessibility"]
+      : ["--disable-threaded-scrolling", "--disable-smooth-scrolling", "--disable-features=ScrollUnification"],
     ignoreDefaultArgs: ["--hide-scrollbars"],
     ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
   for (const mode of modes) {
