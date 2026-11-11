@@ -257,7 +257,7 @@ fn resource_invoke_dispatch(
     })
 }
 
-fn manifest_allows_resource(
+pub(crate) fn manifest_allows_resource(
     manifest_capabilities: &[String],
     resource: &str,
     principal_id: Option<&str>,
@@ -1698,6 +1698,78 @@ mod tests {
             Some(temp.path())
         ));
         assert!(!manifest_allows_resource(&bounds, &resource, None, None));
+    }
+
+    /// An ask grants nothing: a manifest that states asks has an empty ceiling,
+    /// so the ceiling check refuses a request for the very resource it asks
+    /// for. The same resource as a capability is the control.
+    #[test]
+    fn a_manifest_with_asks_is_refused_the_resource_it_asks_for() {
+        let manifest = |extra: serde_json::Value| -> elastos_common::CapsuleManifest {
+            let mut value = serde_json::json!({
+                "schema": "elastos.capsule/v1", "name": "asks-bridge", "version": "0.1.0",
+                "role": "app", "type": "data", "entrypoint": "index.html"
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let manifest: elastos_common::CapsuleManifest = serde_json::from_value(value).unwrap();
+            manifest.validate().unwrap();
+            manifest
+        };
+        let resource = "elastos://did/key";
+        let granted = manifest(serde_json::json!({"capabilities": ["elastos://did/*"]}));
+        assert!(manifest_allows_resource(
+            &granted.resource_authority_bounds(),
+            resource,
+            None,
+            None
+        ));
+        let asked = manifest(serde_json::json!({
+            "asks": [{"resource": "elastos://did/*", "actions": ["read"]}]
+        }));
+        assert!(!manifest_allows_resource(
+            &asked.resource_authority_bounds(),
+            resource,
+            None,
+            None
+        ));
+    }
+
+    /// Every place that fills a capsule's ceiling asks the one function that
+    /// decides it, and none of those files reads a manifest's capability list
+    /// itself. So a rule placed in that function (such as the empty ceiling of
+    /// a manifest with asks) holds wherever a capsule is started.
+    #[test]
+    fn every_place_that_fills_a_ceiling_asks_the_one_bounds_function() {
+        for (file, source, fill) in [
+            (
+                "runtime.rs",
+                include_str!("runtime.rs"),
+                "handle.manifest.resource_authority_bounds(),",
+            ),
+            (
+                "supervisor.rs",
+                include_str!("supervisor.rs"),
+                "manifest_capabilities: manifest.resource_authority_bounds(),",
+            ),
+            (
+                "run_cmd.rs",
+                include_str!("run_cmd.rs"),
+                "let manifest_capabilities = manifest.resource_authority_bounds();",
+            ),
+            (
+                "capsule_cmd.rs",
+                include_str!("capsule_cmd.rs"),
+                "let manifest_capabilities = manifest.resource_authority_bounds();",
+            ),
+        ] {
+            let production = source.split("\nmod tests {").next().unwrap();
+            let production = production.split("\npub(crate) mod tests {").next().unwrap();
+            assert_eq!(production.matches(fill).count(), 1, "{file}: {fill}");
+            assert!(!production.contains("manifest.capabilities"), "{file}");
+        }
     }
 
     /// A temp data dir holding a stored Human record for `principal_id`.
