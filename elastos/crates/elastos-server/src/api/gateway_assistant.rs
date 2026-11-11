@@ -527,3 +527,48 @@ mod r3_tests {
         assert!(!crate::auth::principal_object_io::writes(dir.path()).contains(&child_path));
     }
 }
+
+/// R8d evidence row for the Assistant workspace, for a parent passkey person
+/// on a child Runtime. Entry: `save_assistant_workspace` (line 184), which
+/// `assistant_workspace_put` calls after the token is verified.
+#[cfg(test)]
+mod r8d_passkey_rows {
+    use super::super::gateway_tests::r8d_passkey_rows::{
+        passkey_person, refusal, PasskeyPerson,
+    };
+    use super::super::r3_stored_root_tests::NEEDS_PROTECTION;
+    use super::*;
+
+    fn put_request() -> AssistantWorkspacePutRequest {
+        serde_json::from_value(serde_json::json!({
+            "schema": ASSISTANT_WORKSPACE_SCHEMA,
+            "if_revision": 0,
+            "sessions": [],
+            "draft": "r8d child draft"
+        }))
+        .unwrap()
+    }
+
+    /// Today the child's save is refused with the protection text and leaves
+    /// no file.
+    #[tokio::test(flavor = "current_thread")]
+    async fn r8d_child_assistant_workspace_save_for_the_passkey_person() {
+        let person: PasskeyPerson = passkey_person(ASSISTANT_CAPSULE_ID);
+        let child = person.child.path();
+        let saved = save_assistant_workspace(child, &person.ctx, put_request());
+        assert_eq!(refusal(saved).as_deref(), Some(NEEDS_PROTECTION));
+        // The route gives the same text with the status it answers.
+        let answer = assistant_workspace_put(
+            State(person.child_state()),
+            person.route_headers(ASSISTANT_CAPSULE_ID),
+            Json(put_request()),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), NEEDS_PROTECTION);
+        person.assert_child_holds_only(&[]);
+    }
+}
