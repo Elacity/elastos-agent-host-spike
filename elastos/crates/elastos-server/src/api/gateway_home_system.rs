@@ -9814,6 +9814,9 @@ mod stored_root_tests {
 /// R8c evidence rows for Profile update. `people_profile_update` (line 2521)
 /// first calls `require_profile_authority_passkey_binding` and then the
 /// private `update_profile_for_context` (line 8608); these rows call both.
+/// The child row expects the gate and the update to pass and the Profile to
+/// land under the parent root. For the parent device both refuse with
+/// `proof-bound passkey session required` today, before any write.
 #[cfg(test)]
 mod r8c_child_rows {
     use super::super::r3_stored_root_tests::verified_parent_device_context;
@@ -9856,7 +9859,7 @@ mod r8c_child_rows {
 
     #[test]
     #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
-    fn r8c_child_profile_update_writes_under_the_parent_root() {
+    fn r8c_child_profile_update_passes_the_passkey_gate_and_writes_under_the_parent_root() {
         let dir = tempfile::tempdir().unwrap();
         let (context, parent_root, _, _) =
             verified_parent_device_context(dir.path(), PEOPLE_CAPSULE_ID);
