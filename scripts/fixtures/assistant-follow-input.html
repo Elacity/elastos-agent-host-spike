@@ -46,7 +46,6 @@
   const result = { userAgent: navigator.userAgent, matrix, phase: "done", fallback, swallow, nativeScrollend: "onscrollend" in s, cases: {}, failures: [] };
   window.addEventListener("error", event => result.failures.push(event.message));
   window.addEventListener("unhandledrejection", event => result.failures.push(String(event.reason)));
-  const frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const snap = () => ({ top: s.scrollTop, fromEnd: s.scrollHeight - s.clientHeight - s.scrollTop,
     follow: s.classList.contains("is-follow-bottom"), jump: !viewport.querySelector("[data-agent-jump-latest]").hidden });
   // Wait for the state the next assertion needs, instead of a fixed pause. A
@@ -74,7 +73,10 @@
     let changedAt = performance.now();
     const deadline = changedAt + 15000;
     for (;;) {
-      await frames();
+      // Poll on a timer. Playwright's own waits and every loop here must not
+      // depend on animation frames: a loaded renderer starves them, and a wait
+      // that rides the frame loop never runs even when the state is there.
+      await delay(25);
       const now = state();
       if (now !== last) { last = now; changedAt = performance.now(); }
       else if (performance.now() - changedAt >= 200) return;
@@ -118,7 +120,7 @@
       if (performance.now() > deadline) throw new Error("live turn did not flush");
       await delay(10);
     }
-    await frames();
+    await delay(25);
   };
   const jump = () => {
     if (mod.jumpTranscriptToEnd) mod.jumpTranscriptToEnd(s);
@@ -352,7 +354,7 @@
     await reset();
     pointer("pointerdown"); pointer("pointerup");
     // WebKit can deliver the drag's scroll after release, as measured by review.
-    await new Promise(requestAnimationFrame);
+    await delay(50);
     s.scrollBy(0, -450);
     await heldGrowth("scrollbar scroll after release then growth");
 
@@ -513,7 +515,7 @@
         if (performance.now() > deadline) break;
         await delay(20);
       }
-      await delay(500); await frames(); watchFlash = false;
+      await delay(500); watchFlash = false;
       result.cases["stream growth and completion without Jump flash"] = { flashFrames, after: snap(),
         phase: mod.getLiveTurnCanonical().phase, turn: context.sessions[0].lastTurn };
       expect(!context.turnBusy && !context.sessions[0].lastTurn.error, "stream completes successfully");

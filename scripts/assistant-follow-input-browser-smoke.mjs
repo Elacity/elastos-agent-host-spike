@@ -107,7 +107,10 @@ try {
     // CI's the same page took 52-58 s, and a 55 s bound expired in 18 of 40
     // runs. 120 s leaves the same margin over that work for each mode, and
     // together with the runner's own per-run limit.
-    await page.waitForFunction(() => window.__report, null, { timeout: matrix ? 180000 : 120000 });
+    // Poll on a timer. Playwright polls a waitForFunction on animation frames
+    // by default, and a loaded renderer starves that loop: the report was set
+    // but never read, which is how a run died at the bound.
+    await page.waitForFunction(() => window.__report, null, { polling: 100, timeout: matrix ? 180000 : 120000 });
     record({ engine: "Chromium", input: native ? "CGEvent" : "Playwright", driverErrors, ...await page.evaluate(() => window.__report) });
     await page.close();
   }
