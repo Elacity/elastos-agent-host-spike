@@ -1090,6 +1090,14 @@ pub struct AgentHostPackage {
     pub registry_cid: String,
 }
 
+/// The record shape written for an agent. A record stored before this field
+/// loads as version 0 and saves without the key.
+pub const PRINCIPAL_RECORD_VERSION: u64 = 1;
+
+fn principal_record_version_unset(version: &u64) -> bool {
+    *version == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrincipalRecord {
     pub principal_id: String,
@@ -1121,6 +1129,10 @@ pub struct PrincipalRecord {
     /// Set when the agent is retired. Absent until then, and on a person record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired_at: Option<u64>,
+    /// Section 2's version tag. Absent on a record stored before this field.
+    /// Agent records are written at `PRINCIPAL_RECORD_VERSION`.
+    #[serde(default, skip_serializing_if = "principal_record_version_unset")]
+    pub version: u64,
 }
 
 /// The two principals a Home can mint. Each kind owns one rooted space:
@@ -2081,6 +2093,7 @@ pub(crate) fn complete_owner_recovery(
             request_id: None,
             agent_host_package: None,
             retired_at: None,
+            version: 0,
         });
         state.sessions.push(StoredAuthSession {
             grant: grant.clone(),
@@ -2242,6 +2255,7 @@ pub(crate) fn complete_passkey_add(
             request_id: None,
             agent_host_package: None,
             retired_at: None,
+            version: signer.version,
         };
         state.principals.push(record.clone());
         push_audit_event(data_dir, state, event)?;
@@ -2649,6 +2663,7 @@ pub(crate) fn complete_owner_enrollment_with_intent(
             request_id: None,
             agent_host_package: None,
             retired_at: None,
+            version: 0,
         });
         state.sessions.push(StoredAuthSession {
             grant: grant.clone(),
@@ -4602,6 +4617,7 @@ fn grant_passkey_session_in_state(
                     request_id: None,
                     agent_host_package: None,
                     retired_at: None,
+                    version: 0,
                 };
                 state.principals.push(principal.clone());
                 principal
@@ -5368,6 +5384,9 @@ fn agent_admission_pair_difference(
     }
     if new.kind != old.kind {
         return Some("agent admission kind change");
+    }
+    if new.version != old.version {
+        return Some("agent admission version change");
     }
     // An unchanged malformed record is kept. A real edit names its reason.
     if agent_admission_record_same(old, new) {
@@ -6295,6 +6314,7 @@ pub fn upsert_principal_for_binding_as_role_named(
             request_id: None,
             agent_host_package: None,
             retired_at: None,
+            version: 0,
         };
         state.principals.push(record.clone());
         Ok(record)
@@ -12618,6 +12638,7 @@ pub(crate) fn store_test_human_principal(data_dir: &Path, principal_id: &str) ->
         request_id: None,
         agent_host_package: None,
         retired_at: None,
+        version: 0,
     };
     mutate_auth_state(data_dir, |state| {
         state.principals.push(record.clone());
@@ -12652,6 +12673,7 @@ fn test_agent_record(agent_id: &str) -> PrincipalRecord {
             registry_cid: "bafyrecord".to_string(),
         }),
         retired_at: None,
+        version: PRINCIPAL_RECORD_VERSION,
     }
 }
 
@@ -12743,6 +12765,7 @@ fn admit_passkey_principal_as_agent(
         serde_json::json!({"name": "agent-host", "registry_cid": "bafyrecord"});
     principal["proof_binding"]["kind"] = serde_json::json!("agent_admission");
     principal["proof_binding"]["subject"] = serde_json::json!(agent_id);
+    principal["version"] = serde_json::json!(PRINCIPAL_RECORD_VERSION);
     value["principals"]
         .as_array_mut()
         .unwrap()
@@ -12767,6 +12790,7 @@ fn test_person_record(principal_id: &str) -> PrincipalRecord {
         request_id: None,
         agent_host_package: None,
         retired_at: None,
+        version: 0,
     }
 }
 
@@ -19589,6 +19613,10 @@ pub(crate) mod tests {
                 && value.get("retired_at").is_none(),
             "a person record omits agent fields"
         );
+        assert!(
+            value.get("version").is_none(),
+            "a person record omits version"
+        );
     }
 
     fn passkey_credential() -> elastos_identity::StoredCredential {
@@ -20019,6 +20047,19 @@ pub(crate) mod tests {
             "kind field change was refused",
             "agent admission kind change",
             |record| record.kind = PrincipalKind::Human,
+        );
+    }
+
+    #[test]
+    fn agent_admission_guard_refuses_a_version_change() {
+        assert_eq!(
+            test_agent_record(TEST_AGENT_ID).version,
+            PRINCIPAL_RECORD_VERSION
+        );
+        refuse_agent_field_edit(
+            "version field change was refused",
+            "agent admission version change",
+            |record| record.version = record.version.saturating_add(1),
         );
     }
 
