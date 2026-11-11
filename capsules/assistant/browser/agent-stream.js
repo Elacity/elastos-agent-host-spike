@@ -191,7 +191,7 @@ function observeTranscript(scroller, content) {
   scroller.addEventListener("scrollend", waitForReader);
   const resize = new ResizeObserver(pinFollowing);
   resize.observe(scroller);
-  resize.observe(content);
+
   pinFollowing();
 }
 
