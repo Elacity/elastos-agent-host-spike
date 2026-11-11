@@ -166,7 +166,9 @@ try {
           ...diagnostics }));
       throw error;
     }
-    record({ engine: "Chromium", input: native ? "CGEvent" : "Playwright", driverErrors, ...await page.evaluate(() => window.__report) });
+    record({ engine: "Chromium", input: native ? "CGEvent" : "Playwright", driverErrors,
+      heartbeat: await page.evaluate(() => window.__heartbeat), driverSteps: inputSteps.slice(-60),
+      ...await page.evaluate(() => window.__report) });
     await page.close();
   }
   await browser.close(); browser = null;
