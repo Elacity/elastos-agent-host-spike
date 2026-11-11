@@ -118,7 +118,8 @@ try {
       } else if (request.phase === "key") {
         await step(`key ${request.key}`, () => page.keyboard.press(request.key));
       } else {
-        const selection = request.phase === "select";
+        if (request.phase === "select") return;
+        const selection = false;
         const back = request.phase === "drag-back";
         const x = selection ? b.x + 8 : b.x + b.width - 3;
         const y = selection ? b.y + b.height / 2 : b.y + (back ? 14 : b.height - 14);
