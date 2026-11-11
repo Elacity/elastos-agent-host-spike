@@ -5471,7 +5471,7 @@ fn refuse_agent_admission_changes(
             agent_admission_permit_clause(permit)
         );
     }
-    if quarantined_principal_bytes(&before) != quarantined_principal_bytes(&after.principals) {
+    if quarantined_raw_changed(data_dir, after)? {
         return refuse_quarantined_agent_change(permit, &after.principals);
     }
     Ok(())
@@ -5499,15 +5499,92 @@ fn refuse_quarantined_agent_change(
     }
 }
 
-fn quarantined_principal_bytes(records: &[PrincipalRecord]) -> Vec<Vec<u8>> {
-    let mut bytes = Vec::new();
-    for record in records {
-        if agent_admission_record_violation(records, record).is_some() {
-            bytes.push(serde_json::to_vec(record).unwrap_or_default());
-        }
-    }
+fn canonical_json(values: &[Value]) -> Vec<Vec<u8>> {
+    let mut bytes = values
+        .iter()
+        .map(|value| serde_json::to_vec(value).unwrap_or_default())
+        .collect::<Vec<_>>();
     bytes.sort();
     bytes
+}
+
+/// The raw principal values on disk that this save must keep. A file this
+/// process cannot parse follows the person-only policy of `principals_before_save`.
+fn disk_quarantined_raw(data_dir: &Path, after: &AuthState) -> anyhow::Result<Vec<Value>> {
+    let Some((bytes, _)) = read_auth_state_bytes(data_dir)? else {
+        return Ok(Vec::new());
+    };
+    if serde_json::from_slice::<AuthState>(&bytes).is_err() {
+        return unreadable_quarantine_raw(after);
+    }
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        anyhow!("agent admission record change refused: auth state could not be read")
+    })?;
+    let Some(entries) = value.get("principals").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut records = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match serde_json::from_value::<PrincipalRecord>(entry.clone()) {
+            Ok(record) => records.push(record),
+            Err(_) => return unreadable_quarantine_raw(after),
+        }
+    }
+    Ok(entries
+        .iter()
+        .zip(&records)
+        .filter(|(_, record)| agent_admission_record_violation(&records, record).is_some())
+        .map(|(entry, _)| entry.clone())
+        .collect())
+}
+
+fn unreadable_quarantine_raw(after: &AuthState) -> anyhow::Result<Vec<Value>> {
+    if after.quarantined_raw.is_empty() && !after.principals.iter().any(is_agent_admission_record) {
+        Ok(Vec::new())
+    } else {
+        anyhow::bail!("agent admission record change refused: auth state could not be read")
+    }
+}
+
+/// An in-memory edit of a malformed record is still a change. Unknown fields
+/// are not part of the struct, so this does not see them; the raw values do.
+fn quarantined_record_was_edited(state: &AuthState) -> bool {
+    let mut decoded = Vec::with_capacity(state.quarantined_raw.len());
+    for raw in &state.quarantined_raw {
+        let Ok(record) = serde_json::from_value::<PrincipalRecord>(raw.clone()) else {
+            return true;
+        };
+        decoded.push(record);
+    }
+    let current: Vec<&PrincipalRecord> = state
+        .principals
+        .iter()
+        .filter(|record| agent_admission_record_violation(&state.principals, record).is_some())
+        .collect();
+    if decoded.len() != current.len() {
+        return true;
+    }
+    let mut used = vec![false; decoded.len()];
+    for record in current {
+        let Some(index) = decoded
+            .iter()
+            .enumerate()
+            .find(|(index, parsed)| !used[*index] && *parsed == record)
+            .map(|(index, _)| index)
+        else {
+            return true;
+        };
+        used[index] = true;
+    }
+    false
+}
+
+fn quarantined_raw_changed(data_dir: &Path, after: &AuthState) -> anyhow::Result<bool> {
+    let disk = disk_quarantined_raw(data_dir, after)?;
+    Ok(
+        canonical_json(&disk) != canonical_json(&after.quarantined_raw)
+            || quarantined_record_was_edited(after),
+    )
 }
 
 fn quarantine_reason(state: &AuthState, principal_id: &str) -> Option<&'static str> {
