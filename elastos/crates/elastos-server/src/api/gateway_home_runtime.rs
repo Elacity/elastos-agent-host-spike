@@ -1968,6 +1968,13 @@ mod tests {
         )
         .unwrap();
         let context = HomeLaunchTokenContext::for_test("fixture", "fixture", None, "fixture");
+        // The cause, and not only the outcome: Home's reader finds no
+        // manifest in the installed folder.
+        let installed = data_dir.join("capsules/pinned-fixture");
+        assert!(
+            crate::api::capsule_inventory::load_capsule_manifest(&installed, "pinned-fixture")
+                .is_none()
+        );
         let outcome = launch_runtime_backed_home_target(data_dir, "pinned-fixture", &context).await;
         assert!(outcome.is_none());
         assert!(!crate::runtime_control::home_runtime_coord_path(data_dir).exists());

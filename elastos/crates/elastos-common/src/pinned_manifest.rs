@@ -540,6 +540,35 @@ mod tests {
         assert_eq!(pin_refusal(&two), (REQUIREMENT_DUPLICATE, String::new()));
     }
 
+    /// The pinned type runs the ordinary `validate()`, so a manifest that
+    /// pins a requirement and also states asks is held to the ask rules: a
+    /// valid one parses, an ask with no action is refused, and asks beside
+    /// capabilities are refused, each as `Invalid` with the ordinary text.
+    #[test]
+    fn a_pinned_manifest_with_asks_is_held_to_the_ask_rules() {
+        let with = |extra: serde_json::Value| {
+            let mut value = json!({"requires": [pinned("viewer", ROOT_A)]});
+            let extra = extra.as_object().unwrap().clone();
+            value.as_object_mut().unwrap().extend(extra);
+            manifest(value)
+        };
+        let ask = |actions: serde_json::Value| json!([{"resource": "elastos://did/*", "actions": actions}]);
+        let fine = PinnedManifest::parse(&with(json!({"asks": ask(json!(["read"]))}))).unwrap();
+        assert_eq!(fine.pins().len(), 1);
+        for (extra, expected) in [
+            (json!({"asks": ask(json!([]))}), "ask_invalid:"),
+            (
+                json!({"asks": ask(json!(["read"])), "capabilities": ["elastos://did/*"]}),
+                "asks_conflict:",
+            ),
+        ] {
+            match refusal(&with(extra)) {
+                PinnedManifestError::Invalid(text) => assert!(text.starts_with(expected), "{text}"),
+                other => panic!("{expected} {other:?}"),
+            }
+        }
+    }
+
     /// The crate has no compile-fail harness, so this is a check of the
     /// source text: the manifest inside is a private field, the type derives
     /// nothing, and no public function or conversion hands the manifest out.
@@ -574,9 +603,11 @@ mod tests {
                 "let manifest: CapsuleManifest = match without_pins {",
             ]
         );
-        // One derive in the file, on the error type; none on the struct. (An
-        // impl in another file could not read the field: it is private to
-        // this module.)
+        // One derive in the file, on the error type; none on the struct.
+        // What this check covers: the top-level items of this one file. The
+        // field is private to this module, so code in another file cannot
+        // read it; a child module declared in this file could, and would
+        // have to be added here to be seen.
         let derives: Vec<&str> = code().filter(|line| line.starts_with("#[derive")).collect();
         assert_eq!(derives, ["#[derive(Debug, Clone, PartialEq, Eq)]"]);
         let field_uses: Vec<&str> = code()

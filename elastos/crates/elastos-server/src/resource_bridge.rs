@@ -1773,7 +1773,12 @@ mod tests {
     /// or storage permissions itself. So a rule placed in that function (such
     /// as the empty ceiling of a manifest with asks) holds wherever a capsule
     /// is started. And those four are the only production callers of that
-    /// function in the workspace's crates: a fifth has to be added here.
+    /// function under `elastos/crates`: a fifth has to be added here.
+    ///
+    /// What this cannot show: a workspace member outside `elastos/crates`
+    /// (two live under `capsules/`; neither calls the function today), a call
+    /// split across lines, and a fifth file that fills a ceiling straight
+    /// from a manifest's capability list without calling the function at all.
     #[test]
     fn every_place_that_fills_a_ceiling_asks_the_one_bounds_function() {
         for (file, source, fill) in [
