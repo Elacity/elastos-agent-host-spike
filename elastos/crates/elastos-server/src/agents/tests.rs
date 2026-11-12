@@ -4,6 +4,9 @@
 use super::*;
 use serde_json::{json, Value};
 
+#[path = "frozen_audit_v2_0_1.rs"]
+mod frozen_audit;
+
 pub(crate) const OWNER_ID: &str = "person:local:agents-owner";
 const SESSION_ID: &str = "session:agents-test";
 const AGENT_A: &str = "agent:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1315,4 +1318,173 @@ fn a_refused_file_keeps_its_bytes_and_refuses_every_operation() {
         .iter()
         .any(|principal| principal.principal_id == OWNER_ID));
     assert!(owner_protection(&home).principal_id == OWNER_ID);
+}
+
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn with_the_feature_off_every_operation_refuses_by_name() {
+    assert!(!build_allows());
+    let home = Home::new();
+    let caller = home.caller();
+    let agent_id = plant_enabled_home_with_one_agent(
+        home.path(),
+        caller.principal_id,
+        caller.proof_binding_id,
+    );
+    assert_eq!(
+        loaded(&home).agents.len(),
+        1,
+        "a valid enabled file is on disk"
+    );
+    let written = home.agent_bytes();
+    let events = home.audit().len();
+
+    assert_eq!(
+        refusal_of(set_enabled(home.path(), &caller, true, 12)),
+        FEATURE_OFF
+    );
+    assert_eq!(
+        refusal_of(set_enabled(home.path(), &caller, false, 12)),
+        FEATURE_OFF
+    );
+    let created = create(home.path(), &caller, &request("request-2"), admit, 12);
+    assert_eq!(refusal_of(created), FEATURE_OFF);
+    assert_eq!(refusal_of(list(home.path(), &caller)), FEATURE_OFF);
+    assert_eq!(
+        refusal_of(retire(home.path(), &caller, &agent_id, 12)),
+        FEATURE_OFF
+    );
+
+    assert_eq!(home.agent_bytes(), written);
+    assert_eq!(home.audit().len(), events);
+}
+
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn with_the_feature_on_the_operations_are_served() {
+    assert!(build_allows());
+    let home = Home::new();
+    let caller = home.caller();
+    assert_eq!(refusal_of(list(home.path(), &caller)), NOT_ENABLED);
+    assert!(set_enabled(home.path(), &caller, true, 9).unwrap());
+    let agent = create(home.path(), &caller, &request("request-1"), admit, 9).unwrap();
+    assert_eq!(
+        list(home.path(), &caller).unwrap(),
+        std::slice::from_ref(&agent)
+    );
+    let retired = retire(home.path(), &caller, &agent.agent_id, 11).unwrap();
+    assert_eq!(retired.retired_at, Some(11));
+    assert!(!set_enabled(home.path(), &caller, false, 12).unwrap());
+}
+
+/// Every `.rs` file under `dir` that is not test code, with its text.
+fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.contains("tests") || name.starts_with("test_") {
+            continue;
+        }
+        if path.is_dir() {
+            production_sources(&path, found);
+        } else if name.ends_with(".rs") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            found.push((path, text));
+        }
+    }
+}
+
+#[test]
+fn the_cargo_feature_is_read_in_one_place() {
+    let mut sources = Vec::new();
+    production_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+    assert!(sources.len() > 100, "the walk found the crate's sources");
+    let name = ["prototype", "-agents"].concat();
+    let readers: Vec<(String, usize)> = sources
+        .iter()
+        .map(|(path, text)| {
+            let file = path.file_name().unwrap().to_string_lossy().to_string();
+            (file, text.matches(&name).count())
+        })
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    assert_eq!(readers, [("agents.rs".to_string(), 1)]);
+}
+
+#[test]
+fn agents_rs_names_no_owner_key_function_and_reads_no_environment() {
+    let source = include_str!("../agents.rs");
+    // Every function of `auth` that returns the owner's key, a key that
+    // opens it, a fresh secret, or the material a person recovers with.
+    let key_functions = [
+        "principal_root_data_key_from_protection",
+        "load_or_create_recovery_archive_key",
+        "recovery_kit_from_archive",
+        "recovery_kit_data_key",
+        "derive_recovery_wrapping_key",
+        "random_secret_hex",
+        "recovery_archive_from_kit",
+        "decrypt_aes256_gcm_bytes",
+        "decrypt_root_descriptor",
+        "arm_owner_recovery",
+        "check_owner_recovery_code",
+        "complete_owner_recovery",
+        "attach_recovery_archive",
+        "verify_recovery_kit_material",
+    ];
+    // Broader than the names: no word for opening a ciphertext, and nothing
+    // of the person's kit or code.
+    let words = [
+        "decrypt",
+        "recovery_kit",
+        "recovery_archive",
+        "recovery_code",
+        "owner_recovery",
+        "RecoveryKit",
+        "data_key_from",
+    ];
+    let environment = ["env::", "var_os", "env!(", "option_env!"];
+    for forbidden in key_functions.iter().chain(&words).chain(&environment) {
+        assert!(!source.contains(forbidden), "agents.rs names `{forbidden}`");
+    }
+    // The one key function it may call returns a derived key only.
+    assert_eq!(source.matches("owner_root_wrap_key(").count(), 1);
+}
+
+#[test]
+fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
+    set_enabled_in_any_build(home.path(), &home.caller(), false, 12).unwrap();
+
+    let path = crate::auth::auth_state_path(home.path()).unwrap();
+    let stored: frozen_audit::FrozenAuditState =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let (_, runtime_did) = elastos_identity::load_or_create_did(home.path()).unwrap();
+    frozen_audit::verify_audit_chain_from(&runtime_did, &stored)
+        .expect("the frozen check accepts a chain that holds agent events");
+
+    let agent_events: Vec<&str> = stored
+        .audit
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .filter(|event_type| event_type.starts_with("agent."))
+        .collect();
+    assert_eq!(
+        agent_events,
+        [
+            "agent.records.enable",
+            "agent.record.create",
+            "agent.record.retire",
+            "agent.records.disable",
+        ]
+    );
+    // Each stored event has exactly the frozen event's fields.
+    let ours = serde_json::to_value(home.audit()).unwrap();
+    assert_eq!(serde_json::to_value(&stored.audit).unwrap(), ours);
 }
