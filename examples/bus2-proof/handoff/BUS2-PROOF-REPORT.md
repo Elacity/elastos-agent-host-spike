@@ -115,7 +115,9 @@ names it.
   after a sleep. Its events stay open until the busy guest has given the thread back 8 more times and seen one
   more real tick, and the test asserts that the busy guest's run had not ended when the photo guest stopped.
 - Its only time limit is 120 s for the whole test, compiling included (about 1.6 s where it was written). When
-  that runs out the worker is stopped before the test fails, so no thread is left running.
+  that runs out the worker is told to stop and given 10 s to end before the test fails. A worker that does not
+  end in that time (for example one stuck in compiling) is left running and the test fails at once, as the
+  older helper does, so the test's failure is bounded either way.
 
 Tests that still depend on the real clock. In each, a planted fault is caught whatever the machine's speed; a
 very slow or loaded machine can only make the test fail with no fault in:
