@@ -872,6 +872,217 @@ pub(crate) mod tests {
         assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
+    /// What a provider saw when it was asked to start a capsule: the ceiling
+    /// recorded for it, and the arguments on its handle.
+    type SeenAtStart = (Option<Vec<String>>, Vec<String>);
+
+    /// Records, at each start, the ceiling the launch entry filled for the
+    /// capsule and the arguments on its handle; refuses the start when told to.
+    #[derive(Default)]
+    struct TailRecordingProvider {
+        ceilings: std::sync::OnceLock<Ceilings>,
+        starts: std::sync::Mutex<Vec<SeenAtStart>>,
+        refuse: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl ComputeProvider for TailRecordingProvider {
+        async fn load(&self, _path: &Path, manifest: CapsuleManifest) -> Result<CapsuleHandle> {
+            Ok(CapsuleHandle {
+                id: CapsuleId::new("tail-capsule"),
+                manifest,
+                args: Vec::new(),
+            })
+        }
+
+        async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
+            let ceilings = self.ceilings.get().unwrap().read().unwrap();
+            let ceiling = ceilings.get(&handle.id.0).cloned();
+            self.starts
+                .lock()
+                .unwrap()
+                .push((ceiling, handle.args.clone()));
+            if self.refuse.load(Ordering::SeqCst) {
+                return Err(ElastosError::Compute("refused by the test".to_string()));
+            }
+            Ok(())
+        }
+
+        async fn stop(&self, _handle: &CapsuleHandle) -> Result<()> {
+            Ok(())
+        }
+
+        async fn status(&self, _handle: &CapsuleHandle) -> Result<CapsuleStatus> {
+            Ok(CapsuleStatus::Running)
+        }
+
+        async fn info(&self, handle: &CapsuleHandle) -> Result<CapsuleInfo> {
+            Ok(CapsuleInfo {
+                id: handle.id.clone(),
+                name: handle.manifest.name.clone(),
+                status: CapsuleStatus::Running,
+                memory_used_mb: 0,
+            })
+        }
+
+        fn supports(&self, _capsule_type: &CapsuleType) -> bool {
+            true
+        }
+    }
+
+    /// The end of the folder start, asserted where it is called: while the
+    /// provider starts the capsule, the ceiling recorded for it is its
+    /// manifest's, and its handle carries the caller's arguments; when the
+    /// start has ended, well or badly, no ceiling is left for it. Written
+    /// before that end is shared with the start by CID, so that the move
+    /// keeps each of these.
+    #[tokio::test]
+    async fn the_folder_start_records_the_ceiling_hands_over_the_args_and_clears_the_ceiling() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let provider = Arc::new(TailRecordingProvider::default());
+        let runtime = Runtime::new(storage, provider.clone());
+        assert!(provider
+            .ceilings
+            .set(runtime.bridge_manifest_capabilities.clone())
+            .is_ok());
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        let dir = temp_dir.path().join("tail");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"vm image bytes").unwrap();
+        let mut manifest = unsigned_manifest();
+        manifest.capsule_type = CapsuleType::MicroVM;
+        manifest.entrypoint = "rootfs.ext4".to_string();
+        manifest.capabilities = vec!["elastos://did/*".to_string()];
+        manifest.permissions.storage = vec!["localhost://Users/self/Documents/*".to_string()];
+        std::fs::write(
+            dir.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let ceiling = vec![
+            "elastos://did/*".to_string(),
+            "localhost://Users/self/Documents/*".to_string(),
+        ];
+        let args = vec!["one".to_string(), "two".to_string()];
+        let none_left = || {
+            runtime
+                .bridge_manifest_capabilities
+                .read()
+                .unwrap()
+                .is_empty()
+        };
+
+        let handle = runtime.run_local(&dir, args.clone()).await.unwrap();
+        assert_eq!(handle.args, args);
+        assert_eq!(handle.id.0, "tail-capsule");
+        assert_eq!(
+            *provider.starts.lock().unwrap(),
+            vec![(Some(ceiling.clone()), args.clone())]
+        );
+        assert!(
+            none_left(),
+            "no ceiling is left after a start that ended well"
+        );
+
+        provider.refuse.store(true, Ordering::SeqCst);
+        let error = runtime.run_local(&dir, Vec::new()).await.unwrap_err();
+        assert_eq!(error.to_string(), "Compute error: refused by the test");
+        assert_eq!(
+            *provider.starts.lock().unwrap(),
+            vec![(Some(ceiling.clone()), args), (Some(ceiling), Vec::new())]
+        );
+        assert!(none_left(), "no ceiling is left after a start that failed");
+    }
+
+    /// The same for a component, through the real component provider. The
+    /// fixture component asks the Runtime who it runs for and goes on only
+    /// for its own person; then it calls the bridge. So: with that person
+    /// given, its call reaches the bridge with that principal and under the
+    /// ceiling of its manifest; with no person given, it ends before any
+    /// call. No ceiling is left either time. The bridge here answers with a
+    /// refusal, so nothing is granted and no provider is asked.
+    #[tokio::test]
+    async fn the_folder_start_of_a_component_gives_the_bridge_its_principal_and_ceiling() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        );
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        type Call = (String, Option<String>, Option<Vec<String>>);
+        let calls: Arc<std::sync::Mutex<Vec<Call>>> = Arc::default();
+        let seen = calls.clone();
+        let ceilings = runtime.bridge_manifest_capabilities.clone();
+        runtime.set_bridge_hostcall(Arc::new(move |_line, capsule_id, principal_id| {
+            let ceiling = ceilings.read().unwrap().get(capsule_id).cloned();
+            seen.lock().unwrap().push((
+                capsule_id.to_string(),
+                principal_id.map(ToOwned::to_owned),
+                ceiling,
+            ));
+            Err("refused by the test".to_string())
+        }));
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/components/bus-v1");
+        let person = "person:local:bus-conformance";
+
+        let ended = runtime
+            .run_local_with_principal(&fixture, Vec::new(), Some(person.to_string()))
+            .await;
+
+        let none_left = || {
+            runtime
+                .bridge_manifest_capabilities
+                .read()
+                .unwrap()
+                .is_empty()
+        };
+        let made = calls.lock().unwrap().clone();
+        assert_eq!(made.len(), 1, "one call, refused: {made:?}");
+        for (capsule_id, principal_id, ceiling) in made.iter() {
+            assert!(capsule_id.starts_with("component-"), "{capsule_id}");
+            assert_eq!(principal_id.as_deref(), Some(person));
+            assert_eq!(
+                ceiling.as_deref(),
+                Some(&["elastos://test/bus/probe".to_string()][..])
+            );
+        }
+        assert!(none_left(), "no ceiling is left after the component ended");
+        let error = ended.expect_err("the fixture ends in an error when its call is refused");
+        assert_eq!(
+            error.to_string(),
+            "Compute error: Component capsule denied: BusError::Internal(\"refused by the test\")"
+        );
+
+        let error = runtime
+            .run_local_with_principal(&fixture, Vec::new(), None)
+            .await
+            .expect_err("the fixture does not go on without its person");
+        assert_eq!(
+            error.to_string(),
+            "Compute error: Component capsule denied: BusError::Denied(\"Runtime did not bind the conformance principal\")"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1, "no call without the person");
+        assert!(none_left(), "no ceiling is left after that start either");
+    }
+
     pub(crate) async fn test_runtime() -> (Runtime, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
