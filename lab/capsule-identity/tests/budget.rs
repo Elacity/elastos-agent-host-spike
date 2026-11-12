@@ -280,6 +280,45 @@ fn an_entry_past_a_listing_limit_is_refused_before_its_path_is_built() {
     assert_eq!(code.matches("tally.entry(").count(), 1);
 }
 
+/// The count and the length are judged from the name's bytes before the
+/// entry's path is built, and building the path is where a name that is not
+/// UTF-8 is found out. So a name with both faults is refused for its length.
+/// Linux only: the file system of a Mac does not let such a name be made.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_name_too_long_and_not_utf8_is_refused_for_its_length_first() {
+    use std::os::unix::ffi::OsStrExt;
+    let bundle = assemble(&WEB_APP);
+    let fits = exact(shape(bundle.path()));
+    let name = std::ffi::OsStr::from_bytes(&[0xff; 64]);
+    assert!(
+        fits.max_path_bytes < 64,
+        "the fixture's longest path is shorter"
+    );
+    fs::write(bundle.path().join(name), b"x").expect("a name that is not UTF-8");
+    let one_more = Budget {
+        max_entries: fits.max_entries + 1,
+        max_total_bytes: fits.max_total_bytes + 1,
+        ..fits
+    };
+    assert_eq!(
+        checked_bundle_within(bundle.path(), one_more).expect_err("too long"),
+        Refusal::OverBudget {
+            limit: "path bytes",
+            path: "./…".into()
+        }
+    );
+    // With room for the path, the same bundle is refused for the name.
+    let roomy = Budget {
+        max_path_bytes: 1_024,
+        ..one_more
+    };
+    assert!(matches!(
+        checked_bundle_within(bundle.path(), roomy),
+        Err(Refusal::NonUtf8Name { .. })
+    ));
+}
+
 #[test]
 fn the_lab_build_holds_the_lab_refusals_and_says_so() {
     // The lab turns the crate's `lab` feature on; a production crate asserts

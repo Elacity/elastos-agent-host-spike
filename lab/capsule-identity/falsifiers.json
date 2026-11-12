@@ -104,14 +104,14 @@
     },
     {
       "id": "F-CI1g",
-      "title": "parse capsule.json as plain JSON instead of the Runtime type when the Runtime type refuses it",
+      "title": "name a bundle whose capsule.json the Runtime type refuses to parse",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    let manifest: CapsuleManifest = serde_json::from_slice(bytes)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n",
-          "new": "    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(bytes) else {\n        serde_json::from_slice::<serde_json::Value>(bytes)\n            .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n        return Ok((false, String::new()));\n    };\n"
+          "old": "    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {\n",
+          "new": "    if matches!(\n        PinnedManifest::parse(bytes),\n        Err(PinnedManifestError::Unparsed(_))\n    ) {\n        return Ok((false, String::new(), String::new()));\n    }\n    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {\n"
         }
       ],
       "tests": [
@@ -121,14 +121,14 @@
     },
     {
       "id": "F-CI1h",
-      "title": "skip the Runtime's validate() call",
+      "title": "name a bundle whose capsule.json fails the Runtime's validate()",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    manifest.validate().map_err(Refusal::ManifestInvalid)?;\n",
-          "new": ""
+          "old": "    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {\n",
+          "new": "    if matches!(\n        PinnedManifest::parse(bytes),\n        Err(PinnedManifestError::Invalid(_))\n    ) {\n        return Ok((false, String::new(), String::new()));\n    }\n    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {\n"
         }
       ],
       "tests": [
@@ -632,13 +632,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
-          "new": "    let cid = claimed\n        .strip_prefix('b')\n        .or(Some(claimed))\n        .and_then(decode_base32)\n"
-        },
-        {
-          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    if printed_cid(&cid) != claimed {\n        return Err(not_a_lab_cid());\n    }\n",
-          "new": "    if printed_cid(&cid).trim_start_matches('b') != claimed.trim_start_matches('b') {\n        return Err(not_a_lab_cid());\n    }\n"
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    cid_form(claimed)\n        .or_else(|| cid_form(&format!(\"b{claimed}\")))\n        .ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -686,8 +681,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    if cid != cid_bytes(DAG_PB_CODEC, &root) {\n        return Err(not_a_lab_cid());\n    }\n",
-          "new": ""
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    cid_form(claimed)\n        .or_else(|| {\n            (claimed.len() == 59 && claimed.starts_with(\"bafkrei\")).then_some([0u8; 32])\n        })\n        .ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -702,8 +697,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
-          "new": "    let claimed: &str = &claimed\n        .chars()\n        .filter(|one| one.is_ascii_lowercase() || ('2'..='7').contains(one))\n        .collect::<String>();\n    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n"
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    let claimed: &str = &claimed\n        .chars()\n        .filter(|one| one.is_ascii_lowercase() || ('2'..='7').contains(one))\n        .collect::<String>();\n    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -718,8 +713,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
-          "new": "    let claimed: &str = &claimed.to_ascii_lowercase();\n    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n"
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    let claimed: &str = &claimed.to_ascii_lowercase();\n    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -921,7 +916,7 @@
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        let claimed_digits = lab_cid_digits(claimed)?;\n        compare_name(self.cid, claimed_digits, claimed)\n",
-          "new": "        let claimed_digits: [u8; 32] = decode_base32(claimed.strip_prefix('b').unwrap_or(claimed))\n            .and_then(|cid| cid.get(4..).and_then(|digest| digest.try_into().ok()))\n            .unwrap_or([0; 32]);\n        compare_name(self.cid, claimed_digits, claimed)\n"
+          "new": "        let claimed_digits: [u8; 32] = cid_form(claimed)\n            .or_else(|| cid_form(&format!(\"b{claimed}\")))\n            .unwrap_or([0; 32]);\n        compare_name(self.cid, claimed_digits, claimed)\n"
         }
       ],
       "tests": [
@@ -1463,14 +1458,14 @@
     },
     {
       "id": "F-CI13a",
-      "title": "the parse decodes the base32 itself, without the one claim check, so a raw leaf's CID parses",
+      "title": "the parse reads the claim itself, without the one claim check, so a raw leaf's CID parses",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        let digest = lab_cid_digits(printed)?;\n",
-          "new": "        let digest: [u8; 32] = printed\n            .strip_prefix('b')\n            .and_then(decode_base32)\n            .and_then(|cid| cid.get(4..).and_then(|digest| digest.try_into().ok()))\n            .ok_or_else(|| Refusal::NotALabCid {\n                claimed: printed.to_owned(),\n            })?;\n"
+          "new": "        let digest: [u8; 32] = cid_form(printed)\n            .or_else(|| {\n                (printed.len() == 59 && printed.starts_with(\"bafkrei\")).then_some([0u8; 32])\n            })\n            .ok_or_else(|| Refusal::NotALabCid {\n                claimed: printed.to_owned(),\n            })?;\n"
         }
       ],
       "tests": [
@@ -2590,8 +2585,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    let wasm = manifest.capsule_type == CapsuleType::Wasm;\n",
-          "new": "    let wasm = manifest.capsule_type == CapsuleType::Wasm || true;\n"
+          "old": "    let wasm = manifest.capsule_type() == &CapsuleType::Wasm;\n",
+          "new": "    let wasm = manifest.capsule_type() == &CapsuleType::Wasm || true;\n"
         }
       ],
       "tests": [
@@ -2897,8 +2892,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    if printed_cid(&cid) != claimed {\n        return Err(not_a_lab_cid());\n    }\n",
-          "new": ""
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    let last = claimed.len().saturating_sub(1);\n    let respelled: String = claimed\n        .char_indices()\n        .map(|(at, one)| {\n            match BASE32_ALPHABET.iter().position(|&letter| letter as char == one) {\n                Some(value) if at == last => BASE32_ALPHABET[value & !0b11] as char,\n                _ => one,\n            }\n        })\n        .collect();\n    let claimed: &str = &respelled;\n    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [

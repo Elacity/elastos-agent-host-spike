@@ -12,7 +12,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use elastos_common::{CapsuleManifest, CapsuleType};
+use elastos_common::{cid_form, CapsuleType, PinnedManifest, PinnedManifestError};
 use rustix::fs::{fstat, openat, Dir, FileType, Mode, OFlags, CWD};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -215,6 +215,15 @@ pub enum Refusal {
     /// of the four limits; `path` is the entry at which it was passed.
     /// Nothing past the limit was read.
     OverBudget { limit: &'static str, path: String },
+    /// The Runtime's reader of a manifest refused a pin (`requires[].cid`) in
+    /// `capsule.json`: the pin is not a package root in its one spelling, or
+    /// two requirements share a name or a pinned CID. `code` is the Runtime's
+    /// own code for the fault and `requirement` the name of the requirement,
+    /// empty when it has none.
+    PinRefused {
+        code: &'static str,
+        requirement: String,
+    },
     /// A name check, or [`LabCid`]'s parse, was given a claim that is not a
     /// lab CID: not `b` and the canonical lowercase base32 of a CIDv1 dag-pb
     /// sha2-256 directory root (`01 70 12 20` and 32 bytes). The claim is
@@ -334,6 +343,10 @@ impl fmt::Display for Refusal {
             Refusal::OverBudget { limit, path } => {
                 write!(f, "{path} passes the walk's limit on {limit}")
             }
+            Refusal::PinRefused { code, requirement } => write!(
+                f,
+                "the Runtime refuses a pin in {MANIFEST_FILE} ({code}): requirement {requirement:?}"
+            ),
             Refusal::NotALabCid { claimed } => write!(
                 f,
                 "the claim {claimed:?} is not a lab CID: a lab package CID is a 59-character CIDv1 bafybei... directory root"
@@ -416,9 +429,11 @@ impl std::error::Error for Refusal {}
 pub const LAB_REFUSALS: bool = cfg!(feature = "lab");
 
 /// The most one walk may take in. Each limit is checked while the walk
-/// lists, before the thing that would pass it costs anything: a file before
-/// it is read, a folder before it is opened, an entry before its path is
-/// built or the listing keeps it.
+/// lists. What each check comes before: a file's bytes are not read; a
+/// folder is not opened or listed; an entry's path is not built, and the
+/// listing does not keep the entry. What has been spent by then: the system
+/// has listed the entry and handed over its name, and a refusal builds its
+/// own text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     /// Files and folders under the root, counted as they are listed.
@@ -674,31 +689,18 @@ fn compare_name(actual: LabCid, claimed_digits: [u8; 32], claimed: &str) -> Resu
     Ok(())
 }
 
-/// The root digest of a claimed lab CID: the one claim check. The claim must
-/// be `b` and base32 whose bytes are the CIDv1 bytes of a dag-pb sha2-256
-/// root (`01 70 12 20` and 32 bytes), so a leaf CID or a CIDv0 is refused.
-/// Then those bytes must print as exactly the claim, so a second spelling of
-/// them (a character more, or unused low bits set in the last character) is
-/// refused too. Any other text is not a lab CID.
+/// The root digest of a claimed lab CID: the one claim check. The form has
+/// one definition, `elastos_common::cid_form`, which a manifest's pins are
+/// checked by too: `b` and base32 whose bytes are the CIDv1 bytes of a dag-pb
+/// sha2-256 root (`01 70 12 20` and 32 bytes), so a leaf CID or a CIDv0 is
+/// refused; and those bytes must print as exactly the claim, so a second
+/// spelling of them (a character more, or unused low bits set in the last
+/// character) is refused too. This function only gives that answer this
+/// crate's own refusal. Any other text is not a lab CID.
 fn lab_cid_digits(claimed: &str) -> Result<[u8; 32], Refusal> {
-    let not_a_lab_cid = || Refusal::NotALabCid {
+    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {
         claimed: claimed.to_owned(),
-    };
-    let cid = claimed
-        .strip_prefix('b')
-        .and_then(decode_base32)
-        .ok_or_else(not_a_lab_cid)?;
-    let root: [u8; 32] = cid
-        .get(cid.len().saturating_sub(32)..)
-        .and_then(|digest| digest.try_into().ok())
-        .ok_or_else(not_a_lab_cid)?;
-    if cid != cid_bytes(DAG_PB_CODEC, &root) {
-        return Err(not_a_lab_cid());
-    }
-    if printed_cid(&cid) != claimed {
-        return Err(not_a_lab_cid());
-    }
-    Ok(root)
+    })
 }
 
 // A lab copy of the CIDv1 bytes and of their text, `b` and RFC 4648 base32
@@ -706,7 +708,8 @@ fn lab_cid_digits(claimed: &str) -> Result<[u8; 32], Refusal> {
 // them. The Runtime's `cid` crate lives only in `elastos-server` and
 // `elastos-namespace`, which the lab does not link, and a new crate here would
 // stale the locks of the two lab crates that path-depend on this one. So the
-// lab keeps this one marked copy: `cid_bytes`, one encoder and one decoder.
+// lab keeps this one marked copy: `cid_bytes` and one encoder. (It kept a
+// decoder too, until the claim check began to call `elastos_common::cid_form`.)
 
 /// The base32 alphabet of RFC 4648, lowercase.
 const BASE32_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -741,26 +744,6 @@ fn printed_cid(cid: &[u8]) -> String {
         ));
     }
     text
-}
-
-/// The bytes of base32 text after its `b`, the one decoder; `None` when a
-/// character is not in [`BASE32_ALPHABET`]. Bits left over after the last
-/// whole byte are dropped here; the claim check refuses a claim that sets
-/// them, because it prints the value again and compares.
-fn decode_base32(text: &str) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let (mut bits, mut held) = (0u32, 0u32);
-    for character in text.bytes() {
-        let value = BASE32_ALPHABET.iter().position(|&one| one == character)?;
-        bits = (bits << 5) | value as u32;
-        held += 5;
-        if held >= 8 {
-            held -= 8;
-            bytes.push((bits >> held) as u8);
-        }
-        bits &= (1 << held) - 1;
-    }
-    Some(bytes)
 }
 
 /// One file of a closure listing: its bundle path, its length in bytes and
@@ -1270,21 +1253,27 @@ fn read_file(handle: OwnedFd, path: &str, tally: &mut Tally) -> Result<Vec<u8>, 
     Ok(content)
 }
 
-/// The Runtime's own two checks on `capsule.json`, the same two calls it
-/// makes on a fetched bundle's manifest: parse it as `CapsuleManifest`
-/// (which refuses an unknown field), then `validate()`. The lab adds no rule.
-/// It returns whether the parsed manifest's `type` is `wasm`, and the
-/// manifest's `name` and `role`, all read from that one parse: nothing else
-/// parses `capsule.json`.
+/// The Runtime's own checks on `capsule.json`, made by the Runtime's own
+/// reader of a manifest that may pin a requirement by CID,
+/// `PinnedManifest::parse`: it checks each `requires[].cid`, then parses the
+/// rest as `CapsuleManifest` (which refuses an unknown field) and calls
+/// `validate()`. A manifest without a pin gets exactly the ordinary parse's
+/// answer. The three ways it refuses stay three refusals here. The lab adds
+/// no rule. It returns whether the parsed manifest's `type` is `wasm`, and
+/// the manifest's `name` and `role`, all read from that one parse: nothing
+/// else parses `capsule.json`. A pin is checked for its form only: nothing
+/// here looks for the capsule it names.
 fn check_manifest(bytes: &[u8]) -> Result<(bool, String, String), Refusal> {
-    let manifest: CapsuleManifest = serde_json::from_slice(bytes)
-        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;
-    let wasm = manifest.capsule_type == CapsuleType::Wasm;
+    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {
+        PinnedManifestError::Unparsed(error) => Refusal::ManifestUnparsed(error),
+        PinnedManifestError::Invalid(error) => Refusal::ManifestInvalid(error),
+        PinnedManifestError::Pin { code, requirement } => Refusal::PinRefused { code, requirement },
+    })?;
+    let wasm = manifest.capsule_type() == &CapsuleType::Wasm;
     // `CapsuleRole::as_str` is total: every role parses to its own spelling,
     // so this conversion has no failure to default.
-    let role = manifest.role.as_str().to_owned();
-    manifest.validate().map_err(Refusal::ManifestInvalid)?;
-    Ok((wasm, manifest.name, role))
+    let role = manifest.role().as_str().to_owned();
+    Ok((wasm, manifest.name().to_owned(), role))
 }
 
 fn special_name(file_type: FileType) -> &'static str {

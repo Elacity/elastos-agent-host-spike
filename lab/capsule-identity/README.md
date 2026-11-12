@@ -186,8 +186,9 @@ with an empty, `.` or `..` part, two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
 claimed name by calling `lab_cid`; it computes no name of its own.
 
-The CIDv1 bytes and the base32 text are one marked copy (`cid_bytes`, one
-encoder, one decoder). Since M2 part B it lives, with the walk and the rest
+The CIDv1 bytes and the base32 text are one marked copy (`cid_bytes` and one
+encoder; the claim check reads a CID's text with the Runtime's `cid_form`, so
+the copy has no decoder). Since M2 part B it lives, with the walk and the rest
 of the identity code, in the workspace crate `elastos-bundle-identity`
 (`elastos/crates/elastos-bundle-identity/src/lib.rs`), moved there text for
 text. This crate re-exports that crate's public names and has no encoder of
