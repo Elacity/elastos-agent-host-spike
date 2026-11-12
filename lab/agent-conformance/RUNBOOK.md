@@ -322,7 +322,11 @@ the bundle the demo ran.
 equals `installed_runtime.binary_sha256`. The receipt records
 `installed_runtime_ran_status` (`ran` or `not shown`) and
 `installed_runtime_ran_failures`; a difference names both hashes, and an
-installed Runtime whose chain did not match leaves nothing to compare. The
+installed Runtime whose chain did not match leaves nothing to compare. Identity
+lines are read from the whole test output, which cannot say which test printed
+a line, so a run that names two different Runtime hashes fails this row with
+`suite recorded more than one Runtime SHA-256`, as well as `versions_receipt`,
+whichever hash came first. The
 suite launches the installed binary only when
 `AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
 launch the named binary where it is and build no Runtime. The suite hashes the

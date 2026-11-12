@@ -2088,6 +2088,62 @@ fn receipt_says_whether_the_suite_ran_the_installed_binary() {
 }
 
 #[test]
+fn two_runtime_hashes_do_not_show_the_installed_binary_ran() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = || {
+        agent_conformance::report::read_installed_runtime(
+            &fixture.binary,
+            &fixture.data,
+            agent_conformance::report::release_platform(),
+        )
+    };
+    let (observations, git) = synthetic(1, false);
+    let elastos = |bytes: &[u8]| Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(bytes),
+    };
+    let ran = |first: &[u8], second: &[u8]| {
+        let mut both = observations.clone();
+        both[0] = elastos(first);
+        both.push(elastos(second));
+        render(&both, git.clone(), Some(installed()))
+    };
+    // Whichever hash the output names first, the installed one or the other.
+    for (first, second) in [
+        (&b"installed runtime"[..], &b"another runtime"[..]),
+        (b"another runtime", b"installed runtime"),
+    ] {
+        let (report, document) = ran(first, second);
+        assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+        assert!(
+            report
+                .table
+                .contains("installed_runtime_ran (A14) | FAIL\n"),
+            "{}",
+            report.table
+        );
+        assert_eq!(
+            document["installed_runtime_ran_failures"],
+            serde_json::json!(["suite recorded more than one Runtime SHA-256"])
+        );
+        assert_eq!(document["installed_runtime_ran_status"], "not shown");
+        assert!(report.table.contains("versions_receipt (A14) | FAIL\n"));
+        assert_eq!(
+            document["missing_or_invalid"],
+            serde_json::json!(["conflicting elastos SHA-256"])
+        );
+    }
+    // The same hash named twice is one hash.
+    let (report, document) = ran(b"installed runtime", b"installed runtime");
+    assert!(report
+        .table
+        .contains("installed_runtime_ran (A14) | PASS\n"));
+    assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+    home.finish().unwrap();
+}
+
+#[test]
 fn a_suite_without_a_runtime_hash_did_not_run_the_installed_binary() {
     use agent_conformance::report::installed_runtime_ran_failures;
     let home = ThrowawayHome::new().unwrap();

@@ -359,6 +359,12 @@ fn hex(value: &str, length: usize) -> bool {
 #[derive(Default)]
 struct Identities {
     runtime: Option<String>,
+    /// The output named two different Runtime hashes. Identity lines are read
+    /// from the whole output, and a line does not say which test printed it, so
+    /// the Runtime's hash cannot be taken from the launching tests alone. A
+    /// second, different hash is therefore a failure wherever it came from, and
+    /// the first one is not treated as the Runtime that ran.
+    runtime_conflict: bool,
     provider: Option<String>,
     built: BTreeMap<String, ProbeIdentity>,
     launched: BTreeMap<String, ProbeIdentity>,
@@ -377,6 +383,7 @@ impl Identities {
                     return Err(format!("malformed {role} SHA-256"));
                 }
                 if slot.as_ref().is_some_and(|old| old != &sha256) {
+                    self.runtime_conflict |= role == "elastos";
                     return Err(format!("conflicting {role} SHA-256"));
                 }
                 *slot = Some(sha256);
@@ -915,8 +922,12 @@ pub fn render_bound_run(
         if unstaged.is_empty() { "PASS" } else { "FAIL" }
     ));
     // Whether the suite ran the installed binary is asked only when an
-    // installed Runtime was given.
+    // installed Runtime was given. A run that named two different Runtime
+    // hashes cannot say which bytes it ran, whichever hash came first.
     let not_ran = installed.as_ref().map(|installed| {
+        if evidence.identities.runtime_conflict {
+            return vec!["suite recorded more than one Runtime SHA-256".to_owned()];
+        }
         installed_runtime_ran_failures(
             evidence.identities.runtime.as_deref(),
             installed.as_ref().ok(),
