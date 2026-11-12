@@ -2011,8 +2011,16 @@ mod tests {
         }))
         .unwrap();
         std::fs::write(&legacy_path, &legacy).unwrap();
+        let (warnings, _guard) = capture_launch_warnings();
         migrate_legacy_services_peer_contacts_for_launch(child, &person.ctx)
             .expect("launch proceeds past a refused migration");
+        let log = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            log.matches("Home launch skipped the legacy Services peer contacts migration")
+                .count(),
+            1,
+            "{log}"
+        );
         assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy);
         let current_uri = format!("{root}/.AppData/ElastOS/Home/services-peer-contacts.json");
         let current_path =
@@ -2027,6 +2035,65 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         person.assert_child_holds_only(&[relative.as_str()]);
+    }
+
+    #[derive(Clone)]
+    struct LaunchWarningWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LaunchWarningWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Collects the warnings one test emits, on this test's own thread.
+    fn capture_launch_warnings() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = LaunchWarningWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        (output, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// A legacy Services peer-contacts object the migration cannot read is not
+    /// the typed refusal, so the wrapper keeps the error and the launch fails.
+    #[test]
+    fn a_legacy_contacts_migration_error_other_than_the_refusal_fails_launch() {
+        use super::super::gateway_tests::r8d_passkey_rows::passkey_person;
+        use std::os::unix::fs::PermissionsExt;
+
+        let person = passkey_person(SERVICES_CAPSULE_ID);
+        let child = person.child.path();
+        let root = person.ctx.root().localhost_root();
+        let legacy_uri = format!("{root}/.AppData/ElastOS/Home/people-contacts.json");
+        let legacy_path =
+            elastos_common::localhost::rooted_localhost_fs_path(child, &legacy_uri).unwrap();
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, b"legacy contacts").unwrap();
+        std::fs::set_permissions(&legacy_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let error = migrate_legacy_services_peer_contacts_for_launch(child, &person.ctx)
+            .expect_err("an unreadable migration fails the launch");
+        assert!(
+            error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+            }),
+            "{error:#}"
+        );
     }
 
     /// Home's launch of an installed capsule whose manifest pins a
