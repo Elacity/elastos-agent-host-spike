@@ -15,8 +15,8 @@ import sys
 
 # Lab crates that a manifest outside lab/ names by path: capsules/model-provider
 # has a dev-dependency on lab/agent-conformance, which names the other two. The
-# locked capsule builds load these crates' manifests and source layout, so only
-# their Markdown is a notes path.
+# locked release build of that capsule loads their manifests to resolve its
+# dependencies. It does not compile them, so their other files are lab files.
 LAB_CRATES_THE_BUILD_LOADS = ("lab/agent-conformance/", "lab/capsule-identity/", "lab/grant-binding/")
 # The Runtime serves these from its source checkout (ALLOWED_DOCS in
 # elastos/crates/elastos-server/src/api/handlers/docs.rs).
@@ -29,8 +29,8 @@ def is_notes_or_lab(path):
     Markdown file at the repository root, less the two exceptions above."""
     if path in SERVED_BY_THE_RUNTIME:
         return False
-    if path.startswith(LAB_CRATES_THE_BUILD_LOADS):
-        return path.endswith(".md")
+    if path.startswith(LAB_CRATES_THE_BUILD_LOADS) and path.endswith("/Cargo.toml"):
+        return False
     if path.startswith(("lab/", "docs/")):
         return True
     return "/" not in path and path.endswith(".md")

@@ -65,12 +65,15 @@ class RuleTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(paths.must_run([path]))
 
-    def test_a_lab_crate_the_build_loads_skips_only_for_its_markdown(self):
+    def test_a_manifest_of_a_lab_crate_the_build_loads_runs(self):
         for crate in paths.LAB_CRATES_THE_BUILD_LOADS:
-            for name in ("Cargo.toml", "Cargo.lock", "src/lib.rs", "probe/Cargo.toml", "notes.txt", "x.md.rs"):
+            for name in ("Cargo.toml", "probe/Cargo.toml"):
                 with self.subTest(path=crate + name):
                     self.assertTrue(paths.must_run([crate + name]))
-            self.assertFalse(paths.must_run([crate + "README.md", crate + "plants/LOG.md"]))
+                    self.assertTrue(paths.must_run([*NOTES, crate + name]))
+            # The release build compiles none of the crate's other files.
+            self.assertFalse(paths.must_run([crate + "README.md", crate + "src/lib.rs", crate + "tests/effects.rs",
+                                             crate + "falsifiers.json", crate + "Cargo.lock", crate + "xCargo.toml"]))
         # A lab crate no outside manifest names is skipped whole.
         self.assertFalse(paths.must_run(["lab/redteam/Cargo.toml", "lab/redteam/src/lib.rs"]))
 
@@ -223,6 +226,17 @@ def lab_crates_named_from_outside_lab():
     return found
 
 
+def tables_naming_lab(manifest, folder):
+    """The table of a manifest in folder above each line that names a path under lab/."""
+    table = ""
+    for line in manifest.splitlines():
+        if line.startswith("["):
+            table = line.strip()
+        for value in re.findall(r"""["']([^"'\n]+)["']""", line):
+            if os.path.normpath(os.path.join(folder, value)).startswith("lab/"):
+                yield table
+
+
 INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*\(")
 
 
@@ -264,6 +278,21 @@ class RepositoryTest(unittest.TestCase):
         self.assertIn("lab/agent-conformance/", found)
         top = {crate for crate in found if not any(crate != other and crate.startswith(other) for other in found)}
         self.assertEqual(top, set(paths.LAB_CRATES_THE_BUILD_LOADS))
+
+    def test_only_a_dev_dependency_outside_lab_names_a_lab_crate(self):
+        # A release build loads a dev-dependency's manifest and compiles none of its files;
+        # a lab crate named as a dependency proper would be compiled into the installed app.
+        named = {}
+        for name in TRACKED:
+            if name.endswith("Cargo.toml") and not name.startswith("lab/"):
+                tables = set(tables_naming_lab((REPO / name).read_text(), os.path.dirname(name)))
+                if tables:
+                    named[name] = tables
+        self.assertEqual(named, {"capsules/model-provider/Cargo.toml": {"[dev-dependencies]"}})
+        self.assertEqual(set(tables_naming_lab('[dependencies]\nlab-x = { path = "../../lab/x" }\n', "capsules/a")),
+                         {"[dependencies]"})
+        self.assertEqual(set(tables_naming_lab("[build-dependencies.lab-x]\npath = '../../lab/x'\n", "capsules/a")),
+                         {"[build-dependencies.lab-x]"})
 
     def test_the_rule_lists_every_file_the_runtime_serves(self):
         handler = (REPO / "elastos/crates/elastos-server/src/api/handlers/docs.rs").read_text()
