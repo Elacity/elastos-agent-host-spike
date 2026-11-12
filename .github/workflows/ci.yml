@@ -904,7 +904,21 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 -I scripts/ci-installed-app-paths.py
+        run: |
+          # The rule that decides is the base branch's copy, never the pull request's own:
+          # a pull request that rewrites the rule is judged by the rule it would replace.
+          # A base without the rule, a rule that fails and any answer but its "run=false"
+          # all run the jobs. The copy runs from outside the checkout.
+          rule="$RUNNER_TEMP/installed-app-paths-rule.py"
+          answer="$RUNNER_TEMP/installed-app-paths-answer"
+          : > "$answer"
+          if git show "origin/${BASE_REF}:scripts/ci-installed-app-paths.py" > "$rule" \
+              && GITHUB_OUTPUT="$answer" python3 -I "$rule" \
+              && [[ "$(< "$answer")" == "run=false" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
 
   # The source-home jobs run in parallel with tests across the three
   # architectures, beside the cheap source gate. setup-source-home compiles the

@@ -377,6 +377,9 @@ def job_inputs(workflow, source, job, leaves=frozenset(), follows=frozenset()):
     return inputs
 
 
+RULE = "scripts/ci-installed-app-paths.py"
+
+
 def glob_regex(pattern):
     return re.compile("".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
                               for part in re.split(r"(\*\*|\*)", pattern)) + r"\Z")
@@ -2225,7 +2228,16 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(checkout, "persist-credentials"), "false")
         self.assertNotIn("uses:", decide)
         self.assertIn("        id: decide\n", decide)
-        self.assertEqual(field(decide, "run"), "python3 -I scripts/ci-installed-app-paths.py")
+        # The step runs the base branch's copy of the rule, from outside the checkout, and
+        # no expression is pasted into its shell.
+        script = self.decide_script(SOURCE)
+        self.assertNotIn("${{", script)
+        self.assertEqual(script.count("ci-installed-app-paths"), 1)
+        self.assertIn('if git show "origin/${BASE_REF}:' + RULE + '" > "$rule" \\\n', script)
+        self.assertEqual(re.findall(r"(?m)^rule=.*$", script), ['rule="$RUNNER_TEMP/installed-app-paths-rule.py"'])
+        self.assertEqual(re.findall(r"python3[^\n]*", script), ['python3 -I "$rule" \\'])
+        # The rule imports nothing a pull request's tree could supply.
+        self.assertEqual(re.findall(r"(?m)^\s*(?:import|from)\s+([\w.]+)", (REPO / RULE).read_text()), ["os", "subprocess", "sys"])
         self.assertEqual(field(decide, "BASE_REF"), "${{ github.base_ref }}")
         self.assertEqual(field(decide, "HEAD_SHA"), "${{ github.event.pull_request.head.sha }}")
         for step in (checkout, decide):
@@ -2249,6 +2261,66 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(field(JOBS[job], "needs").strip("[]").split(", ")[0], "installed-app-paths", job)
             unguarded = SOURCE.replace(field(JOBS[job], "if"), "${{ " + SPARK_SKIP + " }}")
             self.assertTrue(installed_app_runs(unguarded, job, ordinary, "false"), job)
+
+    def decide_script(self, source):
+        decide = steps("installed-app-paths", jobs(source))[1]
+        # The run block is its 10-space lines; the next job's leading comment follows it.
+        return textwrap.dedent(re.match(r"(?:(?: {10}[^\n]*)?\n)*", decide.split("        run: |\n", 1)[1])[0])
+
+    def run_decide(self, base_rule, changes, source=SOURCE):
+        """The decide step's output for a pull request that writes changes, in a throwaway
+        repository whose base branch holds base_rule as the rule script (None: holds none)."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            repo, temp, output = root / "repo", root / "temp", root / "output"
+            repo.mkdir()
+            temp.mkdir()
+            env = fixture_git.fixture_git_env(root, {key: "fixture" for key in fixture_git.IDENTITY})
+
+            def commit(files):
+                for name, text in files.items():
+                    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                    (repo / name).write_text(text)
+                for args in (("add", "-A"), ("commit", "-q", "-m", "fixture")):
+                    subprocess.run(["git", "-C", str(repo), *args], env=env, check=True, capture_output=True)
+
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], env=env, check=True, capture_output=True)
+            commit({"lab/note.md": "note\n", **({} if base_rule is None else {RULE: base_rule})})
+            subprocess.run(["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"], env=env, check=True)
+            commit(changes)
+            head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], env=env, text=True).strip()
+            result = subprocess.run(["bash", "-e", "-c", self.decide_script(source)], cwd=repo, capture_output=True, text=True,
+                                    timeout=60, env={**env, "BASE_REF": "main", "HEAD_SHA": head, "RUNNER_TEMP": str(temp),
+                                                     "GITHUB_OUTPUT": str(output)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return output.read_text()
+
+    def test_the_base_branch_copy_of_the_rule_decides_and_any_doubt_runs(self):
+        honest = (REPO / RULE).read_text()
+        notes, code = {"lab/note.md": "changed\n"}, {"lab/note.md": "changed\n", "capsules/a/src/main.rs": "fn main() {}\n"}
+
+        def writes(answer, status=0):
+            return f'import os\nopen(os.environ["GITHUB_OUTPUT"], "a").write({answer!r})\nraise SystemExit({status})\n'
+
+        always_skip = writes("run=false\n")
+        self.assertEqual(self.run_decide(honest, notes), "run=false\n")
+        self.assertEqual(self.run_decide(honest, code), "run=true\n")
+        # A pull request that rewrites the rule is judged by the base's rule, which runs the jobs
+        # for the rule's own path. The pull request's copy never runs.
+        self.assertEqual(self.run_decide(honest, {**notes, RULE: always_skip}), "run=true\n")
+        self.assertEqual(self.run_decide(always_skip, code), "run=false\n")
+        self.assertEqual(self.run_decide(writes("run=true\n"), {**notes, RULE: always_skip}), "run=true\n")
+        # A base branch without the rule runs the jobs, as on the pull request that adds the rule.
+        self.assertEqual(self.run_decide(None, notes), "run=true\n")
+        self.assertEqual(self.run_decide(None, {**notes, RULE: always_skip}), "run=true\n")
+        # So does a rule that fails, says nothing, or says anything but the one word.
+        for name, rule in {"exits 1": "raise SystemExit(1)\n", "skip, then exits 1": writes("run=false\n", 1),
+                           "no answer": "pass\n", "not Python": "(\n", "empty": "", "another word": writes("run=maybe\n"),
+                           "two answers": writes("run=false\nrun=true\n"), "skip twice": writes("run=false\nrun=false\n"),
+                           "a longer line": writes("run=false \n"), "a second output": writes("run=false\nother=1\n"),
+                           "capitals": writes("run=False\n")}.items():
+            with self.subTest(base_rule=name):
+                self.assertEqual(self.run_decide(rule, notes), "run=true\n")
 
     def test_notes_rule_skips_no_input_the_installed_app_jobs_call(self):
         spec = importlib.util.spec_from_file_location("installed_app_paths", REPO / "scripts/ci-installed-app-paths.py")
