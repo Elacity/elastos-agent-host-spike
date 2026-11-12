@@ -627,3 +627,58 @@ status and duplicate rules; no rule has a second copy.
   until then.
 - tar previews and the tar fuel gate are the next work; `tar.gz` and any
   compressed tar need Bus v2 streams, outside this app's Bus v1 path.
+
+2026-11-12, task 011: tar previews and the tar fuel gate.
+
+A shown tar entry now takes the ZIP stored entry's preview path, and the worst
+tar archive within the caps is measured in the real component. With that, tar
+on Bus v1 is complete on the listing, preview and fuel gate; BACKLOG item 2
+(uncompressed tar) is done.
+
+### What changed
+
+- `src/lib.rs` keeps the format `detect` chose and passes it to the preview
+  pass. A tar entry reads the shared status map and then the one
+  `preview::preview` call a ZIP stored entry takes: the same B1 size check, the
+  same text check and the same docs-model typed blocks. There is no second
+  preview routine, no inflate and no bomb ratio or total cap on a tar entry: it
+  is stored, so its declared size is its only bound.
+- `Entry::crc` is now `Option<u32>`: ZIP sets it, tar leaves it unset, and the
+  L7 compare runs only where the record carries one. `listing::shown_status`
+  is the one status-to-skip-reason map both formats read; the ZIP local-header
+  check calls it first.
+- The tar reader was not changed, and the page and the view schema were not
+  touched: the same `elastos.archive-viewer.view/v1` objects, drawn unchanged.
+
+### Tests and falsifiers
+
+- Five guest tests: a tar text entry's blocks equal the ZIP stored entry's, a
+  binary entry is skipped `not_text`, an over-cap entry is skipped `oversize`
+  before any read of its data, a blocked entry is skipped with its status, and
+  a view over 64 KiB is refused `view_too_large`. Guest suite: 123 tests pass.
+- T21 makes every tar entry unshowable and is caught by those five.
+- F2, F32 and F33 now also name the tar test they break; F27, F25d and F30b
+  anchor on the optional CRC and the shared status map, and F30b names the
+  blocked-entry test it breaks. Each plant is one line, caught with every
+  unnamed test passing.
+- `falsify.py --check`: all 98 anchors found once.
+
+### Measurements (Bus v1, 100,000,000 fuel, gate 80%)
+
+The gate's new archive is 64 headers, the most a run lists at about 212,000
+fuel a header, plus one entry at the largest text preview (B1, 16 KiB). It
+reads 50,176 bytes of archive within the 64 KiB run budget.
+
+| Archive | Fuel | Share |
+|---|---|---|
+| the worst tar archive | 20,821,517 | 20.8% |
+
+The F36 mutant (the counted reader asks one byte a call) puts the same tar
+archive at 100,000,000 fuel (100%, out of fuel) and the gate test fails; the
+other host tests pass under it.
+
+### Remaining
+
+- `tar.gz`, `.gz` and every compressed tar need Bus v2 streams. Nested and
+  image entries on Bus v2 are the same. The bundle and container build are
+  outside this lane.
