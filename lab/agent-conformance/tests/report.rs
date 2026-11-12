@@ -1556,15 +1556,41 @@ impl InstalledFixture {
         );
         bound(Some(installed))
     }
+
+    /// The same, for a suite that launched a Runtime with these bytes.
+    fn receipt_after_running(
+        &self,
+        runtime: &[u8],
+    ) -> (agent_conformance::report::RunReport, Value) {
+        let installed = agent_conformance::report::read_installed_runtime(
+            &self.binary,
+            &self.data,
+            agent_conformance::report::release_platform(),
+        );
+        let (mut observations, git) = synthetic(1, false);
+        observations[0] = Observation::Native {
+            role: "elastos".into(),
+            sha256: sha256(runtime),
+        };
+        render(&observations, git, Some(installed))
+    }
 }
 
 fn bound(
     installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
 ) -> (agent_conformance::report::RunReport, Value) {
     let (observations, git) = synthetic(1, false);
+    render(&observations, git, installed)
+}
+
+fn render(
+    observations: &[Observation],
+    git: GitIdentity,
+    installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
+) -> (agent_conformance::report::RunReport, Value) {
     let report = agent_conformance::report::render_bound_run(
         &format!("{LIVE}: test\n"),
-        &output(&observations),
+        &output(observations),
         true,
         Ok(git),
         agent_conformance::report::Bound {
@@ -1605,8 +1631,6 @@ fn receipt_records_a_matching_installed_runtime() {
         document["report"]["sha256"],
         sha256(report.table.as_bytes())
     );
-    // The Runtime the suite launched is recorded beside it, not compared.
-    assert_eq!(document["runtime_sha256"], sha256(&[1, 1]));
     assert!(report.passed, "{:?}", report.failures);
     home.finish().unwrap();
 }
@@ -1758,5 +1782,230 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
         receipt["installed_runtime_failures"],
         serde_json::json!(["binary does not match the release"])
     );
+    home.finish().unwrap();
+}
+
+#[test]
+fn receipt_says_whether_the_suite_ran_the_installed_binary() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (report, document) = fixture.receipt_after_running(b"installed runtime");
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | PASS\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(document["installed_runtime_ran_status"], "ran");
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        document["runtime_sha256"],
+        document["installed_runtime"]["binary_sha256"]
+    );
+
+    // A suite that launched other bytes: the installed chain still matches, and
+    // this row alone says so, naming both hashes.
+    let (report, document) = fixture.receipt_after_running(b"checkout runtime");
+    assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!([format!(
+            "suite ran Runtime {}, installed binary is {}",
+            sha256(b"checkout runtime"),
+            sha256(b"installed runtime")
+        )])
+    );
+    assert!(report
+        .table
+        .contains("installed_runtime_ran (A14) | FAIL\n"));
+    assert_eq!(document["installed_runtime_ran_status"], "not shown");
+    // Its own row: the suite's result stays.
+    assert_eq!(document["command_success"], true);
+
+    // An installed Runtime whose chain does not match gives nothing to compare.
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let (report, document) = fixture.receipt_after_running(b"another runtime");
+    assert!(report
+        .table
+        .contains("installed_runtime_ran (A14) | FAIL\n"));
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!(["no matched installed Runtime to compare"])
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn a_suite_without_a_runtime_hash_did_not_run_the_installed_binary() {
+    use agent_conformance::report::installed_runtime_ran_failures;
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    )
+    .unwrap();
+    assert_eq!(
+        installed_runtime_ran_failures(None, Some(&installed)),
+        ["suite recorded no Runtime SHA-256"]
+    );
+    assert!(
+        installed_runtime_ran_failures(Some(&installed.binary_sha256), Some(&installed)).is_empty()
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn receipt_names_the_staged_bundles_and_calls_them_staged() {
+    use agent_conformance::report::STAGED_BUNDLE_SCOPE;
+    let (observations, git) = synthetic(1, false);
+    let (report, document) = render(&observations, git.clone(), None);
+    assert!(
+        report.table.contains(&format!(
+            "staged_bundle (A14) | PASS | {STAGED_BUNDLE_SCOPE}\n"
+        )),
+        "{}",
+        report.table
+    );
+    assert!(STAGED_BUNDLE_SCOPE.contains("not an installed bundle"));
+    assert_eq!(document["staged_bundle_status"], "recorded");
+    assert_eq!(document["staged_bundle_failures"], serde_json::json!([]));
+    assert_eq!(
+        document["staged_bundles"],
+        serde_json::json!([synthetic_bundle_cid(&[1, 4])])
+    );
+    assert_eq!(document["staged_bundle_scope"], STAGED_BUNDLE_SCOPE);
+
+    // A bundle that was built and never launched is not a staged bundle the
+    // suite ran.
+    let built_only: Vec<_> = observations
+        .into_iter()
+        .map(|observation| match observation {
+            Observation::Launched { probe } => Observation::BuildOnly { probe },
+            other => other,
+        })
+        .collect();
+    let (report, document) = render(&built_only, git, None);
+    assert!(report.table.contains(&format!(
+        "staged_bundle (A14) | FAIL | {STAGED_BUNDLE_SCOPE}\n"
+    )));
+    assert_eq!(document["staged_bundle_status"], "missing");
+    assert_eq!(
+        document["staged_bundle_failures"],
+        serde_json::json!(["suite launched no staged bundle"])
+    );
+    assert_eq!(document["staged_bundles"], serde_json::json!([]));
+}
+
+#[test]
+fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
+    use agent_conformance::report::a14_rows;
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = || {
+        agent_conformance::report::read_installed_runtime(
+            &fixture.binary,
+            &fixture.data,
+            agent_conformance::report::release_platform(),
+        )
+    };
+    let (mut observations, git) = synthetic(1, false);
+    observations[0] = Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(b"installed runtime"),
+    };
+    let reviews = [review("codex", "pass", &git.commit)];
+    let receipt = |reviews, installed| {
+        agent_conformance::report::render_bound_run(
+            &format!("{LIVE}: test\n"),
+            &output(&observations),
+            true,
+            Ok(git.clone()),
+            agent_conformance::report::Bound { reviews, installed },
+            Some(""),
+        )
+        .receipt_bytes
+    };
+    let grades = |receipt: &[u8]| -> Vec<(&str, bool, Vec<String>)> {
+        a14_rows(receipt)
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.name, row.passed, row.reasons))
+            .collect()
+    };
+    let all = receipt(Some(&reviews[..]), Some(installed()));
+    assert_eq!(
+        grades(&all),
+        [
+            ("versions_receipt", true, vec![]),
+            ("review_binding", true, vec![]),
+            ("staged_bundle", true, vec![]),
+            ("installed_runtime", true, vec![]),
+            ("installed_runtime_ran", true, vec![]),
+        ]
+    );
+    // No review and no installed Runtime: three rows fail, two as missing.
+    assert_eq!(
+        grades(&receipt(None, None))[1..],
+        [
+            ("review_binding", false, vec!["missing review".to_owned()]),
+            ("staged_bundle", true, vec![]),
+            (
+                "installed_runtime",
+                false,
+                vec!["row missing from the receipt".to_owned()]
+            ),
+            (
+                "installed_runtime_ran",
+                false,
+                vec!["row missing from the receipt".to_owned()]
+            ),
+        ]
+    );
+    // A table edited after the receipt was written is refused outright.
+    let edited = String::from_utf8(receipt(None, Some(installed())))
+        .unwrap()
+        .replace("review_binding (A14) | FAIL", "review_binding (A14) | PASS");
+    assert_eq!(
+        a14_rows(edited.as_bytes()),
+        Err("receipt table does not match its recorded hash".into())
+    );
+    assert_eq!(a14_rows(b"{"), Err("malformed receipt".into()));
+
+    // The report tool prints the same rows and fails unless all pass.
+    let check = |name: &str, bytes: &[u8]| {
+        let path = home.root().join(name);
+        fs::write(&path, bytes).unwrap();
+        std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .arg("--a14")
+            .arg(path)
+            .output()
+            .unwrap()
+    };
+    let passed = check("all.json", &all);
+    assert!(passed.status.success(), "{passed:?}");
+    assert_eq!(
+        String::from_utf8(passed.stdout).unwrap(),
+        "versions_receipt (A14) | PASS\nreview_binding (A14) | PASS\nstaged_bundle (A14) | PASS\ninstalled_runtime (A14) | PASS\ninstalled_runtime_ran (A14) | PASS\n"
+    );
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let failed = check(
+        "changed.json",
+        &receipt(Some(&reviews[..]), Some(installed())),
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    let printed = String::from_utf8(failed.stdout).unwrap();
+    assert!(
+        printed.contains("installed_runtime (A14) | FAIL | binary does not match the release\n"),
+        "{printed}"
+    );
+    assert!(printed.contains(
+        "installed_runtime_ran (A14) | FAIL | no matched installed Runtime to compare\n"
+    ));
     home.finish().unwrap();
 }

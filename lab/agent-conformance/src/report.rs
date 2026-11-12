@@ -17,6 +17,11 @@ struct GapRow {
 pub const INSTANCE_GRANTS_SCOPE: &str =
     "process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9";
 
+/// What the bundle row covers. An installed Runtime records release capsules in
+/// `components.json`; the bundles this suite launches are not among them.
+pub const STAGED_BUNDLE_SCOPE: &str =
+    "lab CID of each bundle the suite staged from this checkout and launched; not an installed bundle";
+
 fn blocker_ids(reason: &str) -> BTreeSet<&str> {
     reason.split(';').map(str::trim).collect()
 }
@@ -604,6 +609,26 @@ pub fn installed_runtime(
     })
 }
 
+/// Every reason the receipt cannot say the suite ran the installed binary; empty
+/// means the Runtime the suite launched has the installed binary's SHA-256.
+/// `ran` is the hash the suite printed for the Runtime it launched; `installed`
+/// is the installed Runtime once its hash chain matched. This compares bytes
+/// by hash: it does not show which of the suite's rows launched that Runtime.
+pub fn installed_runtime_ran_failures(
+    ran: Option<&str>,
+    installed: Option<&InstalledRuntime>,
+) -> Vec<String> {
+    match (ran, installed) {
+        (_, None) => vec!["no matched installed Runtime to compare".into()],
+        (None, Some(_)) => vec!["suite recorded no Runtime SHA-256".into()],
+        (Some(ran), Some(installed)) if ran != installed.binary_sha256 => vec![format!(
+            "suite ran Runtime {ran}, installed binary is {}",
+            installed.binary_sha256
+        )],
+        _ => Vec::new(),
+    }
+}
+
 /// The key a release uses for this machine's platform, as the Runtime's own
 /// update check spells it.
 pub fn release_platform() -> &'static str {
@@ -627,8 +652,8 @@ pub fn release_platform() -> &'static str {
 ///   installed bytes belong to, not that the release is genuine;
 /// - the bundle's hash: the capsule bundle the demo ran is not compared with
 ///   anything installed;
-/// - that the suite ran this binary: the receipt's `runtime_sha256` is the
-///   Runtime the suite launched and is recorded beside this one, not compared.
+/// - that the suite ran this binary: `installed_runtime_ran_failures` compares
+///   the two hashes for the receipt's own row.
 pub fn read_installed_runtime(
     binary: &Path,
     data: &Path,
@@ -708,8 +733,9 @@ pub struct Bound<'a> {
 }
 
 /// `write_reviewed_run` with the installed Runtime. Like review binding, the
-/// installed Runtime is its own table row and receipt fields; a chain that does
-/// not match fails that row and does not change the suite's command result.
+/// installed Runtime has its own table rows and receipt fields: one for its
+/// hash chain and one for whether the suite ran that binary. A row that fails
+/// does not change the suite's command result.
 pub fn write_bound_run(
     listed: &str,
     output: &str,
@@ -794,11 +820,43 @@ pub fn render_bound_run(
     } else {
         "review_binding (A14) | FAIL\n"
     });
+    // The bundles are the ones the suite staged from this checkout and launched.
+    // No installed Runtime keeps a record of them, so the row says "staged".
+    let staged: BTreeSet<&str> = evidence
+        .identities
+        .launched
+        .values()
+        .map(|probe| probe.bundle_lab_cid.as_str())
+        .collect();
+    let unstaged: &[&str] = if staged.is_empty() {
+        &["suite launched no staged bundle"]
+    } else {
+        &[]
+    };
+    table.push_str(&format!(
+        "staged_bundle (A14) | {} | {STAGED_BUNDLE_SCOPE}\n",
+        if unstaged.is_empty() { "PASS" } else { "FAIL" }
+    ));
+    // Whether the suite ran the installed binary is asked only when an
+    // installed Runtime was given.
+    let not_ran = installed.as_ref().map(|installed| {
+        installed_runtime_ran_failures(
+            evidence.identities.runtime.as_deref(),
+            installed.as_ref().ok(),
+        )
+    });
     if let Some(installed) = &installed {
         table.push_str(if installed.is_ok() {
             "installed_runtime (A14) | PASS\n"
         } else {
             "installed_runtime (A14) | FAIL\n"
+        });
+    }
+    if let Some(not_ran) = &not_ran {
+        table.push_str(if not_ran.is_empty() {
+            "installed_runtime_ran (A14) | PASS\n"
+        } else {
+            "installed_runtime_ran (A14) | FAIL\n"
         });
     }
     let outcome = if !suite_ok {
@@ -823,6 +881,10 @@ pub fn render_bound_run(
         "reviews": reviews,
         "review_status": if unbound.is_empty() { "bound" } else { "unbound" },
         "review_failures": unbound,
+        "staged_bundles": staged,
+        "staged_bundle_status": if unstaged.is_empty() { "recorded" } else { "missing" },
+        "staged_bundle_failures": unstaged,
+        "staged_bundle_scope": STAGED_BUNDLE_SCOPE,
         "cargo_success": cargo_ok,
         "suite_outcome": outcome,
         "command_success": suite_ok && complete,
@@ -844,6 +906,15 @@ pub fn render_bound_run(
         document["installed_runtime"] = serde_json::json!(record);
         document["installed_runtime_failures"] = unmatched.into();
     }
+    if let Some(not_ran) = not_ran {
+        document["installed_runtime_ran_status"] = if not_ran.is_empty() {
+            "ran"
+        } else {
+            "not shown"
+        }
+        .into();
+        document["installed_runtime_ran_failures"] = not_ran.into();
+    }
     let receipt_bytes = serde_json::to_vec_pretty(&document)
         .map(|mut bytes| {
             bytes.push(b'\n');
@@ -862,6 +933,66 @@ pub fn render_bound_run(
         passed: suite_ok && evidence.failures.is_empty(),
         failures: evidence.failures,
     }
+}
+
+/// One A14 row read back from a receipt: its name, whether it reads PASS, and
+/// the reasons the receipt gives when it does not.
+#[derive(Debug, PartialEq, Eq)]
+pub struct A14Row {
+    pub name: &'static str,
+    pub passed: bool,
+    pub reasons: Vec<String>,
+}
+
+/// The A14 rows of a written receipt, for the owner's command. All five must
+/// be present: a receipt made without an installed Runtime has no installed
+/// rows, and that is a failure here, named as a missing row. The rows are read
+/// from the receipt's own table after the table is checked against the hash the
+/// receipt records for it.
+pub fn a14_rows(receipt: &[u8]) -> Result<Vec<A14Row>, String> {
+    let document: serde_json::Value =
+        serde_json::from_slice(receipt).map_err(|_| "malformed receipt")?;
+    let table = document["report"]["table"]
+        .as_str()
+        .ok_or("receipt has no table")?;
+    if document["report"]["sha256"].as_str() != Some(sha256(table.as_bytes()).as_str()) {
+        return Err("receipt table does not match its recorded hash".into());
+    }
+    let rows = [
+        ("versions_receipt", "missing_or_invalid"),
+        ("review_binding", "review_failures"),
+        ("staged_bundle", "staged_bundle_failures"),
+        ("installed_runtime", "installed_runtime_failures"),
+        ("installed_runtime_ran", "installed_runtime_ran_failures"),
+    ];
+    Ok(rows
+        .into_iter()
+        .map(|(name, field)| {
+            let prefix = format!("{name} (A14) | ");
+            let grades: Vec<_> = table
+                .lines()
+                .filter_map(|line| line.strip_prefix(prefix.as_str()))
+                .map(|rest| rest.split(" | ").next().unwrap_or_default())
+                .collect();
+            let passed = grades == ["PASS"];
+            let mut reasons: Vec<String> = document[field]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|reason| reason.as_str().map(str::to_owned))
+                .collect();
+            if grades.is_empty() {
+                reasons.push("row missing from the receipt".into());
+            } else if !passed && reasons.is_empty() {
+                reasons.push("receipt gives no reason".into());
+            }
+            A14Row {
+                name,
+                passed,
+                reasons,
+            }
+        })
+        .collect())
 }
 
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), String> {
