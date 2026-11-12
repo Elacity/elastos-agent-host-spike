@@ -2394,6 +2394,82 @@ fn a_non_regular_tar_typeflag_is_blocked() {
 }
 
 #[test]
+fn every_supported_tar_record_type_lists_and_the_walk_continues() {
+    // The closed list: `0` and NUL are files, `5` is a directory, and `1`
+    // to `4` and `6` are "other" rows. A following file proves each header
+    // is the size the walk expects.
+    let types: [u8; 8] = [0, b'0', b'5', b'1', b'2', b'3', b'4', b'6'];
+    let kinds = [
+        "file",
+        "file",
+        "directory",
+        "other",
+        "other",
+        "other",
+        "other",
+        "other",
+    ];
+    for (index, flag) in types.iter().enumerate() {
+        let name = if *flag == b'5' { "d/" } else { "k" };
+        let bus = tar_fixture(&[
+            TarSpec::file(name).kind(*flag),
+            TarSpec::file("after.txt").data(b"after"),
+        ]);
+        let listed = entries(&bus);
+        assert_eq!(listed.len(), 2, "typeflag {}", flag);
+        assert_eq!(listed[0]["kind"], kinds[index], "typeflag {flag}");
+        assert_eq!(listed[1]["path"], "after.txt", "typeflag {flag}");
+    }
+}
+
+#[test]
+fn every_unsupported_tar_record_type_refuses_the_archive() {
+    // One flag from each refused class, every one with a valid entry after
+    // it: the archive is refused and the following entry is never listed.
+    for flag in [
+        b'7', b'S', b'M', b'V', b'N', b'x', b'g', b'L', b'K', b'Z', 0x80,
+    ] {
+        let bus = tar_fixture(&[
+            TarSpec::file("bad").kind(flag),
+            TarSpec::file("a.txt").data(b"after"),
+        ]);
+        let view = view(&bus);
+        let code = if matches!(flag, b'x' | b'g' | b'L' | b'K') {
+            "extension_header"
+        } else {
+            "unsupported_type"
+        };
+        assert_eq!(view["refused"]["code"], code, "typeflag {flag}");
+        if code == "unsupported_type" {
+            let message = view["refused"]["message"].as_str().unwrap();
+            assert!(
+                message.contains(&format!("0x{flag:02x}")),
+                "the reason names the flag: {message}"
+            );
+        }
+        assert!(entries(&bus).is_empty(), "typeflag {flag}");
+    }
+}
+
+#[test]
+fn a_size_on_a_link_or_device_refuses_the_archive() {
+    // ustar gives a link, device or FIFO no data; a non-zero size would step
+    // the walk past the next header, so the whole archive is refused.
+    for flag in [b'1', b'2', b'3', b'4', b'6'] {
+        let bus = tar_fixture(&[
+            TarSpec::file("l").kind(flag).data(b"data"),
+            TarSpec::file("a.txt").data(b"after"),
+        ]);
+        assert_eq!(
+            view(&bus)["refused"]["code"],
+            "other_type_size",
+            "typeflag {flag}"
+        );
+        assert!(entries(&bus).is_empty(), "typeflag {flag}");
+    }
+}
+
+#[test]
 fn a_full_width_tar_name_and_prefix_are_kept() {
     // Both fields fill their fixed width with no NUL, so each is used whole:
     // 155 prefix bytes, a slash and 100 name bytes, past the 255-byte cap.

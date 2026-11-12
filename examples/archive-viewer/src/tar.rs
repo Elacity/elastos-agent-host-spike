@@ -157,8 +157,19 @@ fn signed_checksum(block: &[u8]) -> i64 {
         .sum()
 }
 
-/// A regular file or directory is listable; every other type is P9's
-/// non-regular kind. A name that ends like an archive is N1's `archive`.
+/// How a refused record type is named in its refusal: the byte in hex and,
+/// for printable ASCII, the character too.
+fn record_type_text(typeflag: u8) -> String {
+    if typeflag.is_ascii_graphic() {
+        format!("0x{typeflag:02x} ('{}')", typeflag as char)
+    } else {
+        format!("0x{typeflag:02x}")
+    }
+}
+
+/// A regular file or directory is listable; a hard link, symbolic link,
+/// character device, block device or FIFO is P9's non-regular kind. A name
+/// that ends like an archive is N1's `archive`.
 fn kind_of(typeflag: u8, path: &[u8]) -> Kind {
     match typeflag {
         0 | b'0' => {
@@ -327,14 +338,47 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
         }
         path.extend_from_slice(&name);
         let typeflag = block[TYPEFLAG];
-        // A pax header (`x`, `g`) or a GNU long name or link (`L`, `K`)
-        // carries the next entry's effective name or size. This reader does
-        // not apply that metadata, so listing on would show the wrong record.
-        if matches!(typeflag, b'x' | b'g' | b'L' | b'K') {
+        // A closed list: a file (`0`, NUL), a directory (`5`), or a hard
+        // link, symbolic link, character device, block device or FIFO
+        // (`1` to `4`, `6`). Those types carry no data that a later record
+        // depends on. Every other type can change how the following bytes or
+        // entries are read (pax `x`/`g`, a GNU long name or link `L`/`K`,
+        // GNU sparse `S`, multi-volume `M`, a volume header `V`, an old GNU
+        // long name `N`) or is unknown to this reader, so the whole archive
+        // is refused.
+        if !matches!(typeflag, 0 | b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6') {
+            // A pax header (`x`, `g`) or a GNU long name or link (`L`, `K`)
+            // carries the next entry's effective name or size. This reader
+            // does not apply that metadata, so listing on would show the
+            // wrong record.
+            if matches!(typeflag, b'x' | b'g' | b'L' | b'K') {
+                return Err(Refused::new(
+                    "extension_header",
+                    format!(
+                        "the header at {offset} is a pax or GNU extension header, which this reader does not support yet"
+                    ),
+                )
+                .into());
+            }
             return Err(Refused::new(
-                "extension_header",
+                "unsupported_type",
                 format!(
-                    "the header at {offset} is a pax or GNU extension header, which this reader does not support yet"
+                    "the header at {offset} has record type {}, which this reader does not support",
+                    record_type_text(typeflag)
+                ),
+            )
+            .into());
+        }
+        // A link, device or FIFO header carries no data (ustar), so its size
+        // field must be zero. With a non-zero size the walk would step over
+        // bytes that are not part of this record and lose the next header,
+        // so the archive is refused.
+        if matches!(typeflag, b'1' | b'2' | b'3' | b'4' | b'6') && declared != 0 {
+            return Err(Refused::new(
+                "other_type_size",
+                format!(
+                    "the header at {offset} is type {} and declares {declared} bytes; a link, device or FIFO carries no data",
+                    record_type_text(typeflag)
                 ),
             )
             .into());

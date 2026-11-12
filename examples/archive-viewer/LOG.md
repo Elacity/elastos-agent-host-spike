@@ -682,3 +682,23 @@ other host tests pass under it.
 - `tar.gz`, `.gz` and every compressed tar need Bus v2 streams. Nested and
   image entries on Bus v2 are the same. The bundle and container build are
   outside this lane.
+
+2026-11-12, task 009: tar record types are a closed list.
+
+A typeflag outside the five record types this reader understands can change
+how the following bytes or entries are read, so the whole archive is refused.
+
+### What changed
+
+- `src/tar.rs` accepts a file (`0`, NUL), a directory (`5`), and a hard link,
+  symbolic link, character device, block device or FIFO (`1` to `4`, `6`).
+  Every other flag refuses the archive: `x`, `g`, `L` and `K` keep
+  `extension_header`; every other byte is `unsupported_type`, and its message
+  names the flag (`0x53 ('S')`).
+- A non-zero size on `1`, `2`, `3`, `4` or `6` is `other_type_size`: ustar
+  gives those types no data, and stepping over bytes that are not there would
+  lose the next header.
+- Three guest tests: each supported type with a following file, one flag from
+  each refused class with a following file, and a size on each link or device
+  type. T22 plants the closed list as `if false`; it is caught by the two
+  refusal tests, with every unnamed test passing.
