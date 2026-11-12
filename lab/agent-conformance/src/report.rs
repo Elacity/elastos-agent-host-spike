@@ -604,6 +604,55 @@ pub fn installed_runtime(
     })
 }
 
+/// The key a release uses for this machine's platform, as the Runtime's own
+/// update check spells it.
+pub fn release_platform() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "x86_64-linux",
+        ("linux", "aarch64") => "aarch64-linux",
+        ("macos", "x86_64") => "x86_64-darwin",
+        ("macos", "aarch64") => "aarch64-darwin",
+        _ => "unknown",
+    }
+}
+
+/// Reads an installed Runtime from where the installer keeps it and checks it
+/// with `installed_runtime`: the binary at `binary`, and under `data` the files
+/// `installation/release-head.json`, `installation/release.json` and
+/// `components.json`. A file that cannot be read is its own reason, named by
+/// file; nothing is checked until all four are read.
+///
+/// What this does not check:
+/// - signatures: only hashes are compared, so a match shows which release the
+///   installed bytes belong to, not that the release is genuine;
+/// - the bundle's hash: the capsule bundle the demo ran is not compared with
+///   anything installed;
+/// - that the suite ran this binary: the receipt's `runtime_sha256` is the
+///   Runtime the suite launched and is recorded beside this one, not compared.
+pub fn read_installed_runtime(
+    binary: &Path,
+    data: &Path,
+    platform: &str,
+) -> Result<InstalledRuntime, Vec<String>> {
+    let mut failures = Vec::new();
+    let mut read = |path: &Path, name: &str| {
+        std::fs::read(path).unwrap_or_else(|_| {
+            failures.push(format!("could not read {name}"));
+            Vec::new()
+        })
+    };
+    let installation = data.join("installation");
+    let head = read(&installation.join("release-head.json"), "release-head.json");
+    let release = read(&installation.join("release.json"), "release.json");
+    let program = read(binary, "the installed binary");
+    let components = read(&data.join("components.json"), "components.json");
+    if !failures.is_empty() {
+        failures.sort();
+        return Err(failures);
+    }
+    installed_runtime(&head, &release, platform, &program, &components)
+}
+
 /// A missing, repeated or unlisted result fails closed. Cargo failure is also
 /// visible even if compilation or a test binary failed before reporting a row.
 pub fn table(listed: &str, output: &str, cargo_ok: bool, gaps: Option<&str>) -> (String, bool) {
@@ -642,7 +691,35 @@ pub fn write_reviewed_run(
     receipt: &Path,
     gaps: Option<&str>,
 ) -> RunReport {
-    let mut report = render_reviewed_run(listed, output, cargo_ok, git, reviews, gaps);
+    let bound = Bound {
+        reviews,
+        installed: None,
+    };
+    write_bound_run(listed, output, cargo_ok, git, bound, receipt, gaps)
+}
+
+/// What a receipt binds beside the suite's own rows: the reviews of the tested
+/// commit and, when one was given, the installed Runtime.
+pub struct Bound<'a> {
+    pub reviews: Option<&'a [Review]>,
+    /// `None` means no installed Runtime was given: the receipt then carries no
+    /// installed Runtime row or field at all.
+    pub installed: Option<Result<InstalledRuntime, Vec<String>>>,
+}
+
+/// `write_reviewed_run` with the installed Runtime. Like review binding, the
+/// installed Runtime is its own table row and receipt fields; a chain that does
+/// not match fails that row and does not change the suite's command result.
+pub fn write_bound_run(
+    listed: &str,
+    output: &str,
+    cargo_ok: bool,
+    git: Result<GitIdentity, &str>,
+    bound: Bound<'_>,
+    receipt: &Path,
+    gaps: Option<&str>,
+) -> RunReport {
+    let mut report = render_bound_run(listed, output, cargo_ok, git, bound, gaps);
     let written = write_exclusive(receipt, &report.receipt_bytes);
     report.receipt_written = written.is_ok();
     if let Err(reason) = written {
@@ -675,6 +752,24 @@ pub fn render_reviewed_run(
     reviews: Option<&[Review]>,
     gaps: Option<&str>,
 ) -> RunReport {
+    let bound = Bound {
+        reviews,
+        installed: None,
+    };
+    render_bound_run(listed, output, cargo_ok, git, bound, gaps)
+}
+
+/// `render_reviewed_run` with the installed Runtime; `write_bound_run` writes
+/// these same bytes.
+pub fn render_bound_run(
+    listed: &str,
+    output: &str,
+    cargo_ok: bool,
+    git: Result<GitIdentity, &str>,
+    bound: Bound<'_>,
+    gaps: Option<&str>,
+) -> RunReport {
+    let Bound { reviews, installed } = bound;
     let mut evidence = Evidence::parse(listed, output, gaps);
     let (mut table, suite_ok) = evidence.table(cargo_ok);
     evidence.require_identities();
@@ -699,6 +794,13 @@ pub fn render_reviewed_run(
     } else {
         "review_binding (A14) | FAIL\n"
     });
+    if let Some(installed) = &installed {
+        table.push_str(if installed.is_ok() {
+            "installed_runtime (A14) | PASS\n"
+        } else {
+            "installed_runtime (A14) | FAIL\n"
+        });
+    }
     let outcome = if !suite_ok {
         "FAIL"
     } else if table.contains(" | SKIPPED") {
@@ -708,7 +810,7 @@ pub fn render_reviewed_run(
     } else {
         "PASS"
     };
-    let document = serde_json::json!({
+    let mut document = serde_json::json!({
         "schema": "agent-conformance.versions/v1",
         "description": "Version evidence only. The bundle lab CID and any separate signed record give zero admission or permission credit. Runtime decides admission; resource authority requires a Runtime grant for the requesting session. Only the observed Runtime journey supplies that evidence.",
         "identity_status": if complete { "complete" } else { "incomplete" },
@@ -728,6 +830,20 @@ pub fn render_reviewed_run(
         "instance_grants_scope": INSTANCE_GRANTS_SCOPE,
         "report": { "table": table, "sha256": sha256(table.as_bytes()) },
     });
+    if let Some(installed) = installed {
+        let (record, unmatched) = match installed {
+            Ok(record) => (Some(record), Vec::new()),
+            Err(reasons) => (None, reasons),
+        };
+        document["installed_runtime_status"] = if record.is_some() {
+            "matched"
+        } else {
+            "unmatched"
+        }
+        .into();
+        document["installed_runtime"] = serde_json::json!(record);
+        document["installed_runtime_failures"] = unmatched.into();
+    }
     let receipt_bytes = serde_json::to_vec_pretty(&document)
         .map(|mut bytes| {
             bytes.push(b'\n');

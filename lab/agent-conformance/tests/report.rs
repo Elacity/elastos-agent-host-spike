@@ -551,6 +551,8 @@ fn versions_receipt_binds_current_run() {
     let command = || {
         std::process::Command::new(env!("CARGO_BIN_EXE_report"))
             .env_remove("AGENT_CONFORMANCE_REVIEWS")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
             .arg(&listed_path)
             .arg(&results_path)
             .arg("0")
@@ -920,6 +922,8 @@ fn skipped_report_keeps_a_nonzero_exit() {
     fs::write(&results_path, output).unwrap();
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
         .env_remove("AGENT_CONFORMANCE_REVIEWS")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
         .arg(list_path)
         .arg(results_path)
         .arg("101")
@@ -1326,6 +1330,8 @@ fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
     let run = |receipt: &str| {
         std::process::Command::new(env!("CARGO_BIN_EXE_report"))
             .env("AGENT_CONFORMANCE_REVIEWS", &reviews_path)
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
             .arg(&listed_path)
             .arg(&results_path)
             .arg("0")
@@ -1499,4 +1505,181 @@ fn installed_runtime_binds_only_a_matching_hash_chain() {
             "case {index}"
         );
     }
+}
+
+/// An installed Runtime laid out in a temp folder the way the installer lays
+/// one out: the binary on its own, and a data folder holding `components.json`
+/// and `installation/` with the release head and the release it names.
+struct InstalledFixture {
+    binary: std::path::PathBuf,
+    data: std::path::PathBuf,
+    release: Vec<u8>,
+}
+
+const INSTALLED_COMMIT: &str = "7bc3704b5e181e5aa435c2b2cafbd73a996932ef";
+
+impl InstalledFixture {
+    fn new(root: &Path) -> Self {
+        let (binary, data) = (root.join("bin/elastos"), root.join("data"));
+        let descriptor = |bytes: &[u8]| serde_json::json!({ "sha256": sha256(bytes) });
+        let platform = agent_conformance::report::release_platform();
+        let release = serde_json::json!({ "payload": {
+            "version": "2.0.1",
+            "source": { "commit": INSTALLED_COMMIT },
+            "platforms": { platform: {
+                "binary": descriptor(b"installed runtime"),
+                "components": descriptor(b"{\"capsules\":{}}") } } } })
+        .to_string()
+        .into_bytes();
+        let head = serde_json::json!({ "payload": {
+            "version": "2.0.1", "release_sha256": sha256(&release) } })
+        .to_string();
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(data.join("installation")).unwrap();
+        fs::write(&binary, b"installed runtime").unwrap();
+        fs::write(data.join("components.json"), b"{\"capsules\":{}}").unwrap();
+        fs::write(data.join("installation/release-head.json"), head).unwrap();
+        fs::write(data.join("installation/release.json"), &release).unwrap();
+        Self {
+            binary,
+            data,
+            release,
+        }
+    }
+
+    /// The receipt a passing suite gets when this installed Runtime is given.
+    fn receipt(&self) -> (agent_conformance::report::RunReport, Value) {
+        let installed = agent_conformance::report::read_installed_runtime(
+            &self.binary,
+            &self.data,
+            agent_conformance::report::release_platform(),
+        );
+        bound(Some(installed))
+    }
+}
+
+fn bound(
+    installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
+) -> (agent_conformance::report::RunReport, Value) {
+    let (observations, git) = synthetic(1, false);
+    let report = agent_conformance::report::render_bound_run(
+        &format!("{LIVE}: test\n"),
+        &output(&observations),
+        true,
+        Ok(git),
+        agent_conformance::report::Bound {
+            reviews: None,
+            installed,
+        },
+        Some(""),
+    );
+    let document = serde_json::from_slice(&report.receipt_bytes).unwrap();
+    (report, document)
+}
+
+#[test]
+fn receipt_records_a_matching_installed_runtime() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (report, document) = fixture.receipt();
+    assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+    assert_eq!(document["installed_runtime_status"], "matched");
+    assert_eq!(
+        document["installed_runtime_failures"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        document["installed_runtime"],
+        serde_json::json!({
+            "version": "2.0.1",
+            "platform": agent_conformance::report::release_platform(),
+            "source_commit": INSTALLED_COMMIT,
+            "release_sha256": sha256(&fixture.release),
+            "binary_sha256": sha256(b"installed runtime"),
+            "components_sha256": sha256(b"{\"capsules\":{}}"),
+        })
+    );
+    // The row is part of the table the receipt hashes.
+    assert_eq!(document["report"]["table"], report.table);
+    assert_eq!(
+        document["report"]["sha256"],
+        sha256(report.table.as_bytes())
+    );
+    // The Runtime the suite launched is recorded beside it, not compared.
+    assert_eq!(document["runtime_sha256"], sha256(&[1, 1]));
+    assert!(report.passed, "{:?}", report.failures);
+    home.finish().unwrap();
+}
+
+#[test]
+fn changed_installed_binary_fails_the_installed_runtime_row() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let (report, document) = fixture.receipt();
+    assert_eq!(
+        document["installed_runtime_failures"],
+        serde_json::json!(["binary does not match the release"])
+    );
+    assert!(
+        report.table.contains("installed_runtime (A14) | FAIL\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(document["installed_runtime_status"], "unmatched");
+    // An unmatched Runtime is not named: the receipt claims no release for it.
+    assert_eq!(document["installed_runtime"], Value::Null);
+    // Like review binding, this is its own row; the suite's result stays.
+    assert!(report.passed, "{:?}", report.failures);
+    assert_eq!(document["command_success"], true);
+    home.finish().unwrap();
+}
+
+#[test]
+fn missing_release_record_fails_with_its_own_reason() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    fs::remove_file(fixture.data.join("installation/release.json")).unwrap();
+    let (report, document) = fixture.receipt();
+    assert_eq!(
+        document["installed_runtime_failures"],
+        serde_json::json!(["could not read release.json"])
+    );
+    assert!(report.table.contains("installed_runtime (A14) | FAIL\n"));
+    assert_eq!(document["installed_runtime_status"], "unmatched");
+    assert_eq!(document["installed_runtime"], Value::Null);
+    // Every unreadable file is named, and nothing is compared until all are read.
+    fs::remove_file(&fixture.binary).unwrap();
+    fs::remove_file(fixture.data.join("components.json")).unwrap();
+    fs::remove_file(fixture.data.join("installation/release-head.json")).unwrap();
+    assert_eq!(
+        fixture.receipt().1["installed_runtime_failures"],
+        serde_json::json!([
+            "could not read components.json",
+            "could not read release-head.json",
+            "could not read release.json",
+            "could not read the installed binary"
+        ])
+    );
+    home.finish().unwrap();
+}
+
+fn names_installed_runtime(document: &Value, table: &str) -> bool {
+    table.contains("installed_runtime")
+        || document
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("installed_runtime"))
+}
+
+#[test]
+fn no_installed_runtime_leaves_the_receipt_unchanged() {
+    let (report, document) = bound(None);
+    assert!(
+        !names_installed_runtime(&document, &report.table),
+        "{document:#}"
+    );
+    let (_, git) = synthetic(1, false);
+    assert_eq!(report.receipt_bytes, reviewed(git, None).0.receipt_bytes);
 }
