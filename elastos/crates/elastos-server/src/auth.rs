@@ -9011,6 +9011,10 @@ pub(crate) fn principal_stored_localhost_root(
 pub(crate) struct ResolvedPrincipalRoot {
     principal_id: String,
     arm: RootArm,
+    /// The auth store whose stored record gave this root. `None` for a
+    /// device, recovery, test or remote root: those have no record kept
+    /// elsewhere.
+    record_store: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9044,6 +9048,7 @@ impl ResolvedPrincipalRoot {
             return Ok(Self {
                 principal_id: principal_id.to_string(),
                 arm: RootArm::Local(root),
+                record_store: Some(auth_data_dir.to_path_buf()),
             });
         }
         let device = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?;
@@ -9051,15 +9056,18 @@ impl ResolvedPrincipalRoot {
             device.filter(|did| PrincipalId::device_did(did).as_str() == principal_id)
         {
             // Today's device root: the one Users rule, applied to `device:<did>`.
+            // No stored record gave it.
             return Ok(Self {
                 principal_id: principal_id.to_string(),
                 arm: RootArm::Local(verified_device_localhost_root(&did)),
+                record_store: None,
             });
         }
         principal_stored_localhost_root(Some(auth_data_dir), principal_id)
             .map(|root| Self {
                 principal_id: principal_id.to_string(),
                 arm: RootArm::Local(root),
+                record_store: Some(auth_data_dir.to_path_buf()),
             })
             .map_err(|err| anyhow!(err))
     }
@@ -9068,6 +9076,14 @@ impl ResolvedPrincipalRoot {
     /// separate id: the root is the one record of whose data it describes.
     pub(crate) fn principal_id(&self) -> &str {
         &self.principal_id
+    }
+
+    /// True only when this root came from a stored record in a folder other
+    /// than `data_dir`: the store that holds the record, not this Runtime's.
+    fn record_kept_in_another_store(&self, data_dir: &Path) -> bool {
+        self.record_store
+            .as_deref()
+            .is_some_and(|store| store != data_dir)
     }
 
     /// Refuse a caller that pairs this root with another principal's id.
@@ -9097,6 +9113,7 @@ impl ResolvedPrincipalRoot {
         Self {
             principal_id: PrincipalId::device_did(did).as_str().to_string(),
             arm: RootArm::Local(verified_device_localhost_root(did)),
+            record_store: None,
         }
     }
 
@@ -9145,6 +9162,7 @@ impl ResolvedPrincipalRoot {
         Ok(Self {
             principal_id: principal_id.to_string(),
             arm: RootArm::Local(localhost_root.to_string()),
+            record_store: None,
         })
     }
 
@@ -9160,6 +9178,7 @@ impl ResolvedPrincipalRoot {
         Ok(Self {
             principal_id: kit.principal_id.clone(),
             arm: RootArm::Local(kit.localhost_root.clone()),
+            record_store: None,
         })
     }
 
@@ -9171,6 +9190,7 @@ impl ResolvedPrincipalRoot {
         Self {
             principal_id: principal_id.to_string(),
             arm: RootArm::Local(format!("test-root/{principal_id}")),
+            record_store: None,
         }
     }
 
@@ -9189,6 +9209,7 @@ impl ResolvedPrincipalRoot {
         Ok(Self {
             principal_id: remote_principal_id.to_string(),
             arm: RootArm::Remote,
+            record_store: None,
         })
     }
 
