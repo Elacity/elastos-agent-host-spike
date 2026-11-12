@@ -865,6 +865,11 @@
           "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    if require_live_grants {",
           "new": "    drop(_leftover);\n    if require_live_grants {"
+        },
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "        home.finish().unwrap();\n        return;",
+          "new": "        drop(_leftover);\n        home.finish().unwrap();\n        return;"
         }
       ],
       "tests": [
