@@ -9052,6 +9052,20 @@ impl ResolvedPrincipalRoot {
             .map_err(|err| anyhow!(err))
     }
 
+    /// The principal this root was resolved for. A launch context carries no
+    /// separate id: the root is the one record of whose data it describes.
+    pub(crate) fn principal_id(&self) -> &str {
+        &self.principal_id
+    }
+
+    /// Refuse a caller that pairs this root with another principal's id.
+    pub(crate) fn require_for(&self, principal_id: &str) -> anyhow::Result<()> {
+        if self.principal_id != principal_id {
+            anyhow::bail!("resolved root belongs to another principal");
+        }
+        Ok(())
+    }
+
     /// The localhost root this principal owns. A remote principal owns no
     /// localhost path, so it has the empty root: every path resolver refuses
     /// an empty root, and no caller falls back to the principal-id rule.
@@ -18874,6 +18888,23 @@ pub(crate) mod tests {
         assert!(
             own.to_string().contains("quarantined agent record"),
             "{own}"
+        );
+    }
+
+    #[test]
+    fn resolved_root_names_its_principal() {
+        let root = ResolvedPrincipalRoot::for_test_principal("person:local:root-names-its-person");
+        assert_eq!(root.principal_id(), "person:local:root-names-its-person");
+    }
+
+    #[test]
+    fn resolved_root_refuses_another_principal() {
+        let root = ResolvedPrincipalRoot::for_test_principal("person:local:root-owner");
+        root.require_for("person:local:root-owner").unwrap();
+        let refused = root.require_for("person:local:someone-else").unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "resolved root belongs to another principal"
         );
     }
 

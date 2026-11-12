@@ -1080,7 +1080,6 @@ mod r4_root_tests {
             crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), AGENT_ID).unwrap();
         let context = HomeLaunchTokenContext::resolved(
             root,
-            AGENT_ID.into(),
             "session:r4-viewer".into(),
             Some(proof_binding_id),
             "grant:r4-viewer".into(),
@@ -1144,7 +1143,6 @@ mod r4_root_tests {
         let id = "remote:00000000000000000000000000000000";
         let context = HomeLaunchTokenContext::resolved(
             crate::auth::ResolvedPrincipalRoot::remote(id).unwrap(),
-            id.into(),
             "session".into(),
             None,
             "grant".into(),
@@ -1178,13 +1176,8 @@ mod r4_root_tests {
                 crate::auth::r4_fixture::principal_id(kind),
             )
             .unwrap();
-            let context = HomeLaunchTokenContext::resolved(
-                root,
-                crate::auth::r4_fixture::principal_id(kind).to_string(),
-                "session".into(),
-                None,
-                "grant".into(),
-            );
+            let context =
+                HomeLaunchTokenContext::resolved(root, "session".into(), None, "grant".into());
             assert_eq!(
                 viewer_target_root(&context),
                 expected,

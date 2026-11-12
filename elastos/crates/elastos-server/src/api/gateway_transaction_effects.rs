@@ -1592,7 +1592,6 @@ async fn transaction_chain_data(
             .map_err(|err| (StatusCode::FORBIDDEN, err.to_string()))?;
     let context = HomeLaunchTokenContext::resolved(
         root,
-        authority.principal_id.clone(),
         authority.session_id.clone(),
         authority.proof_binding_id.clone(),
         authority.grant_id.clone(),
@@ -4617,7 +4616,7 @@ mod r8c_child_rows {
             parent_store.path(),
         );
         let authority = runtime_wallet_authority(dir.path(), &required.unwrap()).unwrap();
-        assert_eq!(authority.root.localhost_root(), parent_root);
+        assert_eq!(authority.root().localhost_root(), parent_root);
         let outcome = load_and_save(dir.path(), &authority, &parent_root).await;
         assert_eq!(outcome, Ok(()));
     }
@@ -4669,7 +4668,7 @@ mod r8d_passkey_rows {
         let person = passkey_person(WALLET_CAPSULE_ID);
         let child = person.child.path();
         let authority = runtime_wallet_authority(child, &person.required).unwrap();
-        assert_eq!(authority.root.localhost_root(), ROOT);
+        assert_eq!(authority.root().localhost_root(), ROOT);
         assert_eq!(authority.verified_context().principal_id(), PERSON);
         let state = person.child_state();
         // Load. The store's location is resolved in the parent's auth state

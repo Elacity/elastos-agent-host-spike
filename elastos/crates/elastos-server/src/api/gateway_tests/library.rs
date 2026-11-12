@@ -8764,14 +8764,13 @@ async fn r4_runtime_custody_buy_refuses_remote_context_at_root_lookup() {
         },
         context: HomeLaunchTokenContext::resolved(
             crate::auth::ResolvedPrincipalRoot::remote(REMOTE).unwrap(),
-            REMOTE.into(),
             "r4-remote-grant".into(),
             None,
             "r4-remote-grant".into(),
         ),
     };
     let authority = runtime_wallet_authority(dir.path(), &required).unwrap();
-    assert_eq!(authority.root.localhost_root(), "");
+    assert_eq!(authority.root().localhost_root(), "");
     let error = crate::api::gateway::runtime_custody_buy_via_gateway(
         &state,
         &authority,

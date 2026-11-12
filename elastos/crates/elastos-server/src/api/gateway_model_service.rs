@@ -790,7 +790,6 @@ fn provider_status_error(result: &Value) -> Option<String> {
 fn remote_context(principal: &str, grant_id: &str) -> anyhow::Result<HomeLaunchTokenContext> {
     Ok(HomeLaunchTokenContext::resolved(
         crate::auth::ResolvedPrincipalRoot::remote(principal)?,
-        principal.to_string(),
         grant_id.to_string(),
         None,
         grant_id.to_string(),

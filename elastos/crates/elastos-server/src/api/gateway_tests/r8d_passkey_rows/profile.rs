@@ -11,6 +11,7 @@ fn identity_summary(dir: &std::path::Path, ctx: &HomeLaunchTokenContext) -> Valu
 
 #[test]
 fn r8d_child_profile_load_reads_the_passkey_persons_profile() {
+    // F1, whether a second Runtime accepts Profile setup, is the change expected to flip this row.
     let person = passkey_person(PEOPLE_CAPSULE_ID);
     let child = person.child.path();
     // The child answers "no Profile": the bundle path under its own data

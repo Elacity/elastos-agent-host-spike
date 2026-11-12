@@ -433,7 +433,6 @@ fn home_launch_token_context_from_parts(
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, &auth_data_dir, principal_id)?;
     Ok(HomeLaunchTokenContext::resolved(
         root,
-        principal_id.to_string(),
         session_id.to_string(),
         proof_binding_id,
         grant_id.to_string(),

@@ -165,7 +165,6 @@ pub(in crate::api) fn passkey_person(app: &str) -> PasskeyPerson {
     let root = ResolvedPrincipalRoot::resolve(parent.path(), parent.path(), PERSON).unwrap();
     let on_parent = HomeLaunchTokenContext::resolved(
         root,
-        grant.principal_id.clone(),
         grant.session_id.clone(),
         Some(grant.proof_binding_id.clone()),
         grant.grant_id.clone(),

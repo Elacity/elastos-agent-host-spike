@@ -3239,13 +3239,7 @@ pub(in crate::api::gateway) fn local_model_offer_is_shared(
             return false;
         }
     };
-    let context = HomeLaunchTokenContext::resolved(
-        root,
-        principal_id.to_string(),
-        String::new(),
-        None,
-        String::new(),
-    );
+    let context = HomeLaunchTokenContext::resolved(root, String::new(), None, String::new());
     home_services_local_model_shared(data_dir, &context).unwrap_or(false)
 }
 
@@ -4266,7 +4260,6 @@ fn stored_passkey_principal_context(
         crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal.principal_id)?;
     Ok(HomeLaunchTokenContext::resolved(
         root,
-        principal.principal_id.clone(),
         String::new(),
         Some(principal.proof_binding_id.clone()),
         String::new(),
@@ -9933,6 +9926,7 @@ mod r8d_passkey_rows {
 
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
+        // F1, whether a second Runtime accepts Profile setup, is the change expected to flip this row.
         let person = passkey_person(PEOPLE_CAPSULE_ID);
         let child = person.child.path();
         let proof = person.ctx.proof_binding_id();

@@ -32,13 +32,8 @@ pub(super) fn fixture(agent: bool) -> (tempfile::TempDir, HomeLaunchTokenContext
         root.localhost_root(),
         if agent { AGENT_ROOT } else { HUMAN_ROOT }
     );
-    let context = HomeLaunchTokenContext::resolved(
-        root,
-        id.into(),
-        "session:r3".into(),
-        None,
-        "grant:r3".into(),
-    );
+    let context =
+        HomeLaunchTokenContext::resolved(root, "session:r3".into(), None, "grant:r3".into());
     (dir, context)
 }
 
