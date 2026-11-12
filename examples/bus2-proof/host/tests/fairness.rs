@@ -40,18 +40,35 @@ fn photo_state() -> HostState {
     state
 }
 
+/// Counted, not timed: the test below runs on a clock it moves by hand
+/// (`HandClock`), one tick for every 4 turns of the two guests together, so
+/// its result is the same on a fast machine, a slow one and a loaded one.
+/// In 3 turns of every 4 the busy guest uses up a fuel slice; in the fourth
+/// it yields because its tick asks it to. So it uses 3 slices a tick, of a
+/// budget of 40, and its 100 ticks take 300 slices: more than seven budgets.
+const TURNS_PER_TICK: u64 = 4;
+const BUSY_BUDGET_IN_SLICES: u64 = 40;
+const BUSY_MAX_TICKS: u64 = 100;
+/// The photo guest starts at this tick, once the busy guest is going.
+const PHOTO_STARTS_AT_TICK: u64 = 2;
+
 /// Runs a busy guest and the photo guest side by side on one thread, and
-/// returns each outcome with the time it ended.
-fn side_by_side() -> ((Outcome, Duration), (Outcome, Duration)) {
+/// returns each outcome with the tick at which it ended.
+fn side_by_side() -> ((Outcome, u64), (Outcome, u64)) {
     common::within(Duration::from_secs(30), async {
         let engine = bus2_host::engine().unwrap();
-        let _ticker = Ticker::start(&engine, Duration::from_millis(10));
+        let clock = common::HandClock::new(&engine, TURNS_PER_TICK);
         let busy = Component::new(&engine, common::guest("bus2_busy_guest")).unwrap();
         let photo = Component::new(&engine, common::guest("bus2_photo_guest")).unwrap();
-        let started = Instant::now();
         let busy_limits = Limits {
-            max_ticks: 100,
-            grace: Duration::from_secs(10),
+            max_ticks: BUSY_MAX_TICKS,
+            fuel_per_tick: BUSY_BUDGET_IN_SLICES * Limits::default().fuel_slice,
+            ..Limits::default()
+        };
+        // The photo guest is given all the time it needs after its events
+        // close: this proof is about turns, not about its grace period.
+        let photo_limits = Limits {
+            grace: Duration::from_secs(20),
             ..Limits::default()
         };
         let a = async {
@@ -60,49 +77,63 @@ fn side_by_side() -> ((Outcome, Duration), (Outcome, Duration)) {
                 &busy,
                 HostState::default(),
                 busy_limits,
-                async |_events| {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                },
+                // Its events never close: only its deadline ends it.
+                async |_events| std::future::pending::<()>().await,
             )
             .await
             .unwrap();
-            (outcome, started.elapsed())
+            (outcome, clock.ticks())
         };
         let b = async {
             // Let the busy guest get going first.
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            clock.at_tick(PHOTO_STARTS_AT_TICK).await;
             let outcome = run_resident(
                 &engine,
                 &photo,
                 photo_state(),
-                Limits::default(),
+                photo_limits,
                 async |events| {
                     events.send(Event::Message(PHOTO.as_bytes().to_vec()));
                 },
             )
             .await
             .unwrap();
-            (outcome, started.elapsed())
+            (outcome, clock.ticks())
         };
-        tokio::join!(a, b)
+        clock.run(async { tokio::join!(a, b) }).await
     })
 }
 
 #[test]
 fn a_busy_guest_does_not_starve_a_second_guest() {
     let ((busy, busy_ended), (photo, photo_ended)) = side_by_side();
-    println!("photo guest done after {photo_ended:?}; busy guest ended after {busy_ended:?}");
+    println!(
+        "photo guest done at tick {photo_ended} ({} yields); busy guest ended at tick \
+         {busy_ended} ({} yields, {} ticks)",
+        photo.yields, busy.yields, busy.ticks
+    );
 
     // The photo guest did its whole job, and finished long before the busy one.
     assert_eq!(photo.ending, Ending::Stopped);
     assert_eq!(photo.state.frames.len(), 1);
-    assert!(photo_ended < busy_ended, "{photo_ended:?} < {busy_ended:?}");
-    assert!(photo_ended < Duration::from_millis(900), "{photo_ended:?}");
+    assert!(photo_ended < busy_ended, "{photo_ended} < {busy_ended}");
+    // It started at tick 2 of the busy guest's 100, and may be at most ten
+    // ticks late.
+    assert!(
+        photo_ended <= PHOTO_STARTS_AT_TICK + 10,
+        "tick {photo_ended}"
+    );
 
-    // The busy guest ran the whole time on refilled slices, and was ended by
-    // its deadline, not by running out of fuel.
+    // The busy guest ran all its ticks, and was ended by its deadline, not by
+    // running out of fuel.
     assert_eq!(busy.ending, Ending::EpochDeadline);
-    assert!(busy_ended >= Duration::from_millis(900), "{busy_ended:?}");
+    assert_eq!(busy.ticks, BUSY_MAX_TICKS + 1);
+    assert!(busy_ended >= BUSY_MAX_TICKS, "tick {busy_ended}");
+    // It ran on refilled slices. At most one yield a tick was asked for by
+    // the tick; every other one was a used-up slice, and those came to more
+    // than seven budgets. Without the refill it ends fuel-exhausted after one.
+    let slices = busy.yields.saturating_sub(busy.ticks);
+    assert!(slices > 7 * BUSY_BUDGET_IN_SLICES, "{slices} slices");
 }
 
 #[test]
