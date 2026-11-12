@@ -858,8 +858,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
-          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         },
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
