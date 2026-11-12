@@ -3,9 +3,11 @@
 //! A bundle's name is the CID that `elastos-bundle-identity` computes from
 //! its folder. A publisher's signature over that name lives in a file beside
 //! the bundle, never inside it. This module holds the checks that signature
-//! must pass, the limits under which a bundle is walked, which manifests a
-//! start by CID takes, and the fixed codes a refusal is reported by. It
-//! starts nothing: `Runtime::run_by_bundle` calls these checks in order.
+//! must pass, the limits under which a bundle and the bundles it pins are
+//! walked, which manifests a start by CID takes, and the fixed codes a
+//! refusal is reported by. It starts nothing: `Runtime::run_by_bundle` calls
+//! these checks in order, for the bundle it was asked for and then for every
+//! bundle that one pins.
 
 use std::fmt;
 use std::io::Read;
@@ -13,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use elastos_bundle_identity::{Budget, CheckedBundle, LabCid, Refusal, MANIFEST_FILE};
 use elastos_common::{
-    CapsuleExecution, CapsuleManifest, CapsuleRole, CapsuleRuntimeAbi, CapsuleType,
-    ELASTOS_BUS_V1_CONTRACT,
+    CapsuleExecution, CapsuleManifest, CapsuleRole, CapsuleRuntimeAbi, CapsuleType, PinnedManifest,
+    PinnedManifestError, ELASTOS_BUS_V1_CONTRACT,
 };
 use elastos_runtime::signature::SignatureVerifier;
 use serde::Deserialize;
@@ -58,6 +60,14 @@ pub const BUNDLE_WALK_BUDGET: Budget = Budget {
     max_path_bytes: 1_024,
 };
 
+/// The most bundles one start by CID takes in: the one asked for and every
+/// bundle pinned below it, each counted every time a pin reaches it.
+pub const CLOSURE_MAX_MEMBERS: usize = 16;
+
+/// How far below the bundle asked for a pin may reach. That bundle is at
+/// depth 1 and the bundles it pins at depth 2.
+pub const CLOSURE_MAX_DEPTH: usize = 4;
+
 /// Why a bundle was not admitted. Each has one fixed code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BundleRefusal {
@@ -95,6 +105,25 @@ pub enum BundleRefusal {
     /// The admitted component could not be compiled or started, or it ended
     /// in an error. Everything before this passed.
     StartFailed(String),
+    /// A requirement's name has a character outside letters, digits, `.`,
+    /// `_` and `-`, or is `.` or `..`.
+    RequirementNameInvalid(String),
+    /// A requirement carries no pin. A start by CID takes a manifest's
+    /// requirements only when each names its bundle by CID.
+    RequirementUnpinned(String),
+    /// The bundle staged under a pin is called something else than the
+    /// requirement that pins it. The text is the name the bundle carries.
+    RequirementMismatch(String),
+    /// A pin sits deeper than [`CLOSURE_MAX_DEPTH`].
+    ClosureTooDeep,
+    /// A pin reaches one bundle more than [`CLOSURE_MAX_MEMBERS`].
+    ClosureTooMany,
+    /// A pinned bundle was refused: the name of the requirement that pins
+    /// it, and the refusal, which keeps its own code.
+    Requirement {
+        name: String,
+        refusal: Box<BundleRefusal>,
+    },
 }
 
 impl BundleRefusal {
@@ -116,6 +145,12 @@ impl BundleRefusal {
             BundleRefusal::ManifestInvalid(_) => "bundle_manifest_invalid",
             BundleRefusal::NotAComponent(_) => "bundle_not_a_component",
             BundleRefusal::StartFailed(_) => "bundle_start_failed",
+            BundleRefusal::RequirementNameInvalid(_) => "bundle_requirement_name_invalid",
+            BundleRefusal::RequirementUnpinned(_) => "bundle_requirement_unpinned",
+            BundleRefusal::RequirementMismatch(_) => "bundle_requirement_mismatch",
+            BundleRefusal::ClosureTooDeep => "bundle_closure_too_deep",
+            BundleRefusal::ClosureTooMany => "bundle_closure_too_many",
+            BundleRefusal::Requirement { refusal, .. } => refusal.code(),
         }
     }
 }
@@ -154,6 +189,24 @@ impl fmt::Display for BundleRefusal {
             BundleRefusal::ManifestInvalid(why) => write!(f, "{code}: {why}"),
             BundleRefusal::NotAComponent(why) => write!(f, "{code}: {why}"),
             BundleRefusal::StartFailed(why) => write!(f, "{code}: {why}"),
+            BundleRefusal::RequirementNameInvalid(name) => write!(f, "{code}: {name:?}"),
+            BundleRefusal::RequirementUnpinned(name) => write!(f, "{code}: {name}"),
+            BundleRefusal::RequirementMismatch(found) => {
+                write!(
+                    f,
+                    "{code}: the bundle staged under the pin is called {found:?}"
+                )
+            }
+            BundleRefusal::ClosureTooDeep => {
+                write!(f, "{code}: a pin sits below depth {CLOSURE_MAX_DEPTH}")
+            }
+            BundleRefusal::ClosureTooMany => {
+                write!(f, "{code}: more than {CLOSURE_MAX_MEMBERS} bundles")
+            }
+            // The inner refusal's text begins with the code they share.
+            BundleRefusal::Requirement { name, refusal } => {
+                write!(f, "{refusal} (requirement {name})")
+            }
         }
     }
 }
@@ -346,12 +399,12 @@ pub fn walk_refusal(refusal: Refusal) -> BundleRefusal {
 /// a key the manifest format gains later is refused until this list names it.
 ///
 /// Not on it, on purpose: `agent`, `asks`, `capabilities`, `permissions`,
-/// `requires`, `provides`, `providers`, `authority`, `interfaces`, `microvm`,
-/// `viewer`, `model_content` and `signature`. Each is, or carries, an
-/// authority or a relation to another capsule, and this start mints no grant
-/// and reads no ask: a field would be admitted without the code that gives
-/// it meaning. So what starts has an empty ceiling.
-pub const BUNDLE_MANIFEST_KEYS: [&str; 16] = [
+/// `provides`, `providers`, `authority`, `interfaces`, `microvm`, `viewer`,
+/// `model_content` and `signature`. Each is, or carries, an authority or a
+/// relation to another capsule, and this start mints no grant and reads no
+/// ask: a field would be admitted without the code that gives it meaning.
+/// So what starts has an empty ceiling.
+pub const BUNDLE_MANIFEST_KEYS: [&str; 17] = [
     // What it is called.
     "schema",
     "name",
@@ -376,6 +429,12 @@ pub const BUNDLE_MANIFEST_KEYS: [&str; 16] = [
     // path nothing reads it: the component provider applies its own fixed
     // limits to every component.
     "resources",
+    // The bundles this one needs, each named by CID: [`admit_bundle_manifest`]
+    // refuses a requirement without a pin, and the start then holds every
+    // pinned bundle to the checks it holds this one to. It is a condition on
+    // the start and gives the capsule nothing: its ceiling stays empty, no
+    // grant is made, and it has no way to reach a pinned bundle or its bytes.
+    "requires",
 ];
 
 /// The manifest and the component of a bundle that a start by CID may run.
@@ -384,14 +443,21 @@ pub struct AdmittedBundle {
     pub manifest: CapsuleManifest,
     /// The entrypoint's bytes as the walk read them.
     pub component: Vec<u8>,
+    /// The bundles the manifest pins: requirement name and CID text, in the
+    /// manifest's order. Every requirement of the manifest is one of them.
+    pub pins: Vec<(String, String)>,
 }
 
 /// Decide, from the walked bytes alone, whether a start by CID takes this
 /// bundle's manifest. The order: every key as written is on
 /// [`BUNDLE_MANIFEST_KEYS`], before the manifest is parsed as a type; the
-/// Runtime's manifest type parses and validates it; it is an app component
-/// of the one contract; its entrypoint is one of the walked files. Nothing
-/// is read from disk here.
+/// Runtime's reader of a manifest that may pin parses and validates it, and
+/// here, and nowhere else, the ordinary manifest is taken out of what it
+/// read, with the pins; it is an app component of the one contract; its
+/// entrypoint is one of the walked files; every requirement has a plain
+/// name and a pin. Nothing is read from disk here. The start calls this
+/// only for a bundle whose files recomputed to the CID asked for and whose
+/// signature was accepted.
 pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, BundleRefusal> {
     let invalid = BundleRefusal::ManifestInvalid;
     let bytes = bundle
@@ -405,9 +471,14 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
     {
         return Err(BundleRefusal::ManifestFieldRefused(key.clone()));
     }
-    let manifest: CapsuleManifest =
-        serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
-    manifest.validate().map_err(invalid)?;
+    let (manifest, pins) = PinnedManifest::parse(bytes)
+        .map_err(|error| match error {
+            PinnedManifestError::Unparsed(why) | PinnedManifestError::Invalid(why) => invalid(why),
+            PinnedManifestError::Pin { code, requirement } => {
+                invalid(format!("{code}: requirement {requirement:?}"))
+            }
+        })?
+        .into_manifest_and_pins();
     let component_of_the_contract = manifest.role == CapsuleRole::App
         && manifest.capsule_type == CapsuleType::Wasm
         && manifest.runtime_abi == Some(CapsuleRuntimeAbi::ElastosComponentV1)
@@ -432,9 +503,21 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
             manifest.entrypoint
         ))
     })?;
+    let plain = |name: &str| {
+        let plain_byte = |byte: u8| byte.is_ascii_alphanumeric() || b"._-".contains(&byte);
+        !matches!(name, "" | "." | "..") && name.bytes().all(plain_byte)
+    };
+    if let Some(odd) = manifest.requires.iter().find(|it| !plain(&it.name)) {
+        return Err(BundleRefusal::RequirementNameInvalid(odd.name.clone()));
+    }
+    let pinned = |name: &str| pins.iter().any(|(pin, _)| pin == name);
+    if let Some(loose) = manifest.requires.iter().find(|it| !pinned(&it.name)) {
+        return Err(BundleRefusal::RequirementUnpinned(loose.name.clone()));
+    }
     Ok(AdmittedBundle {
         component: component.to_vec(),
         manifest,
+        pins,
     })
 }
 

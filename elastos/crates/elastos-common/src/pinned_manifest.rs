@@ -4,8 +4,10 @@
 //! manifest type has no such key and refuses it, so no start path can read a
 //! pin and ignore it. This second type is the only reader of pins. It checks
 //! each pin, then reads everything else as an ordinary manifest, so every
-//! rule of the ordinary type holds here too. It starts nothing, and it gives
-//! no way to take the ordinary manifest out.
+//! rule of the ordinary type holds here too. It starts nothing. It gives one
+//! way to take the ordinary manifest out, [`PinnedManifest::into_manifest_and_pins`],
+//! which hands the pins over with it; that one is for the start by CID alone,
+//! once the bundle the manifest came from has passed that start's checks.
 
 use crate::cid_form::cid_form;
 use crate::manifest::{CapsuleManifest, CapsuleRole, CapsuleType};
@@ -82,6 +84,15 @@ impl PinnedManifest {
     /// Requirement name and CID text of each pin, in the manifest's order.
     pub fn pins(&self) -> &[(String, String)] {
         &self.pins
+    }
+
+    /// The one way out: the ordinary manifest exactly as it was parsed, with
+    /// the pins beside it instead of in it. The caller takes the pins with
+    /// the manifest, so it cannot start the one and not see the other. Only
+    /// the start by CID calls this, for a bundle that has passed its checks;
+    /// a test in the server holds that to one call site.
+    pub fn into_manifest_and_pins(self) -> (CapsuleManifest, Vec<(String, String)>) {
+        (self.manifest, self.pins)
     }
 }
 
@@ -588,17 +599,26 @@ mod tests {
 
     /// The crate has no compile-fail harness, so this is a check of the
     /// source text: the manifest inside is a private field, the type derives
-    /// nothing, and no public function or conversion hands the manifest out.
+    /// nothing, and one public function, and no other function or
+    /// conversion, hands the manifest out: the one that hands the pins out
+    /// with it.
     #[test]
-    fn nothing_hands_the_ordinary_manifest_out_of_a_pinned_one() {
+    fn one_function_hands_the_ordinary_manifest_out_and_the_pins_with_it() {
         let source = include_str!("pinned_manifest.rs");
         let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
         let declared = "/// A manifest and the CIDs it pins. See the module text.\n\
                         pub struct PinnedManifest {\n    manifest: CapsuleManifest,\n";
         assert_eq!(production.matches(declared).count(), 1);
-        for line in production.lines().filter(|line| line.contains("pub fn")) {
-            assert!(!line.contains("CapsuleManifest"), "{line}");
-        }
+        let ways_out: Vec<&str> = production
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("pub fn") && line.contains("CapsuleManifest"))
+            .collect();
+        assert_eq!(
+            ways_out,
+            ["pub fn into_manifest_and_pins(self) -> (CapsuleManifest, Vec<(String, String)>) {"]
+        );
+        assert_eq!(production.matches("(self.manifest, self.pins)").count(), 1);
         // A signature broken over lines, a generic return or a conversion
         // would still have to name the type or touch the field. So: every
         // code line that names the type, and every use of the field, is
@@ -618,6 +638,7 @@ mod tests {
                 "use crate::manifest::{CapsuleManifest, CapsuleRole, CapsuleType};",
                 "manifest: CapsuleManifest,",
                 "let manifest: CapsuleManifest = match without_pins {",
+                "pub fn into_manifest_and_pins(self) -> (CapsuleManifest, Vec<(String, String)>) {",
             ]
         );
         // One derive in the file, on the error type; none on the struct.
@@ -638,6 +659,7 @@ mod tests {
                 "&self.manifest.name",
                 "&self.manifest.role",
                 "&self.manifest.capsule_type",
+                "(self.manifest, self.pins)",
                 ".field(\"name\", &self.manifest.name)",
             ]
         );
