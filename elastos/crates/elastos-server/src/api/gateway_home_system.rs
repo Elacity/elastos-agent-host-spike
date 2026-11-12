@@ -9588,7 +9588,7 @@ mod stored_root_tests {
         )
         .unwrap();
         let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
-            &data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did, parent.path(),
+            data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did, parent.path(),
         ).unwrap();
         (parent, record, verified.context)
     }
