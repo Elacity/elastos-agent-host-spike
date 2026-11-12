@@ -36,14 +36,18 @@ use anyhow::Context;
 use elastos_runtime::auth::{
     validate_principal_root_protection, PrincipalRootCryptoProfileV1, PrincipalRootProtectionV1,
     PrincipalRootProtectorEnvelopeV1, PrincipalRootProtectorKind, PrincipalRootProtectorV1,
-    ProofBindingKind, RuntimeAuditEventV1, DEFAULT_PRINCIPAL_ROOT_CIPHER,
+    ProofBinding, ProofBindingKind, RuntimeAuditEventV1, DEFAULT_PRINCIPAL_ROOT_CIPHER,
     PRINCIPAL_ROOT_PROTECTION_SCHEMA,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::auth::{PrincipalKind, PrincipalRecord, RuntimePrincipalRole, PRINCIPAL_RECORD_VERSION};
+use crate::agent_admission::VerifiedAgentHost;
+use crate::auth::{
+    AgentHostPackage, PrincipalKind, PrincipalRecord, RuntimePrincipalRole,
+    PRINCIPAL_RECORD_VERSION,
+};
 use crate::host_lock::FileLock;
 
 #[cfg(test)]
@@ -614,4 +618,199 @@ fn set_enabled_in_any_build(
     let subject = caller.principal_id;
     write(data_dir, &opened, operation, &after, caller, subject, now)?;
     Ok(enabled)
+}
+
+/// The most agents one owner may have that are not retired.
+const MAX_LIVE_AGENTS_PER_OWNER: usize = 8;
+
+const BAD_REQUEST: &str = "agent request is invalid: a field is empty, too long or malformed";
+const REQUEST_ID_REUSED: &str = "request id was already used for a different agent";
+const AT_THE_LIMIT: &str = "owner already has the most agents a Home allows";
+const OWNER_UNPROTECTED: &str = "owner has no current storage protection";
+const ID_HELD: &str = "agent id or root is already held";
+
+/// The whole create request. An unknown or missing field is refused. The
+/// owner of the new agent is always the caller; no field can name another.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateRequest {
+    pub(crate) display_name: String,
+    pub(crate) agent_host: String,
+    pub(crate) request_id: String,
+}
+
+/// What an owner is shown of one of their agents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AgentView {
+    pub(crate) agent_id: String,
+    pub(crate) display_name: String,
+    pub(crate) agent_host: Option<AgentHostPackage>,
+    pub(crate) created_at: u64,
+    pub(crate) retired_at: Option<u64>,
+}
+
+fn view(agent: &StoredAgent) -> AgentView {
+    AgentView {
+        agent_id: agent.record.principal_id.clone(),
+        display_name: agent.record.display_name.clone(),
+        agent_host: agent.record.agent_host_package.clone(),
+        created_at: agent.record.created_at,
+        retired_at: agent.record.retired_at,
+    }
+}
+
+fn owned_by(agent: &StoredAgent, owner: &PrincipalRecord) -> bool {
+    agent.record.owner.as_deref() == Some(owner.principal_id.as_str())
+}
+
+/// A name of 1 to 128 letters, digits, `-`, `_`, `.` or `:`.
+fn is_token(text: &str) -> bool {
+    (1..=128).contains(&text.len())
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+/// One line of 1 to 64 bytes with no control character and no outer space.
+fn is_display_name(text: &str) -> bool {
+    (1..=64).contains(&text.len()) && text == text.trim() && !text.chars().any(char::is_control)
+}
+
+/// Whether any record, in either file, holds this id or root. A retired
+/// agent still holds both, so neither is ever used again.
+fn id_or_root_held(opened: &Opened, record: &PrincipalRecord) -> bool {
+    held_in_owner_file(&opened.owner_file, record)
+        || opened.file.agents.iter().any(|agent| {
+            agent.record.principal_id == record.principal_id
+                || agent.record.localhost_root == record.localhost_root
+        })
+}
+
+/// Creates an agent owned by the caller. `admit` checks the named Agent Host
+/// and is asked only once every other refusal has passed. The same owner,
+/// `request_id` and body returns the same agent and writes nothing.
+pub(crate) fn create(
+    data_dir: &Path,
+    caller: &Caller<'_>,
+    request: &CreateRequest,
+    admit: impl FnOnce(&str) -> anyhow::Result<VerifiedAgentHost>,
+    now: u64,
+) -> anyhow::Result<AgentView> {
+    require_build()?;
+    create_in_any_build(data_dir, caller, request, admit, now)
+}
+
+fn create_in_any_build(
+    data_dir: &Path,
+    caller: &Caller<'_>,
+    request: &CreateRequest,
+    admit: impl FnOnce(&str) -> anyhow::Result<VerifiedAgentHost>,
+    now: u64,
+) -> anyhow::Result<AgentView> {
+    let opened = open(data_dir, true)?;
+    if opened.file.enabled.is_none() {
+        return refused(NOT_ENABLED);
+    }
+    let owner = caller_person(&opened.owner_file, caller)?;
+    if !is_display_name(&request.display_name)
+        || !is_token(&request.agent_host)
+        || !is_token(&request.request_id)
+    {
+        return refused(BAD_REQUEST);
+    }
+    let mut theirs = opened
+        .file
+        .agents
+        .iter()
+        .filter(|agent| owned_by(agent, owner));
+    if let Some(existing) =
+        theirs.find(|agent| agent.record.request_id.as_deref() == Some(&request.request_id))
+    {
+        let host = existing.record.agent_host_package.as_ref();
+        let same_body = existing.record.display_name == request.display_name
+            && host.is_some_and(|host| host.name == request.agent_host);
+        return match same_body {
+            true => Ok(view(existing)),
+            false => refused(REQUEST_ID_REUSED),
+        };
+    }
+    let live = opened
+        .file
+        .agents
+        .iter()
+        .filter(|agent| owned_by(agent, owner) && agent.record.retired_at.is_none())
+        .count();
+    if live >= MAX_LIVE_AGENTS_PER_OWNER {
+        return refused(AT_THE_LIMIT);
+    }
+    let Some(owner_protection) = crate::auth::load_principal_root_protection(
+        data_dir,
+        &owner.principal_id,
+        &owner.localhost_root,
+    )?
+    else {
+        return refused(OWNER_UNPROTECTED);
+    };
+    let host = admit(&request.agent_host)?;
+
+    let id = crate::auth::fresh_agent_id();
+    let root = crate::auth::principal_kind_localhost_root(&id, PrincipalKind::Agent);
+    let binding = ProofBinding::agent_admission(&id, now);
+    let agent = StoredAgent {
+        protection: protect_agent_root(data_dir, &owner_protection, &id, &root, now)?,
+        record: PrincipalRecord {
+            principal_id: id,
+            proof_binding_id: binding.id(),
+            proof_binding: binding,
+            display_name: request.display_name.clone(),
+            initial_profile_display_name: None,
+            role: RuntimePrincipalRole::Guest,
+            localhost_root: root,
+            kind: PrincipalKind::Agent,
+            created_at: now,
+            updated_at: now,
+            owner: Some(owner.principal_id.clone()),
+            request_id: Some(request.request_id.clone()),
+            agent_host_package: Some(host.package().clone()),
+            retired_at: None,
+            version: PRINCIPAL_RECORD_VERSION,
+        },
+    };
+    if id_or_root_held(&opened, &agent.record) {
+        return refused(ID_HELD);
+    }
+    let mut after = opened.file.clone();
+    after.sequence += 1;
+    after.agents.push(agent.clone());
+    let subject = agent.record.principal_id.as_str();
+    write(
+        data_dir,
+        &opened,
+        Operation::Create,
+        &after,
+        caller,
+        subject,
+        now,
+    )?;
+    Ok(view(&agent))
+}
+
+/// The caller's own agents, retired ones included.
+pub(crate) fn list(data_dir: &Path, caller: &Caller<'_>) -> anyhow::Result<Vec<AgentView>> {
+    require_build()?;
+    list_in_any_build(data_dir, caller)
+}
+
+fn list_in_any_build(data_dir: &Path, caller: &Caller<'_>) -> anyhow::Result<Vec<AgentView>> {
+    let opened = open(data_dir, false)?;
+    if opened.file.enabled.is_none() {
+        return refused(NOT_ENABLED);
+    }
+    let owner = caller_person(&opened.owner_file, caller)?;
+    let theirs = opened
+        .file
+        .agents
+        .iter()
+        .filter(|agent| owned_by(agent, owner));
+    Ok(theirs.map(view).collect())
 }

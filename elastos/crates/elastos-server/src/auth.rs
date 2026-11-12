@@ -8948,9 +8948,6 @@ pub fn local_person_principal_id(proof_binding_id: &str) -> String {
 }
 
 /// An agent id is `agent:v2:` followed by exactly 32 lowercase hex digits.
-///
-/// Create is a later PR, so nothing in this crate calls this yet.
-#[allow(dead_code)]
 pub(crate) fn validate_agent_id(id: &str) -> Result<(), &'static str> {
     let Some(hex_digits) = id.strip_prefix("agent:v2:") else {
         return Err("invalid agent id");
@@ -8968,10 +8965,7 @@ pub(crate) fn validate_agent_id(id: &str) -> Result<(), &'static str> {
 
 /// Draws 128 bits from the OS random generator and formats them as an agent id.
 ///
-/// No production code calls this function. This PR stores an agent record and
-/// refuses changes to it. It does not create an agent. A later create path is
-/// the caller. The pin row counts the call sites.
-#[allow(dead_code)]
+/// Create in `crate::agents` is its one production caller. The pin row counts the call sites.
 pub(crate) fn fresh_agent_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -19721,7 +19715,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn fresh_agent_id_has_no_production_caller() {
+    fn fresh_agent_id_has_one_production_caller() {
         // `fresh_agent_id` then optional whitespace, including a line break, then `(`.
         // The name is split so this scanner is not itself a call.
         fn count_calls(text: &str) -> usize {
@@ -19759,7 +19753,7 @@ pub(crate) mod tests {
             &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
             &mut count,
         );
-        assert_eq!(count, 2, "fresh agent id maker has no production caller");
+        assert_eq!(count, 3, "fresh agent id maker has one production caller");
     }
 
     #[test]

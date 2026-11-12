@@ -2,7 +2,6 @@
 //! `feature_on`; the rest run in every build.
 
 use super::*;
-use elastos_runtime::auth::ProofBinding;
 use serde_json::{json, Value};
 
 pub(crate) const OWNER_ID: &str = "person:local:agents-owner";
@@ -149,7 +148,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             updated_at: 5,
             owner: Some(owner.to_string()),
             request_id: Some(format!("request-{}", &id[9..13])),
-            agent_host_package: Some(crate::auth::AgentHostPackage {
+            agent_host_package: Some(AgentHostPackage {
                 name: "agent-host".to_string(),
                 registry_cid: "bafyagenthost".to_string(),
             }),
@@ -815,4 +814,365 @@ fn only_an_admin_person_turns_agents_on() {
         NOT_A_PERSON
     );
     assert!(!home.agent_file().exists(), "a refusal writes nothing");
+}
+
+fn request(request_id: &str) -> CreateRequest {
+    CreateRequest {
+        display_name: "Helper".to_string(),
+        agent_host: "agent-host".to_string(),
+        request_id: request_id.to_string(),
+    }
+}
+
+/// Stands in for the Agent Host check, which has its own tests.
+fn admit(agent_host: &str) -> anyhow::Result<VerifiedAgentHost> {
+    Ok(VerifiedAgentHost::unchecked_for_test(
+        agent_host,
+        "bafyagenthost",
+    ))
+}
+
+fn create_as(home: &Home, caller: &Caller<'_>, request_id: &str) -> anyhow::Result<AgentView> {
+    create_in_any_build(home.path(), caller, &request(request_id), admit, 9)
+}
+
+fn create_one(home: &Home, request_id: &str) -> AgentView {
+    create_as(home, &home.caller(), request_id).unwrap()
+}
+
+/// A second admin person with storage protection, in the same Home.
+fn second_person(home: &Home, principal_id: &str) -> PrincipalRecord {
+    crate::auth::store_test_principal_root_protection(home.path(), principal_id);
+    make_admin(home.path(), principal_id);
+    crate::auth::stored_principal_record(home.path(), principal_id)
+        .unwrap()
+        .unwrap()
+}
+
+fn caller_of(person: &PrincipalRecord) -> Caller<'_> {
+    Caller {
+        principal_id: &person.principal_id,
+        proof_binding_id: &person.proof_binding_id,
+        session_id: SESSION_ID,
+    }
+}
+
+/// A valid Home with agents on and one agent, written with no feature check,
+/// so a build without the feature can be shown a file it would otherwise
+/// serve. Returns the agent's id.
+#[cfg(not(feature = "prototype-agents"))]
+pub(crate) fn plant_enabled_home_with_one_agent(
+    data_dir: &Path,
+    principal_id: &str,
+    proof_binding_id: &str,
+) -> String {
+    let caller = Caller {
+        principal_id,
+        proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    set_enabled_in_any_build(data_dir, &caller, true, 9).unwrap();
+    create_in_any_build(data_dir, &caller, &request("request-fixture"), admit, 9)
+        .unwrap()
+        .agent_id
+}
+
+#[test]
+fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
+    let home = Home::new();
+    turn_on(&home);
+    let owner_before = home.owner_json_without_audit();
+    let created = create_one(&home, "request-1");
+
+    let file = loaded(&home);
+    let [agent] = file.agents.as_slice() else {
+        panic!("one agent is stored");
+    };
+    let record = &agent.record;
+    assert_eq!(view(agent), created);
+    assert!(crate::auth::validate_agent_id(&record.principal_id).is_ok());
+    assert_eq!(record.owner.as_deref(), Some(OWNER_ID));
+    assert_eq!(record.kind, PrincipalKind::Agent);
+    assert_eq!(record.role, RuntimePrincipalRole::Guest);
+    assert_eq!(record.proof_binding.kind, ProofBindingKind::AgentAdmission);
+    assert_eq!(record.proof_binding.subject, record.principal_id);
+    assert_eq!(
+        record.localhost_root,
+        crate::auth::principal_kind_localhost_root(&record.principal_id, PrincipalKind::Agent)
+    );
+    assert_eq!(record.request_id.as_deref(), Some("request-1"));
+    assert_eq!(record.display_name, "Helper");
+    assert_eq!(
+        record.agent_host_package,
+        Some(AgentHostPackage {
+            name: "agent-host".to_string(),
+            registry_cid: "bafyagenthost".to_string(),
+        })
+    );
+    assert_eq!((record.retired_at, record.version), (None, 1));
+
+    // The one protection opens under the owner's derived key.
+    let protection = &agent.protection;
+    let wrap_key =
+        crate::auth::owner_root_wrap_key(home.path(), &owner_protection(&home), protection)
+            .unwrap();
+    let envelope = protection.protectors[0].envelope.as_ref().unwrap();
+    let data_key = unwrap_data_key(&wrap_key, envelope).unwrap();
+    assert_eq!(
+        crate::auth::principal_data_key_id(&data_key),
+        protection.data_key_id
+    );
+
+    // The owner's file gained an audit event and nothing else.
+    assert_eq!(home.owner_json_without_audit(), owner_before);
+    let owner_json = home.owner_json();
+    assert!(!owner_json.to_string().contains("\"owner_root\""));
+    for stored in ["principals", "principal_root_protections", "sessions"] {
+        assert!(
+            !owner_json[stored]
+                .to_string()
+                .contains(&record.principal_id),
+            "the owner's {stored} do not name the agent"
+        );
+    }
+    let events = home.agent_events();
+    let event = events.last().unwrap();
+    assert_eq!(event.event_type, "agent.record.create");
+    assert_eq!(
+        event.principal_id.as_deref(),
+        Some(record.principal_id.as_str())
+    );
+    assert_eq!(
+        event.proof_binding_id.as_deref(),
+        Some(home.owner.proof_binding_id.as_str())
+    );
+    assert_eq!(event.session_id.as_deref(), Some(SESSION_ID));
+    let digest = hex::encode(Sha256::digest(home.agent_bytes()));
+    assert_eq!(event.reason, format!("seq=2 sha256={digest}"));
+    assert_eq!(events.len(), 2, "one event for enable and one for create");
+}
+
+#[test]
+fn a_failed_save_leaves_neither_the_record_nor_the_protection() {
+    let home = Home::new();
+    turn_on(&home);
+    let written = home.agent_bytes();
+    let auth_dir = home.agent_file().parent().unwrap().to_path_buf();
+    set_mode(&auth_dir, 0o500);
+    let result = create_as(&home, &home.caller(), "request-1");
+    set_mode(&auth_dir, 0o700);
+    assert!(result.is_err(), "the save failed");
+    assert_eq!(home.agent_bytes(), written);
+    assert!(loaded(&home).agents.is_empty());
+    assert_eq!(home.agent_events().len(), 1, "no create event");
+}
+
+#[test]
+fn the_same_request_returns_the_same_agent_and_a_changed_body_is_refused() {
+    let home = Home::new();
+    turn_on(&home);
+    let first = create_one(&home, "request-1");
+    let written = home.agent_bytes();
+    let events = home.audit().len();
+
+    assert_eq!(create_one(&home, "request-1"), first);
+    assert_eq!(home.agent_bytes(), written, "a repeat writes nothing");
+    assert_eq!(home.audit().len(), events, "a repeat appends no event");
+
+    for change in [
+        (|body: &mut CreateRequest| body.display_name = "Other".to_string())
+            as fn(&mut CreateRequest),
+        |body| body.agent_host = "other-host".to_string(),
+    ] {
+        let mut body = request("request-1");
+        change(&mut body);
+        let result = create_in_any_build(home.path(), &home.caller(), &body, admit, 9);
+        assert_eq!(refusal_of(result), REQUEST_ID_REUSED);
+    }
+    assert_eq!(home.agent_bytes(), written);
+
+    // The same owner, name and package under another request id: a new agent.
+    let second = create_one(&home, "request-2");
+    assert_ne!(second.agent_id, first.agent_id);
+    let file = loaded(&home);
+    assert_ne!(
+        file.agents[0].record.localhost_root,
+        file.agents[1].record.localhost_root
+    );
+
+    // A request id belongs to its owner: another person may use the same one.
+    let other = second_person(&home, "person:local:other-owner");
+    let theirs = create_as(&home, &caller_of(&other), "request-1").unwrap();
+    assert_ne!(theirs.agent_id, first.agent_id);
+}
+
+#[test]
+fn two_racing_creates_with_one_request_id_leave_one_agent() {
+    let home = Home::new();
+    turn_on(&home);
+    let ids: Vec<String> = std::thread::scope(|scope| {
+        let racers: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| create_one(&home, "request-1").agent_id))
+            .collect();
+        racers
+            .into_iter()
+            .map(|racer| racer.join().unwrap())
+            .collect()
+    });
+    assert_eq!(ids[0], ids[1]);
+    let file = loaded(&home);
+    assert_eq!((file.agents.len(), file.sequence), (1, 2));
+}
+
+#[test]
+fn create_refuses_each_caller_and_request_it_should() {
+    let home = Home::new();
+    let asked = std::cell::Cell::new(0);
+    let counted_admit = |agent_host: &str| {
+        asked.set(asked.get() + 1);
+        admit(agent_host)
+    };
+
+    // Agents are off.
+    let result = create_in_any_build(home.path(), &home.caller(), &request("r"), counted_admit, 9);
+    assert_eq!(refusal_of(result), NOT_ENABLED);
+    assert!(!home.agent_file().exists());
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    let written = home.agent_bytes();
+
+    // An agent is never the caller.
+    let stored = loaded(&home).agents[0].record.clone();
+    let as_agent = Caller {
+        principal_id: &stored.principal_id,
+        proof_binding_id: &stored.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    let result = create_in_any_build(home.path(), &as_agent, &request("r"), counted_admit, 9);
+    assert_eq!(refusal_of(result), NOT_A_PERSON);
+    assert_eq!(
+        refusal_of(set_enabled_in_any_build(home.path(), &as_agent, false, 9)),
+        NOT_A_PERSON
+    );
+    assert_eq!(
+        refusal_of(list_in_any_build(home.path(), &as_agent)),
+        NOT_A_PERSON
+    );
+
+    // A person with no storage protection.
+    let bare = crate::auth::store_test_human_principal(home.path(), "person:local:bare");
+    let result = create_in_any_build(
+        home.path(),
+        &caller_of(&bare),
+        &request("r"),
+        counted_admit,
+        9,
+    );
+    assert_eq!(refusal_of(result), OWNER_UNPROTECTED);
+
+    // A field that is empty, too long or malformed.
+    let bad: [fn(&mut CreateRequest); 6] = [
+        |body| body.display_name = String::new(),
+        |body| body.display_name = " padded ".to_string(),
+        |body| body.display_name = "two\nlines".to_string(),
+        |body| body.display_name = "n".repeat(65),
+        |body| body.agent_host = "../agent-host".to_string(),
+        |body| body.request_id = String::new(),
+    ];
+    for (index, change) in bad.into_iter().enumerate() {
+        let mut body = request("r");
+        change(&mut body);
+        let result = create_in_any_build(home.path(), &home.caller(), &body, counted_admit, 9);
+        assert_eq!(refusal_of(result), BAD_REQUEST, "case {index}");
+    }
+    assert_eq!(asked.get(), 0, "the Agent Host is checked last");
+
+    // The Agent Host check refuses.
+    let result = create_in_any_build(
+        home.path(),
+        &home.caller(),
+        &request("r"),
+        |_| refused("agent host refused"),
+        9,
+    );
+    assert_eq!(refusal_of(result), "agent host refused");
+
+    assert_eq!(home.agent_bytes(), written, "no refusal wrote anything");
+    assert_eq!(
+        list_in_any_build(home.path(), &home.caller()).unwrap(),
+        [agent]
+    );
+}
+
+#[test]
+fn an_owner_at_the_limit_creates_no_more() {
+    let home = Home::new();
+    turn_on(&home);
+    let agents: Vec<AgentView> = (0..MAX_LIVE_AGENTS_PER_OWNER)
+        .map(|index| create_one(&home, &format!("request-{index}")))
+        .collect();
+    assert_eq!(
+        refusal_of(create_as(&home, &home.caller(), "request-more")),
+        AT_THE_LIMIT
+    );
+    assert_eq!(
+        create_one(&home, "request-0"),
+        agents[0],
+        "a repeat still returns its agent at the limit"
+    );
+    // The limit is each owner's own.
+    let other = second_person(&home, "person:local:other-owner");
+    create_as(&home, &caller_of(&other), "request-0").unwrap();
+    assert_eq!(
+        list_in_any_build(home.path(), &caller_of(&other))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        list_in_any_build(home.path(), &home.caller()).unwrap(),
+        agents
+    );
+}
+
+#[test]
+fn create_never_reuses_an_id_or_a_root_any_record_holds() {
+    // A unit row on the one function create asks: create draws its own
+    // random id, so no route can produce a collision.
+    let home = Home::new();
+    let mut tombstone = stored_agent(OWNER_ID, AGENT_A);
+    tombstone.record.retired_at = Some(7);
+    let opened = Opened {
+        lock: None,
+        owner_file: home.owner_file(),
+        file: enabled_file(vec![tombstone.clone()]),
+    };
+    assert!(id_or_root_held(&opened, &tombstone.record), "a retired id");
+    let mut same_root = stored_agent(OWNER_ID, AGENT_B).record;
+    same_root.localhost_root = tombstone.record.localhost_root.clone();
+    assert!(id_or_root_held(&opened, &same_root), "a retired root");
+    let mut persons_root = stored_agent(OWNER_ID, AGENT_B).record;
+    persons_root.localhost_root = home.owner.localhost_root.clone();
+    assert!(id_or_root_held(&opened, &persons_root), "a person's root");
+    assert!(!id_or_root_held(
+        &opened,
+        &stored_agent(OWNER_ID, AGENT_B).record
+    ));
+}
+
+#[test]
+fn a_create_request_has_three_fields_and_no_other() {
+    let parse = |body: Value| serde_json::from_value::<CreateRequest>(body);
+    let full = json!({"display_name": "Helper", "agent_host": "agent-host", "request_id": "r"});
+    assert_eq!(parse(full.clone()).unwrap(), request("r"));
+    for extra in ["owner", "agent_id", "kind"] {
+        let mut body = full.clone();
+        body[extra] = json!("person:local:someone");
+        assert!(parse(body).is_err(), "an unknown field: {extra}");
+    }
+    for missing in ["display_name", "agent_host", "request_id"] {
+        let mut body = full.clone();
+        body.as_object_mut().unwrap().remove(missing);
+        assert!(parse(body).is_err(), "a missing field: {missing}");
+    }
 }
