@@ -2185,6 +2185,99 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
 }
 
 #[test]
+fn a14_row_passes_only_when_it_appears_once_and_reads_pass() {
+    use agent_conformance::report::a14_rows;
+    const ROWS: [&str; 5] = [
+        "versions_receipt",
+        "review_binding",
+        "staged_bundle",
+        "installed_runtime",
+        "installed_runtime_ran",
+    ];
+    // A receipt holding exactly these table lines, with the hash that matches.
+    let receipt = |lines: &[String]| {
+        let table: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        serde_json::to_vec(&serde_json::json!({
+            "report": { "table": table, "sha256": sha256(table.as_bytes()) }
+        }))
+        .unwrap()
+    };
+    let row = |name: &str, grade: &str| format!("{name} (A14) | {grade}");
+    let five: Vec<String> = ROWS.iter().map(|name| row(name, "PASS")).collect();
+    let passing = |lines: &[String]| -> Vec<bool> {
+        a14_rows(&receipt(lines))
+            .unwrap()
+            .into_iter()
+            .map(|row| row.passed)
+            .collect()
+    };
+    assert_eq!(passing(&five), [true; 5]);
+    // A note after the grade is not part of the grade.
+    let mut noted = five.clone();
+    noted[2] = row(ROWS[2], "PASS | lab CID of each staged bundle");
+    assert_eq!(passing(&noted), [true; 5]);
+
+    let home = ThrowawayHome::new().unwrap();
+    let exit = |name: &str, lines: &[String]| {
+        let path = home.root().join(name);
+        fs::write(&path, receipt(lines)).unwrap();
+        std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .arg("--a14")
+            .arg(path)
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    assert_eq!(exit("five.json", &five), Some(0));
+    for (index, name) in ROWS.into_iter().enumerate() {
+        let only_this_fails: Vec<bool> = (0..5).map(|other| other != index).collect();
+        // The same row twice, wherever the second copy sits and whatever
+        // either copy says.
+        for (first, second) in [("PASS", "PASS"), ("PASS", "FAIL"), ("FAIL", "PASS")] {
+            let mut twice = five.clone();
+            twice[index] = row(name, first);
+            for at in [0, index + 1, 5] {
+                let mut lines = twice.clone();
+                lines.insert(at, row(name, second));
+                assert_eq!(passing(&lines), only_this_fails, "{lines:?}");
+                let rows = a14_rows(&receipt(&lines)).unwrap();
+                assert_eq!(
+                    rows[index].reasons,
+                    ["row appears more than once in the receipt"]
+                );
+            }
+        }
+        let mut twice = five.clone();
+        twice.push(row(name, "PASS"));
+        assert_eq!(exit(&format!("twice-{index}.json"), &twice), Some(1));
+        // Any grade that is not exactly PASS.
+        for grade in [
+            "",
+            "pass",
+            "PASSED",
+            "PASS ",
+            " PASS",
+            "PASS|",
+            "OK",
+            "BLOCKED (RT3)",
+            "SKIPPED (no reason)",
+            "FAIL",
+        ] {
+            let mut lines = five.clone();
+            lines[index] = row(name, grade);
+            assert_eq!(passing(&lines), only_this_fails, "{lines:?}");
+            let rows = a14_rows(&receipt(&lines)).unwrap();
+            assert_eq!(rows[index].reasons, ["receipt gives no reason"]);
+        }
+        let mut unknown = five.clone();
+        unknown[index] = row(name, "PASSED");
+        assert_eq!(exit(&format!("unknown-{index}.json"), &unknown), Some(1));
+    }
+    home.finish().unwrap();
+}
+
+#[test]
 fn demo_gates_hold_with_a_stub_suite() {
     // The cases and what each must say are in the script. It builds a stand-in
     // checkout and a stand-in installed Runtime under a fresh folder, and names

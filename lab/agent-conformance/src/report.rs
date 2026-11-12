@@ -1023,9 +1023,11 @@ pub struct A14Row {
 
 /// The A14 rows of a written receipt, for the owner's command. All five must
 /// be present: a receipt made without an installed Runtime has no installed
-/// rows, and that is a failure here, named as a missing row. The rows are read
-/// from the receipt's own table after the table is checked against the hash the
-/// receipt records for it.
+/// rows, and that is a failure here, named as a missing row. A row passes only
+/// when the table holds it exactly once and its grade is exactly `PASS`: a
+/// second copy fails it whatever the copies say, and so does any other grade.
+/// The rows are read from the receipt's own table after the table is checked
+/// against the hash the receipt records for it.
 pub fn a14_rows(receipt: &[u8]) -> Result<Vec<A14Row>, String> {
     let document: serde_json::Value =
         serde_json::from_slice(receipt).map_err(|_| "malformed receipt")?;
@@ -1060,6 +1062,8 @@ pub fn a14_rows(receipt: &[u8]) -> Result<Vec<A14Row>, String> {
                 .collect();
             if grades.is_empty() {
                 reasons.push("row missing from the receipt".into());
+            } else if grades.len() > 1 {
+                reasons.push("row appears more than once in the receipt".into());
             } else if !passed && reasons.is_empty() {
                 reasons.push("receipt gives no reason".into());
             }
