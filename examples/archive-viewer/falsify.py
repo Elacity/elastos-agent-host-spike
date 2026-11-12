@@ -373,23 +373,17 @@ CASES = [
     # A skipped entry keeps its own status as the reason.
     ("F30b an entry's own status is not its skip reason",
      "src/zip.rs",
-     "    match entry.status {\n"
-     "        Status::Listed => {}\n"
-     "        Status::Blocked(reason) => return Ok(Err(reason)),\n"
-     "        Status::Unsupported => return Ok(Err(\"unsupported\")),\n"
-     "        Status::Encrypted => return Ok(Err(\"encrypted\")),\n"
-     "    }",
-     "    if entry.status != Status::Listed {\n"
-     "        return Ok(Err(entry.status.reason().unwrap_or(\"not_listed\")));\n"
-     "    }",
+     "    if let Err(reason) = shown_status(entry.status) {",
+     "    if let Err(reason) = shown_status(Status::Listed) {",
      ["a_requested_encrypted_entry_is_skipped_with_its_status",
-      "a_requested_unsupported_entry_is_skipped_with_its_status"]),
+      "a_requested_unsupported_entry_is_skipped_with_its_status",
+      "a_requested_entry_that_is_blocked_is_not_shown"]),
     # The whole view's cap.
     ("F32 a view over its cap is written",
      "src/lib.rs",
      "    if over > MAX_VIEW_BYTES {",
      "    if false {",
-     ["no_view_is_longer_than_its_cap"]),
+     ["no_view_is_longer_than_its_cap", "a_tar_view_over_its_cap_is_refused"]),
     # B1 to B3: the preview window and the bomb caps.
     ("F1 the preview window grows to 64 KiB",
      "src/preview.rs",
@@ -400,7 +394,8 @@ CASES = [
      "src/preview.rs",
      "    if entry.uncompressed_size > MAX_PREVIEW_BYTES {",
      "    if false && entry.uncompressed_size > MAX_PREVIEW_BYTES {",
-     ["an_entry_declared_over_the_cap_is_not_read"]),
+     ["an_entry_declared_over_the_cap_is_not_read",
+      "an_oversize_tar_entry_is_skipped_before_its_bytes_are_read"]),
     ("F4 the declared ratio is not checked",
      "src/preview.rs",
      "    if entry.uncompressed_size\n"
@@ -468,8 +463,8 @@ CASES = [
      ["an_entry_with_junk_after_the_stream_is_skipped"]),
     ("F27 the CRC compare is removed",
      "src/preview.rs",
-     "    if crc32(&output) != entry.crc {",
-     "    if false {",
+     "        if crc32(&output) != crc {",
+     "        if false {",
      ["a_crc_mismatch_skips_the_entry"]),
     ("F28 the stored sizes compare is removed",
      "src/preview.rs",
@@ -480,7 +475,8 @@ CASES = [
      "src/preview.rs",
      '        Err(_) => return Ok(skipped_after(produced, read, consumed, "not_text")),',
      '        Err(_) => "",',
-     ["a_text_entry_that_is_not_text_is_skipped"]),
+     ["a_text_entry_that_is_not_text_is_skipped",
+      "a_tar_binary_entry_is_skipped_not_text"]),
     ("F33b the block cap is ignored",
      "src/preview.rs",
      '        Err(ModelError::TooLong) => return Ok(skipped_after(produced, read, consumed, "too_long")),',
@@ -510,7 +506,7 @@ CASES = [
      ["a_local_flag_that_differs_skips_the_entry"]),
     ("F25d the local CRC compare is removed",
      "src/zip.rs",
-     "        if u32_at(header, 14) != Some(entry.crc) {",
+     "        if u32_at(header, 14) != entry.crc {",
      "        if false {",
      ["a_local_crc_that_differs_skips_the_entry"]),
     ("F25e the local sizes compare is removed",
@@ -643,6 +639,16 @@ CASES = [
      "        if block.len() < BLOCK_BYTES as usize {",
      "        if false {",
      ["a_final_header_shorter_than_a_block_refuses_the_archive"]),
+    # A tar entry takes the ZIP stored preview path.
+    ("T21 a tar entry is never shown",
+     "src/lib.rs",
+     "                    Format::Tar => listing::shown_status(entry.status),",
+     '                    Format::Tar => Err("not_listed"),',
+     ["a_tar_text_entry_is_shown_as_the_zip_blocks",
+      "a_tar_binary_entry_is_skipped_not_text",
+      "an_oversize_tar_entry_is_skipped_before_its_bytes_are_read",
+      "a_blocked_tar_entry_is_skipped_with_its_status",
+      "a_tar_view_over_its_cap_is_refused"]),
 ]
 
 
