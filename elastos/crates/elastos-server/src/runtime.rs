@@ -414,7 +414,7 @@ impl Runtime {
 
         let verifier = self.signature_verifier.read().await;
 
-        if !verifier.is_enabled() {
+        if verifier.trusted_key_count() == 0 {
             return Err(ElastosError::InvalidManifest(
                 "Capsule signature verification has no trusted keys configured".into(),
             ));
