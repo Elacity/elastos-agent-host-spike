@@ -7256,7 +7256,35 @@ pub fn write_principal_root_object(
             create_only: false,
             precondition: None,
             create_owner_only_parent: false,
+            kept_elsewhere: false,
         },
+    )
+}
+
+/// Every held-root write passes through here. The root decides where the
+/// person's stored record is kept, so a write on a Runtime that does not hold
+/// the record, and holds no protection for the object, is refused.
+fn write_held_root_object(
+    data_dir: &Path,
+    resolved: &ResolvedPrincipalRoot,
+    object_uri: &str,
+    path: &Path,
+    plaintext: &[u8],
+    mut options: PrincipalRootObjectWriteOptions<'_>,
+) -> anyhow::Result<()> {
+    let (principal_id, root) = resolved.guard_object(data_dir, object_uri, path)?;
+    options.kept_elsewhere = resolved.record_kept_in_another_store(data_dir);
+    let _guard = principal_root_object_mutation_lock(data_dir)
+        .lock()
+        .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    write_principal_root_object_locked_unchecked(
+        data_dir,
+        principal_id,
+        root,
+        object_uri,
+        path,
+        plaintext,
+        options,
     )
 }
 
@@ -7269,14 +7297,9 @@ pub(crate) fn write_principal_root_object_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
-    let (principal_id, root) = resolved.guard_object(data_dir, object_uri, path)?;
-    let _guard = principal_root_object_mutation_lock(data_dir)
-        .lock()
-        .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
-    write_principal_root_object_locked_unchecked(
+    write_held_root_object(
         data_dir,
-        principal_id,
-        root,
+        resolved,
         object_uri,
         path,
         plaintext,
@@ -7285,6 +7308,7 @@ pub(crate) fn write_principal_root_object_resolved(
             create_only: false,
             precondition: None,
             create_owner_only_parent: true,
+            kept_elsewhere: false,
         },
     )
 }
@@ -7313,6 +7337,7 @@ pub(crate) fn create_principal_root_object(
             create_only: true,
             precondition: None,
             create_owner_only_parent: false,
+            kept_elsewhere: false,
         },
     )
 }
@@ -7337,6 +7362,7 @@ pub(crate) fn write_protected_principal_root_object(
             create_only: false,
             precondition: None,
             create_owner_only_parent: false,
+            kept_elsewhere: false,
         },
     )
 }
@@ -7350,14 +7376,9 @@ pub(crate) fn write_protected_principal_root_object_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
-    let (principal_id, root) = resolved.guard_object(data_dir, object_uri, path)?;
-    let _guard = principal_root_object_mutation_lock(data_dir)
-        .lock()
-        .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
-    write_principal_root_object_locked_unchecked(
+    write_held_root_object(
         data_dir,
-        principal_id,
-        root,
+        resolved,
         object_uri,
         path,
         plaintext,
@@ -7366,6 +7387,7 @@ pub(crate) fn write_protected_principal_root_object_resolved(
             create_only: false,
             precondition: None,
             create_owner_only_parent: false,
+            kept_elsewhere: false,
         },
     )
 }
@@ -7385,6 +7407,20 @@ impl std::fmt::Display for PrincipalRootObjectWriteConflict {
 }
 
 impl std::error::Error for PrincipalRootObjectWriteConflict {}
+
+/// A held-root write refused because the person's stored record is kept in
+/// another Runtime's store and this Runtime holds no protection for the
+/// object. The write creates nothing.
+#[derive(Debug)]
+pub(crate) struct ProtectedRecordKeptElsewhere;
+
+impl std::fmt::Display for ProtectedRecordKeptElsewhere {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("protected record is kept only on the Runtime this person signed in on")
+    }
+}
+
+impl std::error::Error for ProtectedRecordKeptElsewhere {}
 
 pub(crate) fn principal_root_object_revision(
     principal_id: &str,
@@ -7421,6 +7457,7 @@ pub(crate) fn write_principal_root_object_if_revision(
             create_only: matches!(precondition, PrincipalRootObjectPrecondition::Absent),
             precondition: Some(precondition),
             create_owner_only_parent: false,
+            kept_elsewhere: false,
         },
     )
 }
@@ -7435,14 +7472,9 @@ pub(crate) fn write_principal_root_object_if_revision_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
-    let (principal_id, root) = resolved.guard_object(data_dir, object_uri, path)?;
-    let _guard = principal_root_object_mutation_lock(data_dir)
-        .lock()
-        .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
-    write_principal_root_object_locked_unchecked(
+    write_held_root_object(
         data_dir,
-        principal_id,
-        root,
+        resolved,
         object_uri,
         path,
         plaintext,
@@ -7451,6 +7483,7 @@ pub(crate) fn write_principal_root_object_if_revision_resolved(
             create_only: matches!(precondition, PrincipalRootObjectPrecondition::Absent),
             precondition: Some(precondition),
             create_owner_only_parent: false,
+            kept_elsewhere: false,
         },
     )
 }
@@ -7466,6 +7499,10 @@ struct PrincipalRootObjectWriteOptions<'a> {
     /// permissions. The option sets the folder's permissions; it does not
     /// decide whether the folder exists.
     create_owner_only_parent: bool,
+    /// Set only by `write_held_root_object`, from the root it writes for.
+    /// True when the person's stored record is kept in another store and this
+    /// Runtime holds no protection for the object: the write refuses.
+    kept_elsewhere: bool,
 }
 
 /// Internal access to a group of local object operations under the existing mutation lock.
@@ -7531,6 +7568,7 @@ impl<'a> PrincipalRootObjectMutation<'a> {
                 create_only: false,
                 precondition: None,
                 create_owner_only_parent: false,
+                kept_elsewhere: false,
             },
         )
     }
@@ -7634,8 +7672,15 @@ fn write_principal_root_object_locked_unchecked(
         }
     }
     let protection = load_principal_root_protection(data_dir, principal_id, localhost_root)?;
-    if options.require_protection && protection.is_none() {
-        anyhow::bail!("protected principal-root object requires active principal-root protection");
+    if protection.is_none() {
+        if options.kept_elsewhere {
+            return Err(ProtectedRecordKeptElsewhere.into());
+        }
+        if options.require_protection {
+            anyhow::bail!(
+                "protected principal-root object requires active principal-root protection"
+            );
+        }
     }
     let bytes = if let Some(protection) = protection {
         let data_key = principal_root_data_key_from_protection(data_dir, &protection)?;
@@ -15675,6 +15720,7 @@ pub(crate) mod tests {
                 create_only: true,
                 precondition: None,
                 create_owner_only_parent: false,
+                kept_elsewhere: false,
             },
         )
         .unwrap();
@@ -15719,6 +15765,7 @@ pub(crate) mod tests {
                 create_only: true,
                 precondition: None,
                 create_owner_only_parent: false,
+                kept_elsewhere: false,
             },
         )
         .unwrap_err();

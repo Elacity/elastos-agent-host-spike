@@ -1203,7 +1203,9 @@ mod r4_root_tests {
 #[cfg(test)]
 mod r8d_passkey_rows {
     use super::*;
-    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{passkey_person, ROOT};
+    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{
+        kept_elsewhere_refusal, passkey_person, KEPT_ELSEWHERE, ROOT,
+    };
 
     const GBA_VIEWER: &str = "gba-emulator";
     const DOCUMENTS: &str = "documents";
@@ -1263,8 +1265,8 @@ mod r8d_passkey_rows {
         .unwrap();
     }
 
-    /// Today the child's viewer storage write with the `Absent` precondition
-    /// leaves the bytes as given under the person's root.
+    /// The child holds no protection for this person's root, so the write is
+    /// refused and creates nothing.
     #[test]
     fn r8d_child_viewer_storage_save_for_the_passkey_person() {
         let person = passkey_person(GBA_VIEWER);
@@ -1281,27 +1283,22 @@ mod r8d_passkey_rows {
         .unwrap_or_else(|error| panic!("{error:#}"));
         assert_eq!(target.object_uri, format!("{ROOT}/{GBA_RELATIVE}"));
         let bytes = b"r8d child viewer note".to_vec();
-        viewer_storage_write(
+        let error = viewer_storage_write(
             child,
             &target,
             &bytes,
             crate::auth::PrincipalRootObjectPrecondition::Absent,
         )
-        .unwrap_or_else(|error| panic!("{error:#}"));
-        let relative = format!("{}/{GBA_RELATIVE}", ROOT.trim_start_matches("localhost://"));
+        .expect_err("the child holds no protection for this person");
         assert_eq!(
-            std::fs::read(child.join(&relative)).unwrap(),
-            bytes,
-            "{relative} holds the bytes it was given"
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
         );
-        let expected = [
-            "capsules/gba-emulator/browser/index.html".to_string(),
-            "capsules/gba-emulator/capsule.json".to_string(),
-            "components.json".to_string(),
-            relative,
-        ];
-        let also: Vec<&str> = expected.iter().map(String::as_str).collect();
-        person.assert_child_holds_only(&also);
+        person.assert_child_holds_only(&[
+            "capsules/gba-emulator/browser/index.html",
+            "capsules/gba-emulator/capsule.json",
+            "components.json",
+        ]);
     }
 
     /// Today a viewer whose manifest declares no storage grant is refused,
