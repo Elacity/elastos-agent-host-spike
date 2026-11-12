@@ -357,8 +357,7 @@ impl Runtime {
             }
             (None, _) => provider.load(path, manifest).await?,
         };
-        let ceiling = handle.manifest.resource_authority_bounds();
-        self.start_loaded(provider, &mut handle, ceiling, args, principal_id)
+        self.start_loaded(provider, &mut handle, args, principal_id)
             .await?;
 
         Ok((handle, signer))
@@ -373,9 +372,10 @@ impl Runtime {
     /// is the one returned; the manifest must be one a start by CID takes;
     /// and the component that is compiled is the bytes that walk read, never
     /// a second read of the file. A missing slot is a refusal: nothing is
-    /// fetched. What starts has no authority, whatever its manifest says: it
-    /// is loaded sealed, so the component provider refuses its every call to
-    /// the bridge before any handler sees it, and its ceiling is empty.
+    /// fetched. What starts has no authority: it is loaded sealed, so the
+    /// component provider refuses its every call to the bridge before any
+    /// handler sees it; and its ceiling, filled like every capsule's from
+    /// the one bounds function, is empty for any manifest this start admits.
     pub async fn run_by_bundle(
         &self,
         data_dir: &Path,
@@ -436,15 +436,17 @@ impl Runtime {
                 "No component compute provider is configured".to_string(),
             ));
         };
-        // No authority, stated here and not left to the manifest. Loaded
-        // sealed: the provider refuses this capsule's calls to the bridge
-        // itself, so no handler sees one, whoever installed it. And an empty
-        // ceiling, for a handler that reads one.
+        // No authority. Loaded sealed: the provider refuses this capsule's
+        // calls to the bridge itself, so no handler sees one, whoever
+        // installed it. Its ceiling is filled where every capsule's is, by
+        // the shared end below from the one bounds function; for a manifest
+        // this start admits that is empty, because the key list keeps out
+        // every field that function reads.
         let mut handle = component
             .load_admitted_sealed(admitted.component, admitted.manifest)
             .await
             .map_err(failed)?;
-        self.start_loaded(component, &mut handle, Vec::new(), args, principal_id)
+        self.start_loaded(component, &mut handle, args, principal_id)
             .await
             .map_err(failed)?;
         Ok((handle, accepted))
@@ -460,20 +462,25 @@ impl Runtime {
             .cloned()
     }
 
-    /// The end of every start. While `provider` starts the loaded capsule,
-    /// `ceiling` is what the bridge holds it to and, for a component,
-    /// `principal_id` is who it runs for; `args` go on its handle first.
-    /// Ceiling and principal are taken away again however the start ended.
+    /// The end of every start, and the one place in this file that fills a
+    /// capsule's ceiling: from the one bounds function, for a start from a
+    /// folder and for a start by CID alike. While `provider` starts the
+    /// loaded capsule, that ceiling is what the bridge holds it to and, for a
+    /// component, `principal_id` is who it runs for; `args` go on its handle
+    /// first. Ceiling and principal are taken away again when the start
+    /// returns, well or badly.
     async fn start_loaded(
         &self,
         provider: Arc<dyn ComputeProvider>,
         handle: &mut CapsuleHandle,
-        ceiling: Vec<String>,
         args: Vec<String>,
         principal_id: Option<String>,
     ) -> Result<()> {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
-            bounds.insert(handle.id.0.clone(), ceiling);
+            bounds.insert(
+                handle.id.0.clone(),
+                handle.manifest.resource_authority_bounds(),
+            );
         }
         if handle.manifest.is_component_capsule() {
             if let Some(ref component) = self.component_provider {

@@ -440,6 +440,62 @@ async fn each_key_outside_the_list_is_refused_by_name() {
     assert_eq!(home.calls(), Vec::new());
 }
 
+/// R-nogrant. The ceiling of a capsule started by CID is filled, as every
+/// capsule's is, from the one bounds function. For every manifest the policy
+/// admits that function gives an empty ceiling: shown for the base manifest
+/// and for one that sets every other key on the list. The control is a
+/// manifest with a capability: its ceiling is not empty, and the policy
+/// refuses it.
+#[test]
+fn a_manifest_the_policy_admits_has_an_empty_ceiling() {
+    use crate::bundle_admission::{admit_bundle_manifest, BUNDLE_WALK_BUDGET};
+    use elastos_bundle_identity::checked_bundle_within as walk;
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = |name: &str, manifest: &str| {
+        let folder = dir.path().join(name);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("capsule.json"), manifest).unwrap();
+        fs::write(folder.join(ENTRYPOINT), quiet_component()).unwrap();
+        walk(&folder, BUNDLE_WALK_BUDGET).unwrap()
+    };
+    let mut full: serde_json::Value = serde_json::from_str(&manifest("full")).unwrap();
+    let keys = full.as_object_mut().unwrap();
+    keys.insert("description".into(), serde_json::json!("every allowed key"));
+    keys.insert("author".into(), serde_json::json!("a test"));
+    keys.insert("projections".into(), serde_json::json!(["cli", "web"]));
+    keys.insert("window_policy".into(), serde_json::json!("multiple"));
+    keys.insert("icon".into(), serde_json::json!("icons"));
+    keys.insert(
+        "resources".into(),
+        serde_json::json!({"memory_mb": 64, "cpu_shares": 2}),
+    );
+    let written: Vec<&str> = keys.keys().map(String::as_str).collect();
+    for key in BUNDLE_MANIFEST_KEYS {
+        assert!(written.contains(&key), "{key} is not set in this row");
+    }
+    for (name, json) in [("base", manifest("base")), ("full", full.to_string())] {
+        let admitted = admit_bundle_manifest(&bundle(name, &json)).unwrap();
+        assert_eq!(
+            admitted.manifest.resource_authority_bounds(),
+            Vec::<String>::new(),
+            "{name}"
+        );
+    }
+
+    let capable = manifest_with(
+        "capable",
+        "capabilities",
+        serde_json::json!(["elastos://did/*"]),
+    );
+    let walked = bundle("capable", &capable);
+    let typed: elastos_common::CapsuleManifest = serde_json::from_str(&capable).unwrap();
+    assert_eq!(typed.resource_authority_bounds(), ["elastos://did/*"]);
+    assert_eq!(
+        admit_bundle_manifest(&walked).unwrap_err().to_string(),
+        "bundle_manifest_field_refused: capabilities"
+    );
+}
+
 /// The list holds every key the base manifest uses, and the two lists
 /// together are every key of the Runtime's manifest type: a key added to
 /// that type appears in neither and fails this test until it is placed.
@@ -678,6 +734,9 @@ fn the_start_by_cid_reads_the_slot_once_and_fetches_nothing() {
         "fetch",
         "resolve_capsule_dir",
         "resource_authority_bounds",
+        // It fills no ceiling itself: the shared end does, from the one
+        // bounds function.
+        "bridge_manifest_capabilities",
         "dev_mode",
         // Nothing is registered as running, and nothing reads the
         // presentation keys: no window, no projection.
@@ -688,7 +747,12 @@ fn the_start_by_cid_reads_the_slot_once_and_fetches_nothing() {
     ] {
         assert!(!body.contains(never), "{never}");
     }
-    assert_eq!(body.matches("Vec::new(), args, principal_id").count(), 1);
+    // It passes no ceiling of its own: the shared end fills it.
+    assert_eq!(
+        body.matches("self.start_loaded(component, &mut handle, args, principal_id)")
+            .count(),
+        1
+    );
     // The component is loaded sealed, and only that way.
     assert_eq!(body.matches(".load_admitted_sealed(").count(), 1);
     assert_eq!(body.matches(".load_admitted(").count(), 0);
