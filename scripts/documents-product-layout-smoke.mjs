@@ -989,16 +989,20 @@ async function run() {
       await manualPage.locator("#title-input").fill("Fresh");
       await manualPage.locator("#editor").fill("A new idea.");
       // Beta keeps this draft only if the page already marks the new document
-      // unsaved when it is clicked: keepUnsavedCurrent reads state.dirty. Read
-      // the page once here, with no waiting, so a failure below or in the row
-      // check reports what the page held when Beta was clicked.
+      // unsaved when it is clicked: keepUnsavedCurrent reads state.dirty. The
+      // title and editor input handlers call setDirty in the same call that
+      // handles the typing, so both fills have set the Save button's
+      // has-unsaved class before this one-shot read. Read the page once here,
+      // with no waiting, so the assertion below prints the title, body and
+      // unsaved mark the page held when Beta was clicked. A timeout in the
+      // later row check stops without that record.
       const draft = await manualPage.evaluate(() => ({
         title: document.getElementById("title-input")?.value,
         body: document.getElementById("editor")?.value,
         unsaved: document.getElementById("save-button")?.classList.contains("has-unsaved"),
       }));
-      assert(draft.title === "Fresh" && draft.body === "A new idea.",
-        `The new draft must hold the typed title and body. Got ${JSON.stringify(draft)}`);
+      assert(draft.title === "Fresh" && draft.body === "A new idea." && draft.unsaved === true,
+        `The new draft must hold the typed title and body and mark itself unsaved. Got ${JSON.stringify(draft)}`);
       await manualPage.locator('.document-list-item[data-doc-did="doc-beta"]').click();
       await manualPage.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
       assert(await manualPage.locator("#editor").inputValue() === "# Beta\n\nFirst manual edit.",
