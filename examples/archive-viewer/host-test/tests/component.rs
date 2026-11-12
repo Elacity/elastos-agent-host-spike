@@ -14,8 +14,8 @@
 //! a 256 MiB declared total is shown and never sizes a buffer, under the
 //! host's 128 MiB store limit). F35 (a run with no read grant stops with the
 //! authority failure and writes no view) and F36 (one archive per hostile
-//! class at its caps stays at or below 80% of the Runtime's 100,000,000 fuel)
-//! are here too.
+//! class at its caps stays under a ceiling a third above the largest measured
+//! shape) are here too.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 const REQUEST: &str = "localhost://Users/self/.AppData/App/archive-viewer/open.json";
 const VIEW: &str = "localhost://Users/self/.AppData/App/archive-viewer/view.json";
 const ARCHIVE: &str = "localhost://Users/self/Documents/trip.zip";
+const TAR: &str = "localhost://Users/self/Documents/trip.tar";
 const REQUEST_SCHEMA: &str = "elastos.archive-viewer.open/v1";
 const VIEW_SCHEMA: &str = "elastos.archive-viewer.view/v1";
 
@@ -66,11 +67,17 @@ fn manifest() -> CapsuleManifest {
 
 /// A bridge holding the request, the archive and the view write.
 fn bridge_with(archive: Vec<u8>, show: &[usize]) -> Bridge {
+    bridge_at(ARCHIVE, archive, show)
+}
+
+/// The same bridge for an archive named by another URI. The format still
+/// comes from the content; the name is the person's file.
+fn bridge_at(uri: &str, archive: Vec<u8>, show: &[usize]) -> Bridge {
     let mut bridge = Bridge::default();
-    bridge.put(REQUEST, request(ARCHIVE, show));
+    bridge.put(REQUEST, request(uri, show));
     bridge.allow(REQUEST, "read");
-    bridge.put(ARCHIVE, archive);
-    bridge.allow(ARCHIVE, "read");
+    bridge.put(uri, archive);
+    bridge.allow(uri, "read");
     bridge.allow(VIEW, "write");
     bridge
 }
@@ -288,6 +295,33 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
+/// Builds a ustar archive byte by byte: one 512-byte header per entry, its
+/// data and padding, then the two zero blocks that end the listing. The size
+/// is octal and the checksum is the unsigned byte sum, its own field spaces.
+fn tar(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, data) in entries {
+        let mut block = vec![0u8; 512];
+        block[..name.len()].copy_from_slice(name.as_bytes());
+        block[100..108].copy_from_slice(b"0000644\0");
+        block[108..116].copy_from_slice(b"0000000\0");
+        block[116..124].copy_from_slice(b"0000000\0");
+        block[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+        block[136..148].copy_from_slice(b"00000000000\0");
+        block[148..156].copy_from_slice(b"        ");
+        block[156] = b'0';
+        block[257..263].copy_from_slice(b"ustar\0");
+        block[263..265].copy_from_slice(b"00");
+        let sum: u64 = block.iter().map(|&byte| u64::from(byte)).sum();
+        block[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        out.extend_from_slice(&block);
+        out.extend_from_slice(data);
+        out.resize(out.len() + (512 - data.len() % 512) % 512, 0);
+    }
+    out.extend([0u8; 1024]);
+    out
+}
+
 /// Printable text with a moderate deflate ratio: a repeating 200-byte block.
 fn text_block(len: usize) -> Vec<u8> {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -489,6 +523,70 @@ fn largest_view() -> Vec<Fixture> {
     fixtures
 }
 
+/// The worst tar archive within the caps: the most entries a Bus v1 run can
+/// list at about 212,000 fuel a 512-byte header, plus one entry at the largest
+/// text preview the caps allow (B1, 16 KiB). The listing walks 64 headers and
+/// reads the one shown entry's 16 KiB through the same counted reader.
+fn worst_tar() -> Vec<u8> {
+    let mut entries: Vec<(String, Vec<u8>)> =
+        vec![("t.txt".to_string(), plain_text(MAX_PREVIEW_BYTES))];
+    for n in 1..64 {
+        entries.push((format!("e{n:02}.txt"), Vec::new()));
+    }
+    tar(&entries)
+}
+
+/// The longest tar header walk the 64 KiB read budget allows: 127 headers
+/// are listed and the 128th read is refused for budget.
+fn longest_tar_walk() -> Vec<u8> {
+    let entries: Vec<(String, Vec<u8>)> = (0..128)
+        .map(|n| (format!("w{n:03}.txt"), Vec::new()))
+        .collect();
+    tar(&entries)
+}
+
+/// Headers plus the largest text preview that fits one run: 92 empty
+/// headers and one 16 KiB text entry. With the two zero blocks, the format
+/// probe and the size probes the run reads 65,304 of its 65,536 bytes, so
+/// the next header could not fit.
+fn tar_with_preview_at_the_read_cap() -> Vec<u8> {
+    let mut entries: Vec<(String, Vec<u8>)> = (0..92)
+        .map(|n| (format!("c{n:02}.txt"), Vec::new()))
+        .collect();
+    entries.push(("t.txt".to_string(), plain_text(MAX_PREVIEW_BYTES)));
+    tar(&entries)
+}
+
+/// The most previews one request may name, at the compressed-data cap the
+/// shared budget allows: eight 3,072-byte text entries, 24 KiB in all, so
+/// every one is shown and the budget ends at zero.
+fn tar_with_several_previews() -> Vec<u8> {
+    const PREVIEW_BYTES: usize = 3_072;
+    let entries: Vec<(String, Vec<u8>)> = (0..MAX_REQUEST_SHOW)
+        .map(|n| (format!("p{n}.txt"), plain_text(PREVIEW_BYTES)))
+        .collect();
+    tar(&entries)
+}
+
+/// The most tar headers the read budget leaves beside eight previews at the
+/// compressed cap: 69 empty headers, then eight 3,072-byte text entries
+/// (24 KiB, the whole B2 cap) shown in one request. The listing reads every
+/// header and both zero blocks, leaving room for the eight preview reads; one
+/// more header would leave the last preview under its 3,072 bytes. In all the
+/// run reads within one header-sized read of its 64 KiB budget.
+const COMBINED_HEADERS: usize = 69;
+
+fn tar_with_headers_and_eight_previews() -> Vec<u8> {
+    const PREVIEW_BYTES: usize = 3_072;
+    let mut entries: Vec<(String, Vec<u8>)> = (0..COMBINED_HEADERS)
+        .map(|n| (format!("h{n:02}.txt"), Vec::new()))
+        .collect();
+    for n in 0..MAX_REQUEST_SHOW {
+        entries.push((format!("p{n}.txt"), plain_text(PREVIEW_BYTES)));
+    }
+    tar(&entries)
+}
+
 /// The archives the fuel gate runs, one per hostile class at its caps
 /// (DESIGN.md, "The fuel gate (F36)").
 fn worst_archives() -> Vec<(&'static str, Bridge)> {
@@ -521,6 +619,27 @@ fn worst_archives() -> Vec<(&'static str, Bridge)> {
         (
             "the largest view",
             bridge_with(zip(&largest_view()), &[MAX_ENTRIES - 2, MAX_ENTRIES - 1]),
+        ),
+        ("the worst tar archive", bridge_at(TAR, worst_tar(), &[0])),
+        (
+            "the longest tar header walk",
+            bridge_at(TAR, longest_tar_walk(), &[]),
+        ),
+        (
+            "the tar headers and preview at the read cap",
+            bridge_at(TAR, tar_with_preview_at_the_read_cap(), &[92]),
+        ),
+        (
+            "the most tar previews in one request",
+            bridge_at(TAR, tar_with_several_previews(), &show_all),
+        ),
+        (
+            "the most headers beside eight previews",
+            bridge_at(
+                TAR,
+                tar_with_headers_and_eight_previews(),
+                &(COMBINED_HEADERS..COMBINED_HEADERS + MAX_REQUEST_SHOW).collect::<Vec<_>>(),
+            ),
         ),
     ]
 }
@@ -716,7 +835,11 @@ async fn a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory() {
     // The read trace, not only its total: one-byte size probes, then the
     // tail, the directory and each 30-byte local header, at the record's own
     // offset and in offset order.
-    let reads = archive_reads(&bridge);
+    let mut reads = archive_reads(&bridge);
+    // The format decision reads four bytes at offset 0 before any size probe.
+    assert_eq!(reads[0].2, 0, "the format probe starts at offset 0");
+    assert_eq!(reads[0].3, 4, "the format probe reads four bytes");
+    reads.remove(0);
     let tail_start = size.saturating_sub(22 + 1024);
     let mut expected: Vec<(u64, u64)> = vec![
         (tail_start, size - tail_start),
@@ -749,7 +872,11 @@ async fn a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory() {
     assert_eq!(control.bytes.len(), size as usize);
     let (control_result, control_bridge) = run(bridge_with(control.bytes.clone(), &[])).await;
     control_result.unwrap();
-    assert_eq!(archive_reads(&control_bridge), reads);
+    let mut control_reads = archive_reads(&control_bridge);
+    assert_eq!(control_reads[0].2, 0, "the control's format probe");
+    assert_eq!(control_reads[0].3, 4);
+    control_reads.remove(0);
+    assert_eq!(control_reads, reads);
     assert_eq!(
         control_bridge.bytes_served.get(ARCHIVE),
         bridge.bytes_served.get(ARCHIVE)
@@ -844,6 +971,69 @@ async fn the_worst_archives_run_and_write_their_views() {
                     text.len()
                 );
             }
+            "the worst tar archive" => {
+                assert_eq!(view["entries"].as_array().unwrap().len(), 64);
+                let previews = view["previews"].as_array().unwrap();
+                assert_eq!(previews.len(), 1);
+                assert_eq!(
+                    previews[0]["blocks"][0]["spans"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    MAX_PREVIEW_BYTES
+                );
+                assert_eq!(view["previews"][0]["index"], 0);
+            }
+            "the longest tar header walk" => {
+                assert_eq!(view["entries"].as_array().unwrap().len(), 127);
+                assert_eq!(view["stopped"]["code"], "read_budget");
+                assert!(bridge.bytes_served[TAR] + 512 > MAX_READ_BYTES);
+            }
+            "the tar headers and preview at the read cap" => {
+                assert_eq!(view["entries"].as_array().unwrap().len(), 93);
+                assert_eq!(view["previews"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    view["previews"][0]["blocks"][0]["spans"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    MAX_PREVIEW_BYTES
+                );
+                assert!(view.get("stopped").is_none());
+                assert!(bridge.bytes_served[TAR] + 512 > MAX_READ_BYTES);
+            }
+            "the most tar previews in one request" => {
+                assert_eq!(view["entries"].as_array().unwrap().len(), MAX_REQUEST_SHOW);
+                assert_eq!(view["previews"].as_array().unwrap().len(), MAX_REQUEST_SHOW);
+                assert!(view.get("stopped").is_none());
+            }
+            "the most headers beside eight previews" => {
+                assert_eq!(
+                    view["entries"].as_array().unwrap().len(),
+                    COMBINED_HEADERS + MAX_REQUEST_SHOW
+                );
+                let previews = view["previews"].as_array().unwrap();
+                assert_eq!(previews.len(), MAX_REQUEST_SHOW);
+                let shown: usize = previews
+                    .iter()
+                    .map(|preview| {
+                        preview["blocks"][0]["spans"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .len()
+                    })
+                    .sum();
+                assert_eq!(
+                    shown, MAX_COMPRESSED_BYTES,
+                    "eight previews at the compressed cap are all shown"
+                );
+                assert!(view.get("stopped").is_none());
+                assert!(
+                    bridge.bytes_served[TAR] + 512 > MAX_READ_BYTES,
+                    "{} bytes served",
+                    bridge.bytes_served[TAR]
+                );
+            }
             _ => {}
         }
     }
@@ -903,6 +1093,41 @@ fn the_worst_archives_reach_their_caps() {
     assert!(bomb.text.len() <= compressed * 100 + 1024);
 
     assert!(directory_bytes(&largest_view()) <= MAX_DIRECTORY_BYTES);
+
+    // The worst tar archive: 64 headers, the largest text preview, and every
+    // byte one run reads inside the shared budget.
+    let tar = worst_tar();
+    let headers = 64 * 512;
+    assert_eq!(tar.len(), headers + MAX_PREVIEW_BYTES + 1024);
+    // The format probe, the size probes and both zero blocks are all a run
+    // reads besides the headers and the one preview.
+    assert!(
+        headers + MAX_PREVIEW_BYTES + 1024 + 265 + 4 <= MAX_READ_BYTES,
+        "the worst tar archive fits one run's reads"
+    );
+
+    // The four shapes the fuel gate measures. Each is at its intended cap,
+    // not stopped early: 128 headers so 127 are listed, 93 headers with the
+    // largest preview, eight previews, and the most headers beside them.
+    let walk = longest_tar_walk();
+    assert_eq!(walk.len(), 128 * 512 + 1024);
+
+    let combined = tar_with_preview_at_the_read_cap();
+    assert_eq!(combined.len(), 93 * 512 + MAX_PREVIEW_BYTES + 1024);
+
+    let previews = tar_with_several_previews();
+    assert_eq!(previews.len(), MAX_REQUEST_SHOW * (512 + 6 * 512) + 1024);
+    assert_eq!(MAX_REQUEST_SHOW * 3_072, MAX_COMPRESSED_BYTES);
+
+    // The most headers beside eight previews: 69 empty headers and eight
+    // 3,072-byte entries. One more header would leave the last preview under
+    // its 3,072 bytes, and the eight preview reads leave the run within one
+    // header-sized read of its budget.
+    let beside = tar_with_headers_and_eight_previews();
+    assert_eq!(
+        beside.len(),
+        (COMBINED_HEADERS + MAX_REQUEST_SHOW) * 512 + MAX_COMPRESSED_BYTES + 1024
+    );
 }
 
 /// The worst text is chosen by measurement, not assumption: one 16 KiB entry
@@ -976,11 +1201,17 @@ mod measure {
 }
 
 /// F36: one archive per hostile class at its caps, at the Runtime's fixed
-/// 100,000,000 fuel, uses at most 80%. A run that spends the whole budget is
-/// recorded as 100% and fails the gate: the cap, not the trap, is the rule.
+/// 100,000,000 fuel, stays under a ceiling a third above the largest shape
+/// measured. The four tar shapes measure 24,521,609 fuel (127 headers),
+/// 26,215,599 (93 headers and a 16 KiB preview), 14,443,276 (eight previews)
+/// and 27,419,824 (69 headers beside eight previews). The largest is the last;
+/// the ceiling is 36,600,000 fuel, 1.335 times it. A run that spends the whole
+/// budget is recorded as 100% and fails the gate: the cap, not the trap, is
+/// the rule.
+const FUEL_CEILING: u64 = 36_600_000;
+
 #[test]
-fn worst_archives_stay_under_80_percent_of_the_runtime_fuel() {
-    let mut highest = (0.0f64, "no archive");
+fn worst_archives_stay_under_their_fuel_ceiling() {
     for (name, bridge) in worst_archives() {
         let (outcome, used) = measure::run(bridge, measure::RUNTIME_FUEL);
         if let Err(err) = &outcome {
@@ -990,14 +1221,9 @@ fn worst_archives_stay_under_80_percent_of_the_runtime_fuel() {
         }
         let percent = used as f64 * 100.0 / measure::RUNTIME_FUEL as f64;
         println!("{name}: {used} fuel ({percent:.1}% of the Runtime budget)");
-        if percent > highest.0 {
-            highest = (percent, name);
-        }
+        assert!(
+            used <= FUEL_CEILING,
+            "{name} uses {used} fuel, above the {FUEL_CEILING} ceiling"
+        );
     }
-    assert!(
-        highest.0 <= 80.0,
-        "{} uses {:.1}% of the fuel",
-        highest.1,
-        highest.0
-    );
 }

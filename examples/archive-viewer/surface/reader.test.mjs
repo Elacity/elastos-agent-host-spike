@@ -59,7 +59,7 @@ const entry = (index, extra = {}) => ({
 
 const span = (text, style = "plain") => ({ style, text });
 
-function view({ entries = [], previews = [], skipped = [], refused } = {}) {
+function view({ entries = [], previews = [], skipped = [], refused, stopped } = {}) {
   return {
     archive: { size: 4096, uri: "localhost://Users/self/Downloads/trip.zip" },
     entries,
@@ -67,6 +67,7 @@ function view({ entries = [], previews = [], skipped = [], refused } = {}) {
     schema: VIEW_SCHEMA,
     skipped,
     ...(refused ? { refused } : {}),
+    ...(stopped ? { stopped } : {}),
   };
 }
 
@@ -426,6 +427,27 @@ test("a refused archive without a reason still says why", async () => {
     [VIEW_ROUTE]: response(200, view({ refused: { code: "ambiguous_end", message: "" } })),
   });
   assert.equal(drawn.status.textContent, "This archive could not be read.");
+});
+
+test("a partial listing says so beside its entries", async () => {
+  // A spent read budget lists what fit and marks the listing; the page shows
+  // the marker with the entries it drew, so they are not read as the archive.
+  const stopped = {
+    code: "read_budget",
+    message: "The listing reached the bytes one run may read; entries after the stop are not listed.",
+  };
+  const { view: drawn, reader } = await mounted({
+    [VIEW_ROUTE]: response(200, view({ entries: [entry(0), entry(1)], stopped })),
+  });
+  assert.equal(drawn.status.textContent, stopped.message);
+  assert.equal(drawn.entries.children.length, 2);
+  assert.equal(reader.state.entries.length, 2);
+
+  // The marker is optional: a complete listing keeps its normal status.
+  const { view: whole } = await mounted({
+    [VIEW_ROUTE]: response(200, view({ entries: [entry(0)] })),
+  });
+  assert.equal(whole.status.textContent, "No text preview is shown.");
 });
 
 test("the page has no way to hold or reach anything else", () => {
