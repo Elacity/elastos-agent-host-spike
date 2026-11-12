@@ -1367,6 +1367,9 @@ fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
     home.finish().unwrap();
 }
 
+/// Head, release, platform, binary, components, and the reasons expected.
+type Case<'a> = (&'a str, &'a str, &'a str, &'a [u8], &'a [u8], &'a [&'a str]);
+
 #[test]
 fn installed_runtime_binds_only_a_matching_hash_chain() {
     use agent_conformance::{identity::sha256, report::installed_runtime};
@@ -1458,7 +1461,7 @@ fn installed_runtime_binds_only_a_matching_hash_chain() {
         "components do not match the release",
     );
     #[rustfmt::skip]
-    let cases: [(&str, &str, &str, &[u8], &[u8], &[&str]); 20] = [
+    let cases: [Case; 20] = [
         (&good, &release, "x86_64-linux", b"other", b"components", &[bin]),
         (&good, &release, "x86_64-linux", b"elastos", b"other", &[comp]),
         (&good, &other, "x86_64-linux", b"elastos", b"components", &["release", "version"]),
