@@ -542,7 +542,7 @@ CASES = [
      "                i64::from(byte as i8)",
      "                i64::from(byte)",
      ["a_signed_checksum_header_is_accepted"]),
-    ("T15 a base-256 size is read as octal",
+    ("T15 the base-256 size refusal is removed",
      "src/tar.rs",
      "        if block[SIZE] & 0x80 != 0 {",
      "        if false {",
