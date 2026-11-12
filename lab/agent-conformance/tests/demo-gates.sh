@@ -41,16 +41,20 @@ chmod 755 "$stand_in/demo.sh" "$stand_in/run.sh" "$installed/bin/elastos"
 printf '[]\n' >"$root/reviews.json"
 before=$(cd -- "$installed" && find . | sort)
 
-# receipt <name> <table>: a receipt in its own folder with the table's hash.
+# receipt <name> <table> [<hashed-table>]: a receipt in its own folder whose
+# recorded hash is that of <hashed-table>, the table itself unless given.
 receipt() {
-    local table=$2 hash
-    hash=$(printf '%s' "$table" | shasum -a 256 | cut -d ' ' -f 1)
+    local table=$2 hashed=${3:-$2} hash
+    hash=$(printf '%s' "$hashed" | shasum -a 256 | cut -d ' ' -f 1)
     mkdir "$root/receipt-$1"
     printf '{"report":{"table":"%s","sha256":"%s"}}\n' "${table//$'\n'/\\n}" "$hash" \
         >"$root/receipt-$1/VERSIONS.json"
 }
-five=$'versions_receipt (A14) | PASS\nreview_binding (A14) | PASS\nstaged_bundle (A14) | PASS\ninstalled_runtime (A14) | PASS\ninstalled_runtime_ran (A14) | PASS\n'
+four=$'versions_receipt (A14) | PASS\nreview_binding (A14) | PASS\nstaged_bundle (A14) | PASS\ninstalled_runtime (A14) | PASS\n'
+five="$four"$'installed_runtime_ran (A14) | PASS\n'
 receipt pass "$five"
+receipt missing "$four"
+receipt edited "$five" "${five/review_binding (A14) | PASS/review_binding (A14) | FAIL}"
 
 # demo <case> <receipt-name or ""> <suite-exit>: one run of the stand-in
 # demo.sh. `receipts` and `temporary` name where it may write; unset, they are
@@ -105,6 +109,24 @@ fi
 if [ ! -e "$root/ran-pass" ] || [ -z "$(find "$root/kept-pass" -name VERSIONS.json)" ]; then
     fail pass "the suite did not run or no receipt was kept"
 fi
+
+# A suite that fails, whatever the receipt says.
+demo suite-fails pass 1
+failed suite-fails 'demo: FAIL; the suite did not pass (run.sh exit 1)'
+
+# A receipt with one of the five rows missing.
+demo row-missing missing 0
+failed row-missing 'installed_runtime_ran (A14) | FAIL | row missing from the receipt'
+failed row-missing 'demo: FAIL; not every A14 row passes'
+
+# A receipt whose table no longer matches the hash recorded for it.
+demo table-edited edited 0
+failed table-edited 'A14 rows: receipt table does not match its recorded hash'
+failed table-edited 'demo: FAIL; not every A14 row passes'
+
+# A suite that names no receipt.
+demo no-receipt "" 0
+failed no-receipt 'demo: FAIL; run.sh wrote no receipt'
 
 # Nothing is written under the install paths: each of these stops first.
 receipts="$installed/data/receipts"
