@@ -191,6 +191,14 @@ fn size_of(reader: &mut Reader<'_>) -> Result<u64, TarError> {
     }
 }
 
+/// The entries read so far, ruled by the shared duplicate rule before they are
+/// published: a stop is still a listing, and a repeated name in it is a
+/// duplicate.
+fn stop(size: u64, mut entries: Vec<Entry>, reason: Refused) -> (u64, Vec<Entry>, Option<Refused>) {
+    block_duplicates(&mut entries);
+    (size, entries, Some(reason))
+}
+
 fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), TarError> {
     let size = size_of(reader)?;
     let mut entries = Vec::new();
@@ -199,7 +207,7 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
     while offset < size {
         let block = match read_block(reader, offset) {
             Ok(block) => block,
-            Err(TarError::Stopped(reason)) => return Ok((size, entries, Some(reason))),
+            Err(TarError::Stopped(reason)) => return Ok(stop(size, entries, reason)),
             Err(error) => return Err(error),
         };
         if block.len() < BLOCK_BYTES as usize {

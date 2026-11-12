@@ -2359,6 +2359,26 @@ fn the_tar_read_budget_lists_what_fit_and_marks_the_run() {
 }
 
 #[test]
+fn a_partial_tar_listing_still_blocks_duplicates() {
+    // The budget stops before the last header; the two names the run did read
+    // repeat, so the shared duplicate rule must run on the partial listing.
+    let mut specs = vec![TarSpec::file("same.txt"), TarSpec::file("same.txt")];
+    for index in 0..125 {
+        specs.push(TarSpec::file(&format!("fill{index:0>3}.txt")));
+    }
+    specs.push(TarSpec::file("unreached.txt"));
+    let bus = tar_fixture(&specs);
+    let view = view(&bus);
+    assert_eq!(view["stopped"]["code"], "read_budget");
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 127, "the headers that fit are listed");
+    for entry in &entries[..2] {
+        assert_eq!(entry["status"], "blocked");
+        assert_eq!(entry["reason"], "duplicate");
+    }
+}
+
+#[test]
 fn too_many_tar_entries_refuse_the_archive() {
     // 257 entries: more than the shared cap of 256, and the read budget would
     // stop a longer walk first, so the cap is proven with the same reader
