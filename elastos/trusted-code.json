@@ -4,6 +4,7 @@
   "count_rule": "docs/TRUSTED-CODE.md",
   "files": [
     "elastos/crates/elastos-server/src/runtime.rs",
+    "elastos/crates/elastos-compute/src/providers/component.rs",
     "elastos/crates/elastos-server/src/bundle_admission.rs",
     "elastos/crates/elastos-server/src/stage_cmd.rs",
     "elastos/crates/elastos-bundle-identity/src/lib.rs",
