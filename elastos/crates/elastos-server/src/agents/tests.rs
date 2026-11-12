@@ -785,6 +785,62 @@ fn the_wrap_key_binds_the_owner_id() {
     );
 }
 
+/// The owner's own protection with an owner-root wrap added to it.
+fn owner_protection_carrying_a_wrap(home: &Home) -> PrincipalRootProtectionV1 {
+    let mut protection = owner_protection(home);
+    let wrap = stored_agent(OWNER_ID, AGENT_A).protection.protectors[0].clone();
+    protection.protectors.push(wrap);
+    assert!(validate_principal_root_protection(&protection).is_ok());
+    protection
+}
+
+#[test]
+fn the_sign_in_file_never_stores_an_owner_root_wrap() {
+    let home = Home::new();
+    let before = home.owner_json();
+    let carrying = owner_protection_carrying_a_wrap(&home);
+    let error = crate::auth::store_principal_root_protection(home.path(), carrying).unwrap_err();
+    assert_eq!(error.to_string(), crate::auth::OWNER_ROOT_IN_SIGN_IN_FILE);
+    assert_eq!(home.owner_json(), before, "nothing was stored");
+    // The owner's own protection still stores and loads.
+    let own = owner_protection(&home);
+    crate::auth::store_principal_root_protection(home.path(), own.clone()).unwrap();
+    assert_eq!(owner_protection(&home), own);
+}
+
+#[test]
+fn a_sign_in_file_holding_an_owner_root_wrap_refuses_that_protection_only() {
+    let home = Home::new();
+    let other = crate::auth::store_test_principal_root_protection(home.path(), "person:local:b");
+    // Written past the store, as another writer of the file might.
+    crate::auth::plant_principal_root_protection(
+        home.path(),
+        &owner_protection_carrying_a_wrap(&home),
+    );
+    let (owner_id, owner_root) = (&home.owner.principal_id, &home.owner.localhost_root);
+    let refused = crate::auth::load_principal_root_protection(home.path(), owner_id, owner_root);
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        crate::auth::OWNER_ROOT_IN_SIGN_IN_FILE
+    );
+    // No wrap key is derived from it.
+    let agent = stored_agent(OWNER_ID, AGENT_B).protection;
+    assert!(crate::auth::owner_root_wrap_key(home.path(), owner_id, owner_root, &agent).is_err());
+    // The file still loads, the owner still signs in, and another person's
+    // protection is read as before.
+    crate::auth::load_auth_state(home.path()).unwrap();
+    let signed_in =
+        crate::auth::load_principal_for_proof_binding(home.path(), &home.owner.proof_binding_id)
+            .unwrap();
+    assert_eq!(signed_in.principal_id, OWNER_ID);
+    let theirs = crate::auth::load_principal_root_protection(
+        home.path(),
+        &other.principal_id,
+        &other.localhost_root,
+    );
+    assert_eq!(theirs.unwrap(), Some(other));
+}
+
 #[test]
 fn two_wraps_of_one_key_differ() {
     let (wrap_key, data_key) = ([7u8; 32], [9u8; 32]);

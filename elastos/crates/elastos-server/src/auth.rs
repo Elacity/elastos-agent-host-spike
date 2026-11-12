@@ -6564,11 +6564,30 @@ fn authorize_principal_protection(state: &AuthState, principal_id: &str) -> anyh
     refuse_named_quarantine(state, principal_id)
 }
 
+/// The refusal for an owner-root wrap found in the sign-in file.
+pub(crate) const OWNER_ROOT_IN_SIGN_IN_FILE: &str =
+    "a protection in the sign-in file never carries an owner-root wrap";
+
+/// Validates a protection kept in the sign-in file. An owner-root wrap is
+/// kept only in the agent records file, so a protection here that carries
+/// one is refused, on store and whenever it is read.
+fn validate_sign_in_file_protection(protection: &PrincipalRootProtectionV1) -> anyhow::Result<()> {
+    validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+    if protection
+        .protectors
+        .iter()
+        .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
+    {
+        anyhow::bail!(OWNER_ROOT_IN_SIGN_IN_FILE);
+    }
+    Ok(())
+}
+
 pub fn store_principal_root_protection(
     data_dir: &Path,
     protection: PrincipalRootProtectionV1,
 ) -> anyhow::Result<()> {
-    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
+    validate_sign_in_file_protection(&protection)?;
     mutate_auth_state(data_dir, |state| {
         authorize_principal_protection(state, &protection.principal_id)?;
         ensure_users_ai_protection_owner(state, &protection)?;
@@ -6616,7 +6635,7 @@ pub fn load_principal_root_protection(
     }) else {
         return Ok(None);
     };
-    validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+    validate_sign_in_file_protection(protection)?;
     ensure_users_ai_protection_owner(&state, protection)?;
     Ok(Some(protection.clone()))
 }
@@ -6638,7 +6657,7 @@ pub(crate) fn mark_recovery_kit_handed_to_person(
                     && stored.localhost_root == kit.localhost_root
             })
             .ok_or_else(|| anyhow!("principal root protection is missing"))?;
-        validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+        validate_sign_in_file_protection(protection)?;
         if protection.data_key_id != kit.data_key_id || protection.crypto != kit.crypto {
             anyhow::bail!("recovery kit protection binding mismatch");
         }
@@ -6666,7 +6685,7 @@ pub(crate) fn mark_recovery_kit_handed_to_person(
             protector.profile_coverage = Some(coverage);
         }
         protection.updated_at = now.max(protection.updated_at);
-        validate_principal_root_protection(protection).map_err(anyhow::Error::msg)
+        validate_sign_in_file_protection(protection)
     })
 }
 
@@ -6821,7 +6840,7 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_with_candid
     data_key: &[u8; 32],
     inventory: &[PrincipalRootProtectedObjectDeclarationV1],
 ) -> anyhow::Result<PrincipalRootProtectionActivationGuard> {
-    validate_principal_root_protection(candidate).map_err(anyhow::Error::msg)?;
+    validate_sign_in_file_protection(candidate)?;
     if stored_principal_record(data_dir, &candidate.principal_id)?.is_some() {
         validate_principal_root_object_binding_in_state(
             data_dir,
@@ -8182,7 +8201,7 @@ pub fn commit_recovered_root_reassignment(
         signed_audit_event,
         updated_at,
     } = reassignment;
-    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
+    validate_sign_in_file_protection(&protection)?;
     if !recovered_localhost_root.starts_with("localhost://Users/") {
         anyhow::bail!("recovery kit requires a human root");
     }
@@ -11099,7 +11118,7 @@ fn preflight_declared_principal_root_upgrade(
     let state = load_auth_state(data_dir)?;
     let mut protections = std::collections::BTreeMap::new();
     for protection in state.principal_root_protections {
-        validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
+        validate_sign_in_file_protection(&protection)?;
         let key = (
             protection.principal_id.clone(),
             protection.localhost_root.clone(),
