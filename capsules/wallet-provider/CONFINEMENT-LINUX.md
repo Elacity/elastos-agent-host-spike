@@ -209,13 +209,18 @@ absent after the run. The file evidence is those named fixture paths; a seccomp
 filter carries syscall policy, not path policy, so no run claims a general file
 boundary.
 
-The did run requires its permitted operations under the filter, through
-`did_standin_permitted_operations` and `assert_suite_outcomes` against the
-permitted prefix of `DID_SUITE_CASES`: `init` `ok`, `get_did` `ok` with a
-`did:key:` value, `resolve` `ok` on that DID, `set_nickname` `ok`, `get_nickname`
-returning `Confined`, and `get_persona_did` `ok`. Its `STORAGE_ROOT/seccomp-inside-write`
-fixture must equal `b"did seccomp journey fixture\n"`, the encrypted nickname
-`did/nickname.enc` must keep the bytes `set_nickname` wrote, and the named sibling
+The did run requires all ten did operations under the filter. The six file-state
+calls go through `did_standin_permitted_operations` and `assert_suite_outcomes`
+against the permitted prefix of `DID_SUITE_CASES`: `init` `ok`, `get_did` `ok`
+with a `did:key:` value, `resolve` `ok` on that DID, `set_nickname` `ok`,
+`get_nickname` returning `Confined`, and `get_persona_did` `ok`. The journey then
+drives `sign_chat_message`, `verify` on the payload and signature it just
+answered, `verify_did_recovery` with a well-formed request whose signature is not
+hex (which the provider answers `invalid_signature`), and `shutdown`, through
+`did_standin_linux_only_operations` and `DID_LINUX_ONLY_CASES`. Its
+`STORAGE_ROOT/seccomp-inside-write` fixture must equal
+`b"did seccomp journey fixture\n"`, the encrypted nickname `did/nickname.enc`
+must keep the bytes `set_nickname` wrote, and the named sibling
 `seccomp-outside-write` outside `STORAGE_ROOT` must be absent. The did suite's
 file-denial cases stay in the B3 and C0 journeys, because a seccomp filter cannot
 make them fail. Both callers create the fixed-byte fixture before their
@@ -249,11 +254,13 @@ failed with `the confined provider must return the stored nickname` and
 addition was removed. The block is now resolved in did's store instead:
 `save_nickname_with_device_key` creates `nickname.enc` at 0600 and sets the mode
 on the open file, so `fchmodat` stays out of every list.
-`linux_did_journey_runs_under_the_seccomp_allow_list` passes under the same
+`linux_did_journey_runs_under_the_seccomp_allow_list` passed under the same
 policy as wallet's on aarch64 (receipt
 `~/Sparks/office/evidence/b4-x86/pr1548-6241445e-aarch64.log`) and on x86_64
-(this PR's CI). It is lab stand-in evidence on those hosts, not Runtime
-acceptance.
+(this PR's CI) while it drove the six file-state calls. It now drives all ten
+did operations, and the ten-call run on the host "The file row" names is the
+evidence for the ten Linux cells of `../did-provider/CONFINEMENT.md`. It is lab
+stand-in evidence on those hosts, not Runtime acceptance.
 
 The current journey also compares the key's final bytes with the bytes captured
 immediately after `init`. The key check requires the trailing newline.
