@@ -531,7 +531,6 @@ impl TwoRuntimes {
         .expect("fixture principal has a stored root");
         HomeLaunchTokenContext::resolved(
             root,
-            principal_id.to_string(),
             session_id.to_string(),
             proof_binding_id,
             grant_id.to_string(),

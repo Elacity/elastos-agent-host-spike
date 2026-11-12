@@ -1543,7 +1543,6 @@ mod tests {
         .unwrap();
         let context = HomeLaunchTokenContext::resolved(
             root,
-            principal.principal_id.clone(),
             "session".to_string(),
             Some(principal.proof_binding_id.clone()),
             "grant".to_string(),

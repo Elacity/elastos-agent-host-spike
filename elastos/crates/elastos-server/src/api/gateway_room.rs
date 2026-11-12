@@ -2752,13 +2752,7 @@ mod stored_root_tests {
     fn stored_context(data_dir: &std::path::Path, principal_id: &str) -> HomeLaunchTokenContext {
         let root =
             crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).unwrap();
-        HomeLaunchTokenContext::resolved(
-            root,
-            principal_id.to_string(),
-            "session".to_string(),
-            None,
-            "grant".to_string(),
-        )
+        HomeLaunchTokenContext::resolved(root, "session".to_string(), None, "grant".to_string())
     }
 
     #[test]

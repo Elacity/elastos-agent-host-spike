@@ -87,7 +87,7 @@ async fn test_home_wallet_connector_bridge_rejects_invalid_authority_before_wall
         codec.encode(serde_json::to_vec(&envelope).unwrap())
     };
     let wrong_principal = token_for(HomeLaunchTokenContext {
-        principal_id: "principal:wrong".to_string(),
+        root: crate::auth::ResolvedPrincipalRoot::for_test_principal("principal:wrong"),
         ..context.clone()
     });
     let wrong_session = token_for(HomeLaunchTokenContext {

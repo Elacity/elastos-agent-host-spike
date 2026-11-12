@@ -416,7 +416,7 @@ pub(in crate::api::gateway) async fn browser_net_summary(
     context: &HomeLaunchTokenContext,
 ) -> serde_json::Value {
     let registry = state.provider_registry.as_ref();
-    let principal_id = context.principal_id.as_str();
+    let principal_id = context.principal_id();
     let contact_names = super::super::gateway_home_system::browser_exit_contact_names(
         &state.data_dir,
         context,

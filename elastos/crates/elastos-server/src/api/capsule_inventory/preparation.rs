@@ -4587,6 +4587,15 @@ mod tests {
         )
     }
 
+    fn context_for(principal_id: &str) -> HomeLaunchTokenContext {
+        HomeLaunchTokenContext::for_test(
+            principal_id,
+            "session-1",
+            Some("proof-1".into()),
+            "grant-1",
+        )
+    }
+
     /// A stored Human principal, as a real launch stores one, with the context
     /// built from its resolved root.
     fn stored_context(data_dir: &Path) -> HomeLaunchTokenContext {
@@ -4611,7 +4620,6 @@ mod tests {
             crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).unwrap();
         HomeLaunchTokenContext::resolved(
             root,
-            principal_id.to_string(),
             session_id.to_string(),
             proof_binding_id.map(str::to_string),
             grant_id.to_string(),
@@ -6035,8 +6043,7 @@ mod tests {
             assert_eq!(invalid["admitted"], true);
             assert_eq!(invalid["dispatch_ready"], false);
             assert!(invalid["dispatch_unavailable_reason"].is_null());
-            let mut other = context();
-            other.principal_id = "person:other-reader".into();
+            let other = context_for("person:other-reader");
             assert_eq!(
                 model_runtime_projection(
                     root.path(),
@@ -6812,8 +6819,7 @@ mod tests {
         async fn model_owner_reclaim_foreign_keep_refuses_before_withdrawal() {
             let f = retirement_fixture().await;
             retention_intent(f.root.path(), &context(), &f.old.package_cid, true).unwrap();
-            let mut foreign = context();
-            foreign.principal_id = "person:foreign-keeper".into();
+            let foreign = context_for("person:foreign-keeper");
             let inventory = Inventory::open(f.root.path(), false).unwrap();
             let mut state = inventory.load().unwrap();
             let alias = state
@@ -6887,8 +6893,7 @@ mod tests {
             drop(inventory);
             let path = f.root.path().join("model-preparation/state.json");
             let before = std::fs::read(&path).unwrap();
-            let mut foreign = context();
-            foreign.principal_id = "person:new-user-during-removal".into();
+            let foreign = context_for("person:new-user-during-removal");
             let error = reserve(
                 f.root.path(),
                 &caller(&foreign, &method("use")),
@@ -6919,8 +6924,7 @@ mod tests {
         async fn model_owner_reclaim_confirmed_recovery_uses_actual_caller() {
             for startup in [false, true] {
                 let f = retirement_fixture().await;
-                let mut requester = context();
-                requester.principal_id = "person:shared-removal-caller".into();
+                let requester = context_for("person:shared-removal-caller");
                 let inventory = Inventory::open(f.root.path(), false).unwrap();
                 let mut state = inventory.load().unwrap();
                 let alias = state
@@ -9769,8 +9773,7 @@ server.serve_forever()
             next_cid,
         )
         .is_err());
-        let mut other = context();
-        other.principal_id = "person:another-owner".into();
+        let other = context_for("person:another-owner");
         assert!(status(
             root.path(),
             &caller(&other, &method("status")),
@@ -11883,8 +11886,7 @@ server.serve_forever()
             .kept(context().principal_id(), &record.package_cid));
         let calls = backend.calls.lock().unwrap().clone();
         let path = root.path().join("model-preparation/state.json");
-        let mut foreign = context();
-        foreign.principal_id = "person:other-pending-retention".into();
+        let foreign = context_for("person:other-pending-retention");
         for keep in [true, false] {
             let before = std::fs::read(&path).unwrap();
             assert!(retention_intent(root.path(), &foreign, &record.package_cid, keep).is_err());
@@ -13679,8 +13681,7 @@ server.serve_forever()
         finish_retention_fixture(root.path(), &record, registry).await;
         retention_intent(root.path(), &context(), &record.package_cid, true).unwrap();
         let calls = backend.calls.lock().unwrap().clone();
-        let mut foreign = context();
-        foreign.principal_id = "person:shared-pending-retention".into();
+        let foreign = context_for("person:shared-pending-retention");
         for principal in [context(), foreign] {
             let shared = reserve(
                 root.path(),
@@ -13792,8 +13793,7 @@ server.serve_forever()
         let (root, record, backend, registry) = staged_fixture(now().unwrap(), true).await;
         finish_retention_fixture(root.path(), &record, registry.clone()).await;
         let first = context();
-        let mut second = context();
-        second.principal_id = "person:second-retention".into();
+        let second = context_for("person:second-retention");
         assert!(retention_intent(root.path(), &second, &record.package_cid, true).is_err());
         assert!(retention_intent(root.path(), &second, &record.package_cid, false).is_err());
         retention_intent(root.path(), &first, &record.package_cid, true).unwrap();
@@ -13925,8 +13925,7 @@ server.serve_forever()
                 )
                 .is_err());
         }
-        let mut invalid = context();
-        invalid.principal_id.clear();
+        let invalid = context_for("");
         assert!(retention_intent(root.path(), &invalid, &record.package_cid, false).is_err());
         assert!(test_owner()
             .invoke_fixture(
@@ -14042,8 +14041,7 @@ server.serve_forever()
             )
             .unwrap();
         join_worker(&owner).await;
-        let mut other = context();
-        other.principal_id = "person:other-fixture".into();
+        let other = context_for("person:other-fixture");
         for op in ["status", "cancel"] {
             assert!(owner
                 .invoke_fixture(

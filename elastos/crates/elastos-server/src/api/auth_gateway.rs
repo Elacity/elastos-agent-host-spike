@@ -4402,7 +4402,6 @@ pub(in crate::api) async fn evm_verify_for_wallet_link(
         &app,
         &super::gateway::HomeLaunchTokenContext::resolved(
             context.root().clone(),
-            session.principal_id.clone(),
             session.session_id.clone(),
             Some(session.proof_binding_id.clone()),
             session.grant_id.clone(),
@@ -4614,7 +4613,6 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
         &app,
         &super::gateway::HomeLaunchTokenContext::resolved(
             context.root().clone(),
-            session.principal_id.clone(),
             session.session_id.clone(),
             Some(session.proof_binding_id.clone()),
             session.grant_id.clone(),
