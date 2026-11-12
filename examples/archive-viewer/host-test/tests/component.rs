@@ -14,8 +14,8 @@
 //! a 256 MiB declared total is shown and never sizes a buffer, under the
 //! host's 128 MiB store limit). F35 (a run with no read grant stops with the
 //! authority failure and writes no view) and F36 (one archive per hostile
-//! class at its caps stays at or below 80% of the Runtime's 100,000,000 fuel)
-//! are here too.
+//! class at its caps stays under a ceiling a third above the largest measured
+//! shape) are here too.
 
 use std::path::{Path, PathBuf};
 
@@ -536,6 +536,38 @@ fn worst_tar() -> Vec<u8> {
     tar(&entries)
 }
 
+/// The longest tar header walk the 64 KiB read budget allows: 127 headers
+/// are listed and the 128th read is refused for budget.
+fn longest_tar_walk() -> Vec<u8> {
+    let entries: Vec<(String, Vec<u8>)> = (0..128)
+        .map(|n| (format!("w{n:03}.txt"), Vec::new()))
+        .collect();
+    tar(&entries)
+}
+
+/// Headers plus the largest text preview that fits one run: 92 empty
+/// headers and one 16 KiB text entry. With the two zero blocks, the format
+/// probe and the size probes the run reads 65,304 of its 65,536 bytes, so
+/// the next header could not fit.
+fn tar_with_preview_at_the_read_cap() -> Vec<u8> {
+    let mut entries: Vec<(String, Vec<u8>)> = (0..92)
+        .map(|n| (format!("c{n:02}.txt"), Vec::new()))
+        .collect();
+    entries.push(("t.txt".to_string(), plain_text(MAX_PREVIEW_BYTES)));
+    tar(&entries)
+}
+
+/// The most previews one request may name, at the compressed-data cap the
+/// shared budget allows: eight 3,072-byte text entries, 24 KiB in all, so
+/// every one is shown and the budget ends at zero.
+fn tar_with_several_previews() -> Vec<u8> {
+    const PREVIEW_BYTES: usize = 3_072;
+    let entries: Vec<(String, Vec<u8>)> = (0..MAX_REQUEST_SHOW)
+        .map(|n| (format!("p{n}.txt"), plain_text(PREVIEW_BYTES)))
+        .collect();
+    tar(&entries)
+}
+
 /// The archives the fuel gate runs, one per hostile class at its caps
 /// (DESIGN.md, "The fuel gate (F36)").
 fn worst_archives() -> Vec<(&'static str, Bridge)> {
@@ -570,6 +602,18 @@ fn worst_archives() -> Vec<(&'static str, Bridge)> {
             bridge_with(zip(&largest_view()), &[MAX_ENTRIES - 2, MAX_ENTRIES - 1]),
         ),
         ("the worst tar archive", bridge_at(TAR, worst_tar(), &[0])),
+        (
+            "the longest tar header walk",
+            bridge_at(TAR, longest_tar_walk(), &[]),
+        ),
+        (
+            "the tar headers and preview at the read cap",
+            bridge_at(TAR, tar_with_preview_at_the_read_cap(), &[92]),
+        ),
+        (
+            "the most tar previews in one request",
+            bridge_at(TAR, tar_with_several_previews(), &show_all),
+        ),
     ]
 }
 
@@ -913,6 +957,29 @@ async fn the_worst_archives_run_and_write_their_views() {
                 );
                 assert_eq!(view["previews"][0]["index"], 0);
             }
+            "the longest tar header walk" => {
+                assert_eq!(view["entries"].as_array().unwrap().len(), 127);
+                assert_eq!(view["stopped"]["code"], "read_budget");
+                assert!(bridge.bytes_served[TAR] + 512 > MAX_READ_BYTES);
+            }
+            "the tar headers and preview at the read cap" => {
+                assert_eq!(view["entries"].as_array().unwrap().len(), 93);
+                assert_eq!(view["previews"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    view["previews"][0]["blocks"][0]["spans"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    MAX_PREVIEW_BYTES
+                );
+                assert!(view.get("stopped").is_none());
+                assert!(bridge.bytes_served[TAR] + 512 > MAX_READ_BYTES);
+            }
+            "the most tar previews in one request" => {
+                assert_eq!(view["entries"].as_array().unwrap().len(), MAX_REQUEST_SHOW);
+                assert_eq!(view["previews"].as_array().unwrap().len(), MAX_REQUEST_SHOW);
+                assert!(view.get("stopped").is_none());
+            }
             _ => {}
         }
     }
@@ -984,6 +1051,19 @@ fn the_worst_archives_reach_their_caps() {
         headers + MAX_PREVIEW_BYTES + 1024 + 265 + 4 <= MAX_READ_BYTES,
         "the worst tar archive fits one run's reads"
     );
+
+    // The three shapes the fuel gate measures. Each is at its intended cap,
+    // not stopped early: 128 headers so 127 are listed, 93 headers with the
+    // largest preview, and eight previews.
+    let walk = longest_tar_walk();
+    assert_eq!(walk.len(), 128 * 512 + 1024);
+
+    let combined = tar_with_preview_at_the_read_cap();
+    assert_eq!(combined.len(), 93 * 512 + MAX_PREVIEW_BYTES + 1024);
+
+    let previews = tar_with_several_previews();
+    assert_eq!(previews.len(), MAX_REQUEST_SHOW * (512 + 6 * 512) + 1024);
+    assert_eq!(MAX_REQUEST_SHOW * 3_072, MAX_COMPRESSED_BYTES);
 }
 
 /// The worst text is chosen by measurement, not assumption: one 16 KiB entry
@@ -1057,11 +1137,15 @@ mod measure {
 }
 
 /// F36: one archive per hostile class at its caps, at the Runtime's fixed
-/// 100,000,000 fuel, uses at most 80%. A run that spends the whole budget is
-/// recorded as 100% and fails the gate: the cap, not the trap, is the rule.
+/// 100,000,000 fuel, stays under a ceiling a third above the largest shape
+/// measured. The largest is the 93-header archive with its 16 KiB preview at
+/// 26,216,994 fuel; the ceiling is 35,000,000 fuel, 1.335 times that. A run
+/// that spends the whole budget is recorded as 100% and fails the gate: the
+/// cap, not the trap, is the rule.
+const FUEL_CEILING: u64 = 35_000_000;
+
 #[test]
-fn worst_archives_stay_under_80_percent_of_the_runtime_fuel() {
-    let mut highest = (0.0f64, "no archive");
+fn worst_archives_stay_under_their_fuel_ceiling() {
     for (name, bridge) in worst_archives() {
         let (outcome, used) = measure::run(bridge, measure::RUNTIME_FUEL);
         if let Err(err) = &outcome {
@@ -1071,14 +1155,9 @@ fn worst_archives_stay_under_80_percent_of_the_runtime_fuel() {
         }
         let percent = used as f64 * 100.0 / measure::RUNTIME_FUEL as f64;
         println!("{name}: {used} fuel ({percent:.1}% of the Runtime budget)");
-        if percent > highest.0 {
-            highest = (percent, name);
-        }
+        assert!(
+            used <= FUEL_CEILING,
+            "{name} uses {used} fuel, above the {FUEL_CEILING} ceiling"
+        );
     }
-    assert!(
-        highest.0 <= 80.0,
-        "{} uses {:.1}% of the fuel",
-        highest.1,
-        highest.0
-    );
 }

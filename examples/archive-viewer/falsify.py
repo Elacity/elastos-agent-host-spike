@@ -730,7 +730,7 @@ F36 = (
     "            read_counted(self.bus, self.uri, self.grant, self.left, offset, length)\n"
     "                .map_err(ReadError::Refusal)\n"
     "        }",
-    ["worst_archives_stay_under_80_percent_of_the_runtime_fuel",
+    ["worst_archives_stay_under_their_fuel_ceiling",
      "the_worst_archives_run_and_write_their_views",
      "low_compressibility_text_costs_more_than_repeating_text",
      # A 30-byte local header per entry read one byte a call pushes the
@@ -1035,7 +1035,7 @@ def fuel_run():
     """Runs the fuel gate once and returns its printed measurements."""
     result = kit.run(
         ["cargo", "test", "--locked", "--test", "component",
-         "worst_archives_stay_under_80_percent_of_the_runtime_fuel", "--", "--nocapture"],
+         "worst_archives_stay_under_their_fuel_ceiling", "--", "--nocapture"],
         HOST_DIR,
     )
     return FUEL_LINE.findall(result.stdout)

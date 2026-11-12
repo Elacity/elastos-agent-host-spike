@@ -702,3 +702,32 @@ how the following bytes or entries are read, so the whole archive is refused.
   each refused class with a following file, and a size on each link or device
   type. T22 plants the closed list as `if false`; it is caught by the two
   refusal tests, with every unnamed test passing.
+
+2026-11-12, task 009: the fuel gate measures the worst tar shapes.
+
+The old fixture was 64 headers and one 16 KiB preview, 20.8% of the
+100,000,000-fuel budget, so use could almost quadruple before the gate failed.
+The gate now runs the shapes the read and preview budgets allow and fails
+above 35,000,000 fuel.
+
+### Measurements (Bus v1, 100,000,000 fuel)
+
+| Archive | Fuel | Share |
+|---|---|---|
+| the longest tar header walk (127 listed) | 24,522,888 | 24.5% |
+| the tar headers and one 16 KiB preview at the read cap (93 listed) | 26,216,994 | 26.2% |
+| the most tar previews in one request (8 shown, 24 KiB) | 14,443,197 | 14.4% |
+| the old 64-header shape | 20,821,375 | 20.8% |
+
+The ceiling is 35,000,000 fuel, 1.335 times the largest measured shape. The
+host test asserts each fixture reaches its cap: 127 entries with the 128th
+header unread, 93 entries with the preview shown and fewer than 512 read
+bytes left, and eight previews shown at the compressed-data cap.
+
+### Tests and falsifiers
+
+- `worst_archives_stay_under_their_fuel_ceiling` replaces the 80% test; F36
+  names it and its mutant still crosses the ceiling.
+- `the_worst_archives_run_and_write_their_views` and
+  `the_worst_archives_reach_their_caps` assert the three new shapes and their
+  sizes.
