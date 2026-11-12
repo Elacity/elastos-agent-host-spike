@@ -58,6 +58,22 @@ fn require_entries(document: &serde_json::Value) -> Result<&[serde_json::Value],
     Ok(entries)
 }
 
+/// Read the file an edit names, resolved from examples/agent-host the way the
+/// runner resolves it. `None` means the file resolves outside this crate.
+fn read_entry_file(crate_root: &Path, file: &str) -> Result<Option<String>, String> {
+    let lane_base = crate_root.join("../../examples/agent-host");
+    let target = lane_base
+        .join(file)
+        .canonicalize()
+        .map_err(|error| format!("{file} does not resolve: {error}"))?;
+    if !target.starts_with(crate_root) {
+        return Ok(None);
+    }
+    std::fs::read_to_string(&target)
+        .map(Some)
+        .map_err(|error| format!("{file} does not read: {error}"))
+}
+
 #[test]
 fn every_lab_falsifier_edit_still_applies() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -68,19 +84,7 @@ fn every_lab_falsifier_edit_still_applies() {
     let entries = require_entries(&document).expect("falsifiers.json lists entries");
 
     // The runner reads `file` while its working directory is examples/agent-host.
-    let lane_base = crate_root.join("../../examples/agent-host");
-    let read = |file: &str| {
-        let target = lane_base
-            .join(file)
-            .canonicalize()
-            .map_err(|error| format!("{file} does not resolve: {error}"))?;
-        if !target.starts_with(&crate_root) {
-            return Ok(None);
-        }
-        std::fs::read_to_string(&target)
-            .map(Some)
-            .map_err(|error| format!("{file} does not read: {error}"))
-    };
+    let read = |file: &str| read_entry_file(&crate_root, file);
     for entry in entries {
         let id = entry["id"].as_str().expect("every entry has an id");
         if let Err(reason) = check_entry(id, entry, &read) {
@@ -91,8 +95,9 @@ fn every_lab_falsifier_edit_still_applies() {
 
 #[cfg(test)]
 mod rules {
-    use super::{check_entry, require_entries};
+    use super::{check_entry, read_entry_file, require_entries};
     use serde_json::json;
+    use std::path::Path;
 
     fn read_some(text: &'static str) -> impl Fn(&str) -> Result<Option<String>, String> {
         move |_| Ok(Some(text.to_owned()))
@@ -124,6 +129,15 @@ mod rules {
         let read = |_: &str| Err("gone does not resolve: missing".to_owned());
         let error = check_entry("F-missing", &entry, &read).unwrap_err();
         assert!(error.contains("F-missing"), "{error}");
+        assert!(error.contains("does not resolve"), "{error}");
+    }
+
+    #[test]
+    fn refuses_to_read_a_file_that_does_not_resolve() {
+        let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crate_root = crate_root.canonicalize().expect("the crate root resolves");
+        let error = read_entry_file(&crate_root, "tests/does-not-exist.rs").unwrap_err();
+        assert!(error.contains("tests/does-not-exist.rs"), "{error}");
         assert!(error.contains("does not resolve"), "{error}");
     }
 
