@@ -30,7 +30,7 @@ wasmtime::component::bindgen!({
 
 pub use elastos::bus::types::{BusError, Credential, Event, Grant};
 pub use objects::{ReadRecord, StubObject, HOST_MAX_READ_BYTES, READ_CHUNK};
-pub use run::{run_resident, Ending, Events, Limits, Outcome};
+pub use run::{run_resident, run_resident_watched, Ending, Events, Limits, Outcome, Progress};
 pub use ui::{Frame, Node};
 
 /// The one media type `ui.present` takes in this proof.
