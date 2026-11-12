@@ -1195,3 +1195,141 @@ mod r4_root_tests {
         }
     }
 }
+
+/// R8d evidence rows for Viewer storage, for a parent passkey person on a
+/// child Runtime. Entry: `viewer_storage_target_for_context` (line 771), which
+/// `viewer_storage_put` calls and which builds the target for the person's
+/// root; the first row then calls `viewer_storage_write` (line 695).
+#[cfg(test)]
+mod r8d_passkey_rows {
+    use super::*;
+    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{passkey_person, ROOT};
+
+    const GBA_VIEWER: &str = "gba-emulator";
+    const DOCUMENTS: &str = "documents";
+    const GBA_RELATIVE: &str = ".AppData/LocalHost/GBA/r8d-note.gba";
+
+    /// The `gba-emulator` viewer: the name, role and storage grant that
+    /// `capsules/gba-emulator/capsule.json` ships. No capsule bytes run.
+    fn gba_viewer(data_dir: &FsPath) {
+        let capsule = data_dir.join("capsules/gba-emulator");
+        std::fs::create_dir_all(capsule.join("browser")).unwrap();
+        std::fs::write(capsule.join("browser/index.html"), "viewer").unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            serde_json::to_vec(&json!({
+                "schema": "elastos.capsule/v1", "name": "gba-emulator", "version": "0.2.0",
+                "author": "elastos", "role": "viewer", "type": "wasm",
+                "entrypoint": "browser/index.html",
+                "permissions": {"storage": ["localhost://Users/self/.AppData/LocalHost/GBA/*"]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&json!({"external": {"gba-emulator": {
+                "install_path": "capsules/gba-emulator", "platforms": {}
+            }}, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The `documents` viewer as `capsules/documents/capsule.json` ships it:
+    /// a viewer whose manifest declares no storage grant. No capsule bytes
+    /// run.
+    fn documents_viewer(data_dir: &FsPath) {
+        let capsule = data_dir.join("capsules/documents");
+        std::fs::create_dir_all(capsule.join("browser")).unwrap();
+        std::fs::write(capsule.join("browser/index.html"), "viewer").unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            serde_json::to_vec(&json!({
+                "schema": "elastos.capsule/v1", "name": "documents", "version": "0.2.0",
+                "author": "elastos", "role": "viewer", "type": "wasm",
+                "entrypoint": "browser/index.html"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&json!({"external": {"documents": {
+                "install_path": "capsules/documents", "platforms": {}
+            }}, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Today the child's viewer storage write with the `Absent` precondition
+    /// leaves the bytes as given under the person's root.
+    #[test]
+    fn r8d_child_viewer_storage_save_for_the_passkey_person() {
+        let person = passkey_person(GBA_VIEWER);
+        let child = person.child.path();
+        gba_viewer(child);
+        let target = viewer_storage_target_for_context(
+            child,
+            &person.ctx,
+            GBA_VIEWER,
+            GBA_VIEWER,
+            "save",
+            "r8d-note.gba",
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(target.object_uri, format!("{ROOT}/{GBA_RELATIVE}"));
+        let bytes = b"r8d child viewer note".to_vec();
+        viewer_storage_write(
+            child,
+            &target,
+            &bytes,
+            crate::auth::PrincipalRootObjectPrecondition::Absent,
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+        let relative = format!("{}/{GBA_RELATIVE}", ROOT.trim_start_matches("localhost://"));
+        assert_eq!(
+            std::fs::read(child.join(&relative)).unwrap(),
+            bytes,
+            "{relative} holds the bytes it was given"
+        );
+        let expected = [
+            "capsules/gba-emulator/browser/index.html".to_string(),
+            "capsules/gba-emulator/capsule.json".to_string(),
+            "components.json".to_string(),
+            relative,
+        ];
+        let also: Vec<&str> = expected.iter().map(String::as_str).collect();
+        person.assert_child_holds_only(&also);
+    }
+
+    /// Today a viewer whose manifest declares no storage grant is refused,
+    /// and nothing is written.
+    #[test]
+    fn r8d_child_viewer_storage_save_is_refused_for_a_viewer_without_a_storage_grant() {
+        let person = passkey_person(DOCUMENTS);
+        let child = person.child.path();
+        documents_viewer(child);
+        let error = viewer_storage_target_for_context(
+            child,
+            &person.ctx,
+            DOCUMENTS,
+            DOCUMENTS,
+            "save",
+            "r8d-note.md",
+        )
+        .err()
+        .expect("the shipped documents viewer has no storage grant");
+        assert_eq!(error.to_string(), "viewer capsule has no storage grant");
+        assert_eq!(
+            viewer_error_response(error).status(),
+            StatusCode::BAD_REQUEST
+        );
+        person.assert_child_holds_only(&[
+            "capsules/documents/browser/index.html",
+            "capsules/documents/capsule.json",
+            "components.json",
+        ]);
+    }
+}
