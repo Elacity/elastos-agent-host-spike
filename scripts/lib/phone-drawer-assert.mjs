@@ -52,22 +52,19 @@ function readDrawer(target, drawer, room) {
 
 // The slide is the only part of a drawer change that outlasts the click: the
 // state attribute, inert and aria-expanded flip in the handler, the transform
-// runs for --el-drawer-ms. Wait for the position the checks below require
-// instead of for a fixed time, so a slow machine measures at rest and a
-// drawer that never moves still fails.
-async function waitForDrawerRest(target, drawer, room, state) {
-  await target.waitForFunction(({ drawer, room, open }) => {
+// runs for --el-drawer-ms. Wait for the drawer and the room to stop moving
+// instead of for a fixed time, so the checks below read both at rest. The wait
+// holds no geometry, so a drawer that never moves has nothing to wait for and
+// is judged by the checks, which report the values they measured.
+async function waitForDrawerRest(target, drawer, room) {
+  await target.waitForFunction(({ drawer, room }) => {
     const drawerNode = document.querySelector(drawer);
     const roomNode = document.querySelector(room);
     if (!drawerNode || !roomNode) {
       return false;
     }
-    const drawerRight = Math.round(drawerNode.getBoundingClientRect().right);
-    const roomLeft = Math.round(roomNode.getBoundingClientRect().left);
-    return open
-      ? drawerRight > 200 && roomLeft >= drawerRight - 2
-      : drawerRight <= 0 && roomLeft === 0;
-  }, { drawer, room, open: state === "open" }, { timeout: browserWaitTimeoutMs() });
+    return drawerNode.getAnimations().length === 0 && roomNode.getAnimations().length === 0;
+  }, { drawer, room }, { timeout: browserWaitTimeoutMs() });
 }
 
 // Push drawer contract: content first with the sidebar off screen and inert; a
@@ -81,7 +78,7 @@ export async function assertPhoneDrawer(page, target, { label, drawer, room, clo
     `${label} phone: sidebar toggle must be a 44 px collapsed control`, closed);
 
   await target.locator(`[data-el-drawer-toggle]`).first().click();
-  await waitForDrawerRest(target, drawer, room, "open");
+  await waitForDrawerRest(target, drawer, room);
   const opened = await readDrawer(target, drawer, room);
   if (screenshot) {
     await page.screenshot({ path: screenshot });
@@ -90,7 +87,7 @@ export async function assertPhoneDrawer(page, target, { label, drawer, room, clo
     `${label} phone: the toggle must slide the sidebar in and push the content aside`, opened);
 
   await target.locator(closeTarget).first().click();
-  await waitForDrawerRest(target, drawer, room, "closed");
+  await waitForDrawerRest(target, drawer, room);
   const picked = await readDrawer(target, drawer, room);
   check(picked.drawerRight <= 0 && picked.roomLeft === 0 && picked.toggle.expanded === "false",
     `${label} phone: picking an item must close the sidebar`, picked);
