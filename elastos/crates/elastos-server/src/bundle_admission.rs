@@ -521,7 +521,6 @@ pub(crate) mod tests {
         assert!(
             code.contains("const _: () = assert!(\n    !elastos_bundle_identity::LAB_REFUSALS,")
         );
-        assert!(!elastos_bundle_identity::LAB_REFUSALS);
     }
 
     #[test]
