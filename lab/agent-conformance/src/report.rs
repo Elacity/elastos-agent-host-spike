@@ -41,7 +41,7 @@ pub const INSTALLED_RUNTIME_SCOPE: &str =
 /// <first> <now>`, and runs a copy of the verified bytes from a folder no test
 /// process was given.
 pub const INSTALLED_RUNTIME_BINARY_SCOPE: &str =
-    "run.sh made the record after the suite and its liveness check, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record; what this does not show: the suite's own launches use the named path with the harness's pre-launch hash, and nothing sees the bytes the operating system then executed";
+    "run.sh hashed the report it built before the suite, hashed it again after the suite and its liveness check, refused a change, and ran a copy of those verified bytes from a folder no test process was given; it made the record after that, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record; what this does not show: the suite's own launches use the named path with the harness's pre-launch hash, and nothing sees the bytes the operating system then executed";
 
 /// The data folder the Runtime under test ran with, as the receipt states it.
 pub const RUNTIME_DATA_FOLDER: &str =

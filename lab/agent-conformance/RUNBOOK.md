@@ -373,9 +373,10 @@ write: it hashes that binary then, hashes it again after the suite, and
 refuses a difference with `reporter changed during the suite: <first> <now>`;
 it runs a copy of the verified bytes from a folder no test process was given.
 A test that misbehaves, or anything the suite run leaves behind, therefore
-cannot make this line pass; a test process that rewrites the reviewed code
-deliberately is outside the A14 threat model above, which review binding
-covers. The identity line the suite prints when the binary is named comes
+cannot make this line pass by accident. Review binding covers a deliberate
+change written into the reviewed commit; a same-user process cannot be fenced
+off without operating-system isolation, which this tool does not claim. The
+identity line the suite prints when the binary is named comes
 before any launch and is not a record, and no test's own output is read as
 one. What this does not show: the suite's own launches use the
 `AGENT_CONFORMANCE_RUNTIME_BINARY` path with the harness's pre-launch hash, and

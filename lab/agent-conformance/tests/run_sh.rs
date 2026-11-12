@@ -25,6 +25,7 @@ struct Lane {
     launch_log: PathBuf,
     suite_marker: PathBuf,
     suite_pid_file: PathBuf,
+    tmp: PathBuf,
     linger: bool,
     rewrite_reporter: bool,
 }
@@ -64,6 +65,8 @@ impl Lane {
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
         let suite_env = root.path().join("suite-env");
         let report_args = root.path().join("report-args");
+        let tmp = root.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
         Self {
             _root: root,
             repo,
@@ -76,6 +79,7 @@ impl Lane {
             launch_log: PathBuf::new(),
             suite_marker: PathBuf::new(),
             suite_pid_file: PathBuf::new(),
+            tmp,
             linger: false,
             rewrite_reporter: false,
         }
@@ -119,6 +123,7 @@ impl Lane {
             .env("PATH", path)
             .env("AGENT_CONFORMANCE_INSTALLED_BINARY", &self.installed)
             .env("AGENT_CONFORMANCE_INSTALLED_DATA", &self.data)
+            .env("TMPDIR", &self.tmp)
             .env("TEST_REAL_REPORT", env!("CARGO_BIN_EXE_report"))
             .env("TEST_SUITE_ENV", &self.suite_env)
             .env("TEST_REPORT_ARGS", &self.report_args)
@@ -229,6 +234,7 @@ case "$1" in
 #!/bin/sh
 if [ "$1" = "--installed-binary-hash" ]; then exec "$TEST_REAL_REPORT" "$@"; fi
 if [ "$1" = "--check-earlier-runs" ]; then exit 0; fi
+printf 'report self: %s\n' "$0"
 printf '%s\n' "$@" > "$TEST_REPORT_ARGS"
 env > "$TEST_REPORT_ENV"
 exit 0
@@ -565,4 +571,44 @@ fn a_suite_that_rewrites_the_reporter_makes_run_sh_refuse() {
     assert!(!lane.launch_log.exists(), "{}", lane.launch_log.display());
     assert!(!lane.report_args.exists(), "{}", lane.report_args.display());
     assert_eq!(lane.record_folders(), Vec::<String>::new());
+}
+
+#[test]
+fn a_clean_run_executes_the_verified_report_copy_from_a_private_folder() {
+    let mut lane = Lane::new();
+    lane.install(ANSWERING.as_bytes());
+    let output = lane.run();
+    let stdout = lane.stdout(&output);
+    assert!(
+        output.status.success(),
+        "stderr {:?}; stdout {stdout:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("report self: "))
+        .unwrap_or_else(|| panic!("no report path in {stdout:?}"));
+    let printed = PathBuf::from(&line["report self: ".len()..]);
+    // The report that printed the receipt is the copy, not the binary the
+    // suite was given and can write.
+    assert_ne!(
+        printed,
+        lane.lane.join("target/host/debug/report"),
+        "{printed:?}"
+    );
+    assert!(!printed.starts_with(&lane.lane), "{}", printed.display());
+    // The copy sits in the fresh folder `run.sh` made outside the lane.
+    let folder = printed.parent().unwrap();
+    assert_eq!(folder.parent().unwrap(), lane.tmp, "{}", printed.display());
+    assert!(
+        folder
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("a14-report-bin."),
+        "{}",
+        printed.display()
+    );
+    // The folder is gone once the report has run.
+    assert!(!folder.exists(), "{}", printed.display());
 }
