@@ -6,8 +6,9 @@
 //! start-up too. A guest that keeps executing, while starting up or running,
 //! is ended by the epoch deadline. Every run records one `Ending`.
 
+use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -98,6 +99,13 @@ pub struct Outcome {
     pub ending: Ending,
     /// Whether instantiation finished and `lifecycle.run` was called.
     pub started: bool,
+    /// How many times the guest's job (start-up, then the run) gave the
+    /// thread back to the executor unfinished. A guest that is executing
+    /// gives it back only when a fuel slice runs out or when a tick tells it
+    /// to yield; a guest that is waiting gives it back each time it is polled.
+    pub yields: u64,
+    /// How many epoch ticks the run saw: the calls of its epoch callback.
+    pub ticks: u64,
     pub state: HostState,
 }
 
@@ -162,7 +170,8 @@ fn ending_of_trap(error: wasmtime::Error) -> Ending {
 /// Instantiates the guest, then runs `lifecycle.run` with a fresh events
 /// stream, while `drive` sends events. When `drive` returns, the events are
 /// closed and the grace period starts, whether the guest is still starting
-/// up or already running. The `Ticker` must be running on `engine`.
+/// up or already running. Something must advance the epoch of `engine`: a
+/// `Ticker` in real time, or the caller by hand, a counted number of times.
 pub async fn run_resident(
     engine: &Engine,
     component: &Component,
@@ -188,9 +197,12 @@ pub async fn run_resident(
     );
     let running = Arc::new(AtomicBool::new(false));
     let refill = running.clone();
+    let ticks_seen = Arc::new(AtomicU64::new(0));
+    let seen = ticks_seen.clone();
     let mut ticks = 0u64;
     store.epoch_deadline_callback(move |mut context| {
         ticks += 1;
+        seen.store(ticks, Ordering::Relaxed);
         if ticks > max_ticks {
             return Err(wasmtime::Error::new(DeadlineReached));
         }
@@ -210,6 +222,7 @@ pub async fn run_resident(
 
     let (sender, receiver) = unbounded_channel();
     let grace = limits.grace;
+    let mut yields = 0u64;
 
     // Start-up and the run are one job, driven in the same `select` as the
     // driver and the grace timer, so a stop during start-up is seen too. The
@@ -233,6 +246,15 @@ pub async fn run_resident(
                 .await?
         };
         tokio::pin!(job);
+        // Counted where it happens: each time the job is polled and gives the
+        // thread back unfinished.
+        let mut job = std::future::poll_fn(|context| {
+            let poll = job.as_mut().poll(context);
+            if poll.is_pending() {
+                yields += 1;
+            }
+            poll
+        });
         let drive = drive(Events(sender));
         tokio::pin!(drive);
         let mut closed = false;
@@ -266,6 +288,8 @@ pub async fn run_resident(
     Ok(Outcome {
         ending,
         started: running.load(Ordering::Relaxed),
+        yields,
+        ticks: ticks_seen.load(Ordering::Relaxed),
         state: store.into_data(),
     })
 }
