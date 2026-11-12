@@ -232,6 +232,20 @@ async function readControlMetrics(frame, selector) {
   }, selector);
 }
 
+// The models view fetches /api/capsules/catalog and /api/capsules/interfaces
+// together when it becomes visible, and aborts both when the tab changes
+// (capsules/system/browser/model-management.js load() and stopRead()). A tab
+// change before they answer reports them as net::ERR_ABORTED request failures,
+// so let the pair settle before the smoke activates the next tab.
+async function waitForModelsSettled(frame) {
+  await frame.waitForFunction(() => {
+    const status = document.querySelector(
+      '[data-model-management] [role="status"]',
+    );
+    return Boolean(status) && !status.textContent.includes("Loading models");
+  });
+}
+
 async function assertScenario(page, width, height, screenshotPath) {
   await page.setViewportSize({ width, height });
   await page.goto(page.url(), { waitUntil: "networkidle" });
@@ -247,6 +261,9 @@ async function assertScenario(page, width, height, screenshotPath) {
   assert(sidebarTabs.join() === tabs.join(), "System sidebar tabs changed", { sidebarTabs });
   for (const tab of tabs) {
     await activateTab(frame, tab);
+    if (tab === "models") {
+      await waitForModelsSettled(frame);
+    }
   }
   await ensureSidebarVisible(frame);
   await frame.fill("#settings-search", "dock");
@@ -483,6 +500,10 @@ async function main() {
       "System layout smoke hit console errors",
       consoleErrors,
     );
+    // Every failed request stays a failure here, including net::ERR_ABORTED.
+    // The smoke never cancels catalogue or interface requests itself: it waits
+    // for the models view to settle (waitForModelsSettled) before changing tabs
+    // or navigating, so an abort means something outside this smoke aborted.
     assert(
       failedRequests.length === 0,
       "System layout smoke hit failed requests",
