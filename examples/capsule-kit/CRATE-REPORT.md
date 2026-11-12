@@ -211,7 +211,8 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
   nothing either: the fake's body test had to give the fake a real object before its unknown-field case meant
   anything.
 - **rustup picks the toolchain by the current folder.** The Bus v2 parts (Rust 1.95.0) run from their own
-  folder; the guests use the default (1.91.0 here).
+  folder; the guests use the repository's pin (1.91.0 when this was written, 1.95.0 since the pin moved;
+  the container recipe holds 1.91.0 by itself).
 - **Container builds here** need `dockerd` started, and `HTTPS_PROXY` plus `ELASTOS_REPRO_CA=/root/.ccr/ca-bundle.crt`.
   A Mac passes neither.
 - **Disk is tight in the cloud container.** `target-build/debug/incremental` grows past 2 GB; deleting it is safe.

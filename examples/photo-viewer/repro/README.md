@@ -18,7 +18,7 @@ and the artifact, written to `examples/photo-viewer/photo-viewer.component.wasm`
 | --- | --- |
 | Image | `IMAGE` in `examples/capsule-kit/repro/build-in-container.sh` owns the digest pin |
 | Platform | `linux/amd64`, also on Apple Silicon (Docker runs it emulated) |
-| Toolchain | Rust 1.91.0 (image and `rust-toolchain.toml`), target `wasm32-unknown-unknown` |
+| Toolchain | Rust 1.91.0, the image's compiler, held by `RUSTUP_TOOLCHAIN` in the recipe (the repository's `rust-toolchain.toml` pins a newer compiler and is not used in the container); target `wasm32-unknown-unknown` |
 | Crates | `Cargo.lock` of the guest and of `elastos/tools/componentize`, built `--locked` |
 | Paths | Repository mounted at `/src/elastos-runtime`, the path the builder remaps to; `HOME=/home/builder` |
 | `python3` | The package version and Debian snapshot date in `examples/capsule-kit/repro/build-in-container.sh` (bookworm main only) |
