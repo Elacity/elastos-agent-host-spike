@@ -1440,6 +1440,9 @@ fn gateway_provider_error_status(scheme: &str, err: &anyhow::Error) -> StatusCod
 }
 
 fn inbox_error_response(err: anyhow::Error) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
     let profile_required = gateway_home_system::profile_required_message(&err);
     let text = profile_required
         .map(str::to_string)
