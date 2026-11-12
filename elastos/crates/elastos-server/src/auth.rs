@@ -5103,6 +5103,12 @@ pub fn load_auth_state(data_dir: &Path) -> anyhow::Result<AuthState> {
     load_auth_state_with_identity(data_dir).map(|(state, _)| state)
 }
 
+/// The owner's principals, and nothing else of the sign-in file. Agent code
+/// reads people through this, so no protection record crosses the boundary.
+pub(crate) fn load_owner_principals(data_dir: &Path) -> anyhow::Result<Vec<PrincipalRecord>> {
+    Ok(load_auth_state(data_dir)?.principals)
+}
+
 fn load_auth_state_with_identity(
     data_dir: &Path,
 ) -> anyhow::Result<(AuthState, Option<RegularFileIdentity>)> {

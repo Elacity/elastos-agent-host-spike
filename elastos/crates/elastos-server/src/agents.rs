@@ -442,7 +442,7 @@ fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
         true => Some(lock_for_write(data_dir)?),
         false => None,
     };
-    let owner_file = crate::auth::load_auth_state(data_dir)?.principals;
+    let owner_file = crate::auth::load_owner_principals(data_dir)?;
     let file = match load(data_dir, &owner_file)? {
         AgentFile::Missing => AgentRecordsFile::unwritten(),
         AgentFile::Loaded(file) => file,

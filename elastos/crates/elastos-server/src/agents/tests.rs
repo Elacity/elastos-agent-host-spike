@@ -1612,6 +1612,9 @@ fn the_agent_files_name_no_owner_key_function_and_read_no_environment() {
         "load_principal_root_protection",
         "principal_root_protections",
         "encrypted_recovery_kit",
+        // The whole sign-in file holds the protection list; the agents
+        // module reads only `load_owner_principals`.
+        "load_auth_state",
     ];
     // Broader than the names: no word for opening a ciphertext, and nothing
     // of the person's kit or code.
