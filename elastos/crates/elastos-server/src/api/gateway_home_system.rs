@@ -8416,26 +8416,40 @@ fn home_background_image_entry(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<Option<HomeBackgroundImageEntry>> {
+    // An interrupted save can leave an older image of another format beside the
+    // new one, so the reader serves the file written last. A name with no
+    // readable time, and an equal time, keep the earlier name in the fixed
+    // order, which makes the choice stable.
+    let mut chosen: Option<(HomeBackgroundImageEntry, Option<std::time::SystemTime>)> = None;
     for &(file_name, content_type) in HOME_BACKGROUND_IMAGE_FILES {
         let path = home_appearance_path(data_dir, context, file_name)?;
         if !path.is_file() {
             continue;
         }
-        let version = path
+        let modified = path
             .metadata()
             .ok()
-            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|metadata| metadata.modified().ok());
+        let version = modified
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_nanos().to_string())
             .unwrap_or_else(|| now_ts().to_string());
-        return Ok(Some(HomeBackgroundImageEntry {
+        let entry = HomeBackgroundImageEntry {
             path,
             object_uri: home_appearance_object_uri(context, file_name),
             content_type,
             version,
-        }));
+        };
+        let newer = match (&chosen, modified) {
+            (None, _) => true,
+            (Some((_, current)), Some(next)) => current.is_none_or(|current| next > current),
+            (Some(_), None) => false,
+        };
+        if newer {
+            chosen = Some((entry, modified));
+        }
     }
-    Ok(None)
+    Ok(chosen.map(|(entry, _)| entry))
 }
 
 pub(super) fn home_background_overlay_opacity_default() -> f64 {
@@ -8560,15 +8574,24 @@ fn home_save_background_image_with(
     checkpoint: &mut dyn ImageOperationCheckpoint,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let _guard = home_background_image_lock()?;
+    home_remove_staged_background_image_files(data_dir, context);
     let path = home_appearance_path(data_dir, context, file_name)?;
     // Every existing image is read first, the destination name included, so a
     // damaged one refuses the upload before anything is written: the bytes the
     // Home shows now stay in place (#447).
     let existing = home_background_image_paths_checked(data_dir, context)?;
     checkpoint.reached(ImageOperationPoint::Checked);
-    // The write stages the new bytes in a temporary file beside the images and
-    // renames it over the destination in one step. A failure before the rename
-    // removes the temporary file and leaves every existing image as it was.
+    // Crash points of this save, and what each leaves:
+    // - before the write: every existing image as it was.
+    // - while staging: a `.background-image.<format>.<16 hex>.tmp` file beside
+    //   the images, which the next upload or reset removes by that name.
+    // - a failed staging or rename: the temporary file is removed and every
+    //   existing image stays.
+    // - after the rename: the new bytes under the destination name, with an
+    //   older image of another format still beside them until the removal
+    //   below. The reader shows the image written last, so the new image is
+    //   the one served.
+    // - a removal error: that older file stays, and the error names it.
     crate::auth::write_principal_root_object_resolved(
         data_dir,
         context.root(),
@@ -8577,11 +8600,6 @@ fn home_save_background_image_with(
         &bytes,
     )?;
     checkpoint.reached(ImageOperationPoint::Replaced);
-    // The new bytes are now in place under the destination name. A crash here
-    // leaves them beside any older image of another format: nothing is lost,
-    // and the reader shows the first name that exists (png, then jpg, webp,
-    // gif), so an older image can stay visible until the next save or reset
-    // removes it. No reader step sees a partial image.
     home_remove_background_image_files(existing, Some(&path))?;
     checkpoint.reached(ImageOperationPoint::Removed);
     home_appearance_summary(data_dir, context)
@@ -8600,8 +8618,12 @@ fn home_reset_background_image_with(
     checkpoint: &mut dyn ImageOperationCheckpoint,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let _guard = home_background_image_lock()?;
+    home_remove_staged_background_image_files(data_dir, context);
     let existing = home_background_image_paths_checked(data_dir, context)?;
     checkpoint.reached(ImageOperationPoint::Checked);
+    // A crash during the removal leaves the images it had not yet removed.
+    // A crash after the last removal leaves none. No reader step sees a
+    // partial image.
     home_remove_background_image_files(existing, None)?;
     checkpoint.reached(ImageOperationPoint::Removed);
     home_appearance_summary(data_dir, context)
@@ -8633,12 +8655,79 @@ fn home_background_image_paths_checked(
     Ok(paths)
 }
 
+/// Removes temporary files a staging step left beside the images. Only the
+/// fixed staging name `.<image file name>.<16 lowercase hex digits>.tmp` is
+/// matched, so a crash while staging leaves a file the next upload or reset
+/// discards and no other name in the folder is touched. A removal error leaves
+/// that file and logs it; the reader never opens a staged name, so the
+/// operation continues.
+fn home_remove_staged_background_image_files(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+) {
+    let Ok(image_path) = home_appearance_path(data_dir, context, HOME_BACKGROUND_IMAGE_FILES[0].0)
+    else {
+        return;
+    };
+    let Some(folder) = image_path.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_staged_background_image_name(name) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(
+                path = %entry.path().display(),
+                error = %err,
+                "could not remove a staged background image file"
+            ),
+        }
+    }
+}
+
+/// True for the fixed staging name a background image write uses:
+/// `.background-image.<format>.<16 lowercase hex digits>.tmp`.
+fn is_staged_background_image_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".background-image.") else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix(".tmp") else {
+        return false;
+    };
+    let Some((format, hex)) = rest.split_once('.') else {
+        return false;
+    };
+    let known_format = HOME_BACKGROUND_IMAGE_FILES
+        .iter()
+        .any(|(file_name, _)| file_name.strip_prefix("background-image.") == Some(format));
+    known_format
+        && hex.len() == 16
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Removes the listed image files except `keep`, the destination an upload
-/// has just written.
+/// has just written. Every removal is attempted, so one failing file does not
+/// leave the others behind. Each failure is logged and the first one is
+/// returned: the response names the file that stayed and whether the new image
+/// was already in place or the reset was incomplete.
 fn home_remove_background_image_files(
     paths: Vec<PathBuf>,
     keep: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    let replaced = keep.is_some();
+    let mut first_failure: Option<String> = None;
     for path in paths {
         if keep == Some(path.as_path()) {
             continue;
@@ -8646,8 +8735,29 @@ fn home_remove_background_image_files(
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "could not remove an older background image"
+                );
+                if first_failure.is_none() {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    first_failure = Some(format!("{name}: {err}"));
+                }
+            }
         }
+    }
+    if let Some(failure) = first_failure {
+        if replaced {
+            anyhow::bail!("the new background image is in place, but an older image could not be removed ({failure})");
+        }
+        anyhow::bail!(
+            "the background image reset is incomplete; an image could not be removed ({failure})"
+        );
     }
     Ok(())
 }
@@ -10300,6 +10410,147 @@ mod stored_root_tests {
             names,
             ["background-image.jpg", "background-image.png"],
             "neither route removed or added a file"
+        );
+    }
+
+    /// The next upload and reset remove a staged file an interrupted save left,
+    /// matched by its fixed staging name only.
+    #[test]
+    fn background_image_operations_remove_a_leftover_staged_file() {
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        let png =
+            seed_background_image(&data_dir, &context, "background-image.png", b"first image");
+        let folder = png.parent().unwrap();
+        let staged = folder.join(".background-image.png.0123456789abcdef.tmp");
+        let staged_other_format = folder.join(".background-image.webp.0123456789abcdef.tmp");
+        let short_hex = folder.join(".background-image.png.0123456789abcde.tmp");
+        let non_hex = folder.join(".background-image.png.0123456789abcdeg.tmp");
+        let suffix = folder.join(".background-image.png.0123456789abcdef.tmp.bak");
+        let other_name = folder.join(".appearance.0123456789abcdef.tmp");
+        for path in [
+            &staged,
+            &staged_other_format,
+            &short_hex,
+            &non_hex,
+            &suffix,
+            &other_name,
+        ] {
+            std::fs::write(path, b"staged").unwrap();
+        }
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"second image".to_vec(),
+        )
+        .unwrap();
+        assert!(!staged.exists(), "a matching staged file is removed");
+        assert!(!staged_other_format.exists());
+        for kept in [&short_hex, &non_hex, &suffix, &other_name] {
+            assert!(
+                kept.exists(),
+                "a name outside the staging pattern stays: {kept:?}"
+            );
+        }
+        let staged_jpg = folder.join(".background-image.jpg.0123456789abcdef.tmp");
+        std::fs::write(&staged_jpg, b"staged").unwrap();
+        home_reset_background_image(&data_dir, &context).unwrap();
+        assert!(!png.exists());
+        assert!(!staged_jpg.exists());
+        for kept in [&short_hex, &non_hex, &suffix, &other_name] {
+            assert!(kept.exists());
+        }
+    }
+
+    /// A save whose removal of an older image fails reports the failure, names
+    /// the file that stayed, and keeps the new image bytes.
+    #[test]
+    fn background_image_save_reports_a_failed_cleanup_and_keeps_the_new_image() {
+        struct ReadOnlyAfterReplace {
+            folder: PathBuf,
+        }
+        impl ImageOperationCheckpoint for ReadOnlyAfterReplace {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                if point == ImageOperationPoint::Replaced {
+                    std::fs::set_permissions(&self.folder, fs::Permissions::from_mode(0o555))
+                        .unwrap();
+                }
+            }
+        }
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        let png = seed_background_image(&data_dir, &context, "background-image.png", b"old image");
+        let jpg = seed_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"older sibling",
+        );
+        let folder = png.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = folder.join("root-probe");
+        let root_process = std::fs::File::create(&probe).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        if root_process {
+            eprintln!(
+                "skipping background_image_save_reports_a_failed_cleanup_and_keeps_the_new_image: a read-only folder still accepts a new file (running as root)"
+            );
+            return;
+        }
+        let error = home_save_background_image_with(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"new image".to_vec(),
+            &mut ReadOnlyAfterReplace {
+                folder: folder.clone(),
+            },
+        )
+        .unwrap_err();
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        let text = error.to_string();
+        assert!(text.contains("is in place"), "{text}");
+        assert!(
+            text.contains("background-image.jpg"),
+            "the answer names the file that stayed: {text}"
+        );
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.content_type, "image/png", "the new image is served");
+        assert_eq!(
+            home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
+            b"new image"
+        );
+        assert!(jpg.is_file(), "the older sibling stays");
+    }
+
+    /// The reader serves the image written last when two formats remain.
+    #[test]
+    fn background_image_reader_serves_the_last_written_image() {
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        seed_background_image(&data_dir, &context, "background-image.jpg", b"jpg image");
+        let png = seed_background_image(&data_dir, &context, "background-image.png", b"png image");
+        let older = std::time::SystemTime::now() - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&png)
+            .unwrap()
+            .set_modified(older)
+            .unwrap();
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.content_type, "image/jpeg",
+            "the earlier name in the fixed order has the older write time"
+        );
+        assert_eq!(
+            home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
+            b"jpg image"
         );
     }
 }
