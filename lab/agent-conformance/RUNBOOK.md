@@ -274,7 +274,10 @@ The no-operator tests exercise manifest dispatch before payload loading; their
 default component identity comes from the live default journey.
 
 `versions_receipt (A14)` passes only with complete, valid, consistent identities
-and a successful exclusive write. Missing or malformed values and Git query
+and a successful exclusive write. The receipt keeps the suite's Runtime
+identity as `runtime_sha256` beside `runtime_path`, which is absent when the
+suite built its own Runtime, and the installed-path row compares both.
+Missing or malformed values and Git query
 failures produce an incomplete receipt with explicit reasons and a failing
 command. A write refusal names its cause, including `AlreadyExists` or
 `NotFound`, and fails the command. Exclusive creation preserves prior receipts
@@ -308,7 +311,10 @@ families did, stays with the reviewer list.
 `run.sh` and the report — is trusted, because each review names that exact
 commit and the tree must be clean before the suite, after it, and when the
 report is written. An A14 row must not pass by accident, by a test that
-misbehaves, or by anything the suite run leaves behind. A deliberate change
+misbehaves, or by anything the suite run leaves behind. Identity lines from the
+suite's own output are trusted on that same basis: the reviewed code prints
+them at the spawn point, and a test that deliberately rewrote one would have to
+be written into the reviewed commit. A deliberate change
 written into the reviewed commit is outside this model: review binding is what
 covers it. Same-user code cannot be fenced off without operating-system
 isolation, which this tool does not claim.
@@ -358,9 +364,15 @@ installed bytes belong to, not that the release is genuine. The suite does not
 run on the installed data folder. It does not check the hash of the bundle the
 demo ran.
 
-`installed_runtime_ran (A14)` appears beside it and passes only when `run.sh`
-wrote exactly one record to the private folder it made and passed to the
-report. `run.sh` made that record only after the suite had exited and its
+`installed_runtime_ran (A14)` appears beside it and passes only when two
+records agree. The first is the suite's own Runtime identity: the suite must
+have been told to launch a named binary (`AGENT_CONFORMANCE_RUNTIME_BINARY`
+set), and the one Runtime identity it printed must name a path that resolves to
+`installed_runtime.binary_path` with a SHA-256 equal to
+`installed_runtime.binary_sha256`; the receipt keeps that path as
+`runtime_path` beside `runtime_sha256`. The second is the launch record:
+`run.sh` wrote exactly one record to the private folder it made and passed to
+the report. `run.sh` made that record only after the suite had exited and its
 liveness check had found no surviving suite process, and only after it had
 hashed the installed binary, launched it once, seen it answer, and hashed it
 again; both hashes match `installed_runtime.binary_sha256`, and the record
@@ -371,20 +383,20 @@ existed while the suite ran, so no test process is handed the record or its
 path. `run.sh` builds the report before the suite in a folder the suite can
 write: it hashes that binary then, hashes it again after the suite, and
 refuses a difference with `reporter changed during the suite: <first> <now>`;
-it runs a copy of the verified bytes from a folder no test process was given.
-A test that misbehaves, or anything the suite run leaves behind, therefore
-cannot make this line pass by accident. Review binding covers a deliberate
-change written into the reviewed commit; a same-user process cannot be fenced
-off without operating-system isolation, which this tool does not claim. The
-identity line the suite prints when the binary is named comes
-before any launch and is not a record, and no test's own output is read as
-one. What this does not show: the suite's own launches use the
-`AGENT_CONFORMANCE_RUNTIME_BINARY` path with the harness's pre-launch hash, and
-nothing sees the bytes the operating system executed. The liveness check
+it runs a copy of the verified bytes from a folder no test process was given,
+and that same copy grades the receipt after the suite, so the rows the owner
+sees come from bytes no test process could write. A test that misbehaves, or
+anything the suite run leaves behind, therefore cannot make this line pass by
+accident. Review binding covers a deliberate change written into the reviewed
+commit; a same-user process cannot be fenced off without operating-system
+isolation, which this tool does not claim. The identity line the suite prints
+when the binary is named comes before any launch and is not a record, and no
+test's own output is read as one. What this does not show: nothing sees the
+bytes the operating system executed. The liveness check
 covers the process group each suite command was started in; a process that
 leaves its group before the check can still act unseen, and the row then rests
-on the launch above, not on the absence of such a process. The receipt records
-`installed_binary_launch_status`
+on the two records above, not on the absence of such a process. The receipt
+records `installed_binary_launch_status`
 (`run_sh_launched_installed_path_hash_matched` or
 `not_run_sh_launched_installed_path_hash_matched`),
 `installed_binary_launch_failures`, and `runtime_data_folder`, which states that
@@ -397,11 +409,24 @@ path that is not the installed path with
 `run.sh launched <path>, not the installed binary <path>`; a difference in
 hash names both hashes; and an installed Runtime whose chain did not match
 leaves nothing to compare. A record whose fields `run.sh` does not write fails
-the row with `malformed launch record`. Identity lines are
+the row with `malformed launch record`. An unset variable fails it with
+`the suite was not told to launch a named binary (AGENT_CONFORMANCE_RUNTIME_BINARY
+unset); it builds the checkout, so its launches are not the installed binary`;
+a variable naming another file with
+`the suite was told to launch <path>, not the installed binary <path>`; a suite
+identity with no path with
+`the suite recorded no named Runtime path; it built its own Runtime`; an
+identity naming another path with
+`the suite recorded Runtime path <path>, not the installed binary <path>`; and
+a different hash with
+`the suite recorded Runtime SHA-256 <hash>, installed binary is <hash>`.
+Identity lines are
 still read from the whole test output, which cannot say which test printed a
 line, so a run that names two different Runtime hashes fails
 `versions_receipt` with `conflicting elastos SHA-256`, and two different Runtime
-paths fail it with `conflicting elastos path`; neither is launch evidence. This
+paths fail it with `conflicting elastos path`; neither is launch evidence, and
+the installed-path row fails too with `the suite recorded conflicting Runtime
+identities; not every one names the installed binary`. This
 row says nothing about behaviour on the installed data folder: that folder is
 never used by a run.
 
@@ -412,9 +437,9 @@ the first hash it does not launch them, prints
 `given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
 and the run fails. This does not show a swap made between that hash and the
 operating system starting the process, or what a started Runtime then starts by
-itself. The harness writes no record; the installed-path row rests on `run.sh`'s
-launch and does not need this variable. Without it the suite builds the
-checkout's Runtime. When no installed Runtime was given the receipt has no such
+itself. The harness writes no record. The installed-path row reads this
+variable: without it the suite builds the checkout's Runtime, and that row
+fails. When no installed Runtime was given the receipt has no such
 row. Only the Runtime is given; the
 localhost provider, the probe and every Home the Runtime runs in still come
 from the checkout, so the installation's data folder is never used by a run.
@@ -443,9 +468,10 @@ only typed identity fields and graded test rows for the receipt. Child captures,
 HTTP bodies and environment dumps stay outside that data model. Synthetic
 receipt fixtures stay inside ignored throwaway roots and supply zero live proof.
 
-After a successful command, only the small receipt remains in its run directory.
-The table is inside that receipt. Keep it through candidate review, then remove
-the receipt and its empty directory. Failed commands retain Cargo output and
+After a successful command, only the small receipt remains in the folder
+`run.sh` made for it, outside the suite's temporary folder. The table is inside
+that receipt. Keep it through candidate review, then remove the receipt and its
+empty directory. Failed commands retain Cargo output and
 failed Homes under the existing review-and-remove rule. Generated native
 binaries, WASM, receipts and synthetic fixtures remain ignored.
 
@@ -548,12 +574,17 @@ Ready before typing it:
 
 The command says which of the binary, the data folder and the reviews file is
 missing, and refuses a tree that is not clean. It then runs `run.sh` with the
-installed binary as the Runtime the suite launches, prints every A14 row with
-its reasons through `report --a14 <receipt>`, copies the receipt folder to
+installed binary as the Runtime the suite launches. After the suite, `run.sh`
+prints every A14 row with its reasons through `report --a14 <receipt>`, using
+the reporter copy it verified and keeps outside every path the suite was
+given; this command reads that result and runs no reporter of its own. It
+copies the receipt folder to
 `${ELASTOS_DEMO_RECEIPTS:-$HOME/elastos-demo-receipts}/<UTC time>/` with its
 own output as `demo-output.log`, and prints that path. It exits 0 only when
 the suite passed and every A14 row reads PASS; the receipt folder is kept
-either way. It writes nothing under the install paths: the installed binary is
+either way. The receipt is written to its own folder, made after the suite
+outside every path the suite was given. It writes nothing under the install
+paths: the installed binary is
 launched where it is, the suite's throwaway Homes are under this lane's
 `target`, and the record launch's throwaway Home is under the temporary folder
 this command checked. Before anything runs it works out where the receipts
@@ -569,7 +600,7 @@ What each A14 row means:
 | `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
-| `installed_runtime_ran` | `run.sh` hashed the report it built before the suite, hashed it again after the suite and its liveness check, refused a change, and ran a copy of the verified bytes; it made the record after that, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
+| `installed_runtime_ran` | the suite was told a named binary whose canonical path is the installed binary, and the Runtime identity it recorded names that path with the installed binary's SHA-256; `run.sh` hashed the report it built before the suite, hashed it again after the suite and its liveness check, refused a change, and ran a copy of the verified bytes; it made the record after that, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
 
 What the receipt does not prove:
 

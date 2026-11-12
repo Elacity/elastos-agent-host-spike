@@ -234,6 +234,7 @@ case "$1" in
 #!/bin/sh
 if [ "$1" = "--installed-binary-hash" ]; then exec "$TEST_REAL_REPORT" "$@"; fi
 if [ "$1" = "--check-earlier-runs" ]; then exit 0; fi
+if [ "$1" = "--a14" ]; then exit 0; fi
 printf 'report self: %s\n' "$0"
 printf '%s\n' "$@" > "$TEST_REPORT_ARGS"
 env > "$TEST_REPORT_ENV"
@@ -611,4 +612,25 @@ fn a_clean_run_executes_the_verified_report_copy_from_a_private_folder() {
     );
     // The folder is gone once the report has run.
     assert!(!folder.exists(), "{}", printed.display());
+    // The receipt lies in its own folder outside the lane and outside the run
+    // folder the suite was given, and the rows were printed with the verified
+    // copy before that copy was removed.
+    let receipt = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("A14 rows of "))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("no receipt line in {stdout:?}"));
+    assert!(!receipt.starts_with(&lane.lane), "{}", receipt.display());
+    assert!(
+        receipt
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("a14-receipt."),
+        "{}",
+        receipt.display()
+    );
+    assert!(stdout.contains("A14 rows result: PASS\n"), "{stdout:?}");
 }

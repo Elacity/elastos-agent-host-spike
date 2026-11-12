@@ -1,24 +1,25 @@
 #!/bin/bash
 # Checks when demo.sh stops and what it exits with, without running the suite.
 #
-#   demo-gates.sh <report-binary> <new-folder>
+#   demo-gates.sh <new-folder>
 #
-# Under <new-folder> it lays out a stand-in checkout holding a copy of demo.sh,
-# the given report tool and a stub run.sh, beside a stand-in installed Runtime.
-# The stub records that it ran, names a prepared receipt and exits as told, so
-# each case decides what the suite "did". Every case runs with a throwaway HOME
-# and names both install paths, so no real installation is read or written.
+# Under <new-folder> it lays out a stand-in checkout holding a copy of demo.sh
+# and a stub run.sh, beside a stand-in installed Runtime. The stub records that
+# it ran, prints the receipt and A14 rows it was told to print, and exits as
+# told, so each case decides what the suite "did". A reporter stub sits where
+# the suite can write one; a run of demo.sh must never execute it. Every case
+# runs with a throwaway HOME and names both install paths, so no real
+# installation is read or written.
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-    printf 'usage: demo-gates.sh <report-binary> <new-folder>\n' >&2
+if [ "$#" -ne 1 ]; then
+    printf 'usage: demo-gates.sh <new-folder>\n' >&2
     exit 2
 fi
-report=$1
 lane=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 
-mkdir "$2"
-root=$(cd -- "$2" && pwd -P)
+mkdir "$1"
+root=$(cd -- "$1" && pwd -P)
 checkout="$root/checkout"
 stand_in="$checkout/lab/agent-conformance"
 installed="$root/installed"
@@ -27,17 +28,23 @@ mkdir -p "$stand_in/target/host/debug" "$root/home" "$root/tmp" "$installed/bin"
 env -i PATH="$PATH" HOME="$root/home" git init -q "$checkout"
 printf '*\n' >"$checkout/.gitignore"
 cp "$lane/demo.sh" "$stand_in/demo.sh"
-cp "$report" "$stand_in/target/host/debug/report"
+# A reporter where the suite could write one. demo.sh must never run it: this
+# stub would report a pass and leave a marker if it did.
+printf '#!/bin/sh\n: >"%s"\nexit 0\n' "$root/report-ran" >"$stand_in/target/host/debug/report"
 cat >"$stand_in/run.sh" <<'STUB'
 #!/bin/bash
 : >"$STUB_RAN"
 if [ -n "$STUB_RECEIPT" ]; then
     printf 'versions receipt: %s\n' "$STUB_RECEIPT"
 fi
+if [ -n "$STUB_A14" ]; then
+    printf '%s\n' "$STUB_A14"
+fi
 exit "$STUB_EXIT"
 STUB
 printf '#!/bin/sh\nexit 0\n' >"$installed/bin/elastos"
-chmod 755 "$stand_in/demo.sh" "$stand_in/run.sh" "$installed/bin/elastos"
+chmod 755 "$stand_in/demo.sh" "$stand_in/run.sh" "$stand_in/target/host/debug/report" \
+    "$installed/bin/elastos"
 printf '[]\n' >"$root/reviews.json"
 before=$(cd -- "$installed" && find . | sort)
 
@@ -56,9 +63,9 @@ receipt pass "$five"
 receipt missing "$four"
 receipt edited "$five" "${five/review_binding (A14) | PASS/review_binding (A14) | FAIL}"
 
-# demo <case> <receipt-name or ""> <suite-exit>: one run of the stand-in
-# demo.sh. `receipts` and `temporary` name where it may write; unset, they are
-# folders of the case's own. Leaves `status` and the files out-<case>,
+# demo <case> <receipt-name or ""> <suite-exit> <rows-output>: one run of the
+# stand-in demo.sh. `receipts` and `temporary` name where it may write; unset,
+# they are folders of the case's own. Leaves `status` and the files out-<case>,
 # err-<case> and, when the stub ran, ran-<case>.
 receipts=""
 temporary=""
@@ -73,6 +80,7 @@ demo() {
         AGENT_CONFORMANCE_INSTALLED_DATA="$installed/data" \
         ELASTOS_DEMO_RECEIPTS="${receipts:-$root/kept-$name}" \
         STUB_RAN="$root/ran-$name" STUB_RECEIPT="$named" STUB_EXIT="$3" \
+        STUB_A14="$4" \
         "$stand_in/demo.sh" "$root/reviews.json" >"$root/out-$name" 2>"$root/err-$name" || status=$?
     receipts=""
     temporary=""
@@ -101,53 +109,60 @@ refused() {
     fi
 }
 
-# The one way to exit 0: the suite passed and all five rows read PASS.
-demo pass pass 0
+# The one way to exit 0: the suite passed and printed every row as PASS.
+demo pass pass 0 "$five"$'A14 rows result: PASS'
 if [ "$status" -ne 0 ] || ! grep -qx 'demo: PASS; every A14 row passes' "$root/out-pass"; then
     fail pass "exit $status without the PASS line"
 fi
 if [ ! -e "$root/ran-pass" ] || [ -z "$(find "$root/kept-pass" -name VERSIONS.json)" ]; then
     fail pass "the suite did not run or no receipt was kept"
 fi
+# The reporter the suite could write was never run: the rows demo.sh gated on
+# are the ones its runner printed, from the copy it verified.
+if [ -e "$root/report-ran" ]; then
+    fail pass "demo.sh ran the reporter from the suite-writable build path"
+fi
 
-# A suite that fails, whatever the receipt says.
-demo suite-fails pass 1
+# A suite that fails, whatever the receipt and rows say.
+demo suite-fails pass 1 "$five"$'A14 rows result: PASS'
 failed suite-fails 'demo: FAIL; the suite did not pass (run.sh exit 1)'
 
 # A receipt with one of the five rows missing.
-demo row-missing missing 0
+demo row-missing missing 0 \
+    "$four"$'installed_runtime_ran (A14) | FAIL | row missing from the receipt\nA14 rows result: FAIL'
 failed row-missing 'installed_runtime_ran (A14) | FAIL | row missing from the receipt'
 failed row-missing 'demo: FAIL; not every A14 row passes'
 
 # A receipt whose table no longer matches the hash recorded for it.
-demo table-edited edited 0
+demo table-edited edited 0 \
+    $'A14 rows: receipt table does not match its recorded hash\nA14 rows result: FAIL'
 failed table-edited 'A14 rows: receipt table does not match its recorded hash'
 failed table-edited 'demo: FAIL; not every A14 row passes'
 
 # A suite that names no receipt.
-demo no-receipt "" 0
+demo no-receipt "" 0 ""
 failed no-receipt 'demo: FAIL; run.sh wrote no receipt'
 
 # Nothing is written under the install paths: each of these stops first.
 receipts="$installed/data/receipts"
-demo receipts-in-data pass 0
+demo receipts-in-data pass 0 ""
 refused receipts-in-data "refused: the receipts folder is inside the installed data folder"
 
 receipts="$installed/bin"
-demo receipts-in-binary-folder pass 0
+demo receipts-in-binary-folder pass 0 ""
 refused receipts-in-binary-folder "refused: the receipts folder is inside the folder holding the installed binary"
 
 ln -s "$installed/data" "$root/link"
 receipts="$root/link/new/deeper"
-demo receipts-through-a-link pass 0
+demo receipts-through-a-link pass 0 ""
 refused receipts-through-a-link "refused: the receipts folder is inside the installed data folder"
 
 receipts="$root/absent/../installed/data"
-demo receipts-through-dots pass 0
+demo receipts-through-dots pass 0 ""
 refused receipts-through-dots 'refused: cannot tell where the receipts folder would be'
 
 temporary="$installed/data"
-demo temporary-in-data pass 0
+demo temporary-in-data pass 0 ""
 refused temporary-in-data "refused: the temporary folder is inside the installed data folder"
 
 if [ "$before" != "$(cd -- "$installed" && find . | sort)" ]; then

@@ -20,12 +20,13 @@ if [ -L "$lane/target" ]; then
 fi
 mkdir -p "$lane/target"
 run_dir=$(mktemp -d "$lane/target/run-table.XXXXXX")
-# The suite gets this run folder as TMPDIR. The installed-path record is made
-# only after the suite has exited, in a new private folder outside the lane and
-# outside every path the suite was given. The report is given the record's path
-# on its command line after the suite; no test process is given it. The folder
-# is removed once the report has read it, and the record it held stays in the
-# receipt output.
+# The suite gets this run folder as TMPDIR. The installed-path record and the
+# receipt are made only after the suite has exited, in new private folders
+# outside the lane and outside every path the suite was given. The report is
+# given the record's path on its command line after the suite; no test process
+# is given it. The record folder is removed once the report has read it, and
+# the record it held stays in the receipt output. The receipt folder stays for
+# the owner's command to copy.
 base_tmp=${TMPDIR:-/tmp}
 # An ambient value would otherwise reach every test process.
 unset AGENT_CONFORMANCE_LAUNCH_RECORD
@@ -245,7 +246,22 @@ else
 fi
 printf 'process_isolation rows: process isolation, not capsule isolation; diagnostic results only\n'
 printf 'instance rows: two_instances_overlap_with_separate_grants and instance_grant_does_not_authorise_sibling each run one shared journey; process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9\n'
-set -- "$run_dir/list" "$run_dir/results" "$status" "$run_dir/VERSIONS.json"
+# The receipt goes to its own folder, made now that the suite has exited and
+# outside every path the suite was given. A folder the suite can write could
+# hold a prepared receipt; this one it never saw.
+receipt_dir=$(mktemp -d "$base_tmp/a14-receipt.XXXXXX" 2>/dev/null) || {
+    printf 'no private folder for the receipt\n' >&2
+    exit 1
+}
+case "$receipt_dir" in
+    "$lane"|"$lane"/*|"$run_dir"|"$run_dir"/*)
+        rm -rf -- "$receipt_dir" 2>/dev/null || true
+        printf 'no receipt folder outside the suite paths\n' >&2
+        exit 1
+        ;;
+esac
+receipt="$receipt_dir/VERSIONS.json"
+set -- "$run_dir/list" "$run_dir/results" "$status" "$receipt"
 if [ -n "$launch_record" ]; then
     set -- "$@" "$launch_record"
 fi
@@ -255,6 +271,17 @@ if AGENT_CONFORMANCE_TREE_DIRTY_DURING_RUN="$tree_dirty" "$report_bin" "$@"; the
 else
     printf 'retained Cargo output: %s\n' "$run_dir" >&2
     report_failed=1
+fi
+# Grade the receipt with the same verified copy, so the rows the owner sees
+# come from bytes no test process could write. This runs even after a failed
+# report, which may still have written its receipt.
+printf 'A14 rows of %s:\n' "$receipt"
+rows_status=0
+"$report_bin" --a14 "$receipt" || rows_status=$?
+if [ "$rows_status" -eq 0 ]; then
+    printf 'A14 rows result: PASS\n'
+else
+    printf 'A14 rows result: FAIL\n'
 fi
 # The report has read the record; the receipt output above keeps a copy.
 if [ -n "$record_dir" ]; then

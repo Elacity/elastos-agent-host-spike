@@ -1,5 +1,9 @@
 use agent_conformance::{build, report};
-use std::{env, fs, path::Path, process};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process,
+};
 
 fn main() {
     let args: Vec<_> = env::args_os().collect();
@@ -130,6 +134,12 @@ fn main() {
         None => report::LaunchRecord::Missing,
         Some(path) => report::LaunchRecord::read(Path::new(path)),
     };
+    // The binary the suite was told to launch comes from run.sh's environment,
+    // never from test output. Unset means the suite built the checkout, and the
+    // installed-path row then fails.
+    let named_runtime = env::var_os(agent_conformance::runtime::RUNTIME_BINARY)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
     let result = report::write_bound_run(
         &listed,
         &output,
@@ -141,6 +151,7 @@ fn main() {
             tree_check_failure,
             installed,
             launch_record,
+            named_runtime,
         },
         receipt,
         gaps.as_deref(),

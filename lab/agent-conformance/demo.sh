@@ -121,9 +121,14 @@ case "$receipt" in
     *) receipt="$lane/$receipt" ;;
 esac
 
-printf '\nA14 rows of %s:\n' "$receipt"
-rows=0
-"$lane/target/host/debug/report" --a14 "$receipt" || rows=$?
+# The rows are the ones run.sh printed with the reporter copy it verified and
+# keeps outside every path the suite was given. This command runs no reporter
+# of its own: the build path it could reach is one the suite can write.
+rows=$(sed -n 's/^A14 rows result: //p' "$output" | tail -n 1)
+if [ -z "$rows" ]; then
+    printf 'demo: FAIL; run.sh printed no A14 rows (exit %s); its output: %s\n' "$suite" "$output" >&2
+    exit 1
+fi
 
 mkdir -p "$receipts"
 kept="$receipts/$(date -u +%Y%m%dT%H%M%SZ)"
@@ -136,7 +141,7 @@ if [ "$suite" -ne 0 ]; then
     printf 'demo: FAIL; the suite did not pass (run.sh exit %s)\n' "$suite" >&2
     exit 1
 fi
-if [ "$rows" -ne 0 ]; then
+if [ "$rows" != PASS ]; then
     printf 'demo: FAIL; not every A14 row passes\n' >&2
     exit 1
 fi
