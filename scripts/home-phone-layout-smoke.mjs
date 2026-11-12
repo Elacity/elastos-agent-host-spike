@@ -711,7 +711,8 @@ function geometry() {
 // an optional face and the fixture serves it with no-store, so this wait
 // cannot warm a later document's cache: it only lets this document's own font
 // load settle before its boxes are read. A frame that is still navigating has
-// no document to settle; the measurements that follow record null for it.
+// no document to settle; the capsule measurements record null for it, while
+// the shell measurement has no catch and fails its check.
 async function waitForDocumentFonts(target) {
   const timeoutMs = browserWaitTimeoutMs();
   // A font load that never settles fails the check instead of hanging it.

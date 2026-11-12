@@ -133,7 +133,7 @@ try {
   const frame = () => page.frames().find(f => f !== page.mainFrame());
   // Home ignores a close click on a new window until the window's own close
   // guard expires (capsules/home-gui/browser/shell-windows.js:711 writes
-  // data-close-guard-until, :764 compares it with the page clock). Wait for
+  // data-close-guard-until, :766 compares it with the page clock). Wait for
   // that value to pass instead of sleeping past it. A window that carries no
   // attribute, or one that is not a number, counts as no guard, which is how
   // the page reads it too.

@@ -52,11 +52,17 @@ function readDrawer(target, drawer, room) {
 
 // The slide is the only part of a drawer change that outlasts the click: the
 // state attribute, inert and aria-expanded flip in the handler, the transform
-// runs for --el-drawer-ms. Wait for the drawer and the room to stop moving
-// instead of for a fixed time, so the checks below read both at rest. The wait
-// holds no geometry, so a drawer that never moves has nothing to wait for and
-// is judged by the checks, which report the values they measured.
+// runs for --el-drawer-ms. A zero-animation sample taken before the page paints
+// the change would read as rest while the slide is still to come, so first wait
+// for one painted frame (two requestAnimationFrame callbacks) after the click,
+// then poll until the drawer and the room hold no running animation. The
+// checks below then read both at rest. The wait holds no geometry, so a drawer
+// that never moves has nothing to wait for and is judged by the checks, which
+// report the values they measured.
 async function waitForDrawerRest(target, drawer, room) {
+  await target.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
   await target.waitForFunction(({ drawer, room }) => {
     const drawerNode = document.querySelector(drawer);
     const roomNode = document.querySelector(room);
