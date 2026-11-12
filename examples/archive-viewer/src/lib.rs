@@ -1,11 +1,14 @@
-//! Archive viewer core, read-only: one ZIP archive, listed but not extracted.
+//! Archive viewer core, read-only: one ZIP or uncompressed tar archive,
+//! listed but not extracted.
 //!
 //! Runtime calls `lifecycle.run`. The guest reads a request object naming one
 //! archive, asks for a read grant on that one object, and reaches every byte
-//! through the offset/length read window. It reads the end record, the
-//! central directory and one 30-byte local-header prefix per entry, checks
-//! them against each other, and writes one view the render-only page draws.
-//! It never reads the whole archive and never writes anything but its view.
+//! through the offset/length read window. One decision reads the first bytes
+//! and picks the listing: ZIP reads the end record, the central directory and
+//! one 30-byte local-header prefix per entry; tar walks a 512-byte ustar
+//! header per entry. Both check their records and write one view the
+//! render-only page draws. It never reads the whole archive and never writes
+//! anything but its view.
 //!
 //! An authority failure (no grant, a refused or failed call, a request that
 //! cannot be read or parsed) stops the run before anything is written, and

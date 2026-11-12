@@ -580,3 +580,46 @@ change.
   ZIP reader because it reads ZIP attributes.
 - A tar reader feeds its decoded entries to `src/listing.rs` and gets the same
   P1 to P9, L9 and P5 ruling and the same `Listing` shape.
+
+2026-11-12, task 010: uncompressed tar lists through the shared rules.
+
+tar has no directory, so the listing walks one 512-byte ustar header per entry
+and stops at the two zero blocks that end the archive. The tar reader decodes a
+header into an `Entry` and calls `src/listing.rs` for the name, path, kind,
+status and duplicate rules; no rule has a second copy.
+
+### What changed
+
+- New `src/tar.rs`: the header walk over the counted `Reader`. It checks each
+  header's ustar magic and checksum, parses the octal size and refuses a header
+  whose data would pass the object, builds the path from `prefix` and `name`,
+  maps typeflag `0` and NUL to a file (an archive name to N1's `archive`) and
+  `5` to a directory, and blocks every other type through P9. It never reads an
+  entry's data to list it.
+- A spent read budget stops the walk, lists the entries read so far and marks
+  the listing `read_budget` in a new `Listing::stopped` field; the view writes
+  it as `"stopped":{"code","message"}`. A 257th header refuses the archive as
+  `too_many_entries`, the P8 cap.
+- `src/lib.rs` detects the format once: a ZIP local-header or end-record
+  signature at offset 0, else a ustar magic at 257, else a ZIP end record at
+  the object's last byte, else `unknown_format`. One branch calls the matching
+  listing.
+- `src/zip.rs` exposes its reader, read helper, size probe and error to the
+  second format; the ZIP parsing and its rules are unchanged.
+
+### Tests and falsifiers
+
+- 13 tests for tar: listing shape, content-based dispatch, unknown object,
+  checksum, octal size, data bound, prefix path, non-regular types, duplicates,
+  nested archive, end marker, read-budget stop and entry cap; one more proves
+  the first tar header wins over a later ZIP end record.
+- Ten anchors T1 to T10 cover those tar rules. The path, duplicate, count and
+  read-budget cases also name the tar tests, so the shared rule has one copy to
+  break.
+- Guest suite: 104 tests pass. `falsify.py --check`: all 87 anchors found once.
+  The full run catches every case and leaves every unnamed test passing.
+
+### Remaining
+
+- tar previews and the tar fuel gate are the next work; `tar.gz` and any
+  compressed tar need Bus v2 streams, outside this app's Bus v1 path.

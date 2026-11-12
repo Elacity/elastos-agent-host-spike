@@ -28,7 +28,10 @@ the cases for them anchor there, and F44 plants a change in that module to
 prove the P-rule test runs the one copy. The lettered cases F6d to F6f,
 F15b, F16b, F19b, F21b to F21g, F22b, F23b to F23d, F25b to F25f, F30b, F30c,
 F41b to F41e, F5b to F5e and F26b cover bounds, comparisons and request fields DESIGN states
-but gives no row, and F32 covers the whole view's cap. The runtime group (`--runtime`) runs F3 (the streaming ratio check), F35
+but gives no row, and F32 covers the whole view's cap. tar has no F-number in
+DESIGN; its own rules are T1 to T10 (header checksum, octal size, data bound,
+prefix path, typeflag, zero-block end marker, budget stop, entry cap, format
+order and nested-archive name). The runtime group (`--runtime`) runs F3 (the streaming ratio check), F35
 (grant), F36 (fuel) and F43 (declared totals) in the host test, in the
 component.
 """
