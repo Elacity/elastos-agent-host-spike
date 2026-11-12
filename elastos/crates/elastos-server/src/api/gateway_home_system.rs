@@ -8620,9 +8620,10 @@ fn home_reset_background_image_with(
 
 /// Reads every existing background image and returns the paths it found,
 /// refusing on any read error. Upload and reset call this before they write or
-/// remove anything, so a damaged image gets the notice that names the file, and
-/// any other read error (an unreadable file, for example) refuses the operation
-/// before the image is replaced or removed (#447).
+/// remove anything, so an image this process cannot read refuses the operation
+/// before the image is replaced or removed (#447). The answer names only the
+/// image file: the read error carries the data folder path, so the log keeps
+/// the full error and the response does not.
 fn home_background_image_paths_checked(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
@@ -8633,12 +8634,19 @@ fn home_background_image_paths_checked(
         if !path.is_file() {
             continue;
         }
-        let _ = crate::auth::read_principal_root_object_resolved(
+        if let Err(err) = crate::auth::read_principal_root_object_resolved(
             data_dir,
             context.root(),
             &home_appearance_object_uri(context, file_name),
             &path,
-        )?;
+        ) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                "could not read a background image"
+            );
+            anyhow::bail!("background image {file_name} could not be read");
+        }
         paths.push(path);
     }
     Ok(paths)
@@ -10312,11 +10320,25 @@ mod stored_root_tests {
         let _ = std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600));
         let upload_error = upload.expect_err("an unreadable image must refuse the upload");
         let reset_error = reset.expect_err("an unreadable image must refuse the reset");
+        let principal_id = home_browser_principal_id(&context);
+        let data_folder = data_dir.to_string_lossy().into_owned();
         for (route, error) in [("upload", &upload_error), ("reset", &reset_error)] {
-            let text = format!("{error:#}");
+            let text = error.to_string();
             assert!(
-                text.to_lowercase().contains("permission denied"),
-                "{route} refusal is the read error: {text}"
+                text.contains("background-image.png"),
+                "{route} refusal names the image file: {text}"
+            );
+            assert_eq!(
+                text, "background image background-image.png could not be read",
+                "{route} refusal is the fixed message"
+            );
+            assert!(
+                !text.contains(&data_folder),
+                "{route} refusal leaves out the data folder: {text}"
+            );
+            assert!(
+                !text.contains(&principal_id),
+                "{route} refusal leaves out the person's id: {text}"
             );
         }
         let read = |path: &std::path::Path, file_name: &'static str| {
