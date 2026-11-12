@@ -416,7 +416,9 @@ impl std::error::Error for Refusal {}
 pub const LAB_REFUSALS: bool = cfg!(feature = "lab");
 
 /// The most one walk may take in. Each limit is checked while the walk
-/// lists, before the thing that would pass it is read, entered or kept.
+/// lists, before the thing that would pass it costs anything: a file before
+/// it is read, a folder before it is opened, an entry before its path is
+/// built or the listing keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     /// Files and folders under the root, counted as they are listed.
@@ -425,7 +427,7 @@ pub struct Budget {
     /// file is read; a file is read no further than that size.
     pub max_total_bytes: u64,
     /// Parts in an entry's path: `a/b/c.txt` has three. A folder whose
-    /// entries would have more is not listed.
+    /// entries would have more is not opened.
     pub max_depth: usize,
     /// Bytes in an entry's whole path under the root.
     pub max_path_bytes: usize,
@@ -457,19 +459,27 @@ impl Tally {
         }
     }
 
-    /// One listed entry, before the listing keeps it.
-    fn entry(&mut self, path: &str) -> Result<(), Refusal> {
+    /// One listed entry, before its path is built and before the listing
+    /// keeps it. `folder` is the path of the folder being listed and
+    /// `name_bytes` the length of the entry's name there: its path would be
+    /// the two joined by `/`. A refusal names the folder, not the entry,
+    /// because the entry's path is never made.
+    fn entry(&mut self, folder: &str, name_bytes: usize) -> Result<(), Refusal> {
         self.entries += 1;
         if self.entries > self.budget.max_entries {
-            return Err(over("entries", path));
+            return Err(over("entries", &an_entry_of(folder)));
         }
-        if path.len() > self.budget.max_path_bytes {
-            return Err(over("path bytes", path));
+        let path_bytes = match folder.len() {
+            0 => name_bytes,
+            folder_bytes => folder_bytes.saturating_add(1).saturating_add(name_bytes),
+        };
+        if path_bytes > self.budget.max_path_bytes {
+            return Err(over("path bytes", &an_entry_of(folder)));
         }
         Ok(())
     }
 
-    /// A folder, before it is listed: its entries would be one part deeper.
+    /// A folder, before it is opened: its entries would be one part deeper.
     fn folder(&self, path: &str) -> Result<(), Refusal> {
         if path.split('/').count() >= self.budget.max_depth {
             return Err(over("depth", path));
@@ -492,6 +502,12 @@ fn over(limit: &'static str, path: &str) -> Refusal {
         limit,
         path: path.to_owned(),
     }
+}
+
+/// How a refusal names an entry whose own path was not built: its folder,
+/// then `/…`. The root is `.`.
+fn an_entry_of(folder: &str) -> String {
+    format!("{}/…", shown(folder))
 }
 
 /// Name the bundle at `bundle` by its lab CID.
@@ -1131,11 +1147,15 @@ fn collect_entries(
             EntryKind::Special(kind) => return Err(Refusal::NotRegularFile { path, kind }),
             kind => kind,
         };
+        if kind == EntryKind::Directory {
+            // Before it is opened: a folder past the depth limit costs no
+            // handle and no listing.
+            tally.folder(&path)?;
+        }
         observe(Moment::BeforeOpen, &path);
         let handle = open_checked(folder.handle.as_fd(), name.as_c_str(), kind, &path)?;
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
-            tally.folder(&path)?;
             let listing = list_folder(handle.as_fd(), &path, tally)?;
             folders.push(Folder { handle, listing });
         } else {
@@ -1161,8 +1181,8 @@ fn list_folder(
         if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }
+        tally.entry(prefix, name.to_bytes().len())?;
         let path = entry_path(prefix, OsStr::from_bytes(name.to_bytes()))?;
-        tally.entry(&path)?;
         listing.push(Listed {
             path,
             name: name.to_owned(),

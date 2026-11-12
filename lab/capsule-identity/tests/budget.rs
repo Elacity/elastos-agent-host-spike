@@ -8,7 +8,10 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use capsule_identity::{checked_bundle, checked_bundle_within, Budget, LabCid, Refusal};
+use capsule_identity::{
+    checked_bundle, checked_bundle_within, checked_bundle_within_observed, Budget, LabCid, Moment,
+    Refusal,
+};
 use common::*;
 
 /// What a folder holds, as [`Budget`] counts it: every file and folder under
@@ -163,6 +166,53 @@ fn a_nest_of_folders_is_refused_at_the_depth_limit_before_it_is_entered() {
 }
 
 #[test]
+fn a_folder_past_the_depth_limit_is_never_opened() {
+    // The same nest, with the walk's observer listening. The walk tells it
+    // of every entry right before the open and right after. The sixteenth
+    // folder is refused, and the observer never hears of it; it heard of the
+    // fifteenth at both moments, so it was listening.
+    let bundle = assemble(&WEB_APP);
+    let mut nest = bundle.path().to_path_buf();
+    for _ in 0..40 {
+        nest.push("d");
+    }
+    fs::create_dir_all(&nest).expect("nest");
+    let budget = Budget {
+        max_depth: 16,
+        ..Budget::UNLIMITED
+    };
+    let mut seen: Vec<(Moment, String)> = Vec::new();
+    let refused = checked_bundle_within_observed(bundle.path(), budget, |moment, path| {
+        seen.push((moment, path.to_owned()))
+    })
+    .expect_err("the nest is refused");
+    let sixteenth = ["d"; 16].join("/");
+    let fifteenth = ["d"; 15].join("/");
+    assert_eq!(
+        refused,
+        Refusal::OverBudget {
+            limit: "depth",
+            path: sixteenth.clone()
+        }
+    );
+    let moments = |path: &str| -> Vec<Moment> {
+        seen.iter()
+            .filter(|(_, seen)| seen == path)
+            .map(|(moment, _)| *moment)
+            .collect()
+    };
+    assert_eq!(
+        moments(&fifteenth),
+        [Moment::BeforeOpen, Moment::AfterCheck]
+    );
+    assert!(
+        moments(&sixteenth).is_empty(),
+        "the walk came to open a folder past the depth limit: {:?}",
+        moments(&sixteenth)
+    );
+}
+
+#[test]
 fn one_path_byte_over_the_budget_is_refused() {
     let bundle = assemble(&WEB_APP);
     let mut budget = exact(shape(bundle.path()));
@@ -174,8 +224,65 @@ fn one_path_byte_over_the_budget_is_refused() {
 }
 
 #[test]
+fn an_entry_past_a_listing_limit_is_refused_before_its_path_is_built() {
+    // The two limits that are checked while a folder is listed name the
+    // folder in their refusal, with `/…` for the entry: the entry's own path
+    // was never made. The longest path of the fixture is in `browser`.
+    let bundle = assemble(&WEB_APP);
+    let exact = exact(shape(bundle.path()));
+    let mut budget = exact;
+    budget.max_path_bytes -= 1;
+    assert_eq!(
+        checked_bundle_within(bundle.path(), budget).expect_err("one byte"),
+        Refusal::OverBudget {
+            limit: "path bytes",
+            path: "browser/…".into()
+        }
+    );
+    // One entry only: whichever the listing gives second is refused, in the
+    // root, before anything is opened.
+    let mut seen = 0;
+    let budget = Budget {
+        max_entries: 1,
+        ..exact
+    };
+    assert_eq!(
+        checked_bundle_within_observed(bundle.path(), budget, |_, _| seen += 1)
+            .expect_err("one entry"),
+        Refusal::OverBudget {
+            limit: "entries",
+            path: "./…".into()
+        }
+    );
+    assert_eq!(
+        seen, 0,
+        "an entry was opened before the listing was refused"
+    );
+
+    // And in the source: the count and the length are checked before the
+    // path is built, and the depth before the folder is opened.
+    let code = library_code();
+    let listing = library_item(&code, "fn list_folder(");
+    let check = listing.find("tally.entry(prefix, name.to_bytes().len())?;");
+    let build = listing.find("entry_path(prefix,");
+    assert!(
+        matches!((check, build), (Some(check), Some(build)) if check < build),
+        "{listing}"
+    );
+    let walk = library_item(&code, "fn collect_entries(");
+    let depth = walk.find("tally.folder(&path)?;");
+    let open = walk.find("open_checked(folder.handle.as_fd()");
+    assert!(
+        matches!((depth, open), (Some(depth), Some(open)) if depth < open),
+        "{walk}"
+    );
+    assert_eq!(code.matches("tally.folder(").count(), 1);
+    assert_eq!(code.matches("tally.entry(").count(), 1);
+}
+
+#[test]
 fn the_lab_build_holds_the_lab_refusals_and_says_so() {
     // The lab turns the crate's `lab` feature on; a production crate asserts
     // the opposite at compile time.
-    assert!(capsule_identity::LAB_REFUSALS);
+    assert!(std::hint::black_box(capsule_identity::LAB_REFUSALS));
 }
