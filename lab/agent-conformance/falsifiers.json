@@ -842,8 +842,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
-          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         }
       ],
       "tests": [
