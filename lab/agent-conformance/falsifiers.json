@@ -255,9 +255,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/agent-conformance/tests/common/operator.rs",
-          "old": "    if count == 0 || !api_seen {",
-          "new": "    if false && (count == 0 || !api_seen) {"
+          "file": "../../lab/agent-conformance/src/census.rs",
+          "old": "    if files.is_empty() || !api_seen {",
+          "new": "    if false && (files.is_empty() || !api_seen) {"
         }
       ],
       "tests": [
