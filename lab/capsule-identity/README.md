@@ -192,9 +192,10 @@ the copy has no decoder). Since M2 part B it lives, with the walk and the rest
 of the identity code, in the workspace crate `elastos-bundle-identity`
 (`elastos/crates/elastos-bundle-identity/src/lib.rs`), moved there text for
 text. This crate re-exports that crate's public names and has no encoder of
-its own. `cid_bytes`, the base32 printer (`printed_cid`) and the base32
-decoder (`decode_base32`) are private there and are reached through
-`LabCid`'s printing and parsing; the two functions that build the tree,
+its own. `cid_bytes` and the base32 printer (`printed_cid`) are private
+there and are reached through `LabCid`'s printing; `LabCid`'s parsing reads
+the text with `cid_form`, in `elastos-common`, and that crate has the one
+base32 decoder; the two functions that build the tree,
 `encode_entries` and `encode_listed_files`, are public there and re-exported
 here. In the Runtime's workspace the `cid` 0.11 crate is used only by
 `elastos-server` and `elastos-namespace`, which neither this crate nor the

@@ -675,7 +675,7 @@
     },
     {
       "id": "F-CI3k",
-      "title": "check_name accepts any CID bytes that end in 32 bytes: a raw leaf's CID passes",
+      "title": "the form check lets a raw leaf's CID through: any 59-character text that starts with bafkrei passes",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [

@@ -1076,8 +1076,8 @@ content bundle is the same template's `content.capsule.json` and
 string name, which is the form the Runtime manifest type parses.
 
 The ordinary manifest type's requirement is `{name, kind}` only
-(`elastos/crates/elastos-common/src/manifest.rs:276-279`) and still refuses a
-CID key. The Runtime has a second reader, `PinnedManifest`
+(`CapsuleRequirement` in `elastos/crates/elastos-common/src/manifest.rs`) and
+still refuses a CID key. The Runtime has a second reader, `PinnedManifest`
 (`elastos/crates/elastos-common/src/pinned_manifest.rs`), which reads
 `requires[].cid` and checks each pin's form, and the one bundle check now
 parses with it. So a viewer bundle that pins its content is staged and named:

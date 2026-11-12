@@ -216,11 +216,12 @@ pub enum Refusal {
     /// Nothing past the limit was read.
     OverBudget { limit: &'static str, path: String },
     /// The Runtime's reader refused a manifest that pins a requirement
-    /// (`requires[].cid`) in `capsule.json`. Either a pin itself is refused
-    /// (it is not a package root in its one spelling, or its requirement is
-    /// not a capsule), or, in a manifest that has a pin, two requirements
-    /// share a name or two pin one CID; the two that share a name need not
-    /// be pinned themselves. `code` is the Runtime's own code and
+    /// (`requires[].cid`) in `capsule.json`. Either a pin itself is refused,
+    /// `pin_form_invalid`: its `cid` is not a string, or is not a package
+    /// root in its one spelling, or its requirement's kind is not `capsule`.
+    /// Or, in a manifest that has a pin, two requirements share a name or
+    /// two pin one CID, `requirement_duplicate`; the two that share a name
+    /// need not be pinned themselves. `code` is the Runtime's own code and
     /// `requirement` the name the reader gives with it, empty when that
     /// requirement has none.
     PinRefused {
