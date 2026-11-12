@@ -9693,3 +9693,167 @@ A passing row gives the real Runtime no A3 credit. Two-capsule-run owns the real
 
 - 139: `bridge_envelope` records the capsule's capability line and spends the invoke amount through `use_grant`; a `once` hold is settled and a `session` hold stays open.
 
+## 162
+
+Supplied checkout before editing: HEAD `7eadcb0f4a956adf4a50f86998390899b038b7c1`,
+tree `4c6bb23d0350237dd2cc3d81069b66fe2ffda6b7`, branch
+`spark/cx-agent-conformance/162-probe-build-exit-keeps-fail-grade`. Dirty paths:
+none. Cached upstream `spike/spike/agent-host` is zero ahead / zero behind;
+network access stays disabled. The supervisor owns Git state and integration.
+
+Plan: keep the existing build path and extract its process-result decision;
+prove FAIL and setup-SKIPPED through bounded artifact child tests and the existing
+report; correct the build prose; run three separate compiling plants, restore
+each, then run the required lane gates. Read the supplied BACKLOG item 14,
+019/020 handoffs, RUNBOOK setup section, architecture sections and all
+`build_probe` / `skipped` callers before this edit. The repository has no
+humanizer skill; this handoff uses direct behavior and ownership statements.
+
+The build helper now calls `probe_build_output` at its existing `.output()`
+boundary. A started script's unsuccessful status emits one fixed FAILURE line
+and panics before the independent-compilation check or artifact read. A start
+error keeps the existing setup reason. Preparation, package clean, selector
+caches and entrypoint cleanup retain their existing ownership.
+
+`probe_build_failure_stays_fail` and `probe_start_failure_stays_skipped` select
+one ordinary fixture test through the bounded Home launcher. The selection
+file and executable live in the caller's guarded Home. The fixture uses the
+same launcher for real child results and calls the exact build-result helper.
+It starts neither Runtime nor providers and builds no capsule. Its ordinary
+unselected invocation passes. Both refusal cases repair the executable to an
+exit-zero control and require normal continuation. Report checks use the real
+child status, retain all three missing native/probe identity failures and keep
+command success false. Synthetic tool streams stay outside the diagnostic,
+row and receipt. Successful Homes finish; assertion failures keep their roots.
+README and RUNBOOK now tell the caller to repair the reported build/setup
+cause and rerun the same command. The report implementation, receipt grammar,
+product blockers, falsifier list and shared runner keep their existing bytes.
+
+### Hand-run falsifiers
+
+Each plant ran alone under the shared exclusive `fcntl.flock` build lease,
+with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`,
+`CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host"` and
+`CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build"`.
+The volume had 43.346 GiB free when the lease was acquired, above the 12 GiB
+build estimate plus 2 GiB reserve. Each command had a 600-second bound.
+
+**failed-exit-skipped**. Exact old bytes (the closing newline is retained):
+
+```rust
+        failed(&output.status);
+```
+
+Exact new bytes:
+
+```rust
+        let _ = &failed;
+        skipped(&format!("probe build failed: {}", output.status));
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_build_failure_stays_fail -- --exact`. Exit **101** in 0.868 s. The named test compiled and ran; its failed assertion was `fixture observed grade`. **CAUGHT**. The original bytes were restored before the next plant.
+
+Retained fixture root `target/home-87983-1793735073295069000-0` was reviewed, checked with `/usr/sbin/lsof -t +D <root>` (exit 1, zero open-file holders), then removed. Its bounded child launches had returned and been reaped. Earlier roots keep their owners.
+
+**failed-exit-continued**. Exact old bytes (the closing newline is retained):
+
+```rust
+    if !output.status.success() {
+```
+
+Exact new bytes:
+
+```rust
+    if false && !output.status.success() {
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_build_failure_stays_fail -- --exact`. Exit **101** in 0.882 s. The named test compiled and ran; its failed assertion was `failed build keeps failure exit`. **CAUGHT**. The original bytes were restored before the next plant.
+
+Retained fixture root `target/home-88007-1793735074600716000-0` was reviewed, checked with `/usr/sbin/lsof -t +D <root>` (exit 1, zero open-file holders), then removed. Its bounded child launches had returned and been reaped. Earlier roots keep their owners.
+
+**start-error-failed**. Exact old bytes (the closing newline is retained):
+
+```rust
+    let output = result.unwrap_or_else(|error| skipped(&format!("start probe build: {error}")));
+```
+
+Exact new bytes:
+
+```rust
+    let output = result.unwrap_or_else(|error| failed(&error));
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_start_failure_stays_skipped -- --exact`. Exit **101** in 0.744 s. The named test compiled and ran; its failed assertion was `fixture observed grade`. **CAUGHT**. The original bytes were restored before the next plant.
+
+Retained fixture root `target/home-88028-1793735075765766000-0` was reviewed, checked with `/usr/sbin/lsof -t +D <root>` (exit 1, zero open-file holders), then removed. Its bounded child launches had returned and been reaped. Earlier roots keep their owners.
+
+The restored helper SHA-256 is `00a34d5cb155bcc387d38cbe31f2d2904be678d8b87fc3e6be9e7c7c1424ec0e`.
+Both exact-test commands passed before planting and after restoration; the
+restored runs took 0.753 s and 0.242 s respectively.
+The plants add zero list entries and leave the shared runner unchanged.
+Raw command output and machine-readable results are local, uncommitted files
+under `target/task-162/`, retained for supervisor review, then removal.
+
+### Principles check
+
+Answers follow the task's question wording. Paths are relative to this lane.
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name/URL replacing a code/content hash? | No | `tests/artifact.rs:390` retains the existing hash-bound `stage_probe`; the new executable is a local test fixture. |
+| 2. New capsule or UI ambient authority? | No | `tests/artifact.rs:35` uses the existing guarded Home launcher for synthetic children; capsule imports and grants retain their owners. |
+| 3. Second operation path or copy of a rule? | No | `tests/common/probe.rs:118` and `tests/artifact.rs:51` call the same process-result decision. |
+| 4. Does the Runtime core grow? | No | `tests/common/probe.rs:130` keeps build-result grading inside the lane-owned helper; all five changed paths are in this lane. |
+| 5. Do new refusals fail closed with a clear reason? | Yes | `tests/common/probe.rs:134` emits the fixed failure reason and real status, then panics before artifact access. |
+| 6. Does the capsule keep its own logic and granted Bus calls? | Yes | Unchanged `probe/src/lib.rs:138` requests authority before `providers::invoke` at line 146. |
+| 7. Do named tests and caught falsifiers prove the rules? | Yes | `tests/artifact.rs:178` and `:216` pass restored; the three separate compiling plants above each fail their named assertion. |
+| 8. Are identity, admission and allowance separate decisions? | Yes | `tests/artifact.rs:129` retains incomplete identity and `:138` requires all missing identity causes; Runtime owns admission and grants. |
+
+### Initial table-run census result
+
+The first `lab/agent-conformance/run.sh` returned **1 in 261.820 s**.
+`granted_read_succeeds` alone failed at `tests/effects.rs:498`: its physical
+census reported one holder of `stdout-108`, API sockets 0 and temp paths 0.
+The two new tests passed. The receipt kept `cargo_success: false`,
+`command_success: false`, `suite_outcome: FAIL` and complete version identity.
+This matches the capture-file census pattern recorded in the supplied backlog;
+one outer `run.sh` rerun uses identical code and documentation bytes. The
+census implementation and its assertions retain their existing checks.
+
+The failed run receipt is local and uncommitted at `target/run-table.SXES53/VERSIONS.json`, SHA-256 `79c9e5f40ec5b69577b9004e358ffcdd35f02fe7b3da94c9ff0092cc52380019`. Its fixture root `target/home-26219-1793735554499366000-99` is retained privately for supervisor census review, then removal. `/usr/sbin/lsof -t +D <root>` returned 1 with zero open-file holders before the rerun. The existing lifecycle inventory records both artifacts and their cleanup condition.
+
+### Restored author gates and handoff
+
+All lane gate commands below used the offline environment above and the shared
+heavy-build lease. The lease was released after each command set. The final gate set had
+45.302 GiB free and the outer rerun had 44.781 GiB free; each exceeded the
+12 GiB build estimate plus 2 GiB reserve. The code and documentation hashes
+match their pre-gate bytes. LOG records proof after execution.
+
+| Command | Exit | Elapsed / result |
+| --- | --- | --- |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_build_failure_stays_fail -- --exact` | 0 | 0.753 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact probe_start_failure_stays_skipped -- --exact` | 0 | 0.242 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test artifact --test report` | 0 | 40.867 s; 33 passed |
+| `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` | 0 | 0.369 s |
+| `git diff --check` | 0 | 0.026 s |
+| `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` | 0 | 268.857 s; 247 passed, 14 existing blocked tests ignored |
+| `lab/agent-conformance/run.sh` | 1 | 261.82 s; initial stdout capture census failure, retained above |
+| `lab/agent-conformance/run.sh` | 0 | 261.876 s; unchanged-source outer rerun passed |
+
+The basic repository gate also passed: `node scripts/check-product-data.mjs`
+(42 capsules, 2 profiles, 28 method contracts), `node --test
+scripts/check-product-data.test.mjs` (99 passed), Runtime workspace formatting
+from `elastos/`, and chain-provider formatting. Installed-release and Browser
+acceptance belong to their existing owners; this change touches only the lab
+build-result journey. The 14 ignored tests retain their named product blockers.
+
+The successful receipt is local and uncommitted at `target/run-table.pd0Ie0/VERSIONS.json`, SHA-256 `7befea40cf39be34f6a7b74d22e84830cb0efbba517fc6258e8028357fc62054`. It records complete identity, `cargo_success: true`, `command_success: true` and `suite_outcome: BLOCKED`. It has 15 build-only and 16 launched probe identities. Its table contains 248 PASS, 0 FAIL, 14 BLOCKED, 0 SKIPPED. The existing blocked journeys retain their scope; the fixture receipt tests gain zero A14 identity credit.
+
+The passing outer rerun retained zero new Homes. The initial failed Home remains private with zero open-file holders, under its supervisor-review cleanup condition. The three plant roots were removed after review and the passing fixture Homes finished. Proof output and both run receipts remain local for supervisor review, then removal; the existing ignored lifecycle inventory records their owners and terminal decisions. Selector caches remain rebuildable outputs under their existing review cleanup condition.
+
+Final branch/worktree inventory: supplied HEAD and tree are unchanged; only the five task paths are dirty. Cached upstream divergence is 0 ahead / 0 behind. Network access stayed disabled. The current branch owns this reviewable correction; unrelated refs and worktrees retain their supervisor-owned roles.
+
+Remaining gate: supervisor commit, independent reviews and integration. Next owner: lane supervisor. These are author checks; existing stopped/blocked task records retain their states.
+
+- 162: Failed probe-script exits now keep FAIL; bounded child grading tests, three caught/restored plants and repair/rerun documentation prove the build/start boundary.
