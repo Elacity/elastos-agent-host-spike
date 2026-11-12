@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey;
-use elastos_compute::providers::ComponentProvider;
+use elastos_compute::providers::{ComponentProvider, SEALED_BRIDGE};
 use elastos_storage::providers::LocalFSProvider;
 
 use crate::bundle_admission::tests::{did, file_for, key, sign_by_hand, signed};
@@ -21,7 +21,7 @@ use crate::bundle_admission::{
 use crate::runtime::tests::{
     component_manifest_json, component_with_extra_import, quiet_component,
 };
-use crate::runtime::{Runtime, SEALED_BRIDGE};
+use crate::runtime::Runtime;
 use crate::stage_cmd::{bundle_cid, stage_bundle};
 
 /// One call a component made to the bridge: the capsule's id, the principal
@@ -204,7 +204,7 @@ async fn a_staged_component_starts_by_its_cid_and_no_bridge_handler_sees_its_cal
     assert_eq!(
         refusal.to_string(),
         format!(
-            "bundle_start_failed: Compute error: Component capsule denied: BusError::Internal({SEALED_BRIDGE:?})"
+            "bundle_start_failed: Compute error: Component capsule denied: BusError::Denied({SEALED_BRIDGE:?})"
         )
     );
     assert_eq!(
@@ -301,7 +301,7 @@ async fn a_component_replaced_after_the_walk_does_not_run() {
         .expect_err("the walked component ran");
     assert!(refusal
         .to_string()
-        .ends_with(&format!("BusError::Internal({SEALED_BRIDGE:?})")));
+        .ends_with(&format!("BusError::Denied({SEALED_BRIDGE:?})")));
     assert_eq!(home.calls(), Vec::new());
 }
 
@@ -689,40 +689,7 @@ fn the_start_by_cid_reads_the_slot_once_and_fetches_nothing() {
         assert!(!body.contains(never), "{never}");
     }
     assert_eq!(body.matches("Vec::new(), args, principal_id").count(), 1);
-    // The capsule is sealed before its start and unsealed after it.
-    let seal = body.find("sealed.insert(handle.id.0.clone())").unwrap();
-    let start = body.find(".start_loaded(").unwrap();
-    let unseal = body.find("sealed.remove(&handle.id.0)").unwrap();
-    assert!(seal < start && start < unseal);
-}
-
-/// Every bridge handler the Runtime gives the component provider goes
-/// through the seal: the provider's setter is called in two places, each
-/// time with `self.sealing(..)`, and nowhere else in the server.
-#[test]
-fn every_bridge_handler_is_behind_the_seal() {
-    let setter = ["set_bus", "_hostcall("].concat();
-    let source = include_str!("runtime.rs");
-    assert_eq!(source.matches(&setter).count(), 2);
-    assert_eq!(source.matches(&format!("{setter}self.sealing(")).count(), 2);
-    fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
-        for item in fs::read_dir(dir).unwrap() {
-            let path = item.unwrap().path();
-            if path.is_dir() {
-                rust_files(&path, found);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                found.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    rust_files(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut files,
-    );
-    assert!(files.len() > 50);
-    for file in files.iter().filter(|file| !file.ends_with("runtime.rs")) {
-        let text = fs::read_to_string(file).unwrap();
-        assert!(!text.contains(&setter), "{}", file.display());
-    }
+    // The component is loaded sealed, and only that way.
+    assert_eq!(body.matches(".load_admitted_sealed(").count(), 1);
+    assert_eq!(body.matches(".load_admitted(").count(), 0);
 }
