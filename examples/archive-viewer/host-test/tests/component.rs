@@ -529,7 +529,7 @@ fn largest_view() -> Vec<Fixture> {
 /// reads the one shown entry's 16 KiB through the same counted reader.
 fn worst_tar() -> Vec<u8> {
     let mut entries: Vec<(String, Vec<u8>)> =
-        vec![("t.txt".to_string(), plain_text(MAX_PREVIEW_BYTES as usize))];
+        vec![("t.txt".to_string(), plain_text(MAX_PREVIEW_BYTES))];
     for n in 1..64 {
         entries.push((format!("e{n:02}.txt"), Vec::new()));
     }
