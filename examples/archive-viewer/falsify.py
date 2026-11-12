@@ -22,7 +22,10 @@ rewrite in place, is outside this snapshot.
 
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); the core covers F1, F2, F4, F5, F6, F6b, F6c, F7 to F17, F19 to F25,
-F26 to F28, F29 to F31, F32, F33, F40 to F42. The lettered cases F6d to F6f,
+F26 to F28, F29 to F31, F32, F33, F40 to F42. The format-independent name,
+path, kind, status and duplicate rules have one owner in `src/listing.rs`:
+the cases for them anchor there, and F44 plants a change in that module to
+prove the P-rule test runs the one copy. The lettered cases F6d to F6f,
 F15b, F16b, F19b, F21b to F21g, F22b, F23b to F23d, F25b to F25f, F30b, F30c,
 F41b to F41e, F5b to F5e and F26b cover bounds, comparisons and request fields DESIGN states
 but gives no row, and F32 covers the whole view's cap. The runtime group (`--runtime`) runs F3 (the streaming ratio check), F35
@@ -40,6 +43,7 @@ import falsify_kit as kit  # noqa: E402
 
 SNAPSHOT_FILES = (
     "src/lib.rs",
+    "src/listing.rs",
     "src/zip.rs",
     "src/preview.rs",
     "src/request.rs",
@@ -94,7 +98,7 @@ CASES = [
       "entries_that_overlap_only_after_the_local_extra_field_refuse_the_archive"]),
     # P1 to P9: the names.
     ("F7 absolute names pass",
-     "src/zip.rs",
+     "src/listing.rs",
      "    if bytes.first() == Some(&b'/') {\n        return Err(\"absolute_name\");\n    }\n"
      "    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {\n"
      "        return Err(\"absolute_name\");\n    }",
@@ -103,37 +107,37 @@ CASES = [
      "        return Err(\"absolute_name\");\n    }",
      ["absolute_names_are_blocked"]),
     ("F8 dot segments pass",
-     "src/zip.rs",
+     "src/listing.rs",
      'part.is_empty() || part == "." || part == ".."',
      'part.is_empty() || part == "."',
      ["dot_and_empty_segments_are_blocked"]),
     ("F9 a backslash passes",
-     "src/zip.rs",
+     "src/listing.rs",
      "    if path.contains('\\\\') {\n        return Err(\"backslash\");\n    }",
      "    if false {\n        return Err(\"backslash\");\n    }",
      ["a_backslash_is_blocked"]),
     ("F10 the bidi range is dropped",
-     "src/zip.rs",
+     "src/listing.rs",
      "matches!(c, '\\u{202a}'..='\\u{202e}' | '\\u{2066}'..='\\u{2069}')",
      "false",
      ["control_and_bidi_characters_are_blocked"]),
     ("F11 an unmarked non-ASCII name passes",
-     "src/zip.rs",
+     "src/listing.rs",
      "    } else if name.iter().all(|byte| (0x20..=0x7e).contains(byte)) {",
      "    } else if true {",
      ["names_are_utf8_when_marked_and_ascii_otherwise"]),
     ("F12 duplicates keep the first",
-     "src/zip.rs",
+     "src/listing.rs",
      "        if seen.get(&entry.name).copied().unwrap_or(0) > 1",
      "        if seen.get(&entry.name).copied().unwrap_or(0) > 100",
      ["duplicate_names_are_both_blocked"]),
     ("F13 look-alikes are merged by a lower-cased key",
-     "src/zip.rs",
+     "src/listing.rs",
      "        *seen.entry(entry.name.clone()).or_insert(0) += 1;",
      "        *seen.entry(entry.name.to_ascii_lowercase()).or_insert(0) += 1;",
      ["names_that_differ_only_in_case_are_both_listed"]),
     ("F14 the directory hides the file of its path",
-     "src/zip.rs",
+     "src/listing.rs",
      "        *seen.entry(entry.name.clone()).or_insert(0) += 1;",
      "        *seen.entry(entry.name.strip_suffix(b\"/\").unwrap_or(&entry.name).to_vec()).or_insert(0) += 1;",
      ["a_file_and_a_directory_of_one_path_are_both_listed"]),
@@ -153,7 +157,7 @@ CASES = [
      "pub const MAX_SEGMENTS: usize = 64;",
      ["a_name_with_33_segments_is_blocked"]),
     ("F15 the trailing slash counts as a segment",
-     "src/zip.rs",
+     "src/listing.rs",
      "    if trimmed.split('/').count() > MAX_SEGMENTS {",
      "    if path.split('/').count() > MAX_SEGMENTS {",
      ["a_directory_with_32_segments_is_listed"]),
@@ -225,13 +229,13 @@ CASES = [
      ["a_local_header_that_differs_skips_the_entry"]),
     # Methods and encryption.
     ("F29 method 12 is treated as stored",
-     "src/zip.rs",
+     "src/listing.rs",
      "    if method != 0 && method != 8 {",
      "    if false {",
      ["other_methods_are_listed_unsupported",
       "a_requested_unsupported_entry_is_skipped_with_its_status"]),
     ("F30 encryption flag bit 0 is ignored",
-     "src/zip.rs",
+     "src/listing.rs",
      "    if flags & 1 != 0 {",
      "    if false {",
      ["encrypted_entries_are_listed_not_read",
@@ -253,7 +257,7 @@ CASES = [
      ["every_read_counts_toward_the_budget"]),
     # L9: a directory with bytes.
     ("F40 a directory's size is not checked",
-     "src/zip.rs",
+     "src/listing.rs",
      "    if kind == Kind::Directory && (uncompressed_size != 0 || compressed_size != 0) {",
      "    if false {",
      ["a_nonempty_directory_is_blocked_and_the_valid_entry_still_lists",
@@ -508,6 +512,13 @@ CASES = [
      "    if entry.flags & (1 << 3) == 0 {",
      "    if true {",
      ["a_data_descriptor_flag_is_ignored"]),
+    # One owner: the format-independent rules live in src/listing.rs. A plant
+    # there must reach the P-rule test, because the module holds the only copy.
+    ("F44 the shared listing rule has one owner",
+     "src/listing.rs",
+     "    if path.len() > MAX_NAME_BYTES {",
+     "    if path.len() > MAX_NAME_BYTES + 1 {",
+     ["a_name_over_its_cap_is_blocked"]),
 ]
 
 
