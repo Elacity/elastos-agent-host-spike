@@ -7500,8 +7500,8 @@ struct PrincipalRootObjectWriteOptions<'a> {
     /// decide whether the folder exists.
     create_owner_only_parent: bool,
     /// Set only by `write_held_root_object`, from the root it writes for.
-    /// True when the person's stored record is kept in another store and this
-    /// Runtime holds no protection for the object: the write refuses.
+    /// True when the person's stored record is kept in another store; the
+    /// write then refuses unless this Runtime holds protection.
     kept_elsewhere: bool,
 }
 
