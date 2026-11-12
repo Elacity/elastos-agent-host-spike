@@ -1734,7 +1734,7 @@ fn text_block(len: usize) -> Vec<u8> {
 }
 
 /// The listed entries of an archive, and the bus its reads go through.
-fn listing_of(archive: Vec<u8>) -> (FakeBus, String, Vec<zip::Entry>) {
+fn listing_of(archive: Vec<u8>) -> (FakeBus, String, Vec<Entry>) {
     let mut bus = bus_with(request(ARCHIVE, &[]), ARCHIVE, archive);
     let grant = capsule_kit_guest::grant(&mut bus, ARCHIVE, "read", "test a preview").unwrap();
     let mut left = MAX_READ_BYTES;

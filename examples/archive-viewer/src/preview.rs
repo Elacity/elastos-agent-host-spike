@@ -25,7 +25,8 @@ use docs_model::{self, ModelError};
 use miniz_oxide::inflate::core::{decompress_with_limit, inflate_flags, DecompressorOxide};
 use miniz_oxide::inflate::TINFLStatus;
 
-use crate::zip::{Entry, ReadError, Reader, Reason};
+use crate::listing::{Entry, Reason};
+use crate::zip::{ReadError, Reader};
 
 /// B1: an entry is shown only if its declared uncompressed size is at most
 /// this.

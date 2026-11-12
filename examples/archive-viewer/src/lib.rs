@@ -22,6 +22,7 @@
 //! the URI and text checks and the WIT glue are the capsule kit's guest crate
 //! (`examples/capsule-kit/guest`).
 
+mod listing;
 mod preview;
 mod request;
 mod zip;
@@ -32,8 +33,9 @@ mod tests;
 use capsule_kit_guest::{bus, grant, read_bounded, App};
 
 pub use capsule_kit_guest::{Bus, BusFailure, CallError, InvokeReply, Refusal};
+pub use listing::{Entry, Kind, Listing, Reason, Refused, Status};
 pub use request::{Request, REQUEST_SCHEMA};
-pub use zip::{check_local_header, Entry, Kind, Listing, Reason, Refused, Status};
+pub use zip::check_local_header;
 
 /// The request object: one archive to open, and the entries to show.
 pub const REQUEST_URI: &str = "localhost://Users/self/.AppData/App/archive-viewer/open.json";
