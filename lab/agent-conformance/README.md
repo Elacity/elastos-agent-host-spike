@@ -24,8 +24,10 @@ the pinned Rust toolchain, its `wasm32-unknown-unknown` target and cached Cargo
 dependencies. The shared `build::offline_build` setup keeps Cargo targets,
 intermediates and temporary files under this lane's `target/`. Probe builds
 treat warnings as errors; the Runtime build uses its normal warning policy.
-A missing build tool, target or dependency fails the check with a setup reason.
-Pre-probe setup failures grade SKIPPED and keep a nonzero command status.
+Build preparation, cleaning and failure to start the probe build script grade
+SKIPPED and keep a nonzero command status. Once the script starts, an unsuccessful
+exit grades FAIL with its exit status. The caller repairs the build inputs or
+setup named by that result, then reruns the same command.
 
 `runtime::runtime_under_test` builds the checkout's `elastos` binary once per
 test process with `cargo build --locked --offline --manifest-path
