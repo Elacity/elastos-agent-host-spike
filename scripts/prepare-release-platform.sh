@@ -248,7 +248,7 @@ export CARGO_TARGET_DIR ELASTOS_RELEASE_VERSION="$VERSION"
 # Read the whole list first: with pipefail, `grep -q` can exit on the first
 # match and rustup then fails writing to the closed pipe, which reads as a
 # missing target on a loaded machine.
-installed_targets="$(rustup target list --installed)"
+installed_targets="$(rustup target list --installed)" || die "Could not list installed Rust targets"
 grep -Fxq "$TARGET" <<<"$installed_targets" || die "Required Rust target is not installed: $TARGET"
 # Native macOS uses the same Cargo cache as normal source-home builds. Linux
 # keeps its explicit musl target; the receipt still records the actual target.
