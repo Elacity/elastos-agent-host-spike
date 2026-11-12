@@ -378,6 +378,23 @@ fn a_path_that_is_not_a_regular_file_refuses() {
 }
 
 #[test]
+fn a_linked_parent_folder_of_the_agent_file_refuses_the_file() {
+    let home = Home::new();
+    home.plant(&as_json(&enabled_file(Vec::new())));
+    let owner_file = home.owner_file();
+    assert!(matches!(home.load(), AgentFile::Loaded(_)), "the control");
+    // The file stays a regular file at mode 0600; only its folder is a link.
+    let folder = home.agent_file().parent().unwrap().to_path_buf();
+    let moved = folder.with_file_name("Auth-moved");
+    std::fs::rename(&folder, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &folder).unwrap();
+    match load(home.path(), &owner_file).unwrap() {
+        AgentFile::Unavailable(reason) => assert_eq!(reason, NOT_REGULAR),
+        other => panic!("the file was not refused: {other:?}"),
+    }
+}
+
+#[test]
 fn a_record_that_fails_the_agent_record_rule_refuses_the_file() {
     let home = Home::new();
     home.plant(&as_json(&enabled_file(vec![stored_agent(

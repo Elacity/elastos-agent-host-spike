@@ -185,6 +185,49 @@ mod on {
     }
 
     #[tokio::test]
+    async fn a_revoked_admin_is_refused_on_every_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = gateway_router(test_state(dir.path()));
+        let owner = protected_owner(dir.path());
+        let token = &owner.system_token;
+        assert_eq!(call(&app, ENABLE, token, None).await.0, StatusCode::OK);
+        let routes = [
+            (ENABLE, None),
+            (DISABLE, None),
+            (CREATE, Some(create_body("request-1"))),
+            (LIST, None),
+            (
+                RETIRE,
+                Some(json!({"agent_id": "agent:v2:0123456789abcdef0123456789abcdef"})),
+            ),
+        ];
+        // The passkey is revoked while its session is left open, so the
+        // launch token passes and the revocation check alone refuses.
+        let mut state = crate::auth::load_auth_state(dir.path()).unwrap();
+        for principal in &mut state.principals {
+            if principal.proof_binding_id == owner.proof_binding_id {
+                principal.proof_binding.passkey.as_mut().unwrap().revoked_at = Some(now_ts());
+            }
+        }
+        crate::auth::save_auth_state(dir.path(), &state, None).unwrap();
+        let written = std::fs::read(agent_file(dir.path())).unwrap();
+        let revoked = (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "passkey proof binding revoked".to_string(),
+        );
+        for (path, body) in routes.clone() {
+            assert_eq!(call(&app, path, token, body).await, revoked, "{path}");
+        }
+        // Revoking through the store also ends the session.
+        crate::auth::revoke_passkey_binding(dir.path(), &owner.proof_binding_id, now_ts()).unwrap();
+        for (path, body) in routes {
+            let answer = call(&app, path, token, body).await;
+            assert_eq!(answer.0, StatusCode::FORBIDDEN, "{path}: {answer:?}");
+        }
+        assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), written);
+    }
+
+    #[tokio::test]
     async fn the_routes_refuse_until_the_owner_turns_agents_on() {
         let dir = tempfile::tempdir().unwrap();
         let app = gateway_router(test_state(dir.path()));
