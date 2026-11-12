@@ -111,13 +111,67 @@ fn a_guest_that_does_not_return_is_cancelled_after_the_grace_period() {
 
 #[test]
 fn a_busy_guest_that_yields_each_slice_can_still_be_cancelled() {
+    // Counted, not timed. No ticker runs here: the test moves the epoch
+    // itself, one tick for every 4 times the guest gives the thread back
+    // (`HandClock`), so the result is the same on a fast machine, a slow one
+    // and a loaded one. The budget is 8 slices a tick, and the guest uses 4.
+    const SLICES_PER_TICK: u64 = 4;
+    const BUDGET_IN_SLICES: u64 = 8;
+    const CLOSE_AT_TICK: u64 = 20;
     let limits = Limits {
-        grace: Duration::from_millis(1000),
+        fuel_per_tick: BUDGET_IN_SLICES * Limits::default().fuel_slice,
+        // A tick is counted work here, and a faster machine does more of it
+        // within the grace period: no deadline.
+        max_ticks: u64::MAX,
+        // So that every time this guest gives the thread back, it is because
+        // a fuel slice ran out.
+        yield_each_tick: false,
         ..Limits::default()
     };
-    let (outcome, took) = run("bus2_busy_guest", limits, vec![], Duration::ZERO);
+    let grace = limits.grace;
+    let (outcome, took) = common::within(WATCHDOG, async move {
+        let engine = bus2_host::engine().unwrap();
+        let clock = common::HandClock::new(&engine, SLICES_PER_TICK);
+        let component = Component::new(&engine, common::guest("bus2_busy_guest")).unwrap();
+        let started = Instant::now();
+        let outcome = clock
+            .run(run_resident(
+                &engine,
+                &component,
+                HostState::default(),
+                limits,
+                async |_events| {
+                    clock.at_tick(CLOSE_AT_TICK).await;
+                    // `_events` is dropped here: the events stream closes.
+                },
+            ))
+            .await
+            .unwrap();
+        (outcome, started.elapsed())
+    });
+    println!(
+        "busy guest: {} after {} yields and {} ticks, {took:?}",
+        outcome.ending.reason(),
+        outcome.yields,
+        outcome.ticks
+    );
+
+    // The events closed at tick 20. By then the guest had given the thread
+    // back 80 times, so it had used up 80 slices, ten times its budget:
+    // - the budget was refilled at each tick. Without the refill the guest
+    //   ends fuel-exhausted after 8 slices;
+    // - it gave the thread back at every slice. A guest that does not yield
+    //   by fuel never gives it back, so no tick comes, and it ends
+    //   fuel-exhausted on its first budget.
+    // Either way it never reaches the close, let alone the cancel.
     assert_eq!(outcome.ending.reason(), "cancelled-after-grace");
-    assert!(took >= Duration::from_millis(1000), "{took:?}");
+    assert!(
+        outcome.yields >= CLOSE_AT_TICK * SLICES_PER_TICK,
+        "{} yields",
+        outcome.yields
+    );
+    assert!(outcome.ticks >= CLOSE_AT_TICK, "{} ticks", outcome.ticks);
+    assert!(took >= grace, "{took:?}");
 }
 
 #[test]
@@ -242,20 +296,56 @@ fn a_stop_during_start_up_ends_the_run_within_the_grace_period() {
 #[test]
 fn start_up_that_never_ends_uses_up_its_own_budget() {
     // Slicing during start-up does not refill it: start-up that never ends is
-    // ended by its own fuel budget, long before the epoch deadline. The budget
-    // lasts many ticks (about 0.1 s here), so a refill at a tick would show.
+    // ended by its own fuel budget, long before the epoch deadline.
+    //
+    // Counted, not timed. No ticker runs here: the test moves the epoch
+    // itself, one tick for every 4 slices the guest uses up (`HandClock`).
+    // Start-up has a budget of 20 slices, so it lives through 4 ticks before
+    // its fuel runs out, on any machine. A refill at a tick would give it the
+    // run's budget of 1000 slices at the first of them, and again at every
+    // tick after that: it would then end at its deadline of 50 ticks instead.
+    const SLICES_PER_TICK: u64 = 4;
+    const START_UP_BUDGET_IN_SLICES: u64 = 20;
     let limits = Limits {
-        instantiate_fuel: 2_000_000_000,
+        instantiate_fuel: START_UP_BUDGET_IN_SLICES * Limits::default().fuel_slice,
+        max_ticks: 50,
+        // So that every time this guest gives the thread back, it is because
+        // a fuel slice ran out.
+        yield_each_tick: false,
         ..Limits::default()
     };
-    let (outcome, took) = run(
-        "bus2_start_loop_guest",
-        limits,
-        vec![],
-        Duration::from_secs(10),
+    let outcome = common::within(WATCHDOG, async move {
+        let engine = bus2_host::engine().unwrap();
+        let clock = common::HandClock::new(&engine, SLICES_PER_TICK);
+        let component = Component::new(&engine, common::guest("bus2_start_loop_guest")).unwrap();
+        clock
+            .run(run_resident(
+                &engine,
+                &component,
+                HostState::default(),
+                limits,
+                // Its events never close: only its fuel or its deadline can
+                // end it.
+                async |_events| std::future::pending::<()>().await,
+            ))
+            .await
+            .unwrap()
+    });
+    println!(
+        "start-up that never ends: {} after {} yields and {} ticks",
+        outcome.ending.reason(),
+        outcome.yields,
+        outcome.ticks
     );
-    println!("start-up that never ends: ended after {took:?}");
     assert!(!outcome.started);
     assert_eq!(outcome.ending, Ending::FuelExhausted);
-    assert!(took < Duration::from_secs(2), "{took:?}");
+    // It lived through ticks, so a refill at a tick had its chance.
+    assert!(outcome.ticks >= 2, "{} ticks", outcome.ticks);
+    // And it gave the thread back fewer times than its budget has slices: it
+    // got no fuel beyond that budget.
+    assert!(
+        outcome.yields < START_UP_BUDGET_IN_SLICES,
+        "{} yields",
+        outcome.yields
+    );
 }

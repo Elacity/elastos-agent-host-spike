@@ -13,17 +13,18 @@ license = "MIT"
 
 [dependencies]
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+elastos-bundle-identity = { path = "../../elastos/crates/elastos-bundle-identity" }
 elastos-common = { path = "../../elastos/crates/elastos-common" }
 elastos-identity = { path = "../../elastos/crates/elastos-identity" }
 hex = "0.4"
-# Safe `openat`, `fstat` and folder listing from an open handle: the walk
-# reads only handles it has checked, and `std` cannot open relative to one.
-rustix = { version = "=1.1.4", features = ["fs"] }
 serde_json = "1.0"
 sha2 = "0.10"
 
 [dev-dependencies]
 rand = "0.8"
+# The walk lives in `elastos-bundle-identity`, which has its own `rustix`.
+# Here two test files use it, to stage and swap entries under an open handle.
+rustix = { version = "=1.1.4", features = ["fs"] }
 tempfile = "3"
 
 # Stay out of the root ElastOS workspace.

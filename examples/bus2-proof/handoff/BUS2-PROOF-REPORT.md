@@ -7,7 +7,7 @@ What this is:
 - not a second Bus, and not the Runtime. Nothing outside `examples/bus2-proof` changed.
 
 How to check it:
-- `./verify.sh` builds the guests, runs fmt and clippy, all 41 tests and all 46 falsifiers (each falsifier
+- `./verify.sh` builds the guests, runs fmt and clippy, all 42 tests and all 46 falsifiers (each falsifier
   breaks one check and requires its test to fail);
 - `cargo run --locked --release -p bus2-host --example measure` prints the measurements below.
 
@@ -39,7 +39,7 @@ How to check it:
 | 3. `ui.present` draws one declarative frame; images by granted handle; no script | 6 (`tests/ui.rs`) | 7 |
 | 4. Credential checked against the key pinned in the manifest; the guest only refuses; no frame before the check | 7 (`tests/credentials.rs`) | 8 |
 | 5. Admission refuses imports outside `elastos:bus/*@2.0.0`, and v1 and v2 mixed | 7 (`tests/admission.rs`) | 7 |
-| 6. Fuel slices plus async yield: a busy guest, running or still starting up, does not starve a second guest | 2 (`tests/fairness.rs`) | 2, and 1 shared with proof 1 |
+| 6. Fuel slices plus async yield: a busy guest, running or still starting up, does not starve a second guest | 3 (`tests/fairness.rs`) | 2, and 1 shared with proof 1 |
 
 Endings the host records, each by name: `stopped`, `returned`, `returned-error`, `cancelled-after-grace`,
 `cancelled-during-start-up`, `epoch-deadline`, `fuel-exhausted`, `trapped`. An ending also says whether the
@@ -88,6 +88,50 @@ Each way of yielding is enough on its own for fairness:
 The falsifier removes both kinds of yield, and then the photo guest waits for the busy one to end. Removing the
 refill makes the busy guest end by fuel instead of by its deadline, which the fairness test also catches.
 
+Since those measurements, three tests count instead of timing: the fairness test above, the proof 1 test that
+a busy guest can still be cancelled, and the proof 1 test that start-up which never ends uses up its own
+budget. They are the tests named by the falsifiers that remove the refill, remove the yield by fuel, and refill
+start-up at each tick:
+- they run on a clock the test moves by hand, with no ticker thread: one tick for every four times the guests
+  give the thread back, which a busy guest does once per fuel slice;
+- a budget is a counted number of slices (8, 40 and 20 here), and a busy guest uses 4 or 3 slices a tick.
+  Without the refill it ends `fuel-exhausted` after one budget. Without the yield by fuel it never gives the
+  thread back, no tick comes, and it ends `fuel-exhausted` on its first budget. Start-up lives through 4 ticks
+  on its 20 slices, so a refill at a tick always has its chance, and then start-up ends at its deadline
+  instead of by fuel. That is so on any machine;
+- the host records, for every run, how many times the guest gave the thread back and how many ticks it saw, and
+  the tests assert on those counts;
+- with the 10 ms ticker, a slow or loaded machine could miss the first two falsifiers: the first budget (10^10
+  units of fuel) then outlasted the 1 s the tests ran for, so nothing showed that the refill or the yield was
+  gone. The third could be missed the other way round: start-up that burnt its budget before the first real
+  tick never met the planted refill.
+
+One fairness test still runs the busy guest and the photo guest with the real 10 ms ticker
+(`with_the_real_ticker_a_busy_guest_lets_a_second_guest_finish_and_is_then_cancelled`). It shows that the photo
+guest does its job and stops while the busy guest is in its run, and that the busy guest is then cancelled after
+its grace period. It does not show that the fuel is refilled or that the guest yields by fuel: no falsifier
+names it.
+- The photo guest starts on a signal from the host that the busy guest is past start-up and executing, not
+  after a sleep. Its events stay open until the busy guest has given the thread back 8 more times and seen one
+  more real tick, and the test asserts that the busy guest's run had not ended when the photo guest stopped.
+- Its only time limit is 120 s for the whole test, compiling included (about 1.6 s where it was written). When
+  that runs out the worker is told to stop and given 10 s to end before the test fails. A worker that does not
+  end in that time (for example one stuck in compiling) is left running and the test fails at once, as the
+  older helper does, so the test's failure is bounded either way.
+
+Tests that still depend on the real clock. In each, a planted fault is caught whatever the machine's speed; a
+very slow or loaded machine can only make the test fail with no fault in:
+- `a_guest_stuck_in_start_up_does_not_delay_a_second_guest`: the photo guest must be done within 150 ms;
+- `a_stop_during_start_up_ends_the_run_within_the_grace_period`: the cancel must land within 500 ms of when
+  it is due;
+- `a_guest_that_never_awaits_is_ended_at_the_epoch_deadline`: the run must end within 5 s;
+- the real-ticker fairness test above: 120 s for the whole test;
+- the other lifecycle tests, and the streaming, ui and credentials tests: they assert on values. A guest must
+  finish its work within the time its events are held open plus the 300 ms grace period;
+- every other test that runs a guest has a watchdog of 20 or 30 s.
+
+The times above are from the ticker version of the fairness test.
+
 The fairness claim covers start-up too. Measured in this container:
 - a guest stuck in start-up and the photo guest share one engine and one executor. The photo guest was due to
   start at 50 ms;
@@ -101,7 +145,7 @@ The fairness claim covers start-up too. Measured in this container:
 A stop during start-up: the drive closed the events after 50 ms with a 200 ms grace period, and the run ended
 as `cancelled-during-start-up` after about 255 ms. Before the fix it ran on for 10 s, until the epoch
 deadline. Start-up that never ends, with a budget that lasts about 0.1 s, is ended by its own fuel
-(`fuel-exhausted`), so the slicing does not refill it.
+(`fuel-exhausted`), so the slicing does not refill it. (That test now counts: a budget of 20 slices, 4 ticks.)
 
 ## For Anders
 

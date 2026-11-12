@@ -34,7 +34,8 @@ as well as a success. The build uses the developer's toolchain environment,
 sets `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0`, and clears inherited
 Rust flags. Its one target is `target/runtime`, with intermediates in `build/`
 and temporary files in `tmp/` below that target. It returns the absolute binary
-path and a SHA-256 computed from its bytes by macOS `shasum`. This identifies
+path and a SHA-256 computed from its bytes by the system's `sha256sum`, or by
+`shasum` where there is none. This identifies
 the Runtime tested on this machine; it is separate from capsule bundle identity.
 
 `probe_imports_only_the_bus` validates the built component and checks its outer
