@@ -19383,7 +19383,7 @@ pub(crate) mod tests {
             "the refused write made its parent"
         );
 
-        // An accepted write makes its parent owner-only.
+        // An accepted write makes a fresh parent owner-only.
         let uri = format!("{}/PlainTwin/notes.md", root.localhost_root());
         let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
         write_principal_root_object_resolved(data_dir.path(), &root, &uri, &path, b"plain")
@@ -19397,7 +19397,20 @@ pub(crate) mod tests {
                 .permissions()
                 .mode()
                 & 0o777;
-            assert_eq!(mode, 0o700, "parent mode is {mode:o}");
+            assert_eq!(mode, 0o700, "fresh parent mode is {mode:o}");
+
+            // A parent this process made earlier with group and other access
+            // is narrowed, so the result does not depend on the process umask.
+            let uri = format!("{}/PlainTwinNarrowed/notes.md", root.localhost_root());
+            let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+            let parent = path.parent().unwrap();
+            std::fs::create_dir_all(parent).unwrap();
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+            write_principal_root_object_resolved(data_dir.path(), &root, &uri, &path, b"narrowed")
+                .expect("in-root plain write into an existing parent");
+            assert_eq!(std::fs::read(&path).unwrap(), b"narrowed");
+            let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "existing parent mode is {mode:o}");
         }
     }
 
