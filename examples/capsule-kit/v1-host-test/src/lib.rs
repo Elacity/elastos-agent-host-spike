@@ -247,9 +247,15 @@ pub fn imports_and_exports(component: &Path) -> (Vec<String>, Vec<String>) {
 
 // --- the Runtime's admission import check -----------------------------------------
 
-// Copied from `elastos-server/src/component.rs:14-136` (private there), so the
-// artifact passes the same import check Runtime runs before launch
-// (`elastos-server/src/runtime.rs:283`).
+// Copied from `elastos-server/src/component.rs` (private there) when that file
+// was at Wasmtime 36, so that the artifact passes the import check Runtime ran
+// before launch. Since the Runtime moved to Wasmtime 48 this copy reads the
+// component with the same parser version (two calls changed with it) but is
+// NOT the Runtime's check any more: the Runtime's now also caps what the
+// compiler is asked to do (the number of functions, the size of a function
+// body, the locals of a function, the canonical functions), and this copy
+// has none of those caps. Replacing the copy with a call into the Runtime is
+// kit item A2.
 pub mod admission {
     use super::ALLOWED_BUS_IMPORTS;
     use wasmparser::{ComponentTypeRef, Encoding, Parser, Payload};
@@ -285,7 +291,7 @@ pub mod admission {
                 Payload::ComponentImportSection(section) => {
                     for import in section {
                         let import = import.map_err(|err| err.to_string())?;
-                        let name = import.name.0;
+                        let name = import.name.name;
                         if name.starts_with("import-type-") {
                             if !matches!(import.ty, ComponentTypeRef::Type(_)) {
                                 return Err(format!("generated type import {name} must be a type"));
@@ -307,7 +313,7 @@ pub mod admission {
                     }
                 }
                 Payload::ImportSection(section) => {
-                    for import in section {
+                    for import in section.into_imports() {
                         let import = import.map_err(|err| err.to_string())?;
                         validate_core_import(import.module, import.name)?;
                     }
@@ -447,6 +453,12 @@ pub mod measure {
 
     /// Runs `component` (as capsule `capsule`) once with `fuel`. Returns the
     /// outcome and the fuel used.
+    ///
+    /// The engine is the Runtime's version of Wasmtime (the manifest pins the
+    /// same one), set up for measuring only: fuel on, the store limits below.
+    /// It has no epoch deadline and none of the Runtime's compile caps, so a
+    /// number from here is the guest's fuel on that engine version, not a
+    /// statement about the Runtime's time limit or what it refuses to compile.
     pub fn run(
         bridge: Bridge,
         component: &Path,

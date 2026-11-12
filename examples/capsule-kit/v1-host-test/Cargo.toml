@@ -12,30 +12,17 @@ publish = false
 elastos-common = { path = "../../../elastos/crates/elastos-common" }
 elastos-compute = { path = "../../../elastos/crates/elastos-compute" }
 serde_json = "1"
-# Wasmtime's default features minus `cache`: this host test never sets a compilation cache,
-# and `cache` is the only thing that pulls zstd into the build. Same list as elastos-compute.
-wasmtime = { version = "36", default-features = false, features = [
-    "async",
-    "gc",
-    "gc-drc",
-    "gc-null",
-    "wat",
-    "profiling",
-    "parallel-compilation",
-    "cranelift",
-    "pooling-allocator",
-    "demangle",
-    "addr2line",
-    "coredump",
-    "debug-builtins",
+# The same Wasmtime, pinned the same way and built with the same features, as elastos-compute
+# (elastos/crates/elastos-compute/Cargo.toml): the fuel this harness measures is then measured on
+# the engine version the Runtime runs. What still differs is said at `measure::run` in src/lib.rs.
+wasmtime = { version = "=48.0.8", default-features = false, features = [
     "runtime",
+    "cranelift",
     "component-model",
-    "threads",
-    "stack-switching",
     "std",
 ] }
 # Same pin as elastos-server, for the copied admission validator.
-wasmparser = "=0.236.1"
+wasmparser = "=0.254.2"
 
 # Keep it outside the main ElastOS Cargo workspace.
 [workspace]
