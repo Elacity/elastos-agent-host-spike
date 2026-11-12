@@ -20804,4 +20804,205 @@ pub(crate) mod tests {
         commit_recovered_root_reassignment(data_dir.path(), reassignment)
             .expect("recovered root reassignment of a person succeeds");
     }
+
+    /// A signer proved by a real signature over a Home launch-token envelope.
+    fn verified_device_signer_for_tests(
+        seed: [u8; 32],
+    ) -> super::verified_launch_token_signer::VerifiedLaunchTokenSigner {
+        use super::verified_launch_token_signer::{
+            VerifiedLaunchTokenSigner, HOME_LAUNCH_TOKEN_DOMAIN,
+        };
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let payload = serde_json::json!({"body": "kept-elsewhere"});
+        let canonical = serde_json::to_vec(&payload).unwrap();
+        let (signature, did) =
+            crate::crypto::domain_separated_sign(&key, HOME_LAUNCH_TOKEN_DOMAIN, &canonical);
+        let envelope = serde_json::json!({
+            "payload": payload, "signature": signature, "signer_did": did.clone(),
+        });
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        VerifiedLaunchTokenSigner::verify(&bytes, &[did]).unwrap()
+    }
+
+    /// Each of the three held-root write functions, on its own path under
+    /// `root`, with the address and path it wrote or tried to write.
+    fn held_root_write_results(
+        data_dir: &Path,
+        root: &ResolvedPrincipalRoot,
+        case: &str,
+    ) -> [(&'static str, String, PathBuf, anyhow::Result<()>); 3] {
+        let call = |label: &'static str| {
+            let uri = format!("{}/{case}/{label}/note.txt", root.localhost_root());
+            let path = rooted_localhost_fs_path(data_dir, &uri).unwrap();
+            (label, uri, path)
+        };
+        let (plain, plain_uri, plain_path) = call("plain");
+        let (protected, protected_uri, protected_path) = call("protected");
+        let (revision, revision_uri, revision_path) = call("revision");
+        [
+            (
+                plain,
+                plain_uri.clone(),
+                plain_path.clone(),
+                write_principal_root_object_resolved(
+                    data_dir,
+                    root,
+                    &plain_uri,
+                    &plain_path,
+                    b"plain",
+                ),
+            ),
+            (
+                protected,
+                protected_uri.clone(),
+                protected_path.clone(),
+                write_protected_principal_root_object_resolved(
+                    data_dir,
+                    root,
+                    &protected_uri,
+                    &protected_path,
+                    b"plain",
+                ),
+            ),
+            (
+                revision,
+                revision_uri.clone(),
+                revision_path.clone(),
+                write_principal_root_object_if_revision_resolved(
+                    data_dir,
+                    root,
+                    &revision_uri,
+                    &revision_path,
+                    b"plain",
+                    PrincipalRootObjectPrecondition::Absent,
+                ),
+            ),
+        ]
+    }
+
+    /// A data directory with the owner-only permissions a protected write
+    /// requires of its own root.
+    fn owner_only_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
+    /// A person stored on this Runtime, with no Recovery Kit: both plain
+    /// writes save the bytes as given, and the protected write keeps today's
+    /// refusal.
+    #[test]
+    fn kept_elsewhere_case_1_a_stored_person_writes_plain_on_their_own_runtime() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let person = store_test_human_principal(data_dir.path(), "person:local:kept-elsewhere-own");
+        let root =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &person.principal_id)
+                .unwrap();
+        for (label, _uri, path, result) in held_root_write_results(data_dir.path(), &root, "case1")
+        {
+            if label == "protected" {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "protected principal-root object requires active principal-root protection"
+                );
+                continue;
+            }
+            result.unwrap_or_else(|error| panic!("{label}: {error:#}"));
+            assert_eq!(std::fs::read(&path).unwrap(), b"plain", "{label}");
+        }
+    }
+
+    /// The device arm has no stored record, so both plain writes save the
+    /// bytes as given and the protected write keeps today's refusal.
+    #[test]
+    fn kept_elsewhere_case_2_a_device_signer_writes_plain() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let signer = verified_device_signer_for_tests([7u8; 32]);
+        let root = ResolvedPrincipalRoot::verified_device_signer(&signer);
+        for (label, _uri, path, result) in held_root_write_results(data_dir.path(), &root, "case2")
+        {
+            if label == "protected" {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "protected principal-root object requires active principal-root protection"
+                );
+                continue;
+            }
+            result.unwrap_or_else(|error| panic!("{label}: {error:#}"));
+            assert_eq!(std::fs::read(&path).unwrap(), b"plain", "{label}");
+        }
+    }
+
+    /// The record is kept in another store and this Runtime holds no
+    /// protection: every held-root write refuses with the typed error and
+    /// creates nothing.
+    #[test]
+    fn kept_elsewhere_case_3_a_stored_person_on_another_runtime_is_refused() {
+        let runtime_dir = tempfile::tempdir().unwrap();
+        let record_dir = tempfile::tempdir().unwrap();
+        let person =
+            store_test_human_principal(record_dir.path(), "person:local:kept-elsewhere-child");
+        let root = ResolvedPrincipalRoot::resolve(
+            runtime_dir.path(),
+            record_dir.path(),
+            &person.principal_id,
+        )
+        .unwrap();
+        for (label, _uri, path, result) in
+            held_root_write_results(runtime_dir.path(), &root, "case3")
+        {
+            let error = result.expect_err(label);
+            assert!(
+                error.is::<ProtectedRecordKeptElsewhere>(),
+                "{label}: {error}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "protected record is kept only on the Runtime this person signed in on",
+                "{label}"
+            );
+            assert!(!path.exists(), "{label} wrote a file");
+            assert!(!path.parent().unwrap().exists(), "{label} made a directory");
+        }
+    }
+
+    /// The record is kept in another store and this Runtime holds protection
+    /// for the person's root: every held-root write seals.
+    #[test]
+    fn kept_elsewhere_case_4_a_stored_person_with_protection_here_writes_sealed() {
+        let runtime_dir = owner_only_tempdir();
+        let record_dir = tempfile::tempdir().unwrap();
+        let person =
+            store_test_human_principal(record_dir.path(), "person:local:kept-elsewhere-sealed");
+        let root = ResolvedPrincipalRoot::resolve(
+            runtime_dir.path(),
+            record_dir.path(),
+            &person.principal_id,
+        )
+        .unwrap();
+        store_test_principal_root_protection_for(
+            runtime_dir.path(),
+            &person.principal_id,
+            root.localhost_root(),
+        );
+        for (label, uri, path, result) in
+            held_root_write_results(runtime_dir.path(), &root, "case4")
+        {
+            result.unwrap_or_else(|error| panic!("{label}: {error:#}"));
+            let stored = std::fs::read(&path).unwrap();
+            assert_ne!(stored, b"plain", "{label} holds plaintext");
+            let envelope: PrincipalRootObjectEnvelopeV1 = serde_json::from_slice(&stored)
+                .unwrap_or_else(|error| panic!("{label} is not a sealed envelope: {error}"));
+            assert_eq!(envelope.schema, PRINCIPAL_ROOT_OBJECT_SCHEMA, "{label}");
+            let read_back =
+                read_principal_root_object_resolved(runtime_dir.path(), &root, &uri, &path)
+                    .unwrap_or_else(|error| panic!("{label}: {error:#}"));
+            assert_eq!(read_back, b"plain", "{label} reads back its plaintext");
+        }
+    }
 }
