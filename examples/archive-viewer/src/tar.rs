@@ -282,6 +282,18 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
         }
         path.extend_from_slice(&name);
         let typeflag = block[TYPEFLAG];
+        // A pax header (`x`, `g`) or a GNU long name or link (`L`, `K`)
+        // carries the next entry's effective name or size. This reader does
+        // not apply that metadata, so listing on would show the wrong record.
+        if matches!(typeflag, b'x' | b'g' | b'L' | b'K') {
+            return Err(Refused::new(
+                "extension_header",
+                format!(
+                    "the header at {offset} is a pax or GNU extension header, which this reader does not support yet"
+                ),
+            )
+            .into());
+        }
         let end = offset
             .checked_add(BLOCK_BYTES)
             .and_then(|start| start.checked_add(declared));

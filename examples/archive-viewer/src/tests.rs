@@ -2281,6 +2281,25 @@ fn a_non_regular_tar_typeflag_is_blocked() {
 }
 
 #[test]
+fn a_tar_extension_header_refuses_the_archive() {
+    // pax (`x`, `g`) and GNU (`L`, `K`) extension headers change what the
+    // next header means, and this reader does not apply them.
+    for flag in [b'x', b'g', b'L', b'K'] {
+        let bus = tar_fixture(&[
+            TarSpec::file("ext").kind(flag).data(b"data"),
+            TarSpec::file("a.txt"),
+        ]);
+        assert_eq!(
+            view(&bus)["refused"]["code"],
+            "extension_header",
+            "typeflag {}",
+            flag as char
+        );
+        assert!(entries(&bus).is_empty(), "typeflag {}", flag as char);
+    }
+}
+
+#[test]
 fn duplicate_tar_names_are_both_blocked() {
     let bus = tar_fixture(&[
         TarSpec::file("a.txt").data(b"one"),

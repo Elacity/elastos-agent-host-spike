@@ -621,5 +621,9 @@ status and duplicate rules; no rule has a second copy.
 
 ### Remaining
 
+- pax (`x`, `g`) and GNU long name/link (`L`, `K`) extension headers refuse
+  the whole archive as `extension_header` until their metadata is applied.
+  Many tars made by common tools carry pax headers, so this refusal is common
+  until then.
 - tar previews and the tar fuel gate are the next work; `tar.gz` and any
   compressed tar need Bus v2 streams, outside this app's Bus v1 path.
