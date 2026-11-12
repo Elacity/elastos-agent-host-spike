@@ -297,9 +297,12 @@ the binary elsewhere, so both are named). The report reads the binary, and from
 the data folder `installation/release-head.json`, `installation/release.json`
 and `components.json`, and checks the hash chain for this machine's platform:
 the release head names the SHA-256 of `release.json`, which names the SHA-256
-of the binary and of `components.json`. The receipt then records
-`installed_runtime` (version, platform, source commit and the three hashes),
-`installed_runtime_status` (`matched` or `unmatched`) and
+of the binary and of `components.json`. It also requires the release's source
+commit to be the commit the receipt's `repository` records, the same commit
+`review_binding` binds the reviews to; another commit fails the row with both
+commits named, and so does an absent repository commit. The receipt then
+records `installed_runtime` (version, platform, source commit and the three
+hashes), `installed_runtime_status` (`matched` or `unmatched`) and
 `installed_runtime_failures`. A file that cannot be read is named in the
 failures (`could not read release.json`), as is each hash that differs
 (`binary does not match the release`). Each of the four files is opened without
@@ -313,20 +316,26 @@ A14 row reads PASS. Naming one variable without the other fails the command. Wit
 neither, the receipt has no installed Runtime row or field. There is no default
 location: the report never looks for an installation on its own.
 
-This row does not check signatures, so it shows which release the installed
-bytes belong to, not that the release is genuine. It does not check the hash of
-the bundle the demo ran.
+This row covers records only: the installed binary, `release-head.json`,
+`release.json` and `components.json` agree with each other and name this
+repository commit. It does not check signatures, so it shows which release the
+installed bytes belong to, not that the release is genuine. The suite does not
+run on the installed data folder. It does not check the hash of the bundle the
+demo ran.
 
 `installed_runtime_ran (A14)` appears beside it and passes only when
-`runtime_sha256`, the SHA-256 the suite printed for the Runtime it launched,
-equals `installed_runtime.binary_sha256`. The receipt records
-`installed_runtime_ran_status` (`ran` or `not shown`) and
-`installed_runtime_ran_failures`; a difference names both hashes, and an
+`runtime_sha256`, the SHA-256 the Runtime printed for itself, equals
+`installed_runtime.binary_sha256`: the installed binary is the program the
+suite launched. The receipt records `installed_binary_ran_status` (`ran` or
+`not shown`), `installed_binary_ran_failures`, and `runtime_data_folder`, which
+states that the Runtime under test ran with a throwaway data folder the suite
+created, not the installed data folder. A difference names both hashes, and an
 installed Runtime whose chain did not match leaves nothing to compare. Identity
 lines are read from the whole test output, which cannot say which test printed
 a line, so a run that names two different Runtime hashes fails this row with
 `suite recorded more than one Runtime SHA-256`, as well as `versions_receipt`,
-whichever hash came first.
+whichever hash came first. This row says nothing about behaviour on the
+installed data folder: that folder is never used by a run.
 
 The suite launches the installed binary only when
 `AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
@@ -492,8 +501,8 @@ What each A14 row means:
 | `versions_receipt` | the receipt names the commit, the Runtime and provider hashes and every launched probe the rows needed |
 | `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
-| `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, and `release-head.json` names that `release.json` |
-| `installed_runtime_ran` | the Runtime the suite launched has the installed binary's SHA-256 |
+| `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
+| `installed_runtime_ran` | the installed binary is the program the suite launched, by the SHA-256 it printed; it ran with a throwaway data folder, not the installed one |
 
 What the receipt does not prove:
 

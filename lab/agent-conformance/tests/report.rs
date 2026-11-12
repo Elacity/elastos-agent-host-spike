@@ -1732,7 +1732,7 @@ fn receipt_records_a_matching_installed_runtime() {
     let home = ThrowawayHome::new().unwrap();
     let fixture = InstalledFixture::new(&home.root().join("installed"));
     let (report, document) = fixture.receipt();
-    assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+    assert!(report.table.contains("installed_runtime (A14) | PASS | "));
     assert_eq!(document["installed_runtime_status"], "matched");
     assert_eq!(
         document["installed_runtime_failures"],
@@ -1760,6 +1760,33 @@ fn receipt_records_a_matching_installed_runtime() {
 }
 
 #[test]
+fn installed_rows_state_exactly_what_is_proven() {
+    use agent_conformance::report::{
+        INSTALLED_RUNTIME_BINARY_SCOPE, INSTALLED_RUNTIME_SCOPE, RUNTIME_DATA_FOLDER,
+    };
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (report, document) = fixture.receipt_after_running(b"installed runtime");
+    assert!(
+        report.table.contains(&format!(
+            "installed_runtime (A14) | PASS | {INSTALLED_RUNTIME_SCOPE}\n"
+        )),
+        "{}",
+        report.table
+    );
+    assert!(
+        report.table.contains(&format!(
+            "installed_runtime_ran (A14) | PASS | {INSTALLED_RUNTIME_BINARY_SCOPE}\n"
+        )),
+        "{}",
+        report.table
+    );
+    // The receipt says which data folder the Runtime under test used.
+    assert_eq!(document["runtime_data_folder"], RUNTIME_DATA_FOLDER);
+    home.finish().unwrap();
+}
+
+#[test]
 fn changed_installed_binary_fails_the_installed_runtime_row() {
     let home = ThrowawayHome::new().unwrap();
     let fixture = InstalledFixture::new(&home.root().join("installed"));
@@ -1770,7 +1797,7 @@ fn changed_installed_binary_fails_the_installed_runtime_row() {
         serde_json::json!(["binary does not match the release"])
     );
     assert!(
-        report.table.contains("installed_runtime (A14) | FAIL\n"),
+        report.table.contains("installed_runtime (A14) | FAIL | "),
         "{}",
         report.table
     );
@@ -1792,7 +1819,7 @@ fn installed_release_binds_to_the_repository_commit() {
     let fixture = InstalledFixture::new(&home.root().join("same"));
     let (report, document) = fixture.receipt();
     assert!(
-        report.table.contains("installed_runtime (A14) | PASS\n"),
+        report.table.contains("installed_runtime (A14) | PASS | "),
         "{}",
         report.table
     );
@@ -1816,7 +1843,7 @@ fn installed_release_binds_to_the_repository_commit() {
         )])
     );
     assert!(
-        report.table.contains("installed_runtime (A14) | FAIL\n"),
+        report.table.contains("installed_runtime (A14) | FAIL | "),
         "{}",
         report.table
     );
@@ -1824,12 +1851,12 @@ fn installed_release_binds_to_the_repository_commit() {
     assert_eq!(document["installed_runtime"], Value::Null);
     // Nothing matched is left for the ran row to compare.
     assert!(
-        report.table.contains("installed_runtime_ran (A14) | FAIL\n"),
+        report.table.contains("installed_runtime_ran (A14) | FAIL | "),
         "{}",
         report.table
     );
     assert_eq!(
-        document["installed_runtime_ran_failures"],
+        document["installed_binary_ran_failures"],
         serde_json::json!(["no matched installed Runtime to compare"])
     );
 
@@ -1857,7 +1884,7 @@ fn missing_release_record_fails_with_its_own_reason() {
         document["installed_runtime_failures"],
         serde_json::json!(["could not read release.json"])
     );
-    assert!(report.table.contains("installed_runtime (A14) | FAIL\n"));
+    assert!(report.table.contains("installed_runtime (A14) | FAIL | "));
     assert_eq!(document["installed_runtime_status"], "unmatched");
     assert_eq!(document["installed_runtime"], Value::Null);
     // Every unreadable file is named, and nothing is compared until all are read.
@@ -1895,7 +1922,7 @@ fn installed_files_are_not_read_through_a_link() {
             .receipt()
             .0
             .table
-            .contains("installed_runtime (A14) | PASS\n"));
+            .contains("installed_runtime (A14) | PASS | "));
         // The same bytes, reached through a link at the installed name: the
         // hash chain would match if the link were followed.
         let (path, moved) = (root.join(file), root.join("moved"));
@@ -1907,7 +1934,7 @@ fn installed_files_are_not_read_through_a_link() {
             serde_json::json!([format!("{name} is a symbolic link")])
         );
         assert!(
-            report.table.contains("installed_runtime (A14) | FAIL\n"),
+            report.table.contains("installed_runtime (A14) | FAIL | "),
             "{}",
             report.table
         );
@@ -1998,7 +2025,7 @@ fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
         ]
     );
 
-    // A given installed Runtime adds its five fields and two rows, no more.
+    // A given installed Runtime adds its six fields and two rows, no more.
     let home = ThrowawayHome::new().unwrap();
     let fixture = InstalledFixture::new(&home.root().join("installed"));
     let (report, document) = fixture.receipt();
@@ -2007,9 +2034,10 @@ fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
         [
             "installed_runtime",
             "installed_runtime_failures",
-            "installed_runtime_ran_failures",
-            "installed_runtime_ran_status",
+            "installed_binary_ran_failures",
+            "installed_binary_ran_status",
             "installed_runtime_status",
+            "runtime_data_folder",
         ]
         .map(str::to_owned),
     );
@@ -2063,7 +2091,7 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
     assert!(result.status.success(), "{result:?}");
     assert!(String::from_utf8(result.stdout)
         .unwrap()
-        .contains("installed_runtime (A14) | PASS\n"));
+        .contains("installed_runtime (A14) | PASS | "));
     let receipt = read_receipt(&home.root().join("matched.json"));
     assert_eq!(receipt["installed_runtime_status"], "matched");
     assert_eq!(
@@ -2097,7 +2125,7 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
     assert!(result.status.success(), "{result:?}");
     assert!(String::from_utf8(result.stdout)
         .unwrap()
-        .contains("installed_runtime (A14) | FAIL\n"));
+        .contains("installed_runtime (A14) | FAIL | "));
     let receipt = read_receipt(&home.root().join("unmatched.json"));
     assert_eq!(receipt["installed_runtime_status"], "unmatched");
     assert_eq!(
@@ -2115,13 +2143,13 @@ fn receipt_says_whether_the_suite_ran_the_installed_binary() {
     assert!(
         report
             .table
-            .contains("installed_runtime_ran (A14) | PASS\n"),
+            .contains("installed_runtime_ran (A14) | PASS | "),
         "{}",
         report.table
     );
-    assert_eq!(document["installed_runtime_ran_status"], "ran");
+    assert_eq!(document["installed_binary_ran_status"], "ran");
     assert_eq!(
-        document["installed_runtime_ran_failures"],
+        document["installed_binary_ran_failures"],
         serde_json::json!([])
     );
     assert_eq!(
@@ -2132,9 +2160,9 @@ fn receipt_says_whether_the_suite_ran_the_installed_binary() {
     // A suite that launched other bytes: the installed chain still matches, and
     // this row alone says so, naming both hashes.
     let (report, document) = fixture.receipt_after_running(b"checkout runtime");
-    assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+    assert!(report.table.contains("installed_runtime (A14) | PASS | "));
     assert_eq!(
-        document["installed_runtime_ran_failures"],
+        document["installed_binary_ran_failures"],
         serde_json::json!([format!(
             "suite ran Runtime {}, installed binary is {}",
             sha256(b"checkout runtime"),
@@ -2143,8 +2171,8 @@ fn receipt_says_whether_the_suite_ran_the_installed_binary() {
     );
     assert!(report
         .table
-        .contains("installed_runtime_ran (A14) | FAIL\n"));
-    assert_eq!(document["installed_runtime_ran_status"], "not shown");
+        .contains("installed_runtime_ran (A14) | FAIL | "));
+    assert_eq!(document["installed_binary_ran_status"], "not shown");
     // Its own row: the suite's result stays.
     assert_eq!(document["command_success"], true);
 
@@ -2153,9 +2181,9 @@ fn receipt_says_whether_the_suite_ran_the_installed_binary() {
     let (report, document) = fixture.receipt_after_running(b"another runtime");
     assert!(report
         .table
-        .contains("installed_runtime_ran (A14) | FAIL\n"));
+        .contains("installed_runtime_ran (A14) | FAIL | "));
     assert_eq!(
-        document["installed_runtime_ran_failures"],
+        document["installed_binary_ran_failures"],
         serde_json::json!(["no matched installed Runtime to compare"])
     );
     home.finish().unwrap();
@@ -2189,19 +2217,19 @@ fn two_runtime_hashes_do_not_show_the_installed_binary_ran() {
         (b"another runtime", b"installed runtime"),
     ] {
         let (report, document) = ran(first, second);
-        assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+        assert!(report.table.contains("installed_runtime (A14) | PASS | "));
         assert!(
             report
                 .table
-                .contains("installed_runtime_ran (A14) | FAIL\n"),
+                .contains("installed_runtime_ran (A14) | FAIL | "),
             "{}",
             report.table
         );
         assert_eq!(
-            document["installed_runtime_ran_failures"],
+            document["installed_binary_ran_failures"],
             serde_json::json!(["suite recorded more than one Runtime SHA-256"])
         );
-        assert_eq!(document["installed_runtime_ran_status"], "not shown");
+        assert_eq!(document["installed_binary_ran_status"], "not shown");
         assert!(report.table.contains("versions_receipt (A14) | FAIL\n"));
         assert_eq!(
             document["missing_or_invalid"],
@@ -2212,14 +2240,14 @@ fn two_runtime_hashes_do_not_show_the_installed_binary_ran() {
     let (report, document) = ran(b"installed runtime", b"installed runtime");
     assert!(report
         .table
-        .contains("installed_runtime_ran (A14) | PASS\n"));
+        .contains("installed_runtime_ran (A14) | PASS | "));
     assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
     home.finish().unwrap();
 }
 
 #[test]
 fn a_suite_without_a_runtime_hash_did_not_run_the_installed_binary() {
-    use agent_conformance::report::installed_runtime_ran_failures;
+    use agent_conformance::report::installed_binary_ran_failures;
     let home = ThrowawayHome::new().unwrap();
     let fixture = InstalledFixture::new(&home.root().join("installed"));
     let installed = agent_conformance::report::read_installed_runtime(
@@ -2229,11 +2257,11 @@ fn a_suite_without_a_runtime_hash_did_not_run_the_installed_binary() {
     )
     .unwrap();
     assert_eq!(
-        installed_runtime_ran_failures(None, Some(&installed)),
+        installed_binary_ran_failures(None, Some(&installed)),
         ["suite recorded no Runtime SHA-256"]
     );
     assert!(
-        installed_runtime_ran_failures(Some(&installed.binary_sha256), Some(&installed)).is_empty()
+        installed_binary_ran_failures(Some(&installed.binary_sha256), Some(&installed)).is_empty()
     );
     home.finish().unwrap();
 }

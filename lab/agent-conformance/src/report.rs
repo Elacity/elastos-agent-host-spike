@@ -22,6 +22,24 @@ pub const INSTANCE_GRANTS_SCOPE: &str =
 pub const STAGED_BUNDLE_SCOPE: &str =
     "lab CID of each bundle the suite staged from this checkout and launched; not an installed bundle";
 
+/// What the installed row covers: the installed records agree with each other,
+/// and their release source commit is the repository commit this receipt
+/// records. The suite reads those records; it does not run on the data folder
+/// they describe.
+pub const INSTALLED_RUNTIME_SCOPE: &str =
+    "release head, release and components hash-check each other and name this repository commit; records only, the installed data folder did not run";
+
+/// What the runtime-ran row covers: the program the suite started is the
+/// installed binary, by the SHA-256 that program printed. It ran with a
+/// throwaway data folder, so this says nothing about behaviour on the installed
+/// data.
+pub const INSTALLED_RUNTIME_BINARY_SCOPE: &str =
+    "the installed binary is the program the suite launched, by the SHA-256 it printed; it ran with a throwaway data folder, not the installed one";
+
+/// The data folder the Runtime under test ran with, as the receipt states it.
+pub const RUNTIME_DATA_FOLDER: &str =
+    "throwaway: the suite created it for this run; not the installed data folder";
+
 fn blocker_ids(reason: &str) -> BTreeSet<&str> {
     reason.split(';').map(str::trim).collect()
 }
@@ -663,9 +681,10 @@ pub fn release_commit_failures(
 /// Every reason the receipt cannot say the suite ran the installed binary; empty
 /// means the Runtime the suite launched has the installed binary's SHA-256.
 /// `ran` is the hash the suite printed for the Runtime it launched; `installed`
-/// is the installed Runtime once its hash chain matched. This compares bytes
-/// by hash: it does not show which of the suite's rows launched that Runtime.
-pub fn installed_runtime_ran_failures(
+/// is the installed Runtime once its hash chain matched and bound to this
+/// commit. This compares bytes by hash: it does not show which of the suite's
+/// rows launched that Runtime, and the Runtime ran with a throwaway data folder.
+pub fn installed_binary_ran_failures(
     ran: Option<&str>,
     installed: Option<&InstalledRuntime>,
 ) -> Vec<String> {
@@ -709,8 +728,11 @@ pub fn release_platform() -> &'static str {
 ///   installed bytes belong to, not that the release is genuine;
 /// - the bundle's hash: the capsule bundle the demo ran is not compared with
 ///   anything installed;
-/// - that the suite ran this binary: `installed_runtime_ran_failures` compares
-///   the two hashes for the receipt's own row.
+/// - that the suite ran this binary: `installed_binary_ran_failures` compares
+///   the two hashes for the receipt's own row;
+/// - behaviour on the installed data: only these records are read from the
+///   installed data folder, and the Runtime under test runs with a throwaway
+///   data folder of its own.
 pub fn read_installed_runtime(
     binary: &Path,
     data: &Path,
@@ -962,24 +984,22 @@ pub fn render_bound_run(
         if evidence.identities.runtime_conflict {
             return vec!["suite recorded more than one Runtime SHA-256".to_owned()];
         }
-        installed_runtime_ran_failures(
+        installed_binary_ran_failures(
             evidence.identities.runtime.as_deref(),
             installed.as_ref().ok(),
         )
     });
     if let Some(installed) = &installed {
-        table.push_str(if installed.is_ok() {
-            "installed_runtime (A14) | PASS\n"
-        } else {
-            "installed_runtime (A14) | FAIL\n"
-        });
+        table.push_str(&format!(
+            "installed_runtime (A14) | {} | {INSTALLED_RUNTIME_SCOPE}\n",
+            if installed.is_ok() { "PASS" } else { "FAIL" }
+        ));
     }
     if let Some(not_ran) = &not_ran {
-        table.push_str(if not_ran.is_empty() {
-            "installed_runtime_ran (A14) | PASS\n"
-        } else {
-            "installed_runtime_ran (A14) | FAIL\n"
-        });
+        table.push_str(&format!(
+            "installed_runtime_ran (A14) | {} | {INSTALLED_RUNTIME_BINARY_SCOPE}\n",
+            if not_ran.is_empty() { "PASS" } else { "FAIL" }
+        ));
     }
     let outcome = if !suite_ok {
         "FAIL"
@@ -1027,15 +1047,16 @@ pub fn render_bound_run(
         .into();
         document["installed_runtime"] = serde_json::json!(record);
         document["installed_runtime_failures"] = unmatched.into();
+        document["runtime_data_folder"] = RUNTIME_DATA_FOLDER.into();
     }
     if let Some(not_ran) = not_ran {
-        document["installed_runtime_ran_status"] = if not_ran.is_empty() {
+        document["installed_binary_ran_status"] = if not_ran.is_empty() {
             "ran"
         } else {
             "not shown"
         }
         .into();
-        document["installed_runtime_ran_failures"] = not_ran.into();
+        document["installed_binary_ran_failures"] = not_ran.into();
     }
     let receipt_bytes = serde_json::to_vec_pretty(&document)
         .map(|mut bytes| {
@@ -1087,7 +1108,7 @@ pub fn a14_rows(receipt: &[u8]) -> Result<Vec<A14Row>, String> {
         ("review_binding", "review_failures"),
         ("staged_bundle", "staged_bundle_failures"),
         ("installed_runtime", "installed_runtime_failures"),
-        ("installed_runtime_ran", "installed_runtime_ran_failures"),
+        ("installed_runtime_ran", "installed_binary_ran_failures"),
     ];
     Ok(rows
         .into_iter()
