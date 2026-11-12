@@ -46,6 +46,55 @@ binary=$(absolute "$binary")
 reviews=$(absolute "$reviews")
 data=$(cd -- "$data" && pwd -P)
 
+# Where a folder that may not exist yet will really be: the nearest folder that
+# does exist, with its links resolved, then the part still to be made. Fails
+# when that cannot be told: a file or a dangling link in the way, or a `..` in
+# the part still to be made.
+resolved() {
+    local path=$1 rest=""
+    case "$path" in
+        /*) ;;
+        *) path="$PWD/$path" ;;
+    esac
+    while [ ! -d "$path" ]; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            return 1
+        fi
+        rest="/$(basename -- "$path")$rest"
+        path=$(dirname -- "$path")
+    done
+    case "$rest/" in
+        */../* | */./*) return 1 ;;
+    esac
+    printf '%s%s\n' "$(cd -- "$path" && pwd -P)" "$rest"
+}
+
+# This command writes in two places: the receipts folder and a temporary
+# folder. Neither may be inside the installed Runtime. Prints where the folder
+# will really be, or says why it is refused.
+binary_folder=$(dirname -- "$binary")
+outside_install() {
+    local label=$1 real inside
+    if ! real=$(resolved "$2"); then
+        printf 'refused: cannot tell where the %s would be: %s\n' "$label" "$2" >&2
+        return 1
+    fi
+    case "$real/" in
+        "$data"/*) inside="the installed data folder" ;;
+        "$binary_folder"/*) inside="the folder holding the installed binary" ;;
+        *)
+            printf '%s\n' "$real"
+            return 0
+            ;;
+    esac
+    printf 'refused: the %s is inside %s: %s\n' "$label" "$inside" "$real" >&2
+    printf 'this command writes nothing under the install paths; set ELASTOS_DEMO_RECEIPTS (or TMPDIR) to a folder outside them.\n' >&2
+    return 1
+}
+# Both are settled here, before anything runs.
+receipts=$(outside_install "receipts folder" "$receipts")
+temporary=$(outside_install "temporary folder" "${TMPDIR:-/tmp}")
+
 dirty=$(git -C "$repository" status --porcelain=v1 --untracked-files=all)
 if [ -n "$dirty" ]; then
     printf 'refused: the tree is not clean, so the reviews cannot bind to it:\n%s\n' "$dirty" >&2
@@ -53,7 +102,7 @@ if [ -n "$dirty" ]; then
     exit 1
 fi
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/elastos-demo.XXXXXX")
+work=$(mktemp -d "$temporary/elastos-demo.XXXXXX")
 output="$work/demo-output.log"
 suite=0
 AGENT_CONFORMANCE_REVIEWS="$reviews" \

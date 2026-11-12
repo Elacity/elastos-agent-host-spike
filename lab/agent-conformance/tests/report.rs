@@ -2183,3 +2183,28 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
     ));
     home.finish().unwrap();
 }
+
+#[test]
+fn demo_gates_hold_with_a_stub_suite() {
+    // The cases and what each must say are in the script. It builds a stand-in
+    // checkout and a stand-in installed Runtime under a fresh folder, and names
+    // every path it uses, so no real installation is read or written.
+    let root = tempfile::tempdir().unwrap();
+    let lane = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = std::process::Command::new("bash")
+        .arg(lane.join("tests/demo-gates.sh"))
+        .arg(env!("CARGO_BIN_EXE_report"))
+        .arg(root.path().join("gates"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?} {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "demo-gates: every case holds\n"
+    );
+}

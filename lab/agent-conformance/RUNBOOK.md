@@ -470,7 +470,11 @@ its reasons through `report --a14 <receipt>`, copies the receipt folder to
 own output as `demo-output.log`, and prints that path. It exits 0 only when
 the suite passed and every A14 row reads PASS; the receipt folder is kept
 either way. It writes nothing under the install paths: the installed binary is
-launched where it is, in throwaway Homes under this lane's `target`.
+launched where it is, in throwaway Homes under this lane's `target`. Before
+anything runs it works out where the receipts folder and its temporary folder
+(`TMPDIR`, else `/tmp`) really are, links resolved, and stops with a message if
+either is inside the installed data folder or the folder holding the installed
+binary.
 
 What each A14 row means:
 
