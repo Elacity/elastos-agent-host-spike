@@ -296,20 +296,56 @@ fn a_stop_during_start_up_ends_the_run_within_the_grace_period() {
 #[test]
 fn start_up_that_never_ends_uses_up_its_own_budget() {
     // Slicing during start-up does not refill it: start-up that never ends is
-    // ended by its own fuel budget, long before the epoch deadline. The budget
-    // lasts many ticks (about 0.1 s here), so a refill at a tick would show.
+    // ended by its own fuel budget, long before the epoch deadline.
+    //
+    // Counted, not timed. No ticker runs here: the test moves the epoch
+    // itself, one tick for every 4 slices the guest uses up (`HandClock`).
+    // Start-up has a budget of 20 slices, so it lives through 4 ticks before
+    // its fuel runs out, on any machine. A refill at a tick would give it the
+    // run's budget of 1000 slices at the first of them, and again at every
+    // tick after that: it would then end at its deadline of 50 ticks instead.
+    const SLICES_PER_TICK: u64 = 4;
+    const START_UP_BUDGET_IN_SLICES: u64 = 20;
     let limits = Limits {
-        instantiate_fuel: 2_000_000_000,
+        instantiate_fuel: START_UP_BUDGET_IN_SLICES * Limits::default().fuel_slice,
+        max_ticks: 50,
+        // So that every time this guest gives the thread back, it is because
+        // a fuel slice ran out.
+        yield_each_tick: false,
         ..Limits::default()
     };
-    let (outcome, took) = run(
-        "bus2_start_loop_guest",
-        limits,
-        vec![],
-        Duration::from_secs(10),
+    let outcome = common::within(WATCHDOG, async move {
+        let engine = bus2_host::engine().unwrap();
+        let clock = common::HandClock::new(&engine, SLICES_PER_TICK);
+        let component = Component::new(&engine, common::guest("bus2_start_loop_guest")).unwrap();
+        clock
+            .run(run_resident(
+                &engine,
+                &component,
+                HostState::default(),
+                limits,
+                // Its events never close: only its fuel or its deadline can
+                // end it.
+                async |_events| std::future::pending::<()>().await,
+            ))
+            .await
+            .unwrap()
+    });
+    println!(
+        "start-up that never ends: {} after {} yields and {} ticks",
+        outcome.ending.reason(),
+        outcome.yields,
+        outcome.ticks
     );
-    println!("start-up that never ends: ended after {took:?}");
     assert!(!outcome.started);
     assert_eq!(outcome.ending, Ending::FuelExhausted);
-    assert!(took < Duration::from_secs(2), "{took:?}");
+    // It lived through ticks, so a refill at a tick had its chance.
+    assert!(outcome.ticks >= 2, "{} ticks", outcome.ticks);
+    // And it gave the thread back fewer times than its budget has slices: it
+    // got no fuel beyond that budget.
+    assert!(
+        outcome.yields < START_UP_BUDGET_IN_SLICES,
+        "{} yields",
+        outcome.yields
+    );
 }
