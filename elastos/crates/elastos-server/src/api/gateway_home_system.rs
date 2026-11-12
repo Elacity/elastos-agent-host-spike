@@ -8549,13 +8549,7 @@ fn home_save_background_image(
     file_name: &'static str,
     bytes: Vec<u8>,
 ) -> anyhow::Result<HomeAppearanceSummary> {
-    home_save_background_image_with(
-        data_dir,
-        context,
-        file_name,
-        bytes,
-        &mut NoImageCheckpoint,
-    )
+    home_save_background_image_with(data_dir, context, file_name, bytes, &mut NoImageCheckpoint)
 }
 
 fn home_save_background_image_with(
@@ -8614,9 +8608,10 @@ fn home_reset_background_image_with(
 }
 
 /// Reads every existing background image and returns the paths it found,
-/// refusing a damaged one. Upload and reset call this before they write or
-/// remove anything, so the refusal is the damage notice that names the file
-/// and the Home keeps every image it had (#447).
+/// refusing on any read error. Upload and reset call this before they write or
+/// remove anything, so a damaged image gets the notice that names the file, and
+/// any other read error (an unreadable file, for example) refuses the operation
+/// before the image is replaced or removed (#447).
 fn home_background_image_paths_checked(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
@@ -8627,16 +8622,12 @@ fn home_background_image_paths_checked(
         if !path.is_file() {
             continue;
         }
-        if let Err(err) = crate::auth::read_principal_root_object_resolved(
+        let _ = crate::auth::read_principal_root_object_resolved(
             data_dir,
             context.root(),
             &home_appearance_object_uri(context, file_name),
             &path,
-        ) {
-            if is_damaged_home_state(&err) {
-                return Err(err);
-            }
-        }
+        )?;
         paths.push(path);
     }
     Ok(paths)
@@ -10205,8 +10196,8 @@ mod stored_root_tests {
         assert!(at("reset:checked") < at("reset:removed"));
         let upload_replaced_between_reset = at("reset:checked") < at("upload:replaced")
             && at("upload:replaced") < at("reset:removed");
-        let reset_checked_between_upload =
-            at("upload:checked") < at("reset:checked") && at("reset:checked") < at("upload:replaced");
+        let reset_checked_between_upload = at("upload:checked") < at("reset:checked")
+            && at("reset:checked") < at("upload:replaced");
         assert!(
             !upload_replaced_between_reset && !reset_checked_between_upload,
             "one operation ran between the steps of the other: {trace:?}"
@@ -10224,13 +10215,92 @@ mod stored_root_tests {
                     .exists()
             );
         } else {
-            let entry = current.unwrap_or_else(|| panic!("the upload ran second and its image is gone: {trace:?}"));
+            let entry = current.unwrap_or_else(|| {
+                panic!("the upload ran second and its image is gone: {trace:?}")
+            });
             assert_eq!(
                 home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
                 b"second image",
                 "{trace:?}"
             );
         }
+    }
+
+    /// Writes one image file directly, without a save's removal of the other
+    /// names, so a row can hold two images at once.
+    fn seed_background_image(
+        data_dir: &std::path::Path,
+        context: &HomeLaunchTokenContext,
+        file_name: &'static str,
+        bytes: &[u8],
+    ) -> PathBuf {
+        let path = home_appearance_path(data_dir, context, file_name).unwrap();
+        crate::auth::write_principal_root_object_resolved(
+            data_dir,
+            context.root(),
+            &home_appearance_object_uri(context, file_name),
+            &path,
+            bytes,
+        )
+        .unwrap();
+        path
+    }
+
+    /// An image this process cannot read refuses the upload and the reset
+    /// before anything is written or removed: every file keeps its bytes.
+    #[test]
+    fn an_unreadable_background_image_survives_upload_and_reset() {
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        let png = seed_background_image(&data_dir, &context, "background-image.png", b"kept image");
+        let jpg =
+            seed_background_image(&data_dir, &context, "background-image.jpg", b"kept sibling");
+        std::fs::set_permissions(&png, fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&png).is_ok() {
+            std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600)).unwrap();
+            eprintln!(
+                "skipping an_unreadable_background_image_survives_upload_and_reset: a 000 file is readable here (running as root)"
+            );
+            return;
+        }
+        let upload = home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"new image".to_vec(),
+        );
+        let reset = home_reset_background_image(&data_dir, &context);
+        std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600)).unwrap();
+        let upload_error = upload.expect_err("an unreadable image must refuse the upload");
+        let reset_error = reset.expect_err("an unreadable image must refuse the reset");
+        for (route, error) in [("upload", &upload_error), ("reset", &reset_error)] {
+            let text = format!("{error:#}");
+            assert!(
+                text.to_lowercase().contains("permission denied"),
+                "{route} refusal is the read error: {text}"
+            );
+        }
+        let read = |path: &std::path::Path, file_name: &'static str| {
+            crate::auth::read_principal_root_object_resolved(
+                &data_dir,
+                context.root(),
+                &home_appearance_object_uri(&context, file_name),
+                path,
+            )
+            .unwrap()
+        };
+        assert_eq!(read(&png, "background-image.png"), b"kept image");
+        assert_eq!(read(&jpg, "background-image.jpg"), b"kept sibling");
+        let mut names: Vec<String> = std::fs::read_dir(png.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["background-image.jpg", "background-image.png"],
+            "neither route removed or added a file"
+        );
     }
 }
 
