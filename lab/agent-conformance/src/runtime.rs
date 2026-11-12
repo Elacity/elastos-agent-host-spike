@@ -23,19 +23,25 @@ pub const RUNTIME_BINARY: &str = "AGENT_CONFORMANCE_RUNTIME_BINARY";
 /// where it is and builds no Runtime; unset, it builds the checkout's Runtime
 /// as before. Only the Runtime is given: the localhost provider, the probe and
 /// every Home the Runtime runs in still come from this checkout, so a given
-/// Runtime never reads its own installation's data folder.
+/// Runtime never reads its own installation's data folder. The identity line
+/// the suite prints names the given path beside its hash; a build prints no
+/// path, so the receipt can tell the two apart.
 pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
     static RUNTIME: OnceLock<Result<BinaryUnderTest, String>> = OnceLock::new();
     RUNTIME
         .get_or_init(|| match std::env::var_os(RUNTIME_BINARY) {
             Some(given) => given_native(Path::new(&given), "elastos").inspect(|given| {
                 // Printed here, not in `given_native`: a version identity line
-                // enters the receipt, so only the Runtime the suite launches
+                // enters the receipt, so only the Runtime named for the suite
                 // may print one.
                 println!("elastos given, not built");
+                // The path is printed beside the hash so the receipt can check
+                // that the named path is the installed binary's. This line
+                // comes before any launch and is not launch evidence.
                 crate::identity::Observation::Native {
                     role: "elastos".into(),
                     sha256: given.sha256.clone(),
+                    path: Some(given.binary.to_string_lossy().into_owned()),
                 }
                 .emit();
             }),
@@ -48,12 +54,57 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
 /// Printed, with both hashes, when a given Runtime is refused at a launch.
 pub const CHANGED: &str = "given Runtime changed: ";
 
+/// One record from the launch file `run.sh` writes after the suite into the
+/// private folder it makes then: the canonical path it started, the SHA-256 of
+/// that file immediately before the start, and the answer the launch printed.
+/// `run.sh` is the only writer; no library function appends a record, the
+/// type's fields are private, and the file exists only after the suite has
+/// finished, so test code cannot produce one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    pub(crate) path: String,
+    pub(crate) sha256: String,
+    pub(crate) answer: String,
+}
+
+impl Launch {
+    /// The answer the launch printed, kept so a reader can show what the
+    /// installed binary said when `run.sh` started it.
+    pub fn answer(&self) -> &str {
+        &self.answer
+    }
+
+    /// Reads one line `run.sh` wrote. Any other text yields `None`, so test
+    /// output or a hand-written line cannot stand in for a record.
+    pub fn parse_record(line: &str) -> Option<Self> {
+        let (rest, answer) = line.rsplit_once(" answer=")?;
+        let (path, sha256) = rest.rsplit_once(" sha256=")?;
+        let path = path.strip_prefix("path=")?;
+        let lowercase_hex = sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if path.is_empty() || sha256.len() != 64 || !lowercase_hex || answer.is_empty() {
+            return None;
+        }
+        if answer.bytes().any(|byte| byte.is_ascii_control()) {
+            return None;
+        }
+        Some(Self {
+            path: path.into(),
+            sha256: sha256.into(),
+            answer: answer.into(),
+        })
+    }
+}
+
 /// The harness calls this immediately before it starts any program. A given
 /// Runtime is hashed again here, once per launch, and is refused unless it
 /// still has the bytes first recorded for it, so a file replaced after that
-/// first hash is not launched under the recorded hash. The differing hash is
-/// also printed as an identity line, so the receipt records the conflict even
-/// if a caller drops the error.
+/// first hash is not launched under the recorded hash. It keeps the launch
+/// honest and writes no record: the installed-path row rests on `run.sh`'s own
+/// launch, not on the suite's launches. The differing hash is also printed as
+/// an identity line, so the receipt records the conflict even if a caller drops
+/// the error.
 ///
 /// What this does not show: a replacement made after this hash and before the
 /// operating system starts the process, or what a started Runtime then starts
@@ -80,6 +131,7 @@ pub fn unchanged_before_launch(program: &Path) -> Result<(), &'static str> {
     crate::identity::Observation::Native {
         role: "elastos".into(),
         sha256: now,
+        path: Some(program.to_string_lossy().into_owned()),
     }
     .emit();
     Err("given Runtime binary changed after it was first hashed; not launched")
@@ -132,6 +184,9 @@ fn build_native(package: &str, name: &str) -> Result<BinaryUnderTest, String> {
     crate::identity::Observation::Native {
         role: name.into(),
         sha256: sha256.clone(),
+        // A build has no named path: the receipt fails the launched-path row
+        // rather than compare the checkout's own build.
+        path: None,
     }
     .emit();
     Ok(BinaryUnderTest { binary, sha256 })
@@ -259,6 +314,7 @@ mod tests {
         let expected = Observation::Native {
             role: "elastos".into(),
             sha256: sha256(b"given runtime"),
+            path: Some(given.to_string_lossy().into_owned()),
         }
         .line();
         assert_eq!(identities, [expected], "{printed:?}");

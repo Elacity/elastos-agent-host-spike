@@ -44,9 +44,27 @@ fn main() {
         }
         process::exit(1);
     }
-    if args.len() != 5 {
+    if args.len() == 4 && args[1] == "--installed-binary-hash" {
+        // The record's binary hash for run.sh: the hash chain is checked the
+        // same way the receipt checks it, and only the hash is printed.
+        match report::read_installed_runtime(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            report::release_platform(),
+        ) {
+            Ok(installed) => {
+                println!("{}", installed.binary_sha256);
+                return;
+            }
+            Err(reasons) => {
+                eprintln!("no installed binary hash record: {}", reasons.join("; "));
+                process::exit(1);
+            }
+        }
+    }
+    if args.len() != 5 && args.len() != 6 {
         eprintln!(
-            "versions receipt failure: expected inventory, results, Cargo status and receipt path"
+            "versions receipt failure: expected inventory, results, Cargo status and receipt path, and optionally the launch record path"
         );
         process::exit(1);
     }
@@ -98,6 +116,20 @@ fn main() {
             process::exit(1);
         }
     };
+    // The suite's runner checks the tree before and after the tests and passes
+    // its result here. The Git identity above is checked again at this write.
+    let tree_check_failure = (env::var_os("AGENT_CONFORMANCE_TREE_DIRTY_DURING_RUN")
+        .as_deref()
+        .and_then(std::ffi::OsStr::to_str)
+        == Some("1"))
+    .then(|| "tree was dirty during the run".to_owned());
+    // The launch record file is run.sh's: it makes the file after the suite has
+    // exited and names its path on this command line. No test process is given
+    // it, and test output is never read as launch evidence.
+    let launch_record = match args.get(5) {
+        None => report::LaunchRecord::Missing,
+        Some(path) => report::LaunchRecord::read(Path::new(path)),
+    };
     let result = report::write_bound_run(
         &listed,
         &output,
@@ -106,7 +138,9 @@ fn main() {
         report::Bound {
             reviews: reviews.as_deref(),
             reviews_file_failure,
+            tree_check_failure,
             installed,
+            launch_record,
         },
         receipt,
         gaps.as_deref(),

@@ -432,6 +432,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         Observation::Native {
             role: "elastos".into(),
             sha256: runtime.sha256.clone(),
+            path: None,
         },
         Observation::Native {
             role: "localhost-provider".into(),
@@ -439,6 +440,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
                 .unwrap()
                 .sha256
                 .clone(),
+            path: None,
         },
     ]
     .into_iter()
@@ -920,10 +922,12 @@ fn exercise_session_binding(
             Observation::Native {
                 role: "elastos".into(),
                 sha256: runtime.sha256.clone(),
+                path: None,
             },
             Observation::Native {
                 role: "localhost-provider".into(),
                 sha256: provider.sha256.clone(),
+                path: None,
             },
         ];
         controller
@@ -1130,10 +1134,12 @@ fn exercise_owned_roots() -> Result<(), &'static str> {
             Observation::Native {
                 role: "elastos".into(),
                 sha256: runtime.sha256.clone(),
+                path: None,
             },
             Observation::Native {
                 role: "localhost-provider".into(),
                 sha256: provider.sha256.clone(),
+                path: None,
             },
         ];
         controller

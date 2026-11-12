@@ -382,6 +382,9 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
     let given = home.root().join("given-elastos");
     fs::write(&given, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&given, fs::Permissions::from_mode(0o755)).unwrap();
+    // The child is named a fresh, empty file under the old record variable. The
+    // suite writes no record there: launch evidence is run.sh's alone.
+    fs::write(home.root().join("launches"), b"").unwrap();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "given_runtime_changed_after_its_first_hash_is_not_launched",
@@ -390,6 +393,10 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
             "--test-threads=1",
         ])
         .env("AGENT_CONFORMANCE_RUNTIME_BINARY", &given)
+        .env(
+            "AGENT_CONFORMANCE_LAUNCH_RECORD",
+            home.root().join("launches"),
+        )
         .env(SWAP_CHILD, "1")
         .output()
         .unwrap();
@@ -410,14 +417,21 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
         "{stdout:?}"
     );
     // The receipt's collector sees both hashes, so it records the conflict.
-    for hash in [first, swapped] {
+    // Each line names the given path beside its hash.
+    for hash in [&first, &swapped] {
         let line = Observation::Native {
             role: "elastos".into(),
-            sha256: hash,
+            sha256: hash.clone(),
+            path: Some(given.to_string_lossy().into_owned()),
         }
         .line();
         assert!(stdout.contains(&format!("{line}\n")), "{stdout:?}");
     }
+    // Successful and refused starts alike write nothing: the harness keeps no
+    // record, so a test process cannot produce launch evidence.
+    let records = fs::read(home.root().join("launches")).unwrap();
+    assert!(records.is_empty(), "{records:?}");
+    assert!(!stdout.contains("runtime launched:"), "{stdout:?}");
     assert!(stdout.contains(
         "given Runtime changed: it could not be hashed again before a launch; not launched\n"
     ));
