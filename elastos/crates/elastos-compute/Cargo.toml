@@ -10,27 +10,14 @@ elastos-common = { path = "../elastos-common" }
 elastos-guest = { path = "../elastos-guest" }
 async-trait = "0.1"
 serde_json = "1"
-tokio = { version = "1.0", features = ["sync", "rt-multi-thread", "time"] }
-# Wasmtime's default features minus `cache`: the engine never sets a compilation cache
-# (providers/component.rs), and `cache` is the only thing that pulls zstd into the build.
-wasmtime = { version = "36", default-features = false, features = [
-    "async",
-    "gc",
-    "gc-drc",
-    "gc-null",
-    "wat",
-    "profiling",
-    "parallel-compilation",
-    "cranelift",
-    "pooling-allocator",
-    "demangle",
-    "addr2line",
-    "coredump",
-    "debug-builtins",
+tokio = { version = "1.0", features = ["sync", "rt-multi-thread", "time", "fs", "io-util"] }
+# The RA1 feature set: the synchronous elastos.component/v1 host only. No `async` or
+# `component-model-async` (RA2 adds them), no `gc`, `threads` or `stack-switching` (those
+# proposals are compiled out), no `parallel-compilation` (unmeasured), no `cache`.
+wasmtime = { version = "=48.0.8", default-features = false, features = [
     "runtime",
+    "cranelift",
     "component-model",
-    "threads",
-    "stack-switching",
     "std",
 ] }
 uuid = { version = "1.0", features = ["v4"] }
@@ -39,3 +26,5 @@ tracing = "0.1"
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tempfile = "3.0"
+# Test fixtures only: turns component text into bytes. The same wasm-tools line as the engine.
+wat = "=1.254.2"

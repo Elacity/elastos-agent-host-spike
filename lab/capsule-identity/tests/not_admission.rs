@@ -117,11 +117,13 @@ fn valid_signature_grants_nothing_by_itself() {
 /// CID, which the folder and checked record calls use. `CheckedBundle::entry`
 /// reads one file's bytes from the walk the bundle already holds. None
 /// admits, grants or launches.
-const IDENTITY_FUNCTIONS: [&str; 31] = [
+const IDENTITY_FUNCTIONS: [&str; 33] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
     "checked_bundle_observed",
+    "checked_bundle_within",
+    "checked_bundle_within_observed",
     "check_name",
     "cid",
     "entries",

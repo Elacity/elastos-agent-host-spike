@@ -1360,16 +1360,14 @@ fn validate_trak_v1(
     let mut mdia = None;
     for (off, h) in scan_boxes(data, trak_off + trak_h.header_size, trak_off + trak_h.size)? {
         match &h.box_type {
-            b"tkhd" => {
-                if tkhd.replace((off, h)).is_some() {
-                    return Err(ContractError::InvalidField("init_segment_bytes"));
-                }
+            b"tkhd" if tkhd.is_some() => {
+                return Err(ContractError::InvalidField("init_segment_bytes"));
             }
-            b"mdia" => {
-                if mdia.replace((off, h)).is_some() {
-                    return Err(ContractError::InvalidField("init_segment_bytes"));
-                }
+            b"tkhd" => tkhd = Some((off, h)),
+            b"mdia" if mdia.is_some() => {
+                return Err(ContractError::InvalidField("init_segment_bytes"));
             }
+            b"mdia" => mdia = Some((off, h)),
             _ => {}
         }
     }
@@ -1393,16 +1391,14 @@ fn validate_clear_trak_v1(
     let mut mdia = None;
     for (off, h) in scan_boxes(data, trak_off + trak_h.header_size, trak_off + trak_h.size)? {
         match &h.box_type {
-            b"tkhd" => {
-                if tkhd.replace((off, h)).is_some() {
-                    return Err(ContractError::InvalidField("init_segment_bytes"));
-                }
+            b"tkhd" if tkhd.is_some() => {
+                return Err(ContractError::InvalidField("init_segment_bytes"));
             }
-            b"mdia" => {
-                if mdia.replace((off, h)).is_some() {
-                    return Err(ContractError::InvalidField("init_segment_bytes"));
-                }
+            b"tkhd" => tkhd = Some((off, h)),
+            b"mdia" if mdia.is_some() => {
+                return Err(ContractError::InvalidField("init_segment_bytes"));
             }
+            b"mdia" => mdia = Some((off, h)),
             _ => {}
         }
     }
@@ -1432,11 +1428,10 @@ fn validate_mdia_v1(
                 }
                 handler_type = Some(parse_hdlr_type(data, off, h)?);
             }
-            b"minf" => {
-                if minf.replace((off, h)).is_some() {
-                    return Err(ContractError::InvalidField("init_segment_bytes"));
-                }
+            b"minf" if minf.is_some() => {
+                return Err(ContractError::InvalidField("init_segment_bytes"));
             }
+            b"minf" => minf = Some((off, h)),
             _ => {}
         }
     }
@@ -1464,11 +1459,10 @@ fn validate_clear_mdia_v1(
                 }
                 handler_type = Some(parse_hdlr_type(data, off, h)?);
             }
-            b"minf" => {
-                if minf.replace((off, h)).is_some() {
-                    return Err(ContractError::InvalidField("init_segment_bytes"));
-                }
+            b"minf" if minf.is_some() => {
+                return Err(ContractError::InvalidField("init_segment_bytes"));
             }
+            b"minf" => minf = Some((off, h)),
             _ => {}
         }
     }

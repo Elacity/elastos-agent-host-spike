@@ -16223,13 +16223,10 @@ struct DeclaredTest {
 /// line is not a function declaration.
 fn test_declaration_name(line: &str) -> Option<String> {
     let mut rest = line.trim();
-    loop {
-        let Some(next) = ["pub ", "async ", "unsafe ", "const "]
-            .iter()
-            .find_map(|prefix| rest.strip_prefix(prefix))
-        else {
-            break;
-        };
+    while let Some(next) = ["pub ", "async ", "unsafe ", "const "]
+        .iter()
+        .find_map(|prefix| rest.strip_prefix(prefix))
+    {
         rest = next;
     }
     let rest = rest.strip_prefix("fn ")?;
@@ -22654,8 +22651,7 @@ fn model_inline_profile_check_refuses_each_bad_section() {
     // and with it dropped, so the two copies differ by one whole line.
     let last_sentence = real
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .next_back()
+        .rfind(|line| !line.trim().is_empty())
         .expect("a real section holds a sentence line");
     let longer = real.replacen(
         last_sentence,

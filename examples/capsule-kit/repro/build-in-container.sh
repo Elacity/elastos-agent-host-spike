@@ -15,6 +15,11 @@ CAPSULE="${1:?usage: build-in-container.sh <capsule-dir relative to the reposito
 # every crate's metadata, and that hash changes symbol names, LTO function
 # order, and so the code bytes. One platform means one host triple.
 IMAGE="rust:1.91.0-slim-bookworm@sha256:81c97592d519ba7397e8adccb0345fb5a91965c0a44b82af83bd1ef06c36cef5"
+# The compiler is the image's, 1.91.0, whatever the mounted repository pins.
+# rustup reads rust-toolchain.toml from the working folder, and the
+# repository's pin is newer than this image: without this the build would
+# fetch and use another compiler, and the recorded hashes would not hold.
+TOOLCHAIN="1.91.0"
 PLATFORM="linux/amd64"
 # One fixed mount point, and not the path the builder remaps the repository to
 # (/src/elastos-runtime): the builder refuses an artifact that holds the
@@ -45,6 +50,7 @@ docker run --rm --platform "${PLATFORM}" \
     -v "${REPO_ROOT}:${SRC}" \
     -w "${SRC}" \
     -e HOME=/home/builder \
+    -e "RUSTUP_TOOLCHAIN=${TOOLCHAIN}" \
     -e CARGO_BUILD_BUILD_DIR=/tmp/elastos-build-dir \
     -e "CAPSULE=${CAPSULE}" \
     "${IMAGE}" \

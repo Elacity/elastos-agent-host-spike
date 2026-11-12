@@ -166,36 +166,36 @@ function inspectGraph(manifestPath, graphName) {
 
 requireText(
   "rust-toolchain.toml",
-  /^channel = "1\.91\.0"$/m,
-  "rust-toolchain.toml must pin Rust 1.91.0",
+  /^channel = "1\.95\.0"$/m,
+  "rust-toolchain.toml must pin Rust 1.95.0",
 );
 requireText(
   "elastos/Cargo.toml",
-  /^rust-version = "1\.91"$/m,
-  "the workspace MSRV must be Rust 1.91",
+  /^rust-version = "1\.95"$/m,
+  "the workspace MSRV must be Rust 1.95",
 );
 // ci.yml pins actions by commit; the comment names the toolchain branch it came from.
 const ci = requireText(
   ".github/workflows/ci.yml",
-  /dtolnay\/rust-toolchain@[0-9a-f]{40} # 1\.91\.0$/m,
-  "CI must install Rust 1.91.0",
+  /dtolnay\/rust-toolchain@[0-9a-f]{40} # 1\.95\.0$/m,
+  "CI must install Rust 1.95.0",
 );
 const ciToolchains = [...ci.matchAll(/dtolnay\/rust-toolchain@(?:[0-9a-f]{40} # )?([^\s]+)/g)].map(
   (match) => match[1],
 );
 if (
   ciToolchains.length === 0 ||
-  ciToolchains.some((toolchain) => toolchain !== "1.91.0")
+  ciToolchains.some((toolchain) => toolchain !== "1.95.0")
 ) {
-  fail(`CI Rust toolchains must all be 1.91.0, got [${ciToolchains.join(", ")}]`);
+  fail(`CI Rust toolchains must all be 1.95.0, got [${ciToolchains.join(", ")}]`);
 }
 requireText(
   "scripts/setup-source-home.sh",
-  /minor < 91/,
-  "source-home setup must reject Rust older than 1.91",
+  /minor < 95/,
+  "source-home setup must reject Rust older than 1.95",
 );
 for (const path of ["README.md", "docs/GETTING_STARTED.md", "elastos/README.md"]) {
-  requireText(path, /Rust 1\.91(\.0)?\+?|Rust 1\.91 or newer/, `${path} must document the Rust 1.91 floor`);
+  requireText(path, /Rust 1\.95(\.0)?\+?|Rust 1\.95 or newer/, `${path} must document the Rust 1.95 floor`);
 }
 const serverManifest = requireText(
   "elastos/crates/elastos-server/Cargo.toml",
@@ -234,7 +234,7 @@ for (const closed of closedAdvisories) {
 const report = {
   schema: "elastos.carrier-dependency-generation-check/v1",
   ok: true,
-  rust: "1.91.0",
+  rust: "1.95.0",
   graphs: [
     inspectGraph("elastos/Cargo.toml", "Runtime workspace"),
     inspectGraph("capsules/object-provider/Cargo.toml", "object-provider workspace"),

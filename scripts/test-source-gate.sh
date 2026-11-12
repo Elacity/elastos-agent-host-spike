@@ -22,8 +22,14 @@ redteam() {
   # local pre-push both run it. A skip is not a pass: unittest exits 0 on an
   # all-skipped run, so the exact run is checked below.
   # The full receipt probe builds three copies and takes 8-11 minutes; it stays
-  # a local command, not part of this gate:
-  #   python3 -I -m unittest discover -s lab/redteam/py \
+  # a local command, not part of this gate. It needs rustc 1.91.0, the lab
+  # lane's own pin, which is older than this repository's. The probe runs
+  # rustc from the lane's folder, where rustup picks 1.91.0 by itself; RUSTC
+  # names that compiler outright, so that a rustc first on PATH that is not
+  # rustup's cannot stand in for it (a wrong version skips the tests, and an
+  # all-skipped run exits 0):
+  #   RUSTC="$(rustup which --toolchain 1.91.0 rustc)" \
+  #     python3 -I -m unittest discover -s lab/redteam/py \
   #     -p test_wasm_capsule_receipt.py -v
   local output status=0
   output="$(python3 -I -m unittest discover -s lab/redteam/py \
@@ -57,6 +63,7 @@ product_ui() {
 release() {
   node --test scripts/ci-model-package.test.mjs scripts/ci-installed-home-failure.test.mjs
   python3 scripts/ci-release-policy-test.py
+  python3 scripts/ci-installed-app-paths-test.py
   python3 scripts/ci-download-cache-test.py
   python3 scripts/components-release-integrity-check.py --self-test
   python3 scripts/publish-platform-artifacts-test.py

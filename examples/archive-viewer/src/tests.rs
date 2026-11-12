@@ -918,9 +918,9 @@ fn other_entry_kinds_are_blocked() {
     assert_eq!(entries(&bus)[1]["kind"], "other");
 }
 
-/// No read window reaches the bytes `[data_start, data_end)`, in any run.
-fn assert_data_unread(bus: &FakeBus, data_start: u64, data_end: u64) {
-    for call in bus.invokes_on(ARCHIVE) {
+/// No read window reaches the bytes `[data_start, data_end)` of `uri`, in any run.
+fn assert_data_unread(bus: &FakeBus, uri: &str, data_start: u64, data_end: u64) {
+    for call in bus.invokes_on(uri) {
         if let Call::Invoke {
             operation, body, ..
         } = call
@@ -958,7 +958,7 @@ fn a_nested_archive_is_listed_not_opened() {
         assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
         assert_eq!(entries(&bus)[0]["kind"], "archive");
         assert!(skipped(&bus).is_empty());
-        assert_data_unread(&bus, data_start, data_end);
+        assert_data_unread(&bus, ARCHIVE, data_start, data_end);
     }
 }
 
@@ -988,7 +988,7 @@ fn encrypted_entries_are_listed_not_read() {
     let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
     assert_eq!(status_of(&bus, 0), ("encrypted".to_string(), None));
     assert!(skipped(&bus).is_empty());
-    assert_data_unread(&bus, data_start, data_end);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_end);
 }
 
 #[test]
@@ -1000,7 +1000,7 @@ fn a_requested_encrypted_entry_is_skipped_with_its_status() {
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0]["index"], 0);
     assert_eq!(skipped[0]["reason"], "encrypted");
-    assert_data_unread(&bus, data_start, data_end);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_end);
 }
 
 #[test]
@@ -1119,7 +1119,7 @@ fn a_comment_over_1_kib_refuses_the_archive_without_reading_it() {
     let (code, message) = refused(&bus);
     assert_eq!(code, "end_record_missing");
     assert!(message.contains("comment"), "{message}");
-    // The comment was never read: the tail and the size probes only.
+    // The comment was never read: the size probes and the tail only.
     let read = bus.bytes_served(ARCHIVE);
     assert!(
         read <= 22 + MAX_COMMENT_BYTES + 40,
@@ -1734,7 +1734,7 @@ fn text_block(len: usize) -> Vec<u8> {
 }
 
 /// The listed entries of an archive, and the bus its reads go through.
-fn listing_of(archive: Vec<u8>) -> (FakeBus, String, Vec<zip::Entry>) {
+fn listing_of(archive: Vec<u8>) -> (FakeBus, String, Vec<Entry>) {
     let mut bus = bus_with(request(ARCHIVE, &[]), ARCHIVE, archive);
     let grant = capsule_kit_guest::grant(&mut bus, ARCHIVE, "read", "test a preview").unwrap();
     let mut left = MAX_READ_BYTES;
@@ -1901,7 +1901,7 @@ fn an_entry_declared_over_the_cap_is_not_read() {
     assert!(previews(&bus).is_empty());
     // The entry's data starts after its 30-byte local header and 5-byte name.
     let data_start = 30 + 5;
-    assert_data_unread(&bus, data_start, data_start + text.len() as u64);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_start + text.len() as u64);
 }
 
 #[test]
@@ -1921,7 +1921,7 @@ fn an_entry_declared_past_the_ratio_is_not_read() {
     assert_eq!(skipped(&bus)[0]["reason"], "ratio");
     assert!(previews(&bus).is_empty());
     let data_start = 30 + 5;
-    assert_data_unread(&bus, data_start, data_start + compressed);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_start + compressed);
 }
 
 #[test]
@@ -1962,7 +1962,7 @@ fn a_stored_entry_with_two_sizes_is_skipped() {
     assert_eq!(skipped(&bus)[0]["reason"], "size_mismatch");
     assert!(previews(&bus).is_empty());
     let data_start = 30 + 5;
-    assert_data_unread(&bus, data_start, data_start + text.len() as u64);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_start + text.len() as u64);
 }
 
 #[test]
@@ -2010,8 +2010,16 @@ fn no_run_inflates_more_than_its_total() {
             let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
             zip::listing(&mut reader).unwrap()
         };
-        let (previews, skipped, budget) =
-            previews_for(&mut bus, ARCHIVE, &grant, &mut left, &listing, &order).unwrap();
+        let (previews, skipped, budget) = previews_for(
+            &mut bus,
+            ARCHIVE,
+            &grant,
+            &mut left,
+            Format::Zip,
+            &listing,
+            &order,
+        )
+        .unwrap();
         let used = preview::MAX_INFLATE_BYTES - budget.inflate;
         assert!(used <= 65_536, "used {used} in order {order:?}");
         assert_eq!(used, 65_536, "the total is the cap in order {order:?}");
@@ -2062,4 +2070,837 @@ fn no_run_reads_more_compressed_data_than_its_cap() {
     };
     assert_eq!(outcome.read, 0, "the third entry's bytes are not read");
     assert_eq!(outcome.blocks, Err("compressed_budget"));
+}
+
+// --- tar (ustar) listing: the header walk over the shared rules -------------
+
+const TAR: &str = "localhost://Users/self/Documents/trip.tar";
+
+/// One tar entry as the builder writes it.
+struct TarSpec {
+    name: Vec<u8>,
+    prefix: Vec<u8>,
+    typeflag: u8,
+    declared: u64,
+    data: Vec<u8>,
+    /// The size field's exact bytes, when the fixture lies.
+    size_field: Option<Vec<u8>>,
+    /// The stored checksum, when the fixture lies.
+    checksum: Option<u64>,
+}
+
+impl TarSpec {
+    fn file(name: &str) -> Self {
+        TarSpec {
+            name: name.as_bytes().to_vec(),
+            prefix: Vec::new(),
+            typeflag: b'0',
+            declared: 0,
+            data: Vec::new(),
+            size_field: None,
+            checksum: None,
+        }
+    }
+
+    fn data(mut self, data: &[u8]) -> Self {
+        self.declared = data.len() as u64;
+        self.data = data.to_vec();
+        self
+    }
+
+    fn kind(mut self, typeflag: u8) -> Self {
+        self.typeflag = typeflag;
+        self
+    }
+
+    fn prefix(mut self, prefix: &str) -> Self {
+        self.prefix = prefix.as_bytes().to_vec();
+        self
+    }
+}
+
+fn tar_octal(value: u64, width: usize) -> Vec<u8> {
+    let mut field = format!("{:0width$o}", value, width = width - 1).into_bytes();
+    field.push(0);
+    field
+}
+
+fn tar_checksum_field(value: u64) -> Vec<u8> {
+    let mut field = format!("{value:06o}").into_bytes();
+    field.push(0);
+    field.push(b' ');
+    field
+}
+
+/// The unsigned checksum of a header, its own field read as spaces.
+fn tar_sum(block: &[u8]) -> u64 {
+    block
+        .iter()
+        .enumerate()
+        .map(|(at, &byte)| {
+            if (148..156).contains(&at) {
+                u64::from(b' ')
+            } else {
+                u64::from(byte)
+            }
+        })
+        .sum()
+}
+
+/// The signed checksum of a header, its own field read as spaces.
+fn tar_signed_sum(block: &[u8]) -> i64 {
+    block
+        .iter()
+        .enumerate()
+        .map(|(at, &byte)| {
+            if (148..156).contains(&at) {
+                i64::from(b' ')
+            } else {
+                i64::from(byte as i8)
+            }
+        })
+        .sum()
+}
+
+/// One 512-byte ustar header, byte by byte.
+fn tar_header(spec: &TarSpec) -> Vec<u8> {
+    let mut block = vec![0u8; 512];
+    let name = &spec.name[..spec.name.len().min(100)];
+    block[..name.len()].copy_from_slice(name);
+    block[100..108].copy_from_slice(b"0000644\0");
+    block[108..116].copy_from_slice(b"0000000\0");
+    block[116..124].copy_from_slice(b"0000000\0");
+    let size = spec
+        .size_field
+        .clone()
+        .unwrap_or_else(|| tar_octal(spec.declared, 12));
+    block[124..136].copy_from_slice(&size[..12]);
+    block[136..148].copy_from_slice(b"00000000000\0");
+    block[148..156].copy_from_slice(b"        ");
+    block[156] = spec.typeflag;
+    block[257..263].copy_from_slice(b"ustar\0");
+    block[263..265].copy_from_slice(b"00");
+    block[329..337].copy_from_slice(b"0000000\0");
+    block[337..345].copy_from_slice(b"0000000\0");
+    let prefix = &spec.prefix[..spec.prefix.len().min(155)];
+    block[345..345 + prefix.len()].copy_from_slice(prefix);
+    let sum: u64 = block.iter().map(|&byte| u64::from(byte)).sum();
+    let stored = spec.checksum.unwrap_or(sum);
+    block[148..156].copy_from_slice(&tar_checksum_field(stored));
+    block
+}
+
+/// A tar archive: each header, its declared data and padding, then the two
+/// zero blocks that end the listing.
+fn tar_build(specs: &[TarSpec]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for spec in specs {
+        out.extend(tar_header(spec));
+        let declared = spec.declared as usize;
+        let mut data = spec.data.clone();
+        data.resize(declared, 0);
+        out.extend_from_slice(&data);
+        let pad = (512 - declared % 512) % 512;
+        out.extend(std::iter::repeat_n(0, pad));
+    }
+    out.extend([0u8; 1024]);
+    out
+}
+
+fn tar_fixture(specs: &[TarSpec]) -> FakeBus {
+    run_fixture(request(TAR, &[]), TAR, tar_build(specs))
+}
+
+#[test]
+fn a_tar_archive_lists_its_entries() {
+    let archive = tar_build(&[
+        TarSpec::file("a.txt").data(b"hello"),
+        TarSpec::file("dir/").kind(b'5'),
+        TarSpec::file("b.txt").prefix("sub"),
+    ]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive.clone());
+    let view = view(&bus);
+    assert!(view.get("refused").is_none(), "the archive is not refused");
+    assert!(view.get("stopped").is_none(), "the listing reached its end");
+    assert_eq!(view["archive"]["size"], archive.len());
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["path"], "a.txt");
+    assert_eq!(entries[0]["kind"], "file");
+    assert_eq!(entries[0]["uncompressed_size"], 5);
+    assert_eq!(entries[0]["status"], "listed");
+    assert_eq!(entries[1]["path"], "dir/");
+    assert_eq!(entries[1]["kind"], "directory");
+    assert_eq!(entries[2]["path"], "sub/b.txt");
+    assert_eq!(entries[2]["status"], "listed");
+}
+
+#[test]
+fn the_format_comes_from_the_content_not_the_name() {
+    // A ZIP at the tar fixture's URI and a tar at the ZIP fixture's URI both
+    // list: one decision reads the first bytes, not the request's name.
+    let bus = run_fixture(request(TAR, &[]), TAR, build(&[Spec::file("z.txt")], &[]));
+    assert_eq!(entries(&bus)[0]["path"], "z.txt");
+    assert!(view(&bus).get("refused").is_none());
+    let bus = run_fixture(
+        request(ARCHIVE, &[]),
+        ARCHIVE,
+        tar_build(&[TarSpec::file("t.txt")]),
+    );
+    assert_eq!(entries(&bus)[0]["path"], "t.txt");
+    assert!(view(&bus).get("refused").is_none());
+}
+
+#[test]
+fn an_object_that_is_neither_zip_nor_tar_is_refused() {
+    let bus = run_fixture(request(TAR, &[]), TAR, b"not an archive".to_vec());
+    let view = view(&bus);
+    assert_eq!(view["refused"]["code"], "unknown_format");
+    assert!(view["refused"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("ustar"));
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_header_with_a_bad_checksum_refuses_the_archive() {
+    let mut spec = TarSpec::file("a.txt").data(b"hello");
+    spec.checksum = Some(1);
+    let bus = tar_fixture(&[spec]);
+    assert_eq!(view(&bus)["refused"]["code"], "header_checksum");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_size_that_is_not_octal_refuses_the_archive() {
+    let mut spec = TarSpec::file("a.txt");
+    spec.size_field = Some(b"00000000008\0".to_vec());
+    let bus = tar_fixture(&[spec]);
+    assert_eq!(view(&bus)["refused"]["code"], "size_not_octal");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_signed_checksum_header_is_accepted() {
+    // A name with bytes past 0x7F makes the signed and unsigned sums differ;
+    // a writer may store either one.
+    let mut spec = TarSpec::file("");
+    spec.name = vec![0xFF; 6];
+    let probe = tar_header(&spec);
+    spec.checksum = Some(tar_signed_sum(&probe) as u64);
+    let bus = tar_fixture(&[spec]);
+    assert!(
+        view(&bus).get("refused").is_none(),
+        "the signed sum is accepted"
+    );
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["status"], "blocked");
+    assert_eq!(entries[0]["reason"], "not_ascii");
+}
+
+#[test]
+fn a_base_256_size_refuses_the_archive() {
+    let mut spec = TarSpec::file("a.txt");
+    spec.size_field = Some(vec![0x80; 12]);
+    let bus = tar_fixture(&[spec]);
+    assert_eq!(view(&bus)["refused"]["code"], "size_base256");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn an_octal_field_with_other_padding_refuses_the_archive() {
+    // A size with a stray byte after its space padding is not octal.
+    let mut spec = TarSpec::file("a.txt");
+    spec.size_field = Some(b"0000000001 9".to_vec());
+    let bus = tar_fixture(&[spec]);
+    assert_eq!(view(&bus)["refused"]["code"], "size_not_octal");
+    assert!(entries(&bus).is_empty());
+
+    // A checksum field with the right value and a stray byte after the space
+    // is refused, not read as that value.
+    let mut archive = tar_build(&[TarSpec::file("a.txt")]);
+    let sum = tar_sum(&archive[..512]);
+    let field = format!("{sum:06o} x");
+    write_at(&mut archive, 148, field.as_bytes());
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "header_checksum");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_magic_that_is_not_ustar_nul_00_is_not_tar() {
+    // GNU's `ustar  \0` and a wrong version are other formats, and the whole
+    // object is unknown rather than a tar listing on the wrong bytes. Each
+    // header's checksum is recomputed for its changed magic, so a reader that
+    // skips the magic check takes the bytes as tar, not as a bad checksum.
+    for patch in [
+        &[(262, b' '), (263, b' '), (264, 0)][..],
+        &[(263, b'0'), (264, b'1')][..],
+    ] {
+        let mut archive = tar_build(&[TarSpec::file("a.txt")]);
+        for &(at, byte) in patch {
+            archive[at] = byte;
+        }
+        write_at(&mut archive, 148, b"        ");
+        let sum: u64 = archive[..512].iter().map(|&byte| u64::from(byte)).sum();
+        write_at(&mut archive, 148, &tar_checksum_field(sum));
+        let bus = run_fixture(request(TAR, &[]), TAR, archive);
+        let view = view(&bus);
+        assert_eq!(view["refused"]["code"], "unknown_format");
+        assert!(
+            view["refused"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ustar"),
+            "the reason names the format this reader supports"
+        );
+        assert!(entries(&bus).is_empty());
+    }
+}
+
+#[test]
+fn an_old_tar_without_magic_refuses_with_the_ustar_message() {
+    // An old tar header has no magic at all. The reader lists ustar, and its
+    // reason says so instead of calling the object not a tar archive.
+    let mut archive = tar_build(&[TarSpec::file("a.txt")]);
+    write_at(&mut archive, 257, &[0u8; 8]);
+    write_at(&mut archive, 148, b"        ");
+    let sum: u64 = archive[..512].iter().map(|&byte| u64::from(byte)).sum();
+    write_at(&mut archive, 148, &tar_checksum_field(sum));
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    let view = view(&bus);
+    assert_eq!(view["refused"]["code"], "unknown_format");
+    assert!(
+        view["refused"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ustar"),
+        "the reason names the format this reader supports"
+    );
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_later_header_with_a_wrong_magic_refuses_the_archive() {
+    let mut archive = tar_build(&[TarSpec::file("a.txt"), TarSpec::file("b.txt")]);
+    archive[512 + 262] = b'x';
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "header_magic");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn an_entry_whose_size_passes_the_object_refuses_the_archive() {
+    let mut spec = TarSpec::file("a.txt");
+    spec.declared = 4096;
+    let mut archive = tar_build(&[spec]);
+    // The header stays valid; the declared data would run past this object.
+    archive.truncate(1536);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "entry_outside_object");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_tar_prefix_is_still_subject_to_the_name_rules() {
+    let bus = tar_fixture(&[TarSpec::file("passwd").prefix("/etc")]);
+    let (status, reason) = status_of(&bus, 0);
+    assert_eq!(status, "blocked");
+    assert_eq!(reason.as_deref(), Some("absolute_name"));
+    let bus = tar_fixture(&[TarSpec::file("b").prefix("a/..")]);
+    let (status, reason) = status_of(&bus, 0);
+    assert_eq!(status, "blocked");
+    assert_eq!(reason.as_deref(), Some("dot_segment"));
+}
+
+#[test]
+fn a_non_regular_tar_typeflag_is_blocked() {
+    let types = [b'1', b'2', b'3', b'4', b'6'];
+    let specs: Vec<TarSpec> = types
+        .iter()
+        .enumerate()
+        .map(|(index, flag)| TarSpec::file(&format!("k{index}")).kind(*flag))
+        .collect();
+    let bus = tar_fixture(&specs);
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), types.len());
+    for entry in entries {
+        assert_eq!(entry["kind"], "other");
+        assert_eq!(entry["status"], "blocked");
+        assert_eq!(entry["reason"], "unsupported_kind");
+    }
+}
+
+#[test]
+fn every_supported_tar_record_type_lists_and_the_walk_continues() {
+    // The closed list: `0` and NUL are files, `5` is a directory, and `1`
+    // to `4` and `6` are "other" rows. A following file proves each header
+    // is the size the walk expects.
+    let types: [u8; 8] = [0, b'0', b'5', b'1', b'2', b'3', b'4', b'6'];
+    let kinds = [
+        "file",
+        "file",
+        "directory",
+        "other",
+        "other",
+        "other",
+        "other",
+        "other",
+    ];
+    for (index, flag) in types.iter().enumerate() {
+        let name = if *flag == b'5' { "d/" } else { "k" };
+        let bus = tar_fixture(&[
+            TarSpec::file(name).kind(*flag),
+            TarSpec::file("after.txt").data(b"after"),
+        ]);
+        let listed = entries(&bus);
+        assert_eq!(listed.len(), 2, "typeflag {}", flag);
+        assert_eq!(listed[0]["kind"], kinds[index], "typeflag {flag}");
+        assert_eq!(listed[1]["path"], "after.txt", "typeflag {flag}");
+    }
+}
+
+#[test]
+fn every_unsupported_tar_record_type_refuses_the_archive() {
+    // One flag from each refused class, every one with a valid entry after
+    // it: the archive is refused and the following entry is never listed.
+    for flag in [
+        b'7', b'S', b'M', b'V', b'N', b'x', b'g', b'L', b'K', b'Z', 0x80,
+    ] {
+        let bus = tar_fixture(&[
+            TarSpec::file("bad").kind(flag),
+            TarSpec::file("a.txt").data(b"after"),
+        ]);
+        let view = view(&bus);
+        let code = if matches!(flag, b'x' | b'g' | b'L' | b'K') {
+            "extension_header"
+        } else {
+            "unsupported_type"
+        };
+        assert_eq!(view["refused"]["code"], code, "typeflag {flag}");
+        if code == "unsupported_type" {
+            let message = view["refused"]["message"].as_str().unwrap();
+            assert!(
+                message.contains(&format!("0x{flag:02x}")),
+                "the reason names the flag: {message}"
+            );
+        }
+        assert!(entries(&bus).is_empty(), "typeflag {flag}");
+    }
+}
+
+#[test]
+fn a_size_on_a_link_or_device_refuses_the_archive() {
+    // ustar gives a link, device or FIFO no data; a non-zero size would step
+    // the walk past the next header, so the whole archive is refused.
+    for flag in [b'1', b'2', b'3', b'4', b'6'] {
+        let bus = tar_fixture(&[
+            TarSpec::file("l").kind(flag).data(b"data"),
+            TarSpec::file("a.txt").data(b"after"),
+        ]);
+        assert_eq!(
+            view(&bus)["refused"]["code"],
+            "other_type_size",
+            "typeflag {flag}"
+        );
+        assert!(entries(&bus).is_empty(), "typeflag {flag}");
+    }
+}
+
+#[test]
+fn a_full_width_tar_name_and_prefix_are_kept() {
+    // Both fields fill their fixed width with no NUL, so each is used whole:
+    // 155 prefix bytes, a slash and 100 name bytes, past the 255-byte cap.
+    let name = "n".repeat(100);
+    let prefix = "p".repeat(155);
+    let bus = tar_fixture(&[TarSpec::file(&name).prefix(&prefix)]);
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"].as_str().unwrap().len(), 256);
+    assert_eq!(entries[0]["status"], "blocked");
+    assert_eq!(entries[0]["reason"], "name_too_long");
+}
+
+#[test]
+fn an_empty_tar_name_is_blocked() {
+    let bus = tar_fixture(&[TarSpec::file("")]);
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["status"], "blocked");
+    assert_eq!(entries[0]["reason"], "dot_segment");
+}
+
+#[test]
+fn a_final_header_shorter_than_a_block_refuses_the_archive() {
+    let mut archive = tar_build(&[TarSpec::file("a.txt"), TarSpec::file("b.txt")]);
+    // The second header starts at 512 but the object ends after 100 of its
+    // bytes.
+    archive.truncate(512 + 100);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "header_truncated");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_tar_extension_header_refuses_the_archive() {
+    // pax (`x`, `g`) and GNU (`L`, `K`) extension headers change what the
+    // next header means, and this reader does not apply them.
+    for flag in [b'x', b'g', b'L', b'K'] {
+        let bus = tar_fixture(&[
+            TarSpec::file("ext").kind(flag).data(b"data"),
+            TarSpec::file("a.txt"),
+        ]);
+        assert_eq!(
+            view(&bus)["refused"]["code"],
+            "extension_header",
+            "typeflag {}",
+            flag as char
+        );
+        assert!(entries(&bus).is_empty(), "typeflag {}", flag as char);
+    }
+}
+
+#[test]
+fn duplicate_tar_names_are_both_blocked() {
+    let bus = tar_fixture(&[
+        TarSpec::file("a.txt").data(b"one"),
+        TarSpec::file("a.txt").data(b"two"),
+    ]);
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert_eq!(entry["status"], "blocked");
+        assert_eq!(entry["reason"], "duplicate");
+    }
+}
+
+#[test]
+fn a_nested_tar_archive_is_listed_not_opened() {
+    let inner = build(&[Spec::file("x.txt")], &[]);
+    let spec = TarSpec::file("inner.zip").data(&inner);
+    let bus = tar_fixture(&[spec]);
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["kind"], "archive");
+    assert_eq!(entries[0]["status"], "listed");
+    // No read window reaches the nested archive's bytes after its header.
+    let start = 512u64;
+    let end = start + inner.len() as u64;
+    for call in bus.invokes_on(TAR) {
+        if let Call::Invoke {
+            operation, body, ..
+        } = call
+        {
+            if operation == "read" {
+                let offset = body["offset"].as_u64().unwrap();
+                let length = body["length"].as_u64().unwrap();
+                assert!(
+                    length == 1 || offset + length <= start || offset >= end,
+                    "a read reached the nested archive: {body}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_tar_end_marker_ends_the_listing() {
+    let mut archive = tar_build(&[TarSpec::file("a.txt").data(b"hello")]);
+    // Bytes after the two zero blocks are not another entry.
+    archive.extend([0xAAu8; 512]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert!(view(&bus).get("refused").is_none());
+    assert_eq!(entries(&bus).len(), 1);
+}
+
+#[test]
+fn one_zero_block_at_the_end_of_the_object_refuses_the_archive() {
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend([0u8; 512]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn one_zero_block_followed_by_a_header_refuses_the_archive() {
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend([0u8; 512]);
+    archive.extend(tar_header(&TarSpec::file("b.txt")));
+    archive.extend([0u8; 1024]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn one_zero_block_followed_by_data_refuses_the_archive() {
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend([0u8; 512]);
+    archive.extend([0x41u8; 512]);
+    archive.extend([0u8; 1024]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_tar_object_that_ends_after_a_header_refuses_the_archive() {
+    // One valid, empty-file header is the whole object: no zero block, so
+    // the archive never showed its end marker.
+    let archive = tar_header(&TarSpec::file("a.txt"));
+    assert_eq!(archive.len(), 512);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_tar_object_that_ends_after_an_entry_refuses_the_archive() {
+    // The header and its one data block end exactly at the object's end.
+    let mut archive = tar_header(&TarSpec::file("a.txt").data(b"hello"));
+    archive.extend([b'A'; 512]);
+    assert_eq!(archive.len(), 1024);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_tar_object_that_ends_after_two_entries_refuses_the_archive() {
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend(tar_header(&TarSpec::file("b.txt")));
+    assert_eq!(archive.len(), 1024);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn the_tar_object_end_and_the_read_budget_are_told_apart_at_a_block() {
+    // The same 1,024-byte object: two empty headers and no zero block. With
+    // the whole read budget the walk reaches the object's end and refuses.
+    // With one block of budget it cannot read the second header, and that
+    // stop is a partial listing marked read_budget, not a refusal: more
+    // bytes could still follow.
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend(tar_header(&TarSpec::file("b.txt")));
+    let bus = run_fixture(request(TAR, &[]), TAR, archive.clone());
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+
+    let archive_bytes = archive;
+    let mut bus = bus_with(request(TAR, &[]), TAR, archive_bytes.clone());
+    let grant = capsule_kit_guest::grant(&mut bus, TAR, "read", "test the boundary").unwrap();
+    // The size probes cost the same bytes in both runs; measure them once, so
+    // the second run has exactly one block of budget after the probes.
+    let mut left = MAX_READ_BYTES;
+    {
+        let mut reader = crate::zip::Reader::new(&mut bus, TAR, &grant, &mut left);
+        let size = match crate::zip::object_size(&mut reader) {
+            Ok(size) => size,
+            Err(_) => panic!("the object's size is readable"),
+        };
+        assert_eq!(size, archive_bytes.len() as u64);
+    }
+    let probes = MAX_READ_BYTES - left;
+    assert!(probes > 0, "the size probes are counted");
+    let mut left = probes + 512;
+    let mut reader = crate::zip::Reader::new(&mut bus, TAR, &grant, &mut left);
+    let listing = crate::tar::listing(&mut reader).expect("a stop is still a listing");
+    assert!(listing.refused.is_none(), "a spent budget is not a refusal");
+    assert_eq!(listing.stopped.unwrap().code, "read_budget");
+    assert_eq!(listing.entries.len(), 1, "the header that fit is listed");
+    assert_eq!(left, 0, "the budget ended at the second header's block");
+}
+
+#[test]
+fn the_tar_read_budget_lists_what_fit_and_marks_the_run() {
+    let specs: Vec<TarSpec> = (0..200)
+        .map(|index| TarSpec::file(&format!("f{index:0>3}.txt")))
+        .collect();
+    let bus = tar_fixture(&specs);
+    let view = view(&bus);
+    assert!(
+        view.get("refused").is_none(),
+        "a spent budget is not a refusal"
+    );
+    assert_eq!(view["stopped"]["code"], "read_budget");
+    let count = entries(&bus).len();
+    assert!(count > 0, "the entries that fit are listed");
+    assert!(
+        count < specs.len(),
+        "the walk stopped before the last entry"
+    );
+    assert!(
+        bus.bytes_served(TAR) <= MAX_READ_BYTES,
+        "read {} bytes",
+        bus.bytes_served(TAR)
+    );
+}
+
+#[test]
+fn a_partial_tar_listing_still_blocks_duplicates() {
+    // The budget stops before the last header; the two names the run did read
+    // repeat, so the shared duplicate rule must run on the partial listing.
+    let mut specs = vec![TarSpec::file("same.txt"), TarSpec::file("same.txt")];
+    for index in 0..125 {
+        specs.push(TarSpec::file(&format!("fill{index:0>3}.txt")));
+    }
+    specs.push(TarSpec::file("unreached.txt"));
+    let bus = tar_fixture(&specs);
+    let view = view(&bus);
+    assert_eq!(view["stopped"]["code"], "read_budget");
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 127, "the headers that fit are listed");
+    for entry in &entries[..2] {
+        assert_eq!(entry["status"], "blocked");
+        assert_eq!(entry["reason"], "duplicate");
+    }
+}
+
+#[test]
+fn too_many_tar_entries_refuse_the_archive() {
+    // 257 entries: more than the shared cap of 256, and the read budget would
+    // stop a longer walk first, so the cap is proven with the same reader
+    // over a larger allowance.
+    let specs: Vec<TarSpec> = (0..257)
+        .map(|index| TarSpec::file(&format!("e{index}.txt")))
+        .collect();
+    let archive = tar_build(&specs);
+    let mut bus = FakeBus::default().object(TAR, archive).allow(TAR, "read");
+    let grant = capsule_kit_guest::grant(&mut bus, TAR, "read", "test the tar entry cap").unwrap();
+    let mut left = 1 << 20;
+    let mut reader = zip::Reader::new(&mut bus, TAR, &grant, &mut left);
+    let listing = tar::listing(&mut reader).expect("a content refusal is a listing");
+    assert_eq!(listing.refused.unwrap().code, "too_many_entries");
+    assert!(listing.entries.is_empty());
+}
+
+#[test]
+fn a_tar_text_entry_is_shown_as_the_zip_blocks() {
+    // A stored tar entry is shown through the same `preview` call a ZIP
+    // stored entry takes: one preview pass, no inflate, the same docs-model
+    // typed blocks, and no CRC to compare because tar carries none.
+    let text: &[u8] = b"hello\n\nworld\n";
+    let tar_bus = run_fixture(
+        request(TAR, &[0]),
+        TAR,
+        tar_build(&[TarSpec::file("a.txt").data(text)]),
+    );
+    let zip_bus = run_fixture(
+        request(ARCHIVE, &[0]),
+        ARCHIVE,
+        build(&[stored("a.txt", text)], &[]),
+    );
+    assert_eq!(
+        view(&tar_bus)["previews"],
+        view(&zip_bus)["previews"],
+        "the tar entry's blocks are the ZIP stored entry's"
+    );
+    assert!(skipped(&tar_bus).is_empty());
+    let blocks = &view(&tar_bus)["previews"][0]["blocks"];
+    assert_eq!(blocks[0]["kind"], "paragraph");
+    assert_eq!(blocks[0]["spans"][0]["text"], "hello");
+    assert_eq!(blocks[1]["spans"][0]["text"], "world");
+}
+
+#[test]
+fn a_tar_binary_entry_is_skipped_not_text() {
+    let bus = run_fixture(
+        request(TAR, &[0]),
+        TAR,
+        tar_build(&[TarSpec::file("b.bin").data(b"abc\0def")]),
+    );
+    assert!(previews(&bus).is_empty());
+    let skipped = skipped(&bus);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["reason"], "not_text");
+}
+
+#[test]
+fn an_oversize_tar_entry_is_skipped_before_its_bytes_are_read() {
+    let data = text_block(preview::MAX_PREVIEW_BYTES as usize + 1);
+    let bus = run_fixture(
+        request(TAR, &[0]),
+        TAR,
+        tar_build(&[TarSpec::file("big.txt").data(&data)]),
+    );
+    assert!(previews(&bus).is_empty());
+    let skipped = skipped(&bus);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["reason"], "oversize");
+    // The declared size is the header's; the entry's data starts after the
+    // one 512-byte header and is never read.
+    assert_data_unread(&bus, TAR, 512, 512 + data.len() as u64);
+}
+
+#[test]
+fn a_blocked_tar_entry_is_skipped_with_its_status() {
+    let bus = run_fixture(
+        request(TAR, &[0]),
+        TAR,
+        tar_build(&[
+            TarSpec::file("a.txt").data(b"one"),
+            TarSpec::file("a.txt").data(b"two"),
+        ]),
+    );
+    assert_eq!(
+        status_of(&bus, 0),
+        ("blocked".to_string(), Some("duplicate".to_string()))
+    );
+    let skipped = skipped(&bus);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["reason"], "duplicate");
+}
+
+#[test]
+fn a_tar_view_over_its_cap_is_refused() {
+    // F32 over a tar view: 70 entries with a 255-byte path and two previews
+    // of 511 blocks each make a view over 64 KiB. The run writes the small
+    // refusal instead, never the whole listing.
+    let mut specs: Vec<TarSpec> = (0..2)
+        .map(|n| TarSpec::file(&format!("p{n}.txt")).data("x\n\n".repeat(511).as_bytes()))
+        .collect();
+    for n in 0..70 {
+        specs.push(
+            TarSpec::file(&format!("{n:03}{}", "a".repeat(96))) // 99-byte name
+                .prefix(&"p".repeat(155)), // 255-byte path in two segments
+        );
+    }
+    let bus = run_fixture(request(TAR, &[0, 1]), TAR, tar_build(&specs));
+    let written = bus.written.get(VIEW_URI).expect("a view is written");
+    assert!(
+        written.len() as u64 <= MAX_VIEW_BYTES,
+        "{} bytes",
+        written.len()
+    );
+    let view = view(&bus);
+    assert!(view["entries"].as_array().unwrap().is_empty());
+    assert_eq!(view["refused"]["code"], "view_too_large");
+}
+
+#[test]
+fn a_zip_with_ustar_bytes_later_in_its_first_block_is_still_zip() {
+    // The first four bytes are ZIP's local-header signature; ustar bytes in
+    // the entry's data at offset 257 do not change the format.
+    let mut archive = build(&[stored("a.txt", &[b'x'; 400])], &[]);
+    write_at(&mut archive, 257, b"ustar\0\x30\x30");
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert!(view(&bus).get("refused").is_none(), "the ZIP listing runs");
+    assert!(view(&bus).get("stopped").is_none());
+    assert_eq!(entries(&bus)[0]["path"], "a.txt");
+}
+
+#[test]
+fn the_first_block_decides_between_tar_and_zip() {
+    // The tar header comes first, so the object is tar even though a ZIP end
+    // record also ends at its last byte.
+    let mut archive = tar_build(&[TarSpec::file("a.txt").data(b"hello")]);
+    end_record(&mut archive, 0, 0, 0, &[]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert!(view(&bus).get("refused").is_none(), "the tar listing runs");
+    assert_eq!(entries(&bus).len(), 1);
 }

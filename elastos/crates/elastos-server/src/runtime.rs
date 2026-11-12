@@ -239,6 +239,20 @@ impl Runtime {
         Ok(())
     }
 
+    /// Check a bundle's signature file against the keys this Home trusts:
+    /// the same verifier, with the same keys, as every other admission here.
+    pub async fn check_bundle_signature(
+        &self,
+        file: &Path,
+        cid: &elastos_bundle_identity::LabCid,
+    ) -> std::result::Result<
+        crate::bundle_admission::AcceptedSignature,
+        crate::bundle_admission::BundleRefusal,
+    > {
+        let verifier = self.signature_verifier.read().await;
+        crate::bundle_admission::check_bundle_signature(file, cid, &verifier)
+    }
+
     /// Load and run a capsule from a local directory
     pub async fn run_local(&self, path: &Path, args: Vec<String>) -> Result<CapsuleHandle> {
         self.run_local_with_principal(path, args, None).await
@@ -302,9 +316,22 @@ impl Runtime {
         // Check provider dependencies
         self.check_provider_dependencies(&manifest).await?;
 
+        // A component's entrypoint is read once. The signature check, the import
+        // check and the compiler below all use these same bytes.
+        let admitted = if manifest.is_component_capsule() {
+            Some(crate::component::read_admitted_entrypoint(path, &manifest).await?)
+        } else {
+            None
+        };
+
         // Verify signature if verifier is configured
-        let signer = self.verify_capsule_signature(&manifest, path).await?;
-        crate::component::validate_component_capsule(path, &manifest).await?;
+        let signer = self
+            .verify_capsule_signature(&manifest, path, admitted.as_deref())
+            .await?;
+        if let Some(bytes) = &admitted {
+            crate::component::validate_component_imports(bytes)
+                .map_err(ElastosError::InvalidManifest)?;
+        }
 
         // Find a compute provider that supports this capsule type
         let provider = self.get_provider_for_manifest(&manifest).ok_or_else(|| {
@@ -319,7 +346,18 @@ impl Runtime {
         })?;
 
         // Load capsule
-        let mut handle = provider.load(path, manifest).await?;
+        // A component is always compiled from the bytes checked above. The
+        // provider's own `load(path)` reads the file itself and checks nothing,
+        // so it is for capsules that are not components.
+        let mut handle = match (admitted, &self.component_provider) {
+            (Some(bytes), Some(component)) => component.load_admitted(bytes, manifest).await?,
+            (Some(_), None) => {
+                return Err(ElastosError::Compute(
+                    "No component compute provider is configured".to_string(),
+                ))
+            }
+            (None, _) => provider.load(path, manifest).await?,
+        };
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.insert(
                 handle.id.0.clone(),
@@ -376,6 +414,7 @@ impl Runtime {
         &self,
         manifest: &CapsuleManifest,
         path: &Path,
+        admitted: Option<&[u8]>,
     ) -> Result<Signer> {
         if manifest.signature.is_none() {
             return match &*self.unsigned_capsules.read().await {
@@ -414,21 +453,25 @@ impl Runtime {
 
         let verifier = self.signature_verifier.read().await;
 
-        if !verifier.is_enabled() {
+        if verifier.trusted_key_count() == 0 {
             return Err(ElastosError::InvalidManifest(
                 "Capsule signature verification has no trusted keys configured".into(),
             ));
         }
 
-        // Compute content hash (hash the entrypoint file)
-        let entrypoint_path = path.join(&manifest.entrypoint);
-        let content = tokio::fs::read(&entrypoint_path).await.map_err(|e| {
-            ElastosError::InvalidManifest(format!(
-                "Failed to read entrypoint {}: {}",
-                manifest.entrypoint, e
-            ))
-        })?;
-        let content_hash = hash_content(&content);
+        // Hash the entrypoint: the bytes already read for a component, the file otherwise.
+        let content_hash = match admitted {
+            Some(bytes) => hash_content(bytes),
+            None => {
+                let entrypoint_path = path.join(&manifest.entrypoint);
+                hash_content(&tokio::fs::read(&entrypoint_path).await.map_err(|e| {
+                    ElastosError::InvalidManifest(format!(
+                        "Failed to read entrypoint {}: {}",
+                        manifest.entrypoint, e
+                    ))
+                })?)
+            }
+        };
 
         // Verify signature; the matched trusted key names the signer.
         let Some(key) = verifier.verify_capsule(manifest, &content_hash)? else {
@@ -899,7 +942,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let result = runtime
-                .verify_capsule_signature(&unsigned_manifest(), temp_dir.path())
+                .verify_capsule_signature(&unsigned_manifest(), temp_dir.path(), None)
                 .await;
             assert_eq!(result.is_ok(), dev_mode, "{result:?}");
         }
@@ -955,13 +998,13 @@ pub(crate) mod tests {
         // The installed signed release is named as such, not as a key or dev.
         assert_eq!(
             runtime
-                .verify_capsule_signature(&manifest, &release_dir)
+                .verify_capsule_signature(&manifest, &release_dir, None)
                 .await
                 .unwrap(),
             Signer::InstalledRelease
         );
         let error = runtime
-            .verify_capsule_signature(&manifest, &local_dir)
+            .verify_capsule_signature(&manifest, &local_dir, None)
             .await
             .unwrap_err();
         assert!(
@@ -976,7 +1019,7 @@ pub(crate) mod tests {
             kind: elastos_common::AgentKind::Agent,
         });
         let error = runtime
-            .verify_capsule_signature(&declared, &release_dir)
+            .verify_capsule_signature(&declared, &release_dir, None)
             .await
             .unwrap_err();
         let expected = format!(
@@ -997,11 +1040,11 @@ pub(crate) mod tests {
         };
         // The fixture release is signed by key 71.
         runtime
-            .verify_capsule_signature(&signed_by(71), &local_dir)
+            .verify_capsule_signature(&signed_by(71), &local_dir, None)
             .await
             .unwrap();
         let error = runtime
-            .verify_capsule_signature(&signed_by(9), &local_dir)
+            .verify_capsule_signature(&signed_by(9), &local_dir, None)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("verification failed"), "{error}");
@@ -1009,7 +1052,7 @@ pub(crate) mod tests {
         // A release capsule whose CID receipt no longer matches is refused too.
         std::fs::write(release_dir.join(".elastos-cid"), "bafkreiother").unwrap();
         assert!(runtime
-            .verify_capsule_signature(&manifest, &release_dir)
+            .verify_capsule_signature(&manifest, &release_dir, None)
             .await
             .is_err());
     }
@@ -1042,7 +1085,7 @@ pub(crate) mod tests {
 
         let expected_did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
         let signer = runtime
-            .verify_capsule_signature(&manifest, &dir)
+            .verify_capsule_signature(&manifest, &dir, None)
             .await
             .unwrap();
         assert_eq!(signer, Signer::Key { did: expected_did });
@@ -1057,12 +1100,208 @@ pub(crate) mod tests {
         for capsule in [unsigned_manifest(), manifest] {
             assert_eq!(
                 runtime
-                    .verify_capsule_signature(&capsule, &dir)
+                    .verify_capsule_signature(&capsule, &dir, None)
                     .await
                     .unwrap(),
                 Signer::UnsignedDev
             );
         }
+    }
+
+    /// For a component the signature is checked over the bytes the Runtime
+    /// already read, whatever the file holds by then.
+    #[tokio::test]
+    async fn a_signature_is_checked_over_the_admitted_bytes_not_the_file() {
+        let (runtime, temp_dir) = test_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[71; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let dir = temp_dir.path().join("signed-capsule");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (signed, other): (&[u8], &[u8]) = (b"the signed bytes", b"replaced after the read");
+        let mut manifest = unsigned_manifest();
+        manifest.entrypoint = "main.wasm".to_string();
+        elastos_runtime::signature::sign_capsule(&key, &mut manifest, &hash_content(signed))
+            .unwrap();
+
+        // The file was replaced after the read: the signed bytes in hand still pass.
+        std::fs::write(dir.join("main.wasm"), other).unwrap();
+        runtime
+            .verify_capsule_signature(&manifest, &dir, Some(signed))
+            .await
+            .expect("the signed bytes that were read pass");
+        // The file still holds the signed bytes, but other bytes were read: refused.
+        std::fs::write(dir.join("main.wasm"), signed).unwrap();
+        let error = runtime
+            .verify_capsule_signature(&manifest, &dir, Some(other))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("signature verification failed"),
+            "{error}"
+        );
+    }
+
+    /// A component with one empty `run`, as bytes.
+    fn quiet_component() -> Vec<u8> {
+        wat::parse_str(
+            r#"(component
+              (import "elastos:bus/types@1.0.0" (instance $types
+                (type $error (variant
+                  (case "denied" string) (case "not-found" string) (case "invalid" string)
+                  (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+                (export "bus-error" (type (eq $error)))))
+              (alias export $types "bus-error" (type $bus-error))
+              (core module $m
+                (memory (export "memory") 1)
+                (func (export "run") (result i32) (i32.const 0)))
+              (core instance $i (instantiate $m))
+              (func $run (result (result (error $bus-error)))
+                (canon lift (core func $i "run") (memory $i "memory")))
+              (instance $lifecycle (export "run" (func $run)))
+              (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#,
+        )
+        .expect("component text")
+    }
+
+    fn component_manifest_json(name: &str) -> String {
+        format!(
+            r#"{{
+                "schema": "elastos.capsule/v1",
+                "version": "0.1.0",
+                "name": "{name}",
+                "role": "app",
+                "type": "wasm",
+                "runtime_abi": "elastos.component/v1",
+                "bus_contract": "{}",
+                "wit_world_sha256": "{}",
+                "execution": "component",
+                "projections": ["cli"],
+                "entrypoint": "app.component.wasm"
+            }}"#,
+            ELASTOS_BUS_V1_CONTRACT,
+            elastos_bus_v1_wit_sha256()
+        )
+    }
+
+    /// The file is replaced right after the Runtime's one read of it (a test
+    /// hook runs at that point). The capsule is signed and the Home enforces
+    /// signatures, so the signature check, the import check and the compiler
+    /// all take part: any of them reading the file again meets the
+    /// replacement, and the launch fails.
+    #[tokio::test]
+    async fn a_component_file_replaced_after_it_was_read_runs_the_bytes_that_were_checked() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let runtime = Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        );
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[71; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("capsule");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        let component = quiet_component();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("replaced-component")).unwrap();
+        elastos_runtime::signature::sign_capsule(&key, &mut manifest, &hash_content(&component))
+            .unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        let entrypoint = capsule_dir.join("app.component.wasm");
+        std::fs::write(&entrypoint, &component).unwrap();
+
+        let replacement: &[u8] = b"replaced after the check";
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        crate::component::AFTER_ENTRYPOINT_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |path| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::fs::write(path, replacement).unwrap();
+            }));
+        });
+        // The hook is taken away again however this test ends.
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                crate::component::AFTER_ENTRYPOINT_READ.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let _reset = ResetHook;
+        let launched = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await;
+
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "one read of the entrypoint"
+        );
+        assert_eq!(std::fs::read(&entrypoint).unwrap(), replacement);
+        let (_, signer) = launched.expect("the bytes that were checked are the bytes that run");
+        let did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
+        assert_eq!(signer, Signer::Key { did });
+    }
+
+    /// A component file one byte over the cap is refused at launch, before the
+    /// signature check, the import check or the compiler see it.
+    #[tokio::test]
+    async fn a_component_file_over_the_size_cap_is_refused_at_launch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let runtime = Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        );
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("capsule");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            component_manifest_json("oversized-component"),
+        )
+        .unwrap();
+        let file = std::fs::File::create(capsule_dir.join("app.component.wasm")).unwrap();
+        file.set_len(8 * 1024 * 1024 + 1).unwrap();
+
+        let error = runtime
+            .run_local_with_principal(&capsule_dir, Vec::new(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Invalid manifest: failed to read component entrypoint app.component.wasm: \
+             component file is larger than the 8388608 byte limit"
+        );
     }
 
     /// A Home with no signed release, dev_mode off and one trusted key refuses

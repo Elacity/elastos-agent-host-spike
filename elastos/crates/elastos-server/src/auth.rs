@@ -4685,7 +4685,7 @@ fn open_new_secret_file(path: &Path) -> anyhow::Result<File> {
         .with_context(|| format!("failed to create secret state file {path:?}"))
 }
 
-fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<()> {
+pub(crate) fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<()> {
     let relative = parent
         .strip_prefix(data_dir)
         .map_err(|_| anyhow!("auth state path escaped its data root"))?;
@@ -4713,7 +4713,7 @@ fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<
     Ok(())
 }
 
-fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
+pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -5101,6 +5101,12 @@ fn write_secret_bytes_atomic(
 
 pub fn load_auth_state(data_dir: &Path) -> anyhow::Result<AuthState> {
     load_auth_state_with_identity(data_dir).map(|(state, _)| state)
+}
+
+/// The owner's principals, and nothing else of the sign-in file. Agent code
+/// reads people through this, so no protection record crosses the boundary.
+pub(crate) fn load_owner_principals(data_dir: &Path) -> anyhow::Result<Vec<PrincipalRecord>> {
+    Ok(load_auth_state(data_dir)?.principals)
 }
 
 fn load_auth_state_with_identity(
@@ -5711,6 +5717,7 @@ fn refuse_agent_admission_changes(
     if quarantined_raw_changed(data_dir, after)? {
         return refuse_quarantined_agent_change(permit, &after.principals);
     }
+    refuse_new_owner_root_protection(&before.protections, &after.principal_root_protections)?;
     if let Some(reason) = agent_root_protection_change_reason(
         &before.principals,
         &after.principals,
@@ -6030,7 +6037,7 @@ fn agent_admission_record_violation(
     None
 }
 
-fn agent_admission_state_violation(records: &[PrincipalRecord]) -> Option<&'static str> {
+pub(crate) fn agent_admission_state_violation(records: &[PrincipalRecord]) -> Option<&'static str> {
     records
         .iter()
         .find_map(|record| agent_admission_record_violation(records, record))
@@ -6564,11 +6571,70 @@ fn authorize_principal_protection(state: &AuthState, principal_id: &str) -> anyh
     refuse_named_quarantine(state, principal_id)
 }
 
+/// The refusal for an owner-root wrap found in the sign-in file.
+pub(crate) const OWNER_ROOT_IN_SIGN_IN_FILE: &str =
+    "a protection in the sign-in file never carries an owner-root wrap";
+
+/// Typed form of that refusal, so a caller can tell it from other save errors.
+#[derive(Debug)]
+pub(crate) struct OwnerRootInSignInFile;
+
+impl std::fmt::Display for OwnerRootInSignInFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(OWNER_ROOT_IN_SIGN_IN_FILE)
+    }
+}
+
+impl std::error::Error for OwnerRootInSignInFile {}
+
+/// Validates a protection kept in the sign-in file. An owner-root wrap is
+/// kept only in the agent records file, so a protection here that carries
+/// one is refused, on store and whenever it is read.
+fn validate_sign_in_file_protection(protection: &PrincipalRootProtectionV1) -> anyhow::Result<()> {
+    validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+    refuse_owner_root_protector(protection)
+}
+
+/// The owner-root rule, shared by the sign-in-file validator and the save.
+fn refuse_owner_root_protector(protection: &PrincipalRootProtectionV1) -> anyhow::Result<()> {
+    if protection
+        .protectors
+        .iter()
+        .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
+    {
+        return Err(OwnerRootInSignInFile.into());
+    }
+    Ok(())
+}
+
+/// Refuses a protection that is new or changed against the file on disk and
+/// carries an owner-root wrap. An entry already on disk stays as it is, so an
+/// unrelated owner save continues.
+fn refuse_new_owner_root_protection(
+    before: &[PrincipalRootProtectionV1],
+    after: &[PrincipalRootProtectionV1],
+) -> anyhow::Result<()> {
+    let mut unchanged = vec![false; before.len()];
+    for protection in after {
+        if let Some(index) = before
+            .iter()
+            .enumerate()
+            .find(|(index, old)| !unchanged[*index] && *old == protection)
+            .map(|(index, _)| index)
+        {
+            unchanged[index] = true;
+            continue;
+        }
+        refuse_owner_root_protector(protection)?;
+    }
+    Ok(())
+}
+
 pub fn store_principal_root_protection(
     data_dir: &Path,
     protection: PrincipalRootProtectionV1,
 ) -> anyhow::Result<()> {
-    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
+    validate_sign_in_file_protection(&protection)?;
     mutate_auth_state(data_dir, |state| {
         authorize_principal_protection(state, &protection.principal_id)?;
         ensure_users_ai_protection_owner(state, &protection)?;
@@ -6616,7 +6682,7 @@ pub fn load_principal_root_protection(
     }) else {
         return Ok(None);
     };
-    validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+    validate_sign_in_file_protection(protection)?;
     ensure_users_ai_protection_owner(&state, protection)?;
     Ok(Some(protection.clone()))
 }
@@ -6638,7 +6704,7 @@ pub(crate) fn mark_recovery_kit_handed_to_person(
                     && stored.localhost_root == kit.localhost_root
             })
             .ok_or_else(|| anyhow!("principal root protection is missing"))?;
-        validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+        validate_sign_in_file_protection(protection)?;
         if protection.data_key_id != kit.data_key_id || protection.crypto != kit.crypto {
             anyhow::bail!("recovery kit protection binding mismatch");
         }
@@ -6666,7 +6732,7 @@ pub(crate) fn mark_recovery_kit_handed_to_person(
             protector.profile_coverage = Some(coverage);
         }
         protection.updated_at = now.max(protection.updated_at);
-        validate_principal_root_protection(protection).map_err(anyhow::Error::msg)
+        validate_sign_in_file_protection(protection)
     })
 }
 
@@ -6821,7 +6887,7 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_with_candid
     data_key: &[u8; 32],
     inventory: &[PrincipalRootProtectedObjectDeclarationV1],
 ) -> anyhow::Result<PrincipalRootProtectionActivationGuard> {
-    validate_principal_root_protection(candidate).map_err(anyhow::Error::msg)?;
+    validate_sign_in_file_protection(candidate)?;
     if stored_principal_record(data_dir, &candidate.principal_id)?.is_some() {
         validate_principal_root_object_binding_in_state(
             data_dir,
@@ -8182,7 +8248,7 @@ pub fn commit_recovered_root_reassignment(
         signed_audit_event,
         updated_at,
     } = reassignment;
-    validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
+    validate_sign_in_file_protection(&protection)?;
     if !recovered_localhost_root.starts_with("localhost://Users/") {
         anyhow::bail!("recovery kit requires a human root");
     }
@@ -8948,9 +9014,6 @@ pub fn local_person_principal_id(proof_binding_id: &str) -> String {
 }
 
 /// An agent id is `agent:v2:` followed by exactly 32 lowercase hex digits.
-///
-/// Create is a later PR, so nothing in this crate calls this yet.
-#[allow(dead_code)]
 pub(crate) fn validate_agent_id(id: &str) -> Result<(), &'static str> {
     let Some(hex_digits) = id.strip_prefix("agent:v2:") else {
         return Err("invalid agent id");
@@ -8968,10 +9031,7 @@ pub(crate) fn validate_agent_id(id: &str) -> Result<(), &'static str> {
 
 /// Draws 128 bits from the OS random generator and formats them as an agent id.
 ///
-/// No production code calls this function. This PR stores an agent record and
-/// refuses changes to it. It does not create an agent. A later create path is
-/// the caller. The pin row counts the call sites.
-#[allow(dead_code)]
+/// Create in `crate::agents` is its one production caller. The pin row counts the call sites.
 pub(crate) fn fresh_agent_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -9000,7 +9060,7 @@ pub fn principal_localhost_root(principal_id: &str) -> String {
 /// The record's root, chosen by the kind the Runtime minted: an agent owns
 /// `localhost://UsersAI/<sha256 of the same principal id>` and a human keeps
 /// `localhost://Users/<sha256 of the same principal id>`.
-fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> String {
+pub(crate) fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> String {
     match kind {
         PrincipalKind::Human => {
             let digest = Sha256::digest(principal_id.as_bytes());
@@ -9297,6 +9357,45 @@ fn principal_root_data_key_from_protection(
         anyhow::bail!("recovery kit archive is not bound to this principal root");
     }
     recovery_kit_data_key(&kit)
+}
+
+/// What an owner-root wrap key is derived for. Each part is length-prefixed
+/// in the derivation, so no two inputs can run together.
+const OWNER_ROOT_WRAP_INFO: &str = "elastos/usersai-owner-root/v1";
+
+/// Derives the key that wraps an agent's data key under its owner's root:
+/// HKDF-SHA256 over the owner's data key, bound to the owner, the agent, the
+/// agent's root and the agent's data key id. The owner's protection is
+/// loaded here and its data key never leaves this function. Only the derived
+/// key is returned, and it is erased when dropped. `None`: the owner has no
+/// storage protection.
+pub(crate) fn owner_root_wrap_key(
+    data_dir: &Path,
+    owner_id: &str,
+    owner_root: &str,
+    agent: &PrincipalRootProtectionV1,
+) -> anyhow::Result<Option<zeroize::Zeroizing<[u8; 32]>>> {
+    let Some(owner) = load_principal_root_protection(data_dir, owner_id, owner_root)? else {
+        return Ok(None);
+    };
+    let owner_key =
+        zeroize::Zeroizing::new(principal_root_data_key_from_protection(data_dir, &owner)?);
+    let mut info = Vec::new();
+    for part in [
+        OWNER_ROOT_WRAP_INFO,
+        owner_id,
+        agent.principal_id.as_str(),
+        agent.localhost_root.as_str(),
+        agent.data_key_id.as_str(),
+    ] {
+        info.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        info.extend_from_slice(part.as_bytes());
+    }
+    let mut key = zeroize::Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(None, owner_key.as_slice())
+        .expand(&info, key.as_mut_slice())
+        .map_err(|_| anyhow!("owner-root wrap key derivation failed"))?;
+    Ok(Some(key))
 }
 
 /// Checks the object URI against the root the minted kind owns. The caller
@@ -11066,7 +11165,7 @@ fn preflight_declared_principal_root_upgrade(
     let state = load_auth_state(data_dir)?;
     let mut protections = std::collections::BTreeMap::new();
     for protection in state.principal_root_protections {
-        validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
+        validate_sign_in_file_protection(&protection)?;
         let key = (
             protection.principal_id.clone(),
             protection.localhost_root.clone(),
@@ -19679,7 +19778,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn fresh_agent_id_has_no_production_caller() {
+    fn fresh_agent_id_has_one_production_caller() {
         // `fresh_agent_id` then optional whitespace, including a line break, then `(`.
         // The name is split so this scanner is not itself a call.
         fn count_calls(text: &str) -> usize {
@@ -19717,7 +19816,7 @@ pub(crate) mod tests {
             &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
             &mut count,
         );
-        assert_eq!(count, 2, "fresh agent id maker has no production caller");
+        assert_eq!(count, 3, "fresh agent id maker has one production caller");
     }
 
     #[test]
@@ -20079,6 +20178,36 @@ pub(crate) mod tests {
         }
     }
 
+    fn human_person_id_and_root(state: &AuthState) -> (String, String) {
+        let human = state
+            .principals
+            .iter()
+            .find(|record| record.kind == PrincipalKind::Human)
+            .unwrap();
+        (human.principal_id.clone(), human.localhost_root.clone())
+    }
+
+    fn owner_root_in_sign_in_file_protection(
+        principal_id: &str,
+        root: &str,
+    ) -> PrincipalRootProtectionV1 {
+        let mut protection = bare_protection(principal_id, root, 1);
+        protection
+            .protectors
+            .push(elastos_runtime::auth::PrincipalRootProtectorV1 {
+                protector_id: "protector:owner-root:r8".to_string(),
+                kind: PrincipalRootProtectorKind::OwnerRoot,
+                label: "Owner root".to_string(),
+                subject: None,
+                created_at: 1,
+                verified_at: None,
+                envelope: None,
+                archive: None,
+                profile_coverage: None,
+            });
+        protection
+    }
+
     fn bare_session(principal_id: &str, session_id: &str) -> StoredAuthSession {
         let now = now_ts();
         StoredAuthSession {
@@ -20227,6 +20356,78 @@ pub(crate) mod tests {
             );
             assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{permit:?}");
         }
+    }
+
+    #[test]
+    fn save_refuses_an_added_owner_root_protection() {
+        let data_dir = person_file_with_agent();
+        let before = auth_state_file_bytes(data_dir.path());
+        let mut state = load_auth_state(data_dir.path()).unwrap();
+        let (id, root) = human_person_id_and_root(&state);
+        state
+            .principal_root_protections
+            .push(owner_root_in_sign_in_file_protection(&id, &root));
+        let error = save_auth_state(data_dir.path(), &state, None)
+            .expect_err("an added owner-root protection was refused");
+        assert!(
+            error.downcast_ref::<OwnerRootInSignInFile>().is_some(),
+            "{error}"
+        );
+        assert_eq!(error.to_string(), OWNER_ROOT_IN_SIGN_IN_FILE, "{error}");
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before);
+    }
+
+    #[test]
+    fn save_refuses_a_changed_owner_root_protection() {
+        let data_dir = person_file_with_agent();
+        let state = load_auth_state(data_dir.path()).unwrap();
+        let (id, root) = human_person_id_and_root(&state);
+        store_test_principal_root_protection_for(data_dir.path(), &id, &root);
+        let before = auth_state_file_bytes(data_dir.path());
+        let mut state = load_auth_state(data_dir.path()).unwrap();
+        let protection = state
+            .principal_root_protections
+            .iter_mut()
+            .find(|stored| stored.principal_id == id && stored.localhost_root == root)
+            .unwrap();
+        protection.protectors[0].kind = PrincipalRootProtectorKind::OwnerRoot;
+        let error = save_auth_state(data_dir.path(), &state, None)
+            .expect_err("a changed owner-root protection was refused");
+        assert!(
+            error.downcast_ref::<OwnerRootInSignInFile>().is_some(),
+            "{error}"
+        );
+        assert_eq!(error.to_string(), OWNER_ROOT_IN_SIGN_IN_FILE, "{error}");
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before);
+    }
+
+    #[test]
+    fn save_keeps_an_unchanged_owner_root_protection() {
+        let data_dir = person_file_with_agent();
+        let state = load_auth_state(data_dir.path()).unwrap();
+        let (id, root) = human_person_id_and_root(&state);
+        plant_principal_root_protection(
+            data_dir.path(),
+            &owner_root_in_sign_in_file_protection(&id, &root),
+        );
+        let before = auth_state_file_bytes(data_dir.path());
+        let mut state = load_auth_state(data_dir.path()).unwrap();
+        state
+            .principals
+            .iter_mut()
+            .find(|record| record.kind == PrincipalKind::Human)
+            .unwrap()
+            .display_name = "Renamed".to_string();
+        save_auth_state(data_dir.path(), &state, None)
+            .expect("a save with an unchanged owner-root entry succeeds");
+        assert_ne!(auth_state_file_bytes(data_dir.path()), before);
+        let saved = load_auth_state(data_dir.path()).unwrap();
+        assert!(saved.principal_root_protections.iter().any(|stored| {
+            stored
+                .protectors
+                .iter()
+                .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
+        }));
     }
 
     #[test]

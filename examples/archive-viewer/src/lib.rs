@@ -1,11 +1,14 @@
-//! Archive viewer core, read-only: one ZIP archive, listed but not extracted.
+//! Archive viewer core, read-only: one ZIP or ustar tar archive, listed
+//! but not extracted.
 //!
 //! Runtime calls `lifecycle.run`. The guest reads a request object naming one
 //! archive, asks for a read grant on that one object, and reaches every byte
-//! through the offset/length read window. It reads the end record, the
-//! central directory and one 30-byte local-header prefix per entry, checks
-//! them against each other, and writes one view the render-only page draws.
-//! It never reads the whole archive and never writes anything but its view.
+//! through the offset/length read window. One decision reads the first bytes
+//! and picks the listing: ZIP reads the end record, the central directory and
+//! one 30-byte local-header prefix per entry; tar walks a 512-byte ustar
+//! header per entry. Both check their records and write one view the
+//! render-only page draws. It never reads the whole archive and never writes
+//! anything but its view.
 //!
 //! An authority failure (no grant, a refused or failed call, a request that
 //! cannot be read or parsed) stops the run before anything is written, and
@@ -22,8 +25,10 @@
 //! the URI and text checks and the WIT glue are the capsule kit's guest crate
 //! (`examples/capsule-kit/guest`).
 
+mod listing;
 mod preview;
 mod request;
+mod tar;
 mod zip;
 
 #[cfg(test)]
@@ -32,8 +37,9 @@ mod tests;
 use capsule_kit_guest::{bus, grant, read_bounded, App};
 
 pub use capsule_kit_guest::{Bus, BusFailure, CallError, InvokeReply, Refusal};
+pub use listing::{Entry, Kind, Listing, Reason, Refused, Status};
 pub use request::{Request, REQUEST_SCHEMA};
-pub use zip::{check_local_header, Entry, Kind, Listing, Reason, Refused, Status};
+pub use zip::check_local_header;
 
 /// The request object: one archive to open, and the entries to show.
 pub const REQUEST_URI: &str = "localhost://Users/self/.AppData/App/archive-viewer/open.json";
@@ -98,6 +104,38 @@ pub struct Skipped {
     pub message: String,
 }
 
+/// The two formats this viewer lists. `detect` picks one once from content;
+/// the matching listing then reads the same object through the same budget.
+pub(crate) enum Format {
+    Zip,
+    Tar,
+}
+
+/// The object's format, from its first block: a ustar header names tar; a
+/// ZIP end record that ends at the object's last byte names ZIP. Anything
+/// else is refused with its own reason before a listing runs.
+fn detect(reader: &mut zip::Reader<'_>) -> Result<Format, zip::ParseError> {
+    // A ZIP's local-header signature is at offset 0; a ustar magic is later
+    // in the first block. Read no more than each probe needs, so a listing
+    // never touches an entry's data to choose the format.
+    let start = zip::read(reader, 0, 4)?;
+    if start.starts_with(b"PK\x03\x04") || start.starts_with(b"PK\x05\x06") {
+        return Ok(Format::Zip);
+    }
+    let head = zip::read(reader, 0, tar::PROBE_BYTES)?;
+    if tar::is_header(&head) {
+        return Ok(Format::Tar);
+    }
+    if zip::is_archive(reader)? {
+        return Ok(Format::Zip);
+    }
+    Err(Refused::new(
+        "unknown_format",
+        "the object is not a ZIP archive or a ustar tar archive; this reader lists ZIP and ustar only",
+    )
+    .into())
+}
+
 /// Reads the request and the archive, checks a local header for each entry the
 /// request names, inflates the listed files within the caps, and writes the
 /// view. Returns the view text.
@@ -115,9 +153,26 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
 
     let archive_grant = grant(bus, &request.uri, "read", "read the archive to list")?;
     let mut left = MAX_READ_BYTES;
+    // The format `detect` chose also picks the per-entry check the preview
+    // pass runs. A refused archive lists no entry, so the fallback is never
+    // asked to show one.
+    let mut format = Format::Zip;
     let listing = {
         let mut reader = zip::Reader::new(bus, &request.uri, &archive_grant, &mut left);
-        zip::listing(&mut reader)?
+        match detect(&mut reader) {
+            Ok(Format::Zip) => zip::listing(&mut reader)?,
+            Ok(Format::Tar) => {
+                format = Format::Tar;
+                tar::listing(&mut reader)?
+            }
+            Err(zip::ParseError::Refused(refused)) => Listing {
+                size: 0,
+                entries: Vec::new(),
+                refused: Some(refused),
+                stopped: None,
+            },
+            Err(zip::ParseError::Refusal(refusal)) => return Err(refusal),
+        }
     };
 
     let (previews, skipped, _) = previews_for(
@@ -125,6 +180,7 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         &request.uri,
         &archive_grant,
         &mut left,
+        format,
         &listing,
         &request.show,
     )?;
@@ -143,12 +199,12 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
                     code: "view_too_large",
                     message: format!("the listing is {over} bytes, the limit is {MAX_VIEW_BYTES}"),
                 }),
+                stopped: None,
             },
             &[],
             &[],
         );
     }
-    debug_assert!(text.len() as u64 <= MAX_VIEW_BYTES, "{} bytes", text.len());
     let write_grant = grant(bus, VIEW_URI, "write", "write the checked listing")?;
     bus::write_bytes(bus, VIEW_URI, &write_grant, text.as_bytes()).map_err(|error| {
         Refusal::Call {
@@ -161,11 +217,12 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
 
 /// The previews and skips of the entries a request names, and the budget they
 /// used. `run` writes the view; the tests read the budget to prove the total.
-pub fn previews_for(
+pub(crate) fn previews_for(
     bus: &mut dyn Bus,
     uri: &str,
     grant: &str,
     left: &mut u64,
+    format: Format,
     listing: &Listing,
     show: &[usize],
 ) -> Result<(Vec<Preview>, Vec<Skipped>, preview::Budget), Refusal> {
@@ -181,7 +238,14 @@ pub fn previews_for(
             }),
             Some(entry) => {
                 let mut reader = zip::Reader::new(bus, uri, grant, left);
-                match zip::check_shown(&mut reader, entry)? {
+                // ZIP compares the entry's local header with its record (L5);
+                // a tar header was checked when its entry was listed, so its
+                // status alone decides. Both read the shared status map.
+                let shown = match format {
+                    Format::Zip => zip::check_shown(&mut reader, entry)?,
+                    Format::Tar => listing::shown_status(entry.status),
+                };
+                match shown {
                     Ok(()) => {
                         // N1: a directory, a nested archive or another kind is
                         // listed only, and its bytes stay unread.
@@ -255,6 +319,13 @@ pub fn view_json(
     }
     out.push_str(r#","schema":"#);
     push_str(&mut out, VIEW_SCHEMA);
+    if let Some(stopped) = &listing.stopped {
+        out.push_str(r#","stopped":{"code":"#);
+        push_str(&mut out, stopped.code);
+        out.push_str(r#","message":"#);
+        push_str(&mut out, &stopped.message);
+        out.push('}');
+    }
     out.push_str(r#","skipped":["#);
     for (position, skip) in skipped.iter().enumerate() {
         if position > 0 {

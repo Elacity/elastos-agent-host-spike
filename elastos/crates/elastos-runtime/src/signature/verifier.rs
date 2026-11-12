@@ -112,9 +112,12 @@ impl SignatureVerifier {
         Ok(None)
     }
 
-    /// Check if verification is enabled (has trusted keys)
-    pub fn is_enabled(&self) -> bool {
-        !self.trusted_keys.is_empty()
+    /// Whether `key` is one of the trusted keys. Membership only: this is NOT
+    /// a signature check. Ask it only of a key that has already verified the
+    /// signature in question; a key that is merely named beside some bytes is
+    /// a claim, and a trusted name proves nothing about who signed.
+    pub fn trusts(&self, key: &VerifyingKey) -> bool {
+        self.trusted_keys.contains(key)
     }
 }
 
@@ -342,6 +345,24 @@ mod tests {
 
         let result = verifier.verify_capsule(&manifest, &content_hash).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn trusts_answers_membership_and_nothing_else() {
+        let (_, trusted) = generate_keypair();
+        let (_, stranger) = generate_keypair();
+
+        let empty = SignatureVerifier::new();
+        assert!(!empty.trusts(&trusted), "an empty verifier trusts no key");
+
+        let mut verifier = SignatureVerifier::new();
+        verifier.add_trusted_key(trusted).unwrap();
+        assert!(verifier.trusts(&trusted));
+        assert!(!verifier.trusts(&stranger));
+        // Adding the same key twice keeps one entry and the same answer.
+        verifier.add_trusted_key(trusted).unwrap();
+        assert_eq!(verifier.trusted_key_count(), 1);
+        assert!(verifier.trusts(&trusted));
     }
 
     #[test]

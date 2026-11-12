@@ -148,6 +148,10 @@ checks what it reads before it trusts it, and reads no more than it needs.
     that names the resource and the reason;
   - **content** (wrong type, truncated, malformed, oversize): the item is **skipped**, and the output lists it
     with its position, a reason code and a message.
+- [ ] **(added)** give the format-independent rules one owner in the app: the name, path, kind, status and
+      duplicate rules and the types they share sit in one module. Each format reader decodes its records
+      into those entries and hands them to that module, so a second format reuses the rules and no copy can
+      drift.
 - [ ] write its output once, whole, to its own output object, with a deterministic encoding (sorted keys).
 - [ ] stay within the Runtime's fixed fuel (100,000,000 per run on Bus v1): the worst input within its caps
       must use at most 80% of it, and a test must gate that.
@@ -164,6 +168,10 @@ run inside the Runtime's own `ComponentProvider`, the admission import check, an
 and `host-test/`. Shared in the kit's crate `guest/` (`capsule-kit-guest`): `bus` (the two calls and the
 write), `read` (refusals, grant, bounded and counted reads), `uri`, `text`, `image` (header checks), `fake`,
 `component` (WIT glue); and the harness `v1-host-test/`.
+
+**In the archive viewer:** `src/listing.rs` (the one owner: `Entry`, `Kind`, `Status`, `Listing`, the name,
+path, kind, status and duplicate rules), `src/zip.rs` (the ZIP records that feed it), and the P-rule cases and
+F44 in `falsify.py`.
 
 ## 2. Render-only page with a launch token
 

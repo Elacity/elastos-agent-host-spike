@@ -179,6 +179,11 @@ pub use elastos_bundle_identity::{
     entry_kind, entry_path, lab_cid, lab_cid_observed, BundleEntry, CheckedBundle, EntryKind,
     LabCid, ListedFile, Moment, Refusal, MANIFEST_FILE, PORTABLE_PLATFORM, VARIANT_PLATFORMS,
 };
+// The walk under a budget (slice W of the by-CID start): the same walk, with
+// four limits. The lab's own calls stay unbudgeted.
+pub use elastos_bundle_identity::{
+    checked_bundle_within, checked_bundle_within_observed, Budget, LAB_REFUSALS,
+};
 
 /// Domain of the lab name signature, for [`domain_separated_digest`]. It is a
 /// lab proposal.

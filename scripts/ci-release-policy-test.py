@@ -37,8 +37,11 @@ SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "sourc
 FULL_PROOF_JOBS = {
     "engine-llama-amd64", "engine-llama-arm64", "test-elastos", "test-capsules",
     "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
-    "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
+    "installed-app-paths", "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
 }
+# Jobs that build and drive the whole installed app. A pull request that changes only
+# notes and lab files skips them: installed-app-paths decides, and answers run otherwise.
+INSTALLED_APP_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux"}
 SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))"
 # Jobs that run only after merge (pushes and the nightly schedule), never on a PR, batch or baseline run.
 POST_MERGE_JOBS = {"source-home-macos"}
@@ -49,8 +52,8 @@ POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'sch
 REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", "cargo-audit", "core-size", "engine-llama-amd64",
                   "engine-llama-arm64",
                   "lint", "lab-standin", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
-                  "release-upstream-assets", "source-home-linux", "source-home-linux-arm64", "source-home-macos",
-                  "update-hop-linux")
+                  "release-upstream-assets", "installed-app-paths", "source-home-linux", "source-home-linux-arm64",
+                  "source-home-macos", "update-hop-linux")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -114,6 +117,8 @@ def event_context(event, ref, ref_type="", override="", head_ref=None, **extra):
         "github.ref_type": ref_type,
         "inputs.ref": override,
         "github.head_ref": head_ref,
+        # installed-app-paths answers run on every event but a notes-only pull request.
+        "needs.installed-app-paths.outputs.run": "true",
     }
     context.update(extra)
     return context
@@ -372,6 +377,47 @@ def job_inputs(workflow, source, job, leaves=frozenset(), follows=frozenset()):
     return inputs
 
 
+RULE = "scripts/ci-installed-app-paths.py"
+TEST_TARGET = re.compile(r"""(?:cargo|CARGO_BIN\}?)["',]*\s+["']?(?:test|clippy|bench)\b|--(?:tests|all-targets|benches|examples)\b""")
+
+
+def installed_app_lines(source, texts=None):
+    """(file, line) for each line outside a comment that the installed-app jobs run or reach:
+    their steps, then every tracked script under scripts/ that such a line names by repository
+    path or, from its own folder, by file name. texts replaces the text of a script."""
+    scripts = {name for name in TRACKED if name.startswith("scripts/") and name.endswith((".sh", ".py", ".mjs", ".js"))}
+    queue = [("", step) for job in sorted(INSTALLED_APP_JOBS) for step in steps(job, jobs(source))]
+    reached, lines = set(), []
+    while queue:
+        name, text = queue.pop()
+        for line in re.sub(r"\s*\\\n\s*", " ", text).splitlines():  # a line continued with a backslash is one line
+            if line.lstrip().startswith(("#", "//", "*")):
+                continue
+            lines.append((name or "ci.yml", line.strip()))
+            for token in re.findall(r"[\w./-]+", line):
+                parts = token.strip("/").split("/")
+                for tail in ("/".join(parts[start:]) for start in range(len(parts))):
+                    for script in {tail, os.path.dirname(name) + "/" + tail} & scripts - reached:
+                        reached.add(script)
+                        queue.append((script, (texts or {}).get(script) or (REPO / script).read_text(errors="replace")))
+    return lines
+
+
+def notes_named(lines, rule):
+    """(file, path) for each notes path a line names: anything under a bare docs/ or lab/, a
+    tracked file the rule would skip, with or without one leading variable such as $ROOT, and
+    the folder name alone as a quoted word, as in Path("docs") / name."""
+    found = set()
+    for name, line in lines:
+        found |= {(name, folder) for folder in re.findall(r"""["'](docs|lab)["']""", line)}
+        for token in re.findall(r"[\w./-]+", line):
+            path = re.sub(r"\A[A-Z][A-Z_]*/", "", token.strip("/"))
+            folder = path in ("docs", "lab") and token != path  # written as a path: $ROOT/lab, lab/
+            if folder or path.startswith(("docs/", "lab/")) or (path in TRACKED and rule.is_notes_or_lab(path)):
+                found.add((name, path))
+    return found
+
+
 def glob_regex(pattern):
     return re.compile("".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
                               for part in re.split(r"(\*\*|\*)", pattern)) + r"\Z")
@@ -397,6 +443,17 @@ def upstream_assets_run(source, context, changed):
     run = evaluate(output, {**context, "steps.filter.outputs.upstream": changed})
     return job_runs("release-upstream-assets",
                     {**context, "needs.release-upstream-paths.outputs.run": str(run).lower()}, workflow_jobs)
+
+
+def installed_app_runs(source, job, context, decided):
+    """The path job's output decides an installed-app job's guard, as Actions evaluates them.
+    decided is the decision step's output, empty when the step did not run."""
+    workflow_jobs = jobs(source)
+    if not job_runs("installed-app-paths", context, workflow_jobs):
+        return False  # a job is skipped with the job it needs
+    output = field(workflow_jobs["installed-app-paths"].split("    outputs:\n", 1)[1], "run")
+    run = evaluate(output, {**context, "steps.decide.outputs.run": decided})
+    return job_runs(job, {**context, "needs.installed-app-paths.outputs.run": str(run).lower()}, workflow_jobs)
 
 
 def canary_filter(source):
@@ -538,6 +595,9 @@ REVIEWED_ACTIONS = {
     "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad": NO_CACHE,
     "dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0": NO_CACHE,
     "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067": NO_CACHE,
+    # The 1.95.0 branch commit: a composite action of shell steps only (rustup install, then
+    # settings), with no nested action. Its `cachekey` output is a string; it writes no cache.
+    "dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591": NO_CACHE,
     # Writers whose guard save_sites checks: ci.yml only.
     "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830": GUARDED,
     "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6": GUARDED,
@@ -954,6 +1014,8 @@ class ReleasePolicyTests(unittest.TestCase):
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if job == "release-upstream-assets":
                 self.assertTrue(upstream_assets_run(SOURCE, context, ""), job)
+            elif job in INSTALLED_APP_JOBS:
+                self.assertTrue(installed_app_runs(SOURCE, job, context, ""), job)
             elif job in POST_MERGE_JOBS | PR_ONLY_JOBS:
                 self.assertFalse(evaluate(guard[1], context), job)
             elif guard:
@@ -984,8 +1046,10 @@ class ReleasePolicyTests(unittest.TestCase):
         only_spark = "${{ " + SPARK_SKIP + " }}"
         for job in POST_MERGE_JOBS:
             self.assertEqual(job_level_if(job), POST_MERGE_GUARD, job)
-        for job in FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"} - POST_MERGE_JOBS:
+        for job in FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"} - POST_MERGE_JOBS - INSTALLED_APP_JOBS:
             self.assertEqual(job_level_if(job), only_spark, job)
+        for job in INSTALLED_APP_JOBS:
+            self.assertEqual(job_level_if(job), "(needs.installed-app-paths.outputs.run != 'false') && " + SPARK_SKIP, job)
         self.assertEqual(
             job_level_if("custody-harness-smoke"),
             "(github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || "
@@ -1988,6 +2052,7 @@ class ReleasePolicyTests(unittest.TestCase):
             "custody-harness-smoke": ("custody-harness-smoke", "ubuntu-24.04"),
             "release-upstream-paths": ("release-upstream-paths", "ubuntu-24.04"),
             "release-upstream-assets": ("release-upstream-assets (${{ matrix.platform }})", "${{ matrix.os }}"),
+            "installed-app-paths": ("installed-app-paths", "ubuntu-24.04"),
             "source-home-linux": ("source-home-linux (${{ matrix.os }})", "${{ matrix.os }}"),
             "source-home-linux-arm64": ("source-home-linux (${{ matrix.check_name || matrix.os }})", "${{ matrix.os }}"),
             "source-home-macos": ("source-home-macos", "macos-15"),
@@ -2054,11 +2119,13 @@ class ReleasePolicyTests(unittest.TestCase):
             "lab-standin": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
             "custody-harness-smoke": "fork-gate",
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
-            "source-home-linux": "engine-llama-amd64", "source-home-linux-arm64": "engine-llama-arm64",
-            "source-home-macos": "source-gate", "update-hop-linux": "fork-gate", "cancel-on-failure": None,
+            "installed-app-paths": None, "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
+            "source-home-linux-arm64": "[installed-app-paths, engine-llama-arm64]",
+            "source-home-macos": "source-gate", "update-hop-linux": "[installed-app-paths, fork-gate]", "cancel-on-failure": None,
             "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, "
                         "lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
-                        "release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]",
+                        "release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, "
+                        "update-hop-linux]",
         }
         graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
         self.assertEqual(graph, expected)
@@ -2108,13 +2175,16 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(self.run_fork_gate([None, conclusion, "success"]), (1, 2),
                              f"a source-gate {conclusion} must stop a fork pull request's compile jobs")
 
-    def run_required(self, context, results, upstream="false"):
-        """Run the required job's check as Actions would for this context; return its exit status."""
+    def run_required(self, context, results, upstream="false", installed="true"):
+        """Run the required job's check as Actions would for this context; return its exit status.
+        installed is the installed-app-paths output; None leaves the output out."""
         step, = steps("required")
         env = {name: str(evaluate(field(step, name), context)).lower()
                for name in ("SPARK_PULL_REQUEST", "POST_MERGE", "PULL_REQUEST", "CUSTODY_EVENT")}
         needs = {job: {"result": "success", "outputs": {}} for job in REQUIRED_NEEDS}
         needs["release-upstream-paths"]["outputs"]["run"] = upstream
+        if installed is not None:
+            needs["installed-app-paths"]["outputs"]["run"] = installed
         for job, result in results.items():
             needs[job]["result"] = result
         # The run block is its 10-space lines; the next job's leading comment follows it.
@@ -2158,6 +2228,223 @@ class ReleasePolicyTests(unittest.TestCase):
         ]
         for name, context, results, upstream, expected in cases:
             self.assertEqual(self.run_required(context, results, upstream), expected, name)
+        # The installed-app jobs may be skipped only when installed-app-paths said so on a pull request.
+        base = {**mac, **assets}
+        installed = {job: "skipped" for job in INSTALLED_APP_JOBS}
+        after_merge = {**assets, "pr-substance": "skipped"}
+        cases = [
+            ("notes-only PR", pr, {**base, **installed}, "false", 0),
+            ("notes-only PR whose installed-app jobs ran", pr, base, "false", 0),
+            ("installed-app jobs skipped though the paths job said run", pr, {**base, **installed}, "true", 1),
+            ("installed-app jobs skipped with no answer from the paths job", pr, {**base, **installed}, "", 1),
+            ("installed-app jobs skipped with the answer left out", pr, {**base, **installed}, None, 1),
+            ("an answer that is not the word false", pr, {**base, **installed}, "False", 1),
+            ("the paths job failed", pr, {**base, **installed, "installed-app-paths": "failure"}, "", 1),
+            ("the paths job failed after it said skip", pr, {**base, **installed, "installed-app-paths": "failure"}, "false", 1),
+            ("the paths job skipped on an ordinary PR", pr, {**base, **installed, "installed-app-paths": "skipped"}, "", 1),
+            ("the paths job cancelled", pr, {**base, **installed, "installed-app-paths": "cancelled"}, "false", 1),
+            ("notes-only PR with another full proof skipped", pr, {**base, **installed, "test-capsules": "skipped"}, "false", 1),
+            ("notes-only PR with a failed installed-app job", pr, {**base, "update-hop-linux": "failure"}, "false", 1),
+            ("installed-app jobs skipped after merge", push, {**after_merge, **installed}, "false", 1),
+            ("installed-app jobs skipped on the nightly", nightly,
+             {**after_merge, "custody-harness-smoke": "skipped", **installed}, "false", 1),
+            ("spark lane PR, whatever the paths job said", spark, skipped_full, "true", 0),
+        ]
+        for job in INSTALLED_APP_JOBS:
+            cases.append((f"only {job} skipped on a notes-only PR", pr, {**base, job: "skipped"}, "false", 0))
+            cases.append((f"only {job} skipped on an ordinary PR", pr, {**base, job: "skipped"}, "true", 1))
+        for name, context, results, answer, expected in cases:
+            self.assertEqual(self.run_required(context, results, installed=answer), expected, name)
+
+    def test_installed_app_jobs_skip_only_on_a_notes_only_pull_request(self):
+        paths_job = JOBS["installed-app-paths"]
+        self.assertEqual(paths_job.split("    permissions:\n", 1)[1].split("    outputs:\n", 1)[0], "      contents: read\n")
+        self.assertEqual(field(paths_job.split("    outputs:\n", 1)[1], "run"),
+                         "${{ github.event_name != 'pull_request' || steps.decide.outputs.run != 'false' }}")
+        self.assertNotRegex(paths_job, r"(?m)continue-on-error|^    needs:")
+        checkout, decide = steps("installed-app-paths")
+        # The repository's script reads the change list; no other action does.
+        self.assertRegex(checkout, r"\Auses: actions/checkout@[0-9a-f]{40} # v5\n")
+        self.assertEqual(field(checkout, "fetch-depth"), "0")
+        self.assertEqual(field(checkout, "persist-credentials"), "false")
+        self.assertNotIn("uses:", decide)
+        self.assertIn("        id: decide\n", decide)
+        # The step runs the rule held by the event's base commit, from outside the checkout. No
+        # expression is pasted into its shell and no branch name, which moves, picks the rule.
+        script = self.decide_script(SOURCE)
+        self.assertNotIn("${{", script)
+        self.assertNotIn("BASE_REF", script)
+        self.assertEqual(script.count("ci-installed-app-paths"), 1)
+        self.assertIn('if [[ "$BASE_SHA" =~ ^[0-9a-f]{40,64}$ ]] \\\n    && git show "${BASE_SHA}:' + RULE + '" > "$rule" \\\n', script)
+        # The answer is compared byte for byte.
+        self.assertIn("    && printf 'run=false\\n' | cmp -s - \"$answer\"; then\n", script)
+        self.assertEqual(field(decide, "BASE_SHA"), "${{ github.event.pull_request.base.sha }}")
+        self.assertEqual(re.findall(r"(?m)^rule=.*$", script), ['rule="$RUNNER_TEMP/installed-app-paths-rule.py"'])
+        self.assertEqual(re.findall(r"python3[^\n]*", script), ['python3 -I "$rule" \\'])
+        # The rule imports nothing a pull request's tree could supply.
+        self.assertEqual(re.findall(r"(?m)^\s*(?:import|from)\s+([\w.]+)", (REPO / RULE).read_text()), ["os", "subprocess", "sys"])
+        self.assertEqual(field(decide, "BASE_REF"), "${{ github.base_ref }}")
+        self.assertEqual(field(decide, "HEAD_SHA"), "${{ github.event.pull_request.head.sha }}")
+        for step in (checkout, decide):
+            self.assertEqual(field(step, "if"), "github.event_name == 'pull_request'")
+        self.assertIn("python3 scripts/ci-installed-app-paths-test.py", SOURCE_GATE)
+        for event, ref, ref_type, override, _ in [*CASES, *NON_WRITER_CASES]:
+            for head_ref in (("feature", "batch/20261108", "spark", "sparked/lane", "spark/lane")
+                             if event == "pull_request" else ("",)):
+                context = event_context(event, ref, ref_type, override, head_ref)
+                lane = head_ref.startswith("spark/")
+                self.assertEqual(job_runs("installed-app-paths", context), not lane)
+                for decided in ("true", "false", "", "False", "skip"):
+                    # Only a pull request can skip, and only on the decision step's exact answer.
+                    expected = not lane and not (event == "pull_request" and decided == "false")
+                    for job in INSTALLED_APP_JOBS:
+                        with self.subTest(event=event, ref=ref, head_ref=head_ref, decided=decided, job=job):
+                            self.assertEqual(installed_app_runs(SOURCE, job, context, decided), expected)
+        # Each job waits for the answer, and the check above sees a guard that ignores it.
+        ordinary = event_context("pull_request", "refs/pull/9/merge")
+        for job in INSTALLED_APP_JOBS:
+            self.assertEqual(field(JOBS[job], "needs").strip("[]").split(", ")[0], "installed-app-paths", job)
+            unguarded = SOURCE.replace(field(JOBS[job], "if"), "${{ " + SPARK_SKIP + " }}")
+            self.assertTrue(installed_app_runs(unguarded, job, ordinary, "false"), job)
+
+    def decide_script(self, source):
+        decide = steps("installed-app-paths", jobs(source))[1]
+        # The run block is its 10-space lines; the next job's leading comment follows it.
+        return textwrap.dedent(re.match(r"(?:(?: {10}[^\n]*)?\n)*", decide.split("        run: |\n", 1)[1])[0])
+
+    def run_decide(self, base_rule, changes, source=SOURCE, later_rule=None, base_sha=None):
+        """The decide step's output for a pull request that writes changes, in a throwaway
+        repository whose base commit holds base_rule as the rule script (None: holds none).
+        later_rule is the rule the base branch gains after the event; base_sha replaces the
+        base commit the event names."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            repo, temp, output = root / "repo", root / "temp", root / "output"
+            repo.mkdir()
+            temp.mkdir()
+            env = fixture_git.fixture_git_env(root, {key: "fixture" for key in fixture_git.IDENTITY})
+
+            def commit(files):
+                for name, text in files.items():
+                    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                    (repo / name).write_text(text)
+                for args in (("add", "-A"), ("commit", "-q", "-m", "fixture")):
+                    subprocess.run(["git", "-C", str(repo), *args], env=env, check=True, capture_output=True)
+
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], env=env, check=True, capture_output=True)
+            commit({"lab/note.md": "note\n", **({} if base_rule is None else {RULE: base_rule})})
+
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+            base = git("rev-parse", "HEAD")
+            git("checkout", "-q", "-b", "work")
+            commit(changes)
+            head = git("rev-parse", "HEAD")
+            if later_rule is not None:
+                git("checkout", "-q", "main")
+                commit({RULE: later_rule})
+                git("checkout", "-q", "work")
+            git("update-ref", "refs/remotes/origin/main", "main")
+            result = subprocess.run(["bash", "-e", "-c", self.decide_script(source)], cwd=repo, capture_output=True, text=True,
+                                    timeout=60, env={**env, "BASE_REF": "main", "BASE_SHA": base if base_sha is None else base_sha,
+                                                     "HEAD_SHA": head, "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(output)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return output.read_text()
+
+    def test_the_base_branch_copy_of_the_rule_decides_and_any_doubt_runs(self):
+        honest = (REPO / RULE).read_text()
+        notes, code = {"lab/note.md": "changed\n"}, {"lab/note.md": "changed\n", "capsules/a/src/main.rs": "fn main() {}\n"}
+
+        def writes(answer, status=0):
+            return f'import os\nopen(os.environ["GITHUB_OUTPUT"], "a").write({answer!r})\nraise SystemExit({status})\n'
+
+        always_skip = writes("run=false\n")
+        self.assertEqual(self.run_decide(honest, notes), "run=false\n")
+        self.assertEqual(self.run_decide(honest, code), "run=true\n")
+        # A pull request that rewrites the rule is judged by the base's rule, which runs the jobs
+        # for the rule's own path. The pull request's copy never runs.
+        self.assertEqual(self.run_decide(honest, {**notes, RULE: always_skip}), "run=true\n")
+        self.assertEqual(self.run_decide(always_skip, code), "run=false\n")
+        self.assertEqual(self.run_decide(writes("run=true\n"), {**notes, RULE: always_skip}), "run=true\n")
+        # A base branch without the rule runs the jobs, as on the pull request that adds the rule.
+        self.assertEqual(self.run_decide(None, notes), "run=true\n")
+        self.assertEqual(self.run_decide(None, {**notes, RULE: always_skip}), "run=true\n")
+        # The rule is the one in the event's base commit, whatever the base branch holds later.
+        self.assertEqual(self.run_decide(honest, code, later_rule=always_skip), "run=true\n")
+        self.assertEqual(self.run_decide(always_skip, code, later_rule=honest), "run=false\n")
+        self.assertEqual(self.run_decide(None, notes, later_rule=always_skip), "run=true\n")
+        # A base commit that is not in the checkout, or a name where a commit belongs, runs the jobs.
+        for base_sha in ("0" * 40, "", "main", "origin/main", "HEAD", "work^", "-h", "0" * 39, "0" * 65):
+            with self.subTest(base_sha=base_sha):
+                self.assertEqual(self.run_decide(honest, notes, base_sha=base_sha), "run=true\n")
+        # So does a rule that fails, says nothing, or says anything but the one line, byte for byte.
+        for name, rule in {"exits 1": "raise SystemExit(1)\n", "skip, then exits 1": writes("run=false\n", 1),
+                           "no answer": "pass\n", "not Python": "(\n", "empty": "", "another word": writes("run=maybe\n"),
+                           "two answers": writes("run=false\nrun=true\n"), "skip twice": writes("run=false\nrun=false\n"),
+                           "a longer line": writes("run=false \n"), "a second output": writes("run=false\nother=1\n"),
+                           "capitals": writes("run=False\n"), "skip, then a blank line": writes("run=false\n\n"),
+                           "skip, then blank lines": writes("run=false\n\n\n"), "a blank line first": writes("\nrun=false\n"),
+                           "no line end": writes("run=false"), "a carriage return": writes("run=false\r\n")}.items():
+            with self.subTest(base_rule=name):
+                self.assertEqual(self.run_decide(rule, notes), "run=true\n")
+
+    def test_notes_rule_skips_no_input_the_installed_app_jobs_call(self):
+        spec = importlib.util.spec_from_file_location("installed_app_paths", REPO / "scripts/ci-installed-app-paths.py")
+        rule = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rule)
+        for job in sorted(INSTALLED_APP_JOBS):
+            inputs = job_inputs(WORKFLOW, SOURCE, job)
+            self.assertIn("scripts/setup-source-home.sh", inputs, job)
+            self.assertIn("capsules/model-provider/Cargo.toml", inputs, job)
+            self.assertEqual(sorted(path for path in inputs if rule.is_notes_or_lab(path)), [], job)
+        # Capsule folders are inputs whole, so a README.md inside one is no notes path.
+        self.assertIn("capsules/home/README.md", inputs)
+        # A step that builds a lab crate or reads a notes file by path is seen.
+        call = "          scripts/setup-source-home.sh 2>&1 | tee"
+        for planted, path in (("cargo build --locked --manifest-path lab/redteam/Cargo.toml", "lab/redteam/Cargo.toml"),
+                              ('cp "$ROOT/docs/INSTALL.md" "$HOME"', "docs/INSTALL.md"),
+                              ('cat "${REPO_ROOT}/PRINCIPLES.md"', "PRINCIPLES.md")):
+            changed = SOURCE.replace(call, f"          {planted}\n{call}")
+            self.assertNotEqual(changed, SOURCE)
+            for job in sorted(INSTALLED_APP_JOBS):
+                found = {name for name in job_inputs(WORKFLOW, changed, job) if rule.is_notes_or_lab(name)}
+                self.assertIn(path, found, (job, planted))
+        # Line by line: the jobs' steps and every script they reach name no notes path but in two
+        # messages, and build one test target, in the elastos workspace, which names no lab crate.
+        messages = {("scripts/check-versioning.sh", "docs/VERSIONING.md"), ("scripts/publish-release.sh", "docs/VERSIONING.md")}
+        test_targets = {("scripts/pinned-model-consumer-proof.sh",
+                         'env "${PROOF_ENV[@]}" "$CARGO_BIN" test --locked -p elastos-server --lib -- --ignored --nocapture '
+                         '--exact "$test_id"')}
+
+        def seen(source=SOURCE, texts=None):
+            lines = installed_app_lines(source, texts)
+            return notes_named(lines, rule), {(name, line) for name, line in lines if TEST_TARGET.search(line)}
+
+        self.assertEqual(seen(), (messages, test_targets))
+        reached = {name for name, _ in installed_app_lines(SOURCE)}
+        self.assertLessEqual({"ci.yml", "scripts/setup-source-home.sh", "scripts/update-hop-compare.py", "scripts/check-release-musl.sh",
+                              "scripts/ci-installed-journeys.py", "scripts/install-source-home-runtime.py"}, reached)
+        # A reached script that reads a bare docs/ path, and a step or script that builds the
+        # model-provider capsule's test targets with no lab/ on its command line, are both seen.
+        installer = "scripts/install-source-home-runtime.py"
+        for planted in ("    text = open('docs/INSTALL.md').read()", "cat docs/INSTALL.md", 'cp -R "${ROOT}/lab" "$HOME"',
+                        'head -1 "$REPO_ROOT/PRINCIPLES.md"', "ls docs/*.md", '    text = (Path("docs") / "INSTALL.md").read_text()',
+                        "    text = open(os.path.join(ROOT, 'lab', 'x')).read()"):
+            notes, _ = seen(texts={installer: (REPO / installer).read_text() + planted + "\n"})
+            self.assertEqual({name for name, _ in notes - messages}, {installer}, planted)
+            notes, _ = seen(SOURCE.replace(call, f"          {planted.strip()}\n{call}"))
+            self.assertEqual({name for name, _ in notes - messages}, {"ci.yml"}, planted)
+        # A command split across lines with a backslash is read as the one line it is.
+        split = '"$CARGO_BIN" \\\n              test \\\n              --locked'
+        for planted, line in (("(cd capsules/model-provider && cargo test --locked)", None),
+                              ('"$CARGO_BIN" test --locked --manifest-path "${ROOT}/capsules/model-provider/Cargo.toml"', None),
+                              ("cargo build --locked --release --all-targets", None), ("cargo clippy --tests", None),
+                              (split, '"$CARGO_BIN" test --locked'), ("cargo \\\ntest", "cargo test")):
+            _, built = seen(SOURCE.replace(call, f"          {planted}\n{call}"))
+            self.assertEqual(built - test_targets, {("ci.yml", line or planted)})
+            _, built = seen(texts={"scripts/setup-source-home.sh": (REPO / "scripts/setup-source-home.sh").read_text() + planted + "\n"})
+            self.assertEqual(built - test_targets, {("scripts/setup-source-home.sh", line or planted)})
 
     def test_pull_request_runs_cancel_at_the_first_failed_job(self):
         watcher = JOBS["cancel-on-failure"]
@@ -2365,8 +2652,8 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotIn("RECIPE_COMMIT: ${{ github.sha }}", JOBS["engine-llama-arm64"])
 
     def test_engine_consumers_gate_the_current_run_input_with_shared_pin(self):
-        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "engine-llama-amd64")
-        self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"), "engine-llama-arm64")
+        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "[installed-app-paths, engine-llama-amd64]")
+        self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"), "[installed-app-paths, engine-llama-arm64]")
         download, = [step for step in steps("source-home-linux-arm64") if "actions/download-artifact@" in step and "name: llama-arm64-bundle" in step]
         self.assertIn("name: llama-arm64-bundle", download)
         self.assertEqual(field(download, "if"), "matrix.os == 'ubuntu-22.04-arm'")
