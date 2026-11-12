@@ -307,7 +307,7 @@ pub(crate) fn is_archive(reader: &mut Reader<'_>) -> Result<bool, ParseError> {
     let tail_start = size.saturating_sub(END_RECORD_BYTES + MAX_COMMENT_BYTES);
     let tail_length = size - tail_start;
     let tail = read(reader, tail_start, tail_length)?;
-    if tail.len() as u64 != tail_length {
+    if (tail.len() as u64) != tail_length {
         return Ok(false);
     }
     Ok(!end_candidates(&tail, tail_start, size).is_empty())
