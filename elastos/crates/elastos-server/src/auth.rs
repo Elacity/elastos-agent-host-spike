@@ -19402,6 +19402,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn plain_twin_leaves_no_parent_when_its_protection_key_is_unrecoverable() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:plain-twin-unrecoverable";
+        let protection = store_test_principal_root_protection(data_dir.path(), principal_id);
+        // The record still passes validation and load; only the data-key
+        // recovery from its Recovery Kit archive fails.
+        let mut unrecoverable = protection.clone();
+        unrecoverable.protectors[0].archive = None;
+        plant_principal_root_protection(data_dir.path(), &unrecoverable);
+        assert!(
+            load_principal_root_protection(
+                data_dir.path(),
+                principal_id,
+                &protection.localhost_root
+            )
+            .unwrap()
+            .is_some(),
+            "the protection decision still reads the stored record"
+        );
+        let root =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), principal_id).unwrap();
+        let uri = format!("{}/PlainTwin/notes.md", root.localhost_root());
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        assert!(!path.parent().unwrap().exists());
+        let error =
+            write_principal_root_object_resolved(data_dir.path(), &root, &uri, &path, b"plain")
+                .expect_err("an unrecoverable data key refuses the write");
+        assert_eq!(
+            error.to_string(),
+            "principal-root protection has no recoverable data key archive"
+        );
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the refused write made its parent"
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn typed_io_refuses_a_quarantined_record() {
         let data_dir = tempfile::tempdir().unwrap();
         r4_fixture::store(data_dir.path(), PrincipalKind::Human);
