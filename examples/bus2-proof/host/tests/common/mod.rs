@@ -53,6 +53,51 @@ pub fn within<R: Send + 'static>(
     }
 }
 
+/// Like `within`, for a test that must not leave its worker running. When the
+/// limit runs out, the worker is told to stop, the test waits for it to end,
+/// and only then fails. `f` should hold the whole test, its preparation too.
+///
+/// The stop is seen the next time the executor gets the thread back. Guests
+/// that yield give it back within a fuel slice. A guest that never yields
+/// gives it back only when it ends, so every guest in `f` needs an epoch
+/// deadline (`Limits::max_ticks`) and a running `Ticker`: that bounds the
+/// wait. Work that is not a guest (compiling a component) runs to its end
+/// first.
+pub fn within_then_stop<R: Send + 'static>(
+    limit: std::time::Duration,
+    f: impl std::future::Future<Output = R> + Send + 'static,
+) -> R {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let worker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let result = local.block_on(&runtime, async move {
+            tokio::select! {
+                result = f => Some(result),
+                _ = stopped => None,
+            }
+        });
+        let _ = sender.send(result);
+    });
+    let result = match receiver.recv_timeout(limit) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let _ = stop.send(());
+            None
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the run panicked; see its output above")
+        }
+    };
+    // The worker has ended, or has been told to stop: no thread is left.
+    let _ = worker.join();
+    result.unwrap_or_else(|| panic!("no result within {limit:?}; the worker was stopped"))
+}
+
 /// A clock that a test moves by hand, for a proof that must hold on a fast
 /// machine, a slow one and a loaded one alike. No `Ticker` runs next to it.
 ///
