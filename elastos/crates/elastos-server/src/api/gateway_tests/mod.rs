@@ -1176,3 +1176,30 @@ mod wallet;
 
 #[path = "../gateway_home_update/tests.rs"]
 mod home_update;
+
+/// Each of the three mappers answers the held-root refusal with 403 and the
+/// bare text, including under the path context `home_state_write_error` puts
+/// on a refused Home state save.
+#[tokio::test]
+async fn kept_elsewhere_refusal_answers_403() {
+    let refused = || {
+        anyhow::Error::new(crate::auth::ProtectedRecordKeptElsewhere).context(
+            "could not write /child/Users/person/.AppData/ElastOS/Home/services-state.json",
+        )
+    };
+    let responses = [
+        home_error_response(refused()),
+        system_error_response(refused()),
+        crate::api::viewer_gateway::viewer_error_response(refused()),
+    ];
+    for response in responses {
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "protected record is kept only on the Runtime this person signed in on"
+        );
+    }
+}

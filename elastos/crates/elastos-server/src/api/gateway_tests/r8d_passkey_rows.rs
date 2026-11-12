@@ -66,6 +66,11 @@ pub(in crate::api) const NO_STORED_RECORD: &str =
      its root cannot be chosen";
 pub(in crate::api) const PROFILE_FILE: &str =
     "Users/ecee74316e460e2874b8b6d0/.AppData/ElastOS/Profile/profile-authority.json";
+/// The refusal a held-root write gives when the person's record is kept in
+/// another Runtime's store and this Runtime holds no protection for the
+/// object, as `auth.rs` words it (`ProtectedRecordKeptElsewhere`).
+pub(in crate::api) const KEPT_ELSEWHERE: &str =
+    "protected record is kept only on the Runtime this person signed in on";
 
 /// The parent's passkey person, as a child Runtime sees them after it has
 /// verified their launch token.
@@ -347,4 +352,19 @@ pub(in crate::api) async fn discovery_service(
 /// The refusal text, with its whole cause chain, or None when the call passed.
 pub(in crate::api) fn refusal<T>(result: anyhow::Result<T>) -> Option<String> {
     result.err().map(|error| format!("{error:#}"))
+}
+
+/// The refusal a held-root write gives when the person's record is kept in
+/// another Runtime's store and this Runtime holds no protection for the
+/// object, or None when the call passed or failed for another reason. The
+/// typed error may sit under a path context, so this looks through the chain.
+pub(in crate::api) fn kept_elsewhere_refusal(error: &anyhow::Error) -> Option<String> {
+    error
+        .chain()
+        .find(|cause| {
+            cause
+                .downcast_ref::<crate::auth::ProtectedRecordKeptElsewhere>()
+                .is_some()
+        })
+        .map(ToString::to_string)
 }
