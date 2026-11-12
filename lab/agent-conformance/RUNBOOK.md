@@ -330,8 +330,10 @@ named binary again immediately before every launch; when the bytes differ from
 the first hash it does not launch them, prints
 `given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
 and the run fails. This does not show a swap made between that hash and the
-operating system starting the process. Without it the suite
-builds the checkout's Runtime and this row fails. Only the Runtime is given;
+operating system starting the process. Without that variable the suite builds
+the checkout's Runtime. This row then fails only when an installed Runtime was
+given and the built Runtime's hash differs from the installed binary's; when no
+installed Runtime was given the receipt has no such row. Only the Runtime is given;
 the localhost provider, the probe and every Home the Runtime runs in still come
 from the checkout, so the installation's data folder is never used by a run.
 
