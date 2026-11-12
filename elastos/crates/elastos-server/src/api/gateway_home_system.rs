@@ -8416,40 +8416,26 @@ fn home_background_image_entry(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<Option<HomeBackgroundImageEntry>> {
-    // An interrupted save can leave an older image of another format beside the
-    // new one, so the reader serves the file written last. A name with no
-    // readable time, and an equal time, keep the earlier name in the fixed
-    // order, which makes the choice stable.
-    let mut chosen: Option<(HomeBackgroundImageEntry, Option<std::time::SystemTime>)> = None;
     for &(file_name, content_type) in HOME_BACKGROUND_IMAGE_FILES {
         let path = home_appearance_path(data_dir, context, file_name)?;
         if !path.is_file() {
             continue;
         }
-        let modified = path
+        let version = path
             .metadata()
             .ok()
-            .and_then(|metadata| metadata.modified().ok());
-        let version = modified
+            .and_then(|metadata| metadata.modified().ok())
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_nanos().to_string())
             .unwrap_or_else(|| now_ts().to_string());
-        let entry = HomeBackgroundImageEntry {
+        return Ok(Some(HomeBackgroundImageEntry {
             path,
             object_uri: home_appearance_object_uri(context, file_name),
             content_type,
             version,
-        };
-        let newer = match (&chosen, modified) {
-            (None, _) => true,
-            (Some((_, current)), Some(next)) => current.is_none_or(|current| next > current),
-            (Some(_), None) => false,
-        };
-        if newer {
-            chosen = Some((entry, modified));
-        }
+        }));
     }
-    Ok(chosen.map(|(entry, _)| entry))
+    Ok(None)
 }
 
 pub(super) fn home_background_overlay_opacity_default() -> f64 {
@@ -8587,10 +8573,11 @@ fn home_save_background_image_with(
     //   fixed, so the file is never served and is harmless.
     // - a failed staging or rename: the temporary file is removed and every
     //   existing image stays.
-    // - after the rename: the new bytes under the destination name, with an
-    //   older image of another format still beside them until the removal
-    //   below. The reader shows the image written last, so the new image is
-    //   the one served.
+    // - after the rename and before the removal below: the new bytes under
+    //   the destination name beside any older image of another format. The
+    //   reader serves the first name that exists (png, then jpg, webp, gif),
+    //   so an older image can stay on screen until the next upload or reset,
+    //   and both remove every other format under the image lock.
     // - a removal error: that older file stays, and the error names it.
     // - a directory sync error after the rename: the new image is in place
     //   but the upload answers an error. The shared write helper keeps that
@@ -10417,33 +10404,6 @@ mod stored_root_tests {
             b"new image"
         );
         assert!(jpg.is_file(), "the older sibling stays");
-    }
-
-    /// The reader serves the image written last when two formats remain.
-    #[test]
-    fn background_image_reader_serves_the_last_written_image() {
-        let (_temp, data_dir) = state_dir();
-        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
-        seed_background_image(&data_dir, &context, "background-image.jpg", b"jpg image");
-        let png = seed_background_image(&data_dir, &context, "background-image.png", b"png image");
-        let older = std::time::SystemTime::now() - Duration::from_secs(60);
-        std::fs::File::options()
-            .write(true)
-            .open(&png)
-            .unwrap()
-            .set_modified(older)
-            .unwrap();
-        let entry = home_background_image_entry(&data_dir, &context)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            entry.content_type, "image/jpeg",
-            "the earlier name in the fixed order has the older write time"
-        );
-        assert_eq!(
-            home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
-            b"jpg image"
-        );
     }
 }
 
