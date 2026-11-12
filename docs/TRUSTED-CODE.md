@@ -26,7 +26,7 @@ excluded: a listed file that uses `include!` is refused on every path, and the r
 and line, so generated text cannot enter the count unnoticed. Each file is counted on its own; a
 `mod name;` target is not followed, so the list must name every file that makes a decision. The
 counter prints a warning for each non-test `mod name;` in a listed file whose target is not listed;
-`auth.rs`'s `mod verified_launch_token_signer;` is the live example.
+`elastos-identity/src/store.rs`'s `mod files` (owner and mode checks on the identity files, no authority decision) is the live example.
 
 The number moves without a change in behaviour: splits or joins of lines, moving code under a test
 cfg, and any untracked file in the worktree all change it.
