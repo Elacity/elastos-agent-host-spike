@@ -10380,7 +10380,9 @@ mod stored_root_tests {
             b"new image".to_vec(),
         );
         let reset = home_reset_background_image(&data_dir, &context);
-        std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600)).unwrap();
+        // A refusing route keeps this file, so put its readable mode back. A
+        // route that removed it fails at the refusal checks below.
+        let _ = std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600));
         let upload_error = upload.expect_err("an unreadable image must refuse the upload");
         let reset_error = reset.expect_err("an unreadable image must refuse the reset");
         for (route, error) in [("upload", &upload_error), ("reset", &reset_error)] {
