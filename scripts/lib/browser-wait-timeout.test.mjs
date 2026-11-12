@@ -7,7 +7,13 @@ test("the wait timeout is 5 s locally and 15 s on a CI runner", () => {
   assert.equal(CI_WAIT_TIMEOUT_MS, 15000);
   assert.equal(browserWaitTimeoutMs({}), 5000);
   assert.equal(browserWaitTimeoutMs({ CI: "true" }), 15000);
+  assert.equal(browserWaitTimeoutMs({ CI: "1" }), 15000);
+  assert.equal(browserWaitTimeoutMs({ CI: true }), 15000);
   assert.equal(browserWaitTimeoutMs({ CI: "" }), 5000);
+  assert.equal(browserWaitTimeoutMs({ CI: "0" }), 5000);
+  assert.equal(browserWaitTimeoutMs({ CI: "false" }), 5000);
+  assert.equal(browserWaitTimeoutMs({ CI: "FALSE" }), 5000);
+  assert.equal(browserWaitTimeoutMs({ CI: " false " }), 5000);
 });
 
 test("ELASTOS_BROWSER_TIMEOUT_MS names the time and outranks CI", () => {

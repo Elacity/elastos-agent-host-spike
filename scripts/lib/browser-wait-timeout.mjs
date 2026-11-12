@@ -6,10 +6,19 @@
 // predicate never changes: only the time it is allowed.
 //
 // ELASTOS_BROWSER_TIMEOUT_MS names the time directly, CI (set by the runner)
-// allows 15 s, and a local run keeps 5 s.
+// allows 15 s, and a local run keeps 5 s. A CI of "false" or "0" counts as off,
+// as it does for tools that read the variable as a switch.
 
 export const LOCAL_WAIT_TIMEOUT_MS = 5000;
 export const CI_WAIT_TIMEOUT_MS = 15000;
+
+function ciEnabled(value) {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  const text = String(value).trim().toLowerCase();
+  return text !== "" && text !== "0" && text !== "false";
+}
 
 export function browserWaitTimeoutMs(env = process.env) {
   const named = env.ELASTOS_BROWSER_TIMEOUT_MS;
@@ -20,5 +29,5 @@ export function browserWaitTimeoutMs(env = process.env) {
     }
     return Math.round(parsed);
   }
-  return env.CI ? CI_WAIT_TIMEOUT_MS : LOCAL_WAIT_TIMEOUT_MS;
+  return ciEnabled(env.CI) ? CI_WAIT_TIMEOUT_MS : LOCAL_WAIT_TIMEOUT_MS;
 }
