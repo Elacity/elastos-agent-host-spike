@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
+
+// A DOM wait fails on a wrong page, not on a slow runner: same predicate, more time.
+const BROWSER_WAIT_TIMEOUT_MS = browserWaitTimeoutMs();
 
 const repoRoot = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const browserRoot = join(repoRoot, "capsules/chat-room/browser");
@@ -1046,7 +1050,7 @@ async function runScenario(scenario) {
     if (scenario === "shared-file-via-home") {
       await waitForConfiguredChatWithoutLegacyFlash(frame, "shared file");
       const link = frame.locator('[data-seq="1"] a[data-open-uri]');
-      await link.waitFor({ timeout: 5000 });
+      await link.waitFor({ timeout: BROWSER_WAIT_TIMEOUT_MS });
       assert(await link.getAttribute('href') === null, "shared link navigates Chat");
       assert(await link.getAttribute('data-message-ref') === 'test-conversation/sha256:message-1', "message reference missing");
       for (const gesture of ['click', 'Enter', ' ']) {
@@ -1450,7 +1454,7 @@ async function runScenario(scenario) {
       // Exercise Chat's Enter-to-send control and its real form handler.
       await frame.locator("#message-input").press("Enter");
       const own = frame.locator('#message-list [data-seq="12"]');
-      await own.waitFor({ state: "visible", timeout: 5_000 });
+      await own.waitFor({ state: "visible", timeout: BROWSER_WAIT_TIMEOUT_MS });
       assert(await own.locator(".message-body").innerText() === cursorOwnMarker,
         "generated Chat did not render the send response");
       trace.sharedCursorReady = true;
@@ -1458,7 +1462,7 @@ async function runScenario(scenario) {
       assert(trace.sharedCursorPolls[0] === 10,
         "own send skipped the unobserved peer cursor", trace.sharedCursorPolls);
       const peer = frame.locator('#message-list [data-seq="11"]');
-      await peer.waitFor({ state: "visible", timeout: 5_000 });
+      await peer.waitFor({ state: "visible", timeout: BROWSER_WAIT_TIMEOUT_MS });
       assert(await peer.locator(".message-body").innerText() === interveningPeerMarker
         && await peer.count() === 1 && await own.count() === 1,
         "generated Chat lost or duplicated intervening history");
@@ -1536,7 +1540,7 @@ async function runScenario(scenario) {
       assert(!hold.released && trace.current.polls > stalledPolls
         && await marker.innerText() === stalledPollMarker,
         "Chat did not recover from a poll request that never answered", { polls: trace.current.polls, stalledPolls });
-      await frame.locator("#error-text").waitFor({ state: "hidden", timeout: 5_000 });
+      await frame.locator("#error-text").waitFor({ state: "hidden", timeout: BROWSER_WAIT_TIMEOUT_MS });
       return;
     }
 
@@ -1553,7 +1557,7 @@ async function runScenario(scenario) {
       assert(await marker.innerText() === attachmentRetryMarker, "Chat stopped polling after an attachment failed");
       // Home answers again: Chat retries after its cursor passed the row.
       await card.locator("img.attachment-preview").waitFor({ state: "visible", timeout: 20_000 });
-      await card.locator('[data-open-attachment="att-retry"]').waitFor({ state: "visible", timeout: 5_000 });
+      await card.locator('[data-open-attachment="att-retry"]').waitFor({ state: "visible", timeout: BROWSER_WAIT_TIMEOUT_MS });
       const served = trace.attachmentRequests.at(-1);
       assert(served.markerPolled && served.since >= 2 && !(await card.innerText()).includes("Loading attachment..."),
         "a failed attachment was not retried after the poll cursor moved past it", trace.attachmentRequests);
@@ -1569,7 +1573,7 @@ async function runScenario(scenario) {
       const hold = holds["shared-poll-conversations"];
       await waitFor(() => hold.reached);
       const marker = frame.locator('#message-list [data-seq="1"] .message-body');
-      await marker.waitFor({ state: "visible", timeout: 5_000 });
+      await marker.waitFor({ state: "visible", timeout: BROWSER_WAIT_TIMEOUT_MS });
       assert(!hold.released, "Shared marker was checked after metadata release");
       assert(await marker.count() === 1 && await marker.innerText() === sharedRenderMarker,
         "Shared poll did not render the exact new message while Direct metadata was held");
@@ -2336,13 +2340,13 @@ async function runScenario(scenario) {
     );
 
     await frame.locator("#emoji-toggle").click();
-    await frame.locator("#emoji-popover").waitFor({ state: "visible", timeout: 3_000 });
+    await frame.locator("#emoji-popover").waitFor({ state: "visible", timeout: BROWSER_WAIT_TIMEOUT_MS });
     assert(
       await frame.locator("#emoji-popover").isVisible(),
       "emoji popover did not open from the compact composer",
     );
     await frame.locator("body").press("Escape");
-    await frame.locator("#emoji-popover").waitFor({ state: "hidden", timeout: 3_000 });
+    await frame.locator("#emoji-popover").waitFor({ state: "hidden", timeout: BROWSER_WAIT_TIMEOUT_MS });
     assert(
       !(await frame.locator("#emoji-popover").isVisible()),
       "emoji popover did not close on Escape",
