@@ -6937,9 +6937,7 @@ pub(crate) fn read_principal_root_object_resolved(
 ) -> anyhow::Result<Vec<u8>> {
     #[cfg(test)]
     principal_object_io::record_read(data_dir, path);
-    resolved.refuse_if_quarantined(data_dir)?;
-    let (principal_id, root) = resolved.local_binding(object_uri)?;
-    validate_principal_root_object_path(data_dir, object_uri, path)?;
+    let (principal_id, root) = resolved.guard_object(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
@@ -7270,9 +7268,7 @@ pub(crate) fn write_principal_root_object_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
-    resolved.refuse_if_quarantined(data_dir)?;
-    let (principal_id, root) = resolved.local_binding(object_uri)?;
-    validate_principal_root_object_path(data_dir, object_uri, path)?;
+    let (principal_id, root) = resolved.guard_object(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
@@ -7350,9 +7346,7 @@ pub(crate) fn write_protected_principal_root_object_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
-    resolved.refuse_if_quarantined(data_dir)?;
-    let (principal_id, root) = resolved.local_binding(object_uri)?;
-    validate_principal_root_object_path(data_dir, object_uri, path)?;
+    let (principal_id, root) = resolved.guard_object(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
@@ -7435,9 +7429,7 @@ pub(crate) fn write_principal_root_object_if_revision_resolved(
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     principal_object_io::record_write(data_dir, path);
-    resolved.refuse_if_quarantined(data_dir)?;
-    let (principal_id, root) = resolved.local_binding(object_uri)?;
-    validate_principal_root_object_path(data_dir, object_uri, path)?;
+    let (principal_id, root) = resolved.guard_object(data_dir, object_uri, path)?;
     let _guard = principal_root_object_mutation_lock(data_dir)
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
@@ -9100,6 +9092,21 @@ impl ResolvedPrincipalRoot {
             }
             _ => anyhow::bail!("principal-root object URI is outside the resolved root"),
         }
+    }
+
+    /// The three checks each held-root read or write makes before it touches
+    /// bytes: the record is not quarantined, the address is under this root,
+    /// and the path is the address's canonical path.
+    fn guard_object(
+        &self,
+        data_dir: &Path,
+        object_uri: &str,
+        path: &Path,
+    ) -> anyhow::Result<(&str, &str)> {
+        self.refuse_if_quarantined(data_dir)?;
+        let binding = self.local_binding(object_uri)?;
+        validate_principal_root_object_path(data_dir, object_uri, path)?;
+        Ok(binding)
     }
 
     /// The root that verified Recovery Kit material proves for its principal.
@@ -19327,6 +19334,52 @@ pub(crate) mod tests {
             "principal-root object URI is outside the resolved root"
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn typed_io_refuses_a_quarantined_record() {
+        let data_dir = tempfile::tempdir().unwrap();
+        r4_fixture::store(data_dir.path(), PrincipalKind::Human);
+        let root = ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), r4_fixture::ID)
+            .unwrap();
+        r4_fixture::set_kind(
+            data_dir.path(),
+            r4_fixture::ID,
+            PrincipalKind::Agent,
+            root.localhost_root(),
+        );
+        let uri = format!("{}/notes.md", root.localhost_root());
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"sentinel").unwrap();
+        const WANT: &str = "quarantined agent record: agent kind binding mismatch";
+        let error = read_principal_root_object_resolved(data_dir.path(), &root, &uri, &path)
+            .expect_err("a quarantined record is not read");
+        assert_eq!(error.to_string(), WANT);
+        let error =
+            write_principal_root_object_resolved(data_dir.path(), &root, &uri, &path, b"plain")
+                .expect_err("a quarantined record is not written");
+        assert_eq!(error.to_string(), WANT);
+        let error = write_protected_principal_root_object_resolved(
+            data_dir.path(),
+            &root,
+            &uri,
+            &path,
+            b"protected",
+        )
+        .expect_err("a quarantined record is not written");
+        assert_eq!(error.to_string(), WANT);
+        let error = write_principal_root_object_if_revision_resolved(
+            data_dir.path(),
+            &root,
+            &uri,
+            &path,
+            b"revision",
+            PrincipalRootObjectPrecondition::Absent,
+        )
+        .expect_err("a quarantined record is not written");
+        assert_eq!(error.to_string(), WANT);
+        assert_eq!(std::fs::read(&path).unwrap(), b"sentinel");
     }
 
     #[test]
