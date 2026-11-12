@@ -99,12 +99,25 @@ enum Commands {
     /// CID, or host a native provider (e.g. `custody-provider`) standalone
     Run {
         /// Capsule directory, or a native provider name or binary path
-        #[arg(required_unless_present = "cid")]
+        #[arg(required_unless_present_any = ["cid", "bundle"])]
         path: Option<PathBuf>,
 
         /// IPFS CID of the capsule to run
         #[arg(long, conflicts_with = "path")]
         cid: Option<String>,
+
+        /// CID of a bundle this Home's store holds (put there by
+        /// `stage-bundle`). The slot and its signature are checked again and
+        /// nothing is fetched. It is another path than `--cid` and cannot be
+        /// combined with it, with a folder or with a provider host. Like
+        /// `--cid`, it takes no capsule arguments: the first word after it
+        /// would be read as the folder.
+        #[arg(
+            long,
+            hide = true,
+            conflicts_with_all = ["path", "cid", "with", "carrier_addr"]
+        )]
+        bundle: Option<String>,
 
         /// Additional native provider to host, by name or binary path (repeatable)
         #[arg(long = "with", value_name = "NAME_OR_PATH")]
@@ -1395,10 +1408,14 @@ async fn run() -> anyhow::Result<()> {
         Commands::Run {
             path,
             cid,
+            bundle,
             with,
             carrier_addr,
             capsule_args,
         } => {
+            if let Some(bundle) = bundle {
+                return run_cmd::run_bundle(&bundle).await;
+            }
             return run_cmd::run_capsule(path, cid, with, carrier_addr, capsule_args).await;
         }
 
@@ -2396,6 +2413,65 @@ pub(crate) async fn create_runtime(
 #[cfg(test)]
 mod tests {
     use super::verify_component_binary_with_data_dir;
+
+    /// `run --bundle <cid>` is its own path: it takes the CID and nothing
+    /// else, and cannot be combined with the fetch by `--cid`, with a
+    /// folder, with capsule arguments (the first would be read as the
+    /// folder) or with a provider host. Each of the others alone still
+    /// parses.
+    #[test]
+    fn run_bundle_cannot_be_combined_with_another_way_to_name_what_runs() {
+        use clap::Parser;
+        const CID: &str = "bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q";
+        let parsed = |args: &[&str]| super::Cli::try_parse_from(args);
+        let cli = parsed(&["elastos", "run", "--bundle", CID]).unwrap();
+        match cli.command {
+            Some(super::Commands::Run {
+                path: None,
+                cid: None,
+                bundle: Some(bundle),
+                capsule_args,
+                ..
+            }) => {
+                assert_eq!(bundle, CID);
+                assert!(capsule_args.is_empty());
+            }
+            _ => panic!("not a run by bundle"),
+        }
+        for refused in [
+            &["elastos", "run", "--bundle", CID, "--cid", CID][..],
+            &["elastos", "run", "some/folder", "--bundle", CID],
+            &["elastos", "run", "--bundle", CID, "--", "one"],
+            &["elastos", "run", "--bundle", CID, "--with", "did-provider"],
+            &[
+                "elastos",
+                "run",
+                "--bundle",
+                CID,
+                "--carrier-addr",
+                "127.0.0.1:1",
+            ],
+            &["elastos", "run", "--bundle"],
+        ] {
+            let error = parsed(refused)
+                .err()
+                .unwrap_or_else(|| panic!("{refused:?}"));
+            assert!(
+                matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::ArgumentConflict | clap::error::ErrorKind::InvalidValue
+                ),
+                "{refused:?}: {error}"
+            );
+        }
+        for alone in [
+            &["elastos", "run", "--cid", CID][..],
+            &["elastos", "run", "some/folder"],
+        ] {
+            assert!(parsed(alone).is_ok(), "{alone:?}");
+        }
+        assert!(parsed(&["elastos", "run"]).is_err());
+    }
 
     #[cfg(unix)]
     #[test]

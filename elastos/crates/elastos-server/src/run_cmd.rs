@@ -89,6 +89,29 @@ pub async fn run_capsule(
     Ok(())
 }
 
+/// `elastos run --bundle <cid>`: start a bundle from this Home's store of
+/// bundles named by CID. The Runtime is made as `stage-bundle` makes it, so
+/// the keys asked are the keys that staging asked. This path fetches nothing
+/// and attaches to no running Runtime: what starts has an empty ceiling and
+/// no bridge to ask through.
+pub async fn run_bundle(cid: &str) -> anyhow::Result<()> {
+    let data_dir = crate::default_data_dir();
+    let runtime = crate::create_runtime(data_dir.join("storage")).await?;
+    let (handle, accepted) = runtime
+        .run_by_bundle(&data_dir, cid, Vec::new(), None)
+        .await?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "cid": cid,
+            "name": handle.manifest.name,
+            "signer_did": accepted.signer_did,
+            "ended": "ok",
+        })
+    );
+    Ok(())
+}
+
 /// Decide whether this `elastos run` invocation hosts a native provider.
 ///
 /// App-capsule behavior is untouched: a `--cid` run and any target that is an

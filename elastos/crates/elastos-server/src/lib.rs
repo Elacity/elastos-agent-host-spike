@@ -9,6 +9,8 @@ pub mod auth;
 pub mod binaries;
 pub mod browser_app_hosts;
 pub mod bundle_admission;
+#[cfg(test)]
+mod bundle_start_tests;
 pub(crate) mod capsule_record;
 pub mod carrier;
 pub mod carrier_service;

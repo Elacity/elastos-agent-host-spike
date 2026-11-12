@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
+use crate::bundle_admission::{self, AcceptedSignature, BundleRefusal};
+use elastos_bundle_identity::{checked_bundle_within, LabCid};
 use elastos_common::{CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
@@ -244,13 +246,10 @@ impl Runtime {
     pub async fn check_bundle_signature(
         &self,
         file: &Path,
-        cid: &elastos_bundle_identity::LabCid,
-    ) -> std::result::Result<
-        crate::bundle_admission::AcceptedSignature,
-        crate::bundle_admission::BundleRefusal,
-    > {
+        cid: &LabCid,
+    ) -> std::result::Result<AcceptedSignature, BundleRefusal> {
         let verifier = self.signature_verifier.read().await;
-        crate::bundle_admission::check_bundle_signature(file, cid, &verifier)
+        bundle_admission::check_bundle_signature(file, cid, &verifier)
     }
 
     /// Load and run a capsule from a local directory
@@ -363,6 +362,90 @@ impl Runtime {
             .await?;
 
         Ok((handle, signer))
+    }
+
+    /// Start the bundle that the Home at `data_dir` holds under the name
+    /// `cid`, and return who signed it.
+    ///
+    /// Nothing in the store is trusted. The slot is walked again under the
+    /// staging limits and must recompute to `cid`; the signature file that is
+    /// beside it now must pass the one signature check again, and its signer
+    /// is the one returned; the manifest must be one a start by CID takes;
+    /// and the component that is compiled is the bytes that walk read, never
+    /// a second read of the file. A missing slot is a refusal: nothing is
+    /// fetched. What starts has an empty ceiling, whatever its manifest says.
+    pub async fn run_by_bundle(
+        &self,
+        data_dir: &Path,
+        cid: &str,
+        args: Vec<String>,
+        principal_id: Option<String>,
+    ) -> std::result::Result<(CapsuleHandle, AcceptedSignature), BundleRefusal> {
+        self.run_by_bundle_observed(data_dir, cid, args, principal_id, || {})
+            .await
+    }
+
+    /// [`Runtime::run_by_bundle`], telling `after_walk` when the one walk of
+    /// the slot is done. Tests change the slot at that moment, as another
+    /// process could.
+    pub(crate) async fn run_by_bundle_observed(
+        &self,
+        data_dir: &Path,
+        cid: &str,
+        args: Vec<String>,
+        principal_id: Option<String>,
+        after_walk: impl FnOnce(),
+    ) -> std::result::Result<(CapsuleHandle, AcceptedSignature), BundleRefusal> {
+        let asked: LabCid = cid
+            .parse()
+            .map_err(|_| BundleRefusal::CidFormInvalid(cid.to_string()))?;
+        let slot = bundle_admission::bundle_slot(data_dir, &asked);
+        if std::fs::symlink_metadata(&slot).is_err() {
+            return Err(BundleRefusal::Missing(asked.to_string()));
+        }
+        // The one walk of the slot. The manifest and the component below
+        // come from this value; the slot is not read again.
+        let bundle = checked_bundle_within(&slot, bundle_admission::BUNDLE_WALK_BUDGET)
+            .map_err(bundle_admission::walk_refusal)?;
+        after_walk();
+        if bundle.cid() != asked {
+            return Err(BundleRefusal::CidMismatch {
+                asked: asked.to_string(),
+                computed: bundle.cid().to_string(),
+            });
+        }
+        let signature = bundle_admission::bundle_signature_path(data_dir, &asked);
+        let accepted = self.check_bundle_signature(&signature, &asked).await?;
+        let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
+        crate::component::validate_component_imports(&admitted.component)
+            .map_err(BundleRefusal::NotAComponent)?;
+
+        let failed = |error: ElastosError| BundleRefusal::StartFailed(error.to_string());
+        let Some(component) = self.component_provider.clone() else {
+            return Err(BundleRefusal::StartFailed(
+                "No component compute provider is configured".to_string(),
+            ));
+        };
+        let mut handle = component
+            .load_admitted(admitted.component, admitted.manifest)
+            .await
+            .map_err(failed)?;
+        // An empty ceiling, stated here and not left to the manifest: the
+        // bridge holds this capsule to nothing.
+        self.start_loaded(component, &mut handle, Vec::new(), args, principal_id)
+            .await
+            .map_err(failed)?;
+        Ok((handle, accepted))
+    }
+
+    /// Test only: the ceiling the bridge holds the capsule `id` to right now.
+    #[cfg(test)]
+    pub(crate) fn ceiling_of(&self, id: &str) -> Option<Vec<String>> {
+        self.bridge_manifest_capabilities
+            .read()
+            .unwrap()
+            .get(id)
+            .cloned()
     }
 
     /// The end of every start. While `provider` starts the loaded capsule,
@@ -1142,7 +1225,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn component_with_extra_import() -> Vec<u8> {
+    pub(crate) fn component_with_extra_import() -> Vec<u8> {
         let mut types = ComponentTypeSection::new();
         types.instance(&InstanceType::new());
 
@@ -1374,7 +1457,7 @@ pub(crate) mod tests {
     }
 
     /// A component with one empty `run`, as bytes.
-    fn quiet_component() -> Vec<u8> {
+    pub(crate) fn quiet_component() -> Vec<u8> {
         wat::parse_str(
             r#"(component
               (import "elastos:bus/types@1.0.0" (instance $types
@@ -1395,7 +1478,7 @@ pub(crate) mod tests {
         .expect("component text")
     }
 
-    fn component_manifest_json(name: &str) -> String {
+    pub(crate) fn component_manifest_json(name: &str) -> String {
         format!(
             r#"{{
                 "schema": "elastos.capsule/v1",

@@ -3,14 +3,19 @@
 //! A bundle's name is the CID that `elastos-bundle-identity` computes from
 //! its folder. A publisher's signature over that name lives in a file beside
 //! the bundle, never inside it. This module holds the checks that signature
-//! must pass, the limits under which a bundle is walked, and the fixed codes
-//! a refusal is reported by. It admits nothing by itself and starts nothing.
+//! must pass, the limits under which a bundle is walked, which manifests a
+//! start by CID takes, and the fixed codes a refusal is reported by. It
+//! starts nothing: `Runtime::run_by_bundle` calls these checks in order.
 
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use elastos_bundle_identity::{Budget, LabCid, Refusal};
+use elastos_bundle_identity::{Budget, CheckedBundle, LabCid, Refusal, MANIFEST_FILE};
+use elastos_common::{
+    CapsuleExecution, CapsuleManifest, CapsuleRole, CapsuleRuntimeAbi, CapsuleType,
+    ELASTOS_BUS_V1_CONTRACT,
+};
 use elastos_runtime::signature::SignatureVerifier;
 use serde::Deserialize;
 
@@ -74,6 +79,22 @@ pub enum BundleRefusal {
     SlotDiffers { cid: String, found: String },
     /// The store could not be read or written.
     Store(String),
+    /// The text given as a bundle's CID is not one.
+    CidFormInvalid(String),
+    /// The store has no slot for this CID. A start by CID fetches nothing.
+    Missing(String),
+    /// The slot's files do not recompute to the CID that was asked for.
+    CidMismatch { asked: String, computed: String },
+    /// The bundle's manifest has a key a start by CID does not take.
+    ManifestFieldRefused(String),
+    /// The Runtime's manifest type refuses the bundle's manifest, or its
+    /// entrypoint is not one of the bundle's files.
+    ManifestInvalid(String),
+    /// The bundle is not an app component of the one contract this start runs.
+    NotAComponent(String),
+    /// The admitted component could not be compiled or started, or it ended
+    /// in an error. Everything before this passed.
+    StartFailed(String),
 }
 
 impl BundleRefusal {
@@ -88,6 +109,13 @@ impl BundleRefusal {
             BundleRefusal::Walk { code, .. } => code,
             BundleRefusal::SlotDiffers { .. } => "bundle_slot_differs",
             BundleRefusal::Store(_) => "bundle_store_io",
+            BundleRefusal::CidFormInvalid(_) => "bundle_cid_form_invalid",
+            BundleRefusal::Missing(_) => "bundle_missing",
+            BundleRefusal::CidMismatch { .. } => "bundle_cid_mismatch",
+            BundleRefusal::ManifestFieldRefused(_) => "bundle_manifest_field_refused",
+            BundleRefusal::ManifestInvalid(_) => "bundle_manifest_invalid",
+            BundleRefusal::NotAComponent(_) => "bundle_not_a_component",
+            BundleRefusal::StartFailed(_) => "bundle_start_failed",
         }
     }
 }
@@ -112,6 +140,20 @@ impl fmt::Display for BundleRefusal {
                 "{code}: the store's slot for {cid} does not hold that bundle: {found}"
             ),
             BundleRefusal::Store(why) => write!(f, "{code}: {why}"),
+            BundleRefusal::CidFormInvalid(text) => {
+                write!(f, "{code}: {text:?} is not a bundle's CID")
+            }
+            BundleRefusal::Missing(cid) => {
+                write!(f, "{code}: this Home's store holds no bundle {cid}")
+            }
+            BundleRefusal::CidMismatch { asked, computed } => write!(
+                f,
+                "{code}: the store's slot for {asked} holds files that are {computed}"
+            ),
+            BundleRefusal::ManifestFieldRefused(key) => write!(f, "{code}: {key}"),
+            BundleRefusal::ManifestInvalid(why) => write!(f, "{code}: {why}"),
+            BundleRefusal::NotAComponent(why) => write!(f, "{code}: {why}"),
+            BundleRefusal::StartFailed(why) => write!(f, "{code}: {why}"),
         }
     }
 }
@@ -291,6 +333,101 @@ pub fn walk_refusal(refusal: Refusal) -> BundleRefusal {
         code,
         detail: refusal.to_string(),
     }
+}
+
+/// The keys of `capsule.json` that a start by CID takes. It is a closed
+/// list: a key that is not on it is refused by name, whatever its value, so
+/// a key the manifest format gains later is refused until this list names it.
+///
+/// Not on it, on purpose: `agent`, `asks`, `capabilities`, `permissions`,
+/// `requires`, `provides`, `providers`, `authority`, `interfaces`, `microvm`,
+/// `viewer`, `model_content` and `signature`. Each is, or carries, an
+/// authority or a relation to another capsule, and this start mints no grant
+/// and reads no ask: a field would be admitted without the code that gives
+/// it meaning. So what starts has an empty ceiling.
+pub const BUNDLE_MANIFEST_KEYS: [&str; 16] = [
+    // What it is called.
+    "schema",
+    "name",
+    "version",
+    "description",
+    "author",
+    // What kind of capsule it is. [`admit_bundle_manifest`] holds each to the
+    // one value this start runs.
+    "role",
+    "type",
+    "execution",
+    "runtime_abi",
+    "bus_contract",
+    "wit_world_sha256",
+    "entrypoint",
+    // Presentation. Home reads these; a start from the command line makes no
+    // window and registers no projection.
+    "projections",
+    "window_policy",
+    "icon",
+    // A limit on the capsule, never an authority.
+    "resources",
+];
+
+/// The manifest and the component of a bundle that a start by CID may run.
+#[derive(Debug, Clone)]
+pub struct AdmittedBundle {
+    pub manifest: CapsuleManifest,
+    /// The entrypoint's bytes as the walk read them.
+    pub component: Vec<u8>,
+}
+
+/// Decide, from the walked bytes alone, whether a start by CID takes this
+/// bundle's manifest. The order: every key as written is on
+/// [`BUNDLE_MANIFEST_KEYS`], before the manifest is parsed as a type; the
+/// Runtime's manifest type parses and validates it; it is an app component
+/// of the one contract; its entrypoint is one of the walked files. Nothing
+/// is read from disk here.
+pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, BundleRefusal> {
+    let invalid = BundleRefusal::ManifestInvalid;
+    let bytes = bundle
+        .entry(MANIFEST_FILE)
+        .ok_or_else(|| invalid(format!("the bundle has no {MANIFEST_FILE}")))?;
+    let keys: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
+    if let Some(key) = keys
+        .keys()
+        .find(|key| !BUNDLE_MANIFEST_KEYS.contains(&key.as_str()))
+    {
+        return Err(BundleRefusal::ManifestFieldRefused(key.clone()));
+    }
+    let manifest: CapsuleManifest =
+        serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
+    manifest.validate().map_err(invalid)?;
+    let component_of_the_contract = manifest.role == CapsuleRole::App
+        && manifest.capsule_type == CapsuleType::Wasm
+        && manifest.runtime_abi == Some(CapsuleRuntimeAbi::ElastosComponentV1)
+        && matches!(manifest.execution, None | Some(CapsuleExecution::Component))
+        && matches!(
+            manifest.bus_contract.as_deref(),
+            None | Some(ELASTOS_BUS_V1_CONTRACT)
+        );
+    if !component_of_the_contract {
+        return Err(BundleRefusal::NotAComponent(format!(
+            "role {}, type {:?}, runtime_abi {:?}, execution {:?}, bus_contract {:?}",
+            manifest.role.as_str(),
+            manifest.capsule_type,
+            manifest.runtime_abi,
+            manifest.execution,
+            manifest.bus_contract
+        )));
+    }
+    let component = bundle.entry(&manifest.entrypoint).ok_or_else(|| {
+        invalid(format!(
+            "entrypoint {:?} is not a file of the bundle",
+            manifest.entrypoint
+        ))
+    })?;
+    Ok(AdmittedBundle {
+        component: component.to_vec(),
+        manifest,
+    })
 }
 
 #[cfg(test)]
