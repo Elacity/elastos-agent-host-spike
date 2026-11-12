@@ -31,6 +31,44 @@ function close(server) {
   return new Promise((resolve) => server.close(resolve));
 }
 
+// This check's precondition is that the browser returns a screenshot at all;
+// its assertion is that the screenshot's width and height match the geometry
+// just set. The pinned headless shell refuses a capture with "Unable to capture
+// screenshot" while it is still committing the frame after a geometry change or
+// a press, so a refusal is arranged again here within a stated budget. A
+// screenshot that did arrive is asserted at its exact size, unchanged.
+const SCREENSHOT_ARRANGE_MS = 5_000;
+const SCREENSHOT_RETRY_MS = 50;
+
+async function captureScreenshot(cdp, page, size) {
+  const deadline = Date.now() + SCREENSHOT_ARRANGE_MS;
+  let refusals = 0;
+  let lastError = null;
+  for (;;) {
+    // Ask for a drawn frame first, bounded so a stalled page cannot hang the
+    // check; the retry below still covers a frame that never came.
+    await page.waitForFunction(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))),
+      null,
+      { timeout: Math.max(1, deadline - Date.now()) },
+    ).catch(() => {});
+    try {
+      return await cdp.send("Page.captureScreenshot");
+    } catch (error) {
+      refusals += 1;
+      lastError = error;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `precondition not met: ${size.width}x${size.height} screenshot was refused ${refusals} times within ${SCREENSHOT_ARRANGE_MS} ms. `
+        + "The target, draft, corner and press assertions passed first; this is not a screenshot-size failure. "
+        + `Last refusal: ${lastError?.message}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, SCREENSHOT_RETRY_MS));
+  }
+}
+
 test("Chromium keeps its target and form while DPR-1 layout follows portrait and landscape", async () => {
   const proxyRequests = [];
   const proxy = http.createServer((request, response) => {
@@ -140,7 +178,7 @@ test("Chromium keeps its target and form while DPR-1 layout follows portrait and
       await page.evaluate(() => { globalThis.clickedCorners = []; });
       for (const [x, y] of [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]]) await page.mouse.click(x, y);
       assert.deepEqual(await page.evaluate(() => globalThis.clickedCorners), ["tl", "tr", "bl", "br"]);
-      const screenshot = await cdp.send("Page.captureScreenshot");
+      const screenshot = await captureScreenshot(cdp, page, { width, height });
       const png = Buffer.from(screenshot.data, "base64");
       assert.equal(png.readUInt32BE(16), width); assert.equal(png.readUInt32BE(20), height);
     }
