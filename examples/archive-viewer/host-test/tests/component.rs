@@ -716,7 +716,11 @@ async fn a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory() {
     // The read trace, not only its total: one-byte size probes, then the
     // tail, the directory and each 30-byte local header, at the record's own
     // offset and in offset order.
-    let reads = archive_reads(&bridge);
+    let mut reads = archive_reads(&bridge);
+    // The format decision reads four bytes at offset 0 before any size probe.
+    assert_eq!(reads[0].2, 0, "the format probe starts at offset 0");
+    assert_eq!(reads[0].3, 4, "the format probe reads four bytes");
+    reads.remove(0);
     let tail_start = size.saturating_sub(22 + 1024);
     let mut expected: Vec<(u64, u64)> = vec![
         (tail_start, size - tail_start),
@@ -749,7 +753,11 @@ async fn a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory() {
     assert_eq!(control.bytes.len(), size as usize);
     let (control_result, control_bridge) = run(bridge_with(control.bytes.clone(), &[])).await;
     control_result.unwrap();
-    assert_eq!(archive_reads(&control_bridge), reads);
+    let mut control_reads = archive_reads(&control_bridge);
+    assert_eq!(control_reads[0].2, 0, "the control's format probe");
+    assert_eq!(control_reads[0].3, 4);
+    control_reads.remove(0);
+    assert_eq!(control_reads, reads);
     assert_eq!(
         control_bridge.bytes_served.get(ARCHIVE),
         bridge.bytes_served.get(ARCHIVE)
