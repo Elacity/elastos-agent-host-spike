@@ -8508,17 +8508,70 @@ fn home_save_background_overlay(
     home_appearance_summary(data_dir, context)
 }
 
+/// One lock for this Home's background-image operations. Upload and reset hold
+/// it from the image check through the write or removal and the summary, so a
+/// reset cannot list an image, let an upload replace that same name, and then
+/// remove the new bytes. A process-wide lock also covers every data folder,
+/// which is more than the one-folder minimum.
+static HOME_BACKGROUND_IMAGE_MUTEX: std::sync::LazyLock<Mutex<()>> =
+    std::sync::LazyLock::new(|| Mutex::new(()));
+
+fn home_background_image_lock() -> anyhow::Result<std::sync::MutexGuard<'static, ()>> {
+    HOME_BACKGROUND_IMAGE_MUTEX
+        .lock()
+        .map_err(|_| anyhow::anyhow!("background image mutex poisoned"))
+}
+
+/// Points an image operation reaches in order. A test can hold a reset at
+/// `Checked` until an upload has reached `Replaced`, which proves the lock
+/// keeps the two operations apart. Production reaches them with
+/// `NoImageCheckpoint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageOperationPoint {
+    Checked,
+    Replaced,
+    Removed,
+}
+
+trait ImageOperationCheckpoint {
+    fn reached(&mut self, point: ImageOperationPoint);
+}
+
+struct NoImageCheckpoint;
+
+impl ImageOperationCheckpoint for NoImageCheckpoint {
+    fn reached(&mut self, _point: ImageOperationPoint) {}
+}
+
 fn home_save_background_image(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
     file_name: &'static str,
     bytes: Vec<u8>,
 ) -> anyhow::Result<HomeAppearanceSummary> {
+    home_save_background_image_with(
+        data_dir,
+        context,
+        file_name,
+        bytes,
+        &mut NoImageCheckpoint,
+    )
+}
+
+fn home_save_background_image_with(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    file_name: &'static str,
+    bytes: Vec<u8>,
+    checkpoint: &mut dyn ImageOperationCheckpoint,
+) -> anyhow::Result<HomeAppearanceSummary> {
+    let _guard = home_background_image_lock()?;
     let path = home_appearance_path(data_dir, context, file_name)?;
     // Every existing image is read first, the destination name included, so a
     // damaged one refuses the upload before anything is written: the bytes the
     // Home shows now stay in place (#447).
     let existing = home_background_image_paths_checked(data_dir, context)?;
+    checkpoint.reached(ImageOperationPoint::Checked);
     // The write stages the new bytes in a temporary file beside the images and
     // renames it over the destination in one step. A failure before the rename
     // removes the temporary file and leaves every existing image as it was.
@@ -8529,12 +8582,14 @@ fn home_save_background_image(
         &path,
         &bytes,
     )?;
+    checkpoint.reached(ImageOperationPoint::Replaced);
     // The new bytes are now in place under the destination name. A crash here
     // leaves them beside any older image of another format: nothing is lost,
     // and the reader shows the first name that exists (png, then jpg, webp,
     // gif), so an older image can stay visible until the next save or reset
     // removes it. No reader step sees a partial image.
     home_remove_background_image_files(existing, Some(&path))?;
+    checkpoint.reached(ImageOperationPoint::Removed);
     home_appearance_summary(data_dir, context)
 }
 
@@ -8542,8 +8597,19 @@ fn home_reset_background_image(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<HomeAppearanceSummary> {
+    home_reset_background_image_with(data_dir, context, &mut NoImageCheckpoint)
+}
+
+fn home_reset_background_image_with(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    checkpoint: &mut dyn ImageOperationCheckpoint,
+) -> anyhow::Result<HomeAppearanceSummary> {
+    let _guard = home_background_image_lock()?;
     let existing = home_background_image_paths_checked(data_dir, context)?;
+    checkpoint.reached(ImageOperationPoint::Checked);
     home_remove_background_image_files(existing, None)?;
+    checkpoint.reached(ImageOperationPoint::Removed);
     home_appearance_summary(data_dir, context)
 }
 
@@ -9369,6 +9435,7 @@ mod stored_root_tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
 
     fn state_dir() -> (tempfile::TempDir, std::path::PathBuf) {
         let temp = tempfile::tempdir().unwrap();
@@ -10010,6 +10077,160 @@ mod stored_root_tests {
                 .localhost_root,
             expected_root
         );
+    }
+
+    /// An upload and a reset of the same name cannot interleave. The reset
+    /// waits, at its `Checked` point, until the upload reports `Replaced`;
+    /// with the image lock the upload cannot reach its write while the reset
+    /// holds the lock, so the reset either finishes first (the image stays) or
+    /// starts after the write (it removes that image). A reported success from
+    /// both, with the upload's new image gone after it ran second, fails.
+    #[test]
+    fn background_image_upload_and_reset_do_not_race() {
+        struct RaceState {
+            trace: Mutex<Vec<&'static str>>,
+            replaced: Mutex<bool>,
+            replaced_cv: std::sync::Condvar,
+        }
+        struct ResetCheckpoint {
+            state: Arc<RaceState>,
+        }
+        struct UploadCheckpoint {
+            state: Arc<RaceState>,
+        }
+        impl ImageOperationCheckpoint for ResetCheckpoint {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                match point {
+                    ImageOperationPoint::Checked => {
+                        self.state.trace.lock().unwrap().push("reset:checked");
+                        let deadline = Instant::now() + Duration::from_secs(1);
+                        let mut replaced = self.state.replaced.lock().unwrap();
+                        while !*replaced {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            if left.is_zero() {
+                                break;
+                            }
+                            replaced = self
+                                .state
+                                .replaced_cv
+                                .wait_timeout(replaced, left)
+                                .unwrap()
+                                .0;
+                        }
+                    }
+                    ImageOperationPoint::Replaced => {}
+                    ImageOperationPoint::Removed => {
+                        self.state.trace.lock().unwrap().push("reset:removed");
+                    }
+                }
+            }
+        }
+        impl ImageOperationCheckpoint for UploadCheckpoint {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                match point {
+                    ImageOperationPoint::Checked => {
+                        self.state.trace.lock().unwrap().push("upload:checked");
+                    }
+                    ImageOperationPoint::Replaced => {
+                        self.state.trace.lock().unwrap().push("upload:replaced");
+                        *self.state.replaced.lock().unwrap() = true;
+                        self.state.replaced_cv.notify_all();
+                    }
+                    ImageOperationPoint::Removed => {
+                        self.state.trace.lock().unwrap().push("upload:removed");
+                    }
+                }
+            }
+        }
+
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"first image".to_vec(),
+        )
+        .unwrap();
+        let state = Arc::new(RaceState {
+            trace: Mutex::new(Vec::new()),
+            replaced: Mutex::new(false),
+            replaced_cv: std::sync::Condvar::new(),
+        });
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let upload = {
+            let data_dir = data_dir.clone();
+            let context = context.clone();
+            let state = Arc::clone(&state);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                home_save_background_image_with(
+                    &data_dir,
+                    &context,
+                    "background-image.png",
+                    b"second image".to_vec(),
+                    &mut UploadCheckpoint { state },
+                )
+            })
+        };
+        let reset = {
+            let data_dir = data_dir.clone();
+            let context = context.clone();
+            let state = Arc::clone(&state);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                home_reset_background_image_with(
+                    &data_dir,
+                    &context,
+                    &mut ResetCheckpoint { state },
+                )
+            })
+        };
+        start.wait();
+        let uploaded = upload.join().unwrap();
+        let reset_done = reset.join().unwrap();
+        assert!(uploaded.is_ok(), "{uploaded:?}");
+        assert!(reset_done.is_ok(), "{reset_done:?}");
+        let trace = state.trace.lock().unwrap().clone();
+        let at = |event: &str| {
+            trace
+                .iter()
+                .position(|seen| *seen == event)
+                .unwrap_or_else(|| panic!("missing {event} in {trace:?}"))
+        };
+        assert!(at("upload:checked") < at("upload:replaced"));
+        assert!(at("upload:replaced") < at("upload:removed"));
+        assert!(at("reset:checked") < at("reset:removed"));
+        let upload_replaced_between_reset = at("reset:checked") < at("upload:replaced")
+            && at("upload:replaced") < at("reset:removed");
+        let reset_checked_between_upload =
+            at("upload:checked") < at("reset:checked") && at("reset:checked") < at("upload:replaced");
+        assert!(
+            !upload_replaced_between_reset && !reset_checked_between_upload,
+            "one operation ran between the steps of the other: {trace:?}"
+        );
+        let reset_ran_second = at("upload:replaced") < at("reset:checked");
+        let current = home_background_image_entry(&data_dir, &context).unwrap();
+        if reset_ran_second {
+            assert!(
+                current.is_none(),
+                "the reset that ran second must leave no image: {trace:?}"
+            );
+            assert!(
+                !home_appearance_path(&data_dir, &context, "background-image.png")
+                    .unwrap()
+                    .exists()
+            );
+        } else {
+            let entry = current.unwrap_or_else(|| panic!("the upload ran second and its image is gone: {trace:?}"));
+            assert_eq!(
+                home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
+                b"second image",
+                "{trace:?}"
+            );
+        }
     }
 }
 
