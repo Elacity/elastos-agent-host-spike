@@ -5711,6 +5711,7 @@ fn refuse_agent_admission_changes(
     if quarantined_raw_changed(data_dir, after)? {
         return refuse_quarantined_agent_change(permit, &after.principals);
     }
+    refuse_new_owner_root_protection(&before.protections, &after.principal_root_protections)?;
     if let Some(reason) = agent_root_protection_change_reason(
         &before.principals,
         &after.principals,
@@ -6573,12 +6574,40 @@ pub(crate) const OWNER_ROOT_IN_SIGN_IN_FILE: &str =
 /// one is refused, on store and whenever it is read.
 fn validate_sign_in_file_protection(protection: &PrincipalRootProtectionV1) -> anyhow::Result<()> {
     validate_principal_root_protection(protection).map_err(anyhow::Error::msg)?;
+    refuse_owner_root_protector(protection)
+}
+
+/// The owner-root rule, shared by the sign-in-file validator and the save.
+fn refuse_owner_root_protector(protection: &PrincipalRootProtectionV1) -> anyhow::Result<()> {
     if protection
         .protectors
         .iter()
         .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
     {
         anyhow::bail!(OWNER_ROOT_IN_SIGN_IN_FILE);
+    }
+    Ok(())
+}
+
+/// Refuses a protection that is new or changed against the file on disk and
+/// carries an owner-root wrap. An entry already on disk stays as it is, so an
+/// unrelated owner save continues.
+fn refuse_new_owner_root_protection(
+    before: &[PrincipalRootProtectionV1],
+    after: &[PrincipalRootProtectionV1],
+) -> anyhow::Result<()> {
+    let mut unchanged = vec![false; before.len()];
+    for protection in after {
+        if let Some(index) = before
+            .iter()
+            .enumerate()
+            .find(|(index, old)| !unchanged[*index] && *old == protection)
+            .map(|(index, _)| index)
+        {
+            unchanged[index] = true;
+            continue;
+        }
+        refuse_owner_root_protector(protection)?;
     }
     Ok(())
 }
@@ -20131,6 +20160,36 @@ pub(crate) mod tests {
         }
     }
 
+    fn human_person_id_and_root(state: &AuthState) -> (String, String) {
+        let human = state
+            .principals
+            .iter()
+            .find(|record| record.kind == PrincipalKind::Human)
+            .unwrap();
+        (human.principal_id.clone(), human.localhost_root.clone())
+    }
+
+    fn owner_root_in_sign_in_file_protection(
+        principal_id: &str,
+        root: &str,
+    ) -> PrincipalRootProtectionV1 {
+        let mut protection = bare_protection(principal_id, root, 1);
+        protection
+            .protectors
+            .push(elastos_runtime::auth::PrincipalRootProtectorV1 {
+                protector_id: "protector:owner-root:r8".to_string(),
+                kind: PrincipalRootProtectorKind::OwnerRoot,
+                label: "Owner root".to_string(),
+                subject: None,
+                created_at: 1,
+                verified_at: None,
+                envelope: None,
+                archive: None,
+                profile_coverage: None,
+            });
+        protection
+    }
+
     fn bare_session(principal_id: &str, session_id: &str) -> StoredAuthSession {
         let now = now_ts();
         StoredAuthSession {
@@ -20279,6 +20338,70 @@ pub(crate) mod tests {
             );
             assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{permit:?}");
         }
+    }
+
+    #[test]
+    fn save_refuses_an_added_owner_root_protection() {
+        let data_dir = person_file_with_agent();
+        let before = auth_state_file_bytes(data_dir.path());
+        let mut state = load_auth_state(data_dir.path()).unwrap();
+        let (id, root) = human_person_id_and_root(&state);
+        state
+            .principal_root_protections
+            .push(owner_root_in_sign_in_file_protection(&id, &root));
+        let error = save_auth_state(data_dir.path(), &state, None)
+            .expect_err("an added owner-root protection was refused");
+        assert_eq!(error.to_string(), OWNER_ROOT_IN_SIGN_IN_FILE, "{error}");
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before);
+    }
+
+    #[test]
+    fn save_refuses_a_changed_owner_root_protection() {
+        let data_dir = person_file_with_agent();
+        let state = load_auth_state(data_dir.path()).unwrap();
+        let (id, root) = human_person_id_and_root(&state);
+        store_test_principal_root_protection_for(data_dir.path(), &id, &root);
+        let before = auth_state_file_bytes(data_dir.path());
+        let mut state = load_auth_state(data_dir.path()).unwrap();
+        let protection = state
+            .principal_root_protections
+            .iter_mut()
+            .find(|stored| stored.principal_id == id && stored.localhost_root == root)
+            .unwrap();
+        protection.protectors[0].kind = PrincipalRootProtectorKind::OwnerRoot;
+        let error = save_auth_state(data_dir.path(), &state, None)
+            .expect_err("a changed owner-root protection was refused");
+        assert_eq!(error.to_string(), OWNER_ROOT_IN_SIGN_IN_FILE, "{error}");
+        assert_eq!(auth_state_file_bytes(data_dir.path()), before);
+    }
+
+    #[test]
+    fn save_keeps_an_unchanged_owner_root_protection() {
+        let data_dir = person_file_with_agent();
+        let state = load_auth_state(data_dir.path()).unwrap();
+        let (id, root) = human_person_id_and_root(&state);
+        plant_principal_root_protection(
+            data_dir.path(),
+            &owner_root_in_sign_in_file_protection(&id, &root),
+        );
+        let before = auth_state_file_bytes(data_dir.path());
+        let mut state = load_auth_state(data_dir.path()).unwrap();
+        state
+            .principals
+            .iter_mut()
+            .find(|record| record.kind == PrincipalKind::Human)
+            .unwrap()
+            .display_name = "Renamed".to_string();
+        save_auth_state(data_dir.path(), &state, None)
+            .expect("a save with an unchanged owner-root entry succeeds");
+        assert_ne!(auth_state_file_bytes(data_dir.path()), before);
+        let saved = load_auth_state(data_dir.path()).unwrap();
+        assert!(saved.principal_root_protections.iter().any(|stored| {
+            stored
+                .protectors
+                .iter()
+                .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
+        }));
     }
 
     #[test]
