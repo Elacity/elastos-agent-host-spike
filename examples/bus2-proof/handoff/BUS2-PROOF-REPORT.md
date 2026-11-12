@@ -88,6 +88,21 @@ Each way of yielding is enough on its own for fairness:
 The falsifier removes both kinds of yield, and then the photo guest waits for the busy one to end. Removing the
 refill makes the busy guest end by fuel instead of by its deadline, which the fairness test also catches.
 
+Since those measurements, two tests count instead of timing: the fairness test above, and the proof 1 test that
+a busy guest can still be cancelled. They are the tests named by the falsifiers that remove the refill and the
+yield by fuel:
+- they run on a clock the test moves by hand, with no ticker thread: one tick for every four times the guests
+  give the thread back, which a busy guest does once per fuel slice;
+- a budget is a counted number of slices (8 and 40 here), and the busy guest uses 4 or 3 slices a tick. Without
+  the refill it ends `fuel-exhausted` after one budget. Without the yield by fuel it never gives the thread
+  back, no tick comes, and it ends `fuel-exhausted` on its first budget. That is so on any machine;
+- the host records, for every run, how many times the guest gave the thread back and how many ticks it saw, and
+  the tests assert on those counts;
+- with the 10 ms ticker, a slow or loaded machine could miss both falsifiers: the first budget (10^10 units of
+  fuel) then outlasted the 1 s the tests ran for, so nothing showed that the refill or the yield was gone.
+
+The times above are from the ticker version of the fairness test.
+
 The fairness claim covers start-up too. Measured in this container:
 - a guest stuck in start-up and the photo guest share one engine and one executor. The photo guest was due to
   start at 50 ms;
