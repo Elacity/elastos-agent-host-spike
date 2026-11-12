@@ -136,6 +136,13 @@ fn a_refused_pinned_manifest_is_its_own_refusal_and_carries_the_runtimes_code() 
             REQUIREMENT_DUPLICATE,
             "twin",
         ),
+        // Two requirements with no name at all, beside a pinned one: the
+        // reader takes an absent name as the empty name, so they share it.
+        (
+            format!(r#"[{good}, {{"kind": "capsule"}}, {{"kind": "capsule"}}]"#),
+            REQUIREMENT_DUPLICATE,
+            "",
+        ),
     ];
     for (requires, code, requirement) in cases {
         let manifest = manifest_requiring(&requires);
