@@ -328,8 +328,12 @@ root on a clean tree, with the reviews file kept outside the repository:
 AGENT_CONFORMANCE_REVIEWS="$HOME/a14-reviews.json" \
 AGENT_CONFORMANCE_INSTALLED_BINARY="$HOME/.local/bin/elastos" \
 AGENT_CONFORMANCE_INSTALLED_DATA="$HOME/Library/Application Support/elastos" \
+AGENT_CONFORMANCE_RUNTIME_BINARY="$HOME/.local/bin/elastos" \
 lab/agent-conformance/run.sh
 ```
+
+`demo.sh`, described under "The owner's one command", sets these four and
+checks the result.
 
 On Linux the data folder is `$HOME/.local/share/elastos`, or
 `$XDG_DATA_HOME/elastos` when that is set.
@@ -421,6 +425,62 @@ F-report-b changes SKIPPED to PASS and fails the report test. The controller,
 callback and guest comparison falsifiers are listed beside these in
 `falsifiers.json`. Restore each mutation before running the next one.
 
+
+## The owner's one command
+
+From the repository root, on a clean tree at the reviewed commit:
+
+```bash
+lab/agent-conformance/demo.sh "$HOME/a14-reviews.json"
+```
+
+Ready before typing it:
+
+- the Runtime installed: the binary at `~/.local/bin/elastos` and the data
+  folder at `~/Library/Application Support/elastos` (on Linux
+  `~/.local/share/elastos`). `AGENT_CONFORMANCE_INSTALLED_BINARY` and
+  `AGENT_CONFORMANCE_INSTALLED_DATA` name other places;
+- a reviews file outside the repository: a JSON list of
+  `{"reviewer": "...", "verdict": "pass", "commit": "<the 40-character commit checked out>"}`;
+- this checkout at that commit with nothing changed or untracked;
+- everything `run.sh` needs: cached dependencies, the pinned Rust toolchain
+  with its `wasm32-unknown-unknown` target, `shasum`, the build space named at
+  the top of this file and the shared heavy-build lease. It needs no network
+  and no model server.
+
+The command says which of the binary, the data folder and the reviews file is
+missing, and refuses a tree that is not clean. It then runs `run.sh` with the
+installed binary as the Runtime the suite launches, prints every A14 row with
+its reasons through `report --a14 <receipt>`, copies the receipt folder to
+`${ELASTOS_DEMO_RECEIPTS:-$HOME/elastos-demo-receipts}/<UTC time>/` with its
+own output as `demo-output.log`, and prints that path. It exits 0 only when
+the suite passed and every A14 row reads PASS; the receipt folder is kept
+either way. It writes nothing under the install paths: the installed binary is
+launched where it is, in throwaway Homes under this lane's `target`.
+
+What each A14 row means:
+
+| Row | PASS means |
+| --- | --- |
+| `versions_receipt` | the receipt names the commit, the Runtime and provider hashes and every launched probe the rows needed |
+| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree |
+| `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
+| `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, and `release-head.json` names that `release.json` |
+| `installed_runtime_ran` | the Runtime the suite launched has the installed binary's SHA-256 |
+
+What the receipt does not prove:
+
+- that the release is genuine: no signature is verified, only hashes;
+- anything about an installed bundle: none exists yet, and the bundles are
+  staged from this checkout, as are the localhost provider
+  (`localhost_provider_sha256`) and the probe. The installed data folder is
+  read for the hash chain and is not what the suite runs on;
+- that the reviews are independent or by whom: the row checks only the commit
+  and the verdict each review states;
+- that the rows came from the reviewed tree: the tree is checked clean before
+  the run and when the report is written, not during it;
+- capsule isolation: the rows remain process isolation, and the BLOCKED rows
+  stay blocked.
 
 ## Bounded preparation and credential evidence
 
