@@ -6371,6 +6371,11 @@ pub(super) async fn home_active_shell_update(
     match home_save_active_shell(&state.data_dir, &context, input.active.trim()) {
         Ok(summary) => Json(summary).into_response(),
         Err(err) => {
+            if let Some(response) =
+                crate::api::gateway::protected_record_kept_elsewhere_response(&err)
+            {
+                return response;
+            }
             let text = err.to_string();
             let status = if text.contains("not a launchable shell") {
                 StatusCode::BAD_REQUEST
@@ -8095,6 +8100,7 @@ pub(super) async fn system_community_membership_update(
 struct HomeBackgroundImageEntry {
     path: PathBuf,
     object_uri: String,
+    file_name: &'static str,
     content_type: &'static str,
     version: String,
 }
@@ -8426,6 +8432,7 @@ fn home_background_image_entry(
         return Ok(Some(HomeBackgroundImageEntry {
             path,
             object_uri: home_appearance_object_uri(context, file_name),
+            file_name,
             content_type,
             version,
         }));
@@ -8503,14 +8510,83 @@ fn home_save_background_overlay(
     home_appearance_summary(data_dir, context)
 }
 
+/// One lock for this Home's background-image operations. Upload and reset hold
+/// it from the image check through the write or removal and the summary, so a
+/// reset cannot list an image, let an upload replace that same name, and then
+/// remove the new bytes. A process-wide lock also covers every data folder,
+/// which is more than the one-folder minimum.
+static HOME_BACKGROUND_IMAGE_MUTEX: std::sync::LazyLock<Mutex<()>> =
+    std::sync::LazyLock::new(|| Mutex::new(()));
+
+fn home_background_image_lock() -> anyhow::Result<std::sync::MutexGuard<'static, ()>> {
+    HOME_BACKGROUND_IMAGE_MUTEX
+        .lock()
+        .map_err(|_| anyhow::anyhow!("background image mutex poisoned"))
+}
+
+/// Points an image operation reaches in order. A test can hold a reset at
+/// `Checked` until an upload has reached `Replaced`, which proves the lock
+/// keeps the two operations apart. Production reaches them with
+/// `NoImageCheckpoint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageOperationPoint {
+    Checked,
+    Replaced,
+    Removed,
+}
+
+trait ImageOperationCheckpoint {
+    fn reached(&mut self, point: ImageOperationPoint);
+}
+
+struct NoImageCheckpoint;
+
+impl ImageOperationCheckpoint for NoImageCheckpoint {
+    fn reached(&mut self, _point: ImageOperationPoint) {}
+}
+
 fn home_save_background_image(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
     file_name: &'static str,
     bytes: Vec<u8>,
 ) -> anyhow::Result<HomeAppearanceSummary> {
+    home_save_background_image_with(data_dir, context, file_name, bytes, &mut NoImageCheckpoint)
+}
+
+fn home_save_background_image_with(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    file_name: &'static str,
+    bytes: Vec<u8>,
+    checkpoint: &mut dyn ImageOperationCheckpoint,
+) -> anyhow::Result<HomeAppearanceSummary> {
+    let _guard = home_background_image_lock()?;
     let path = home_appearance_path(data_dir, context, file_name)?;
-    remove_home_background_images(data_dir, context)?;
+    // Every existing image is read first, the destination name included, so a
+    // damaged one refuses the upload before anything is written: the bytes the
+    // Home shows now stay in place (#447).
+    let existing = home_background_image_paths_checked(data_dir, context)?;
+    checkpoint.reached(ImageOperationPoint::Checked);
+    // Crash points of this save, and what each leaves:
+    // - before the write: every existing image as it was.
+    // - while staging: one `.background-image.<format>.<16 hex>.tmp` file
+    //   beside the images. The 16 hex digits are random, no reader opens a
+    //   staged name, and its cleanup is best effort, so a leftover is never
+    //   served and is harmless.
+    // - a failed staging or rename: the shared write helper tries to remove
+    //   the temporary file and every existing image stays. That cleanup is
+    //   best effort, so the temporary file can remain.
+    // - after the rename and before the removal below: the new bytes under
+    //   the destination name beside any older image of another format. The
+    //   reader serves the first name that exists (png, then jpg, webp, gif),
+    //   so an older image can stay on screen until a later upload or reset
+    //   succeeds, and both then remove every other format under the image
+    //   lock.
+    // - a removal error: that older file stays, and the error names it.
+    // - a directory sync error after the rename: the new image is in place
+    //   but the upload answers an error. The shared write helper keeps that
+    //   error for every caller, so this route does not hide it.
     crate::auth::write_principal_root_object_resolved(
         data_dir,
         context.root(),
@@ -8518,6 +8594,9 @@ fn home_save_background_image(
         &path,
         &bytes,
     )?;
+    checkpoint.reached(ImageOperationPoint::Replaced);
+    home_remove_background_image_files(existing, Some(&path))?;
+    checkpoint.reached(ImageOperationPoint::Removed);
     home_appearance_summary(data_dir, context)
 }
 
@@ -8525,40 +8604,182 @@ fn home_reset_background_image(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<HomeAppearanceSummary> {
-    remove_home_background_images(data_dir, context)?;
+    home_reset_background_image_with(data_dir, context, &mut NoImageCheckpoint)
+}
+
+fn home_reset_background_image_with(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    checkpoint: &mut dyn ImageOperationCheckpoint,
+) -> anyhow::Result<HomeAppearanceSummary> {
+    let _guard = home_background_image_lock()?;
+    let existing = home_background_image_paths_checked(data_dir, context)?;
+    checkpoint.reached(ImageOperationPoint::Checked);
+    // A crash during the removal leaves the images it had not yet removed.
+    // A crash after the last removal leaves none. No reader step sees a
+    // partial image.
+    home_remove_background_image_files(existing, None)?;
+    checkpoint.reached(ImageOperationPoint::Removed);
     home_appearance_summary(data_dir, context)
 }
 
-/// Upload and reset replace the background, but never delete a damaged
-/// image: the refusal is the damage notice that names the file, as for every
-/// other Home state save (#447). Every image is checked before any is removed.
-fn remove_home_background_images(
+/// The one sentence each background-image route answers for an error that is
+/// not a deliberate answer. The full error stays in the log, because it can
+/// carry the data folder path and the person id.
+const BACKGROUND_IMAGE_SAVE_FAILED: &str = "background image could not be saved";
+const BACKGROUND_IMAGE_RESET_FAILED: &str = "background image could not be reset";
+const BACKGROUND_IMAGE_READ_FAILED: &str = "background image could not be read";
+
+/// An upload the route refuses before it touches any image. The text is one
+/// fixed sentence that names no path, so the route answers it as it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackgroundImageRequestError(&'static str);
+
+impl std::fmt::Display for BackgroundImageRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for BackgroundImageRequestError {}
+
+fn background_image_request_error(message: &'static str) -> anyhow::Error {
+    BackgroundImageRequestError(message).into()
+}
+
+/// An image this process cannot read. The read error carries the data folder
+/// path, so the log keeps the full error and the answer names only the file.
+#[derive(Debug)]
+struct HomeBackgroundImageReadFailure {
+    file_name: &'static str,
+}
+
+impl std::fmt::Display for HomeBackgroundImageReadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "background image {} could not be read",
+            self.file_name
+        )
+    }
+}
+
+impl std::error::Error for HomeBackgroundImageReadFailure {}
+
+/// Builds the answer for an image this process cannot read. Upload, reset and
+/// GET share this.
+fn home_background_image_read_failure(
+    file_name: &'static str,
+    path: &std::path::Path,
+    err: &anyhow::Error,
+) -> anyhow::Error {
+    tracing::warn!(
+        path = %path.display(),
+        error = %format!("{err:#}"),
+        "could not read a background image"
+    );
+    HomeBackgroundImageReadFailure { file_name }.into()
+}
+
+/// Answers one background-image route's error. A deliberate answer keeps its
+/// own text: the typed held-record refusal, the fixed upload validation
+/// sentences, and the unreadable-image sentence that names only the file.
+/// Every other error keeps its full text in the log, because it can carry the
+/// data folder path and the person id, and the client gets `sentence` with the
+/// status the error answers today.
+fn background_image_route_error(
+    err: anyhow::Error,
+    sentence: &'static str,
+    respond: fn(anyhow::Error) -> Response,
+) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
+    if err.downcast_ref::<BackgroundImageRequestError>().is_some()
+        || err
+            .downcast_ref::<HomeBackgroundImageReadFailure>()
+            .is_some()
+    {
+        return respond(err);
+    }
+    tracing::warn!(
+        error = %format!("{err:#}"),
+        "background image request failed"
+    );
+    let status = respond(err).status();
+    (status, sentence).into_response()
+}
+
+/// Reads every existing background image and returns the paths it found,
+/// refusing on any read error. Upload and reset call this before they write or
+/// remove anything, so an image this process cannot read refuses the operation
+/// before the image is replaced or removed (#447). The answer names only the
+/// image file: the read error carries the data folder path, so the log keeps
+/// the full error and the response does not.
+fn home_background_image_paths_checked(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = Vec::with_capacity(HOME_BACKGROUND_IMAGE_FILES.len());
     for &(file_name, _content_type) in HOME_BACKGROUND_IMAGE_FILES {
         let path = home_appearance_path(data_dir, context, file_name)?;
-        if path.is_file() {
-            if let Err(err) = crate::auth::read_principal_root_object_resolved(
-                data_dir,
-                context.root(),
-                &home_appearance_object_uri(context, file_name),
-                &path,
-            ) {
-                if is_damaged_home_state(&err) {
-                    return Err(err);
-                }
-            }
+        if !path.is_file() {
+            continue;
+        }
+        if let Err(err) = crate::auth::read_principal_root_object_resolved(
+            data_dir,
+            context.root(),
+            &home_appearance_object_uri(context, file_name),
+            &path,
+        ) {
+            return Err(home_background_image_read_failure(file_name, &path, &err));
         }
         paths.push(path);
     }
+    Ok(paths)
+}
+
+/// Removes the listed image files except `keep`, the destination an upload
+/// has just written. Every removal is attempted, so one failing file does not
+/// leave the others behind. Each failure is logged and the first one is
+/// returned: the response names the file that stayed and whether the new image
+/// was already in place or the reset was incomplete.
+fn home_remove_background_image_files(
+    paths: Vec<PathBuf>,
+    keep: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let replaced = keep.is_some();
+    let mut first_failure: Option<String> = None;
     for path in paths {
-        match std::fs::remove_file(path) {
+        if keep == Some(path.as_path()) {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "could not remove an older background image"
+                );
+                if first_failure.is_none() {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    first_failure = Some(format!("{name}: {err}"));
+                }
+            }
         }
+    }
+    if let Some(failure) = first_failure {
+        if replaced {
+            anyhow::bail!("the new background image is in place, but an older image could not be removed ({failure})");
+        }
+        anyhow::bail!(
+            "the background image reset is incomplete; an image could not be removed ({failure})"
+        );
     }
     Ok(())
 }
@@ -8578,13 +8799,19 @@ fn parse_background_image_upload(
         "image/jpeg" => "background-image.jpg",
         "image/webp" => "background-image.webp",
         "image/gif" => "background-image.gif",
-        _ => anyhow::bail!("background image must be PNG, JPEG, WebP, or GIF"),
+        _ => {
+            return Err(background_image_request_error(
+                "background image must be PNG, JPEG, WebP, or GIF",
+            ))
+        }
     };
     if body.is_empty() {
-        anyhow::bail!("background image is empty");
+        return Err(background_image_request_error("background image is empty"));
     }
     if body.len() > HOME_BACKGROUND_IMAGE_MAX_BYTES {
-        anyhow::bail!("background image is larger than 5 MB");
+        return Err(background_image_request_error(
+            "background image is larger than 5 MB",
+        ));
     }
     Ok((file_name, body.to_vec()))
 }
@@ -8663,17 +8890,31 @@ pub(super) async fn system_background_image_update(
     let context =
         match require_home_launch_token_context(&state.data_dir, &headers, SYSTEM_CAPSULE_ID) {
             Ok(context) => context,
-            Err(err) => return system_error_response(err),
+            Err(err) => {
+                return background_image_route_error(
+                    err,
+                    BACKGROUND_IMAGE_SAVE_FAILED,
+                    system_error_response,
+                )
+            }
         };
 
     let upload = match parse_background_image_upload(&headers, &body) {
         Ok(upload) => upload,
-        Err(err) => return system_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_SAVE_FAILED,
+                system_error_response,
+            )
+        }
     };
 
     match home_save_background_image(&state.data_dir, &context, upload.0, upload.1) {
         Ok(summary) => Json(summary).into_response(),
-        Err(err) => system_error_response(err),
+        Err(err) => {
+            background_image_route_error(err, BACKGROUND_IMAGE_SAVE_FAILED, system_error_response)
+        }
     }
 }
 
@@ -8684,12 +8925,20 @@ pub(super) async fn system_background_image_reset(
     let context =
         match require_home_launch_token_context(&state.data_dir, &headers, SYSTEM_CAPSULE_ID) {
             Ok(context) => context,
-            Err(err) => return system_error_response(err),
+            Err(err) => {
+                return background_image_route_error(
+                    err,
+                    BACKGROUND_IMAGE_RESET_FAILED,
+                    system_error_response,
+                )
+            }
         };
 
     match home_reset_background_image(&state.data_dir, &context) {
         Ok(summary) => Json(summary).into_response(),
-        Err(err) => system_error_response(err),
+        Err(err) => {
+            background_image_route_error(err, BACKGROUND_IMAGE_RESET_FAILED, system_error_response)
+        }
     }
 }
 
@@ -8716,13 +8965,37 @@ pub(super) async fn home_background_image(
 ) -> Response {
     let context = match require_home_token_context(&state.data_dir, &headers) {
         Ok(context) => context,
-        Err(err) => return home_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     };
 
+    // The lock covers choosing and reading the image, so a read never sees a
+    // half-finished upload or reset. Nothing between these steps awaits.
+    let _guard = match home_background_image_lock() {
+        Ok(guard) => guard,
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
+    };
     let entry = match home_background_image_entry(&state.data_dir, &context) {
         Ok(Some(entry)) => entry,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(err) => return home_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     };
     match home_background_image_bytes(&state.data_dir, &context, &entry) {
         Ok(bytes) => {
@@ -8745,7 +9018,16 @@ pub(super) async fn home_background_image(
             );
             response
         }
-        Err(err) => home_error_response(anyhow::anyhow!(err)),
+        Err(err) => {
+            // The read error can carry the image path, which holds the person
+            // id. The log keeps the full error and the response names only the
+            // image file, as upload and reset do.
+            background_image_route_error(
+                home_background_image_read_failure(entry.file_name, &entry.path, &err),
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     }
 }
 
@@ -9337,6 +9619,7 @@ mod stored_root_tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
 
     fn state_dir() -> (tempfile::TempDir, std::path::PathBuf) {
         let temp = tempfile::tempdir().unwrap();
@@ -9539,14 +9822,18 @@ mod stored_root_tests {
         assert!(!child_path.exists());
     }
 
-    /// The launch context takes this person's root from the parent's store,
-    /// where their record is kept. This Runtime holds no protection for that
-    /// root, so the save is refused and the read answers the default.
-    #[test]
-    fn parent_auth_store_person_services_selection_is_refused_in_child() {
+    /// A person stored only in a parent auth directory, verified into this
+    /// Runtime through a parent-signed launch token. Returns the parent's
+    /// temporary directory, the person's record, and the verified context.
+    fn parent_store_services_person(
+        data_dir: &std::path::Path,
+    ) -> (
+        tempfile::TempDir,
+        crate::auth::PrincipalRecord,
+        HomeLaunchTokenContext,
+    ) {
         use elastos_runtime::auth::AuthSessionGrantV1;
 
-        let (_temp, data_dir) = state_dir();
         let parent = tempfile::tempdir().unwrap();
         let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
         let mut record = crate::auth::store_test_human_principal(
@@ -9576,9 +9863,18 @@ mod stored_root_tests {
         )
         .unwrap();
         let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
-            &data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did, parent.path(),
+            data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did, parent.path(),
         ).unwrap();
-        let context = verified.context;
+        (parent, record, verified.context)
+    }
+
+    /// The launch context takes this person's root from the parent's store,
+    /// where their record is kept. This Runtime holds no protection for that
+    /// root, so the save is refused and the read answers the default.
+    #[test]
+    fn parent_auth_store_person_services_selection_is_refused_in_child() {
+        let (_temp, data_dir) = state_dir();
+        let (_parent, record, context) = parent_store_services_person(&data_dir);
         assert_eq!(
             context.root().localhost_root(),
             "localhost://Users/parent-stored-root"
@@ -9615,6 +9911,49 @@ mod stored_root_tests {
         let formula_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &formula_uri).unwrap();
         assert!(!formula_path.exists());
+    }
+
+    /// The same parent-stored person with test protection seeded on this
+    /// Runtime: the save seals the object under the stored root, and the read
+    /// returns the selection.
+    #[test]
+    fn parent_auth_store_person_services_selection_writes_sealed_with_protection_here() {
+        let (_temp, data_dir) = state_dir();
+        let (_parent, record, context) = parent_store_services_person(&data_dir);
+        crate::auth::store_test_principal_root_protection_for(
+            &data_dir,
+            &record.principal_id,
+            context.root().localhost_root(),
+        );
+        // One non-default field: a read that fails and answers the default
+        // would otherwise match a selection built from the same default.
+        let mut selection = home_services_default_selection_state(&context);
+        selection
+            .local_offer_ids
+            .insert("offer:r2-non-default".to_string());
+        home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
+        let stored_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(
+            stored_path.is_file(),
+            "the save wrote under the stored root"
+        );
+        assert!(
+            stored_path.starts_with(data_dir.join("Users").join("parent-stored-root")),
+            "{}",
+            stored_path.display()
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&stored_path).unwrap()).unwrap();
+        assert_eq!(stored["schema"], "elastos.principal-root.object/v1");
+        let read = home_services_selection_state(&data_dir, &context).unwrap();
+        assert_eq!(
+            read.local_offer_ids.iter().cloned().collect::<Vec<_>>(),
+            ["offer:r2-non-default"]
+        );
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            serde_json::to_value(&selection).unwrap()
+        );
     }
 
     #[test]
@@ -9762,7 +10101,7 @@ mod stored_root_tests {
         assert_only_file_named(&data_dir, &entry.path);
         let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
         assert_eq!(bytes, b"parent image");
-        remove_home_background_images(&data_dir, &context).unwrap();
+        home_reset_background_image(&data_dir, &context).unwrap();
         assert!(!entry.path.exists());
         let child_root = format!(
             "localhost://Users/{}",
@@ -9773,6 +10112,44 @@ mod stored_root_tests {
         let child_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
         assert!(!child_path.exists());
+    }
+
+    /// A second background image replaces the first: the success path leaves
+    /// exactly one image file, the one just saved.
+    #[test]
+    fn second_background_image_replaces_the_first() {
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"first image".to_vec(),
+        )
+        .unwrap();
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"second image".to_vec(),
+        )
+        .unwrap();
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.content_type, "image/jpeg");
+        let present: Vec<&str> = HOME_BACKGROUND_IMAGE_FILES
+            .iter()
+            .map(|(file_name, _)| *file_name)
+            .filter(|file_name| {
+                home_appearance_path(&data_dir, &context, file_name)
+                    .unwrap()
+                    .is_file()
+            })
+            .collect();
+        assert_eq!(present, ["background-image.jpg"]);
+        let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
+        assert_eq!(bytes, b"second image");
     }
 
     #[test]
@@ -9884,6 +10261,319 @@ mod stored_root_tests {
                 .localhost_root,
             expected_root
         );
+    }
+
+    /// An upload and a reset of the same name cannot interleave. The reset
+    /// waits, at its `Checked` point, until the upload reports `Replaced`;
+    /// with the image lock the upload cannot reach its write while the reset
+    /// holds the lock, so the reset either finishes first (the image stays) or
+    /// starts after the write (it removes that image). A reported success from
+    /// both, with the upload's new image gone after it ran second, fails.
+    #[test]
+    fn background_image_upload_and_reset_do_not_race() {
+        struct RaceState {
+            trace: Mutex<Vec<&'static str>>,
+            replaced: Mutex<bool>,
+            replaced_cv: std::sync::Condvar,
+        }
+        struct ResetCheckpoint {
+            state: Arc<RaceState>,
+        }
+        struct UploadCheckpoint {
+            state: Arc<RaceState>,
+        }
+        impl ImageOperationCheckpoint for ResetCheckpoint {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                match point {
+                    ImageOperationPoint::Checked => {
+                        self.state.trace.lock().unwrap().push("reset:checked");
+                        let deadline = Instant::now() + Duration::from_secs(1);
+                        let mut replaced = self.state.replaced.lock().unwrap();
+                        while !*replaced {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            if left.is_zero() {
+                                break;
+                            }
+                            replaced = self
+                                .state
+                                .replaced_cv
+                                .wait_timeout(replaced, left)
+                                .unwrap()
+                                .0;
+                        }
+                    }
+                    ImageOperationPoint::Replaced => {}
+                    ImageOperationPoint::Removed => {
+                        self.state.trace.lock().unwrap().push("reset:removed");
+                    }
+                }
+            }
+        }
+        impl ImageOperationCheckpoint for UploadCheckpoint {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                match point {
+                    ImageOperationPoint::Checked => {
+                        self.state.trace.lock().unwrap().push("upload:checked");
+                    }
+                    ImageOperationPoint::Replaced => {
+                        self.state.trace.lock().unwrap().push("upload:replaced");
+                        *self.state.replaced.lock().unwrap() = true;
+                        self.state.replaced_cv.notify_all();
+                    }
+                    ImageOperationPoint::Removed => {
+                        self.state.trace.lock().unwrap().push("upload:removed");
+                    }
+                }
+            }
+        }
+
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"first image".to_vec(),
+        )
+        .unwrap();
+        let state = Arc::new(RaceState {
+            trace: Mutex::new(Vec::new()),
+            replaced: Mutex::new(false),
+            replaced_cv: std::sync::Condvar::new(),
+        });
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let upload = {
+            let data_dir = data_dir.clone();
+            let context = context.clone();
+            let state = Arc::clone(&state);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                home_save_background_image_with(
+                    &data_dir,
+                    &context,
+                    "background-image.png",
+                    b"second image".to_vec(),
+                    &mut UploadCheckpoint { state },
+                )
+            })
+        };
+        let reset = {
+            let data_dir = data_dir.clone();
+            let context = context.clone();
+            let state = Arc::clone(&state);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                home_reset_background_image_with(
+                    &data_dir,
+                    &context,
+                    &mut ResetCheckpoint { state },
+                )
+            })
+        };
+        start.wait();
+        let uploaded = upload.join().unwrap();
+        let reset_done = reset.join().unwrap();
+        assert!(uploaded.is_ok(), "{uploaded:?}");
+        assert!(reset_done.is_ok(), "{reset_done:?}");
+        let trace = state.trace.lock().unwrap().clone();
+        let at = |event: &str| {
+            trace
+                .iter()
+                .position(|seen| *seen == event)
+                .unwrap_or_else(|| panic!("missing {event} in {trace:?}"))
+        };
+        assert!(at("upload:checked") < at("upload:replaced"));
+        assert!(at("upload:replaced") < at("upload:removed"));
+        assert!(at("reset:checked") < at("reset:removed"));
+        let upload_replaced_between_reset = at("reset:checked") < at("upload:replaced")
+            && at("upload:replaced") < at("reset:removed");
+        let reset_checked_between_upload = at("upload:checked") < at("reset:checked")
+            && at("reset:checked") < at("upload:replaced");
+        assert!(
+            !upload_replaced_between_reset && !reset_checked_between_upload,
+            "one operation ran between the steps of the other: {trace:?}"
+        );
+        let reset_ran_second = at("upload:replaced") < at("reset:checked");
+        let current = home_background_image_entry(&data_dir, &context).unwrap();
+        if reset_ran_second {
+            assert!(
+                current.is_none(),
+                "the reset that ran second must leave no image: {trace:?}"
+            );
+            assert!(
+                !home_appearance_path(&data_dir, &context, "background-image.png")
+                    .unwrap()
+                    .exists()
+            );
+        } else {
+            let entry = current.unwrap_or_else(|| {
+                panic!("the upload ran second and its image is gone: {trace:?}")
+            });
+            assert_eq!(
+                home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
+                b"second image",
+                "{trace:?}"
+            );
+        }
+    }
+
+    /// Writes one image file directly, without a save's removal of the other
+    /// names, so a row can hold two images at once.
+    fn seed_background_image(
+        data_dir: &std::path::Path,
+        context: &HomeLaunchTokenContext,
+        file_name: &'static str,
+        bytes: &[u8],
+    ) -> PathBuf {
+        let path = home_appearance_path(data_dir, context, file_name).unwrap();
+        crate::auth::write_principal_root_object_resolved(
+            data_dir,
+            context.root(),
+            &home_appearance_object_uri(context, file_name),
+            &path,
+            bytes,
+        )
+        .unwrap();
+        path
+    }
+
+    /// An image this process cannot read refuses the upload and the reset
+    /// before anything is written or removed: every file keeps its bytes.
+    #[test]
+    fn an_unreadable_background_image_survives_upload_and_reset() {
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        let png = seed_background_image(&data_dir, &context, "background-image.png", b"kept image");
+        let jpg =
+            seed_background_image(&data_dir, &context, "background-image.jpg", b"kept sibling");
+        std::fs::set_permissions(&png, fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&png).is_ok() {
+            std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600)).unwrap();
+            eprintln!(
+                "skipping an_unreadable_background_image_survives_upload_and_reset: a 000 file is readable here (running as root)"
+            );
+            return;
+        }
+        let upload = home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"new image".to_vec(),
+        );
+        let reset = home_reset_background_image(&data_dir, &context);
+        // A refusing route keeps this file, so put its readable mode back. A
+        // route that removed it fails at the refusal checks below.
+        let _ = std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600));
+        let upload_error = upload.expect_err("an unreadable image must refuse the upload");
+        let reset_error = reset.expect_err("an unreadable image must refuse the reset");
+        let principal_id = home_browser_principal_id(&context);
+        let data_folder = data_dir.to_string_lossy().into_owned();
+        for (route, error) in [("upload", &upload_error), ("reset", &reset_error)] {
+            let text = error.to_string();
+            assert!(
+                text.contains("background-image.png"),
+                "{route} refusal names the image file: {text}"
+            );
+            assert_eq!(
+                text, "background image background-image.png could not be read",
+                "{route} refusal is the fixed message"
+            );
+            assert!(
+                !text.contains(&data_folder),
+                "{route} refusal leaves out the data folder: {text}"
+            );
+            assert!(
+                !text.contains(&principal_id),
+                "{route} refusal leaves out the person's id: {text}"
+            );
+        }
+        let read = |path: &std::path::Path, file_name: &'static str| {
+            crate::auth::read_principal_root_object_resolved(
+                &data_dir,
+                context.root(),
+                &home_appearance_object_uri(&context, file_name),
+                path,
+            )
+            .unwrap()
+        };
+        assert_eq!(read(&png, "background-image.png"), b"kept image");
+        assert_eq!(read(&jpg, "background-image.jpg"), b"kept sibling");
+        let mut names: Vec<String> = std::fs::read_dir(png.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["background-image.jpg", "background-image.png"],
+            "neither route removed or added a file"
+        );
+    }
+
+    /// A save whose removal of an older image fails reports the failure, names
+    /// the file that stayed, and keeps the new image bytes.
+    #[test]
+    fn background_image_save_reports_a_failed_cleanup_and_keeps_the_new_image() {
+        struct ReadOnlyAfterReplace {
+            folder: PathBuf,
+        }
+        impl ImageOperationCheckpoint for ReadOnlyAfterReplace {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                if point == ImageOperationPoint::Replaced {
+                    std::fs::set_permissions(&self.folder, fs::Permissions::from_mode(0o555))
+                        .unwrap();
+                }
+            }
+        }
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        let png = seed_background_image(&data_dir, &context, "background-image.png", b"old image");
+        let jpg = seed_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"older sibling",
+        );
+        let folder = png.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = folder.join("root-probe");
+        let root_process = std::fs::File::create(&probe).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        if root_process {
+            eprintln!(
+                "skipping background_image_save_reports_a_failed_cleanup_and_keeps_the_new_image: a read-only folder still accepts a new file (running as root)"
+            );
+            return;
+        }
+        let error = home_save_background_image_with(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"new image".to_vec(),
+            &mut ReadOnlyAfterReplace {
+                folder: folder.clone(),
+            },
+        )
+        .unwrap_err();
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        let text = error.to_string();
+        assert!(text.contains("is in place"), "{text}");
+        assert!(
+            text.contains("background-image.jpg"),
+            "the answer names the file that stayed: {text}"
+        );
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.content_type, "image/png", "the new image is served");
+        assert_eq!(
+            home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
+            b"new image"
+        );
+        assert!(jpg.is_file(), "the older sibling stays");
     }
 }
 
@@ -10082,10 +10772,7 @@ mod r8d_passkey_rows {
     }
 
     /// A later image upload is refused the same way as the first, and the
-    /// child creates nothing. By reading, `home_save_background_image` calls
-    /// `remove_home_background_images` before
-    /// `write_principal_root_object_resolved`; this row does not show that
-    /// order.
+    /// child creates nothing.
     #[test]
     fn r8d_child_background_image_replace_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
@@ -10100,6 +10787,37 @@ mod r8d_passkey_rows {
             );
         }
         person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: `home_save_background_image` with a second name, on a child
+    /// that already holds an image saved before the held-root rule. The save
+    /// is refused before any image is removed, so the seeded image stays in
+    /// place byte for byte.
+    #[test]
+    fn r8d_child_refused_background_image_save_keeps_the_seeded_image() {
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
+        let child = person.child.path();
+        let seeded = home_appearance_path(child, &person.ctx, "background-image.png").unwrap();
+        std::fs::create_dir_all(seeded.parent().unwrap()).unwrap();
+        std::fs::write(&seeded, b"seeded child image").unwrap();
+        let error = home_save_background_image(
+            child,
+            &person.ctx,
+            "background-image.jpg",
+            b"r8d image".to_vec(),
+        )
+        .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        assert_eq!(std::fs::read(&seeded).unwrap(), b"seeded child image");
+        let relative = seeded
+            .strip_prefix(child)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        person.assert_child_holds_only(&[relative.as_str()]);
     }
 
     /// Entry: `home_save_appearance_preferences` with one field set. The
@@ -10135,6 +10853,51 @@ mod r8d_passkey_rows {
             Some(KEPT_ELSEWHERE)
         );
         person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: the active-shell update route with the Home GUI shell. The
+    /// child lists that shell from an installed capsule fixture, so the save
+    /// reaches the held-root write. The child holds no protection for this
+    /// person's root, so the route answers 403 with the bare refusal text and
+    /// creates no state file or Home folder.
+    #[tokio::test(flavor = "current_thread")]
+    async fn r8d_child_active_shell_save_is_refused_for_the_passkey_person() {
+        let person = passkey_person(HOME_GUI_SHELL_ID);
+        let child = person.child.path();
+        let capsule_dir = child.join("capsules/home-gui");
+        std::fs::create_dir_all(capsule_dir.join("browser")).unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            include_str!("../../../../../capsules/home-gui/capsule.json"),
+        )
+        .unwrap();
+        std::fs::write(capsule_dir.join("browser/index.html"), "Home fixture").unwrap();
+        std::fs::write(
+            child.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({"external": {
+                "home-gui": {"install_path": "capsules/home-gui", "platforms": {}}
+            }, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+        let request: HomeActiveShellUpdate =
+            serde_json::from_value(serde_json::json!({"active": HOME_GUI_SHELL_ID})).unwrap();
+        let answer = home_active_shell_update(
+            State(person.child_state()),
+            person.route_headers(HOME_GUI_SHELL_ID),
+            Json(request),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), KEPT_ELSEWHERE);
+        person.assert_child_holds_only(&[
+            "capsules/home-gui/browser/index.html",
+            "capsules/home-gui/capsule.json",
+            "components.json",
+        ]);
     }
 
     /// Entry: `home_save_services_selection_state` with the person's default

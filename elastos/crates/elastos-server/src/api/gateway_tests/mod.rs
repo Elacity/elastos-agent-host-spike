@@ -1204,3 +1204,22 @@ async fn kept_elsewhere_refusal_answers_403() {
         );
     }
 }
+
+/// The Inbox mapper answers the held-root refusal with 403 and the bare text,
+/// including under the path context `home_state_write_error` puts on a
+/// refused Services requests save.
+#[tokio::test]
+async fn inbox_kept_elsewhere_refusal_answers_403() {
+    let refused = anyhow::Error::new(crate::auth::ProtectedRecordKeptElsewhere).context(
+        "could not write /child/Users/person/.AppData/ElastOS/Home/services-requests-state.json",
+    );
+    let response = inbox_error_response(refused);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "protected record is kept only on the Runtime this person signed in on"
+    );
+}

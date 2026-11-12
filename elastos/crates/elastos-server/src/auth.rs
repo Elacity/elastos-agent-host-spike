@@ -7566,8 +7566,8 @@ struct PrincipalRootObjectWriteOptions<'a> {
     /// decide whether the folder exists.
     create_owner_only_parent: bool,
     /// Set only by `write_held_root_object`, from the root it writes for.
-    /// True when the person's stored record is kept in another store and this
-    /// Runtime holds no protection for the object: the write refuses.
+    /// True when the person's stored record is kept in another store; the
+    /// write then refuses unless this Runtime holds protection.
     kept_elsewhere: bool,
 }
 
@@ -21193,6 +21193,53 @@ pub(crate) mod tests {
         );
         for (label, uri, path, result) in
             held_root_write_results(runtime_dir.path(), &root, "case4")
+        {
+            result.unwrap_or_else(|error| panic!("{label}: {error:#}"));
+            let stored = std::fs::read(&path).unwrap();
+            assert_ne!(stored, b"plain", "{label} holds plaintext");
+            let envelope: PrincipalRootObjectEnvelopeV1 = serde_json::from_slice(&stored)
+                .unwrap_or_else(|error| panic!("{label} is not a sealed envelope: {error}"));
+            assert_eq!(envelope.schema, PRINCIPAL_ROOT_OBJECT_SCHEMA, "{label}");
+            let read_back =
+                read_principal_root_object_resolved(runtime_dir.path(), &root, &uri, &path)
+                    .unwrap_or_else(|error| panic!("{label}: {error:#}"));
+            assert_eq!(read_back, b"plain", "{label} reads back its plaintext");
+        }
+    }
+
+    /// One folder spelled two ways is two stores to the comparison, which
+    /// compares path components and does not canonicalise. A `..` segment in
+    /// the record's store makes the same folder compare unequal: the write
+    /// refuses without protection here, and seals once this Runtime holds
+    /// protection for the root.
+    #[test]
+    fn kept_elsewhere_case_5_one_folder_spelled_two_ways_refuses_or_seals() {
+        let runtime_dir = owner_only_tempdir();
+        std::fs::create_dir_all(runtime_dir.path().join("inner")).unwrap();
+        let person =
+            store_test_human_principal(runtime_dir.path(), "person:local:kept-elsewhere-spelling");
+        let spelled = runtime_dir.path().join("inner").join("..");
+        let root =
+            ResolvedPrincipalRoot::resolve(runtime_dir.path(), &spelled, &person.principal_id)
+                .unwrap();
+        for (label, _uri, path, result) in
+            held_root_write_results(runtime_dir.path(), &root, "case5")
+        {
+            let error = result.expect_err(label);
+            assert!(
+                error.is::<ProtectedRecordKeptElsewhere>(),
+                "{label}: {error}"
+            );
+            assert!(!path.exists(), "{label} wrote a file");
+            assert!(!path.parent().unwrap().exists(), "{label} made a directory");
+        }
+        store_test_principal_root_protection_for(
+            runtime_dir.path(),
+            &person.principal_id,
+            root.localhost_root(),
+        );
+        for (label, uri, path, result) in
+            held_root_write_results(runtime_dir.path(), &root, "case5-sealed")
         {
             result.unwrap_or_else(|error| panic!("{label}: {error:#}"));
             let stored = std::fs::read(&path).unwrap();
