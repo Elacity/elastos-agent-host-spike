@@ -390,7 +390,7 @@ def installed_app_lines(source, texts=None):
     reached, lines = set(), []
     while queue:
         name, text = queue.pop()
-        for line in text.splitlines():
+        for line in re.sub(r"\s*\\\n\s*", " ", text).splitlines():  # a line continued with a backslash is one line
             if line.lstrip().startswith(("#", "//", "*")):
                 continue
             lines.append((name or "ci.yml", line.strip()))
@@ -404,10 +404,12 @@ def installed_app_lines(source, texts=None):
 
 
 def notes_named(lines, rule):
-    """(file, path) for each notes path a line names: anything under a bare docs/ or lab/, and
-    a tracked file the rule would skip, with or without one leading variable such as $ROOT."""
+    """(file, path) for each notes path a line names: anything under a bare docs/ or lab/, a
+    tracked file the rule would skip, with or without one leading variable such as $ROOT, and
+    the folder name alone as a quoted word, as in Path("docs") / name."""
     found = set()
     for name, line in lines:
+        found |= {(name, folder) for folder in re.findall(r"""["'](docs|lab)["']""", line)}
         for token in re.findall(r"[\w./-]+", line):
             path = re.sub(r"\A[A-Z][A-Z_]*/", "", token.strip("/"))
             folder = path in ("docs", "lab") and token != path  # written as a path: $ROOT/lab, lab/
@@ -2409,7 +2411,8 @@ class ReleasePolicyTests(unittest.TestCase):
         # messages, and build one test target, in the elastos workspace, which names no lab crate.
         messages = {("scripts/check-versioning.sh", "docs/VERSIONING.md"), ("scripts/publish-release.sh", "docs/VERSIONING.md")}
         test_targets = {("scripts/pinned-model-consumer-proof.sh",
-                         '"$CARGO_BIN" test --locked -p elastos-server --lib -- --ignored --nocapture \\')}
+                         'env "${PROOF_ENV[@]}" "$CARGO_BIN" test --locked -p elastos-server --lib -- --ignored --nocapture '
+                         '--exact "$test_id"')}
 
         def seen(source=SOURCE, texts=None):
             lines = installed_app_lines(source, texts)
@@ -2423,18 +2426,22 @@ class ReleasePolicyTests(unittest.TestCase):
         # model-provider capsule's test targets with no lab/ on its command line, are both seen.
         installer = "scripts/install-source-home-runtime.py"
         for planted in ("    text = open('docs/INSTALL.md').read()", "cat docs/INSTALL.md", 'cp -R "${ROOT}/lab" "$HOME"',
-                        'head -1 "$REPO_ROOT/PRINCIPLES.md"', "ls docs/*.md"):
+                        'head -1 "$REPO_ROOT/PRINCIPLES.md"', "ls docs/*.md", '    text = (Path("docs") / "INSTALL.md").read_text()',
+                        "    text = open(os.path.join(ROOT, 'lab', 'x')).read()"):
             notes, _ = seen(texts={installer: (REPO / installer).read_text() + planted + "\n"})
             self.assertEqual({name for name, _ in notes - messages}, {installer}, planted)
             notes, _ = seen(SOURCE.replace(call, f"          {planted.strip()}\n{call}"))
             self.assertEqual({name for name, _ in notes - messages}, {"ci.yml"}, planted)
-        for planted in ("(cd capsules/model-provider && cargo test --locked)",
-                        '"$CARGO_BIN" test --locked --manifest-path "${ROOT}/capsules/model-provider/Cargo.toml"',
-                        "cargo build --locked --release --all-targets", "cargo clippy --tests"):
+        # A command split across lines with a backslash is read as the one line it is.
+        split = '"$CARGO_BIN" \\\n              test \\\n              --locked'
+        for planted, line in (("(cd capsules/model-provider && cargo test --locked)", None),
+                              ('"$CARGO_BIN" test --locked --manifest-path "${ROOT}/capsules/model-provider/Cargo.toml"', None),
+                              ("cargo build --locked --release --all-targets", None), ("cargo clippy --tests", None),
+                              (split, '"$CARGO_BIN" test --locked'), ("cargo \\\ntest", "cargo test")):
             _, built = seen(SOURCE.replace(call, f"          {planted}\n{call}"))
-            self.assertEqual(built - test_targets, {("ci.yml", planted)})
+            self.assertEqual(built - test_targets, {("ci.yml", line or planted)})
             _, built = seen(texts={"scripts/setup-source-home.sh": (REPO / "scripts/setup-source-home.sh").read_text() + planted + "\n"})
-            self.assertEqual(built - test_targets, {("scripts/setup-source-home.sh", planted)})
+            self.assertEqual(built - test_targets, {("scripts/setup-source-home.sh", line or planted)})
 
     def test_pull_request_runs_cancel_at_the_first_failed_job(self):
         watcher = JOBS["cancel-on-failure"]
