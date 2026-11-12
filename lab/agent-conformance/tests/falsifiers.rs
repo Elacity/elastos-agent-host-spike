@@ -1,19 +1,50 @@
 //! Each falsifier edits exact text and the runner requires that text to occur
 //! exactly once in the file it names. A lint or refactor can move that text and
-//! orphan a plant silently, so this test checks every edit that lands inside
-//! this crate before the runner has to report NO MATCH.
+//! orphan a plant silently, so this test checks every edit before the runner
+//! has to report NO MATCH.
 
 use std::path::Path;
 
-/// Entries whose edited text did not match before this check existed. Repair
-/// each one in its own task; this list keeps them visible instead of hiding the
-/// rest. An id leaves this list only when its edit matches again.
-const KNOWN_STALE: [&str; 4] = [
-    "F-census-a",
-    "F-grant-http",
-    "F-cleanup-temp",
-    "F-cleanup-process",
-];
+/// Check one entry against the text of each file its edits name. `read` returns
+/// `Some(text)` for a file this test owns, `None` for a file it does not, and
+/// `Err` for a file that does not resolve.
+fn check_entry(
+    id: &str,
+    entry: &serde_json::Value,
+    read: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<(), String> {
+    let edits = entry["edits"]
+        .as_array()
+        .filter(|edits| !edits.is_empty())
+        .ok_or_else(|| format!("{id}: entry lists no edits"))?;
+    for edit in edits {
+        let file = edit["file"]
+            .as_str()
+            .ok_or_else(|| format!("{id}: an edit names no file"))?;
+        let old = edit["old"]
+            .as_str()
+            .ok_or_else(|| format!("{id}: an edit has no old text"))?;
+        let new = edit["new"]
+            .as_str()
+            .ok_or_else(|| format!("{id}: an edit has no new text"))?;
+        if old.trim().is_empty() {
+            return Err(format!("{id}: its old text is empty or only whitespace"));
+        }
+        if old == new {
+            return Err(format!("{id}: its new text equals its old text"));
+        }
+        let Some(text) = read(file).map_err(|error| format!("{id}: {error}"))? else {
+            continue;
+        };
+        let found = text.matches(old).count();
+        if found != 1 {
+            return Err(format!(
+                "{id}: its old text occurs {found} times in {file}; a plant needs exactly one"
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[test]
 fn every_lab_falsifier_edit_still_applies() {
@@ -28,39 +59,61 @@ fn every_lab_falsifier_edit_still_applies() {
 
     // The runner reads `file` while its working directory is examples/agent-host.
     let lane_base = crate_root.join("../../examples/agent-host");
-    let mut stale_ids = Vec::new();
+    let read = |file: &str| {
+        let target = lane_base
+            .join(file)
+            .canonicalize()
+            .map_err(|error| format!("{file} does not resolve: {error}"))?;
+        if !target.starts_with(&crate_root) {
+            return Ok(None);
+        }
+        std::fs::read_to_string(&target)
+            .map(Some)
+            .map_err(|error| format!("{file} does not read: {error}"))
+    };
     for entry in entries {
         let id = entry["id"].as_str().expect("every entry has an id");
-        if KNOWN_STALE.contains(&id) {
-            stale_ids.push(id);
-            continue;
-        }
-        let edits = entry["edits"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{id} lists its edits"));
-        for edit in edits {
-            let file = edit["file"].as_str().expect("every edit names a file");
-            let target = lane_base
-                .join(file)
-                .canonicalize()
-                .unwrap_or_else(|error| panic!("{id}: {file} does not resolve: {error}"));
-            if !target.starts_with(&crate_root) {
-                continue;
-            }
-            let old = edit["old"].as_str().expect("every edit has old text");
-            let text = std::fs::read_to_string(&target)
-                .unwrap_or_else(|error| panic!("{id}: {file} does not read: {error}"));
-            let found = text.matches(old).count();
-            assert_eq!(
-                found, 1,
-                "{id}: its old text occurs {found} times in {file}; a plant needs exactly one"
-            );
+        if let Err(reason) = check_entry(id, entry, &read) {
+            panic!("{reason}");
         }
     }
-    for id in KNOWN_STALE {
-        assert!(
-            stale_ids.contains(&id),
-            "{id} is listed as stale but falsifiers.json has no such entry"
-        );
+}
+
+#[cfg(test)]
+mod rules {
+    use super::check_entry;
+    use serde_json::json;
+
+    fn read_some(text: &'static str) -> impl Fn(&str) -> Result<Option<String>, String> {
+        move |_| Ok(Some(text.to_owned()))
+    }
+
+    #[test]
+    fn rejects_an_edit_whose_new_text_equals_its_old_text() {
+        let entry = json!({"edits": [{"file": "x", "old": "same", "new": "same"}]});
+        let error = check_entry("F-same", &entry, &read_some("same")).unwrap_err();
+        assert!(error.contains("F-same"), "{error}");
+        assert!(error.contains("equals its old text"), "{error}");
+    }
+
+    #[test]
+    fn rejects_old_text_that_is_empty_or_only_whitespace() {
+        let entry = json!({"edits": [{"file": "x", "old": " \n ", "new": "changed"}]});
+        let error = check_entry("F-blank", &entry, &read_some(" \n ")).unwrap_err();
+        assert!(error.contains("F-blank"), "{error}");
+        assert!(error.contains("empty or only whitespace"), "{error}");
+    }
+
+    #[test]
+    fn rejects_an_entry_without_edits_and_an_unresolved_file() {
+        let empty = json!({"edits": []});
+        let error = check_entry("F-empty", &empty, &read_some("")).unwrap_err();
+        assert!(error.contains("F-empty"), "{error}");
+
+        let entry = json!({"edits": [{"file": "gone", "old": "a", "new": "b"}]});
+        let read = |_: &str| Err("gone does not resolve: missing".to_owned());
+        let error = check_entry("F-missing", &entry, &read).unwrap_err();
+        assert!(error.contains("F-missing"), "{error}");
+        assert!(error.contains("does not resolve"), "{error}");
     }
 }
