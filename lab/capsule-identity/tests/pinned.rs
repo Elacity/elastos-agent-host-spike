@@ -94,7 +94,7 @@ fn a_bundle_whose_manifest_pins_a_requirement_is_named() {
 }
 
 #[test]
-fn a_refused_pin_is_its_own_refusal_and_carries_the_runtimes_code() {
+fn a_refused_pinned_manifest_is_its_own_refusal_and_carries_the_runtimes_code() {
     let good = pin("one", CONTENT_SAMPLE_LAB_CID);
     let cases = [
         // Not a package root in its one spelling: a raw leaf's CID.
@@ -118,6 +118,24 @@ fn a_refused_pin_is_its_own_refusal_and_carries_the_runtimes_code() {
             REQUIREMENT_DUPLICATE,
             "two",
         ),
+        // A pin on a requirement that is not a capsule.
+        (
+            format!(
+                r#"[{{"name": "kubo", "kind": "external", "cid": "{CONTENT_SAMPLE_LAB_CID}"}}]"#
+            ),
+            PIN_FORM_INVALID,
+            "kubo",
+        ),
+        // Two requirements share a name, neither of them pinned, in a
+        // manifest where a third has a pin. No pin is at fault here, which
+        // is why the refusal speaks of the pinned manifest and not of a pin.
+        (
+            format!(
+                r#"[{good}, {{"name": "twin", "kind": "capsule"}}, {{"name": "twin", "kind": "capsule"}}]"#
+            ),
+            REQUIREMENT_DUPLICATE,
+            "twin",
+        ),
     ];
     for (requires, code, requirement) in cases {
         let manifest = manifest_requiring(&requires);
@@ -132,7 +150,7 @@ fn a_refused_pin_is_its_own_refusal_and_carries_the_runtimes_code() {
         assert_eq!(
             refusal.to_string(),
             format!(
-                "the Runtime refuses a pin in capsule.json ({code}): requirement {requirement:?}"
+                "the Runtime refuses the pinned manifest capsule.json ({code}): requirement {requirement:?}"
             )
         );
     }

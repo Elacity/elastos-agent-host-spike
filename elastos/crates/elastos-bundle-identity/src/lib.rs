@@ -215,11 +215,14 @@ pub enum Refusal {
     /// of the four limits; `path` is the entry at which it was passed.
     /// Nothing past the limit was read.
     OverBudget { limit: &'static str, path: String },
-    /// The Runtime's reader of a manifest refused a pin (`requires[].cid`) in
-    /// `capsule.json`: the pin is not a package root in its one spelling, or
-    /// two requirements share a name or a pinned CID. `code` is the Runtime's
-    /// own code for the fault and `requirement` the name of the requirement,
-    /// empty when it has none.
+    /// The Runtime's reader refused a manifest that pins a requirement
+    /// (`requires[].cid`) in `capsule.json`. Either a pin itself is refused
+    /// (it is not a package root in its one spelling, or its requirement is
+    /// not a capsule), or, in a manifest that has a pin, two requirements
+    /// share a name or two pin one CID; the two that share a name need not
+    /// be pinned themselves. `code` is the Runtime's own code and
+    /// `requirement` the name the reader gives with it, empty when that
+    /// requirement has none.
     PinRefused {
         code: &'static str,
         requirement: String,
@@ -345,7 +348,7 @@ impl fmt::Display for Refusal {
             }
             Refusal::PinRefused { code, requirement } => write!(
                 f,
-                "the Runtime refuses a pin in {MANIFEST_FILE} ({code}): requirement {requirement:?}"
+                "the Runtime refuses the pinned manifest {MANIFEST_FILE} ({code}): requirement {requirement:?}"
             ),
             Refusal::NotALabCid { claimed } => write!(
                 f,

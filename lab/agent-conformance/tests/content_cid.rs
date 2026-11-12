@@ -247,7 +247,7 @@ fn a_viewer_that_pins_its_content_is_staged_and_named() {
     );
     assert_eq!(
         manifest_refusal(&wrong),
-        "the Runtime refuses a pin in capsule.json (pin_form_invalid): requirement \"example-content\""
+        "the Runtime refuses the pinned manifest capsule.json (pin_form_invalid): requirement \"example-content\""
     );
 
     for home in [home, plain_home, wrong_home] {

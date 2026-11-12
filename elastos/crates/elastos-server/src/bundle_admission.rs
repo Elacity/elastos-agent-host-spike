@@ -711,7 +711,7 @@ pub(crate) mod tests {
         assert_eq!(refusal.code(), "bundle_walk_pin_refused");
         assert_eq!(
             refusal.to_string(),
-            "bundle_walk_pin_refused: the Runtime refuses a pin in capsule.json (pin_form_invalid): requirement \"content\""
+            "bundle_walk_pin_refused: the Runtime refuses the pinned manifest capsule.json (pin_form_invalid): requirement \"content\""
         );
     }
 
