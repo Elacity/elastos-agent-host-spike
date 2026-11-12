@@ -62,10 +62,12 @@ fn main() {
     let output = read(&args[2], "results");
     let gaps = fs::read_to_string(build::lane().join("GAPS.md")).ok();
     let receipt = Path::new(&args[4]);
-    // Reviews name the commit they read, so they live outside that commit.
-    let reviews = match env::var_os("AGENT_CONFORMANCE_REVIEWS") {
+    // Reviews name the commit they read, so they live outside that commit. A
+    // file inside the repository is still read and recorded, and cannot bind.
+    let reviews_path = env::var_os("AGENT_CONFORMANCE_REVIEWS");
+    let reviews = match &reviews_path {
         None => None,
-        Some(path) => match fs::read(&path)
+        Some(path) => match fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Vec<report::Review>>(&bytes).ok())
         {
@@ -76,6 +78,8 @@ fn main() {
             }
         },
     };
+    let reviews_file_failure = reviews_path
+        .and_then(|path| report::reviews_file_failure(Path::new(&path), &build::repository()));
     // An installed Runtime is named by its binary and its data folder, because
     // the installer can put the binary elsewhere. Neither given means no
     // installed Runtime; there is no default, so a test never reads a real one.
@@ -101,6 +105,7 @@ fn main() {
         report::GitIdentity::read(&build::repository()),
         report::Bound {
             reviews: reviews.as_deref(),
+            reviews_file_failure,
             installed,
         },
         receipt,

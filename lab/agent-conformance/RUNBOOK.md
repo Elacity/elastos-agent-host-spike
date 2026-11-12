@@ -264,8 +264,13 @@ JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
 verdict `pass` and the exact commit the receipt's `repository` names, and the
 tree is clean when the report is written. That is checked after the suite
 runs, so the row does not show that the results came from that tree. Reviews
-live outside the commit they read: keep the file outside the repository, since
-an untracked file inside it makes the tree dirty. The receipt records
+live outside the commit they read, so the file must be outside the repository.
+The report resolves the path first, links included and a relative path from
+the current directory: a file that is inside the work tree, or is named in a
+folder inside it, leaves the row FAIL with
+`reviews file is inside the repository`. An untracked file there also makes the
+tree dirty; a tracked or ignored one does not, which is why the place itself is
+checked. The receipt records
 `reviews`, `review_status` (`bound` or `unbound`) and `review_failures`. An
 unreadable or malformed reviews file fails the command; an unbound review
 leaves this row FAIL without changing `command_success`, so CI still reports
@@ -468,7 +473,7 @@ What each A14 row means:
 | Row | PASS means |
 | --- | --- |
 | `versions_receipt` | the receipt names the commit, the Runtime and provider hashes and every launched probe the rows needed |
-| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree |
+| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, and `release-head.json` names that `release.json` |
 | `installed_runtime_ran` | the Runtime the suite launched has the installed binary's SHA-256 |

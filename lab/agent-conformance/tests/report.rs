@@ -1352,6 +1352,32 @@ fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
         .unwrap()
         .iter()
         .any(|failure| failure == "review names another commit: codex"));
+    // This Home is under the lane's ignored `target`, which is inside the
+    // repository: a reviews file there leaves the tree clean and cannot bind.
+    // The same holds when the file is named by a relative path.
+    let inside = |receipt: &Value| {
+        receipt["review_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure == "reviews file is inside the repository")
+    };
+    assert!(inside(&receipt), "{receipt:#}");
+    let relative = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+        .current_dir(home.root())
+        .env("AGENT_CONFORMANCE_REVIEWS", "reviews.json")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
+        .arg(&listed_path)
+        .arg(&results_path)
+        .arg("0")
+        .arg(home.root().join("relative.json"))
+        .output()
+        .unwrap();
+    assert!(relative.status.success(), "{relative:?}");
+    let receipt = read_receipt(&home.root().join("relative.json"));
+    assert_eq!(receipt["reviews"], serde_json::to_value(&reviews).unwrap());
+    assert!(inside(&receipt), "{receipt:#}");
 
     fs::write(&reviews_path, br#"[{"reviewer":"codex","verdict":"pass"}]"#).unwrap();
     let malformed = run("malformed.json");
@@ -1370,6 +1396,97 @@ fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
         "versions receipt failure: could not read reviews\n"
     );
     assert!(!home.root().join("missing.json").exists());
+    home.finish().unwrap();
+}
+
+#[test]
+fn reviews_file_inside_the_repository_cannot_bind() {
+    use agent_conformance::report::reviews_file_failure;
+    use std::os::unix::fs::symlink;
+    const INSIDE: &str = "reviews file is inside the repository";
+    let home = ThrowawayHome::new().unwrap();
+    // A stand-in work tree and a folder beside it.
+    let (tree, outside) = (home.root().join("tree"), home.root().join("outside"));
+    fs::create_dir_all(tree.join("target")).unwrap();
+    fs::create_dir(&outside).unwrap();
+    for file in [
+        tree.join("reviews.json"),
+        tree.join("target/reviews.json"),
+        outside.join("reviews.json"),
+    ] {
+        fs::write(file, b"[]").unwrap();
+    }
+    assert_eq!(
+        reviews_file_failure(&outside.join("reviews.json"), &tree),
+        None
+    );
+    // Tracked or ignored makes no difference: both leave `git status` empty.
+    for inside in ["reviews.json", "target/reviews.json"] {
+        assert_eq!(
+            reviews_file_failure(&tree.join(inside), &tree).as_deref(),
+            Some(INSIDE)
+        );
+    }
+    // A link outside the tree to a file inside it, as a file and as a folder.
+    symlink(tree.join("target/reviews.json"), outside.join("link.json")).unwrap();
+    symlink(tree.join("target"), outside.join("folder")).unwrap();
+    // A link inside the tree to a file outside it: the name is still inside.
+    symlink(outside.join("reviews.json"), tree.join("link.json")).unwrap();
+    for path in [
+        outside.join("link.json"),
+        outside.join("folder/reviews.json"),
+        outside.join("../tree/reviews.json"),
+        tree.join("link.json"),
+    ] {
+        assert_eq!(
+            reviews_file_failure(&path, &tree).as_deref(),
+            Some(INSIDE),
+            "{path:?}"
+        );
+    }
+    // A relative path is resolved from the current directory.
+    let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let canonical = tree.join("target/reviews.json").canonicalize().unwrap();
+    let relative = canonical.strip_prefix(&here).unwrap();
+    assert!(relative.is_relative());
+    assert_eq!(
+        reviews_file_failure(relative, &tree).as_deref(),
+        Some(INSIDE)
+    );
+    assert_eq!(
+        reviews_file_failure(&outside.join("absent.json"), &tree).as_deref(),
+        Some("could not resolve the reviews file against the repository")
+    );
+
+    // The row: reviews that would bind do not when their file is refused.
+    let (observations, git) = synthetic(1, false);
+    let reviews = [review("codex", "pass", &git.commit)];
+    let row = |reviews_file_failure: Option<String>| {
+        let report = agent_conformance::report::render_bound_run(
+            &format!("{LIVE}: test\n"),
+            &output(&observations),
+            true,
+            Ok(git.clone()),
+            agent_conformance::report::Bound {
+                reviews: Some(&reviews),
+                reviews_file_failure,
+                installed: None,
+            },
+            Some(""),
+        );
+        let document: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+        (report.table, document)
+    };
+    let (table, document) = row(None);
+    assert!(table.contains("review_binding (A14) | PASS\n"), "{table}");
+    assert_eq!(document["review_status"], "bound");
+    let (table, document) = row(reviews_file_failure(
+        &tree.join("target/reviews.json"),
+        &tree,
+    ));
+    assert!(table.contains("review_binding (A14) | FAIL\n"), "{table}");
+    assert_eq!(document["review_status"], "unbound");
+    assert_eq!(document["review_failures"], serde_json::json!([INSIDE]));
     home.finish().unwrap();
 }
 
@@ -1595,6 +1712,7 @@ fn render(
         Ok(git),
         agent_conformance::report::Bound {
             reviews: None,
+            reviews_file_failure: None,
             installed,
         },
         Some(""),
@@ -1926,7 +2044,11 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
             &output(&observations),
             true,
             Ok(git.clone()),
-            agent_conformance::report::Bound { reviews, installed },
+            agent_conformance::report::Bound {
+                reviews,
+                reviews_file_failure: None,
+                installed,
+            },
             Some(""),
         )
         .receipt_bytes

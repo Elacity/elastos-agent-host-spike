@@ -504,6 +504,30 @@ pub fn review_failures(reviews: Option<&[Review]>, git: Option<&GitIdentity>) ->
     failures
 }
 
+/// Why a reviews file at `reviews` cannot bind to the tree at `repository`; None
+/// when it can. Reviews name the commit they read, so the file has to live
+/// outside that tree: a tracked or ignored file inside it leaves the tree clean
+/// and would otherwise bind. Two places are checked with their links resolved:
+/// the file the path leads to, and the folder the path names it in. So a link
+/// outside the tree to a file inside it is refused, and so is a link inside the
+/// tree to a file outside it. A relative path is taken from the current
+/// directory, as the read of the file takes it.
+pub fn reviews_file_failure(reviews: &Path, repository: &Path) -> Option<String> {
+    let folder = match reviews.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => folder,
+        _ => Path::new("."),
+    };
+    let (Ok(file), Ok(folder), Ok(repository)) = (
+        reviews.canonicalize(),
+        folder.canonicalize(),
+        repository.canonicalize(),
+    ) else {
+        return Some("could not resolve the reviews file against the repository".into());
+    };
+    (file.starts_with(&repository) || folder.starts_with(&repository))
+        .then(|| "reviews file is inside the repository".into())
+}
+
 /// The installed Runtime a receipt can name, from the records the installer
 /// keeps. Only the hash chain is checked: release-head.json names the hash of
 /// release.json, which names the binary and components.json for one platform.
@@ -718,6 +742,7 @@ pub fn write_reviewed_run(
 ) -> RunReport {
     let bound = Bound {
         reviews,
+        reviews_file_failure: None,
         installed: None,
     };
     write_bound_run(listed, output, cargo_ok, git, bound, receipt, gaps)
@@ -727,6 +752,10 @@ pub fn write_reviewed_run(
 /// commit and, when one was given, the installed Runtime.
 pub struct Bound<'a> {
     pub reviews: Option<&'a [Review]>,
+    /// From `reviews_file_failure`: why the file the reviews were read from
+    /// cannot bind, whatever the reviews say. `None` when it can, or when the
+    /// reviews did not come from a file.
+    pub reviews_file_failure: Option<String>,
     /// `None` means no installed Runtime was given: the receipt then carries no
     /// installed Runtime row or field at all.
     pub installed: Option<Result<InstalledRuntime, Vec<String>>>,
@@ -780,6 +809,7 @@ pub fn render_reviewed_run(
 ) -> RunReport {
     let bound = Bound {
         reviews,
+        reviews_file_failure: None,
         installed: None,
     };
     render_bound_run(listed, output, cargo_ok, git, bound, gaps)
@@ -795,7 +825,11 @@ pub fn render_bound_run(
     bound: Bound<'_>,
     gaps: Option<&str>,
 ) -> RunReport {
-    let Bound { reviews, installed } = bound;
+    let Bound {
+        reviews,
+        reviews_file_failure,
+        installed,
+    } = bound;
     let mut evidence = Evidence::parse(listed, output, gaps);
     let (mut table, suite_ok) = evidence.table(cargo_ok);
     evidence.require_identities();
@@ -814,7 +848,9 @@ pub fn render_bound_run(
     } else {
         "versions_receipt (A14) | FAIL\n"
     });
-    let unbound = review_failures(reviews, git.as_ref());
+    let mut unbound = review_failures(reviews, git.as_ref());
+    unbound.extend(reviews_file_failure);
+    unbound.sort();
     table.push_str(if unbound.is_empty() {
         "review_binding (A14) | PASS\n"
     } else {
