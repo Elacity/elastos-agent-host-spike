@@ -237,9 +237,11 @@ fn check(file: &AgentRecordsFile, owner_file: &[PrincipalRecord]) -> Result<(), 
     if file.sequence == 0 {
         return Err(BAD_SEQUENCE);
     }
-    for (index, agent) in file.agents.iter().enumerate() {
+    if let Some(reason) = repeated_id_or_root(&file.agents) {
+        return Err(reason);
+    }
+    for agent in &file.agents {
         let record = &agent.record;
-        let earlier = &file.agents[..index];
         if record.version != PRINCIPAL_RECORD_VERSION {
             return Err(UNKNOWN_VERSION);
         }
@@ -248,18 +250,6 @@ fn check(file: &AgentRecordsFile, owner_file: &[PrincipalRecord]) -> Result<(), 
         }
         if record.role != RuntimePrincipalRole::Guest {
             return Err(AGENT_IS_ADMIN);
-        }
-        if earlier
-            .iter()
-            .any(|other| other.record.principal_id == record.principal_id)
-        {
-            return Err(REPEATED_ID);
-        }
-        if earlier
-            .iter()
-            .any(|other| other.record.localhost_root == record.localhost_root)
-        {
-            return Err(REPEATED_ROOT);
         }
         if held_in_owner_file(owner_file, record) {
             return Err(HELD_BY_OWNER_FILE);
@@ -279,6 +269,28 @@ fn check(file: &AgentRecordsFile, owner_file: &[PrincipalRecord]) -> Result<(), 
         Some(reason) => Err(reason),
         None => Ok(()),
     }
+}
+
+/// Two agents with one id, or with one root. A root is derived from its id,
+/// so the agent record rule also refuses a repeated root; this check names
+/// it first.
+fn repeated_id_or_root(agents: &[StoredAgent]) -> Option<&'static str> {
+    for (index, agent) in agents.iter().enumerate() {
+        let (record, earlier) = (&agent.record, &agents[..index]);
+        if earlier
+            .iter()
+            .any(|other| other.record.principal_id == record.principal_id)
+        {
+            return Some(REPEATED_ID);
+        }
+        if earlier
+            .iter()
+            .any(|other| other.record.localhost_root == record.localhost_root)
+        {
+            return Some(REPEATED_ROOT);
+        }
+    }
+    None
 }
 
 /// Whether any record of the owner's sign-in file holds this id, root or

@@ -343,7 +343,11 @@ fn a_repeated_root_refuses_the_file() {
     let mut second = stored_agent(OWNER_ID, AGENT_B);
     second.record.localhost_root = first.record.localhost_root.clone();
     second.protection.localhost_root = first.record.localhost_root.clone();
-    home.plant(&as_json(&enabled_file(vec![first, second])));
+    // A root is derived from its id, so the agent record rule would refuse
+    // this file too. The uniqueness check alone, then the whole file:
+    let agents = [first, second];
+    assert_eq!(repeated_id_or_root(&agents), Some(REPEATED_ROOT));
+    home.plant(&as_json(&enabled_file(agents.to_vec())));
     assert_eq!(home.refusal(), REPEATED_ROOT);
 }
 

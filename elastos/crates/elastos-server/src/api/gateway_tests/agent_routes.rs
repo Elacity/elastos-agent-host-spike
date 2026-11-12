@@ -276,11 +276,15 @@ mod on {
         assert_eq!(status, StatusCode::OK, "{body}");
         let written = std::fs::read(agent_file(&home.data)).unwrap();
 
-        // A child Runtime reads its parent's sign-in store, not its own. The
-        // gateway's front door cannot be driven as a child from this test
-        // binary, so these rows call the route handlers themselves.
+        // A child Runtime reads a sign-in store at another path than its own
+        // data folder. Here that path is a link to this Home's own folder, so
+        // the launch token and the owner check pass and the path rule alone
+        // refuses. The gateway's front door cannot be driven as a child from
+        // this test binary, so these rows call the route handlers themselves.
         let parent = tempfile::tempdir().unwrap();
-        let _store = set_test_home_launch_auth_data_dir(parent.path());
+        let other_path = parent.path().join("sign-in-store");
+        std::os::unix::fs::symlink(&home.data, &other_path).unwrap();
+        let _store = set_test_home_launch_auth_data_dir(&other_path);
         let state = || State(installed.state.clone());
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("localhost:61180"));
@@ -300,7 +304,6 @@ mod on {
         let retired = agents_retire(state(), headers.clone(), body(json!({"agent_id": "a"})));
         assert_eq!(answer(retired.await).await, not_the_home);
         assert_eq!(std::fs::read(agent_file(&home.data)).unwrap(), written);
-        assert!(!agent_file(parent.path()).exists());
     }
 
     #[tokio::test]
