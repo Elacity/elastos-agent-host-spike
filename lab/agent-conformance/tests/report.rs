@@ -1337,6 +1337,7 @@ fn a_tree_dirty_around_the_run_fails_review_binding() {
                 tree_check_failure,
                 installed: None,
                 launch_record: agent_conformance::report::LaunchRecord::Missing,
+                named_runtime: None,
             },
             Some(""),
         );
@@ -1558,6 +1559,7 @@ fn reviews_file_inside_the_repository_cannot_bind() {
                 tree_check_failure: None,
                 installed: None,
                 launch_record: agent_conformance::report::LaunchRecord::Missing,
+                named_runtime: None,
             },
             Some(""),
         );
@@ -1847,6 +1849,15 @@ fn render_record(
     git: GitIdentity,
     installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
 ) -> (agent_conformance::report::RunReport, Value) {
+    // The suite was told a named binary only when its Runtime identity names a
+    // path; `run.sh` passes the variable through the environment in the same
+    // way. A build records no path, so the row then sees no named binary.
+    let named_runtime = observations
+        .iter()
+        .find_map(|observation| match observation {
+            Observation::Native { role, path, .. } if role == "elastos" => path.as_ref(),
+            _ => None,
+        });
     let report = agent_conformance::report::render_bound_run(
         &format!("{LIVE}: test\n"),
         &output(observations),
@@ -1858,6 +1869,7 @@ fn render_record(
             tree_check_failure: None,
             installed,
             launch_record,
+            named_runtime: named_runtime.map(std::path::PathBuf::from),
         },
         Some(""),
     );
@@ -2120,7 +2132,7 @@ fn no_installed_runtime_leaves_the_receipt_unchanged() {
 fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
     use agent_conformance::report::STAGED_BUNDLE_SCOPE;
     // The whole list, so a field added under any name shows up here.
-    const FIELDS: [&str; 22] = [
+    const FIELDS: [&str; 23] = [
         "build_only_probes",
         "cargo_success",
         "command_success",
@@ -2135,6 +2147,7 @@ fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
         "review_failures",
         "review_status",
         "reviews",
+        "runtime_path",
         "runtime_sha256",
         "schema",
         "scope",
@@ -2203,7 +2216,14 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
         .unwrap()
         .commit;
     let fixture = InstalledFixture::at_commit(&home.root().join("installed"), &commit);
-    let (observations, _) = synthetic(5, false);
+    let (mut observations, _) = synthetic(5, false);
+    // A suite told a named binary prints its path with its hash; the report
+    // reads the variable's value, as run.sh passes it, and the identity line.
+    observations[0] = Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(b"installed runtime"),
+        path: Some(fixture.binary.to_string_lossy().into_owned()),
+    };
     let listed_path = home.root().join("list");
     let results_path = home.root().join("results");
     fs::write(&listed_path, format!("{LIVE}: test\n")).unwrap();
@@ -2213,9 +2233,11 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
         command
             .env_remove("AGENT_CONFORMANCE_REVIEWS")
             .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
-            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA");
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
+            .env_remove("AGENT_CONFORMANCE_RUNTIME_BINARY");
         if binary {
             command.env("AGENT_CONFORMANCE_INSTALLED_BINARY", &fixture.binary);
+            command.env("AGENT_CONFORMANCE_RUNTIME_BINARY", &fixture.binary);
         }
         if data {
             command.env("AGENT_CONFORMANCE_INSTALLED_DATA", &fixture.data);
@@ -2335,16 +2357,24 @@ fn receipt_says_whether_the_suite_launched_the_installed_path() {
     );
 
     // A suite that launched the installed path with other bytes: the installed
-    // chain still matches, and this row alone says so, naming both hashes.
+    // chain still matches, and this row alone says so, naming both hashes. The
+    // suite's own identity names the same bytes, so it is named as well.
     let (report, document) = fixture.receipt_after_running(b"checkout runtime");
     assert!(report.table.contains("installed_runtime (A14) | PASS | "));
     assert_eq!(
         document["installed_binary_launch_failures"],
-        serde_json::json!([format!(
-            "run.sh launched a Runtime with SHA-256 {}, installed binary is {}",
-            sha256(b"checkout runtime"),
-            sha256(b"installed runtime")
-        )])
+        serde_json::json!([
+            format!(
+                "run.sh launched a Runtime with SHA-256 {}, installed binary is {}",
+                sha256(b"checkout runtime"),
+                sha256(b"installed runtime")
+            ),
+            format!(
+                "the suite recorded Runtime SHA-256 {}, installed binary is {}",
+                sha256(b"checkout runtime"),
+                sha256(b"installed runtime")
+            )
+        ])
     );
     assert!(report
         .table
@@ -2375,7 +2405,8 @@ fn installed_path_row_needs_the_named_installed_path() {
     let fixture = InstalledFixture::new(&home.root().join("installed"));
 
     // A checkout build with the installed bytes records no launch: the row
-    // fails even though the hashes match, because no launch was recorded.
+    // fails even though the hashes match, because no launch was recorded, and
+    // because the suite was told no named binary and recorded no path.
     let (report, document) = fixture.receipt_after_launching(b"installed runtime", None);
     assert!(
         report
@@ -2386,14 +2417,19 @@ fn installed_path_row_needs_the_named_installed_path() {
     );
     assert_eq!(
         document["installed_binary_launch_failures"],
-        serde_json::json!(["run.sh wrote no launch record for the installed path"])
+        serde_json::json!([
+            "run.sh wrote no launch record for the installed path",
+            "the suite recorded no named Runtime path; it built its own Runtime",
+            "the suite was not told to launch a named binary (AGENT_CONFORMANCE_RUNTIME_BINARY unset); it builds the checkout, so its launches are not the installed binary"
+        ])
     );
     assert_eq!(
         document["installed_binary_launch_status"],
         "not_run_sh_launched_installed_path_hash_matched"
     );
 
-    // A named path that is not the installed path fails, naming both paths.
+    // A named path that is not the installed path fails, naming both paths in
+    // the launch record and in the suite's own identity.
     let other = fixture.binary.with_file_name("other-elastos");
     fs::write(&other, b"installed runtime").unwrap();
     let (report, document) = fixture.receipt_after_launching(b"installed runtime", Some(&other));
@@ -2405,13 +2441,133 @@ fn installed_path_row_needs_the_named_installed_path() {
         "{}",
         report.table
     );
+    let (other_path, installed_path) = (
+        fs::canonicalize(&other).unwrap(),
+        fs::canonicalize(&fixture.binary).unwrap(),
+    );
+    assert_eq!(
+        document["installed_binary_launch_failures"],
+        serde_json::json!([
+            format!(
+                "run.sh launched {}, not the installed binary {}",
+                other_path.display(),
+                installed_path.display()
+            ),
+            format!(
+                "the suite recorded Runtime path {}, not the installed binary {}",
+                other_path.display(),
+                installed_path.display()
+            ),
+            format!(
+                "the suite was told to launch {}, not the installed binary {}",
+                other_path.display(),
+                installed_path.display()
+            )
+        ])
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn the_installed_path_row_reads_the_suites_named_runtime() {
+    use agent_conformance::report::{render_bound_run, Bound, LaunchRecord};
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let record = directory.path().join("launches");
+    fs::write(
+        &record,
+        record_line(&fixture.binary, b"installed runtime") + "\n",
+    )
+    .unwrap();
+    let (observations, git) = synthetic(1, false);
+    let path = fixture.binary.to_string_lossy().into_owned();
+    let render = |named: Option<&Path>, bytes: &[u8]| {
+        let mut named_observations = observations.clone();
+        named_observations[0] = Observation::Native {
+            role: "elastos".into(),
+            sha256: sha256(bytes),
+            path: Some(path.clone()),
+        };
+        let report = render_bound_run(
+            &format!("{LIVE}: test\n"),
+            &output(&named_observations),
+            true,
+            Ok(git.clone()),
+            Bound {
+                reviews: None,
+                reviews_file_failure: None,
+                tree_check_failure: None,
+                installed: Some(installed.clone()),
+                launch_record: LaunchRecord::read(&record),
+                named_runtime: named.map(Path::to_path_buf),
+            },
+            Some(""),
+        );
+        let document: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+        (report, document)
+    };
+
+    // A named path that resolves to the installed binary, and the installed
+    // bytes: the row passes, and the receipt keeps the suite's path beside the
+    // hash the row compares.
+    let (report, document) = render(Some(&fixture.binary), b"installed runtime");
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | PASS | "),
+        "{}",
+        report.table
+    );
+    assert_eq!(document["runtime_path"], serde_json::json!(path));
+    assert_eq!(
+        document["installed_binary_launch_failures"],
+        serde_json::json!([])
+    );
+
+    // The suite was told no binary: it builds the checkout, so the row fails
+    // even though the identity and the record agree with the installed bytes.
+    let (report, document) = render(None, b"installed runtime");
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | FAIL | "),
+        "{}",
+        report.table
+    );
+    assert_eq!(
+        document["installed_binary_launch_failures"],
+        serde_json::json!([
+            "the suite was not told to launch a named binary (AGENT_CONFORMANCE_RUNTIME_BINARY unset); it builds the checkout, so its launches are not the installed binary"
+        ])
+    );
+
+    // The suite's identity names the installed path with other bytes: the row
+    // fails, naming both hashes.
+    let (report, document) = render(Some(&fixture.binary), b"checkout runtime");
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | FAIL | "),
+        "{}",
+        report.table
+    );
     assert_eq!(
         document["installed_binary_launch_failures"],
         serde_json::json!([format!(
-            "run.sh launched {}, not the installed binary {}",
-            fs::canonicalize(&other).unwrap().display(),
-            fs::canonicalize(&fixture.binary).unwrap().display()
+            "the suite recorded Runtime SHA-256 {}, installed binary is {}",
+            sha256(b"checkout runtime"),
+            sha256(b"installed runtime")
         )])
+    );
+    assert_eq!(
+        document["runtime_sha256"],
+        serde_json::json!(sha256(b"checkout runtime"))
     );
     home.finish().unwrap();
 }
@@ -2441,7 +2597,9 @@ fn two_runtime_hashes_do_not_show_the_installed_path_was_launched() {
         render(&both, records, git.clone(), Some(installed()))
     };
     // Whichever hash the identity lines name first, the installed one or the
-    // other, two identity lines are no launch evidence.
+    // other, two identity lines are no launch evidence. The identity the
+    // receipt keeps is the first one, so it also names that hash when it is
+    // not the installed binary's.
     for (first, second) in [
         (&b"installed runtime"[..], &b"another runtime"[..]),
         (b"another runtime", b"installed runtime"),
@@ -2455,9 +2613,21 @@ fn two_runtime_hashes_do_not_show_the_installed_path_was_launched() {
             "{}",
             report.table
         );
+        let mut expected = vec!["run.sh wrote no launch record for the installed path".to_owned()];
+        if first != b"installed runtime".as_slice() {
+            expected.push(format!(
+                "the suite recorded Runtime SHA-256 {}, installed binary is {}",
+                sha256(first),
+                sha256(b"installed runtime")
+            ));
+        }
+        expected.push(
+            "the suite recorded conflicting Runtime identities; not every one names the installed binary"
+                .to_owned(),
+        );
         assert_eq!(
             document["installed_binary_launch_failures"],
-            serde_json::json!(["run.sh wrote no launch record for the installed path"])
+            serde_json::to_value(&expected).unwrap()
         );
         assert_eq!(
             document["installed_binary_launch_status"],
@@ -2643,6 +2813,7 @@ fn test_output_that_looks_like_a_launch_is_not_launch_evidence() {
             tree_check_failure: None,
             installed: Some(installed),
             launch_record: LaunchRecord::read(&path),
+            named_runtime: Some(fixture.binary.clone()),
         },
         Some(""),
     );
@@ -2707,7 +2878,12 @@ fn two_launch_records_are_not_evidence() {
         &fixture.data,
         agent_conformance::report::release_platform(),
     );
-    let (observations, git) = synthetic(1, false);
+    let (mut observations, git) = synthetic(1, false);
+    observations[0] = Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(b"installed runtime"),
+        path: Some(fixture.binary.to_string_lossy().into_owned()),
+    };
     // run.sh writes exactly one record. A file with two, even two for the
     // installed path and hash, is not that file.
     let (report, document) = render(
@@ -2814,6 +2990,7 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
                 tree_check_failure: None,
                 installed,
                 launch_record: agent_conformance::report::LaunchRecord::read(&record_path),
+                named_runtime: Some(fixture.binary.clone()),
             },
             Some(""),
         )
@@ -3000,7 +3177,6 @@ fn demo_gates_hold_with_a_stub_suite() {
     let lane = Path::new(env!("CARGO_MANIFEST_DIR"));
     let output = std::process::Command::new("bash")
         .arg(lane.join("tests/demo-gates.sh"))
-        .arg(env!("CARGO_BIN_EXE_report"))
         .arg(root.path().join("gates"))
         .output()
         .unwrap();

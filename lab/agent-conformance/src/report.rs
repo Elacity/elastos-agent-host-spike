@@ -30,18 +30,20 @@ pub const STAGED_BUNDLE_SCOPE: &str =
 pub const INSTALLED_RUNTIME_SCOPE: &str =
     "release head, release and components hash-check each other and name this repository commit; records only, the installed data folder did not run";
 
-/// What the runtime-ran row covers: after the suite and its liveness check,
-/// `run.sh` made a private record folder, hashed the installed binary,
-/// launched it once, saw it answer, and hashed it again; both hashes match the
-/// installed record. Nothing here sees the bytes the operating system then
-/// executed, and the suite's own launches use the named path with the
-/// harness's pre-launch hash. The report's own bytes are the ones hashed
-/// before the suite: `run.sh` hashes the report it built, hashes it again
-/// after the suite, refuses a change with `reporter changed during the suite:
-/// <first> <now>`, and runs a copy of the verified bytes from a folder no test
-/// process was given.
+/// What the runtime-ran row covers: the suite was told a named binary whose
+/// canonical path is the installed binary, and the one Runtime identity it
+/// recorded names that path with the installed binary's SHA-256; after the
+/// suite and its liveness check, `run.sh` made a private record folder, hashed
+/// the installed binary, launched it once, saw it answer, and hashed it again;
+/// both hashes match the installed record. Nothing here sees the bytes the
+/// operating system then executed, and the suite's own launches use the named
+/// path with the harness's pre-launch hash. The report's own bytes are the ones
+/// hashed before the suite: `run.sh` hashes the report it built, hashes it
+/// again after the suite, refuses a change with `reporter changed during the
+/// suite: <first> <now>`, and runs a copy of the verified bytes from a folder
+/// no test process was given.
 pub const INSTALLED_RUNTIME_BINARY_SCOPE: &str =
-    "run.sh made the record after the suite and its liveness check, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record; what this does not show: the suite's own launches use the named path with the harness's pre-launch hash, and nothing sees the bytes the operating system then executed";
+    "the suite was told a named binary whose canonical path is the installed binary, and the Runtime identity it recorded names that path with the installed binary's SHA-256; run.sh hashed the report it built before the suite, hashed it again after the suite and its liveness check, refused a change, and ran a copy of those verified bytes from a folder no test process was given; it made the record after that, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record; what this does not show: nothing sees the bytes the operating system then executed";
 
 /// The data folder the Runtime under test ran with, as the receipt states it.
 pub const RUNTIME_DATA_FOLDER: &str =
@@ -390,6 +392,12 @@ struct Identities {
     /// treated as the Runtime that ran. Nothing here shows a launch; the
     /// record `run.sh` wrote carries that.
     runtime: Option<RuntimeIdentity>,
+    /// Set when a later identity line named a different Runtime path or
+    /// SHA-256 than the first. That line fails `versions_receipt` with
+    /// `conflicting elastos SHA-256` or `conflicting elastos path`, and the
+    /// installed-path row fails too: not every identity the suite recorded
+    /// names the installed binary.
+    runtime_conflict: bool,
     provider: Option<String>,
     built: BTreeMap<String, ProbeIdentity>,
     launched: BTreeMap<String, ProbeIdentity>,
@@ -412,14 +420,15 @@ impl Identities {
                     if !hex(&sha256, 64) {
                         return Err(format!("malformed {role} SHA-256"));
                     }
-                    match &self.runtime {
-                        Some(old) if old.sha256 != sha256 => {
+                    if let Some(old) = &self.runtime {
+                        if old.sha256 != sha256 {
+                            self.runtime_conflict = true;
                             return Err(format!("conflicting {role} SHA-256"));
                         }
-                        Some(old) if old.path != path => {
+                        if old.path != path {
+                            self.runtime_conflict = true;
                             return Err(format!("conflicting {role} path"));
                         }
-                        _ => {}
                     }
                     self.runtime = Some(RuntimeIdentity { path, sha256 });
                 }
@@ -822,6 +831,83 @@ pub fn installed_binary_launched_failures(
     failures
 }
 
+/// Every reason the suite's own record does not show it ran the installed
+/// binary; empty means the suite was told to launch a named binary
+/// (`AGENT_CONFORMANCE_RUNTIME_BINARY`, `named` here) whose canonical path is
+/// the installed binary's, and the one Runtime identity it recorded names that
+/// path and that binary's SHA-256. `named` is the variable's value as `run.sh`
+/// passed it through the environment; the report reads no test output for it.
+/// A suite that was told nothing builds the checkout, so its launches are not
+/// the installed binary and the row fails.
+///
+/// Identity lines come from the suite's own output: the code at the reviewed
+/// commit prints them at the spawn point, before any Runtime starts, and a
+/// test that deliberately wrote a different line would have to be written into
+/// that reviewed commit. Review binding covers such a change, so these lines
+/// are trusted on the same basis as the rest of the reviewed code.
+pub fn suite_runtime_failures(
+    suite: Option<&RuntimeIdentity>,
+    named: Option<&Path>,
+    installed: Option<&InstalledRuntime>,
+) -> Vec<String> {
+    let Some(installed) = installed else {
+        return vec!["no matched installed Runtime to compare".into()];
+    };
+    let Ok(installed_path) = std::fs::canonicalize(&installed.binary_path) else {
+        return vec![format!(
+            "could not resolve the installed binary path {}",
+            installed.binary_path.display()
+        )];
+    };
+    let mut failures = Vec::new();
+    match named {
+        None => failures.push(
+            "the suite was not told to launch a named binary (AGENT_CONFORMANCE_RUNTIME_BINARY unset); it builds the checkout, so its launches are not the installed binary".into(),
+        ),
+        Some(named) => match std::fs::canonicalize(named) {
+            Ok(named) if named != installed_path => failures.push(format!(
+                "the suite was told to launch {}, not the installed binary {}",
+                named.display(),
+                installed_path.display()
+            )),
+            Ok(_) => {}
+            Err(_) => failures.push(format!(
+                "could not resolve the named suite Runtime path {}",
+                named.display()
+            )),
+        },
+    }
+    match suite {
+        None => failures.push("the suite recorded no Runtime identity".into()),
+        Some(suite) => {
+            match &suite.path {
+                None => failures.push(
+                    "the suite recorded no named Runtime path; it built its own Runtime".into(),
+                ),
+                Some(path) => match std::fs::canonicalize(path) {
+                    Ok(path) if path != installed_path => failures.push(format!(
+                        "the suite recorded Runtime path {}, not the installed binary {}",
+                        path.display(),
+                        installed_path.display()
+                    )),
+                    Ok(_) => {}
+                    Err(_) => failures.push(format!(
+                        "could not resolve the suite's Runtime path {}",
+                        path
+                    )),
+                },
+            }
+            if suite.sha256 != installed.binary_sha256 {
+                failures.push(format!(
+                    "the suite recorded Runtime SHA-256 {}, installed binary is {}",
+                    suite.sha256, installed.binary_sha256
+                ));
+            }
+        }
+    }
+    failures
+}
+
 /// The key a release uses for this machine's platform, as the Runtime's own
 /// update check spells it.
 pub fn release_platform() -> &'static str {
@@ -959,6 +1045,7 @@ pub fn write_reviewed_run(
         tree_check_failure: None,
         installed: None,
         launch_record: LaunchRecord::Missing,
+        named_runtime: None,
     };
     write_bound_run(listed, output, cargo_ok, git, bound, receipt, gaps)
 }
@@ -983,6 +1070,10 @@ pub struct Bound<'a> {
     /// suite and named on the command line. `Missing` means the report was
     /// named no file, so the installed-path row has no launch evidence.
     pub launch_record: LaunchRecord,
+    /// The binary `run.sh`'s environment named for the suite
+    /// (`AGENT_CONFORMANCE_RUNTIME_BINARY`), as given. `None` means the
+    /// variable was unset, so the suite built the checkout.
+    pub named_runtime: Option<PathBuf>,
 }
 
 /// `write_reviewed_run` with the installed Runtime. Like review binding, the
@@ -1037,6 +1128,7 @@ pub fn render_reviewed_run(
         tree_check_failure: None,
         installed: None,
         launch_record: LaunchRecord::Missing,
+        named_runtime: None,
     };
     render_bound_run(listed, output, cargo_ok, git, bound, gaps)
 }
@@ -1057,6 +1149,7 @@ pub fn render_bound_run(
         tree_check_failure,
         installed,
         launch_record,
+        named_runtime,
     } = bound;
     let mut evidence = Evidence::parse(listed, output, gaps);
     let (mut table, suite_ok) = evidence.table(cargo_ok);
@@ -1116,13 +1209,29 @@ pub fn render_bound_run(
         "staged_bundle (A14) | {} | {STAGED_BUNDLE_SCOPE}\n",
         if unstaged.is_empty() { "PASS" } else { "FAIL" }
     ));
-    // Whether run.sh launched the installed path is asked only when an
-    // installed Runtime was given, and it rests on the record file alone: the
-    // file is made after the suite, the identity line printed when the binary
-    // was named comes before any launch, a test's own output carries no record,
-    // and no test process is given the file's path.
+    // Whether the installed path ran is asked only when an installed Runtime
+    // was given. Two records answer it: the file `run.sh` wrote after the suite
+    // (paths and hashes of its one launch), and the suite's own Runtime
+    // identity (the path it was told to launch beside the hash it took then).
+    // The identity line is printed at the spawn point and carries no launch;
+    // the file is made after the suite, and no test process is given its path.
     let not_launched = installed.as_ref().map(|installed| {
-        installed_binary_launched_failures(&launch_record, installed.as_ref().ok())
+        let mut failures =
+            installed_binary_launched_failures(&launch_record, installed.as_ref().ok());
+        failures.extend(suite_runtime_failures(
+            evidence.identities.runtime.as_ref(),
+            named_runtime.as_deref(),
+            installed.as_ref().ok(),
+        ));
+        if evidence.identities.runtime_conflict {
+            failures.push(
+                "the suite recorded conflicting Runtime identities; not every one names the installed binary"
+                    .into(),
+            );
+        }
+        failures.sort();
+        failures.dedup();
+        failures
     });
     if let Some(installed) = &installed {
         table.push_str(&format!(
@@ -1159,6 +1268,11 @@ pub fn render_bound_run(
             .runtime
             .as_ref()
             .map(|runtime| &runtime.sha256),
+        "runtime_path": evidence
+            .identities
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.path.as_deref()),
         "localhost_provider_sha256": evidence.identities.provider,
         "probes": evidence.identities.launched.values().collect::<Vec<_>>(),
         "build_only_probes": evidence.identities.built.values().collect::<Vec<_>>(),
