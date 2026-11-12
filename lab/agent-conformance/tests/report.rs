@@ -1633,16 +1633,22 @@ struct InstalledFixture {
     release: Vec<u8>,
 }
 
-const INSTALLED_COMMIT: &str = "7bc3704b5e181e5aa435c2b2cafbd73a996932ef";
+/// The commit `synthetic(1, _)` returns, so the fixture's release is built from
+/// the commit the receipt records unless a test names another one.
+const INSTALLED_COMMIT: &str = "0000000000000000000000000000000000000001";
 
 impl InstalledFixture {
     fn new(root: &Path) -> Self {
+        Self::at_commit(root, INSTALLED_COMMIT)
+    }
+
+    fn at_commit(root: &Path, commit: &str) -> Self {
         let (binary, data) = (root.join("bin/elastos"), root.join("data"));
         let descriptor = |bytes: &[u8]| serde_json::json!({ "sha256": sha256(bytes) });
         let platform = agent_conformance::report::release_platform();
         let release = serde_json::json!({ "payload": {
             "version": "2.0.1",
-            "source": { "commit": INSTALLED_COMMIT },
+            "source": { "commit": commit },
             "platforms": { platform: {
                 "binary": descriptor(b"installed runtime"),
                 "components": descriptor(b"{\"capsules\":{}}") } } } })
@@ -1774,6 +1780,70 @@ fn changed_installed_binary_fails_the_installed_runtime_row() {
     // Like review binding, this is its own row; the suite's result stays.
     assert!(report.passed, "{:?}", report.failures);
     assert_eq!(document["command_success"], true);
+    home.finish().unwrap();
+}
+
+#[test]
+fn installed_release_binds_to_the_repository_commit() {
+    let home = ThrowawayHome::new().unwrap();
+    let other = format!("{:040x}", 2);
+
+    // The release names the commit the receipt records: the installed row passes.
+    let fixture = InstalledFixture::new(&home.root().join("same"));
+    let (report, document) = fixture.receipt();
+    assert!(
+        report.table.contains("installed_runtime (A14) | PASS\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(document["repository"]["commit"], INSTALLED_COMMIT);
+    assert_eq!(
+        document["installed_runtime"]["source_commit"],
+        INSTALLED_COMMIT
+    );
+    assert_eq!(
+        document["installed_runtime_failures"],
+        serde_json::json!([])
+    );
+
+    // A release of another commit fails the row and names both commits.
+    let fixture = InstalledFixture::at_commit(&home.root().join("other"), &other);
+    let (report, document) = fixture.receipt();
+    assert_eq!(
+        document["installed_runtime_failures"],
+        serde_json::json!([format!(
+            "release source commit {other} differs from repository commit {INSTALLED_COMMIT}"
+        )])
+    );
+    assert!(
+        report.table.contains("installed_runtime (A14) | FAIL\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(document["installed_runtime_status"], "unmatched");
+    assert_eq!(document["installed_runtime"], Value::Null);
+    // Nothing matched is left for the ran row to compare.
+    assert!(
+        report.table.contains("installed_runtime_ran (A14) | FAIL\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!(["no matched installed Runtime to compare"])
+    );
+
+    // Without a recorded repository commit there is nothing to bind to.
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    )
+    .unwrap();
+    assert_eq!(
+        agent_conformance::report::release_commit_failures(&installed, None),
+        ["no repository commit to bind the release source to"]
+    );
     home.finish().unwrap();
 }
 
@@ -1959,7 +2029,11 @@ fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
 #[test]
 fn report_cli_reads_an_installed_runtime_only_when_given() {
     let home = ThrowawayHome::new().unwrap();
-    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    // The report binds the release to the commit it reads from the repository.
+    let commit = GitIdentity::read(&agent_conformance::build::repository())
+        .unwrap()
+        .commit;
+    let fixture = InstalledFixture::at_commit(&home.root().join("installed"), &commit);
     let (observations, _) = synthetic(5, false);
     let listed_path = home.root().join("list");
     let results_path = home.root().join("results");

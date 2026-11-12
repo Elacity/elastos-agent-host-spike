@@ -538,8 +538,9 @@ pub fn reviews_file_failure(reviews: &Path, repository: &Path) -> Option<String>
 /// The installed Runtime a receipt can name, from the records the installer
 /// keeps. Only the hash chain is checked: release-head.json names the hash of
 /// release.json, which names the binary and components.json for one platform.
-/// Neither signature is verified, so this shows which release the installed
-/// bytes match, not that the release is genuine.
+/// The receipt then binds the source commit it finds to the repository commit
+/// with `release_commit_failures`. Neither signature is verified, so this shows
+/// which release the installed bytes match, not that the release is genuine.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct InstalledRuntime {
     pub version: String,
@@ -638,6 +639,25 @@ pub fn installed_runtime(
         binary_sha256,
         components_sha256,
     })
+}
+
+/// Every reason an installed release cannot serve as the release of this
+/// repository commit; empty means its source commit is the one the receipt
+/// records. `git` is the identity `review_binding` binds the reviews to, so a
+/// release built from another commit fails here even when its own hash chain is
+/// consistent.
+pub fn release_commit_failures(
+    installed: &InstalledRuntime,
+    git: Option<&GitIdentity>,
+) -> Vec<String> {
+    match git {
+        None => vec!["no repository commit to bind the release source to".into()],
+        Some(git) if git.commit != installed.source_commit => vec![format!(
+            "release source commit {} differs from repository commit {}",
+            installed.source_commit, git.commit
+        )],
+        Some(_) => Vec::new(),
+    }
 }
 
 /// Every reason the receipt cannot say the suite ran the installed binary; empty
@@ -888,6 +908,20 @@ pub fn render_bound_run(
             None
         }
     };
+    // The installed release must be the release of the commit this receipt
+    // records, the same commit `review_binding` binds the reviews to. A record
+    // whose chain matched but names another source commit fails the installed
+    // rows, naming both commits.
+    let installed = installed.map(|installed| {
+        installed.and_then(|record| {
+            let failures = release_commit_failures(&record, git.as_ref());
+            if failures.is_empty() {
+                Ok(record)
+            } else {
+                Err(failures)
+            }
+        })
+    });
     evidence.failures.sort();
     evidence.failures.dedup();
     let complete = evidence.failures.is_empty();
