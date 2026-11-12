@@ -2375,3 +2375,14 @@ fn too_many_tar_entries_refuse_the_archive() {
     assert_eq!(listing.refused.unwrap().code, "too_many_entries");
     assert!(listing.entries.is_empty());
 }
+
+#[test]
+fn the_first_block_decides_between_tar_and_zip() {
+    // The tar header comes first, so the object is tar even though a ZIP end
+    // record also ends at its last byte.
+    let mut archive = tar_build(&[TarSpec::file("a.txt").data(b"hello")]);
+    end_record(&mut archive, 0, 0, 0, &[]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert!(view(&bus).get("refused").is_none(), "the tar listing runs");
+    assert_eq!(entries(&bus).len(), 1);
+}
