@@ -579,7 +579,7 @@
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;\n",
-          "new": "    let mut entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;\n    entries.extend(collect_entries(bundle.parent().unwrap_or(bundle), &mut observe)?);\n"
+          "new": "    let mut entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;\n    entries.extend(collect_entries(\n        bundle.parent().unwrap_or(bundle),\n        &mut observe,\n        &mut Tally::new(budget),\n    )?);\n"
         }
       ],
       "tests": [
@@ -751,7 +751,7 @@
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let actual = lab_cid(bundle)?;\n",
-          "new": "    let entries = collect_entries(bundle, &mut |_, _| {})?;\n    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    let actual = encode_entries(&entries)?;\n"
+          "new": "    let entries = collect_entries(bundle, &mut |_, _| {}, &mut Tally::new(Budget::UNLIMITED))?;\n    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    let actual = encode_entries(&entries)?;\n"
         }
       ],
       "tests": [
