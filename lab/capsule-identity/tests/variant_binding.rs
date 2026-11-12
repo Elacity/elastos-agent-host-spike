@@ -852,7 +852,7 @@ fn variant_binding_paths_share_one_implementation() {
     for text in [".wasm", "PORTABLE_PLATFORM", "Refusal::WasmNotPortable"] {
         assert_eq!(portable.matches(text).count(), 1, "{text}:\n{portable}");
     }
-    assert_eq!(code.matches(".wasm").count(), 1, ".wasm");
+    assert_eq!(code.matches(".wasm").count(), 2, ".wasm");
     let shape = library_item(&code, "fn require_variant_shape<'a>(");
     assert_eq!(
         shape.matches("Refusal::PortableNotAlone").count(),

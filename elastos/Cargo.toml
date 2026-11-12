@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/elastos-common",
+    "crates/elastos-bundle-identity",
     "crates/elastos-protected-content-contracts",
     "crates/elastos-protected-content-custody",
     "crates/elastos-protected-content-provider-contracts",

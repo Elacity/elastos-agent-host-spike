@@ -9539,8 +9539,11 @@ mod stored_root_tests {
         assert!(!child_path.exists());
     }
 
+    /// The launch context takes this person's root from the parent's store,
+    /// where their record is kept. This Runtime holds no protection for that
+    /// root, so the save is refused and the read answers the default.
     #[test]
-    fn parent_auth_store_person_services_selection_uses_stored_root_in_child() {
+    fn parent_auth_store_person_services_selection_is_refused_in_child() {
         use elastos_runtime::auth::AuthSessionGrantV1;
 
         let (_temp, data_dir) = state_dir();
@@ -9585,18 +9588,28 @@ mod stored_root_tests {
                 .unwrap()
                 .is_none()
         );
-        let mut selection = home_services_default_selection_state(&context);
-        selection
-            .local_offer_ids
-            .insert("parent-person-offer".to_string());
-        home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
+        let selection = home_services_default_selection_state(&context);
+        let stored_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        let error = home_save_services_selection_state(&data_dir, &context, &selection)
+            .expect_err("this Runtime holds no protection for the parent store's person");
+        let text = format!("{error:#}");
+        assert!(text.starts_with("could not write "), "{text}");
+        assert!(
+            text.ends_with("protected record is kept only on the Runtime this person signed in on"),
+            "{text}"
+        );
+        assert!(
+            !stored_path.exists(),
+            "the refused save wrote under the stored root"
+        );
+        assert!(
+            !stored_path.parent().unwrap().exists(),
+            "the refused save made the Home folder"
+        );
         assert!(home_services_selection_state(&data_dir, &context)
             .unwrap()
             .local_offer_ids
-            .contains("parent-person-offer"));
-        let parent_path = home_services_selection_state_path(&data_dir, &context).unwrap();
-        assert!(parent_path.is_file());
-        assert_only_file_named(&data_dir, &parent_path);
+            .is_empty());
         let formula_root = crate::auth::principal_localhost_root(&record.principal_id);
         let formula_uri = format!("{formula_root}/.AppData/ElastOS/Home/services-state.json");
         let formula_path =
@@ -9979,45 +9992,10 @@ mod r8c_child_rows {
 #[cfg(test)]
 mod r8d_passkey_rows {
     use super::super::gateway_tests::r8d_passkey_rows::{
-        passkey_person, refusal, PasskeyPerson, PERSON, ROOT,
+        kept_elsewhere_refusal, passkey_person, refusal, KEPT_ELSEWHERE, PERSON, ROOT,
     };
     use super::*;
     use crate::collaboration_profile_authority as authority;
-
-    /// A path under the person's root, as `assert_child_holds_only` reports it.
-    fn under_person(relative: &str) -> String {
-        format!("{}/{relative}", ROOT.trim_start_matches("localhost://"))
-    }
-
-    /// The same path on disk, under `child`.
-    fn person_path(child: &std::path::Path, relative: &str) -> std::path::PathBuf {
-        child.join(under_person(relative))
-    }
-
-    /// The file's bytes, parsed as JSON. The caller compares the parsed value
-    /// with the expected object; that comparison shows the file is plain JSON,
-    /// because bytes in a sealed envelope also parse as JSON.
-    fn plain_json(path: &std::path::Path) -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(path).unwrap())
-            .unwrap_or_else(|error| panic!("{} is not plain JSON: {error}", path.display()))
-    }
-
-    /// A saved file is the only entry beside what the fixture left, and its
-    /// bytes are `expected`.
-    fn assert_saved(
-        child: &std::path::Path,
-        relative: &str,
-        expected: &[u8],
-        person: &PasskeyPerson,
-    ) {
-        assert_eq!(
-            std::fs::read(person_path(child, relative)).unwrap(),
-            expected,
-            "{relative} holds the bytes the save was given"
-        );
-        let expected = under_person(relative);
-        person.assert_child_holds_only(&[expected.as_str()]);
-    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
@@ -10066,209 +10044,139 @@ mod r8d_passkey_rows {
         assert_eq!(name.as_deref(), Some("Parent Person"));
     }
 
-    /// Entry: `home_save_background_image` (line 8519) with the name
-    /// `background-image.png`. Today the child's write leaves the image bytes
-    /// as given under the person's root.
+    /// Entry: `home_save_background_image` with the name
+    /// `background-image.png`. The child holds no protection for this
+    /// person's root, so the save is refused and creates nothing.
     #[test]
     fn r8d_child_background_image_save_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
         let child = person.child.path();
-        let bytes = b"r8d child background image".to_vec();
-        let file_name = "background-image.png";
-        let saved = home_save_background_image(child, &person.ctx, file_name, bytes.clone())
-            .unwrap_or_else(|error| panic!("{error:#}"));
-        assert_eq!(saved.schema, "elastos.home.appearance/v1");
-        assert!(!saved.background_overlay_enabled);
-        let image_url = saved
-            .background_image_url
-            .expect("the summary names the image");
-        // The scope part is fixed for this person. The `v` part is the image
-        // file's modification time in nanoseconds, so it changes per run.
-        let (fixed, version) = image_url
-            .split_once("&v=")
-            .unwrap_or_else(|| panic!("{image_url}"));
+        let error = home_save_background_image(
+            child,
+            &person.ctx,
+            "background-image.png",
+            b"r8d child background image".to_vec(),
+        )
+        .expect_err("the child holds no protection for this person");
         assert_eq!(
-            fixed,
-            "/api/apps/home/appearance/background-image?scope=ecee74316e460e28"
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
         );
-        assert!(
-            version.bytes().all(|byte| byte.is_ascii_digit()),
-            "{version}"
-        );
-        let relative = format!(".AppData/ElastOS/Home/Appearance/{file_name}");
-        assert_saved(child, &relative, &bytes, &person);
+        person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_background_overlay` (line 8495) with opacity 0.4,
-    /// which is not the default. Today the child's write leaves the overlay
-    /// settings as a plain JSON object.
+    /// Entry: `home_save_background_overlay` with opacity 0.4, which is not
+    /// the default. The child holds no protection for this person's root, so
+    /// the save is refused and creates nothing.
     #[test]
     fn r8d_child_background_overlay_save_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
         let child = person.child.path();
-        let saved = home_save_background_overlay(child, &person.ctx, true, 0.4)
-            .unwrap_or_else(|error| panic!("{error:#}"));
-        assert!(saved.background_overlay_enabled);
-        assert_eq!(saved.background_overlay_opacity, 0.4);
-        let relative = ".AppData/ElastOS/Home/Appearance/background-overlay.json";
+        let error = home_save_background_overlay(child, &person.ctx, true, 0.4)
+            .expect_err("the child holds no protection for this person");
         assert_eq!(
-            plain_json(&person_path(child, relative)),
-            serde_json::json!({"enabled": true, "opacity": 0.4})
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
         );
-        let expected = under_person(relative);
-        person.assert_child_holds_only(&[expected.as_str()]);
+        person.assert_child_holds_only(&[]);
     }
 
-    /// A later image upload: both calls succeed, the first file is gone and
-    /// the second file is present under the person's root. By reading,
-    /// `home_save_background_image` calls `remove_home_background_images`
-    /// (line 8529) before `write_principal_root_object_resolved` (line 8530);
-    /// this row does not show that order.
+    /// A later image upload is refused the same way as the first, and the
+    /// child creates nothing. By reading, `home_save_background_image` calls
+    /// `remove_home_background_images` before
+    /// `write_principal_root_object_resolved`; this row does not show that
+    /// order.
     #[test]
     fn r8d_child_background_image_replace_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
         let child = person.child.path();
-        home_save_background_image(
-            child,
-            &person.ctx,
-            "background-image.png",
-            b"r8d first image".to_vec(),
-        )
-        .unwrap_or_else(|error| panic!("{error:#}"));
-        let second = b"r8d second image".to_vec();
-        home_save_background_image(child, &person.ctx, "background-image.jpg", second.clone())
-            .unwrap_or_else(|error| panic!("{error:#}"));
-        let earlier = person_path(
-            child,
-            ".AppData/ElastOS/Home/Appearance/background-image.png",
-        );
-        assert!(
-            !earlier.exists(),
-            "the earlier image is removed: {}",
-            earlier.display()
-        );
-        let relative = ".AppData/ElastOS/Home/Appearance/background-image.jpg";
-        assert_saved(child, relative, &second, &person);
+        for file_name in ["background-image.png", "background-image.jpg"] {
+            let error =
+                home_save_background_image(child, &person.ctx, file_name, b"r8d image".to_vec())
+                    .expect_err("the child holds no protection for this person");
+            assert_eq!(
+                kept_elsewhere_refusal(&error).as_deref(),
+                Some(KEPT_ELSEWHERE)
+            );
+        }
+        person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_appearance_preferences` (line 8330) with one field
-    /// set. Today the child's write leaves a plain JSON object with the
-    /// revision raised by one and the other fields at their defaults.
+    /// Entry: `home_save_appearance_preferences` with one field set. The
+    /// child holds no protection for this person's root, so the save is
+    /// refused and creates nothing.
     #[test]
     fn r8d_child_appearance_preferences_save_for_the_passkey_person() {
         let person = passkey_person(HOME_CAPSULE_ID);
         let child = person.child.path();
         let update: HomeAppearancePreferencesUpdate =
             serde_json::from_value(serde_json::json!({"sounds": true})).unwrap();
-        let saved = home_save_appearance_preferences(child, &person.ctx, update)
-            .unwrap_or_else(|error| panic!("{error:#}"));
-        assert_eq!(saved.revision, 1);
-        assert!(saved.sounds);
-        let relative = ".AppData/ElastOS/Home/Appearance/preferences.json";
+        let error = home_save_appearance_preferences(child, &person.ctx, update)
+            .expect_err("the child holds no protection for this person");
         assert_eq!(
-            plain_json(&person_path(child, relative)),
-            serde_json::json!({
-                "schema": "elastos.home.appearance.preferences/v1",
-                "revision": 1,
-                "theme": "dark",
-                "accent": "blue",
-                "accent_custom": "#4f7fff",
-                "dock_auto_hide": false,
-                "sounds": true,
-                "focus_mode": false,
-            })
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
         );
-        let expected = under_person(relative);
-        person.assert_child_holds_only(&[expected.as_str()]);
+        person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_browser_state` (line 7177) with an empty update.
-    /// Today the child's write leaves the Home browser state as plain JSON
-    /// with the person's id and root.
+    /// Entry: `home_save_browser_state` with an empty update. The child
+    /// holds no protection for this person's root, so the save is refused
+    /// and creates nothing.
     #[test]
     fn r8d_child_browser_state_save_for_the_passkey_person() {
         let person = passkey_person(HOME_CAPSULE_ID);
         let child = person.child.path();
         let update: HomeBrowserStateUpdate = serde_json::from_value(serde_json::json!({})).unwrap();
-        let saved = home_save_browser_state(child, &person.ctx, update)
-            .unwrap_or_else(|error| panic!("{error:#}"));
-        assert_eq!(saved.schema, "elastos.home.browser-state/v1");
-        let relative = ".AppData/ElastOS/Home/browser-state.json";
+        let error = home_save_browser_state(child, &person.ctx, update)
+            .expect_err("the child holds no protection for this person");
         assert_eq!(
-            plain_json(&person_path(child, relative)),
-            serde_json::json!({
-                "schema": "elastos.home.browser-state/v1",
-                "principal_id": PERSON,
-                "localhost_root": ROOT,
-                "layout": null,
-                "session": null,
-                "recent_targets": [],
-            })
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
         );
-        let expected = under_person(relative);
-        person.assert_child_holds_only(&[expected.as_str()]);
+        person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_services_selection_state` (line 3004) with the
-    /// person's default state. This row calls the storage function directly;
-    /// the route (`services_offer_update`, line 2664) calls it at line 2888
-    /// after it reads the Home state, checks the offer and builds the state,
-    /// and those steps do not run here. Today the child's write leaves that
-    /// state as plain JSON.
+    /// Entry: `home_save_services_selection_state` with the person's default
+    /// state. This row calls the storage function directly; the route
+    /// `services_offer_update` calls it after it reads the Home state, checks
+    /// the offer and builds the state, and those steps do not run here. The
+    /// child holds no protection for this person's root, so the save is
+    /// refused and creates nothing.
+    /// `home_state_write_error` puts the file's path on top of the refusal,
+    /// so the row reads through that context.
     #[test]
     fn r8d_child_services_selection_save_for_the_passkey_person() {
         let person = passkey_person(SERVICES_CAPSULE_ID);
         let child = person.child.path();
         let state = home_services_default_selection_state(&person.ctx);
-        home_save_services_selection_state(child, &person.ctx, &state)
-            .unwrap_or_else(|error| panic!("{error:#}"));
-        let relative = ".AppData/ElastOS/Home/services-state.json";
+        let error = home_save_services_selection_state(child, &person.ctx, &state)
+            .expect_err("the child holds no protection for this person");
         assert_eq!(
-            plain_json(&person_path(child, relative)),
-            serde_json::json!({
-                "schema": "elastos.services.state/v1",
-                "principal_id": PERSON,
-                "localhost_root": ROOT,
-                "updated_at": 0,
-                "local_offer_ids": [],
-                "remote_offer_ids": [],
-                "remote_offer_requests": {},
-                "model_catalog_requests": {},
-            })
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
         );
-        let expected = under_person(relative);
-        person.assert_child_holds_only(&[expected.as_str()]);
+        person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_services_requests_state` (line 3104) with the
-    /// person's default state. This row calls the storage function directly.
-    /// By reading, no route reaches this save for this person on a child
-    /// today: `home_services_sync_access_requests` returns with no known peer
-    /// (lines 4897-4899) before its save, and
-    /// `home_services_record_access_decision` returns "service request not
-    /// found" (line 5450) before its save (line 5549). Today the child's
-    /// write leaves that state as plain JSON.
+    /// Entry: `home_save_services_requests_state` with the person's default
+    /// state. This row calls the storage function directly. By reading, no
+    /// route reaches this save for this person on a child today:
+    /// `home_services_sync_access_requests` returns with no known peer before
+    /// its save, and `home_services_record_access_decision` returns "service
+    /// request not found" before its save. The child holds no protection for
+    /// this person's root, so the save is refused and creates nothing.
     #[test]
     fn r8d_child_services_requests_save_for_the_passkey_person() {
         let person = passkey_person(SERVICES_CAPSULE_ID);
         let child = person.child.path();
         let state = home_services_default_requests_state(&person.ctx);
-        home_save_services_requests_state(child, &person.ctx, &state)
-            .unwrap_or_else(|error| panic!("{error:#}"));
-        let relative = ".AppData/ElastOS/Home/services-requests.json";
+        let error = home_save_services_requests_state(child, &person.ctx, &state)
+            .expect_err("the child holds no protection for this person");
         assert_eq!(
-            plain_json(&person_path(child, relative)),
-            serde_json::json!({
-                "schema": "elastos.services.requests/v1",
-                "principal_id": PERSON,
-                "localhost_root": ROOT,
-                "updated_at": 0,
-                "requests": {},
-                "catalog_last_response_at": {},
-                "pending_model_catalogs": {},
-            })
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
         );
-        let expected = under_person(relative);
-        person.assert_child_holds_only(&[expected.as_str()]);
+        person.assert_child_holds_only(&[]);
     }
 }

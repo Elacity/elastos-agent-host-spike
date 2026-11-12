@@ -550,6 +550,9 @@ fn versions_receipt_binds_current_run() {
     fs::write(&results_path, output(&observations)).unwrap();
     let command = || {
         std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .env_remove("AGENT_CONFORMANCE_REVIEWS")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
             .arg(&listed_path)
             .arg(&results_path)
             .arg("0")
@@ -918,6 +921,9 @@ fn skipped_report_keeps_a_nonzero_exit() {
     fs::write(&list_path, listed).unwrap();
     fs::write(&results_path, output).unwrap();
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+        .env_remove("AGENT_CONFORMANCE_REVIEWS")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
         .arg(list_path)
         .arg(results_path)
         .arg("101")
@@ -1188,5 +1194,1244 @@ fn session_binding_receipt_still_requires_a_launched_probe() {
         report.failures,
         ["missing launched probe identity".to_string()],
         "a session-binding row does not waive the launched-probe receipt"
+    );
+}
+
+fn review(reviewer: &str, verdict: &str, commit: &str) -> agent_conformance::report::Review {
+    agent_conformance::report::Review {
+        reviewer: reviewer.into(),
+        verdict: verdict.into(),
+        commit: commit.into(),
+    }
+}
+
+#[test]
+fn review_failures_name_each_unbound_review() {
+    use agent_conformance::report::review_failures;
+    let (_, git) = synthetic(1, false);
+    let other = format!("{:040x}", 2);
+    let fails = |reviews: Option<&[_]>, git: &GitIdentity| review_failures(reviews, Some(git));
+    assert_eq!(fails(None, &git), ["missing review"]);
+    assert_eq!(fails(Some(&[]), &git), ["missing review"]);
+    let wrong = [
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &other),
+    ];
+    assert_eq!(
+        fails(Some(&wrong), &git),
+        ["review names another commit: claude"]
+    );
+    let rejected = [review("codex", "reject", &git.commit)];
+    assert_eq!(fails(Some(&rejected), &git), ["review did not pass: codex"]);
+    // Exact match only: a prefix, another case, or a verdict that merely
+    // contains "pass" does not bind.
+    let lettered = GitIdentity {
+        commit: "ab".repeat(20),
+        ..git.clone()
+    };
+    let near = [
+        review("prefix", "pass", &lettered.commit[..12]),
+        review("upper", "pass", &lettered.commit.to_uppercase()),
+    ];
+    assert_eq!(
+        fails(Some(&near), &lettered),
+        [
+            "review names another commit: prefix",
+            "review names another commit: upper"
+        ]
+    );
+    let worded = [
+        review("codex", "did not pass", &git.commit),
+        review("claude", "PASS", &git.commit),
+    ];
+    assert_eq!(
+        fails(Some(&worded), &git),
+        ["review did not pass: claude", "review did not pass: codex"]
+    );
+    let passed = [review("codex", "pass", &git.commit)];
+    let dirty = GitIdentity {
+        dirty: true,
+        ..git.clone()
+    };
+    assert_eq!(
+        fails(Some(&passed), &dirty),
+        ["reviews cannot bind: dirty tree"]
+    );
+    assert_eq!(
+        review_failures(Some(&passed), None),
+        ["reviews cannot bind: no Git identity"]
+    );
+    let unnamed = [review("", "pass", &git.commit)];
+    assert_eq!(fails(Some(&unnamed), &git), ["malformed review: reviewer"]);
+    let spaced = [review("co dex", "pass", &git.commit)];
+    assert_eq!(fails(Some(&spaced), &git), ["malformed review: reviewer"]);
+    let both = [
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &git.commit),
+    ];
+    assert!(fails(Some(&both), &git).is_empty());
+}
+
+fn reviewed(
+    git: GitIdentity,
+    reviews: Option<&[agent_conformance::report::Review]>,
+) -> (agent_conformance::report::RunReport, Value) {
+    let (observations, _) = synthetic(1, false);
+    let report = agent_conformance::report::render_reviewed_run(
+        &format!("{LIVE}: test\n"),
+        &output(&observations),
+        true,
+        Ok(git),
+        reviews,
+        Some(""),
+    );
+    let document = serde_json::from_slice(&report.receipt_bytes).unwrap();
+    (report, document)
+}
+
+#[test]
+fn receipt_records_review_binding_beside_command_success() {
+    let (_, git) = synthetic(1, false);
+    let (report, document) = reviewed(git.clone(), None);
+    assert!(report.table.contains("review_binding (A14) | FAIL\n"));
+    assert_eq!(document["review_status"], "unbound");
+    assert_eq!(
+        document["review_failures"],
+        serde_json::json!(["missing review"])
+    );
+    assert_eq!(document["reviews"], Value::Null);
+    // Review binding is its own row; the suite's command result stays.
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(report.table.contains("versions_receipt (A14) | PASS\n"));
+    assert_eq!(document["command_success"], true);
+
+    let reviews = [
+        review("codex", "pass", &git.commit),
+        review("claude", "pass", &git.commit),
+    ];
+    let (report, document) = reviewed(git, Some(&reviews));
+    assert!(report.passed, "{:?}", report.failures);
+    assert!(report.table.contains("review_binding (A14) | PASS\n"));
+    assert_eq!(document["review_status"], "bound");
+    assert_eq!(document["review_failures"], serde_json::json!([]));
+    assert_eq!(document["reviews"], serde_json::to_value(&reviews).unwrap());
+    assert_eq!(document["report"]["table"], report.table);
+}
+
+#[test]
+fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
+    let home = ThrowawayHome::new().unwrap();
+    let (observations, _) = synthetic(4, false);
+    let listed_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    let reviews_path = home.root().join("reviews.json");
+    fs::write(&listed_path, format!("{LIVE}: test\n")).unwrap();
+    fs::write(&results_path, output(&observations)).unwrap();
+    let run = |receipt: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .env("AGENT_CONFORMANCE_REVIEWS", &reviews_path)
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
+            .arg(&listed_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(home.root().join(receipt))
+            .output()
+            .unwrap()
+    };
+    // No real commit is all zeros, so this review names another commit.
+    let reviews = [review("codex", "pass", &"0".repeat(40))];
+    fs::write(&reviews_path, serde_json::to_vec(&reviews).unwrap()).unwrap();
+    let result = run("reviewed.json");
+    assert!(result.status.success(), "{result:?}");
+    let receipt = read_receipt(&home.root().join("reviewed.json"));
+    assert_eq!(receipt["reviews"], serde_json::to_value(&reviews).unwrap());
+    assert_eq!(receipt["review_status"], "unbound");
+    assert!(receipt["review_failures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|failure| failure == "review names another commit: codex"));
+    // This Home is under the lane's ignored `target`, which is inside the
+    // repository: a reviews file there leaves the tree clean and cannot bind.
+    // The same holds when the file is named by a relative path.
+    let inside = |receipt: &Value| {
+        receipt["review_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure == "reviews file is inside the repository")
+    };
+    assert!(inside(&receipt), "{receipt:#}");
+    let relative = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+        .current_dir(home.root())
+        .env("AGENT_CONFORMANCE_REVIEWS", "reviews.json")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
+        .arg(&listed_path)
+        .arg(&results_path)
+        .arg("0")
+        .arg(home.root().join("relative.json"))
+        .output()
+        .unwrap();
+    assert!(relative.status.success(), "{relative:?}");
+    let receipt = read_receipt(&home.root().join("relative.json"));
+    assert_eq!(receipt["reviews"], serde_json::to_value(&reviews).unwrap());
+    assert!(inside(&receipt), "{receipt:#}");
+
+    fs::write(&reviews_path, br#"[{"reviewer":"codex","verdict":"pass"}]"#).unwrap();
+    let malformed = run("malformed.json");
+    assert_eq!(malformed.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(malformed.stderr).unwrap(),
+        "versions receipt failure: could not read reviews\n"
+    );
+    assert!(!home.root().join("malformed.json").exists());
+
+    fs::remove_file(&reviews_path).unwrap();
+    let missing = run("missing.json");
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(missing.stderr).unwrap(),
+        "versions receipt failure: could not read reviews\n"
+    );
+    assert!(!home.root().join("missing.json").exists());
+    home.finish().unwrap();
+}
+
+#[test]
+fn reviews_file_inside_the_repository_cannot_bind() {
+    use agent_conformance::report::reviews_file_failure;
+    use std::os::unix::fs::symlink;
+    const INSIDE: &str = "reviews file is inside the repository";
+    let home = ThrowawayHome::new().unwrap();
+    // A stand-in work tree and a folder beside it.
+    let (tree, outside) = (home.root().join("tree"), home.root().join("outside"));
+    fs::create_dir_all(tree.join("target")).unwrap();
+    fs::create_dir(&outside).unwrap();
+    for file in [
+        tree.join("reviews.json"),
+        tree.join("target/reviews.json"),
+        outside.join("reviews.json"),
+    ] {
+        fs::write(file, b"[]").unwrap();
+    }
+    assert_eq!(
+        reviews_file_failure(&outside.join("reviews.json"), &tree),
+        None
+    );
+    // Tracked or ignored makes no difference: both leave `git status` empty.
+    for inside in ["reviews.json", "target/reviews.json"] {
+        assert_eq!(
+            reviews_file_failure(&tree.join(inside), &tree).as_deref(),
+            Some(INSIDE)
+        );
+    }
+    // A link outside the tree to a file inside it, as a file and as a folder.
+    symlink(tree.join("target/reviews.json"), outside.join("link.json")).unwrap();
+    symlink(tree.join("target"), outside.join("folder")).unwrap();
+    // A link inside the tree to a file outside it: the name is still inside.
+    symlink(outside.join("reviews.json"), tree.join("link.json")).unwrap();
+    for path in [
+        outside.join("link.json"),
+        outside.join("folder/reviews.json"),
+        outside.join("../tree/reviews.json"),
+        tree.join("link.json"),
+    ] {
+        assert_eq!(
+            reviews_file_failure(&path, &tree).as_deref(),
+            Some(INSIDE),
+            "{path:?}"
+        );
+    }
+    // A relative path is resolved from the current directory.
+    let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let canonical = tree.join("target/reviews.json").canonicalize().unwrap();
+    let relative = canonical.strip_prefix(&here).unwrap();
+    assert!(relative.is_relative());
+    assert_eq!(
+        reviews_file_failure(relative, &tree).as_deref(),
+        Some(INSIDE)
+    );
+    assert_eq!(
+        reviews_file_failure(&outside.join("absent.json"), &tree).as_deref(),
+        Some("could not resolve the reviews file against the repository")
+    );
+
+    // The row: reviews that would bind do not when their file is refused.
+    let (observations, git) = synthetic(1, false);
+    let reviews = [review("first", "pass", &git.commit)];
+    let row = |reviews_file_failure: Option<String>| {
+        let report = agent_conformance::report::render_bound_run(
+            &format!("{LIVE}: test\n"),
+            &output(&observations),
+            true,
+            Ok(git.clone()),
+            agent_conformance::report::Bound {
+                reviews: Some(&reviews),
+                reviews_file_failure,
+                installed: None,
+            },
+            Some(""),
+        );
+        let document: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+        (report.table, document)
+    };
+    let (table, document) = row(None);
+    assert!(table.contains("review_binding (A14) | PASS\n"), "{table}");
+    assert_eq!(document["review_status"], "bound");
+    let (table, document) = row(reviews_file_failure(
+        &tree.join("target/reviews.json"),
+        &tree,
+    ));
+    assert!(table.contains("review_binding (A14) | FAIL\n"), "{table}");
+    assert_eq!(document["review_status"], "unbound");
+    assert_eq!(document["review_failures"], serde_json::json!([INSIDE]));
+    home.finish().unwrap();
+}
+
+/// Head, release, platform, binary, components, and the reasons expected.
+type Case<'a> = (&'a str, &'a str, &'a str, &'a [u8], &'a [u8], &'a [&'a str]);
+
+#[test]
+fn installed_runtime_binds_only_a_matching_hash_chain() {
+    use agent_conformance::{identity::sha256, report::installed_runtime};
+    let commit = "7bc3704b5e181e5aa435c2b2cafbd73a996932ef";
+    let record = |version: &str, commit: &str| {
+        let (bin, comp) = (sha256(b"elastos"), sha256(b"components"));
+        let platform =
+            serde_json::json!({ "binary": { "sha256": bin }, "components": { "sha256": comp } });
+        let payload = serde_json::json!({ "version": version, "source": { "commit": commit },
+            "platforms": { "x86_64-linux": platform } });
+        serde_json::json!({ "payload": payload }).to_string()
+    };
+    let head = |release: &str, version: &str| {
+        let payload =
+            serde_json::json!({ "release_sha256": sha256(release.as_bytes()), "version": version });
+        serde_json::json!({ "payload": payload }).to_string()
+    };
+    let (release, other, short) = (
+        record("2.0.0", commit),
+        record("2.0.1", commit),
+        record("2.0.0", &commit[..39]),
+    );
+    let not_hex = record("2.0.0", &format!("{}g", &commit[..39]));
+    let versionless = serde_json::json!({ "payload": {
+        "source": { "commit": commit },
+        "platforms": { "x86_64-linux": {
+            "binary": { "sha256": sha256(b"elastos") },
+            "components": { "sha256": sha256(b"components") } } } } })
+    .to_string();
+    let without_binary = serde_json::json!({ "payload": {
+        "version": "2.0.0",
+        "source": { "commit": commit },
+        "platforms": { "x86_64-linux": {
+            "components": { "sha256": sha256(b"components") } } } } })
+    .to_string();
+    let without_components = serde_json::json!({ "payload": {
+        "version": "2.0.0",
+        "source": { "commit": commit },
+        "platforms": { "x86_64-linux": {
+            "binary": { "sha256": sha256(b"elastos") } } } } })
+    .to_string();
+    let sourceless = serde_json::json!({ "payload": {
+        "version": "2.0.0",
+        "platforms": { "x86_64-linux": {
+            "binary": { "sha256": sha256(b"elastos") },
+            "components": { "sha256": sha256(b"components") } } } } })
+    .to_string();
+    let platform_array = serde_json::json!({ "payload": {
+        "version": "2.0.0",
+        "source": { "commit": commit },
+        "platforms": [{
+            "binary": { "sha256": sha256(b"elastos") },
+            "components": { "sha256": sha256(b"components") } }] } })
+    .to_string();
+    let (head_without_hash, head_without_version, head_versionless) = (
+        serde_json::json!({ "payload": { "version": "2.0.0" } }).to_string(),
+        serde_json::json!({
+            "payload": { "release_sha256": sha256(release.as_bytes()) } })
+        .to_string(),
+        serde_json::json!({
+            "payload": { "release_sha256": sha256(versionless.as_bytes()) } })
+        .to_string(),
+    );
+    let good = head(&release, "2.0.0");
+    let check = |head: &str, release: &str, platform: &str, binary: &[u8], components: &[u8]| {
+        installed_runtime(
+            head.as_bytes(),
+            release.as_bytes(),
+            platform,
+            binary,
+            components,
+        )
+    };
+    let installed = check(&good, &release, "x86_64-linux", b"elastos", b"components").unwrap();
+    assert_eq!(
+        (
+            installed.version.as_str(),
+            installed.platform.as_str(),
+            installed.source_commit.as_str()
+        ),
+        ("2.0.0", "x86_64-linux", commit)
+    );
+    assert_eq!(installed.release_sha256, sha256(release.as_bytes()));
+    assert_eq!(installed.binary_sha256, sha256(b"elastos"));
+    assert_eq!(installed.components_sha256, sha256(b"components"));
+    let (another, bin, comp) = (
+        "release head names another ",
+        "binary does not match the release",
+        "components do not match the release",
+    );
+    #[rustfmt::skip]
+    let cases: [Case; 20] = [
+        (&good, &release, "x86_64-linux", b"other", b"components", &[bin]),
+        (&good, &release, "x86_64-linux", b"elastos", b"other", &[comp]),
+        (&good, &other, "x86_64-linux", b"elastos", b"components", &["release", "version"]),
+        (&head(&other, "2.0.0"), &other, "x86_64-linux", b"elastos", b"components", &["version"]),
+        (&good, &release, "aarch64-darwin", b"elastos", b"components", &["release names no entry for aarch64-darwin"]),
+        (&head(&short, "2.0.0"), &short, "x86_64-linux", b"elastos", b"components", &["malformed release source commit"]),
+        (&head(&not_hex, "2.0.0"), &not_hex, "x86_64-linux", b"elastos", b"components", &["malformed release source commit"]),
+        (&good, &release, "", b"elastos", b"components", &["malformed platform"]),
+        (&good, &release, "x86_64-linux/binary", b"elastos", b"components", &["malformed platform"]),
+        (&good, &release, "x86_64-linux~1", b"elastos", b"components", &["malformed platform"]),
+        ("{", &release, "x86_64-linux", b"elastos", b"components", &["malformed release head"]),
+        (&good, "", "x86_64-linux", b"elastos", b"components", &["malformed release"]),
+        (&head_without_hash, &release, "x86_64-linux", b"elastos", b"components", &["release"]),
+        (&head_without_version, &release, "x86_64-linux", b"elastos", b"components", &["version"]),
+        (&head(&without_binary, "2.0.0"), &without_binary, "x86_64-linux", b"elastos", b"components", &[bin]),
+        (&head(&without_components, "2.0.0"), &without_components, "x86_64-linux", b"elastos", b"components", &[comp]),
+        (&head_versionless, &versionless, "x86_64-linux", b"elastos", b"components", &["version"]),
+        (&head(&versionless, "2.0.0"), &versionless, "x86_64-linux", b"elastos", b"components", &["version"]),
+        (&head(&sourceless, "2.0.0"), &sourceless, "x86_64-linux", b"elastos", b"components", &["malformed release source commit"]),
+        (&head(&platform_array, "2.0.0"), &platform_array, "0", b"elastos", b"components", &["release names no entry for 0"]),
+    ];
+    for (index, (head, release, platform, binary, components, want)) in
+        cases.into_iter().enumerate()
+    {
+        let want: Vec<String> = want
+            .iter()
+            .map(|reason| match *reason {
+                "release" | "version" => format!("{another}{reason}"),
+                reason => reason.to_owned(),
+            })
+            .collect();
+        assert_eq!(
+            check(head, release, platform, binary, components),
+            Err(want),
+            "case {index}"
+        );
+    }
+}
+
+/// An installed Runtime laid out in a temp folder the way the installer lays
+/// one out: the binary on its own, and a data folder holding `components.json`
+/// and `installation/` with the release head and the release it names.
+struct InstalledFixture {
+    binary: std::path::PathBuf,
+    data: std::path::PathBuf,
+    release: Vec<u8>,
+}
+
+const INSTALLED_COMMIT: &str = "7bc3704b5e181e5aa435c2b2cafbd73a996932ef";
+
+impl InstalledFixture {
+    fn new(root: &Path) -> Self {
+        let (binary, data) = (root.join("bin/elastos"), root.join("data"));
+        let descriptor = |bytes: &[u8]| serde_json::json!({ "sha256": sha256(bytes) });
+        let platform = agent_conformance::report::release_platform();
+        let release = serde_json::json!({ "payload": {
+            "version": "2.0.1",
+            "source": { "commit": INSTALLED_COMMIT },
+            "platforms": { platform: {
+                "binary": descriptor(b"installed runtime"),
+                "components": descriptor(b"{\"capsules\":{}}") } } } })
+        .to_string()
+        .into_bytes();
+        let head = serde_json::json!({ "payload": {
+            "version": "2.0.1", "release_sha256": sha256(&release) } })
+        .to_string();
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(data.join("installation")).unwrap();
+        fs::write(&binary, b"installed runtime").unwrap();
+        fs::write(data.join("components.json"), b"{\"capsules\":{}}").unwrap();
+        fs::write(data.join("installation/release-head.json"), head).unwrap();
+        fs::write(data.join("installation/release.json"), &release).unwrap();
+        Self {
+            binary,
+            data,
+            release,
+        }
+    }
+
+    /// The receipt a passing suite gets when this installed Runtime is given.
+    fn receipt(&self) -> (agent_conformance::report::RunReport, Value) {
+        let installed = agent_conformance::report::read_installed_runtime(
+            &self.binary,
+            &self.data,
+            agent_conformance::report::release_platform(),
+        );
+        bound(Some(installed))
+    }
+
+    /// The same, for a suite that launched a Runtime with these bytes.
+    fn receipt_after_running(
+        &self,
+        runtime: &[u8],
+    ) -> (agent_conformance::report::RunReport, Value) {
+        let installed = agent_conformance::report::read_installed_runtime(
+            &self.binary,
+            &self.data,
+            agent_conformance::report::release_platform(),
+        );
+        let (mut observations, git) = synthetic(1, false);
+        observations[0] = Observation::Native {
+            role: "elastos".into(),
+            sha256: sha256(runtime),
+        };
+        render(&observations, git, Some(installed))
+    }
+}
+
+fn bound(
+    installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
+) -> (agent_conformance::report::RunReport, Value) {
+    let (observations, git) = synthetic(1, false);
+    render(&observations, git, installed)
+}
+
+fn render(
+    observations: &[Observation],
+    git: GitIdentity,
+    installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
+) -> (agent_conformance::report::RunReport, Value) {
+    let report = agent_conformance::report::render_bound_run(
+        &format!("{LIVE}: test\n"),
+        &output(observations),
+        true,
+        Ok(git),
+        agent_conformance::report::Bound {
+            reviews: None,
+            reviews_file_failure: None,
+            installed,
+        },
+        Some(""),
+    );
+    let document = serde_json::from_slice(&report.receipt_bytes).unwrap();
+    (report, document)
+}
+
+#[test]
+fn receipt_records_a_matching_installed_runtime() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (report, document) = fixture.receipt();
+    assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+    assert_eq!(document["installed_runtime_status"], "matched");
+    assert_eq!(
+        document["installed_runtime_failures"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        document["installed_runtime"],
+        serde_json::json!({
+            "version": "2.0.1",
+            "platform": agent_conformance::report::release_platform(),
+            "source_commit": INSTALLED_COMMIT,
+            "release_sha256": sha256(&fixture.release),
+            "binary_sha256": sha256(b"installed runtime"),
+            "components_sha256": sha256(b"{\"capsules\":{}}"),
+        })
+    );
+    // The row is part of the table the receipt hashes.
+    assert_eq!(document["report"]["table"], report.table);
+    assert_eq!(
+        document["report"]["sha256"],
+        sha256(report.table.as_bytes())
+    );
+    assert!(report.passed, "{:?}", report.failures);
+    home.finish().unwrap();
+}
+
+#[test]
+fn changed_installed_binary_fails_the_installed_runtime_row() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let (report, document) = fixture.receipt();
+    assert_eq!(
+        document["installed_runtime_failures"],
+        serde_json::json!(["binary does not match the release"])
+    );
+    assert!(
+        report.table.contains("installed_runtime (A14) | FAIL\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(document["installed_runtime_status"], "unmatched");
+    // An unmatched Runtime is not named: the receipt claims no release for it.
+    assert_eq!(document["installed_runtime"], Value::Null);
+    // Like review binding, this is its own row; the suite's result stays.
+    assert!(report.passed, "{:?}", report.failures);
+    assert_eq!(document["command_success"], true);
+    home.finish().unwrap();
+}
+
+#[test]
+fn missing_release_record_fails_with_its_own_reason() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    fs::remove_file(fixture.data.join("installation/release.json")).unwrap();
+    let (report, document) = fixture.receipt();
+    assert_eq!(
+        document["installed_runtime_failures"],
+        serde_json::json!(["could not read release.json"])
+    );
+    assert!(report.table.contains("installed_runtime (A14) | FAIL\n"));
+    assert_eq!(document["installed_runtime_status"], "unmatched");
+    assert_eq!(document["installed_runtime"], Value::Null);
+    // Every unreadable file is named, and nothing is compared until all are read.
+    fs::remove_file(&fixture.binary).unwrap();
+    fs::remove_file(fixture.data.join("components.json")).unwrap();
+    fs::remove_file(fixture.data.join("installation/release-head.json")).unwrap();
+    assert_eq!(
+        fixture.receipt().1["installed_runtime_failures"],
+        serde_json::json!([
+            "could not read components.json",
+            "could not read release-head.json",
+            "could not read release.json",
+            "could not read the installed binary"
+        ])
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn installed_files_are_not_read_through_a_link() {
+    use std::os::unix::fs::symlink;
+    let home = ThrowawayHome::new().unwrap();
+    for (index, (file, name)) in [
+        ("data/installation/release-head.json", "release-head.json"),
+        ("data/installation/release.json", "release.json"),
+        ("bin/elastos", "the installed binary"),
+        ("data/components.json", "components.json"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = home.root().join(format!("installed-{index}"));
+        let fixture = InstalledFixture::new(&root);
+        assert!(fixture
+            .receipt()
+            .0
+            .table
+            .contains("installed_runtime (A14) | PASS\n"));
+        // The same bytes, reached through a link at the installed name: the
+        // hash chain would match if the link were followed.
+        let (path, moved) = (root.join(file), root.join("moved"));
+        fs::rename(&path, &moved).unwrap();
+        symlink(&moved, &path).unwrap();
+        let (report, document) = fixture.receipt();
+        assert_eq!(
+            document["installed_runtime_failures"],
+            serde_json::json!([format!("{name} is a symbolic link")])
+        );
+        assert!(
+            report.table.contains("installed_runtime (A14) | FAIL\n"),
+            "{}",
+            report.table
+        );
+        // A link whose target is missing is refused as a link too.
+        fs::remove_file(&moved).unwrap();
+        assert_eq!(
+            fixture.receipt().1["installed_runtime_failures"],
+            serde_json::json!([format!("{name} is a symbolic link")])
+        );
+        // A folder at the name is not a file to read.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(
+            fixture.receipt().1["installed_runtime_failures"],
+            serde_json::json!([format!("{name} is not a regular file")])
+        );
+    }
+    home.finish().unwrap();
+}
+
+fn names_installed_runtime(document: &Value, table: &str) -> bool {
+    table.contains("installed_runtime")
+        || document
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("installed_runtime"))
+}
+
+#[test]
+fn no_installed_runtime_leaves_the_receipt_unchanged() {
+    let (report, document) = bound(None);
+    assert!(
+        !names_installed_runtime(&document, &report.table),
+        "{document:#}"
+    );
+    let (_, git) = synthetic(1, false);
+    assert_eq!(report.receipt_bytes, reviewed(git, None).0.receipt_bytes);
+}
+
+#[test]
+fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
+    use agent_conformance::report::STAGED_BUNDLE_SCOPE;
+    // The whole list, so a field added under any name shows up here.
+    const FIELDS: [&str; 22] = [
+        "build_only_probes",
+        "cargo_success",
+        "command_success",
+        "description",
+        "identity_status",
+        "instance_grants_scope",
+        "localhost_provider_sha256",
+        "missing_or_invalid",
+        "probes",
+        "report",
+        "repository",
+        "review_failures",
+        "review_status",
+        "reviews",
+        "runtime_sha256",
+        "schema",
+        "scope",
+        "staged_bundle_failures",
+        "staged_bundle_scope",
+        "staged_bundle_status",
+        "staged_bundles",
+        "suite_outcome",
+    ];
+    let fields = |document: &Value| {
+        let mut fields: Vec<String> = document.as_object().unwrap().keys().cloned().collect();
+        fields.sort();
+        fields
+    };
+    let (report, document) = bound(None);
+    assert_eq!(fields(&document), FIELDS);
+    assert_eq!(fields(&document["report"]), ["sha256", "table"]);
+    let a14: Vec<_> = report
+        .table
+        .lines()
+        .filter(|line| line.contains("(A14)"))
+        .collect();
+    assert_eq!(
+        a14,
+        [
+            "versions_receipt (A14) | PASS",
+            "review_binding (A14) | FAIL",
+            &format!("staged_bundle (A14) | PASS | {STAGED_BUNDLE_SCOPE}"),
+        ]
+    );
+
+    // A given installed Runtime adds its five fields and two rows, no more.
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (report, document) = fixture.receipt();
+    let mut with_installed = FIELDS.map(str::to_owned).to_vec();
+    with_installed.extend(
+        [
+            "installed_runtime",
+            "installed_runtime_failures",
+            "installed_runtime_ran_failures",
+            "installed_runtime_ran_status",
+            "installed_runtime_status",
+        ]
+        .map(str::to_owned),
+    );
+    with_installed.sort();
+    assert_eq!(fields(&document), with_installed);
+    assert_eq!(
+        report
+            .table
+            .lines()
+            .filter(|line| line.contains("(A14)"))
+            .count(),
+        5
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn report_cli_reads_an_installed_runtime_only_when_given() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (observations, _) = synthetic(5, false);
+    let listed_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    fs::write(&listed_path, format!("{LIVE}: test\n")).unwrap();
+    fs::write(&results_path, output(&observations)).unwrap();
+    let run = |receipt: &str, binary: bool, data: bool| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_report"));
+        command
+            .env_remove("AGENT_CONFORMANCE_REVIEWS")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA");
+        if binary {
+            command.env("AGENT_CONFORMANCE_INSTALLED_BINARY", &fixture.binary);
+        }
+        if data {
+            command.env("AGENT_CONFORMANCE_INSTALLED_DATA", &fixture.data);
+        }
+        command
+            .arg(&listed_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(home.root().join(receipt))
+            .output()
+            .unwrap()
+    };
+    let result = run("matched.json", true, true);
+    assert!(result.status.success(), "{result:?}");
+    assert!(String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("installed_runtime (A14) | PASS\n"));
+    let receipt = read_receipt(&home.root().join("matched.json"));
+    assert_eq!(receipt["installed_runtime_status"], "matched");
+    assert_eq!(
+        receipt["installed_runtime"]["binary_sha256"],
+        sha256(b"installed runtime")
+    );
+    assert_eq!(
+        receipt["installed_runtime"]["release_sha256"],
+        sha256(&fixture.release)
+    );
+
+    let result = run("absent.json", false, false);
+    assert!(result.status.success(), "{result:?}");
+    let table = String::from_utf8(result.stdout).unwrap();
+    let receipt = read_receipt(&home.root().join("absent.json"));
+    assert!(!names_installed_runtime(&receipt, &table), "{receipt:#}");
+
+    // Half a location is a mistake in the command, not an absent Runtime.
+    for (name, binary, data) in [("binary.json", true, false), ("data.json", false, true)] {
+        let result = run(name, binary, data);
+        assert_eq!(result.status.code(), Some(1));
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap(),
+            "versions receipt failure: an installed Runtime needs both its binary and its data folder\n"
+        );
+        assert!(!home.root().join(name).exists());
+    }
+
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let result = run("unmatched.json", true, true);
+    assert!(result.status.success(), "{result:?}");
+    assert!(String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("installed_runtime (A14) | FAIL\n"));
+    let receipt = read_receipt(&home.root().join("unmatched.json"));
+    assert_eq!(receipt["installed_runtime_status"], "unmatched");
+    assert_eq!(
+        receipt["installed_runtime_failures"],
+        serde_json::json!(["binary does not match the release"])
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn receipt_says_whether_the_suite_ran_the_installed_binary() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (report, document) = fixture.receipt_after_running(b"installed runtime");
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | PASS\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(document["installed_runtime_ran_status"], "ran");
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        document["runtime_sha256"],
+        document["installed_runtime"]["binary_sha256"]
+    );
+
+    // A suite that launched other bytes: the installed chain still matches, and
+    // this row alone says so, naming both hashes.
+    let (report, document) = fixture.receipt_after_running(b"checkout runtime");
+    assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!([format!(
+            "suite ran Runtime {}, installed binary is {}",
+            sha256(b"checkout runtime"),
+            sha256(b"installed runtime")
+        )])
+    );
+    assert!(report
+        .table
+        .contains("installed_runtime_ran (A14) | FAIL\n"));
+    assert_eq!(document["installed_runtime_ran_status"], "not shown");
+    // Its own row: the suite's result stays.
+    assert_eq!(document["command_success"], true);
+
+    // An installed Runtime whose chain does not match gives nothing to compare.
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let (report, document) = fixture.receipt_after_running(b"another runtime");
+    assert!(report
+        .table
+        .contains("installed_runtime_ran (A14) | FAIL\n"));
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!(["no matched installed Runtime to compare"])
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn two_runtime_hashes_do_not_show_the_installed_binary_ran() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = || {
+        agent_conformance::report::read_installed_runtime(
+            &fixture.binary,
+            &fixture.data,
+            agent_conformance::report::release_platform(),
+        )
+    };
+    let (observations, git) = synthetic(1, false);
+    let elastos = |bytes: &[u8]| Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(bytes),
+    };
+    let ran = |first: &[u8], second: &[u8]| {
+        let mut both = observations.clone();
+        both[0] = elastos(first);
+        both.push(elastos(second));
+        render(&both, git.clone(), Some(installed()))
+    };
+    // Whichever hash the output names first, the installed one or the other.
+    for (first, second) in [
+        (&b"installed runtime"[..], &b"another runtime"[..]),
+        (b"another runtime", b"installed runtime"),
+    ] {
+        let (report, document) = ran(first, second);
+        assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+        assert!(
+            report
+                .table
+                .contains("installed_runtime_ran (A14) | FAIL\n"),
+            "{}",
+            report.table
+        );
+        assert_eq!(
+            document["installed_runtime_ran_failures"],
+            serde_json::json!(["suite recorded more than one Runtime SHA-256"])
+        );
+        assert_eq!(document["installed_runtime_ran_status"], "not shown");
+        assert!(report.table.contains("versions_receipt (A14) | FAIL\n"));
+        assert_eq!(
+            document["missing_or_invalid"],
+            serde_json::json!(["conflicting elastos SHA-256"])
+        );
+    }
+    // The same hash named twice is one hash.
+    let (report, document) = ran(b"installed runtime", b"installed runtime");
+    assert!(report
+        .table
+        .contains("installed_runtime_ran (A14) | PASS\n"));
+    assert_eq!(document["missing_or_invalid"], serde_json::json!([]));
+    home.finish().unwrap();
+}
+
+#[test]
+fn a_suite_without_a_runtime_hash_did_not_run_the_installed_binary() {
+    use agent_conformance::report::installed_runtime_ran_failures;
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    )
+    .unwrap();
+    assert_eq!(
+        installed_runtime_ran_failures(None, Some(&installed)),
+        ["suite recorded no Runtime SHA-256"]
+    );
+    assert!(
+        installed_runtime_ran_failures(Some(&installed.binary_sha256), Some(&installed)).is_empty()
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn receipt_names_the_staged_bundles_and_calls_them_staged() {
+    use agent_conformance::report::STAGED_BUNDLE_SCOPE;
+    let (observations, git) = synthetic(1, false);
+    let (report, document) = render(&observations, git.clone(), None);
+    assert!(
+        report.table.contains(&format!(
+            "staged_bundle (A14) | PASS | {STAGED_BUNDLE_SCOPE}\n"
+        )),
+        "{}",
+        report.table
+    );
+    assert!(STAGED_BUNDLE_SCOPE.contains("not an installed bundle"));
+    assert_eq!(document["staged_bundle_status"], "recorded");
+    assert_eq!(document["staged_bundle_failures"], serde_json::json!([]));
+    assert_eq!(
+        document["staged_bundles"],
+        serde_json::json!([synthetic_bundle_cid(&[1, 4])])
+    );
+    assert_eq!(document["staged_bundle_scope"], STAGED_BUNDLE_SCOPE);
+
+    // A bundle that was built and never launched is not a staged bundle the
+    // suite ran.
+    let built_only: Vec<_> = observations
+        .into_iter()
+        .map(|observation| match observation {
+            Observation::Launched { probe } => Observation::BuildOnly { probe },
+            other => other,
+        })
+        .collect();
+    let (report, document) = render(&built_only, git, None);
+    assert!(report.table.contains(&format!(
+        "staged_bundle (A14) | FAIL | {STAGED_BUNDLE_SCOPE}\n"
+    )));
+    assert_eq!(document["staged_bundle_status"], "missing");
+    assert_eq!(
+        document["staged_bundle_failures"],
+        serde_json::json!(["suite launched no staged bundle"])
+    );
+    assert_eq!(document["staged_bundles"], serde_json::json!([]));
+}
+
+#[test]
+fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
+    use agent_conformance::report::a14_rows;
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = || {
+        agent_conformance::report::read_installed_runtime(
+            &fixture.binary,
+            &fixture.data,
+            agent_conformance::report::release_platform(),
+        )
+    };
+    let (mut observations, git) = synthetic(1, false);
+    observations[0] = Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(b"installed runtime"),
+    };
+    let reviews = [review("codex", "pass", &git.commit)];
+    let receipt = |reviews, installed| {
+        agent_conformance::report::render_bound_run(
+            &format!("{LIVE}: test\n"),
+            &output(&observations),
+            true,
+            Ok(git.clone()),
+            agent_conformance::report::Bound {
+                reviews,
+                reviews_file_failure: None,
+                installed,
+            },
+            Some(""),
+        )
+        .receipt_bytes
+    };
+    let grades = |receipt: &[u8]| -> Vec<(&str, bool, Vec<String>)> {
+        a14_rows(receipt)
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.name, row.passed, row.reasons))
+            .collect()
+    };
+    let all = receipt(Some(&reviews[..]), Some(installed()));
+    assert_eq!(
+        grades(&all),
+        [
+            ("versions_receipt", true, vec![]),
+            ("review_binding", true, vec![]),
+            ("staged_bundle", true, vec![]),
+            ("installed_runtime", true, vec![]),
+            ("installed_runtime_ran", true, vec![]),
+        ]
+    );
+    // No review and no installed Runtime: three rows fail, two as missing.
+    assert_eq!(
+        grades(&receipt(None, None))[1..],
+        [
+            ("review_binding", false, vec!["missing review".to_owned()]),
+            ("staged_bundle", true, vec![]),
+            (
+                "installed_runtime",
+                false,
+                vec!["row missing from the receipt".to_owned()]
+            ),
+            (
+                "installed_runtime_ran",
+                false,
+                vec!["row missing from the receipt".to_owned()]
+            ),
+        ]
+    );
+    // A table edited after the receipt was written is refused outright.
+    let edited = String::from_utf8(receipt(None, Some(installed())))
+        .unwrap()
+        .replace("review_binding (A14) | FAIL", "review_binding (A14) | PASS");
+    assert_eq!(
+        a14_rows(edited.as_bytes()),
+        Err("receipt table does not match its recorded hash".into())
+    );
+    assert_eq!(a14_rows(b"{"), Err("malformed receipt".into()));
+
+    // The report tool prints the same rows and fails unless all pass.
+    let check = |name: &str, bytes: &[u8]| {
+        let path = home.root().join(name);
+        fs::write(&path, bytes).unwrap();
+        std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .arg("--a14")
+            .arg(path)
+            .output()
+            .unwrap()
+    };
+    let passed = check("all.json", &all);
+    assert!(passed.status.success(), "{passed:?}");
+    assert_eq!(
+        String::from_utf8(passed.stdout).unwrap(),
+        "versions_receipt (A14) | PASS\nreview_binding (A14) | PASS\nstaged_bundle (A14) | PASS\ninstalled_runtime (A14) | PASS\ninstalled_runtime_ran (A14) | PASS\n"
+    );
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let failed = check(
+        "changed.json",
+        &receipt(Some(&reviews[..]), Some(installed())),
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    let printed = String::from_utf8(failed.stdout).unwrap();
+    assert!(
+        printed.contains("installed_runtime (A14) | FAIL | binary does not match the release\n"),
+        "{printed}"
+    );
+    assert!(printed.contains(
+        "installed_runtime_ran (A14) | FAIL | no matched installed Runtime to compare\n"
+    ));
+    home.finish().unwrap();
+}
+
+#[test]
+fn a14_row_passes_only_when_it_appears_once_and_reads_pass() {
+    use agent_conformance::report::a14_rows;
+    const ROWS: [&str; 5] = [
+        "versions_receipt",
+        "review_binding",
+        "staged_bundle",
+        "installed_runtime",
+        "installed_runtime_ran",
+    ];
+    // A receipt holding exactly these table lines, with the hash that matches.
+    let receipt = |lines: &[String]| {
+        let table: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        serde_json::to_vec(&serde_json::json!({
+            "report": { "table": table, "sha256": sha256(table.as_bytes()) }
+        }))
+        .unwrap()
+    };
+    let row = |name: &str, grade: &str| format!("{name} (A14) | {grade}");
+    let five: Vec<String> = ROWS.iter().map(|name| row(name, "PASS")).collect();
+    let passing = |lines: &[String]| -> Vec<bool> {
+        a14_rows(&receipt(lines))
+            .unwrap()
+            .into_iter()
+            .map(|row| row.passed)
+            .collect()
+    };
+    assert_eq!(passing(&five), [true; 5]);
+    // A note after the grade is not part of the grade.
+    let mut noted = five.clone();
+    noted[2] = row(ROWS[2], "PASS | lab CID of each staged bundle");
+    assert_eq!(passing(&noted), [true; 5]);
+
+    let home = ThrowawayHome::new().unwrap();
+    let exit = |name: &str, lines: &[String]| {
+        let path = home.root().join(name);
+        fs::write(&path, receipt(lines)).unwrap();
+        std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+            .arg("--a14")
+            .arg(path)
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    assert_eq!(exit("five.json", &five), Some(0));
+    for (index, name) in ROWS.into_iter().enumerate() {
+        let only_this_fails: Vec<bool> = (0..5).map(|other| other != index).collect();
+        // The same row twice, wherever the second copy sits and whatever
+        // either copy says.
+        for (first, second) in [("PASS", "PASS"), ("PASS", "FAIL"), ("FAIL", "PASS")] {
+            let mut twice = five.clone();
+            twice[index] = row(name, first);
+            for at in [0, index + 1, 5] {
+                let mut lines = twice.clone();
+                lines.insert(at, row(name, second));
+                assert_eq!(passing(&lines), only_this_fails, "{lines:?}");
+                let rows = a14_rows(&receipt(&lines)).unwrap();
+                assert_eq!(
+                    rows[index].reasons,
+                    ["row appears more than once in the receipt"]
+                );
+            }
+        }
+        let mut twice = five.clone();
+        twice.push(row(name, "PASS"));
+        assert_eq!(exit(&format!("twice-{index}.json"), &twice), Some(1));
+        // Any grade that is not exactly PASS.
+        for grade in [
+            "",
+            "pass",
+            "PASSED",
+            "PASS ",
+            " PASS",
+            "PASS|",
+            "OK",
+            "BLOCKED (RT3)",
+            "SKIPPED (no reason)",
+            "FAIL",
+        ] {
+            let mut lines = five.clone();
+            lines[index] = row(name, grade);
+            assert_eq!(passing(&lines), only_this_fails, "{lines:?}");
+            let rows = a14_rows(&receipt(&lines)).unwrap();
+            assert_eq!(rows[index].reasons, ["receipt gives no reason"]);
+        }
+        let mut unknown = five.clone();
+        unknown[index] = row(name, "PASSED");
+        assert_eq!(exit(&format!("unknown-{index}.json"), &unknown), Some(1));
+    }
+    home.finish().unwrap();
+}
+
+#[test]
+fn demo_gates_hold_with_a_stub_suite() {
+    // The cases and what each must say are in the script. It builds a stand-in
+    // checkout and a stand-in installed Runtime under a fresh folder, and names
+    // every path it uses, so no real installation is read or written.
+    let root = tempfile::tempdir().unwrap();
+    let lane = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = std::process::Command::new("bash")
+        .arg(lane.join("tests/demo-gates.sh"))
+        .arg(env!("CARGO_BIN_EXE_report"))
+        .arg(root.path().join("gates"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?} {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "demo-gates: every case holds\n"
     );
 }

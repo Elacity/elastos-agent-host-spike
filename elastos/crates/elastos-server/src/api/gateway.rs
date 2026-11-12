@@ -1473,7 +1473,20 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
     (status, text).into_response()
 }
 
+/// The response for a held-root write that refused because the person's
+/// record is kept in another Runtime's store and this Runtime holds no
+/// protection for the object. `home_state_write_error` puts a path context on
+/// top of the refusal, so this looks through the whole cause chain.
+pub(super) fn protected_record_kept_elsewhere_response(err: &anyhow::Error) -> Option<Response> {
+    err.chain()
+        .find(|cause| cause.is::<crate::auth::ProtectedRecordKeptElsewhere>())
+        .map(|cause| (StatusCode::FORBIDDEN, cause.to_string()).into_response())
+}
+
 fn system_error_response(err: anyhow::Error) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
     if let Some(text) = gateway_home_system::home_appearance_preference_request_message(&err) {
         return (StatusCode::BAD_REQUEST, text.to_string()).into_response();
     }
@@ -1511,6 +1524,9 @@ fn system_error_response(err: anyhow::Error) -> Response {
 }
 
 fn home_error_response(err: anyhow::Error) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
     let profile_required = gateway_home_system::profile_required_message(&err);
     let appearance_request = gateway_home_system::home_appearance_preference_request_message(&err);
     let text = profile_required

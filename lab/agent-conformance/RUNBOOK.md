@@ -7,8 +7,8 @@ lab/agent-conformance/run.sh
 ```
 
 The command uses cached dependencies, the pinned Rust toolchain and its
-`wasm32-unknown-unknown` target and the macOS `shasum` tool. Reserve 12 GiB for
-builds plus 2 GiB free. The
+`wasm32-unknown-unknown` target and the system's `sha256sum` or `shasum` tool.
+Reserve 12 GiB for builds plus 2 GiB free. The
 lease procedure is in [scripts/README.md](../../scripts/README.md#local-pre-push-gate).
 The command prints typed `version identity: {...}` observations above one table
 from Cargo's test inventory and result lines. Native records identify `elastos`
@@ -259,6 +259,108 @@ command. A write refusal names its cause, including `AlreadyExists` or
 and symlink targets. A report-build failure stops before suite execution and
 retains its build output; the command cannot issue a receipt without its writer.
 
+`review_binding (A14)` passes only when `AGENT_CONFORMANCE_REVIEWS` names a
+JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
+verdict `pass` and the exact commit the receipt's `repository` names, and the
+tree is clean when the report is written. That is checked after the suite
+runs, so the row does not show that the results came from that tree. Reviews
+live outside the commit they read, so the file must be outside the repository.
+The report resolves the path first, links included and a relative path from
+the current directory: a file that is inside the work tree, or is named in a
+folder inside it, leaves the row FAIL with
+`reviews file is inside the repository`. An untracked file there also makes the
+tree dirty; a tracked or ignored one does not, which is why the place itself is
+checked. The receipt records
+`reviews`, `review_status` (`bound` or `unbound`) and `review_failures`. An
+unreadable or malformed reviews file fails the command; an unbound review
+leaves this row FAIL without changing `command_success`, so CI still reports
+unreviewed candidates. A14 needs every A14 row to pass. The report checks only
+that each review names this commit; who reviewed, and whether two model
+families did, stays with the reviewer list.
+
+`staged_bundle (A14)` passes when the suite launched at least one bundle and
+the receipt names it. The bundles are the ones the suite stages from this
+checkout in a throwaway Home: the conformance probe for each effect, and with
+`--agent-host` the real agent-host capsule built from `examples/agent-host`.
+The receipt records `staged_bundles` (the lab CID of each launched bundle, also
+in `probes`), `staged_bundle_status` (`recorded` or `missing`) and
+`staged_bundle_failures`. An installed bundle does not exist yet: an installed
+Runtime's `components.json` records release capsules by name with a SHA-256
+and a CID, and neither the probe nor agent-host is among them, so there is no
+installed record to compare a staged bundle with. The row is therefore named
+for what it is, and it says nothing about what is installed.
+
+`installed_runtime (A14)` appears only when an installed Runtime is given, by
+two variables together: `AGENT_CONFORMANCE_INSTALLED_BINARY` names its binary
+and `AGENT_CONFORMANCE_INSTALLED_DATA` its data folder (the installer can put
+the binary elsewhere, so both are named). The report reads the binary, and from
+the data folder `installation/release-head.json`, `installation/release.json`
+and `components.json`, and checks the hash chain for this machine's platform:
+the release head names the SHA-256 of `release.json`, which names the SHA-256
+of the binary and of `components.json`. The receipt then records
+`installed_runtime` (version, platform, source commit and the three hashes),
+`installed_runtime_status` (`matched` or `unmatched`) and
+`installed_runtime_failures`. A file that cannot be read is named in the
+failures (`could not read release.json`), as is each hash that differs
+(`binary does not match the release`). Each of the four files is opened without
+following a symbolic link at its final name and must be a regular file, as the
+Runtime itself requires of them: a link there fails the row with its own reason
+(`release.json is a symbolic link`). The folders above those names are not
+checked, so a link in a parent folder is followed. An unmatched Runtime is
+recorded as `null`. Like an unbound review, an unmatched chain leaves this row
+FAIL without changing `command_success`, so a receipt backs A14 only when every
+A14 row reads PASS. Naming one variable without the other fails the command. With
+neither, the receipt has no installed Runtime row or field. There is no default
+location: the report never looks for an installation on its own.
+
+This row does not check signatures, so it shows which release the installed
+bytes belong to, not that the release is genuine. It does not check the hash of
+the bundle the demo ran.
+
+`installed_runtime_ran (A14)` appears beside it and passes only when
+`runtime_sha256`, the SHA-256 the suite printed for the Runtime it launched,
+equals `installed_runtime.binary_sha256`. The receipt records
+`installed_runtime_ran_status` (`ran` or `not shown`) and
+`installed_runtime_ran_failures`; a difference names both hashes, and an
+installed Runtime whose chain did not match leaves nothing to compare. Identity
+lines are read from the whole test output, which cannot say which test printed
+a line, so a run that names two different Runtime hashes fails this row with
+`suite recorded more than one Runtime SHA-256`, as well as `versions_receipt`,
+whichever hash came first.
+
+The suite launches the installed binary only when
+`AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
+launch the named binary where it is and build no Runtime. The suite hashes the
+named binary again immediately before every launch; when the bytes differ from
+the first hash it does not launch them, prints
+`given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
+and the run fails. This does not show a swap made between that hash and the
+operating system starting the process, or what a started Runtime then starts
+by itself. Without that variable the suite builds
+the checkout's Runtime. This row then fails only when an installed Runtime was
+given and the built Runtime's hash differs from the installed binary's; when no
+installed Runtime was given the receipt has no such row. Only the Runtime is
+given; the localhost provider, the probe and every Home the Runtime runs in
+still come from the checkout, so the installation's data folder is never used
+by a run.
+
+A receipt with reviews and an installed Runtime on macOS, from the repository
+root on a clean tree, with the reviews file kept outside the repository:
+
+```bash
+AGENT_CONFORMANCE_REVIEWS="$HOME/a14-reviews.json" \
+AGENT_CONFORMANCE_INSTALLED_BINARY="$HOME/.local/bin/elastos" \
+AGENT_CONFORMANCE_INSTALLED_DATA="$HOME/Library/Application Support/elastos" \
+AGENT_CONFORMANCE_RUNTIME_BINARY="$HOME/.local/bin/elastos" \
+lab/agent-conformance/run.sh
+```
+
+`demo.sh`, described under "The owner's one command", sets these four and
+checks the result.
+
+On Linux the data folder is `$HOME/.local/share/elastos`, or
+`$XDG_DATA_HOME/elastos` when that is set.
+
 `identity_status` describes identity coverage. `suite_outcome` describes the
 Cargo rows, including FAIL and BLOCKED; `command_success` combines both gates.
 A complete identity record preserves each journey's grade. The parser accepts
@@ -346,6 +448,66 @@ F-report-b changes SKIPPED to PASS and fails the report test. The controller,
 callback and guest comparison falsifiers are listed beside these in
 `falsifiers.json`. Restore each mutation before running the next one.
 
+
+## The owner's one command
+
+From the repository root, on a clean tree at the reviewed commit:
+
+```bash
+lab/agent-conformance/demo.sh "$HOME/a14-reviews.json"
+```
+
+Ready before typing it:
+
+- the Runtime installed: the binary at `~/.local/bin/elastos` and the data
+  folder at `~/Library/Application Support/elastos` (on Linux
+  `~/.local/share/elastos`). `AGENT_CONFORMANCE_INSTALLED_BINARY` and
+  `AGENT_CONFORMANCE_INSTALLED_DATA` name other places;
+- a reviews file outside the repository: a JSON list of
+  `{"reviewer": "...", "verdict": "pass", "commit": "<the 40-character commit checked out>"}`;
+- this checkout at that commit with nothing changed or untracked;
+- everything `run.sh` needs: cached dependencies, the pinned Rust toolchain
+  with its `wasm32-unknown-unknown` target, `sha256sum` or `shasum`, the build
+  space named at the top of this file and the shared heavy-build lease. It
+  needs no network and no model server.
+
+The command says which of the binary, the data folder and the reviews file is
+missing, and refuses a tree that is not clean. It then runs `run.sh` with the
+installed binary as the Runtime the suite launches, prints every A14 row with
+its reasons through `report --a14 <receipt>`, copies the receipt folder to
+`${ELASTOS_DEMO_RECEIPTS:-$HOME/elastos-demo-receipts}/<UTC time>/` with its
+own output as `demo-output.log`, and prints that path. It exits 0 only when
+the suite passed and every A14 row reads PASS; the receipt folder is kept
+either way. It writes nothing under the install paths: the installed binary is
+launched where it is, in throwaway Homes under this lane's `target`. Before
+anything runs it works out where the receipts folder and its temporary folder
+(`TMPDIR`, else `/tmp`) really are, links resolved, and stops with a message if
+either is inside the installed data folder or the folder holding the installed
+binary.
+
+What each A14 row means:
+
+| Row | PASS means |
+| --- | --- |
+| `versions_receipt` | the receipt names the commit, the Runtime and provider hashes and every launched probe the rows needed |
+| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
+| `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
+| `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, and `release-head.json` names that `release.json` |
+| `installed_runtime_ran` | the Runtime the suite launched has the installed binary's SHA-256 |
+
+What the receipt does not prove:
+
+- that the release is genuine: no signature is verified, only hashes;
+- anything about an installed bundle: none exists yet, and the bundles are
+  staged from this checkout, as are the localhost provider
+  (`localhost_provider_sha256`) and the probe. The installed data folder is
+  read for the hash chain and is not what the suite runs on;
+- that the reviews are independent or by whom: the row checks only the commit
+  and the verdict each review states;
+- that the rows came from the reviewed tree: the tree is checked clean before
+  the run and when the report is written, not during it;
+- capsule isolation: the rows remain process isolation, and the BLOCKED rows
+  stay blocked.
 
 ## Bounded preparation and credential evidence
 
