@@ -358,16 +358,32 @@ impl Runtime {
             }
             (None, _) => provider.load(path, manifest).await?,
         };
+        let ceiling = handle.manifest.resource_authority_bounds();
+        self.start_loaded(provider, &mut handle, ceiling, args, principal_id)
+            .await?;
+
+        Ok((handle, signer))
+    }
+
+    /// The end of every start. While `provider` starts the loaded capsule,
+    /// `ceiling` is what the bridge holds it to and, for a component,
+    /// `principal_id` is who it runs for; `args` go on its handle first.
+    /// Ceiling and principal are taken away again however the start ended.
+    async fn start_loaded(
+        &self,
+        provider: Arc<dyn ComputeProvider>,
+        handle: &mut CapsuleHandle,
+        ceiling: Vec<String>,
+        args: Vec<String>,
+        principal_id: Option<String>,
+    ) -> Result<()> {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
-            bounds.insert(
-                handle.id.0.clone(),
-                handle.manifest.resource_authority_bounds(),
-            );
+            bounds.insert(handle.id.0.clone(), ceiling);
         }
         if handle.manifest.is_component_capsule() {
             if let Some(ref component) = self.component_provider {
                 component
-                    .set_bridge_principal(&handle.id, principal_id.clone())
+                    .set_bridge_principal(&handle.id, principal_id)
                     .await;
             }
         }
@@ -376,7 +392,7 @@ impl Runtime {
         handle.args = args;
 
         // Start capsule
-        let start = provider.start(&handle).await;
+        let start = provider.start(handle).await;
         if handle.manifest.is_component_capsule() {
             if let Some(ref component) = self.component_provider {
                 component.clear_bridge_principal(&handle.id).await;
@@ -385,9 +401,7 @@ impl Runtime {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.remove(&handle.id.0);
         }
-        start?;
-
-        Ok((handle, signer))
+        start
     }
 
     /// Check that all providers required by a capsule are registered
