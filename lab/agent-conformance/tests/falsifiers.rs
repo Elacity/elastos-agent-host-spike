@@ -224,6 +224,13 @@ mod rules {
     }
 
     #[test]
+    fn reads_a_file_outside_the_crate_that_sits_inside_the_repository() {
+        let text = read_entry_file(&this_crate_root(), "falsify.py")
+            .expect("examples/agent-host/falsify.py is inside the repository");
+        assert!(!text.is_empty(), "falsify.py reads with text");
+    }
+
+    #[test]
     fn counts_each_edit_against_the_text_the_earlier_edits_left() {
         let entry = json!({"edits": [
             {"file": "x", "old": "x", "new": "a a"},
