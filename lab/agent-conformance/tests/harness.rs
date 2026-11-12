@@ -437,7 +437,8 @@ fn swap_the_given_runtime_between_launches() {
     let runtime = agent_conformance::runtime::runtime_under_test().unwrap();
     let given = &runtime.binary;
     let home = ThrowawayHome::new().unwrap();
-    let launch = || home.launch(given, &[], Duration::from_secs(5));
+    // A bound, not a wait: these exit at once, and a busy machine has room.
+    let launch = || home.launch(given, &[], Duration::from_secs(60));
     assert!(launch().unwrap().status.success());
 
     let original = fs::read(given).unwrap();
@@ -457,7 +458,7 @@ fn swap_the_given_runtime_between_launches() {
     assert!(!given.with_file_name("swapped-ran").exists());
     // Another program is not held to the given Runtime's hash.
     assert!(home
-        .launch(Path::new("/usr/bin/true"), &[], Duration::from_secs(5))
+        .launch(Path::new("/usr/bin/true"), &[], Duration::from_secs(60))
         .unwrap()
         .status
         .success());

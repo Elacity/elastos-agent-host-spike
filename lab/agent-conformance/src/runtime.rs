@@ -56,7 +56,8 @@ pub const CHANGED: &str = "given Runtime changed: ";
 /// if a caller drops the error.
 ///
 /// What this does not show: a replacement made after this hash and before the
-/// operating system starts the process.
+/// operating system starts the process, or what a started Runtime then starts
+/// by itself.
 pub fn unchanged_before_launch(program: &Path) -> Result<(), &'static str> {
     let Some(given) = std::env::var_os(RUNTIME_BINARY) else {
         return Ok(());
@@ -154,10 +155,18 @@ fn given_native(binary: &Path, name: &str) -> Result<BinaryUnderTest, String> {
 
 /// Hash built and installed copies through the same std-only path.
 pub fn sha256_file(path: &Path) -> Result<String, String> {
-    // macOS supplies shasum. Hash the bytes through stdin, without running the
-    // binary or adding a crate dependency to this std-only harness.
-    let output = Command::new("/usr/bin/shasum")
-        .args(["-a", "256"])
+    // Hash the bytes through stdin, without running the binary or adding a
+    // crate dependency to this std-only harness. A given Runtime is hashed
+    // before every launch, inside the time bounds of the tests that launch it,
+    // so the system's own sha256sum is used where there is one: it is several
+    // times faster than shasum, which macOS and Linux both supply and which
+    // stays the fallback. Both print the hash first.
+    let (tool, arguments): (&str, &[&str]) = ["/sbin/sha256sum", "/usr/bin/sha256sum"]
+        .into_iter()
+        .find(|tool| Path::new(tool).is_file())
+        .map_or(("/usr/bin/shasum", &["-a", "256"]), |tool| (tool, &[]));
+    let output = Command::new(tool)
+        .args(arguments)
         .stdin(File::open(path).map_err(|error| format!("open binary for SHA-256: {error}"))?)
         .output()
         .map_err(|error| format!("hash binary: {error}"))?;

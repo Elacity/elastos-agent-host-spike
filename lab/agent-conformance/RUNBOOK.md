@@ -7,8 +7,8 @@ lab/agent-conformance/run.sh
 ```
 
 The command uses cached dependencies, the pinned Rust toolchain and its
-`wasm32-unknown-unknown` target and the macOS `shasum` tool. Reserve 12 GiB for
-builds plus 2 GiB free. The
+`wasm32-unknown-unknown` target and the system's `sha256sum` or `shasum` tool.
+Reserve 12 GiB for builds plus 2 GiB free. The
 lease procedure is in [scripts/README.md](../../scripts/README.md#local-pre-push-gate).
 The command prints typed `version identity: {...}` observations above one table
 from Cargo's test inventory and result lines. Native records identify `elastos`
@@ -335,7 +335,8 @@ named binary again immediately before every launch; when the bytes differ from
 the first hash it does not launch them, prints
 `given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
 and the run fails. This does not show a swap made between that hash and the
-operating system starting the process. Without that variable the suite builds
+operating system starting the process, or what a started Runtime then starts
+by itself. Without that variable the suite builds
 the checkout's Runtime. This row then fails only when an installed Runtime was
 given and the built Runtime's hash differs from the installed binary's; when no
 installed Runtime was given the receipt has no such row. Only the Runtime is
@@ -466,9 +467,9 @@ Ready before typing it:
   `{"reviewer": "...", "verdict": "pass", "commit": "<the 40-character commit checked out>"}`;
 - this checkout at that commit with nothing changed or untracked;
 - everything `run.sh` needs: cached dependencies, the pinned Rust toolchain
-  with its `wasm32-unknown-unknown` target, `shasum`, the build space named at
-  the top of this file and the shared heavy-build lease. It needs no network
-  and no model server.
+  with its `wasm32-unknown-unknown` target, `sha256sum` or `shasum`, the build
+  space named at the top of this file and the shared heavy-build lease. It
+  needs no network and no model server.
 
 The command says which of the binary, the data folder and the reviews file is
 missing, and refuses a tree that is not clean. It then runs `run.sh` with the
