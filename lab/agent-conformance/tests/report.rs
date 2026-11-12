@@ -1859,3 +1859,45 @@ fn a_suite_without_a_runtime_hash_did_not_run_the_installed_binary() {
     );
     home.finish().unwrap();
 }
+
+#[test]
+fn receipt_names_the_staged_bundles_and_calls_them_staged() {
+    use agent_conformance::report::STAGED_BUNDLE_SCOPE;
+    let (observations, git) = synthetic(1, false);
+    let (report, document) = render(&observations, git.clone(), None);
+    assert!(
+        report.table.contains(&format!(
+            "staged_bundle (A14) | PASS | {STAGED_BUNDLE_SCOPE}\n"
+        )),
+        "{}",
+        report.table
+    );
+    assert!(STAGED_BUNDLE_SCOPE.contains("not an installed bundle"));
+    assert_eq!(document["staged_bundle_status"], "recorded");
+    assert_eq!(document["staged_bundle_failures"], serde_json::json!([]));
+    assert_eq!(
+        document["staged_bundles"],
+        serde_json::json!([synthetic_bundle_cid(&[1, 4])])
+    );
+    assert_eq!(document["staged_bundle_scope"], STAGED_BUNDLE_SCOPE);
+
+    // A bundle that was built and never launched is not a staged bundle the
+    // suite ran.
+    let built_only: Vec<_> = observations
+        .into_iter()
+        .map(|observation| match observation {
+            Observation::Launched { probe } => Observation::BuildOnly { probe },
+            other => other,
+        })
+        .collect();
+    let (report, document) = render(&built_only, git, None);
+    assert!(report.table.contains(&format!(
+        "staged_bundle (A14) | FAIL | {STAGED_BUNDLE_SCOPE}\n"
+    )));
+    assert_eq!(document["staged_bundle_status"], "missing");
+    assert_eq!(
+        document["staged_bundle_failures"],
+        serde_json::json!(["suite launched no staged bundle"])
+    );
+    assert_eq!(document["staged_bundles"], serde_json::json!([]));
+}

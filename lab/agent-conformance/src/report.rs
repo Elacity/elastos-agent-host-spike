@@ -17,6 +17,11 @@ struct GapRow {
 pub const INSTANCE_GRANTS_SCOPE: &str =
     "process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9";
 
+/// What the bundle row covers. An installed Runtime records release capsules in
+/// `components.json`; the bundles this suite launches are not among them.
+pub const STAGED_BUNDLE_SCOPE: &str =
+    "lab CID of each bundle the suite staged from this checkout and launched; not an installed bundle";
+
 fn blocker_ids(reason: &str) -> BTreeSet<&str> {
     reason.split(';').map(str::trim).collect()
 }
@@ -815,6 +820,23 @@ pub fn render_bound_run(
     } else {
         "review_binding (A14) | FAIL\n"
     });
+    // The bundles are the ones the suite staged from this checkout and launched.
+    // No installed Runtime keeps a record of them, so the row says "staged".
+    let staged: BTreeSet<&str> = evidence
+        .identities
+        .launched
+        .values()
+        .map(|probe| probe.bundle_lab_cid.as_str())
+        .collect();
+    let unstaged: &[&str] = if staged.is_empty() {
+        &["suite launched no staged bundle"]
+    } else {
+        &[]
+    };
+    table.push_str(&format!(
+        "staged_bundle (A14) | {} | {STAGED_BUNDLE_SCOPE}\n",
+        if unstaged.is_empty() { "PASS" } else { "FAIL" }
+    ));
     // Whether the suite ran the installed binary is asked only when an
     // installed Runtime was given.
     let not_ran = installed.as_ref().map(|installed| {
@@ -859,6 +881,10 @@ pub fn render_bound_run(
         "reviews": reviews,
         "review_status": if unbound.is_empty() { "bound" } else { "unbound" },
         "review_failures": unbound,
+        "staged_bundles": staged,
+        "staged_bundle_status": if unstaged.is_empty() { "recorded" } else { "missing" },
+        "staged_bundle_failures": unstaged,
+        "staged_bundle_scope": STAGED_BUNDLE_SCOPE,
         "cargo_success": cargo_ok,
         "suite_outcome": outcome,
         "command_success": suite_ok && complete,

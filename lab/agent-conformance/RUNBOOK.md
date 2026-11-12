@@ -273,6 +273,18 @@ unreviewed candidates. A14 needs every A14 row to pass. The report checks only
 that each review names this commit; who reviewed, and whether two model
 families did, stays with the reviewer list.
 
+`staged_bundle (A14)` passes when the suite launched at least one bundle and
+the receipt names it. The bundles are the ones the suite stages from this
+checkout in a throwaway Home: the conformance probe for each effect, and with
+`--agent-host` the real agent-host capsule built from `examples/agent-host`.
+The receipt records `staged_bundles` (the lab CID of each launched bundle, also
+in `probes`), `staged_bundle_status` (`recorded` or `missing`) and
+`staged_bundle_failures`. An installed bundle does not exist yet: an installed
+Runtime's `components.json` records release capsules by name with a SHA-256
+and a CID, and neither the probe nor agent-host is among them, so there is no
+installed record to compare a staged bundle with. The row is therefore named
+for what it is, and it says nothing about what is installed.
+
 `installed_runtime (A14)` appears only when an installed Runtime is given, by
 two variables together: `AGENT_CONFORMANCE_INSTALLED_BINARY` names its binary
 and `AGENT_CONFORMANCE_INSTALLED_DATA` its data folder (the installer can put
