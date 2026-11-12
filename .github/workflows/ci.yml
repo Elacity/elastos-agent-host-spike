@@ -876,6 +876,36 @@ jobs:
           # prepare-release-platform.sh merges this stdout with jq; it must be one JSON document.
           jq -e '.external | length > 0' "$RUNNER_TEMP/upstream-assets.json" > /dev/null
 
+  # source-home-linux, source-home-linux-arm64 and update-hop-linux build and drive the
+  # whole installed app. A pull request that changes only notes and lab files, none of
+  # which they read, skips them: scripts/ci-installed-app-paths.py holds the list and
+  # answers run when in doubt. Every other event runs them.
+  installed-app-paths:
+    name: installed-app-paths
+    runs-on: ubuntu-24.04
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ github.event_name != 'pull_request' || steps.decide.outputs.run != 'false' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          persist-credentials: false
+          # The changed paths are read against the base branch, which needs the history.
+          fetch-depth: 0
+      - name: decide whether the installed-app jobs must run
+        id: decide
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -I scripts/ci-installed-app-paths.py
+
   # The source-home jobs run in parallel with tests across the three
   # architectures, beside the cheap source gate. setup-source-home compiles the
   # runtime, shell, home-cli and every provider in --release; ARM also
@@ -885,9 +915,9 @@ jobs:
     name: source-home-linux (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
-    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
+    if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     timeout-minutes: 120
-    needs: engine-llama-amd64
+    needs: [installed-app-paths, engine-llama-amd64]
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
     strategy:
@@ -1183,9 +1213,9 @@ jobs:
     name: source-home-linux (${{ matrix.check_name || matrix.os }})
     runs-on: ${{ matrix.os }}
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
-    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
+    if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     timeout-minutes: 90
-    needs: engine-llama-arm64
+    needs: [installed-app-paths, engine-llama-arm64]
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
     strategy:
@@ -1527,10 +1557,10 @@ jobs:
     name: update-hop-linux
     runs-on: ubuntu-24.04
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
-    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
+    if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     # The two hop builds have a 70-minute step budget and the update journey 75.
     timeout-minutes: 150
-    needs: fork-gate
+    needs: [installed-app-paths, fork-gate]
     env:
       CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
     steps:
@@ -1762,7 +1792,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
     steps:
       - name: every job passed or was skipped by its own guard
         env:
@@ -1778,7 +1808,7 @@ jobs:
           # Lane pull requests (spark/*) run only the quick checks.
           full_proof = {"engine-llama-amd64", "engine-llama-arm64", "test-elastos", "test-capsules",
                         "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
-                        "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
+                        "installed-app-paths", "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
           may_skip = set(full_proof) if os.environ["SPARK_PULL_REQUEST"] == "true" else set()
           if os.environ["PULL_REQUEST"] != "true":
               may_skip.add("pr-substance")
@@ -1788,6 +1818,9 @@ jobs:
               may_skip.add("custody-harness-smoke")
           if needs.get("release-upstream-paths", {}).get("outputs", {}).get("run") != "true":
               may_skip.add("release-upstream-assets")
+          # A pull request that changes only notes and lab files skips the installed-app jobs.
+          if os.environ["PULL_REQUEST"] == "true" and needs.get("installed-app-paths", {}).get("outputs", {}).get("run") == "false":
+              may_skip.update(("source-home-linux", "source-home-linux-arm64", "update-hop-linux"))
           failed = [f"{job}: {need['result']}" for job, need in sorted(needs.items())
                     if need["result"] != "success" and not (need["result"] == "skipped" and job in may_skip)]
           for line in failed:

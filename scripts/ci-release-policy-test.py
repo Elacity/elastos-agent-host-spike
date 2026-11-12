@@ -37,8 +37,11 @@ SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "sourc
 FULL_PROOF_JOBS = {
     "engine-llama-amd64", "engine-llama-arm64", "test-elastos", "test-capsules",
     "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
-    "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
+    "installed-app-paths", "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
 }
+# Jobs that build and drive the whole installed app. A pull request that changes only
+# notes and lab files skips them: installed-app-paths decides, and answers run otherwise.
+INSTALLED_APP_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux"}
 SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))"
 # Jobs that run only after merge (pushes and the nightly schedule), never on a PR, batch or baseline run.
 POST_MERGE_JOBS = {"source-home-macos"}
@@ -49,8 +52,8 @@ POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'sch
 REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", "cargo-audit", "core-size", "engine-llama-amd64",
                   "engine-llama-arm64",
                   "lint", "lab-standin", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
-                  "release-upstream-assets", "source-home-linux", "source-home-linux-arm64", "source-home-macos",
-                  "update-hop-linux")
+                  "release-upstream-assets", "installed-app-paths", "source-home-linux", "source-home-linux-arm64",
+                  "source-home-macos", "update-hop-linux")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -114,6 +117,8 @@ def event_context(event, ref, ref_type="", override="", head_ref=None, **extra):
         "github.ref_type": ref_type,
         "inputs.ref": override,
         "github.head_ref": head_ref,
+        # installed-app-paths answers run on every event but a notes-only pull request.
+        "needs.installed-app-paths.outputs.run": "true",
     }
     context.update(extra)
     return context
@@ -397,6 +402,17 @@ def upstream_assets_run(source, context, changed):
     run = evaluate(output, {**context, "steps.filter.outputs.upstream": changed})
     return job_runs("release-upstream-assets",
                     {**context, "needs.release-upstream-paths.outputs.run": str(run).lower()}, workflow_jobs)
+
+
+def installed_app_runs(source, job, context, decided):
+    """The path job's output decides an installed-app job's guard, as Actions evaluates them.
+    decided is the decision step's output, empty when the step did not run."""
+    workflow_jobs = jobs(source)
+    if not job_runs("installed-app-paths", context, workflow_jobs):
+        return False  # a job is skipped with the job it needs
+    output = field(workflow_jobs["installed-app-paths"].split("    outputs:\n", 1)[1], "run")
+    run = evaluate(output, {**context, "steps.decide.outputs.run": decided})
+    return job_runs(job, {**context, "needs.installed-app-paths.outputs.run": str(run).lower()}, workflow_jobs)
 
 
 def canary_filter(source):
@@ -954,6 +970,8 @@ class ReleasePolicyTests(unittest.TestCase):
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if job == "release-upstream-assets":
                 self.assertTrue(upstream_assets_run(SOURCE, context, ""), job)
+            elif job in INSTALLED_APP_JOBS:
+                self.assertTrue(installed_app_runs(SOURCE, job, context, ""), job)
             elif job in POST_MERGE_JOBS | PR_ONLY_JOBS:
                 self.assertFalse(evaluate(guard[1], context), job)
             elif guard:
@@ -984,8 +1002,10 @@ class ReleasePolicyTests(unittest.TestCase):
         only_spark = "${{ " + SPARK_SKIP + " }}"
         for job in POST_MERGE_JOBS:
             self.assertEqual(job_level_if(job), POST_MERGE_GUARD, job)
-        for job in FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"} - POST_MERGE_JOBS:
+        for job in FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"} - POST_MERGE_JOBS - INSTALLED_APP_JOBS:
             self.assertEqual(job_level_if(job), only_spark, job)
+        for job in INSTALLED_APP_JOBS:
+            self.assertEqual(job_level_if(job), "(needs.installed-app-paths.outputs.run != 'false') && " + SPARK_SKIP, job)
         self.assertEqual(
             job_level_if("custody-harness-smoke"),
             "(github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || "
@@ -1988,6 +2008,7 @@ class ReleasePolicyTests(unittest.TestCase):
             "custody-harness-smoke": ("custody-harness-smoke", "ubuntu-24.04"),
             "release-upstream-paths": ("release-upstream-paths", "ubuntu-24.04"),
             "release-upstream-assets": ("release-upstream-assets (${{ matrix.platform }})", "${{ matrix.os }}"),
+            "installed-app-paths": ("installed-app-paths", "ubuntu-24.04"),
             "source-home-linux": ("source-home-linux (${{ matrix.os }})", "${{ matrix.os }}"),
             "source-home-linux-arm64": ("source-home-linux (${{ matrix.check_name || matrix.os }})", "${{ matrix.os }}"),
             "source-home-macos": ("source-home-macos", "macos-15"),
@@ -2054,11 +2075,13 @@ class ReleasePolicyTests(unittest.TestCase):
             "lab-standin": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
             "custody-harness-smoke": "fork-gate",
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
-            "source-home-linux": "engine-llama-amd64", "source-home-linux-arm64": "engine-llama-arm64",
-            "source-home-macos": "source-gate", "update-hop-linux": "fork-gate", "cancel-on-failure": None,
+            "installed-app-paths": None, "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
+            "source-home-linux-arm64": "[installed-app-paths, engine-llama-arm64]",
+            "source-home-macos": "source-gate", "update-hop-linux": "[installed-app-paths, fork-gate]", "cancel-on-failure": None,
             "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, "
                         "lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
-                        "release-upstream-assets, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]",
+                        "release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, "
+                        "update-hop-linux]",
         }
         graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
         self.assertEqual(graph, expected)
@@ -2108,13 +2131,16 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(self.run_fork_gate([None, conclusion, "success"]), (1, 2),
                              f"a source-gate {conclusion} must stop a fork pull request's compile jobs")
 
-    def run_required(self, context, results, upstream="false"):
-        """Run the required job's check as Actions would for this context; return its exit status."""
+    def run_required(self, context, results, upstream="false", installed="true"):
+        """Run the required job's check as Actions would for this context; return its exit status.
+        installed is the installed-app-paths output; None leaves the output out."""
         step, = steps("required")
         env = {name: str(evaluate(field(step, name), context)).lower()
                for name in ("SPARK_PULL_REQUEST", "POST_MERGE", "PULL_REQUEST", "CUSTODY_EVENT")}
         needs = {job: {"result": "success", "outputs": {}} for job in REQUIRED_NEEDS}
         needs["release-upstream-paths"]["outputs"]["run"] = upstream
+        if installed is not None:
+            needs["installed-app-paths"]["outputs"]["run"] = installed
         for job, result in results.items():
             needs[job]["result"] = result
         # The run block is its 10-space lines; the next job's leading comment follows it.
@@ -2158,6 +2184,93 @@ class ReleasePolicyTests(unittest.TestCase):
         ]
         for name, context, results, upstream, expected in cases:
             self.assertEqual(self.run_required(context, results, upstream), expected, name)
+        # The installed-app jobs may be skipped only when installed-app-paths said so on a pull request.
+        base = {**mac, **assets}
+        installed = {job: "skipped" for job in INSTALLED_APP_JOBS}
+        after_merge = {**assets, "pr-substance": "skipped"}
+        cases = [
+            ("notes-only PR", pr, {**base, **installed}, "false", 0),
+            ("notes-only PR whose installed-app jobs ran", pr, base, "false", 0),
+            ("installed-app jobs skipped though the paths job said run", pr, {**base, **installed}, "true", 1),
+            ("installed-app jobs skipped with no answer from the paths job", pr, {**base, **installed}, "", 1),
+            ("installed-app jobs skipped with the answer left out", pr, {**base, **installed}, None, 1),
+            ("an answer that is not the word false", pr, {**base, **installed}, "False", 1),
+            ("the paths job failed", pr, {**base, **installed, "installed-app-paths": "failure"}, "", 1),
+            ("the paths job failed after it said skip", pr, {**base, **installed, "installed-app-paths": "failure"}, "false", 1),
+            ("the paths job skipped on an ordinary PR", pr, {**base, **installed, "installed-app-paths": "skipped"}, "", 1),
+            ("the paths job cancelled", pr, {**base, **installed, "installed-app-paths": "cancelled"}, "false", 1),
+            ("notes-only PR with another full proof skipped", pr, {**base, **installed, "test-capsules": "skipped"}, "false", 1),
+            ("notes-only PR with a failed installed-app job", pr, {**base, "update-hop-linux": "failure"}, "false", 1),
+            ("installed-app jobs skipped after merge", push, {**after_merge, **installed}, "false", 1),
+            ("installed-app jobs skipped on the nightly", nightly,
+             {**after_merge, "custody-harness-smoke": "skipped", **installed}, "false", 1),
+            ("spark lane PR, whatever the paths job said", spark, skipped_full, "true", 0),
+        ]
+        for job in INSTALLED_APP_JOBS:
+            cases.append((f"only {job} skipped on a notes-only PR", pr, {**base, job: "skipped"}, "false", 0))
+            cases.append((f"only {job} skipped on an ordinary PR", pr, {**base, job: "skipped"}, "true", 1))
+        for name, context, results, answer, expected in cases:
+            self.assertEqual(self.run_required(context, results, installed=answer), expected, name)
+
+    def test_installed_app_jobs_skip_only_on_a_notes_only_pull_request(self):
+        paths_job = JOBS["installed-app-paths"]
+        self.assertEqual(paths_job.split("    permissions:\n", 1)[1].split("    outputs:\n", 1)[0], "      contents: read\n")
+        self.assertEqual(field(paths_job.split("    outputs:\n", 1)[1], "run"),
+                         "${{ github.event_name != 'pull_request' || steps.decide.outputs.run != 'false' }}")
+        self.assertNotRegex(paths_job, r"(?m)continue-on-error|^    needs:")
+        checkout, decide = steps("installed-app-paths")
+        # The repository's script reads the change list; no other action does.
+        self.assertRegex(checkout, r"\Auses: actions/checkout@[0-9a-f]{40} # v5\n")
+        self.assertEqual(field(checkout, "fetch-depth"), "0")
+        self.assertEqual(field(checkout, "persist-credentials"), "false")
+        self.assertNotIn("uses:", decide)
+        self.assertIn("        id: decide\n", decide)
+        self.assertEqual(field(decide, "run"), "python3 -I scripts/ci-installed-app-paths.py")
+        self.assertEqual(field(decide, "BASE_REF"), "${{ github.base_ref }}")
+        self.assertEqual(field(decide, "HEAD_SHA"), "${{ github.event.pull_request.head.sha }}")
+        for step in (checkout, decide):
+            self.assertEqual(field(step, "if"), "github.event_name == 'pull_request'")
+        self.assertIn("python3 scripts/ci-installed-app-paths-test.py", SOURCE_GATE)
+        for event, ref, ref_type, override, _ in [*CASES, *NON_WRITER_CASES]:
+            for head_ref in (("feature", "batch/20261108", "spark", "sparked/lane", "spark/lane")
+                             if event == "pull_request" else ("",)):
+                context = event_context(event, ref, ref_type, override, head_ref)
+                lane = head_ref.startswith("spark/")
+                self.assertEqual(job_runs("installed-app-paths", context), not lane)
+                for decided in ("true", "false", "", "False", "skip"):
+                    # Only a pull request can skip, and only on the decision step's exact answer.
+                    expected = not lane and not (event == "pull_request" and decided == "false")
+                    for job in INSTALLED_APP_JOBS:
+                        with self.subTest(event=event, ref=ref, head_ref=head_ref, decided=decided, job=job):
+                            self.assertEqual(installed_app_runs(SOURCE, job, context, decided), expected)
+        # Each job waits for the answer, and the check above sees a guard that ignores it.
+        ordinary = event_context("pull_request", "refs/pull/9/merge")
+        for job in INSTALLED_APP_JOBS:
+            self.assertEqual(field(JOBS[job], "needs").strip("[]").split(", ")[0], "installed-app-paths", job)
+            unguarded = SOURCE.replace(field(JOBS[job], "if"), "${{ " + SPARK_SKIP + " }}")
+            self.assertTrue(installed_app_runs(unguarded, job, ordinary, "false"), job)
+
+    def test_notes_rule_skips_no_input_the_installed_app_jobs_call(self):
+        spec = importlib.util.spec_from_file_location("installed_app_paths", REPO / "scripts/ci-installed-app-paths.py")
+        rule = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rule)
+        for job in sorted(INSTALLED_APP_JOBS):
+            inputs = job_inputs(WORKFLOW, SOURCE, job)
+            self.assertIn("scripts/setup-source-home.sh", inputs, job)
+            self.assertIn("capsules/model-provider/Cargo.toml", inputs, job)
+            self.assertEqual(sorted(path for path in inputs if rule.is_notes_or_lab(path)), [], job)
+        # Capsule folders are inputs whole, so a README.md inside one is no notes path.
+        self.assertIn("capsules/home/README.md", inputs)
+        # A step that builds a lab crate or reads a notes file by path is seen.
+        call = "          scripts/setup-source-home.sh 2>&1 | tee"
+        for planted, path in (("cargo build --locked --manifest-path lab/redteam/Cargo.toml", "lab/redteam/Cargo.toml"),
+                              ('cp "$ROOT/docs/INSTALL.md" "$HOME"', "docs/INSTALL.md"),
+                              ('cat "${REPO_ROOT}/PRINCIPLES.md"', "PRINCIPLES.md")):
+            changed = SOURCE.replace(call, f"          {planted}\n{call}")
+            self.assertNotEqual(changed, SOURCE)
+            for job in sorted(INSTALLED_APP_JOBS):
+                found = {name for name in job_inputs(WORKFLOW, changed, job) if rule.is_notes_or_lab(name)}
+                self.assertIn(path, found, (job, planted))
 
     def test_pull_request_runs_cancel_at_the_first_failed_job(self):
         watcher = JOBS["cancel-on-failure"]
@@ -2365,8 +2478,8 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotIn("RECIPE_COMMIT: ${{ github.sha }}", JOBS["engine-llama-arm64"])
 
     def test_engine_consumers_gate_the_current_run_input_with_shared_pin(self):
-        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "engine-llama-amd64")
-        self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"), "engine-llama-arm64")
+        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "[installed-app-paths, engine-llama-amd64]")
+        self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"), "[installed-app-paths, engine-llama-arm64]")
         download, = [step for step in steps("source-home-linux-arm64") if "actions/download-artifact@" in step and "name: llama-arm64-bundle" in step]
         self.assertIn("name: llama-arm64-bundle", download)
         self.assertEqual(field(download, "if"), "matrix.os == 'ubuntu-22.04-arm'")
