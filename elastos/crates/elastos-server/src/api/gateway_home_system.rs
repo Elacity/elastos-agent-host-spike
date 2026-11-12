@@ -8515,6 +8515,13 @@ fn home_save_background_image(
     bytes: Vec<u8>,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let path = home_appearance_path(data_dir, context, file_name)?;
+    // Every existing image is read first, the destination name included, so a
+    // damaged one refuses the upload before anything is written: the bytes the
+    // Home shows now stay in place (#447).
+    let existing = home_background_image_paths_checked(data_dir, context)?;
+    // The write stages the new bytes in a temporary file beside the images and
+    // renames it over the destination in one step. A failure before the rename
+    // removes the temporary file and leaves every existing image as it was.
     crate::auth::write_principal_root_object_resolved(
         data_dir,
         context.root(),
@@ -8522,19 +8529,12 @@ fn home_save_background_image(
         &path,
         &bytes,
     )?;
-    if let Err(err) = remove_home_background_images(data_dir, context, Some(file_name)) {
-        // A damaged sibling refuses the upload after it was written. Remove
-        // the new file so the refusal leaves the Home as it found it.
-        if let Err(rollback) = std::fs::remove_file(&path) {
-            if rollback.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    error = %rollback,
-                    "failed to remove a refused background image"
-                );
-            }
-        }
-        return Err(err);
-    }
+    // The new bytes are now in place under the destination name. A crash here
+    // leaves them beside any older image of another format: nothing is lost,
+    // and the reader shows the first name that exists (png, then jpg, webp,
+    // gif), so an older image can stay visible until the next save or reset
+    // removes it. No reader step sees a partial image.
+    home_remove_background_image_files(existing, Some(&path))?;
     home_appearance_summary(data_dir, context)
 }
 
@@ -8542,41 +8542,51 @@ fn home_reset_background_image(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<HomeAppearanceSummary> {
-    remove_home_background_images(data_dir, context, None)?;
+    let existing = home_background_image_paths_checked(data_dir, context)?;
+    home_remove_background_image_files(existing, None)?;
     home_appearance_summary(data_dir, context)
 }
 
-/// Upload and reset replace the background, but never delete a damaged
-/// image: the refusal is the damage notice that names the file, as for every
-/// other Home state save (#447). Every image other than `keep` is checked
-/// before any is removed; `keep` is the file an upload just wrote.
-fn remove_home_background_images(
+/// Reads every existing background image and returns the paths it found,
+/// refusing a damaged one. Upload and reset call this before they write or
+/// remove anything, so the refusal is the damage notice that names the file
+/// and the Home keeps every image it had (#447).
+fn home_background_image_paths_checked(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
-    keep: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = Vec::with_capacity(HOME_BACKGROUND_IMAGE_FILES.len());
     for &(file_name, _content_type) in HOME_BACKGROUND_IMAGE_FILES {
-        if keep == Some(file_name) {
+        let path = home_appearance_path(data_dir, context, file_name)?;
+        if !path.is_file() {
             continue;
         }
-        let path = home_appearance_path(data_dir, context, file_name)?;
-        if path.is_file() {
-            if let Err(err) = crate::auth::read_principal_root_object_resolved(
-                data_dir,
-                context.root(),
-                &home_appearance_object_uri(context, file_name),
-                &path,
-            ) {
-                if is_damaged_home_state(&err) {
-                    return Err(err);
-                }
+        if let Err(err) = crate::auth::read_principal_root_object_resolved(
+            data_dir,
+            context.root(),
+            &home_appearance_object_uri(context, file_name),
+            &path,
+        ) {
+            if is_damaged_home_state(&err) {
+                return Err(err);
             }
         }
         paths.push(path);
     }
+    Ok(paths)
+}
+
+/// Removes the listed image files except `keep`, the destination an upload
+/// has just written.
+fn home_remove_background_image_files(
+    paths: Vec<PathBuf>,
+    keep: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     for path in paths {
-        match std::fs::remove_file(path) {
+        if keep == Some(path.as_path()) {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(err.into()),
@@ -9826,7 +9836,7 @@ mod stored_root_tests {
         assert_only_file_named(&data_dir, &entry.path);
         let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
         assert_eq!(bytes, b"parent image");
-        remove_home_background_images(&data_dir, &context, None).unwrap();
+        home_reset_background_image(&data_dir, &context).unwrap();
         assert!(!entry.path.exists());
         let child_root = format!(
             "localhost://Users/{}",

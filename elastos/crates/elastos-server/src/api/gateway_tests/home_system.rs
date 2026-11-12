@@ -4822,6 +4822,285 @@ async fn damaged_background_image_survives_upload_and_reset() {
     }
 }
 
+const APPEARANCE_IMAGE_FOLDER: &str = ".AppData/ElastOS/Home/Appearance";
+
+fn appearance_image_folder(dir: &std::path::Path, principal_id: &str) -> std::path::PathBuf {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let uri = format!("{localhost_root}/{APPEARANCE_IMAGE_FOLDER}");
+    elastos_common::localhost::rooted_localhost_fs_path(dir, &uri).unwrap()
+}
+
+fn appearance_image_uri(principal_id: &str, file_name: &str) -> String {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    format!("{localhost_root}/{APPEARANCE_IMAGE_FOLDER}/{file_name}")
+}
+
+/// Seeds one protected background image under the authority's root. `damage`
+/// corrupts the stored envelope label, which is what the notice names.
+fn seed_protected_background_image(
+    dir: &std::path::Path,
+    principal_id: &str,
+    file_name: &str,
+    bytes: &[u8],
+    damage: bool,
+) -> std::path::PathBuf {
+    let folder = appearance_image_folder(dir, principal_id);
+    crate::auth::create_owner_only_dir_all(dir, &folder).unwrap();
+    let uri = appearance_image_uri(principal_id, file_name);
+    let path = folder.join(file_name);
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    crate::auth::write_principal_root_object(
+        dir,
+        principal_id,
+        &localhost_root,
+        &uri,
+        &path,
+        bytes,
+    )
+    .unwrap();
+    if damage {
+        let mut damaged = std::fs::read(&path).unwrap();
+        damaged[9] = 0xff;
+        std::fs::write(&path, &damaged).unwrap();
+    }
+    path
+}
+
+fn read_protected_background_image(
+    dir: &std::path::Path,
+    principal_id: &str,
+    file_name: &str,
+) -> Vec<u8> {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let uri = appearance_image_uri(principal_id, file_name);
+    let path = appearance_image_folder(dir, principal_id).join(file_name);
+    crate::auth::read_principal_root_object(dir, principal_id, &localhost_root, &uri, &path)
+        .unwrap()
+}
+
+/// The names in the image folder, sorted, so a test can prove no temporary or
+/// extra image was left behind.
+fn appearance_image_names(dir: &std::path::Path, principal_id: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(appearance_image_folder(dir, principal_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+async fn upload_background_image(
+    app: &axum::Router,
+    token: &str,
+    content_type: &str,
+    body: &str,
+) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/apps/system/appearance/background-image")
+                .header("x-elastos-home-token", token)
+                .header(CONTENT_TYPE, content_type)
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let text = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&text).into_owned())
+}
+
+/// An upload that names the current image, while a sibling of another format
+/// is damaged, is refused before anything is written: the current image keeps
+/// its bytes and the refusal names the damaged file.
+#[tokio::test]
+async fn same_name_image_upload_with_a_damaged_sibling_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let current = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"current image",
+        false,
+    );
+    let sibling = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.jpg",
+        b"damaged sibling",
+        true,
+    );
+    let current_before = std::fs::read(&current).unwrap();
+    let sibling_before = std::fs::read(&sibling).unwrap();
+
+    let (status, text) = upload_background_image(
+        &app,
+        &authority.system_token,
+        "image/png",
+        "replacement image",
+    )
+    .await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains(&format!(
+            "{APPEARANCE_IMAGE_FOLDER}/background-image.jpg does not carry the label"
+        )),
+        "{text}"
+    );
+    assert_eq!(std::fs::read(&current).unwrap(), current_before);
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"current image"
+    );
+    assert_eq!(std::fs::read(&sibling).unwrap(), sibling_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.jpg", "background-image.png"]
+    );
+}
+
+/// An upload whose destination is itself damaged is refused before the write,
+/// so the damaged image stays byte for byte rather than being replaced.
+#[tokio::test]
+async fn same_name_image_upload_over_a_damaged_image_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let damaged = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"damaged image",
+        true,
+    );
+    let damaged_before = std::fs::read(&damaged).unwrap();
+
+    let (status, text) = upload_background_image(
+        &app,
+        &authority.system_token,
+        "image/png",
+        "replacement image",
+    )
+    .await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains(&format!(
+            "{APPEARANCE_IMAGE_FOLDER}/background-image.png does not carry the label"
+        )),
+        "{text}"
+    );
+    assert_eq!(std::fs::read(&damaged).unwrap(), damaged_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.png"]
+    );
+}
+
+/// A same-name upload over a readable image succeeds: one image remains and
+/// it holds the new bytes.
+#[tokio::test]
+async fn same_name_image_upload_replaces_the_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"first image",
+        false,
+    );
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/png", "second image").await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        payload["background_image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("/api/apps/home/appearance/background-image?scope="),
+        "{text}"
+    );
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.png"]
+    );
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"second image"
+    );
+}
+
+/// An upload of another format while a sibling is damaged is refused before
+/// anything is written or removed: both images keep their bytes and the new
+/// name does not appear.
+#[tokio::test]
+async fn different_name_image_upload_with_a_damaged_sibling_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let current = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"current image",
+        false,
+    );
+    let sibling = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.jpg",
+        b"damaged sibling",
+        true,
+    );
+    let current_before = std::fs::read(&current).unwrap();
+    let sibling_before = std::fs::read(&sibling).unwrap();
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/webp", "new webp").await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains(&format!(
+            "{APPEARANCE_IMAGE_FOLDER}/background-image.jpg does not carry the label"
+        )),
+        "{text}"
+    );
+    assert_eq!(std::fs::read(&current).unwrap(), current_before);
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"current image"
+    );
+    assert_eq!(std::fs::read(&sibling).unwrap(), sibling_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.jpg", "background-image.png"]
+    );
+}
+
 #[tokio::test]
 async fn test_recovery_readiness_projects_unavailable_and_first_profile_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
