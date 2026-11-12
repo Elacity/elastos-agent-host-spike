@@ -7,8 +7,8 @@ lab/agent-conformance/run.sh
 ```
 
 The command uses cached dependencies, the pinned Rust toolchain and its
-`wasm32-unknown-unknown` target and the macOS `shasum` tool. Reserve 12 GiB for
-builds plus 2 GiB free. The
+`wasm32-unknown-unknown` target and the system's `sha256sum` or `shasum` tool.
+Reserve 12 GiB for builds plus 2 GiB free. The
 lease procedure is in [scripts/README.md](../../scripts/README.md#local-pre-push-gate).
 The command prints typed `version identity: {...}` observations above one table
 from Cargo's test inventory and result lines. Native records identify `elastos`
@@ -264,8 +264,13 @@ JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
 verdict `pass` and the exact commit the receipt's `repository` names, and the
 tree is clean when the report is written. That is checked after the suite
 runs, so the row does not show that the results came from that tree. Reviews
-live outside the commit they read: keep the file outside the repository, since
-an untracked file inside it makes the tree dirty. The receipt records
+live outside the commit they read, so the file must be outside the repository.
+The report resolves the path first, links included and a relative path from
+the current directory: a file that is inside the work tree, or is named in a
+folder inside it, leaves the row FAIL with
+`reviews file is inside the repository`. An untracked file there also makes the
+tree dirty; a tracked or ignored one does not, which is why the place itself is
+checked. The receipt records
 `reviews`, `review_status` (`bound` or `unbound`) and `review_failures`. An
 unreadable or malformed reviews file fails the command; an unbound review
 leaves this row FAIL without changing `command_success`, so CI still reports
@@ -297,10 +302,14 @@ of the binary and of `components.json`. The receipt then records
 `installed_runtime_status` (`matched` or `unmatched`) and
 `installed_runtime_failures`. A file that cannot be read is named in the
 failures (`could not read release.json`), as is each hash that differs
-(`binary does not match the release`); an unmatched Runtime is recorded as
-`null`. Like an unbound review, an unmatched chain leaves this row FAIL without
-changing `command_success`, so a receipt backs A14 only when every A14 row
-reads PASS. Naming one variable without the other fails the command. With
+(`binary does not match the release`). Each of the four files is opened without
+following a symbolic link at its final name and must be a regular file, as the
+Runtime itself requires of them: a link there fails the row with its own reason
+(`release.json is a symbolic link`). The folders above those names are not
+checked, so a link in a parent folder is followed. An unmatched Runtime is
+recorded as `null`. Like an unbound review, an unmatched chain leaves this row
+FAIL without changing `command_success`, so a receipt backs A14 only when every
+A14 row reads PASS. Naming one variable without the other fails the command. With
 neither, the receipt has no installed Runtime row or field. There is no default
 location: the report never looks for an installation on its own.
 
@@ -313,13 +322,27 @@ the bundle the demo ran.
 equals `installed_runtime.binary_sha256`. The receipt records
 `installed_runtime_ran_status` (`ran` or `not shown`) and
 `installed_runtime_ran_failures`; a difference names both hashes, and an
-installed Runtime whose chain did not match leaves nothing to compare. The
-suite launches the installed binary only when
+installed Runtime whose chain did not match leaves nothing to compare. Identity
+lines are read from the whole test output, which cannot say which test printed
+a line, so a run that names two different Runtime hashes fails this row with
+`suite recorded more than one Runtime SHA-256`, as well as `versions_receipt`,
+whichever hash came first.
+
+The suite launches the installed binary only when
 `AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
-launch the named binary where it is and build no Runtime. Without it the suite
-builds the checkout's Runtime and this row fails. Only the Runtime is given;
-the localhost provider, the probe and every Home the Runtime runs in still come
-from the checkout, so the installation's data folder is never used by a run.
+launch the named binary where it is and build no Runtime. The suite hashes the
+named binary again immediately before every launch; when the bytes differ from
+the first hash it does not launch them, prints
+`given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
+and the run fails. This does not show a swap made between that hash and the
+operating system starting the process, or what a started Runtime then starts
+by itself. Without that variable the suite builds
+the checkout's Runtime. This row then fails only when an installed Runtime was
+given and the built Runtime's hash differs from the installed binary's; when no
+installed Runtime was given the receipt has no such row. Only the Runtime is
+given; the localhost provider, the probe and every Home the Runtime runs in
+still come from the checkout, so the installation's data folder is never used
+by a run.
 
 A receipt with reviews and an installed Runtime on macOS, from the repository
 root on a clean tree, with the reviews file kept outside the repository:
@@ -444,9 +467,9 @@ Ready before typing it:
   `{"reviewer": "...", "verdict": "pass", "commit": "<the 40-character commit checked out>"}`;
 - this checkout at that commit with nothing changed or untracked;
 - everything `run.sh` needs: cached dependencies, the pinned Rust toolchain
-  with its `wasm32-unknown-unknown` target, `shasum`, the build space named at
-  the top of this file and the shared heavy-build lease. It needs no network
-  and no model server.
+  with its `wasm32-unknown-unknown` target, `sha256sum` or `shasum`, the build
+  space named at the top of this file and the shared heavy-build lease. It
+  needs no network and no model server.
 
 The command says which of the binary, the data folder and the reviews file is
 missing, and refuses a tree that is not clean. It then runs `run.sh` with the
@@ -456,14 +479,18 @@ its reasons through `report --a14 <receipt>`, copies the receipt folder to
 own output as `demo-output.log`, and prints that path. It exits 0 only when
 the suite passed and every A14 row reads PASS; the receipt folder is kept
 either way. It writes nothing under the install paths: the installed binary is
-launched where it is, in throwaway Homes under this lane's `target`.
+launched where it is, in throwaway Homes under this lane's `target`. Before
+anything runs it works out where the receipts folder and its temporary folder
+(`TMPDIR`, else `/tmp`) really are, links resolved, and stops with a message if
+either is inside the installed data folder or the folder holding the installed
+binary.
 
 What each A14 row means:
 
 | Row | PASS means |
 | --- | --- |
 | `versions_receipt` | the receipt names the commit, the Runtime and provider hashes and every launched probe the rows needed |
-| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree |
+| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, and `release-head.json` names that `release.json` |
 | `installed_runtime_ran` | the Runtime the suite launched has the installed binary's SHA-256 |

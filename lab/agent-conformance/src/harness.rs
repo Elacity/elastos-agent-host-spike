@@ -252,6 +252,9 @@ impl ThrowawayHome {
                 operator.data().join("runtime-coords.json"),
             );
         }
+        // A given Runtime must still have the bytes first hashed for it. This
+        // is the last step before the process is started.
+        crate::runtime::unchanged_before_launch(program)?;
         let child = command
             .spawn()
             .map_err(|_| "could not start child process")?;

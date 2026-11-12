@@ -4,7 +4,7 @@ use crate::identity::{sha256, Observation, ProbeIdentity, PREFIX};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -359,6 +359,12 @@ fn hex(value: &str, length: usize) -> bool {
 #[derive(Default)]
 struct Identities {
     runtime: Option<String>,
+    /// The output named two different Runtime hashes. Identity lines are read
+    /// from the whole output, and a line does not say which test printed it, so
+    /// the Runtime's hash cannot be taken from the launching tests alone. A
+    /// second, different hash is therefore a failure wherever it came from, and
+    /// the first one is not treated as the Runtime that ran.
+    runtime_conflict: bool,
     provider: Option<String>,
     built: BTreeMap<String, ProbeIdentity>,
     launched: BTreeMap<String, ProbeIdentity>,
@@ -377,6 +383,7 @@ impl Identities {
                     return Err(format!("malformed {role} SHA-256"));
                 }
                 if slot.as_ref().is_some_and(|old| old != &sha256) {
+                    self.runtime_conflict |= role == "elastos";
                     return Err(format!("conflicting {role} SHA-256"));
                 }
                 *slot = Some(sha256);
@@ -502,6 +509,30 @@ pub fn review_failures(reviews: Option<&[Review]>, git: Option<&GitIdentity>) ->
     failures.sort();
     failures.dedup();
     failures
+}
+
+/// Why a reviews file at `reviews` cannot bind to the tree at `repository`; None
+/// when it can. Reviews name the commit they read, so the file has to live
+/// outside that tree: a tracked or ignored file inside it leaves the tree clean
+/// and would otherwise bind. Two places are checked with their links resolved:
+/// the file the path leads to, and the folder the path names it in. So a link
+/// outside the tree to a file inside it is refused, and so is a link inside the
+/// tree to a file outside it. A relative path is taken from the current
+/// directory, as the read of the file takes it.
+pub fn reviews_file_failure(reviews: &Path, repository: &Path) -> Option<String> {
+    let folder = match reviews.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => folder,
+        _ => Path::new("."),
+    };
+    let (Ok(file), Ok(folder), Ok(repository)) = (
+        reviews.canonicalize(),
+        folder.canonicalize(),
+        repository.canonicalize(),
+    ) else {
+        return Some("could not resolve the reviews file against the repository".into());
+    };
+    (file.starts_with(&repository) || folder.starts_with(&repository))
+        .then(|| "reviews file is inside the repository".into())
 }
 
 /// The installed Runtime a receipt can name, from the records the installer
@@ -647,6 +678,12 @@ pub fn release_platform() -> &'static str {
 /// `components.json`. A file that cannot be read is its own reason, named by
 /// file; nothing is checked until all four are read.
 ///
+/// Each of the four is opened without following a link at its final name, and
+/// must be a regular file: the Runtime admits its installed files the same way,
+/// so a link there is refused with its own reason, not read through to some
+/// other file. The open itself refuses the link, so there is no gap between a
+/// check and the read. The folders above the four names are not checked.
+///
 /// What this does not check:
 /// - signatures: only hashes are compared, so a match shows which release the
 ///   installed bytes belong to, not that the release is genuine;
@@ -661,8 +698,12 @@ pub fn read_installed_runtime(
 ) -> Result<InstalledRuntime, Vec<String>> {
     let mut failures = Vec::new();
     let mut read = |path: &Path, name: &str| {
-        std::fs::read(path).unwrap_or_else(|_| {
-            failures.push(format!("could not read {name}"));
+        read_installed_file(path).unwrap_or_else(|reason| {
+            failures.push(match reason {
+                Unread::Link => format!("{name} is a symbolic link"),
+                Unread::NotAFile => format!("{name} is not a regular file"),
+                Unread::Other => format!("could not read {name}"),
+            });
             Vec::new()
         })
     };
@@ -676,6 +717,37 @@ pub fn read_installed_runtime(
         return Err(failures);
     }
     installed_runtime(&head, &release, platform, &program, &components)
+}
+
+enum Unread {
+    Link,
+    NotAFile,
+    Other,
+}
+
+/// The bytes of the regular file at `path`, never those of a link's target.
+fn read_installed_file(path: &Path) -> Result<Vec<u8>, Unread> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // NOFOLLOW makes the open fail on a link at the final name. NONBLOCK keeps
+    // the open from waiting on a pipe placed there; it does nothing to a file.
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits() as i32)
+        .open(path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                Unread::Link
+            } else {
+                Unread::Other
+            }
+        })?;
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return Err(Unread::NotAFile);
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| Unread::Other)?;
+    Ok(bytes)
 }
 
 /// A missing, repeated or unlisted result fails closed. Cargo failure is also
@@ -718,6 +790,7 @@ pub fn write_reviewed_run(
 ) -> RunReport {
     let bound = Bound {
         reviews,
+        reviews_file_failure: None,
         installed: None,
     };
     write_bound_run(listed, output, cargo_ok, git, bound, receipt, gaps)
@@ -727,6 +800,10 @@ pub fn write_reviewed_run(
 /// commit and, when one was given, the installed Runtime.
 pub struct Bound<'a> {
     pub reviews: Option<&'a [Review]>,
+    /// From `reviews_file_failure`: why the file the reviews were read from
+    /// cannot bind, whatever the reviews say. `None` when it can, or when the
+    /// reviews did not come from a file.
+    pub reviews_file_failure: Option<String>,
     /// `None` means no installed Runtime was given: the receipt then carries no
     /// installed Runtime row or field at all.
     pub installed: Option<Result<InstalledRuntime, Vec<String>>>,
@@ -780,6 +857,7 @@ pub fn render_reviewed_run(
 ) -> RunReport {
     let bound = Bound {
         reviews,
+        reviews_file_failure: None,
         installed: None,
     };
     render_bound_run(listed, output, cargo_ok, git, bound, gaps)
@@ -795,7 +873,11 @@ pub fn render_bound_run(
     bound: Bound<'_>,
     gaps: Option<&str>,
 ) -> RunReport {
-    let Bound { reviews, installed } = bound;
+    let Bound {
+        reviews,
+        reviews_file_failure,
+        installed,
+    } = bound;
     let mut evidence = Evidence::parse(listed, output, gaps);
     let (mut table, suite_ok) = evidence.table(cargo_ok);
     evidence.require_identities();
@@ -814,7 +896,9 @@ pub fn render_bound_run(
     } else {
         "versions_receipt (A14) | FAIL\n"
     });
-    let unbound = review_failures(reviews, git.as_ref());
+    let mut unbound = review_failures(reviews, git.as_ref());
+    unbound.extend(reviews_file_failure);
+    unbound.sort();
     table.push_str(if unbound.is_empty() {
         "review_binding (A14) | PASS\n"
     } else {
@@ -838,8 +922,12 @@ pub fn render_bound_run(
         if unstaged.is_empty() { "PASS" } else { "FAIL" }
     ));
     // Whether the suite ran the installed binary is asked only when an
-    // installed Runtime was given.
+    // installed Runtime was given. A run that named two different Runtime
+    // hashes cannot say which bytes it ran, whichever hash came first.
     let not_ran = installed.as_ref().map(|installed| {
+        if evidence.identities.runtime_conflict {
+            return vec!["suite recorded more than one Runtime SHA-256".to_owned()];
+        }
         installed_runtime_ran_failures(
             evidence.identities.runtime.as_deref(),
             installed.as_ref().ok(),
@@ -946,9 +1034,11 @@ pub struct A14Row {
 
 /// The A14 rows of a written receipt, for the owner's command. All five must
 /// be present: a receipt made without an installed Runtime has no installed
-/// rows, and that is a failure here, named as a missing row. The rows are read
-/// from the receipt's own table after the table is checked against the hash the
-/// receipt records for it.
+/// rows, and that is a failure here, named as a missing row. A row passes only
+/// when the table holds it exactly once and its grade is exactly `PASS`: a
+/// second copy fails it whatever the copies say, and so does any other grade.
+/// The rows are read from the receipt's own table after the table is checked
+/// against the hash the receipt records for it.
 pub fn a14_rows(receipt: &[u8]) -> Result<Vec<A14Row>, String> {
     let document: serde_json::Value =
         serde_json::from_slice(receipt).map_err(|_| "malformed receipt")?;
@@ -983,6 +1073,8 @@ pub fn a14_rows(receipt: &[u8]) -> Result<Vec<A14Row>, String> {
                 .collect();
             if grades.is_empty() {
                 reasons.push("row missing from the receipt".into());
+            } else if grades.len() > 1 {
+                reasons.push("row appears more than once in the receipt".into());
             } else if !passed && reasons.is_empty() {
                 reasons.push("receipt gives no reason".into());
             }
