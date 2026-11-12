@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 struct GapRow {
@@ -29,13 +29,13 @@ pub const STAGED_BUNDLE_SCOPE: &str =
 pub const INSTALLED_RUNTIME_SCOPE: &str =
     "release head, release and components hash-check each other and name this repository commit; records only, the installed data folder did not run";
 
-/// What the runtime-ran row covers: the suite launched the installed path, and
-/// the SHA-256 the harness took of that file, again immediately before each
-/// launch, equals the installed binary's. It does not see the bytes the
-/// operating system then executed. It ran with a throwaway data folder, so this
-/// says nothing about behaviour on the installed data.
+/// What the runtime-ran row covers: the named path the suite launched is the
+/// installed binary's path, and the SHA-256 the suite took of that file again
+/// immediately before each launch equals the installed binary's. Nothing here
+/// sees the bytes the operating system then executed. It ran with a throwaway
+/// data folder, so this says nothing about behaviour on the installed data.
 pub const INSTALLED_RUNTIME_BINARY_SCOPE: &str =
-    "the suite launched the installed path, whose SHA-256, taken by the harness immediately before each launch, equals the installed binary's; it ran with a throwaway data folder, not the installed one";
+    "the suite launched the installed path, and the harness's SHA-256 of that file, taken immediately before each launch, equals the installed binary's; nothing shows the bytes the operating system then executed; it ran with a throwaway data folder, not the installed one";
 
 /// The data folder the Runtime under test ran with, as the receipt states it.
 pub const RUNTIME_DATA_FOLDER: &str =
@@ -377,36 +377,62 @@ fn hex(value: &str, length: usize) -> bool {
 
 #[derive(Default)]
 struct Identities {
-    runtime: Option<String>,
+    runtime: Option<RuntimeIdentity>,
     /// The output named two different Runtime hashes. Identity lines are read
     /// from the whole output, and a line does not say which test printed it, so
     /// the Runtime's hash cannot be taken from the launching tests alone. A
     /// second, different hash is therefore a failure wherever it came from, and
     /// the first one is not treated as the Runtime that ran.
     runtime_conflict: bool,
+    /// The output named two different Runtime paths, so it does not say which
+    /// file the suite launched.
+    runtime_path_conflict: bool,
     provider: Option<String>,
     built: BTreeMap<String, ProbeIdentity>,
     launched: BTreeMap<String, ProbeIdentity>,
 }
 
+/// The Runtime identity the suite printed: the SHA-256 it took of the file
+/// first, and the named path it was told to launch. `path` is None when the
+/// suite built its own Runtime, which was told no path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeIdentity {
+    pub path: Option<String>,
+    pub sha256: String,
+}
+
 impl Identities {
     fn observe(&mut self, observation: Observation) -> Result<(), String> {
         match observation {
-            Observation::Native { role, sha256 } => {
-                let slot = match role.as_str() {
-                    "elastos" => &mut self.runtime,
-                    "localhost-provider" => &mut self.provider,
-                    _ => return Err("malformed native role".into()),
-                };
-                if !hex(&sha256, 64) {
-                    return Err(format!("malformed {role} SHA-256"));
+            Observation::Native { role, sha256, path } => match role.as_str() {
+                "elastos" => {
+                    if !hex(&sha256, 64) {
+                        return Err(format!("malformed {role} SHA-256"));
+                    }
+                    match &self.runtime {
+                        Some(old) if old.sha256 != sha256 => {
+                            self.runtime_conflict = true;
+                            return Err(format!("conflicting {role} SHA-256"));
+                        }
+                        Some(old) if old.path != path => {
+                            self.runtime_path_conflict = true;
+                            return Err(format!("conflicting {role} path"));
+                        }
+                        _ => {}
+                    }
+                    self.runtime = Some(RuntimeIdentity { path, sha256 });
                 }
-                if slot.as_ref().is_some_and(|old| old != &sha256) {
-                    self.runtime_conflict |= role == "elastos";
-                    return Err(format!("conflicting {role} SHA-256"));
+                "localhost-provider" => {
+                    if !hex(&sha256, 64) {
+                        return Err(format!("malformed {role} SHA-256"));
+                    }
+                    if self.provider.as_ref().is_some_and(|old| old != &sha256) {
+                        return Err(format!("conflicting {role} SHA-256"));
+                    }
+                    self.provider = Some(sha256);
                 }
-                *slot = Some(sha256);
-            }
+                _ => return Err("malformed native role".into()),
+            },
             Observation::BuildOnly { probe } => return self.observe_probe(probe, false),
             Observation::Launched { probe } => return self.observe_probe(probe, true),
         }
@@ -562,6 +588,9 @@ pub fn reviews_file_failure(reviews: &Path, repository: &Path) -> Option<String>
 /// which release the installed bytes match, not that the release is genuine.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct InstalledRuntime {
+    /// The installed binary path the report was given, as given. The launched
+    /// path is compared with it after both are resolved to canonical paths.
+    pub binary_path: PathBuf,
     pub version: String,
     pub platform: String,
     pub source_commit: String,
@@ -571,8 +600,9 @@ pub struct InstalledRuntime {
 }
 
 /// Every reason the installed bytes do not match their release; Ok only when
-/// none.
+/// none. `binary_path` is where the installed binary was read.
 pub fn installed_runtime(
+    binary_path: &Path,
     head: &[u8],
     release: &[u8],
     platform: &str,
@@ -651,6 +681,7 @@ pub fn installed_runtime(
         return Err(vec!["release record omits a required field".into()]);
     };
     Ok(InstalledRuntime {
+        binary_path: binary_path.to_path_buf(),
         version,
         platform: platform.to_owned(),
         source_commit,
@@ -679,25 +710,56 @@ pub fn release_commit_failures(
     }
 }
 
-/// Every reason the receipt cannot say the suite ran the installed binary; empty
-/// means the Runtime the suite launched has the installed binary's SHA-256.
-/// `ran` is the hash the suite printed for the Runtime it launched; `installed`
+/// Every reason the receipt cannot show that the suite launched the installed
+/// path; empty means the named path the suite launched resolves to the path of
+/// the installed binary, and the SHA-256 the suite printed for that file, which
+/// it took again immediately before every launch, equals the installed
+/// binary's. `launched` is the Runtime identity the suite printed; `installed`
 /// is the installed Runtime once its hash chain matched and bound to this
-/// commit. This compares bytes by hash: it does not show which of the suite's
-/// rows launched that Runtime, and the Runtime ran with a throwaway data folder.
-pub fn installed_binary_ran_failures(
-    ran: Option<&str>,
+/// commit. The check is of paths and hashes: it does not see the bytes the
+/// operating system then executed, and the Runtime ran with a throwaway data
+/// folder.
+pub fn installed_binary_launched_failures(
+    launched: Option<&RuntimeIdentity>,
     installed: Option<&InstalledRuntime>,
 ) -> Vec<String> {
-    match (ran, installed) {
-        (_, None) => vec!["no matched installed Runtime to compare".into()],
-        (None, Some(_)) => vec!["suite recorded no Runtime SHA-256".into()],
-        (Some(ran), Some(installed)) if ran != installed.binary_sha256 => vec![format!(
-            "suite ran Runtime {ran}, installed binary is {}",
-            installed.binary_sha256
-        )],
-        _ => Vec::new(),
+    let Some(installed) = installed else {
+        return vec!["no matched installed Runtime to compare".into()];
+    };
+    let Some(launched) = launched else {
+        return vec!["suite recorded no Runtime SHA-256".into()];
+    };
+    let Some(named) = launched.path.as_deref() else {
+        return vec![
+            "the suite built its own Runtime instead of launching the installed path".into(),
+        ];
+    };
+    let Ok(named) = std::fs::canonicalize(named) else {
+        return vec![format!(
+            "could not resolve the launched path {named} against the installed binary {}",
+            installed.binary_path.display()
+        )];
+    };
+    let Ok(installed_path) = std::fs::canonicalize(&installed.binary_path) else {
+        return vec![format!(
+            "could not resolve the installed binary path {}",
+            installed.binary_path.display()
+        )];
+    };
+    if named != installed_path {
+        return vec![format!(
+            "the suite launched {}, not the installed binary {}",
+            named.display(),
+            installed_path.display()
+        )];
     }
+    if launched.sha256 != installed.binary_sha256 {
+        return vec![format!(
+            "suite launched a Runtime with SHA-256 {}, installed binary is {}",
+            launched.sha256, installed.binary_sha256
+        )];
+    }
+    Vec::new()
 }
 
 /// The key a release uses for this machine's platform, as the Runtime's own
@@ -729,8 +791,8 @@ pub fn release_platform() -> &'static str {
 ///   installed bytes belong to, not that the release is genuine;
 /// - the bundle's hash: the capsule bundle the demo ran is not compared with
 ///   anything installed;
-/// - that the suite ran this binary: `installed_binary_ran_failures` compares
-///   the two hashes for the receipt's own row;
+/// - that the suite launched this path: `installed_binary_launched_failures`
+///   compares the paths and the two hashes for the receipt's own row;
 /// - behaviour on the installed data: only these records are read from the
 ///   installed data folder, and the Runtime under test runs with a throwaway
 ///   data folder of its own.
@@ -759,7 +821,7 @@ pub fn read_installed_runtime(
         failures.sort();
         return Err(failures);
     }
-    installed_runtime(&head, &release, platform, &program, &components)
+    installed_runtime(binary, &head, &release, platform, &program, &components)
 }
 
 enum Unread {
@@ -860,8 +922,8 @@ pub struct Bound<'a> {
 
 /// `write_reviewed_run` with the installed Runtime. Like review binding, the
 /// installed Runtime has its own table rows and receipt fields: one for its
-/// hash chain and one for whether the suite ran that binary. A row that fails
-/// does not change the suite's command result.
+/// hash chain and one for whether the suite launched that path with those
+/// bytes. A row that fails does not change the suite's command result.
 pub fn write_bound_run(
     listed: &str,
     output: &str,
@@ -987,15 +1049,18 @@ pub fn render_bound_run(
         "staged_bundle (A14) | {} | {STAGED_BUNDLE_SCOPE}\n",
         if unstaged.is_empty() { "PASS" } else { "FAIL" }
     ));
-    // Whether the suite ran the installed binary is asked only when an
+    // Whether the suite launched the installed path is asked only when an
     // installed Runtime was given. A run that named two different Runtime
-    // hashes cannot say which bytes it ran, whichever hash came first.
-    let not_ran = installed.as_ref().map(|installed| {
+    // hashes or paths cannot say what it launched.
+    let not_launched = installed.as_ref().map(|installed| {
         if evidence.identities.runtime_conflict {
             return vec!["suite recorded more than one Runtime SHA-256".to_owned()];
         }
-        installed_binary_ran_failures(
-            evidence.identities.runtime.as_deref(),
+        if evidence.identities.runtime_path_conflict {
+            return vec!["suite recorded more than one Runtime path".to_owned()];
+        }
+        installed_binary_launched_failures(
+            evidence.identities.runtime.as_ref(),
             installed.as_ref().ok(),
         )
     });
@@ -1005,10 +1070,14 @@ pub fn render_bound_run(
             if installed.is_ok() { "PASS" } else { "FAIL" }
         ));
     }
-    if let Some(not_ran) = &not_ran {
+    if let Some(not_launched) = &not_launched {
         table.push_str(&format!(
             "installed_runtime_ran (A14) | {} | {INSTALLED_RUNTIME_BINARY_SCOPE}\n",
-            if not_ran.is_empty() { "PASS" } else { "FAIL" }
+            if not_launched.is_empty() {
+                "PASS"
+            } else {
+                "FAIL"
+            }
         ));
     }
     let outcome = if !suite_ok {
@@ -1025,7 +1094,11 @@ pub fn render_bound_run(
         "description": "Version evidence only. The bundle lab CID and any separate signed record give zero admission or permission credit. Runtime decides admission; resource authority requires a Runtime grant for the requesting session. Only the observed Runtime journey supplies that evidence.",
         "identity_status": if complete { "complete" } else { "incomplete" },
         "repository": git,
-        "runtime_sha256": evidence.identities.runtime,
+        "runtime_sha256": evidence
+            .identities
+            .runtime
+            .as_ref()
+            .map(|runtime| &runtime.sha256),
         "localhost_provider_sha256": evidence.identities.provider,
         "probes": evidence.identities.launched.values().collect::<Vec<_>>(),
         "build_only_probes": evidence.identities.built.values().collect::<Vec<_>>(),
@@ -1059,14 +1132,14 @@ pub fn render_bound_run(
         document["installed_runtime_failures"] = unmatched.into();
         document["runtime_data_folder"] = RUNTIME_DATA_FOLDER.into();
     }
-    if let Some(not_ran) = not_ran {
-        document["installed_binary_ran_status"] = if not_ran.is_empty() {
-            "ran"
+    if let Some(not_launched) = not_launched {
+        document["installed_binary_launch_status"] = if not_launched.is_empty() {
+            "launched_installed_path_hash_matched"
         } else {
-            "not shown"
+            "not_launched_installed_path_hash_matched"
         }
         .into();
-        document["installed_binary_ran_failures"] = not_ran.into();
+        document["installed_binary_launch_failures"] = not_launched.into();
     }
     let receipt_bytes = serde_json::to_vec_pretty(&document)
         .map(|mut bytes| {
@@ -1118,7 +1191,7 @@ pub fn a14_rows(receipt: &[u8]) -> Result<Vec<A14Row>, String> {
         ("review_binding", "review_failures"),
         ("staged_bundle", "staged_bundle_failures"),
         ("installed_runtime", "installed_runtime_failures"),
-        ("installed_runtime_ran", "installed_binary_ran_failures"),
+        ("installed_runtime_ran", "installed_binary_launch_failures"),
     ];
     Ok(rows
         .into_iter()

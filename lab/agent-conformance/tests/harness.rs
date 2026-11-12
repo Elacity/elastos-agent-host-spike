@@ -410,10 +410,12 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
         "{stdout:?}"
     );
     // The receipt's collector sees both hashes, so it records the conflict.
+    // Each line names the given path beside its hash.
     for hash in [first, swapped] {
         let line = Observation::Native {
             role: "elastos".into(),
             sha256: hash,
+            path: Some(given.to_string_lossy().into_owned()),
         }
         .line();
         assert!(stdout.contains(&format!("{line}\n")), "{stdout:?}");

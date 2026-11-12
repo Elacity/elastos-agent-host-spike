@@ -23,7 +23,9 @@ pub const RUNTIME_BINARY: &str = "AGENT_CONFORMANCE_RUNTIME_BINARY";
 /// where it is and builds no Runtime; unset, it builds the checkout's Runtime
 /// as before. Only the Runtime is given: the localhost provider, the probe and
 /// every Home the Runtime runs in still come from this checkout, so a given
-/// Runtime never reads its own installation's data folder.
+/// Runtime never reads its own installation's data folder. The identity line
+/// the suite prints names the given path beside its hash; a build prints no
+/// path, so the receipt can tell the two apart.
 pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
     static RUNTIME: OnceLock<Result<BinaryUnderTest, String>> = OnceLock::new();
     RUNTIME
@@ -33,9 +35,12 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
                 // enters the receipt, so only the Runtime the suite launches
                 // may print one.
                 println!("elastos given, not built");
+                // The path is printed beside the hash so the receipt can check
+                // that the path the suite launched is the installed binary's.
                 crate::identity::Observation::Native {
                     role: "elastos".into(),
                     sha256: given.sha256.clone(),
+                    path: Some(given.binary.to_string_lossy().into_owned()),
                 }
                 .emit();
             }),
@@ -80,6 +85,7 @@ pub fn unchanged_before_launch(program: &Path) -> Result<(), &'static str> {
     crate::identity::Observation::Native {
         role: "elastos".into(),
         sha256: now,
+        path: Some(program.to_string_lossy().into_owned()),
     }
     .emit();
     Err("given Runtime binary changed after it was first hashed; not launched")
@@ -132,6 +138,9 @@ fn build_native(package: &str, name: &str) -> Result<BinaryUnderTest, String> {
     crate::identity::Observation::Native {
         role: name.into(),
         sha256: sha256.clone(),
+        // A build has no named path: the receipt fails the launched-path row
+        // rather than compare the checkout's own build.
+        path: None,
     }
     .emit();
     Ok(BinaryUnderTest { binary, sha256 })
@@ -259,6 +268,7 @@ mod tests {
         let expected = Observation::Native {
             role: "elastos".into(),
             sha256: sha256(b"given runtime"),
+            path: Some(given.to_string_lossy().into_owned()),
         }
         .line();
         assert_eq!(identities, [expected], "{printed:?}");

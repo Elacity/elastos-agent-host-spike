@@ -1543,10 +1543,12 @@ pub fn assert_memory_surfaces() {
         Observation::Native {
             role: "elastos".into(),
             sha256: "1".repeat(64),
+            path: None,
         },
         Observation::Native {
             role: "localhost-provider".into(),
             sha256: "2".repeat(64),
+            path: None,
         },
         Observation::Launched {
             probe: agent_conformance::identity::ProbeIdentity {
@@ -2575,10 +2577,12 @@ mod tests {
             Observation::Native {
                 role: "elastos".into(),
                 sha256: "a".repeat(64),
+                path: None,
             },
             Observation::Native {
                 role: "localhost-provider".into(),
                 sha256: "b".repeat(64),
+                path: None,
             },
         ];
         let printed = "session grant: synthetic\nsession grant refusal: synthetic\n";
@@ -3391,10 +3395,12 @@ mod tests {
             Observation::Native {
                 role: "elastos".into(),
                 sha256: "a".repeat(64),
+                path: None,
             },
             Observation::Native {
                 role: "localhost-provider".into(),
                 sha256: "b".repeat(64),
+                path: None,
             },
         ];
         assert_eq!(

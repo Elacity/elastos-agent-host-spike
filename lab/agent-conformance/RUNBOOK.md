@@ -305,9 +305,9 @@ of the binary and of `components.json`. It also requires the release's source
 commit to be the commit the receipt's `repository` records, the same commit
 `review_binding` binds the reviews to; another commit fails the row with both
 commits named, and so does an absent repository commit. The receipt then
-records `installed_runtime` (version, platform, source commit and the three
-hashes), `installed_runtime_status` (`matched` or `unmatched`) and
-`installed_runtime_failures`. A file that cannot be read is named in the
+records `installed_runtime` (the installed binary path as given, version,
+platform, source commit and the three hashes), `installed_runtime_status`
+(`matched` or `unmatched`) and `installed_runtime_failures`. A file that cannot be read is named in the
 failures (`could not read release.json`), as is each hash that differs
 (`binary does not match the release`). Each of the four files is opened without
 following a symbolic link at its final name and must be a regular file, as the
@@ -327,20 +327,29 @@ installed bytes belong to, not that the release is genuine. The suite does not
 run on the installed data folder. It does not check the hash of the bundle the
 demo ran.
 
-`installed_runtime_ran (A14)` appears beside it and passes only when
-`runtime_sha256`, the SHA-256 the harness took of the named binary and
-printed before launch, equals `installed_runtime.binary_sha256`: the suite
-launched the installed path, and its bytes hashed the same immediately before
-each launch. It does not see the bytes the operating system then executed. The receipt records `installed_binary_ran_status` (`ran` or
-`not shown`), `installed_binary_ran_failures`, and `runtime_data_folder`, which
-states that the Runtime under test ran with a throwaway data folder the suite
-created, not the installed data folder. A difference names both hashes, and an
-installed Runtime whose chain did not match leaves nothing to compare. Identity
-lines are read from the whole test output, which cannot say which test printed
-a line, so a run that names two different Runtime hashes fails this row with
-`suite recorded more than one Runtime SHA-256`, as well as `versions_receipt`,
-whichever hash came first. This row says nothing about behaviour on the
-installed data folder: that folder is never used by a run.
+`installed_runtime_ran (A14)` appears beside it and passes only when all three
+hold: `AGENT_CONFORMANCE_RUNTIME_BINARY` named a binary, the identity line the
+suite printed names that path beside its SHA-256, and the path resolves to
+`installed_runtime.binary_path`, the installed binary the report was given.
+`runtime_sha256`, the SHA-256 the harness took of that file and took again
+immediately before each launch, must then equal
+`installed_runtime.binary_sha256`. So the row says the suite launched the
+installed path, and that path hashed to the installed binary's SHA-256
+immediately before every launch. Nothing here sees the bytes the operating
+system then executed. The receipt records `installed_binary_launch_status`
+(`launched_installed_path_hash_matched` or
+`not_launched_installed_path_hash_matched`), `installed_binary_launch_failures`,
+and `runtime_data_folder`, which states that the Runtime under test ran with a
+throwaway data folder the suite created, not the installed data folder. A path
+that is not the installed path fails the row with
+`the suite launched <path>, not the installed binary <path>`; a difference in
+hash names both hashes; and an installed Runtime whose chain did not match
+leaves nothing to compare. Identity lines are read from the whole test output,
+which cannot say which test printed a line, so a run that names two different
+Runtime hashes fails this row with `suite recorded more than one Runtime
+SHA-256`, and two different Runtime paths fail it with `suite recorded more than
+one Runtime path`, as well as `versions_receipt`. This row says nothing about
+behaviour on the installed data folder: that folder is never used by a run.
 
 The suite launches the installed binary only when
 `AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
@@ -350,13 +359,13 @@ the first hash it does not launch them, prints
 `given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
 and the run fails. This does not show a swap made between that hash and the
 operating system starting the process, or what a started Runtime then starts
-by itself. Without that variable the suite builds
-the checkout's Runtime. This row then fails only when an installed Runtime was
-given and the built Runtime's hash differs from the installed binary's; when no
-installed Runtime was given the receipt has no such row. Only the Runtime is
-given; the localhost provider, the probe and every Home the Runtime runs in
-still come from the checkout, so the installation's data folder is never used
-by a run.
+by itself. Without that variable the suite builds the checkout's Runtime; its
+identity line names no path, and `installed_runtime_ran` then fails with
+`the suite built its own Runtime instead of launching the installed path`, even
+when the built bytes hash the same as the installed binary. When no installed
+Runtime was given the receipt has no such row. Only the Runtime is given; the
+localhost provider, the probe and every Home the Runtime runs in still come
+from the checkout, so the installation's data folder is never used by a run.
 
 A receipt with reviews and an installed Runtime on macOS, from the repository
 root on a clean tree, with the reviews file kept outside the repository:
@@ -507,7 +516,7 @@ What each A14 row means:
 | `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
-| `installed_runtime_ran` | the suite launched the installed path, whose SHA-256, taken by the harness immediately before each launch, equals the installed binary's; it ran with a throwaway data folder, not the installed one |
+| `installed_runtime_ran` | the suite launched the installed path, and the harness's SHA-256 of that file, taken immediately before each launch, equals the installed binary's; nothing shows the bytes the operating system then executed; it started with a throwaway data folder, not the installed one |
 
 What the receipt does not prove:
 
