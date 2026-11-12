@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
 
 import { LONG_PRESS_MS } from "../capsules/home-gui/browser/shell-touch.js";
 import { EXTERNAL_LINK_OPEN_GUARD_MS } from "../capsules/home/browser/home-external-link.js";
@@ -705,24 +706,37 @@ function geometry() {
   };
 }
 
-// A cold font cache lays text out in the fallback face, a warm cache in Inter,
-// and the two have different metrics. Load the family each document uses and
-// let that document's font state settle before reading boxes, so every
-// document measured after this point finds the face in the cache and lays out
-// in the same face a warm run uses.
+// A cold font cache lays text out in the fallback face and a warm cache in
+// Inter, and the two have different metrics. Every capsule declares Inter as
+// an optional face and the fixture serves it with no-store, so this wait
+// cannot warm a later document's cache: it only lets this document's own font
+// load settle before its boxes are read. A frame that is still navigating has
+// no document to settle; the measurements that follow record null for it.
 async function waitForDocumentFonts(target) {
-  await target.evaluate(async () => {
+  const timeoutMs = browserWaitTimeoutMs();
+  // A font load that never settles fails the check instead of hanging it.
+  const settled = await target.evaluate(async (limitMs) => {
     // A frame that is still parsing has no body yet; measure the family the
     // parsed text uses and keep the wait harmless there.
     const styled = document.body || document.documentElement;
     const family = getComputedStyle(styled).fontFamily.split(",")[0].trim();
-    if (family) {
-      // A face the document does not declare rejects here; the measurement
-      // then uses the same fallback it always did.
-      await document.fonts.load(`16px ${family}`).catch(() => null);
-    }
-    await document.fonts.ready;
-  });
+    const loading = (async () => {
+      // A family the document does not declare has no face to load; the
+      // measurement then uses the same fallback it always did.
+      if (family) {
+        await document.fonts.load(`16px ${family}`).catch(() => null);
+      }
+      await document.fonts.ready;
+    })();
+    let timer;
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(false), limitMs); });
+    const result = await Promise.race([loading.then(() => true), deadline]);
+    clearTimeout(timer);
+    return result;
+  }, timeoutMs).catch(() => null);
+  if (settled === false) {
+    throw new Error(`document fonts must settle within ${timeoutMs} ms`);
+  }
 }
 
 async function measure(frame, label) {
@@ -874,7 +888,7 @@ async function measureCapsuleFrame(page, target) {
   }
   // A frame that is still navigating has no document to settle; the capsule
   // measurements below already record null in that case.
-  await waitForDocumentFonts(capsuleFrame).catch(() => null);
+  await waitForDocumentFonts(capsuleFrame);
   return {
     capsule: await capsuleFrame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX }).catch(() => null),
     capsuleLayout: await capsuleFrame.evaluate(() => ({
