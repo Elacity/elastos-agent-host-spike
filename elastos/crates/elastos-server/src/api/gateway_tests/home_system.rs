@@ -4762,7 +4762,7 @@ async fn damaged_home_state_file_leaves_shell_and_summaries_answering() {
 }
 
 /// #447 N1: System → Appearance upload and reset never delete a damaged
-/// background image; both are refused with the notice that names it.
+/// background image; both are refused with a message that names the image.
 #[tokio::test]
 async fn damaged_background_image_survives_upload_and_reset() {
     let dir = tempfile::tempdir().unwrap();
@@ -4812,10 +4812,12 @@ async fn damaged_background_image_survives_upload_and_reset() {
         let text = String::from_utf8_lossy(&text);
         assert!(!status.is_success(), "{method}: {text}");
         assert!(
-            text.contains(&format!(
-                ".AppData/ElastOS/Home/{file} does not carry the label"
-            )),
+            text.contains("background image background-image.jpg could not be read"),
             "{method}: {text}"
+        );
+        assert!(
+            !text.contains(dir.path().to_string_lossy().as_ref()),
+            "{method}: the answer leaves out the data folder: {text}"
         );
         assert_eq!(std::fs::read(&path).unwrap(), damaged, "{method}");
         assert!(!uploaded.exists(), "{method}");
@@ -4950,10 +4952,12 @@ async fn same_name_image_upload_with_a_damaged_sibling_is_refused() {
     .await;
     assert!(!status.is_success(), "{text}");
     assert!(
-        text.contains(&format!(
-            "{APPEARANCE_IMAGE_FOLDER}/background-image.jpg does not carry the label"
-        )),
+        text.contains("background image background-image.jpg could not be read"),
         "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
     );
     assert_eq!(std::fs::read(&current).unwrap(), current_before);
     assert_eq!(
@@ -4997,10 +5001,12 @@ async fn same_name_image_upload_over_a_damaged_image_is_refused() {
     .await;
     assert!(!status.is_success(), "{text}");
     assert!(
-        text.contains(&format!(
-            "{APPEARANCE_IMAGE_FOLDER}/background-image.png does not carry the label"
-        )),
+        text.contains("background image background-image.png could not be read"),
         "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
     );
     assert_eq!(std::fs::read(&damaged).unwrap(), damaged_before);
     assert_eq!(
@@ -5080,10 +5086,12 @@ async fn different_name_image_upload_with_a_damaged_sibling_is_refused() {
         upload_background_image(&app, &authority.system_token, "image/webp", "new webp").await;
     assert!(!status.is_success(), "{text}");
     assert!(
-        text.contains(&format!(
-            "{APPEARANCE_IMAGE_FOLDER}/background-image.jpg does not carry the label"
-        )),
+        text.contains("background image background-image.jpg could not be read"),
         "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
     );
     assert_eq!(std::fs::read(&current).unwrap(), current_before);
     assert_eq!(
