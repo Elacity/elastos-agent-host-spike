@@ -918,9 +918,9 @@ fn other_entry_kinds_are_blocked() {
     assert_eq!(entries(&bus)[1]["kind"], "other");
 }
 
-/// No read window reaches the bytes `[data_start, data_end)`, in any run.
-fn assert_data_unread(bus: &FakeBus, data_start: u64, data_end: u64) {
-    for call in bus.invokes_on(ARCHIVE) {
+/// No read window reaches the bytes `[data_start, data_end)` of `uri`, in any run.
+fn assert_data_unread(bus: &FakeBus, uri: &str, data_start: u64, data_end: u64) {
+    for call in bus.invokes_on(uri) {
         if let Call::Invoke {
             operation, body, ..
         } = call
@@ -958,7 +958,7 @@ fn a_nested_archive_is_listed_not_opened() {
         assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
         assert_eq!(entries(&bus)[0]["kind"], "archive");
         assert!(skipped(&bus).is_empty());
-        assert_data_unread(&bus, data_start, data_end);
+        assert_data_unread(&bus, ARCHIVE, data_start, data_end);
     }
 }
 
@@ -988,7 +988,7 @@ fn encrypted_entries_are_listed_not_read() {
     let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
     assert_eq!(status_of(&bus, 0), ("encrypted".to_string(), None));
     assert!(skipped(&bus).is_empty());
-    assert_data_unread(&bus, data_start, data_end);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_end);
 }
 
 #[test]
@@ -1000,7 +1000,7 @@ fn a_requested_encrypted_entry_is_skipped_with_its_status() {
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0]["index"], 0);
     assert_eq!(skipped[0]["reason"], "encrypted");
-    assert_data_unread(&bus, data_start, data_end);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_end);
 }
 
 #[test]
@@ -1901,7 +1901,7 @@ fn an_entry_declared_over_the_cap_is_not_read() {
     assert!(previews(&bus).is_empty());
     // The entry's data starts after its 30-byte local header and 5-byte name.
     let data_start = 30 + 5;
-    assert_data_unread(&bus, data_start, data_start + text.len() as u64);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_start + text.len() as u64);
 }
 
 #[test]
@@ -1921,7 +1921,7 @@ fn an_entry_declared_past_the_ratio_is_not_read() {
     assert_eq!(skipped(&bus)[0]["reason"], "ratio");
     assert!(previews(&bus).is_empty());
     let data_start = 30 + 5;
-    assert_data_unread(&bus, data_start, data_start + compressed);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_start + compressed);
 }
 
 #[test]
@@ -1962,7 +1962,7 @@ fn a_stored_entry_with_two_sizes_is_skipped() {
     assert_eq!(skipped(&bus)[0]["reason"], "size_mismatch");
     assert!(previews(&bus).is_empty());
     let data_start = 30 + 5;
-    assert_data_unread(&bus, data_start, data_start + text.len() as u64);
+    assert_data_unread(&bus, ARCHIVE, data_start, data_start + text.len() as u64);
 }
 
 #[test]
@@ -2010,8 +2010,16 @@ fn no_run_inflates_more_than_its_total() {
             let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
             zip::listing(&mut reader).unwrap()
         };
-        let (previews, skipped, budget) =
-            previews_for(&mut bus, ARCHIVE, &grant, &mut left, &listing, &order).unwrap();
+        let (previews, skipped, budget) = previews_for(
+            &mut bus,
+            ARCHIVE,
+            &grant,
+            &mut left,
+            Format::Zip,
+            &listing,
+            &order,
+        )
+        .unwrap();
         let used = preview::MAX_INFLATE_BYTES - budget.inflate;
         assert!(used <= 65_536, "used {used} in order {order:?}");
         assert_eq!(used, 65_536, "the total is the cap in order {order:?}");
@@ -2583,6 +2591,109 @@ fn too_many_tar_entries_refuse_the_archive() {
     let listing = tar::listing(&mut reader).expect("a content refusal is a listing");
     assert_eq!(listing.refused.unwrap().code, "too_many_entries");
     assert!(listing.entries.is_empty());
+}
+
+#[test]
+fn a_tar_text_entry_is_shown_as_the_zip_blocks() {
+    // A stored tar entry is shown through the same `preview` call a ZIP
+    // stored entry takes: one preview pass, no inflate, the same docs-model
+    // typed blocks, and no CRC to compare because tar carries none.
+    let text: &[u8] = b"hello\n\nworld\n";
+    let tar_bus = run_fixture(
+        request(TAR, &[0]),
+        TAR,
+        tar_build(&[TarSpec::file("a.txt").data(text)]),
+    );
+    let zip_bus = run_fixture(
+        request(ARCHIVE, &[0]),
+        ARCHIVE,
+        build(&[stored("a.txt", text)], &[]),
+    );
+    assert_eq!(
+        view(&tar_bus)["previews"],
+        view(&zip_bus)["previews"],
+        "the tar entry's blocks are the ZIP stored entry's"
+    );
+    assert!(skipped(&tar_bus).is_empty());
+    let blocks = &view(&tar_bus)["previews"][0]["blocks"];
+    assert_eq!(blocks[0]["kind"], "paragraph");
+    assert_eq!(blocks[0]["spans"][0]["text"], "hello");
+    assert_eq!(blocks[1]["spans"][0]["text"], "world");
+}
+
+#[test]
+fn a_tar_binary_entry_is_skipped_not_text() {
+    let bus = run_fixture(
+        request(TAR, &[0]),
+        TAR,
+        tar_build(&[TarSpec::file("b.bin").data(b"abc\0def")]),
+    );
+    assert!(previews(&bus).is_empty());
+    let skipped = skipped(&bus);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["reason"], "not_text");
+}
+
+#[test]
+fn an_oversize_tar_entry_is_skipped_before_its_bytes_are_read() {
+    let data = text_block(preview::MAX_PREVIEW_BYTES as usize + 1);
+    let bus = run_fixture(
+        request(TAR, &[0]),
+        TAR,
+        tar_build(&[TarSpec::file("big.txt").data(&data)]),
+    );
+    assert!(previews(&bus).is_empty());
+    let skipped = skipped(&bus);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["reason"], "oversize");
+    // The declared size is the header's; the entry's data starts after the
+    // one 512-byte header and is never read.
+    assert_data_unread(&bus, TAR, 512, 512 + data.len() as u64);
+}
+
+#[test]
+fn a_blocked_tar_entry_is_skipped_with_its_status() {
+    let bus = run_fixture(
+        request(TAR, &[0]),
+        TAR,
+        tar_build(&[
+            TarSpec::file("a.txt").data(b"one"),
+            TarSpec::file("a.txt").data(b"two"),
+        ]),
+    );
+    assert_eq!(
+        status_of(&bus, 0),
+        ("blocked".to_string(), Some("duplicate".to_string()))
+    );
+    let skipped = skipped(&bus);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["reason"], "duplicate");
+}
+
+#[test]
+fn a_tar_view_over_its_cap_is_refused() {
+    // F32 over a tar view: 70 entries with a 255-byte path and two previews
+    // of 511 blocks each make a view over 64 KiB. The run writes the small
+    // refusal instead, never the whole listing.
+    let mut specs: Vec<TarSpec> = (0..2)
+        .map(|n| TarSpec::file(&format!("p{n}.txt")).data("x\n\n".repeat(511).as_bytes()))
+        .collect();
+    for n in 0..70 {
+        specs.push(
+            TarSpec::file(&format!("{n:03}{}", "a".repeat(96))) // 99-byte name
+                .prefix(&"p".repeat(155)), // 255-byte path in two segments
+        );
+    }
+    let bus = run_fixture(request(TAR, &[0, 1]), TAR, tar_build(&specs));
+    let written = bus.written.get(VIEW_URI).expect("a view is written");
+    assert!(
+        written.len() as u64 <= MAX_VIEW_BYTES,
+        "{} bytes",
+        written.len()
+    );
+    let view = view(&bus);
+    assert!(view["entries"].as_array().unwrap().is_empty());
+    assert_eq!(view["refused"]["code"], "view_too_large");
 }
 
 #[test]

@@ -17,8 +17,8 @@ use capsule_kit_guest::{read_counted, Bus, Refusal};
 
 use crate::{
     listing::{
-        archive_name, block_duplicates, entry_status, name_text, Entry, Kind, Listing, Reason,
-        Refused, Status,
+        archive_name, block_duplicates, entry_status, name_text, shown_status, Entry, Kind,
+        Listing, Reason, Refused, Status,
     },
     MAX_ARCHIVE_BYTES, MAX_COMMENT_BYTES, MAX_DIRECTORY_BYTES, MAX_ENTRIES, MAX_LOCAL_HEADER_BYTES,
 };
@@ -409,7 +409,7 @@ fn make_entry(
         name_len,
         extra_len,
         flags,
-        crc,
+        crc: Some(crc),
         name: name.clone(),
     };
     let status = match name_text(&name, flags) {
@@ -534,11 +534,8 @@ pub fn check_shown(reader: &mut Reader<'_>, entry: &Entry) -> Result<Result<(), 
     // An entry that is not listed keeps its own status as the skip reason, so
     // the page never has to guess why the request named an entry it cannot
     // show.
-    match entry.status {
-        Status::Listed => {}
-        Status::Blocked(reason) => return Ok(Err(reason)),
-        Status::Unsupported => return Ok(Err("unsupported")),
-        Status::Encrypted => return Ok(Err("encrypted")),
+    if let Err(reason) = shown_status(entry.status) {
+        return Ok(Err(reason));
     }
     let length = LOCAL_HEADER_BYTES + u64::from(entry.name_len);
     if length > MAX_LOCAL_HEADER_BYTES {
@@ -579,7 +576,7 @@ pub fn check_local_header(entry: &Entry, header: &[u8]) -> Result<(), Reason> {
         return Err("local_header_method");
     }
     if entry.flags & (1 << 3) == 0 {
-        if u32_at(header, 14) != Some(entry.crc) {
+        if u32_at(header, 14) != entry.crc {
             return Err("local_header_crc");
         }
         let local_compressed = u64::from(u32_at(header, 18).unwrap_or(0));

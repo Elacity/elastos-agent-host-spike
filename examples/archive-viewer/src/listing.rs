@@ -50,7 +50,9 @@ pub struct Entry {
     pub(crate) name_len: u16,
     pub(crate) extra_len: u16,
     pub(crate) flags: u16,
-    pub(crate) crc: u32,
+    /// The record's CRC-32, where its format carries one. A tar entry has no
+    /// checksum, so its stored bytes are checked by their length alone.
+    pub(crate) crc: Option<u32>,
     pub(crate) name: Vec<u8>,
 }
 
@@ -207,6 +209,18 @@ fn path_rules(path: &str, kind: Kind) -> Result<(), Reason> {
         return Err("dot_segment");
     }
     Ok(())
+}
+
+/// Why a listed entry is not shown, from its own status. Every format that
+/// shows an entry reads this one map, so a blocked, unsupported or encrypted
+/// entry keeps its reason whichever record decoded it.
+pub(crate) fn shown_status(status: Status) -> Result<(), Reason> {
+    match status {
+        Status::Listed => Ok(()),
+        Status::Blocked(reason) => Err(reason),
+        Status::Unsupported => Err("unsupported"),
+        Status::Encrypted => Err("encrypted"),
+    }
 }
 
 /// P5: two entries with one name are both blocked, whichever comes first.

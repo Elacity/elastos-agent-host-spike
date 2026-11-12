@@ -106,7 +106,7 @@ pub struct Skipped {
 
 /// The two formats this viewer lists. `detect` picks one once from content;
 /// the matching listing then reads the same object through the same budget.
-enum Format {
+pub(crate) enum Format {
     Zip,
     Tar,
 }
@@ -153,11 +153,18 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
 
     let archive_grant = grant(bus, &request.uri, "read", "read the archive to list")?;
     let mut left = MAX_READ_BYTES;
+    // The format `detect` chose also picks the per-entry check the preview
+    // pass runs. A refused archive lists no entry, so the fallback is never
+    // asked to show one.
+    let mut format = Format::Zip;
     let listing = {
         let mut reader = zip::Reader::new(bus, &request.uri, &archive_grant, &mut left);
         match detect(&mut reader) {
             Ok(Format::Zip) => zip::listing(&mut reader)?,
-            Ok(Format::Tar) => tar::listing(&mut reader)?,
+            Ok(Format::Tar) => {
+                format = Format::Tar;
+                tar::listing(&mut reader)?
+            }
             Err(zip::ParseError::Refused(refused)) => Listing {
                 size: 0,
                 entries: Vec::new(),
@@ -173,6 +180,7 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         &request.uri,
         &archive_grant,
         &mut left,
+        format,
         &listing,
         &request.show,
     )?;
@@ -210,11 +218,12 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
 
 /// The previews and skips of the entries a request names, and the budget they
 /// used. `run` writes the view; the tests read the budget to prove the total.
-pub fn previews_for(
+pub(crate) fn previews_for(
     bus: &mut dyn Bus,
     uri: &str,
     grant: &str,
     left: &mut u64,
+    format: Format,
     listing: &Listing,
     show: &[usize],
 ) -> Result<(Vec<Preview>, Vec<Skipped>, preview::Budget), Refusal> {
@@ -230,7 +239,14 @@ pub fn previews_for(
             }),
             Some(entry) => {
                 let mut reader = zip::Reader::new(bus, uri, grant, left);
-                match zip::check_shown(&mut reader, entry)? {
+                // ZIP compares the entry's local header with its record (L5);
+                // a tar header was checked when its entry was listed, so its
+                // status alone decides. Both read the shared status map.
+                let shown = match format {
+                    Format::Zip => zip::check_shown(&mut reader, entry)?,
+                    Format::Tar => listing::shown_status(entry.status),
+                };
+                match shown {
                     Ok(()) => {
                         // N1: a directory, a nested archive or another kind is
                         // listed only, and its bytes stay unread.

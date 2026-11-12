@@ -196,7 +196,7 @@ fn make_entry(index: usize, name: Vec<u8>, kind: Kind, size: u64, offset: u64) -
         name_len: 0,
         extra_len: 0,
         flags: 0,
-        crc: 0,
+        crc: None,
         name,
     }
 }
