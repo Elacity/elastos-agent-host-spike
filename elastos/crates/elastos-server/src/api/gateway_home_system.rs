@@ -9674,19 +9674,33 @@ mod stored_root_tests {
             &record.principal_id,
             context.root().localhost_root(),
         );
-        let selection = home_services_default_selection_state(&context);
+        // One non-default field: a read that fails and answers the default
+        // would otherwise match a selection built from the same default.
+        let mut selection = home_services_default_selection_state(&context);
+        selection
+            .local_offer_ids
+            .insert("offer:r2-non-default".to_string());
         home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
         let stored_path = home_services_selection_state_path(&data_dir, &context).unwrap();
         assert!(
             stored_path.is_file(),
             "the save wrote under the stored root"
         );
+        assert!(
+            stored_path.starts_with(data_dir.join("Users").join("parent-stored-root")),
+            "{}",
+            stored_path.display()
+        );
         let stored: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&stored_path).unwrap()).unwrap();
         assert_eq!(stored["schema"], "elastos.principal-root.object/v1");
+        let read = home_services_selection_state(&data_dir, &context).unwrap();
         assert_eq!(
-            serde_json::to_value(home_services_selection_state(&data_dir, &context).unwrap())
-                .unwrap(),
+            read.local_offer_ids.iter().cloned().collect::<Vec<_>>(),
+            ["offer:r2-non-default"]
+        );
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
             serde_json::to_value(&selection).unwrap()
         );
     }
