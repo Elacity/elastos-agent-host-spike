@@ -22,6 +22,7 @@ import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
 import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
+import { pointerOnTopPageControl, pressTopPageControl } from "./lib/home-top-page-press.mjs";
 
 import { LONG_PRESS_MS } from "../capsules/home-gui/browser/shell-touch.js";
 import { EXTERNAL_LINK_OPEN_GUARD_MS } from "../capsules/home/browser/home-external-link.js";
@@ -1079,7 +1080,9 @@ async function probeExternalLink(page, dir, target) {
     await sleep(SURFACE_SETTLE_MS);
     const afterSynthetic = { pages: context.pages().length - pagesBefore, requests: destinationRequests.length, sheet: await sheet() };
     const popupOpened = context.waitForEvent("page", { timeout: BOOT_TIMEOUT_MS });
-    await page.locator("#home-link-open").click();
+    // The sheet is drawn over the Library frame: each pointer press on it goes
+    // through the helper, which first sees the pointer reach Home's page.
+    await pressTopPageControl(page.locator("#home-link-open"), { label: "Open link" });
     const popup = await popupOpened;
     await popup.waitForLoadState("domcontentloaded");
     const opened = {
@@ -1095,8 +1098,7 @@ async function probeExternalLink(page, dir, target) {
     // press held past the guard, an early held Space and an early Enter with
     // key repeat open nothing; a fresh tap on the same sheet then opens once.
     const earlyPresses = [];
-    for (const kind of ["pointer", "space", "enter-repeat"]) {
-      const url = `${LINK_DESTINATION_ORIGIN}/early-${kind}`;
+    const earlyPress = async (kind, url) => {
       await page.evaluate(() => {
         const root = document.querySelector("#home-link-prompt");
         const timing = { shownAt: null, pressAt: null };
@@ -1114,11 +1116,17 @@ async function probeExternalLink(page, dir, target) {
         open.addEventListener("keydown", pressed, { capture: true, once: true });
       });
       await ask(url);
+      // Watched in the page, frame by frame: the locator wait below re-checks
+      // only every 500 ms once its first tries have passed, which alone can
+      // carry the press past the guard.
+      await page.waitForFunction(() => !document.querySelector("#home-link-prompt").hidden, null, { timeout: BOOT_TIMEOUT_MS });
       await page.locator("#home-link-prompt").waitFor({ state: "visible", timeout: BOOT_TIMEOUT_MS });
       const before = { pages: context.pages().length, requests: destinationRequests.length };
       if (kind === "pointer") {
-        // hover waits until Open link is visible, stable and hit by the pointer.
-        await page.locator("#home-link-open").hover();
+        // The button is pressed once Home's page reports the pointer on it: a
+        // press sent before the browser has drawn the sheet goes to the
+        // Library frame underneath and never reaches Open link.
+        await pointerOnTopPageControl(page.locator("#home-link-open"), { label: "early pointer press" });
         await page.mouse.down();
         await sleep(EARLY_PRESS_HOLD_MS);
         await page.mouse.up();
@@ -1135,23 +1143,50 @@ async function probeExternalLink(page, dir, target) {
       }
       await sleep(SURFACE_SETTLE_MS);
       const timing = await page.evaluate(() => window.__earlyPress);
+      const sheetShown = !(await sheet()).hidden;
+      if (!sheetShown && destinationRequests.length > before.requests) {
+        // The press opened the link. Its tab can be listed a moment after its
+        // request, and it is counted and closed below.
+        await waitFor(() => context.pages().length > before.pages, BOOT_TIMEOUT_MS, "the tab a press opened");
+      }
       const press = {
         kind,
         url,
         pressedAfterMs: timing.shownAt === null || timing.pressAt === null ? null : Math.round(timing.pressAt - timing.shownAt),
         pages: context.pages().length - before.pages,
         requests: destinationRequests.length - before.requests,
-        sheetShown: !(await sheet()).hidden,
+        sheetShown,
       };
-      earlyPresses.push(press);
       if (!press.sheetShown) {
-        // The early press opened the link: close what it opened and report it.
+        // The press opened the link: close what it opened.
         await Promise.all(context.pages().slice(before.pages).map((opened) => opened.close()));
         await page.bringToFront();
+      }
+      return press;
+    };
+    for (const kind of ["pointer", "space", "enter-repeat"]) {
+      const url = `${LINK_DESTINATION_ORIGIN}/early-${kind}`;
+      let press = await earlyPress(kind, url);
+      // On a slow machine the press can reach Open link only after the guard
+      // has ended. That is an ordinary press, it opens its address once, and
+      // it tested nothing about the guard. Such a turn is kept on record and
+      // the sheet is shown again for a fresh address, at most twice. Every
+      // other outcome, and the guard's own assertions, stand as they are.
+      const shownAgain = [];
+      while (shownAgain.length < 2 && press.pressedAfterMs !== null && press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS
+        && !press.sheetShown && press.pages === 1 && press.requests === 1) {
+        shownAgain.push(press);
+        press = await earlyPress(kind, `${url}-shown-again-${shownAgain.length}`);
+      }
+      if (shownAgain.length) press.shownAgain = shownAgain;
+      earlyPresses.push(press);
+      if (!press.sheetShown) {
+        // The early press opened the link; that is reported below.
         continue;
       }
       const retried = context.waitForEvent("page", { timeout: BOOT_TIMEOUT_MS });
       // A touch tap, not a mouse click: its click can follow pointerup late.
+      await pointerOnTopPageControl(page.locator("#home-link-open"), { label: `fresh tap after the early ${kind} press` });
       await page.locator("#home-link-open").tap();
       const retry = await retried;
       await retry.waitForLoadState("domcontentloaded");
@@ -1171,7 +1206,7 @@ async function probeExternalLink(page, dir, target) {
     await sleep(3_200);
     await ask(`${LINK_DESTINATION_ORIGIN}/cancel`);
     await shown("link sheet after the cool-down");
-    await page.locator("#home-link-cancel").click();
+    await pressTopPageControl(page.locator("#home-link-cancel"), { label: "Cancel on the link sheet" });
     await sleep(SURFACE_SETTLE_MS);
     const afterCancel = (await sheet()).hidden;
     return {
@@ -1240,7 +1275,9 @@ function externalLinkFailures(run) {
   if (!probe.afterEscape || !probe.duringCooldown || !probe.afterCancel) {
     failures.push(`${label}: Escape and Cancel must close the sheet, and the app must wait out its cool-down. Got ${JSON.stringify({ afterEscape: probe.afterEscape, duringCooldown: probe.duringCooldown, afterCancel: probe.afterCancel })}`);
   }
-  const expectedRequests = [probe.address, ...probe.earlyPresses.map((press) => press.url)];
+  // A turn whose press began after the guard opened its own address once,
+  // before the sheet was shown again for the address the case then used.
+  const expectedRequests = [probe.address, ...probe.earlyPresses.flatMap((press) => [...(press.shownAgain || []).map((late) => late.url), press.url])];
   if (JSON.stringify(probe.destinationRequests) !== JSON.stringify(expectedRequests) || probe.pagesAfter !== probe.pagesBefore) {
     failures.push(`${label}: each destination must be requested once, only after a press that began after the guard. Got ${JSON.stringify(probe.destinationRequests)}`);
   }
@@ -2264,7 +2301,7 @@ async function runBrowserLinkProbe(browser, profile, origin) {
     }));
     await sleep(EXTERNAL_LINK_OPEN_GUARD_MS + 100);
     const pagesBefore = context.pages().length;
-    await page.locator("#home-link-open").click();
+    await pressTopPageControl(page.locator("#home-link-open"), { label: "Open in Browser" });
     await waitFor(
       () => frame.locator('.window[data-target="browser"]').count().then((count) => count > 0),
       BOOT_TIMEOUT_MS,
