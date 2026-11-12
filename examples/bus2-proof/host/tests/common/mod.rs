@@ -53,20 +53,28 @@ pub fn within<R: Send + 'static>(
     }
 }
 
-/// Like `within`, for a test that must not leave its worker running. When the
-/// limit runs out, the worker is told to stop, the test waits for it to end,
-/// and only then fails. `f` should hold the whole test, its preparation too.
+/// Like `within`, for a test that should not leave its worker running. When
+/// the limit runs out, the worker is told to stop, the test waits a short,
+/// fixed time for it to end, and then fails. `f` should hold the whole test,
+/// its preparation too.
 ///
 /// The stop is seen the next time the executor gets the thread back. Guests
-/// that yield give it back within a fuel slice. A guest that never yields
-/// gives it back only when it ends, so every guest in `f` needs an epoch
-/// deadline (`Limits::max_ticks`) and a running `Ticker`: that bounds the
-/// wait. Work that is not a guest (compiling a component) runs to its end
-/// first.
+/// that yield give it back within a fuel slice. Work that is not a guest
+/// (compiling a component) runs to its end first. A guest that never yields
+/// gives the thread back only when it ends, so every guest in `f` needs an
+/// epoch deadline (`Limits::max_ticks`) and a running `Ticker`.
+///
+/// The wait for the worker is `STOP_WAIT`, 10 s, and no longer, so a worker
+/// that cannot stop never holds the test up for more than that: it is left
+/// running, as `within` leaves its worker, and the failure says so. 10 s is
+/// enough for a worker that can stop: the longest step it may be in the
+/// middle of is compiling a guest, about 1 s on the machine this was written
+/// on, so 10 s allows for one several times slower.
 pub fn within_then_stop<R: Send + 'static>(
     limit: std::time::Duration,
     f: impl std::future::Future<Output = R> + Send + 'static,
 ) -> R {
+    const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
     let (sender, receiver) = std::sync::mpsc::channel();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let worker = std::thread::spawn(move || {
@@ -87,13 +95,24 @@ pub fn within_then_stop<R: Send + 'static>(
         Ok(result) => result,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             let _ = stop.send(());
+            if matches!(
+                receiver.recv_timeout(STOP_WAIT),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                // Not joined: a worker that cannot stop must not hold the
+                // test up any longer.
+                panic!(
+                    "no result within {limit:?}; the worker did not stop within \
+                     {STOP_WAIT:?} more and was left running"
+                );
+            }
             None
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             panic!("the run panicked; see its output above")
         }
     };
-    // The worker has ended, or has been told to stop: no thread is left.
+    // The worker has ended, or is ending: no thread is left.
     let _ = worker.join();
     result.unwrap_or_else(|| panic!("no result within {limit:?}; the worker was stopped"))
 }
