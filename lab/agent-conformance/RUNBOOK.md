@@ -287,17 +287,27 @@ of the binary and of `components.json`. The receipt then records
 failures (`could not read release.json`), as is each hash that differs
 (`binary does not match the release`); an unmatched Runtime is recorded as
 `null`. Like an unbound review, an unmatched chain leaves this row FAIL without
-changing `command_success`, so a receipt backs A14 only when all three A14 rows
-read PASS. Naming one variable without the other fails the command. With
+changing `command_success`, so a receipt backs A14 only when every A14 row
+reads PASS. Naming one variable without the other fails the command. With
 neither, the receipt has no installed Runtime row or field. There is no default
 location: the report never looks for an installation on its own.
 
 This row does not check signatures, so it shows which release the installed
 bytes belong to, not that the release is genuine. It does not check the hash of
-the bundle the demo ran. It does not compare the installed binary with
-`runtime_sha256`, the Runtime the suite launched; both are recorded, and a
-reader compares `installed_runtime.binary_sha256` with `runtime_sha256` to see
-whether they are the same bytes.
+the bundle the demo ran.
+
+`installed_runtime_ran (A14)` appears beside it and passes only when
+`runtime_sha256`, the SHA-256 the suite printed for the Runtime it launched,
+equals `installed_runtime.binary_sha256`. The receipt records
+`installed_runtime_ran_status` (`ran` or `not shown`) and
+`installed_runtime_ran_failures`; a difference names both hashes, and an
+installed Runtime whose chain did not match leaves nothing to compare. The
+suite launches the installed binary only when
+`AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
+launch the named binary where it is and build no Runtime. Without it the suite
+builds the checkout's Runtime and this row fails. Only the Runtime is given;
+the localhost provider, the probe and every Home the Runtime runs in still come
+from the checkout, so the installation's data folder is never used by a run.
 
 A receipt with reviews and an installed Runtime on macOS, from the repository
 root on a clean tree, with the reviews file kept outside the repository:

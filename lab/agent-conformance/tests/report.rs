@@ -1556,15 +1556,41 @@ impl InstalledFixture {
         );
         bound(Some(installed))
     }
+
+    /// The same, for a suite that launched a Runtime with these bytes.
+    fn receipt_after_running(
+        &self,
+        runtime: &[u8],
+    ) -> (agent_conformance::report::RunReport, Value) {
+        let installed = agent_conformance::report::read_installed_runtime(
+            &self.binary,
+            &self.data,
+            agent_conformance::report::release_platform(),
+        );
+        let (mut observations, git) = synthetic(1, false);
+        observations[0] = Observation::Native {
+            role: "elastos".into(),
+            sha256: sha256(runtime),
+        };
+        render(&observations, git, Some(installed))
+    }
 }
 
 fn bound(
     installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
 ) -> (agent_conformance::report::RunReport, Value) {
     let (observations, git) = synthetic(1, false);
+    render(&observations, git, installed)
+}
+
+fn render(
+    observations: &[Observation],
+    git: GitIdentity,
+    installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
+) -> (agent_conformance::report::RunReport, Value) {
     let report = agent_conformance::report::render_bound_run(
         &format!("{LIVE}: test\n"),
-        &output(&observations),
+        &output(observations),
         true,
         Ok(git),
         agent_conformance::report::Bound {
@@ -1605,8 +1631,6 @@ fn receipt_records_a_matching_installed_runtime() {
         document["report"]["sha256"],
         sha256(report.table.as_bytes())
     );
-    // The Runtime the suite launched is recorded beside it, not compared.
-    assert_eq!(document["runtime_sha256"], sha256(&[1, 1]));
     assert!(report.passed, "{:?}", report.failures);
     home.finish().unwrap();
 }
@@ -1757,6 +1781,81 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
     assert_eq!(
         receipt["installed_runtime_failures"],
         serde_json::json!(["binary does not match the release"])
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn receipt_says_whether_the_suite_ran_the_installed_binary() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (report, document) = fixture.receipt_after_running(b"installed runtime");
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | PASS\n"),
+        "{}",
+        report.table
+    );
+    assert_eq!(document["installed_runtime_ran_status"], "ran");
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        document["runtime_sha256"],
+        document["installed_runtime"]["binary_sha256"]
+    );
+
+    // A suite that launched other bytes: the installed chain still matches, and
+    // this row alone says so, naming both hashes.
+    let (report, document) = fixture.receipt_after_running(b"checkout runtime");
+    assert!(report.table.contains("installed_runtime (A14) | PASS\n"));
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!([format!(
+            "suite ran Runtime {}, installed binary is {}",
+            sha256(b"checkout runtime"),
+            sha256(b"installed runtime")
+        )])
+    );
+    assert!(report
+        .table
+        .contains("installed_runtime_ran (A14) | FAIL\n"));
+    assert_eq!(document["installed_runtime_ran_status"], "not shown");
+    // Its own row: the suite's result stays.
+    assert_eq!(document["command_success"], true);
+
+    // An installed Runtime whose chain does not match gives nothing to compare.
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let (report, document) = fixture.receipt_after_running(b"another runtime");
+    assert!(report
+        .table
+        .contains("installed_runtime_ran (A14) | FAIL\n"));
+    assert_eq!(
+        document["installed_runtime_ran_failures"],
+        serde_json::json!(["no matched installed Runtime to compare"])
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn a_suite_without_a_runtime_hash_did_not_run_the_installed_binary() {
+    use agent_conformance::report::installed_runtime_ran_failures;
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    )
+    .unwrap();
+    assert_eq!(
+        installed_runtime_ran_failures(None, Some(&installed)),
+        ["suite recorded no Runtime SHA-256"]
+    );
+    assert!(
+        installed_runtime_ran_failures(Some(&installed.binary_sha256), Some(&installed)).is_empty()
     );
     home.finish().unwrap();
 }

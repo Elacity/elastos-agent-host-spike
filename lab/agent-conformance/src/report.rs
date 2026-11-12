@@ -604,6 +604,26 @@ pub fn installed_runtime(
     })
 }
 
+/// Every reason the receipt cannot say the suite ran the installed binary; empty
+/// means the Runtime the suite launched has the installed binary's SHA-256.
+/// `ran` is the hash the suite printed for the Runtime it launched; `installed`
+/// is the installed Runtime once its hash chain matched. This compares bytes
+/// by hash: it does not show which of the suite's rows launched that Runtime.
+pub fn installed_runtime_ran_failures(
+    ran: Option<&str>,
+    installed: Option<&InstalledRuntime>,
+) -> Vec<String> {
+    match (ran, installed) {
+        (_, None) => vec!["no matched installed Runtime to compare".into()],
+        (None, Some(_)) => vec!["suite recorded no Runtime SHA-256".into()],
+        (Some(ran), Some(installed)) if ran != installed.binary_sha256 => vec![format!(
+            "suite ran Runtime {ran}, installed binary is {}",
+            installed.binary_sha256
+        )],
+        _ => Vec::new(),
+    }
+}
+
 /// The key a release uses for this machine's platform, as the Runtime's own
 /// update check spells it.
 pub fn release_platform() -> &'static str {
@@ -627,8 +647,8 @@ pub fn release_platform() -> &'static str {
 ///   installed bytes belong to, not that the release is genuine;
 /// - the bundle's hash: the capsule bundle the demo ran is not compared with
 ///   anything installed;
-/// - that the suite ran this binary: the receipt's `runtime_sha256` is the
-///   Runtime the suite launched and is recorded beside this one, not compared.
+/// - that the suite ran this binary: `installed_runtime_ran_failures` compares
+///   the two hashes for the receipt's own row.
 pub fn read_installed_runtime(
     binary: &Path,
     data: &Path,
@@ -708,8 +728,9 @@ pub struct Bound<'a> {
 }
 
 /// `write_reviewed_run` with the installed Runtime. Like review binding, the
-/// installed Runtime is its own table row and receipt fields; a chain that does
-/// not match fails that row and does not change the suite's command result.
+/// installed Runtime has its own table rows and receipt fields: one for its
+/// hash chain and one for whether the suite ran that binary. A row that fails
+/// does not change the suite's command result.
 pub fn write_bound_run(
     listed: &str,
     output: &str,
@@ -794,11 +815,26 @@ pub fn render_bound_run(
     } else {
         "review_binding (A14) | FAIL\n"
     });
+    // Whether the suite ran the installed binary is asked only when an
+    // installed Runtime was given.
+    let not_ran = installed.as_ref().map(|installed| {
+        installed_runtime_ran_failures(
+            evidence.identities.runtime.as_deref(),
+            installed.as_ref().ok(),
+        )
+    });
     if let Some(installed) = &installed {
         table.push_str(if installed.is_ok() {
             "installed_runtime (A14) | PASS\n"
         } else {
             "installed_runtime (A14) | FAIL\n"
+        });
+    }
+    if let Some(not_ran) = &not_ran {
+        table.push_str(if not_ran.is_empty() {
+            "installed_runtime_ran (A14) | PASS\n"
+        } else {
+            "installed_runtime_ran (A14) | FAIL\n"
         });
     }
     let outcome = if !suite_ok {
@@ -843,6 +879,15 @@ pub fn render_bound_run(
         .into();
         document["installed_runtime"] = serde_json::json!(record);
         document["installed_runtime_failures"] = unmatched.into();
+    }
+    if let Some(not_ran) = not_ran {
+        document["installed_runtime_ran_status"] = if not_ran.is_empty() {
+            "ran"
+        } else {
+            "not shown"
+        }
+        .into();
+        document["installed_runtime_ran_failures"] = not_ran.into();
     }
     let receipt_bytes = serde_json::to_vec_pretty(&document)
         .map(|mut bytes| {
