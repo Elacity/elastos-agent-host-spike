@@ -108,9 +108,14 @@ start-up at each tick:
 
 One fairness test still runs the busy guest and the photo guest with the real 10 ms ticker
 (`with_the_real_ticker_a_busy_guest_lets_a_second_guest_finish_and_is_then_cancelled`). It shows that the photo
-guest finishes next to a running busy guest, and that the busy guest is then cancelled after its grace period,
-with real ticks arriving. It does not show that the fuel is refilled or that the guest yields by fuel: no
-falsifier names it, and its time limits are wide (10 s) so that a loaded machine does not fail it.
+guest does its job and stops while the busy guest is in its run, and that the busy guest is then cancelled after
+its grace period. It does not show that the fuel is refilled or that the guest yields by fuel: no falsifier
+names it.
+- The photo guest starts on a signal from the host that the busy guest is past start-up and executing, not
+  after a sleep. Its events stay open until the busy guest has given the thread back 8 more times and seen one
+  more real tick, and the test asserts that the busy guest's run had not ended when the photo guest stopped.
+- Its only time limit is 120 s for the whole test, compiling included (about 1.6 s where it was written). When
+  that runs out the worker is stopped before the test fails, so no thread is left running.
 
 Tests that still depend on the real clock. In each, a planted fault is caught whatever the machine's speed; a
 very slow or loaded machine can only make the test fail with no fault in:
@@ -118,10 +123,10 @@ very slow or loaded machine can only make the test fail with no fault in:
 - `a_stop_during_start_up_ends_the_run_within_the_grace_period`: the cancel must land within 500 ms of when
   it is due;
 - `a_guest_that_never_awaits_is_ended_at_the_epoch_deadline`: the run must end within 5 s;
-- the real-ticker fairness test above: 10 s limits;
+- the real-ticker fairness test above: 120 s for the whole test;
 - the other lifecycle tests, and the streaming, ui and credentials tests: they assert on values. A guest must
   finish its work within the time its events are held open plus the 300 ms grace period;
-- every test that runs a guest has a watchdog of 20, 30 or 60 s.
+- every other test that runs a guest has a watchdog of 20 or 30 s.
 
 The times above are from the ticker version of the fairness test.
 
