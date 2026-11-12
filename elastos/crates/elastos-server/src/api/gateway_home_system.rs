@@ -8522,7 +8522,19 @@ fn home_save_background_image(
         &path,
         &bytes,
     )?;
-    remove_home_background_images(data_dir, context, Some(file_name))?;
+    if let Err(err) = remove_home_background_images(data_dir, context, Some(file_name)) {
+        // A damaged sibling refuses the upload after it was written. Remove
+        // the new file so the refusal leaves the Home as it found it.
+        if let Err(rollback) = std::fs::remove_file(&path) {
+            if rollback.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    error = %rollback,
+                    "failed to remove a refused background image"
+                );
+            }
+        }
+        return Err(err);
+    }
     home_appearance_summary(data_dir, context)
 }
 
