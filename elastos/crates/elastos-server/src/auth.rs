@@ -21015,10 +21015,8 @@ pub(crate) mod tests {
     fn kept_elsewhere_case_5_one_folder_spelled_two_ways_refuses_or_seals() {
         let runtime_dir = owner_only_tempdir();
         std::fs::create_dir_all(runtime_dir.path().join("inner")).unwrap();
-        let person = store_test_human_principal(
-            runtime_dir.path(),
-            "person:local:kept-elsewhere-spelling",
-        );
+        let person =
+            store_test_human_principal(runtime_dir.path(), "person:local:kept-elsewhere-spelling");
         let spelled = runtime_dir.path().join("inner").join("..");
         let root =
             ResolvedPrincipalRoot::resolve(runtime_dir.path(), &spelled, &person.principal_id)

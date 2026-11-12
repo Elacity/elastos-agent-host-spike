@@ -6371,7 +6371,9 @@ pub(super) async fn home_active_shell_update(
     match home_save_active_shell(&state.data_dir, &context, input.active.trim()) {
         Ok(summary) => Json(summary).into_response(),
         Err(err) => {
-            if let Some(response) = crate::api::gateway::protected_record_kept_elsewhere_response(&err) {
+            if let Some(response) =
+                crate::api::gateway::protected_record_kept_elsewhere_response(&err)
+            {
                 return response;
             }
             let text = err.to_string();
@@ -9653,7 +9655,10 @@ mod stored_root_tests {
         let selection = home_services_default_selection_state(&context);
         home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
         let stored_path = home_services_selection_state_path(&data_dir, &context).unwrap();
-        assert!(stored_path.is_file(), "the save wrote under the stored root");
+        assert!(
+            stored_path.is_file(),
+            "the save wrote under the stored root"
+        );
         let stored: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&stored_path).unwrap()).unwrap();
         assert_eq!(stored["schema"], "elastos.principal-root.object/v1");

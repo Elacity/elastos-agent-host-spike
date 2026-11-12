@@ -559,9 +559,7 @@ mod r3_tests {
 #[cfg(test)]
 mod r8d_rows {
     use super::*;
-    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{
-        passkey_person, KEPT_ELSEWHERE,
-    };
+    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{passkey_person, KEPT_ELSEWHERE};
 
     /// Entry: the v2 workspace PUT route with the current migration identity.
     /// The person's record is kept on the parent and the child holds no
@@ -570,7 +568,11 @@ mod r8d_rows {
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_assistant_workspace_v2_save_is_refused_for_the_passkey_person() {
         let person = passkey_person("assistant");
-        let read = get(State(person.child_state()), person.route_headers("assistant")).await;
+        let read = get(
+            State(person.child_state()),
+            person.route_headers("assistant"),
+        )
+        .await;
         assert_eq!(read.status(), StatusCode::OK);
         let body = axum::body::to_bytes(read.into_body(), usize::MAX)
             .await
