@@ -24,9 +24,13 @@ sign that printed lab CID, and a check can say whether that key did.
   capsule identity. It is not the Runtime's published name (see
   [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)).
 - The one schema check is the Runtime's own. `capsule.json` at the bundle root
-  is parsed as `elastos_common::CapsuleManifest`, which refuses an unknown
-  field, and then checked with its `validate()`. Each refusal keeps the
-  Runtime's own text. The lab adds no field, no schema and no parser.
+  is read with `elastos_common::PinnedManifest::parse`, the Runtime's reader
+  for a manifest that may pin a requirement by CID (`requires[].cid`). It
+  checks each pin's form, parses everything else as
+  `elastos_common::CapsuleManifest`, which refuses an unknown field, and
+  checks that with its `validate()`. Each refusal keeps the Runtime's own
+  text or code. A pin is checked for its form only: nothing here finds or
+  reads the capsule it names. The lab adds no field, no schema and no parser.
 
 ## The encoding
 
@@ -450,7 +454,7 @@ claimed)` (`tests/check_name.rs`):
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
-| A wrong lab CID is refused with both values; a claim that is not a lab CID is refused as one, before any bundle is read | `claimed_name_is_checked_never_trusted` | F-CI3g (no comparison), F-CI3h (no `b`), F-CI3k (any CID bytes), F-CI3l (characters outside the alphabet dropped), F-CI3m (uppercase), F-CI3p (order), F-CI18l (no re-encode) |
+| A wrong lab CID is refused with both values; a claim that is not a lab CID is refused as one, before any bundle is read | `claimed_name_is_checked_never_trusted` | F-CI3g (no comparison), F-CI3h (no `b`), F-CI3k (a raw leaf's CID), F-CI3l (characters outside the alphabet dropped), F-CI3m (uppercase), F-CI3p (order), F-CI18l (no re-encode) |
 | `lab_cid`'s refusals pass through | `check_name_preserves_lab_cid_refusals` | F-CI3n |
 | `check_name` names the bundle only by calling `lab_cid` | `check_name_uses_the_single_naming_path` | F-CI3o |
 
@@ -813,7 +817,7 @@ not loosen, skip or copy the manifest check.
 | --- | --- | --- |
 | The listing of the copy's five files gets the pin, the value `encode_entries` gives for the same files; on a temp copy whose `viewer` is the Runtime type's string, `lab_cid` of the folder equals `encode_listed_files` of that folder's listing | `photo_listing_gets_the_lab_cid_of_its_folder` | F-CI47a (the root is the photo rule's raw-listing CID: the SHA-256 of a `{path,size,sha256}` JSON listing, not of the directory block), F-CI47b (every leaf's Tsize is 0) |
 | README's Python rule recomputes the photo pin | `readme_python_recomputes_every_lab_cid_pin` | F-CI47a |
-| `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime type refuses is read as plain JSON) |
+| `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime's reader does not parse is named all the same) |
 | A listed file over one chunk is refused with its path; one of exactly one chunk is a leaf | `listed_file_over_the_chunk_limit_is_refused` | F-CI47c (`encode_listed_files` has no size refusal) |
 | A listed file over one leaf is still refused, its text names its path, its length and `encode_entries`, and `encode_entries` names the same file from its bytes (task 048) | `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c |
 | The listing's lab CID gets the one package record from `sign_cid_record`, with the record's exact payload, and `verify_cid_record` passes it; no folder is walked (task 049) | `a_closure_listing_gets_a_package_record_by_its_cid` | F-CI49c |
@@ -1748,7 +1752,7 @@ RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-id
 The package is its own workspace (empty `[workspace]` table) with its own
 `Cargo.lock`, so the Runtime's workspace never grows for it. Dependencies:
 `elastos-bundle-identity` by path (the identity code: the walk and the
-encoder), `elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
+encoder), `elastos-common` by path (read only, for `CapsuleManifest` and `PinnedManifest`), `elastos-identity`
 by path (read only, for the one `did:key` encoder and decoder), `hex` (since
 task 018 only the tests use it), `serde_json`, `sha2`, and `ed25519-dalek` 2.1 with its `rand_core` feature.
 `rustix` 1.1.4 with its `fs` feature (safe `openat`, `fstat` and listing
@@ -2085,13 +2089,26 @@ F-CI1d prints without the `b`; F-CI1r keeps a second link of one name. F-CI3b
 joins absolute paths as folders (a leading `/` would be refused, not named).
 F-CI3d and F-CI3j keep their edits, with titles that no longer say stream.
 The hex claim check is now the base32 one: F-CI3g skips the compare, F-CI3h
-takes the claim without its `b`, F-CI3k drops the CID-bytes check, F-CI3l
+takes the claim without its `b`, F-CI3k lets a raw leaf's CID through (any
+59-character text that starts with `bafkrei`), F-CI3l
 drops characters outside the alphabet first, F-CI3m lowercases the claim
 first, F-CI9i reads the claim itself without the `b`, F-CI4j signs the text
 without the `b`, and F-CI13a to F-CI13c plant their bugs in the parse, which
 now keeps the claim check's root. F-CI14d and F-CI14e anchor on
 `MANIFEST_FILE` and `NAME_SIGNATURE_DOMAIN`, since the two constants they
 anchored on are gone. F-CI15ae compares only the `bafybei` start.
+
+M2 slice Q1 (a bundle whose manifest pins a requirement can be named) moved
+ten older edits, each with its same tests. The claim check now calls the
+Runtime's `cid_form` and the identity crate has no decoder, so F-CI3h, F-CI3l,
+F-CI3m and F-CI18l plant around that one call in `lab_cid_digits`, and F-CI9i
+and F-CI13a call `cid_form` themselves. F-CI3k and F-CI13a no longer take any
+CID bytes: each lets one thing through, a 59-character text that starts with
+`bafkrei`, which is what a raw leaf's CID is. `check_manifest` now parses with
+`PinnedManifest::parse`, so F-CI1g names a bundle whose manifest that reader
+does not parse and F-CI1h one that fails its `validate()`, and F-CI16c anchors
+on `manifest.capsule_type()`. The edits around the call leave `cid_form`
+itself as it is; its own tests are in `elastos-common`.
 
 Task 016 moved seventeen older edits, each with its same bug and the same
 tests. The seam now keeps `check_manifest`'s answer
