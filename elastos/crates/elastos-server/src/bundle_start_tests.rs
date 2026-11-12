@@ -223,6 +223,74 @@ async fn a_staged_component_starts_by_its_cid_and_no_bridge_handler_sees_its_cal
     assert_eq!(home.calls(), Vec::new());
 }
 
+/// The asks-nothing fixture's bundle folder: a manifest and one component.
+fn asks_nothing_bundle() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/components/asks-nothing/bundle")
+}
+
+/// The CID of that bundle. Recorded from the lab README's Python rule for a
+/// bundle's CID, run over the two committed files, not from the code under
+/// test. A machine that stages this folder must print this.
+const ASKS_NOTHING_CID: &str = "bafybeifg5dmvip4scwenuyzleucrl4zl2fwfrma7xi7y3pmt544driy4fi";
+
+/// The fixture's binary is what its committed text builds, byte for byte, and
+/// that is the quiet component these tests build for themselves; its manifest
+/// uses only keys a start by CID takes and names the Runtime's own contract
+/// hash; and the bundle's CID is the recorded one.
+#[test]
+fn the_asks_nothing_fixture_is_its_text_and_has_its_recorded_cid() {
+    let bundle = asks_nothing_bundle();
+    let text = fs::read_to_string(bundle.join("../asks-nothing.wat")).unwrap();
+    let built = wat::parse_str(&text).expect("the fixture's text is a component");
+    let committed = fs::read(bundle.join("asks-nothing.component.wasm")).unwrap();
+    assert_eq!(
+        hex::encode(&committed),
+        hex::encode(&built),
+        "the committed binary (left) is not what its text builds (right)"
+    );
+    assert_eq!(built, quiet_component());
+
+    let manifest = fs::read(bundle.join("capsule.json")).unwrap();
+    let keys: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+    for key in keys.as_object().unwrap().keys() {
+        assert!(BUNDLE_MANIFEST_KEYS.contains(&key.as_str()), "{key}");
+    }
+    assert_eq!(
+        keys["wit_world_sha256"],
+        elastos_common::elastos_bus_v1_wit_sha256()
+    );
+    assert_eq!(keys["entrypoint"], "asks-nothing.component.wasm");
+    let mut names: Vec<String> = fs::read_dir(&bundle)
+        .unwrap()
+        .map(|item| item.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["asks-nothing.component.wasm", "capsule.json"]);
+
+    assert_eq!(bundle_cid(&bundle).unwrap(), ASKS_NOTHING_CID);
+}
+
+/// The fixture, staged as it is committed and started by its CID, ends well:
+/// for nobody and for a person alike, with its name and its signer, with no
+/// call to any bridge handler and nothing registered as running. This is the
+/// run the three-machine receipts repeat with the built binary.
+#[tokio::test]
+async fn the_asks_nothing_fixture_is_staged_and_started_by_its_cid_and_ends_well() {
+    let publisher = key(56);
+    let home = Home::trusting(&[&publisher]).await;
+    let cid = home.stage(&asks_nothing_bundle(), &publisher).await;
+    assert_eq!(cid, ASKS_NOTHING_CID);
+    for person in [None, Some(PERSON)] {
+        assert_eq!(
+            home.run(&cid, person).await.unwrap(),
+            ("asks-nothing".to_string(), did(&publisher.verifying_key()))
+        );
+    }
+    assert_eq!(home.calls(), Vec::new());
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
 /// R-signer. After the same bundle is staged again with a second trusted
 /// key's signature, a start reports that key: the signer is read from the
 /// signature file checked at this start, not remembered from staging.
