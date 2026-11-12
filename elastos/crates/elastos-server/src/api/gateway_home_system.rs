@@ -9539,8 +9539,11 @@ mod stored_root_tests {
         assert!(!child_path.exists());
     }
 
+    /// The launch context takes this person's root from the parent's store,
+    /// where their record is kept. This Runtime holds no protection for that
+    /// root, so the save is refused and the read answers the default.
     #[test]
-    fn parent_auth_store_person_services_selection_uses_stored_root_in_child() {
+    fn parent_auth_store_person_services_selection_is_refused_in_child() {
         use elastos_runtime::auth::AuthSessionGrantV1;
 
         let (_temp, data_dir) = state_dir();
@@ -9585,18 +9588,28 @@ mod stored_root_tests {
                 .unwrap()
                 .is_none()
         );
-        let mut selection = home_services_default_selection_state(&context);
-        selection
-            .local_offer_ids
-            .insert("parent-person-offer".to_string());
-        home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
+        let selection = home_services_default_selection_state(&context);
+        let stored_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        let error = home_save_services_selection_state(&data_dir, &context, &selection)
+            .expect_err("this Runtime holds no protection for the parent store's person");
+        let text = format!("{error:#}");
+        assert!(text.starts_with("could not write "), "{text}");
+        assert!(
+            text.ends_with("protected record is kept only on the Runtime this person signed in on"),
+            "{text}"
+        );
+        assert!(
+            !stored_path.exists(),
+            "the refused save wrote under the stored root"
+        );
+        assert!(
+            !stored_path.parent().unwrap().exists(),
+            "the refused save made the Home folder"
+        );
         assert!(home_services_selection_state(&data_dir, &context)
             .unwrap()
             .local_offer_ids
-            .contains("parent-person-offer"));
-        let parent_path = home_services_selection_state_path(&data_dir, &context).unwrap();
-        assert!(parent_path.is_file());
-        assert_only_file_named(&data_dir, &parent_path);
+            .is_empty());
         let formula_root = crate::auth::principal_localhost_root(&record.principal_id);
         let formula_uri = format!("{formula_root}/.AppData/ElastOS/Home/services-state.json");
         let formula_path =
