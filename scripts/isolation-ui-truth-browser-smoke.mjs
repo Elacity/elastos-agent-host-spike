@@ -134,8 +134,11 @@ try {
   // Home ignores a close click on a new window until the window's own close
   // guard expires (capsules/home-gui/browser/shell-windows.js:711 writes
   // data-close-guard-until, :764 compares it with the page clock). Wait for
-  // that value to pass instead of sleeping past it.
+  // that value to pass instead of sleeping past it. A window that carries no
+  // attribute, or one that is not a number, counts as no guard, which is how
+  // the page reads it too.
   const waitForCloseGuardExpired = async (windowSelector) => {
+    await frame().locator(windowSelector).waitFor();
     await frame().waitForFunction((selector) => {
       const node = document.querySelector(selector);
       if (!node) return false;
