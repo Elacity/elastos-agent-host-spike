@@ -2,7 +2,9 @@
 //!
 //! tar has no directory: the listing starts at offset 0 and reads one header
 //! per entry, then steps over the entry's data by its declared size without
-//! reading it. Every byte comes through [`Reader`], so a run stops when the
+//! reading it. A listing is complete only when the walk reads the archive's
+//! two zero blocks; an object that ends anywhere else is refused with
+//! `end_marker`. Every byte comes through [`Reader`], so a run stops when the
 //! read budget is spent; that stop lists the entries read so far and is
 //! marked on the listing, never a trap. The header's checksum, its octal
 //! size and the data bound are checked before an entry is listed.
@@ -245,7 +247,19 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
     let size = size_of(reader)?;
     let mut entries = Vec::new();
     let mut offset = 0u64;
-    while offset < size {
+    loop {
+        // A listing is complete only at the two zero blocks below. The walk
+        // may also stop because the read budget is spent; that answer comes
+        // from `read_block` and is a marked partial listing. Reaching the
+        // object's end here means the archive never showed its end marker,
+        // so this is a refusal, not a complete listing.
+        if offset >= size {
+            return Err(Refused::new(
+                "end_marker",
+                format!("the object ends at {offset} without two zero blocks"),
+            )
+            .into());
+        }
         let block = match read_block(reader, offset) {
             Ok(block) => block,
             Err(TarError::Stopped(reason)) => return Ok(stop(size, entries, reason)),

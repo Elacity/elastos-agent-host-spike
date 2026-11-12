@@ -2647,6 +2647,76 @@ fn one_zero_block_followed_by_data_refuses_the_archive() {
 }
 
 #[test]
+fn a_tar_object_that_ends_after_a_header_refuses_the_archive() {
+    // One valid, empty-file header is the whole object: no zero block, so
+    // the archive never showed its end marker.
+    let archive = tar_header(&TarSpec::file("a.txt"));
+    assert_eq!(archive.len(), 512);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_tar_object_that_ends_after_an_entry_refuses_the_archive() {
+    // The header and its one data block end exactly at the object's end.
+    let mut archive = tar_header(&TarSpec::file("a.txt").data(b"hello"));
+    archive.extend([b'A'; 512]);
+    assert_eq!(archive.len(), 1024);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_tar_object_that_ends_after_two_entries_refuses_the_archive() {
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend(tar_header(&TarSpec::file("b.txt")));
+    assert_eq!(archive.len(), 1024);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn the_tar_object_end_and_the_read_budget_are_told_apart_at_a_block() {
+    // The same 1,024-byte object: two empty headers and no zero block. With
+    // the whole read budget the walk reaches the object's end and refuses.
+    // With one block of budget it cannot read the second header, and that
+    // stop is a partial listing marked read_budget, not a refusal: more
+    // bytes could still follow.
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend(tar_header(&TarSpec::file("b.txt")));
+    let bus = run_fixture(request(TAR, &[]), TAR, archive.clone());
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+
+    let archive_bytes = archive;
+    let mut bus = bus_with(request(TAR, &[]), TAR, archive_bytes.clone());
+    let grant = capsule_kit_guest::grant(&mut bus, TAR, "read", "test the boundary").unwrap();
+    // The size probes cost the same bytes in both runs; measure them once, so
+    // the second run has exactly one block of budget after the probes.
+    let mut left = MAX_READ_BYTES;
+    {
+        let mut reader = crate::zip::Reader::new(&mut bus, TAR, &grant, &mut left);
+        let size = match crate::zip::object_size(&mut reader) {
+            Ok(size) => size,
+            Err(_) => panic!("the object's size is readable"),
+        };
+        assert_eq!(size, archive_bytes.len() as u64);
+    }
+    let probes = MAX_READ_BYTES - left;
+    assert!(probes > 0, "the size probes are counted");
+    let mut left = probes + 512;
+    let mut reader = crate::zip::Reader::new(&mut bus, TAR, &grant, &mut left);
+    let listing = crate::tar::listing(&mut reader).expect("a stop is still a listing");
+    assert!(listing.refused.is_none(), "a spent budget is not a refusal");
+    assert_eq!(listing.stopped.unwrap().code, "read_budget");
+    assert_eq!(listing.entries.len(), 1, "the header that fit is listed");
+    assert_eq!(left, 0, "the budget ended at the second header's block");
+}
+
+#[test]
 fn the_tar_read_budget_lists_what_fit_and_marks_the_run() {
     let specs: Vec<TarSpec> = (0..200)
         .map(|index| TarSpec::file(&format!("f{index:0>3}.txt")))

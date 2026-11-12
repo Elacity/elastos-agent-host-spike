@@ -588,6 +588,20 @@ CASES = [
      "        if false {",
      ["every_unsupported_tar_record_type_refuses_the_archive",
       "a_tar_extension_header_refuses_the_archive"]),
+    ("T23 an object that ends without the marker lists cleanly",
+     "src/tar.rs",
+     '        if offset >= size {\n'
+     '            return Err(Refused::new(\n'
+     '                "end_marker",\n'
+     '                format!("the object ends at {offset} without two zero blocks"),\n'
+     '            )\n'
+     '            .into());\n'
+     '        }',
+     "        if offset >= size {\n            break;\n        }",
+     ["a_tar_object_that_ends_after_a_header_refuses_the_archive",
+      "a_tar_object_that_ends_after_an_entry_refuses_the_archive",
+      "a_tar_object_that_ends_after_two_entries_refuses_the_archive",
+      "the_tar_object_end_and_the_read_budget_are_told_apart_at_a_block"]),
     ("T6 a full block after one zero block is taken as the end",
      "src/tar.rs",
      "                second.len() == BLOCK_BYTES as usize && second.iter().all(|&byte| byte == 0);",
