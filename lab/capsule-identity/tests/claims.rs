@@ -9,7 +9,12 @@ mod common;
 use common::*;
 
 /// The files the claim test must have read, at the least.
-const MUST_READ: [&str; 3] = ["README.md", "GAP-REPORT.md", "src/lib.rs"];
+const MUST_READ: [&str; 4] = [
+    "README.md",
+    "GAP-REPORT.md",
+    "src/lib.rs",
+    IDENTITY_CRATE_SOURCE,
+];
 
 #[test]
 fn the_lab_cid_claim_stays_computed_by_the_lab() {

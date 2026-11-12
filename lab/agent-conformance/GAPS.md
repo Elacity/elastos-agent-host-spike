@@ -148,14 +148,16 @@ Neither the real `ipfs-provider` nor Kubo was run for 025.
 
 In this checkout the lab CID is a CIDv1 dag-pb UnixFS directory root
 (cc-capsule-identity 018, PR #226). `LabCid` prints 59 characters that start
-`bafybei` (`lab/capsule-identity/src/lib.rs:7-13,236-238`). The lab computes
+`bafybei` (`lab/capsule-identity/src/lib.rs:7-13`; `CID_VERSION` and `SHA2_256` in
+`elastos/crates/elastos-bundle-identity/src/lib.rs`). The lab computes
 that root from Kubo v0.40.1's import profile, which
 `capsules/ipfs-provider/src/directory_hash.rs:21-43` sends on Kubo's HTTP
 `add` (`directory_hash.rs:818-831`). `verify_profile` refuses any other Kubo
 version (`directory_hash.rs:526-528`). This lane parses a printed value only
 through `LabCid` (`src/report.rs:384-387`, the receipt). The 025 refusal
 tests make a value only through `encode_entries`
-(`lab/capsule-identity/src/lib.rs:793`; `tests/runtime.rs:67`). The lab runs
+(`encode_entries` in `elastos/crates/elastos-bundle-identity/src/lib.rs`;
+`tests/runtime.rs:67`). The lab runs
 no Kubo (`lab/capsule-identity/src/lib.rs:21-24`), so "Kubo would print the
 same CID for this directory" is not yet measured (cc-capsule-identity 023).
 A lab that uses the lab CID follows
