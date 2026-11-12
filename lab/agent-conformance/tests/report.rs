@@ -1879,6 +1879,84 @@ fn no_installed_runtime_leaves_the_receipt_unchanged() {
 }
 
 #[test]
+fn receipt_without_an_installed_runtime_has_exactly_these_fields() {
+    use agent_conformance::report::STAGED_BUNDLE_SCOPE;
+    // The whole list, so a field added under any name shows up here.
+    const FIELDS: [&str; 22] = [
+        "build_only_probes",
+        "cargo_success",
+        "command_success",
+        "description",
+        "identity_status",
+        "instance_grants_scope",
+        "localhost_provider_sha256",
+        "missing_or_invalid",
+        "probes",
+        "report",
+        "repository",
+        "review_failures",
+        "review_status",
+        "reviews",
+        "runtime_sha256",
+        "schema",
+        "scope",
+        "staged_bundle_failures",
+        "staged_bundle_scope",
+        "staged_bundle_status",
+        "staged_bundles",
+        "suite_outcome",
+    ];
+    let fields = |document: &Value| {
+        let mut fields: Vec<String> = document.as_object().unwrap().keys().cloned().collect();
+        fields.sort();
+        fields
+    };
+    let (report, document) = bound(None);
+    assert_eq!(fields(&document), FIELDS);
+    assert_eq!(fields(&document["report"]), ["sha256", "table"]);
+    let a14: Vec<_> = report
+        .table
+        .lines()
+        .filter(|line| line.contains("(A14)"))
+        .collect();
+    assert_eq!(
+        a14,
+        [
+            "versions_receipt (A14) | PASS",
+            "review_binding (A14) | FAIL",
+            &format!("staged_bundle (A14) | PASS | {STAGED_BUNDLE_SCOPE}"),
+        ]
+    );
+
+    // A given installed Runtime adds its five fields and two rows, no more.
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (report, document) = fixture.receipt();
+    let mut with_installed = FIELDS.map(str::to_owned).to_vec();
+    with_installed.extend(
+        [
+            "installed_runtime",
+            "installed_runtime_failures",
+            "installed_runtime_ran_failures",
+            "installed_runtime_ran_status",
+            "installed_runtime_status",
+        ]
+        .map(str::to_owned),
+    );
+    with_installed.sort();
+    assert_eq!(fields(&document), with_installed);
+    assert_eq!(
+        report
+            .table
+            .lines()
+            .filter(|line| line.contains("(A14)"))
+            .count(),
+        5
+    );
+    home.finish().unwrap();
+}
+
+#[test]
 fn report_cli_reads_an_installed_runtime_only_when_given() {
     let home = ThrowawayHome::new().unwrap();
     let fixture = InstalledFixture::new(&home.root().join("installed"));
