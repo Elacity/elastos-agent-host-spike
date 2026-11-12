@@ -135,3 +135,6 @@ gossip-rand = { package = "rand", version = "0.10", default-features = false, fe
 
 [features]
 default = []
+# Agents that belong to one person: an owner turns them on for a Home, then
+# creates, lists and retires them. Off by default.
+prototype-agents = []

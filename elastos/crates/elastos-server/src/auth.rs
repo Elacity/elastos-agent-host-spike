@@ -4685,7 +4685,7 @@ fn open_new_secret_file(path: &Path) -> anyhow::Result<File> {
         .with_context(|| format!("failed to create secret state file {path:?}"))
 }
 
-fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<()> {
+pub(crate) fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<()> {
     let relative = parent
         .strip_prefix(data_dir)
         .map_err(|_| anyhow!("auth state path escaped its data root"))?;
@@ -4713,7 +4713,7 @@ fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<
     Ok(())
 }
 
-fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
+pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -6030,7 +6030,7 @@ fn agent_admission_record_violation(
     None
 }
 
-fn agent_admission_state_violation(records: &[PrincipalRecord]) -> Option<&'static str> {
+pub(crate) fn agent_admission_state_violation(records: &[PrincipalRecord]) -> Option<&'static str> {
     records
         .iter()
         .find_map(|record| agent_admission_record_violation(records, record))
@@ -9000,7 +9000,7 @@ pub fn principal_localhost_root(principal_id: &str) -> String {
 /// The record's root, chosen by the kind the Runtime minted: an agent owns
 /// `localhost://UsersAI/<sha256 of the same principal id>` and a human keeps
 /// `localhost://Users/<sha256 of the same principal id>`.
-fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> String {
+pub(crate) fn principal_kind_localhost_root(principal_id: &str, kind: PrincipalKind) -> String {
     match kind {
         PrincipalKind::Human => {
             let digest = Sha256::digest(principal_id.as_bytes());

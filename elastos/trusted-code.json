@@ -8,6 +8,7 @@
     "elastos/crates/elastos-server/src/installed_release.rs",
     "elastos/crates/elastos-server/src/api/handlers/capability.rs",
     "elastos/crates/elastos-server/src/auth.rs",
+    "elastos/crates/elastos-server/src/agents.rs",
     "elastos/crates/elastos-runtime/src/capability/evaluator.rs",
     "elastos/crates/elastos-runtime/src/capability/policy.rs",
     "elastos/crates/elastos-runtime/src/capability/manager.rs",
