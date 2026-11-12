@@ -52,12 +52,33 @@ fn main() {
             }
         },
     };
-    let result = report::write_reviewed_run(
+    // An installed Runtime is named by its binary and its data folder, because
+    // the installer can put the binary elsewhere. Neither given means no
+    // installed Runtime; there is no default, so a test never reads a real one.
+    let installed = match (
+        env::var_os("AGENT_CONFORMANCE_INSTALLED_BINARY"),
+        env::var_os("AGENT_CONFORMANCE_INSTALLED_DATA"),
+    ) {
+        (None, None) => None,
+        (Some(binary), Some(data)) => Some(report::read_installed_runtime(
+            Path::new(&binary),
+            Path::new(&data),
+            report::release_platform(),
+        )),
+        _ => {
+            eprintln!("versions receipt failure: an installed Runtime needs both its binary and its data folder");
+            process::exit(1);
+        }
+    };
+    let result = report::write_bound_run(
         &listed,
         &output,
         inputs_ok && args[3] == "0",
         report::GitIdentity::read(&build::repository()),
-        reviews.as_deref(),
+        report::Bound {
+            reviews: reviews.as_deref(),
+            installed,
+        },
         receipt,
         gaps.as_deref(),
     );

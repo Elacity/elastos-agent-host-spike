@@ -1683,3 +1683,80 @@ fn no_installed_runtime_leaves_the_receipt_unchanged() {
     let (_, git) = synthetic(1, false);
     assert_eq!(report.receipt_bytes, reviewed(git, None).0.receipt_bytes);
 }
+
+#[test]
+fn report_cli_reads_an_installed_runtime_only_when_given() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let (observations, _) = synthetic(5, false);
+    let listed_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    fs::write(&listed_path, format!("{LIVE}: test\n")).unwrap();
+    fs::write(&results_path, output(&observations)).unwrap();
+    let run = |receipt: &str, binary: bool, data: bool| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_report"));
+        command
+            .env_remove("AGENT_CONFORMANCE_REVIEWS")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA");
+        if binary {
+            command.env("AGENT_CONFORMANCE_INSTALLED_BINARY", &fixture.binary);
+        }
+        if data {
+            command.env("AGENT_CONFORMANCE_INSTALLED_DATA", &fixture.data);
+        }
+        command
+            .arg(&listed_path)
+            .arg(&results_path)
+            .arg("0")
+            .arg(home.root().join(receipt))
+            .output()
+            .unwrap()
+    };
+    let result = run("matched.json", true, true);
+    assert!(result.status.success(), "{result:?}");
+    assert!(String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("installed_runtime (A14) | PASS\n"));
+    let receipt = read_receipt(&home.root().join("matched.json"));
+    assert_eq!(receipt["installed_runtime_status"], "matched");
+    assert_eq!(
+        receipt["installed_runtime"]["binary_sha256"],
+        sha256(b"installed runtime")
+    );
+    assert_eq!(
+        receipt["installed_runtime"]["release_sha256"],
+        sha256(&fixture.release)
+    );
+
+    let result = run("absent.json", false, false);
+    assert!(result.status.success(), "{result:?}");
+    let table = String::from_utf8(result.stdout).unwrap();
+    let receipt = read_receipt(&home.root().join("absent.json"));
+    assert!(!names_installed_runtime(&receipt, &table), "{receipt:#}");
+
+    // Half a location is a mistake in the command, not an absent Runtime.
+    for (name, binary, data) in [("binary.json", true, false), ("data.json", false, true)] {
+        let result = run(name, binary, data);
+        assert_eq!(result.status.code(), Some(1));
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap(),
+            "versions receipt failure: an installed Runtime needs both its binary and its data folder\n"
+        );
+        assert!(!home.root().join(name).exists());
+    }
+
+    fs::write(&fixture.binary, b"another runtime").unwrap();
+    let result = run("unmatched.json", true, true);
+    assert!(result.status.success(), "{result:?}");
+    assert!(String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("installed_runtime (A14) | FAIL\n"));
+    let receipt = read_receipt(&home.root().join("unmatched.json"));
+    assert_eq!(receipt["installed_runtime_status"], "unmatched");
+    assert_eq!(
+        receipt["installed_runtime_failures"],
+        serde_json::json!(["binary does not match the release"])
+    );
+    home.finish().unwrap();
+}
