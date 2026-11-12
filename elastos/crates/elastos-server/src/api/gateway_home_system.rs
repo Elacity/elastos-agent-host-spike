@@ -8853,6 +8853,12 @@ pub(super) async fn home_background_image(
         Err(err) => return home_error_response(err),
     };
 
+    // The lock covers choosing and reading the image, so a read never sees a
+    // half-finished upload or reset. Nothing between these steps awaits.
+    let _guard = match home_background_image_lock() {
+        Ok(guard) => guard,
+        Err(err) => return home_error_response(err),
+    };
     let entry = match home_background_image_entry(&state.data_dir, &context) {
         Ok(Some(entry)) => entry,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
