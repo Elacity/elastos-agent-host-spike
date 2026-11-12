@@ -13,14 +13,15 @@ use ed25519_dalek::SigningKey;
 use elastos_compute::providers::ComponentProvider;
 use elastos_storage::providers::LocalFSProvider;
 
-use crate::bundle_admission::tests::{did, key, signed};
+use crate::bundle_admission::tests::{did, file_for, key, sign_by_hand, signed};
 use crate::bundle_admission::{
     bundle_signature_path, bundle_slot, BundleRefusal, BUNDLE_MANIFEST_KEYS,
+    BUNDLE_SIGNATURE_DOMAIN,
 };
 use crate::runtime::tests::{
     component_manifest_json, component_with_extra_import, quiet_component,
 };
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, SEALED_BRIDGE};
 use crate::stage_cmd::{bundle_cid, stage_bundle};
 
 /// One call a component made to the bridge: the capsule's id, the principal
@@ -34,7 +35,10 @@ const PERSON: &str = "person:local:bus-conformance";
 const ENTRYPOINT: &str = "app.component.wasm";
 
 /// A Home with a real component provider, trusting `keys`, never in dev mode.
-/// Its bridge records each call and refuses it, so nothing is ever granted.
+/// Its bridge handler is set from outside (`set_bridge_hostcall`) and reads no
+/// ceiling: it records each call it sees. A capsule started from a folder
+/// reaches such a handler (the runtime module's test of the folder start
+/// shows that with the same component); a capsule started by CID must not.
 struct Home {
     runtime: Arc<Runtime>,
     dir: tempfile::TempDir,
@@ -69,19 +73,24 @@ impl Home {
                     principal_id.map(ToOwned::to_owned),
                     ceiling,
                 ));
-                Err("refused by the test".to_string())
+                Err("the test's bridge handler was reached".to_string())
             }));
         home
     }
 
     /// Replace the keys this Home trusts.
     async fn trust(&self, keys: &[&SigningKey]) {
+        self.admit(keys, false).await;
+    }
+
+    /// Replace the keys this Home trusts and say whether it is in dev mode.
+    async fn admit(&self, keys: &[&SigningKey], dev_mode: bool) {
         let keys: Vec<String> = keys
             .iter()
             .map(|key| hex::encode(key.verifying_key().to_bytes()))
             .collect();
         self.runtime
-            .configure_capsule_admission(self.dir.path(), &keys, false)
+            .configure_capsule_admission(self.dir.path(), &keys, dev_mode)
             .await
             .unwrap();
     }
@@ -169,13 +178,13 @@ fn code(result: Result<(String, String), BundleRefusal>) -> &'static str {
 }
 
 /// R-run, R-nogrant, R-presentation. A staged component starts by its CID and
-/// what runs is that component: the quiet one ends well and calls nothing;
-/// the calling one makes its one call, for the person given, under an EMPTY
-/// ceiling, and ends in its own error. No ceiling is left afterwards and
-/// nothing was registered with the Runtime as a running capsule, though the
-/// manifest sets projections.
+/// what runs is that component: the quiet one ends well; the calling one,
+/// run for its person, makes its one call to the bridge and gets the seal's
+/// answer, and the Home's bridge handler never sees that call; run for nobody
+/// it ends before any call, with its own words. Nothing is registered with
+/// the Runtime as a running capsule, though the manifest sets projections.
 #[tokio::test]
-async fn a_staged_component_starts_by_its_cid_under_an_empty_ceiling() {
+async fn a_staged_component_starts_by_its_cid_and_no_bridge_handler_sees_its_calls() {
     let publisher = key(41);
     let home = Home::trusting(&[&publisher]).await;
     let quiet = home.bundle("quiet", &manifest("quiet-by-cid"), &quiet_component());
@@ -190,34 +199,28 @@ async fn a_staged_component_starts_by_its_cid_under_an_empty_ceiling() {
         ran,
         ("quiet-by-cid".to_string(), did(&publisher.verifying_key()))
     );
-    assert_eq!(
-        home.calls(),
-        Vec::new(),
-        "the quiet component calls nothing"
-    );
 
     let refusal = home.run(&calling, Some(PERSON)).await.unwrap_err();
     assert_eq!(
         refusal.to_string(),
-        "bundle_start_failed: Compute error: Component capsule denied: BusError::Internal(\"refused by the test\")"
+        format!(
+            "bundle_start_failed: Compute error: Component capsule denied: BusError::Internal({SEALED_BRIDGE:?})"
+        )
     );
-    let calls = home.calls();
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    let (capsule_id, principal_id, ceiling) = &calls[0];
-    assert!(capsule_id.starts_with("component-"), "{capsule_id}");
-    assert_eq!(principal_id.as_deref(), Some(PERSON));
     assert_eq!(
-        ceiling.as_deref(),
-        Some(&[][..]),
-        "an empty ceiling, recorded"
+        home.calls(),
+        Vec::new(),
+        "no bridge handler sees a call from a capsule started by CID"
     );
-    assert_eq!(home.runtime.ceiling_of(capsule_id), None, "and taken away");
     assert!(home.runtime.list_capsules().await.is_empty());
 
-    // Without the person the calling component ends before any call.
+    // Run for nobody, the calling component ends before any call.
     let refusal = home.run(&calling, None).await.unwrap_err();
-    assert_eq!(refusal.code(), "bundle_start_failed");
-    assert_eq!(home.calls().len(), 1);
+    assert_eq!(
+        refusal.to_string(),
+        "bundle_start_failed: Compute error: Component capsule denied: BusError::Denied(\"Runtime did not bind the conformance principal\")"
+    );
+    assert_eq!(home.calls(), Vec::new());
 }
 
 /// R-signer. After the same bundle is staged again with a second trusted
@@ -267,8 +270,9 @@ async fn a_slot_changed_after_staging_is_refused_as_a_mismatch() {
 }
 
 /// R-swap. The slot's component is replaced right after the start's one walk
-/// of it. What runs is the component that was walked (it calls the bridge
-/// once); the replacement on disk (which calls nothing) is never read.
+/// of it. What runs is the component that was walked (it calls the bridge and
+/// ends with the seal's answer); the replacement on disk (which calls nothing
+/// and would end well) is never read.
 #[tokio::test]
 async fn a_component_replaced_after_the_walk_does_not_run() {
     let publisher = key(45);
@@ -292,12 +296,13 @@ async fn a_component_replaced_after_the_walk_does_not_run() {
         fs::read(home.slot_file(&cid, ENTRYPOINT)).unwrap(),
         replacement
     );
-    assert_eq!(
-        home.calls().len(),
-        1,
-        "the walked component ran: {result:?}"
-    );
-    assert_eq!(result.unwrap_err().code(), "bundle_start_failed");
+    let refusal = result
+        .map(|(handle, _)| handle.manifest.name)
+        .expect_err("the walked component ran");
+    assert!(refusal
+        .to_string()
+        .ends_with(&format!("BusError::Internal({SEALED_BRIDGE:?})")));
+    assert_eq!(home.calls(), Vec::new());
 }
 
 /// R-sig-gone, and its neighbours: the store is trusted for nothing at a
@@ -322,8 +327,70 @@ async fn a_start_checks_the_signature_that_is_there_now_against_the_keys_trusted
     home.trust(&[&publisher]).await;
     home.run(&cid, None).await.unwrap();
 
-    fs::remove_file(bundle_signature_path(&home.data(), &cid.parse().unwrap())).unwrap();
+    // The key is still trusted, and the file beside the slot no longer holds
+    // its signature over this CID: one character of it changed; then a good
+    // signature by the same key over another text.
+    let file = bundle_signature_path(&home.data(), &cid.parse().unwrap());
+    let good = fs::read(&file).unwrap();
+    let signer = did(&publisher.verifying_key());
+    let signature = sign_by_hand(&publisher, BUNDLE_SIGNATURE_DOMAIN, &cid);
+    let flipped = if signature.starts_with('0') { "1" } else { "0" };
+    let tampered = format!("{flipped}{}", &signature[1..]);
+    let over_another = sign_by_hand(&publisher, BUNDLE_SIGNATURE_DOMAIN, "another text");
+    for signature in [tampered, over_another] {
+        fs::write(&file, file_for(&cid, &signer, &signature)).unwrap();
+        assert_eq!(
+            code(home.run(&cid, None).await),
+            "bundle_signature_not_accepted"
+        );
+    }
+    fs::write(&file, good).unwrap();
+    home.run(&cid, None).await.unwrap();
+
+    // Dev mode, which lets a start from a folder run an unsigned capsule,
+    // relaxes none of this: no signature file, no trusted key, a key that is
+    // not the signer's.
+    fs::remove_file(&file).unwrap();
     assert_eq!(code(home.run(&cid, None).await), "bundle_unsigned");
+    home.admit(&[&publisher], true).await;
+    assert_eq!(code(home.run(&cid, None).await), "bundle_unsigned");
+    fs::write(&file, signed(&cid, &publisher)).unwrap();
+    home.admit(&[], true).await;
+    assert_eq!(code(home.run(&cid, None).await), "bundle_trust_set_empty");
+    home.admit(&[&other], true).await;
+    assert_eq!(
+        code(home.run(&cid, None).await),
+        "bundle_signature_not_accepted"
+    );
+    home.admit(&[&publisher], true).await;
+    home.run(&cid, None).await.unwrap();
+}
+
+/// R-presentation. A manifest that sets all three presentation keys starts by
+/// CID, and nothing is registered with the Runtime as running: no window, no
+/// projection. The control has none of the three and behaves the same.
+#[tokio::test]
+async fn a_manifest_with_presentation_keys_starts_and_registers_nothing() {
+    let publisher = key(55);
+    let home = Home::trusting(&[&publisher]).await;
+    let mut json: serde_json::Value = serde_json::from_str(&manifest("presented")).unwrap();
+    let keys = json.as_object_mut().unwrap();
+    keys.insert("projections".into(), serde_json::json!(["cli", "web"]));
+    keys.insert("window_policy".into(), serde_json::json!("multiple"));
+    keys.insert("icon".into(), serde_json::json!("icons"));
+    let presented = home.bundle("presented", &json.to_string(), &quiet_component());
+    let keys = json.as_object_mut().unwrap();
+    for key in ["projections", "window_policy", "icon"] {
+        assert!(BUNDLE_MANIFEST_KEYS.contains(&key));
+        keys.remove(key).unwrap();
+    }
+    let plain = home.bundle("plain", &json.to_string(), &quiet_component());
+    for folder in [presented, plain] {
+        let cid = home.stage(&folder, &publisher).await;
+        assert_eq!(home.run(&cid, None).await.unwrap().0, "presented");
+        assert!(home.runtime.list_capsules().await.is_empty());
+    }
+    assert_eq!(home.calls(), Vec::new());
 }
 
 /// R-agent to R-signed-inside: one row per key that a start by CID does not
@@ -530,6 +597,60 @@ async fn a_missing_slot_and_a_bad_cid_are_refused() {
         !home.data().join("capsules").exists(),
         "nothing was made in the store"
     );
+
+    // A store that cannot be looked into is not "no such bundle": here the
+    // store's folder is a file.
+    fs::create_dir_all(home.data().join("capsules")).unwrap();
+    fs::write(home.data().join("capsules").join("by-cid"), b"not a folder").unwrap();
+    assert_eq!(code(home.run(absent, None).await), "bundle_store_io");
+}
+
+/// The slot is a symbolic link to a folder that holds the same bundle. The
+/// walk does not follow it: the start is refused by the walk, whatever the
+/// link points at.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_slot_that_is_a_symbolic_link_is_not_followed() {
+    let publisher = key(53);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("linked", &manifest("linked"), &quiet_component());
+    let cid = home.stage(&folder, &publisher).await;
+    home.run(&cid, None).await.unwrap();
+
+    let slot = bundle_slot(&home.data(), &cid.parse().unwrap());
+    let moved = home.dir.path().join("moved-slot");
+    fs::rename(&slot, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &slot).unwrap();
+    let refusal = home.run(&cid, None).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_walk_unreadable", "{refusal}");
+}
+
+/// A Runtime with no component provider admits the bundle and then cannot
+/// start it: the one code for what comes after admission.
+#[tokio::test]
+async fn a_runtime_without_a_component_provider_cannot_start_a_bundle() {
+    let publisher = key(54);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("no-provider", &manifest("no-provider"), &quiet_component());
+    let cid = home.stage(&folder, &publisher).await;
+
+    let (bare, _dir) = crate::runtime::tests::test_runtime().await;
+    bare.configure_capsule_admission(
+        home.dir.path(),
+        &[hex::encode(publisher.verifying_key().to_bytes())],
+        false,
+    )
+    .await
+    .unwrap();
+    let refusal = bare
+        .run_by_bundle(&home.data(), &cid, Vec::new(), None)
+        .await
+        .map(|(handle, _)| handle.manifest.name)
+        .unwrap_err();
+    assert_eq!(
+        refusal.to_string(),
+        "bundle_start_failed: No component compute provider is configured"
+    );
 }
 
 /// The start by CID reads the slot through the one bounded walk and nothing
@@ -568,4 +689,40 @@ fn the_start_by_cid_reads_the_slot_once_and_fetches_nothing() {
         assert!(!body.contains(never), "{never}");
     }
     assert_eq!(body.matches("Vec::new(), args, principal_id").count(), 1);
+    // The capsule is sealed before its start and unsealed after it.
+    let seal = body.find("sealed.insert(handle.id.0.clone())").unwrap();
+    let start = body.find(".start_loaded(").unwrap();
+    let unseal = body.find("sealed.remove(&handle.id.0)").unwrap();
+    assert!(seal < start && start < unseal);
+}
+
+/// Every bridge handler the Runtime gives the component provider goes
+/// through the seal: the provider's setter is called in two places, each
+/// time with `self.sealing(..)`, and nowhere else in the server.
+#[test]
+fn every_bridge_handler_is_behind_the_seal() {
+    let setter = ["set_bus", "_hostcall("].concat();
+    let source = include_str!("runtime.rs");
+    assert_eq!(source.matches(&setter).count(), 2);
+    assert_eq!(source.matches(&format!("{setter}self.sealing(")).count(), 2);
+    fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
+        for item in fs::read_dir(dir).unwrap() {
+            let path = item.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(files.len() > 50);
+    for file in files.iter().filter(|file| !file.ends_with("runtime.rs")) {
+        let text = fs::read_to_string(file).unwrap();
+        assert!(!text.contains(&setter), "{}", file.display());
+    }
 }

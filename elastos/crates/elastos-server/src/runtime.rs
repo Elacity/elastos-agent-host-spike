@@ -1,6 +1,6 @@
 //! Core runtime implementation
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::RwLock;
@@ -70,7 +70,14 @@ pub struct Runtime {
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
     bridge_manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+    /// Capsules that were started with no authority (a start by CID), while
+    /// they run. No bridge handler sees a call from one of these.
+    bridge_sealed: Arc<StdRwLock<HashSet<String>>>,
 }
+
+/// What a capsule started with no authority gets for any call to the bridge.
+pub const SEALED_BRIDGE: &str =
+    "this capsule was started by CID with no authority: it has no bridge";
 
 impl Runtime {
     /// Create a new runtime with a single compute provider (backward compatible)
@@ -84,6 +91,7 @@ impl Runtime {
             running_capsules: RwLock::new(HashMap::new()),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            bridge_sealed: Arc::default(),
         }
     }
 
@@ -101,6 +109,7 @@ impl Runtime {
             running_capsules: RwLock::new(HashMap::new()),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            bridge_sealed: Arc::default(),
         }
     }
 
@@ -123,28 +132,30 @@ impl Runtime {
             let host_data_dir = data_dir.clone();
             let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
             let host_handle = tokio::runtime::Handle::current();
-            component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
-                let manifest_capabilities = host_manifest_capabilities
-                    .read()
-                    .ok()
-                    .and_then(|guard| guard.get(capsule_id).cloned())
-                    .unwrap_or_default();
-                let ctx = crate::resource_bridge::BridgeContext {
-                    provider_registry: host_reg.clone(),
-                    capability_manager: host_cap_mgr.clone(),
-                    pending_store: host_pending.clone(),
-                    capsule_id: capsule_id.to_string(),
-                    principal_id: principal_id.map(ToOwned::to_owned),
-                    manifest_capabilities,
-                    data_dir: Some(host_data_dir.clone()),
-                };
-                let response = host_handle
-                    .block_on(crate::resource_bridge::handle_component_resource_request(
-                        line, ctx,
-                    ))
-                    .map_err(|err| err.to_string())?;
-                serde_json::to_string(&response).map_err(|err| err.to_string())
-            }));
+            let registry_bridge: BridgeHostcall =
+                Arc::new(move |line, capsule_id, principal_id| {
+                    let manifest_capabilities = host_manifest_capabilities
+                        .read()
+                        .ok()
+                        .and_then(|guard| guard.get(capsule_id).cloned())
+                        .unwrap_or_default();
+                    let ctx = crate::resource_bridge::BridgeContext {
+                        provider_registry: host_reg.clone(),
+                        capability_manager: host_cap_mgr.clone(),
+                        pending_store: host_pending.clone(),
+                        capsule_id: capsule_id.to_string(),
+                        principal_id: principal_id.map(ToOwned::to_owned),
+                        manifest_capabilities,
+                        data_dir: Some(host_data_dir.clone()),
+                    };
+                    let response = host_handle
+                        .block_on(crate::resource_bridge::handle_component_resource_request(
+                            line, ctx,
+                        ))
+                        .map_err(|err| err.to_string())?;
+                    serde_json::to_string(&response).map_err(|err| err.to_string())
+                });
+            component.set_bus_hostcall(self.sealing(registry_bridge));
             tracing::info!("Component resource bridge configured");
         }
 
@@ -158,8 +169,28 @@ impl Runtime {
     /// through the already-running local runtime API.
     pub fn set_bridge_hostcall(&self, hostcall: BridgeHostcall) {
         if let Some(ref component) = self.component_provider {
-            component.set_bus_hostcall(hostcall);
+            component.set_bus_hostcall(self.sealing(hostcall));
         }
+    }
+
+    /// Put the seal in front of a bridge handler. Every handler this Runtime
+    /// gives the component provider goes through here, so a capsule that was
+    /// started with no authority reaches none of them, whatever the handler
+    /// itself would have answered. A ceiling is a handler's own business: the
+    /// registry bridge reads it, a handler set from outside need not.
+    fn sealing(&self, handler: BridgeHostcall) -> BridgeHostcall {
+        let sealed = self.bridge_sealed.clone();
+        Arc::new(move |line, capsule_id, principal_id| {
+            // A lock that cannot be read refuses: this answer is never a guess.
+            if sealed
+                .read()
+                .map(|ids| ids.contains(capsule_id))
+                .unwrap_or(true)
+            {
+                return Err(SEALED_BRIDGE.to_string());
+            }
+            handler(line, capsule_id, principal_id)
+        })
     }
 
     /// Find a compute provider that supports the given capsule type
@@ -373,7 +404,8 @@ impl Runtime {
     /// is the one returned; the manifest must be one a start by CID takes;
     /// and the component that is compiled is the bytes that walk read, never
     /// a second read of the file. A missing slot is a refusal: nothing is
-    /// fetched. What starts has an empty ceiling, whatever its manifest says.
+    /// fetched. What starts has no authority, whatever its manifest says: its
+    /// ceiling is empty, and while it runs no bridge handler sees its calls.
     pub async fn run_by_bundle(
         &self,
         data_dir: &Path,
@@ -400,8 +432,16 @@ impl Runtime {
             .parse()
             .map_err(|_| BundleRefusal::CidFormInvalid(cid.to_string()))?;
         let slot = bundle_admission::bundle_slot(data_dir, &asked);
-        if std::fs::symlink_metadata(&slot).is_err() {
-            return Err(BundleRefusal::Missing(asked.to_string()));
+        match std::fs::symlink_metadata(&slot) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BundleRefusal::Missing(asked.to_string()));
+            }
+            Err(error) => {
+                return Err(BundleRefusal::Store(format!(
+                    "could not look at the slot for {asked}: {error}"
+                )));
+            }
         }
         // The one walk of the slot. The manifest and the component below
         // come from this value; the slot is not read again.
@@ -430,11 +470,19 @@ impl Runtime {
             .load_admitted(admitted.component, admitted.manifest)
             .await
             .map_err(failed)?;
-        // An empty ceiling, stated here and not left to the manifest: the
-        // bridge holds this capsule to nothing.
-        self.start_loaded(component, &mut handle, Vec::new(), args, principal_id)
-            .await
-            .map_err(failed)?;
+        // No authority, stated here and not left to the manifest. Sealed: no
+        // bridge handler sees a call from this capsule while it runs. And an
+        // empty ceiling, for a handler that reads one.
+        if let Ok(mut sealed) = self.bridge_sealed.write() {
+            sealed.insert(handle.id.0.clone());
+        }
+        let started = self
+            .start_loaded(component, &mut handle, Vec::new(), args, principal_id)
+            .await;
+        if let Ok(mut sealed) = self.bridge_sealed.write() {
+            sealed.remove(&handle.id.0);
+        }
+        started.map_err(failed)?;
         Ok((handle, accepted))
     }
 

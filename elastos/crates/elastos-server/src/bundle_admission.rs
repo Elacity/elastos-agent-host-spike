@@ -366,7 +366,9 @@ pub const BUNDLE_MANIFEST_KEYS: [&str; 16] = [
     "projections",
     "window_policy",
     "icon",
-    // A limit on the capsule, never an authority.
+    // What the capsule says it wants as limits; never an authority. On this
+    // path nothing reads it: the component provider applies its own fixed
+    // limits to every component.
     "resources",
 ];
 
