@@ -728,3 +728,91 @@ fn a_new_agent_protection_opens_under_its_own_derived_key_only() {
         "a key derived for another agent opens nothing"
     );
 }
+
+/// The reason of a named refusal.
+fn refusal_of<T: std::fmt::Debug>(result: anyhow::Result<T>) -> String {
+    let error = result.expect_err("the operation was not refused");
+    match error.downcast_ref::<Refused>() {
+        Some(refused) => refused.0.clone(),
+        None => panic!("not a named refusal: {error:#}"),
+    }
+}
+
+fn turn_on(home: &Home) {
+    assert!(set_enabled_in_any_build(home.path(), &home.caller(), true, 9).unwrap());
+}
+
+fn loaded(home: &Home) -> AgentRecordsFile {
+    match home.load() {
+        AgentFile::Loaded(file) => file,
+        other => panic!("the agent file did not load: {other:?}"),
+    }
+}
+
+#[test]
+fn turning_agents_on_or_off_writes_once_and_names_the_owner() {
+    let home = Home::new();
+    assert!(!set_enabled_in_any_build(home.path(), &home.caller(), false, 9).unwrap());
+    assert!(
+        !home.agent_file().exists(),
+        "off when already off writes nothing"
+    );
+
+    turn_on(&home);
+    turn_on(&home);
+    let file = loaded(&home);
+    assert_eq!(file.sequence, 1, "on when already on writes nothing");
+    assert_eq!(
+        file.enabled,
+        Some(Enabled {
+            by: OWNER_ID.to_string(),
+            at: 9
+        })
+    );
+
+    assert!(!set_enabled_in_any_build(home.path(), &home.caller(), false, 11).unwrap());
+    let file = loaded(&home);
+    assert_eq!((file.sequence, file.enabled), (2, None));
+    let events = home.agent_events();
+    let seen: Vec<(&str, Option<&str>)> = events
+        .iter()
+        .map(|event| (event.event_type.as_str(), event.principal_id.as_deref()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("agent.records.enable", Some(OWNER_ID)),
+            ("agent.records.disable", Some(OWNER_ID)),
+        ]
+    );
+}
+
+#[test]
+fn only_an_admin_person_turns_agents_on() {
+    let home = Home::new();
+    let guest = crate::auth::store_test_human_principal(home.path(), "person:local:guest");
+    let as_guest = Caller {
+        principal_id: &guest.principal_id,
+        proof_binding_id: &guest.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    assert_eq!(
+        refusal_of(set_enabled_in_any_build(home.path(), &as_guest, true, 9)),
+        NOT_AN_ADMIN
+    );
+    // The admin's id on a binding that is not theirs is no stored person.
+    let wrong_binding = Caller {
+        proof_binding_id: &guest.proof_binding_id,
+        ..home.caller()
+    };
+    assert_eq!(
+        refusal_of(set_enabled_in_any_build(
+            home.path(),
+            &wrong_binding,
+            true,
+            9
+        )),
+        NOT_A_PERSON
+    );
+    assert!(!home.agent_file().exists(), "a refusal writes nothing");
+}

@@ -542,3 +542,76 @@ fn protect_agent_root(
     });
     Ok(protection)
 }
+
+/// The refusal for create, list and retire while agents are off for a Home.
+pub(crate) const NOT_ENABLED: &str = "agents are not turned on for this Home";
+/// The refusal for a caller who is not a stored person on a proved binding.
+pub(crate) const NOT_A_PERSON: &str = "only a stored person may use agents";
+/// The refusal for a person who may not turn agents on or off.
+pub(crate) const NOT_AN_ADMIN: &str = "only an admin of this Home turns agents on or off";
+
+/// Refuses by name in a build without the feature. Every operation below
+/// starts here.
+pub(crate) fn require_build() -> anyhow::Result<()> {
+    match build_allows() {
+        true => Ok(()),
+        false => refused(FEATURE_OFF),
+    }
+}
+
+/// The caller's stored record: a person, never an agent, on the proof
+/// binding their session proved.
+fn caller_person<'a>(
+    owner_file: &'a [PrincipalRecord],
+    caller: &Caller<'_>,
+) -> anyhow::Result<&'a PrincipalRecord> {
+    let person = owner_file.iter().find(|record| {
+        record.principal_id == caller.principal_id
+            && record.proof_binding_id == caller.proof_binding_id
+            && is_person(record)
+    });
+    match person {
+        Some(person) => Ok(person),
+        None => refused(NOT_A_PERSON),
+    }
+}
+
+/// Turns agents on or off for this Home. Returns the state it leaves.
+/// Turning them off keeps every record; create, list and retire then refuse.
+pub(crate) fn set_enabled(
+    data_dir: &Path,
+    caller: &Caller<'_>,
+    enabled: bool,
+    now: u64,
+) -> anyhow::Result<bool> {
+    require_build()?;
+    set_enabled_in_any_build(data_dir, caller, enabled, now)
+}
+
+fn set_enabled_in_any_build(
+    data_dir: &Path,
+    caller: &Caller<'_>,
+    enabled: bool,
+    now: u64,
+) -> anyhow::Result<bool> {
+    let opened = open(data_dir, true)?;
+    if !crate::auth::is_admin(caller_person(&opened.owner_file, caller)?) {
+        return refused(NOT_AN_ADMIN);
+    }
+    if opened.file.enabled.is_some() == enabled {
+        return Ok(enabled);
+    }
+    let mut after = opened.file.clone();
+    after.sequence += 1;
+    after.enabled = enabled.then(|| Enabled {
+        by: caller.principal_id.to_string(),
+        at: now,
+    });
+    let operation = match enabled {
+        true => Operation::Enable,
+        false => Operation::Disable,
+    };
+    let subject = caller.principal_id;
+    write(data_dir, &opened, operation, &after, caller, subject, now)?;
+    Ok(enabled)
+}
