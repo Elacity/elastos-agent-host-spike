@@ -46,6 +46,18 @@ fn check_entry(
     Ok(())
 }
 
+/// The falsifier list, refused when the document names none. An empty list
+/// would let the entry test pass while checking nothing.
+fn require_entries(document: &serde_json::Value) -> Result<&[serde_json::Value], String> {
+    let entries = document["falsifiers"]
+        .as_array()
+        .ok_or("falsifiers.json lists no entries")?;
+    if entries.is_empty() {
+        return Err("falsifiers.json lists no entries".to_owned());
+    }
+    Ok(entries)
+}
+
 #[test]
 fn every_lab_falsifier_edit_still_applies() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -53,9 +65,7 @@ fn every_lab_falsifier_edit_still_applies() {
     let data = std::fs::read_to_string(crate_root.join("falsifiers.json"))
         .expect("falsifiers.json sits beside the crate manifest");
     let document: serde_json::Value = serde_json::from_str(&data).expect("falsifiers.json is JSON");
-    let entries = document["falsifiers"]
-        .as_array()
-        .expect("falsifiers.json lists entries");
+    let entries = require_entries(&document).expect("falsifiers.json lists entries");
 
     // The runner reads `file` while its working directory is examples/agent-host.
     let lane_base = crate_root.join("../../examples/agent-host");
@@ -81,7 +91,7 @@ fn every_lab_falsifier_edit_still_applies() {
 
 #[cfg(test)]
 mod rules {
-    use super::check_entry;
+    use super::{check_entry, require_entries};
     use serde_json::json;
 
     fn read_some(text: &'static str) -> impl Fn(&str) -> Result<Option<String>, String> {
@@ -125,5 +135,18 @@ mod rules {
 
         let error = check_entry("F-absent", &entry, &read_some("b")).unwrap_err();
         assert!(error.contains("occurs 0 times"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_document_that_lists_no_entries() {
+        let error = require_entries(&json!({"falsifiers": []})).unwrap_err();
+        assert_eq!(error, "falsifiers.json lists no entries");
+
+        let error = require_entries(&json!({"edits": []})).unwrap_err();
+        assert_eq!(error, "falsifiers.json lists no entries");
+
+        let document = json!({"falsifiers": [{"id": "F-one"}]});
+        let entries = require_entries(&document).unwrap();
+        assert_eq!(entries.len(), 1);
     }
 }
