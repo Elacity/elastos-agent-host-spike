@@ -185,6 +185,12 @@ CASES = [
         ["without a launch token it asks for nothing"],
     ),
     (
+        "a partial listing is drawn as the whole archive",
+        "      if (read.stopped) setStatus(read.stopped.message);",
+        "      if (false) setStatus(read.stopped.message);",
+        ["a partial listing says so beside its entries"],
+    ),
+    (
         "an entry keeps its uri",
         '    path: cut(own(entry, "path"), MAX_PATH_CHARS, ""),',
         '    uri: own(entry, "uri"),\n    path: cut(own(entry, "path"), MAX_PATH_CHARS, ""),',
