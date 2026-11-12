@@ -30,13 +30,13 @@ pub const STAGED_BUNDLE_SCOPE: &str =
 pub const INSTALLED_RUNTIME_SCOPE: &str =
     "release head, release and components hash-check each other and name this repository commit; records only, the installed data folder did not run";
 
-/// What the runtime-ran row covers: the suite recorded a launch of the named
-/// path, and the SHA-256 the harness took of that file immediately before each
-/// recorded launch equals the installed binary's. Nothing here sees the bytes
-/// the operating system then executed. It ran with a throwaway data folder, so
-/// this says nothing about behaviour on the installed data.
+/// What the runtime-ran row covers: `run.sh` hashed the installed binary,
+/// launched it once, saw it answer, and hashed it again; both hashes match the
+/// installed record. Nothing here sees the bytes the operating system then
+/// executed, and the suite's own launches use the named path with the
+/// harness's pre-launch hash.
 pub const INSTALLED_RUNTIME_BINARY_SCOPE: &str =
-    "the suite recorded a launch of the installed path, and the harness's SHA-256 of that file, taken immediately before each recorded launch, equals the installed binary's; nothing shows the bytes the operating system then executed; it ran with a throwaway data folder, not the installed one";
+    "run.sh hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record; what this does not show: the suite's own launches use the named path with the harness's pre-launch hash, and nothing sees the bytes the operating system then executed";
 
 /// The data folder the Runtime under test ran with, as the receipt states it.
 pub const RUNTIME_DATA_FOLDER: &str =
@@ -383,7 +383,7 @@ struct Identities {
     /// and a line does not say which test printed it, so a second, different
     /// hash is a failure wherever it came from, and the first one is not
     /// treated as the Runtime that ran. Nothing here shows a launch; the
-    /// launch record file carries that.
+    /// record `run.sh` wrote carries that.
     runtime: Option<RuntimeIdentity>,
     provider: Option<String>,
     built: BTreeMap<String, ProbeIdentity>,
@@ -706,23 +706,23 @@ pub fn release_commit_failures(
     }
 }
 
-/// The launch records the receipt grades: one record per successful start of
-/// the given Runtime, read from the run-private file the runner made. A test's
+/// The launch record the receipt grades: one record `run.sh` wrote to its
+/// run-private file, passed to the report on its own command line. A test's
 /// own output carries no record, so text that looks like a launch cannot stand
 /// in for one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchRecord {
-    /// The runner named no record file: the harness recorded nothing.
+    /// The report was named no record file: nothing was recorded.
     Missing,
-    /// The file could not be read, or held a line the harness would not write.
+    /// The file could not be read, or held a line `run.sh` would not write.
     Unreadable(String),
-    /// The records, in the order the harness appended them.
+    /// The record, in the file `run.sh` wrote.
     Records(Vec<Launch>),
 }
 
 impl LaunchRecord {
-    /// Reads the file at `path`. Every non-empty line must be one record the
-    /// harness writes; a line that is not is refused as a whole, so a partly
+    /// Reads the file at `path`. Every non-empty line must be one record
+    /// `run.sh` writes; a line that is not is refused as a whole, so a partly
     /// understood file is no evidence.
     pub fn read(path: &Path) -> Self {
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -742,15 +742,17 @@ impl LaunchRecord {
     }
 }
 
-/// Every reason the receipt cannot show that the suite launched the installed
-/// path; empty means the record file holds at least one record and every
-/// record names the installed binary's path with the SHA-256 the harness took
-/// of that file immediately before that launch. `record` is read from the
-/// file the runner named; the identity line printed when the binary was named
-/// comes before any launch and is not a record. `installed` is the installed
-/// Runtime once its hash chain matched and bound to this commit. The check is
-/// of paths and hashes: it does not see the bytes the operating system then
-/// executed, and the Runtime ran with a throwaway data folder.
+/// Every reason the receipt cannot show that `run.sh` launched the installed
+/// path; empty means the file `run.sh` passed to the report holds exactly one
+/// record, and that record names the installed binary's path with the SHA-256
+/// `run.sh` took of that file immediately before its launch. `record` is the
+/// file `run.sh` named on the report's command line; the identity line printed
+/// when the binary was named comes before any launch and is not a record.
+/// `installed` is the installed Runtime once its hash chain matched and bound
+/// to this commit. The check is of paths and hashes: it does not see the bytes
+/// the operating system then executed. The file is `run.sh`'s: `run.sh` writes
+/// it before the suite and names its path only to the report, so no test
+/// process can write it.
 pub fn installed_binary_launched_failures(
     record: &LaunchRecord,
     installed: Option<&InstalledRuntime>,
@@ -764,39 +766,41 @@ pub fn installed_binary_launched_failures(
         LaunchRecord::Records(launches) => launches,
     };
     if launches.is_empty() {
-        return vec!["no launch of the installed path was recorded".into()];
+        return vec!["run.sh wrote no launch record for the installed path".into()];
     }
+    if launches.len() != 1 {
+        return vec![format!(
+            "run.sh wrote {} launch records; exactly one is required",
+            launches.len()
+        )];
+    }
+    let launched = &launches[0];
     let Ok(installed_path) = std::fs::canonicalize(&installed.binary_path) else {
         return vec![format!(
             "could not resolve the installed binary path {}",
             installed.binary_path.display()
         )];
     };
+    let Ok(named) = std::fs::canonicalize(&launched.path) else {
+        return vec![format!(
+            "could not resolve the launched path {} against the installed binary {}",
+            launched.path,
+            installed_path.display()
+        )];
+    };
     let mut failures = Vec::new();
-    for launched in launches {
-        let Ok(named) = std::fs::canonicalize(&launched.path) else {
-            failures.push(format!(
-                "could not resolve the launched path {} against the installed binary {}",
-                launched.path,
-                installed_path.display()
-            ));
-            continue;
-        };
-        if named != installed_path {
-            failures.push(format!(
-                "the suite launched {}, not the installed binary {}",
-                named.display(),
-                installed_path.display()
-            ));
-        } else if launched.sha256 != installed.binary_sha256 {
-            failures.push(format!(
-                "suite launched a Runtime with SHA-256 {}, installed binary is {}",
-                launched.sha256, installed.binary_sha256
-            ));
-        }
+    if named != installed_path {
+        failures.push(format!(
+            "run.sh launched {}, not the installed binary {}",
+            named.display(),
+            installed_path.display()
+        ));
+    } else if launched.sha256 != installed.binary_sha256 {
+        failures.push(format!(
+            "run.sh launched a Runtime with SHA-256 {}, installed binary is {}",
+            launched.sha256, installed.binary_sha256
+        ));
     }
-    failures.sort();
-    failures.dedup();
     failures
 }
 
@@ -829,7 +833,7 @@ pub fn release_platform() -> &'static str {
 ///   installed bytes belong to, not that the release is genuine;
 /// - the bundle's hash: the capsule bundle the demo ran is not compared with
 ///   anything installed;
-/// - that the suite launched this path: `installed_binary_launched_failures`
+/// - that run.sh launched this path: `installed_binary_launched_failures`
 ///   compares the paths and the two hashes for the receipt's own row;
 /// - behaviour on the installed data: only these records are read from the
 ///   installed data folder, and the Runtime under test runs with a throwaway
@@ -957,17 +961,16 @@ pub struct Bound<'a> {
     /// `None` means no installed Runtime was given: the receipt then carries no
     /// installed Runtime row or field at all.
     pub installed: Option<Result<InstalledRuntime, Vec<String>>>,
-    /// The launch records read from the run-private file the runner named.
-    /// `Missing` means the runner named no file, so the installed-path row has
-    /// no launch evidence.
+    /// The launch record read from the run-private file run.sh named on the
+    /// command line. `Missing` means the report was named no file, so the
+    /// installed-path row has no launch evidence.
     pub launch_record: LaunchRecord,
 }
 
 /// `write_reviewed_run` with the installed Runtime. Like review binding, the
 /// installed Runtime has its own table rows and receipt fields: one for its
-/// hash chain and one for whether the suite launched that path after its
-/// pre-launch hash matched. A row that fails does not change the suite's
-/// command result.
+/// hash chain and one for whether run.sh launched that path and saw it answer.
+/// A row that fails does not change the suite's command result.
 pub fn write_bound_run(
     listed: &str,
     output: &str,
@@ -1095,10 +1098,11 @@ pub fn render_bound_run(
         "staged_bundle (A14) | {} | {STAGED_BUNDLE_SCOPE}\n",
         if unstaged.is_empty() { "PASS" } else { "FAIL" }
     ));
-    // Whether the suite launched the installed path is asked only when an
+    // Whether run.sh launched the installed path is asked only when an
     // installed Runtime was given, and it rests on the record file alone: the
     // identity line printed when the binary was named comes before any launch,
-    // and a test's own output carries no record.
+    // a test's own output carries no record, and no test process is given the
+    // file's path.
     let not_launched = installed.as_ref().map(|installed| {
         installed_binary_launched_failures(&launch_record, installed.as_ref().ok())
     });
@@ -1172,9 +1176,9 @@ pub fn render_bound_run(
     }
     if let Some(not_launched) = not_launched {
         document["installed_binary_launch_status"] = if not_launched.is_empty() {
-            "launched_installed_path_hash_matched"
+            "run_sh_launched_installed_path_hash_matched"
         } else {
-            "not_launched_installed_path_hash_matched"
+            "not_run_sh_launched_installed_path_hash_matched"
         }
         .into();
         document["installed_binary_launch_failures"] = not_launched.into();

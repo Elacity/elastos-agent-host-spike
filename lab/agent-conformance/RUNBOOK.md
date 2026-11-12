@@ -14,12 +14,18 @@ The command prints typed `version identity: {...}` observations above one table
 from Cargo's test inventory and result lines. Native records identify `elastos`
 and `localhost-provider` by SHA-256. Probe records carry the component SHA-256
 and complete bundle lab CID, with separate `build_only` and `launched` kinds.
-The command creates an empty, run-private launch record file with mode 0600 for
-each run and names it in `AGENT_CONFORMANCE_LAUNCH_RECORD`. The harness appends
-one record to that file per successful start of the Runtime it was given, after
-the start returned, with the path started and the hash taken immediately before
-the start. The report reads launch records from that file alone, never from
-Cargo's output. The existing
+The command writes the installed-path launch record itself, and only when an
+installed Runtime is named by `AGENT_CONFORMANCE_INSTALLED_BINARY` and
+`AGENT_CONFORMANCE_INSTALLED_DATA`: it hashes the binary, launches it once
+with `--version` under a throwaway Home and a 30-second limit, and hashes it
+again. Only when the launch exited 0 and printed a version, and both hashes
+equal the installed record's binary hash, does it write one record
+`path=<canonical path> sha256=<hash> answer=<first line>` to a run-private file
+with mode 0600. The file's path never enters a test process: the suite's
+environment carries no such variable, no library function writes a record, and
+the report is given the path on its command line after the suite. The report
+reads launch evidence from that file alone, never from Cargo's output. The
+existing
 build helpers hash the native binaries; the staging path names the exact probe
 manifest and payload through `capsule_identity::checked_bundle`.
 `ok` becomes PASS. `ignored, blocked: <reason>` becomes BLOCKED with each
@@ -332,33 +338,31 @@ installed bytes belong to, not that the release is genuine. The suite does not
 run on the installed data folder. It does not check the hash of the bundle the
 demo ran.
 
-`installed_runtime_ran (A14)` appears beside it and passes only when
-`AGENT_CONFORMANCE_RUNTIME_BINARY` named a binary and the run's launch record
-file holds at least one record for it, `path=<path> sha256=<SHA-256>`. The
-harness appends that record only after its start of the named binary returned,
-and it carries the path it started and the SHA-256 it took of that file
-immediately before the start. The identity line the suite prints when the
+`installed_runtime_ran (A14)` appears beside it and passes only when `run.sh`
+wrote exactly one record to the run-private file it passed to the report.
+`run.sh` hashed the installed binary, launched it once, saw it answer, and
+hashed it again; both hashes match `installed_runtime.binary_sha256`, and the
+record names a path that resolves to `installed_runtime.binary_path`. No test
+process is given the record's path and no library function writes a record, so
+the suite cannot produce this line. The identity line the suite prints when the
 binary is named comes before any launch and is not a record, and no test's own
-output is read as one. Every record must name
-a path that resolves to `installed_runtime.binary_path`, the installed binary
-the report was given, and a SHA-256 equal to
-`installed_runtime.binary_sha256`. So the row says the suite started the
-installed path after that path hashed to the installed binary's SHA-256
-immediately before the start. Nothing here sees the bytes the operating system
-then executed. The receipt records `installed_binary_launch_status`
-(`launched_installed_path_hash_matched` or
-`not_launched_installed_path_hash_matched`), `installed_binary_launch_failures`,
-and `runtime_data_folder`, which states that the Runtime under test ran with a
-throwaway data folder the suite created, not the installed data folder. No
-record at all fails the row with
-`no launch of the installed path was recorded`; a run with no
-`AGENT_CONFORMANCE_LAUNCH_RECORD` fails it with `no launch record file`; a
-record of a path that is not
-the installed path fails it with
-`the suite launched <path>, not the installed binary <path>`; a difference in
+output is read as one. What this does not show: the suite's own launches use
+the `AGENT_CONFORMANCE_RUNTIME_BINARY` path with the harness's pre-launch hash,
+and nothing sees the bytes the operating system executed. The receipt records
+`installed_binary_launch_status`
+(`run_sh_launched_installed_path_hash_matched` or
+`not_run_sh_launched_installed_path_hash_matched`),
+`installed_binary_launch_failures`, and `runtime_data_folder`, which states that
+the Runtime under test ran with a throwaway data folder the suite created, not
+the installed data folder. A report named no record file fails the row with
+`no launch record file`; an empty file with
+`run.sh wrote no launch record for the installed path`; more than one record
+with `run.sh wrote <N> launch records; exactly one is required`; a record of a
+path that is not the installed path with
+`run.sh launched <path>, not the installed binary <path>`; a difference in
 hash names both hashes; and an installed Runtime whose chain did not match
-leaves nothing to compare. A record whose fields the harness could not have
-written fails the row with `malformed launch record`. Identity lines are
+leaves nothing to compare. A record whose fields `run.sh` does not write fails
+the row with `malformed launch record`. Identity lines are
 still read from the whole test output, which cannot say which test printed a
 line, so a run that names two different Runtime hashes fails
 `versions_receipt` with `conflicting elastos SHA-256`, and two different Runtime
@@ -366,22 +370,17 @@ paths fail it with `conflicting elastos path`; neither is launch evidence. This
 row says nothing about behaviour on the installed data folder: that folder is
 never used by a run.
 
-The suite launches the installed binary only when
-`AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
-launch the named binary where it is and build no Runtime. The suite hashes the
-named binary again immediately before every launch; when the bytes differ from
+`AGENT_CONFORMANCE_RUNTIME_BINARY` names a binary for the suite to launch
+instead of building one. The suite hashes the named binary again immediately
+before every launch; when the bytes differ from
 the first hash it does not launch them, prints
 `given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
-and the run fails. When the bytes match and the process starts, it appends
-`path=<path> sha256=<hash>` to the run's launch record file once for that
-start, with the resolved path and the hash it just took. This does not show a
-swap made between that hash and the operating system starting the process, or
-what a started Runtime then starts by itself. Without that variable the suite
-builds the checkout's Runtime; it writes no launch record, and
-`installed_runtime_ran` then fails with
-`no launch of the installed path was recorded`, even
-when the built bytes hash the same as the installed binary. When no installed
-Runtime was given the receipt has no such row. Only the Runtime is given; the
+and the run fails. This does not show a swap made between that hash and the
+operating system starting the process, or what a started Runtime then starts by
+itself. The harness writes no record; the installed-path row rests on `run.sh`'s
+launch and does not need this variable. Without it the suite builds the
+checkout's Runtime. When no installed Runtime was given the receipt has no such
+row. Only the Runtime is given; the
 localhost provider, the probe and every Home the Runtime runs in still come
 from the checkout, so the installation's data folder is never used by a run.
 
@@ -534,7 +533,7 @@ What each A14 row means:
 | `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
-| `installed_runtime_ran` | the launch record file holds at least one record for the installed path, and the harness's SHA-256 of that file, taken immediately before each recorded launch, equals the installed binary's; nothing shows the bytes the operating system then executed; it started with a throwaway data folder, not the installed one |
+| `installed_runtime_ran` | `run.sh` hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
 
 What the receipt does not prove:
 

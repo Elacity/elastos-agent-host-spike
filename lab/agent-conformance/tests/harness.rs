@@ -382,10 +382,8 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
     let given = home.root().join("given-elastos");
     fs::write(&given, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&given, fs::Permissions::from_mode(0o755)).unwrap();
-    // The child removes this file at its last launch, so its resolved path is
-    // taken while the file is still there.
-    let given_path = fs::canonicalize(&given).unwrap();
-    // The child records into its own fresh, empty file, not this run's.
+    // The child is named a fresh, empty file under the old record variable. The
+    // suite writes no record there: launch evidence is run.sh's alone.
     fs::write(home.root().join("launches"), b"").unwrap();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -396,7 +394,7 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
         ])
         .env("AGENT_CONFORMANCE_RUNTIME_BINARY", &given)
         .env(
-            agent_conformance::runtime::LAUNCH_RECORD_FILE,
+            "AGENT_CONFORMANCE_LAUNCH_RECORD",
             home.root().join("launches"),
         )
         .env(SWAP_CHILD, "1")
@@ -429,21 +427,10 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
         .line();
         assert!(stdout.contains(&format!("{line}\n")), "{stdout:?}");
     }
-    // Each successful start appended one record to the file the runner named:
-    // the path it started, resolved, and the hash checked just before it. The
-    // refused starts appended none, so the two starts are the two records. The
-    // same text in test output is not a record.
-    let launched = agent_conformance::runtime::Launch {
-        path: given_path.to_string_lossy().into_owned(),
-        sha256: first.clone(),
-    };
-    let records = fs::read_to_string(home.root().join("launches")).unwrap();
-    assert_eq!(
-        records.lines().collect::<Vec<_>>(),
-        [launched.record(), launched.record()],
-        "{records:?}"
-    );
-    assert!(!stdout.contains(&launched.record()), "{stdout:?}");
+    // Successful and refused starts alike write nothing: the harness keeps no
+    // record, so a test process cannot produce launch evidence.
+    let records = fs::read(home.root().join("launches")).unwrap();
+    assert!(records.is_empty(), "{records:?}");
     assert!(!stdout.contains("runtime launched:"), "{stdout:?}");
     assert!(stdout.contains(
         "given Runtime changed: it could not be hashed again before a launch; not launched\n"

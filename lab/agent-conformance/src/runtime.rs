@@ -1,8 +1,7 @@
 //! Identify the native binaries under test. `harness` owns every Runtime launch.
 
 use crate::build::{lane, offline_build};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -55,98 +54,74 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
 /// Printed, with both hashes, when a given Runtime is refused at a launch.
 pub const CHANGED: &str = "given Runtime changed: ";
 
-/// Names the run-private file that receives one record per successful start of
-/// the given Runtime. The runner creates it empty for each run and the harness
-/// appends to it and nowhere else; test output carries no launch record.
-pub const LAUNCH_RECORD_FILE: &str = "AGENT_CONFORMANCE_LAUNCH_RECORD";
-
-/// One launch of the given Runtime: the path that was started and the SHA-256
-/// taken of that file immediately before the start.
+/// One record from the run-private launch file `run.sh` writes: the canonical
+/// path it started, the SHA-256 of that file immediately before the start, and
+/// the answer the launch printed. `run.sh` is the only writer; no library
+/// function appends a record, and the type's fields are private, so test code
+/// cannot produce one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
-    pub path: String,
-    pub sha256: String,
+    pub(crate) path: String,
+    pub(crate) sha256: String,
+    pub(crate) answer: String,
 }
 
 impl Launch {
-    /// One line of the record file. The harness writes this line after its
-    /// `spawn` returned Ok and nowhere else.
-    pub fn record(&self) -> String {
-        format!("path={} sha256={}", self.path, self.sha256)
+    /// The answer the launch printed, kept so a reader can show what the
+    /// installed binary said when `run.sh` started it.
+    pub fn answer(&self) -> &str {
+        &self.answer
     }
 
-    /// Reads one line the harness wrote. Any other text yields `None`, so test
-    /// output cannot stand in for a record.
+    /// Reads one line `run.sh` wrote. Any other text yields `None`, so test
+    /// output or a hand-written line cannot stand in for a record.
     pub fn parse_record(line: &str) -> Option<Self> {
-        let (path, sha256) = line.rsplit_once(" sha256=")?;
+        let (rest, answer) = line.rsplit_once(" answer=")?;
+        let (path, sha256) = rest.rsplit_once(" sha256=")?;
         let path = path.strip_prefix("path=")?;
         let lowercase_hex = sha256
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-        if path.is_empty() || sha256.len() != 64 || !lowercase_hex {
+        if path.is_empty() || sha256.len() != 64 || !lowercase_hex || answer.is_empty() {
+            return None;
+        }
+        if answer.bytes().any(|byte| byte.is_ascii_control()) {
             return None;
         }
         Some(Self {
             path: path.into(),
             sha256: sha256.into(),
+            answer: answer.into(),
         })
     }
-}
-
-/// Appends one record to the run-private file the runner named, and to no
-/// other output. The harness calls this only after `spawn` returned Ok, so a
-/// refused start leaves no record. Without the variable the harness records
-/// nothing; the report then has no launch evidence and its row fails.
-pub fn record_launch(launch: &Launch) -> Result<(), &'static str> {
-    let Some(path) = std::env::var_os(LAUNCH_RECORD_FILE) else {
-        return Ok(());
-    };
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .map_err(|_| "could not open the launch record file")?;
-    writeln!(file, "{}", launch.record()).map_err(|_| "could not append a launch record")
 }
 
 /// The harness calls this immediately before it starts any program. A given
 /// Runtime is hashed again here, once per launch, and is refused unless it
 /// still has the bytes first recorded for it, so a file replaced after that
-/// first hash is not launched under the recorded hash. A launch that passes
-/// returns the record for `record_launch` to append once `spawn` has returned
-/// Ok; a run that never starts the runtime has no such record. The differing
-/// hash is also printed as an identity line, so the receipt records the
-/// conflict even if a caller drops the error.
+/// first hash is not launched under the recorded hash. It keeps the launch
+/// honest and writes no record: the installed-path row rests on `run.sh`'s own
+/// launch, not on the suite's launches. The differing hash is also printed as
+/// an identity line, so the receipt records the conflict even if a caller drops
+/// the error.
 ///
 /// What this does not show: a replacement made after this hash and before the
 /// operating system starts the process, or what a started Runtime then starts
 /// by itself.
-pub fn unchanged_before_launch(program: &Path) -> Result<Option<Launch>, &'static str> {
+pub fn unchanged_before_launch(program: &Path) -> Result<(), &'static str> {
     let Some(given) = std::env::var_os(RUNTIME_BINARY) else {
-        return Ok(None);
+        return Ok(());
     };
     if program != Path::new(&given) {
-        return Ok(None);
+        return Ok(());
     }
     let first = runtime_under_test()?;
-    // Resolved before the hash, so the record names the file that was hashed
-    // as the installed path comparison sees it. A path that cannot be resolved
-    // is refused only after the hash, which keeps a missing file's own reason.
-    let canonical = std::fs::canonicalize(program);
     let Ok(now) = sha256_file(program) else {
         println!("{CHANGED}it could not be hashed again before a launch; not launched");
         return Err("given Runtime binary could not be hashed again before a launch; not launched");
     };
     if now == first.sha256 {
-        let Ok(canonical) = canonical else {
-            println!("{CHANGED}its path could not be resolved before a launch; not launched");
-            return Err(
-                "given Runtime binary path could not be resolved before a launch; not launched",
-            );
-        };
-        return Ok(Some(Launch {
-            path: canonical.to_string_lossy().into_owned(),
-            sha256: now,
-        }));
+        return Ok(());
     }
     println!(
         "{CHANGED}first hashed {}, {now} immediately before a launch; not launched",

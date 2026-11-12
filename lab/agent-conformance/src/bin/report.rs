@@ -44,9 +44,27 @@ fn main() {
         }
         process::exit(1);
     }
-    if args.len() != 5 {
+    if args.len() == 4 && args[1] == "--installed-binary-hash" {
+        // The record's binary hash for run.sh: the hash chain is checked the
+        // same way the receipt checks it, and only the hash is printed.
+        match report::read_installed_runtime(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            report::release_platform(),
+        ) {
+            Ok(installed) => {
+                println!("{}", installed.binary_sha256);
+                return;
+            }
+            Err(reasons) => {
+                eprintln!("no installed binary hash record: {}", reasons.join("; "));
+                process::exit(1);
+            }
+        }
+    }
+    if args.len() != 5 && args.len() != 6 {
         eprintln!(
-            "versions receipt failure: expected inventory, results, Cargo status and receipt path"
+            "versions receipt failure: expected inventory, results, Cargo status and receipt path, and optionally the launch record path"
         );
         process::exit(1);
     }
@@ -105,12 +123,12 @@ fn main() {
         .and_then(std::ffi::OsStr::to_str)
         == Some("1"))
     .then(|| "tree was dirty during the run".to_owned());
-    // The launch records come from the run-private file `run.sh` made and
-    // named. Test output is never read for them, and an unset variable leaves
-    // the installed-path row with no launch evidence.
-    let launch_record = match env::var_os(agent_conformance::runtime::LAUNCH_RECORD_FILE) {
+    // The launch record file is run.sh's: it writes the file and names its path
+    // on this command line, after the suite. No test process is given it, and
+    // test output is never read as launch evidence.
+    let launch_record = match args.get(5) {
         None => report::LaunchRecord::Missing,
-        Some(path) => report::LaunchRecord::read(Path::new(&path)),
+        Some(path) => report::LaunchRecord::read(Path::new(path)),
     };
     let result = report::write_bound_run(
         &listed,
