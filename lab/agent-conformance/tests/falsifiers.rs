@@ -259,6 +259,19 @@ mod rules {
     }
 
     #[test]
+    fn refuses_the_second_edit_with_the_count_the_first_edit_left() {
+        let entry = json!({"edits": [
+            {"file": "x", "old": "x", "new": "y y"},
+            {"file": "x", "old": "y", "new": "z"},
+        ]});
+        let error = check_entry("F-chain-refused", &entry, &read_some("x y")).unwrap_err();
+        assert_eq!(
+            error,
+            "F-chain-refused: its old text occurs 3 times in x; a plant needs exactly one"
+        );
+    }
+
+    #[test]
     fn rejects_old_text_that_occurs_twice_or_not_at_all() {
         let entry = json!({"edits": [{"file": "x", "old": "a", "new": "b"}]});
         let error = check_entry("F-twice", &entry, &read_some("a a")).unwrap_err();
