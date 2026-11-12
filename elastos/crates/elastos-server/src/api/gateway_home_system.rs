@@ -6371,6 +6371,9 @@ pub(super) async fn home_active_shell_update(
     match home_save_active_shell(&state.data_dir, &context, input.active.trim()) {
         Ok(summary) => Json(summary).into_response(),
         Err(err) => {
+            if let Some(response) = crate::api::gateway::protected_record_kept_elsewhere_response(&err) {
+                return response;
+            }
             let text = err.to_string();
             let status = if text.contains("not a launchable shell") {
                 StatusCode::BAD_REQUEST
@@ -10135,6 +10138,51 @@ mod r8d_passkey_rows {
             Some(KEPT_ELSEWHERE)
         );
         person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: the active-shell update route with the Home GUI shell. The
+    /// child lists that shell from an installed capsule fixture, so the save
+    /// reaches the held-root write. The child holds no protection for this
+    /// person's root, so the route answers 403 with the bare refusal text and
+    /// creates no state file or Home folder.
+    #[tokio::test(flavor = "current_thread")]
+    async fn r8d_child_active_shell_save_is_refused_for_the_passkey_person() {
+        let person = passkey_person(HOME_GUI_SHELL_ID);
+        let child = person.child.path();
+        let capsule_dir = child.join("capsules/home-gui");
+        std::fs::create_dir_all(capsule_dir.join("browser")).unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            include_str!("../../../../../capsules/home-gui/capsule.json"),
+        )
+        .unwrap();
+        std::fs::write(capsule_dir.join("browser/index.html"), "Home fixture").unwrap();
+        std::fs::write(
+            child.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({"external": {
+                "home-gui": {"install_path": "capsules/home-gui", "platforms": {}}
+            }, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+        let request: HomeActiveShellUpdate =
+            serde_json::from_value(serde_json::json!({"active": HOME_GUI_SHELL_ID})).unwrap();
+        let answer = home_active_shell_update(
+            State(person.child_state()),
+            person.route_headers(HOME_GUI_SHELL_ID),
+            Json(request),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), KEPT_ELSEWHERE);
+        person.assert_child_holds_only(&[
+            "capsules/home-gui/browser/index.html",
+            "capsules/home-gui/capsule.json",
+            "components.json",
+        ]);
     }
 
     /// Entry: `home_save_services_selection_state` with the person's default
