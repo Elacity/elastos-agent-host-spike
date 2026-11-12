@@ -1196,7 +1196,7 @@ fn wasm_type_comes_from_the_one_manifest_check() {
             .count(),
         1
     );
-    let seam = library_item(&code, "pub fn checked_bundle_observed(");
+    let seam = library_item(&code, "pub fn checked_bundle_within_observed(");
     for text in [
         "let (wasm, name, role) = check_manifest(",
         "CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n            role,\n        }",

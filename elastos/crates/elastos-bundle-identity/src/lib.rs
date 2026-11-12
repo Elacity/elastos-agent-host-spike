@@ -23,6 +23,7 @@ pub const MANIFEST_FILE: &str = "capsule.json";
 /// The portable label: one variant that is not per platform, as the Runtime's
 /// own record writes `"platform": "*"`. A binding that holds it holds no other
 /// label, and a bundle whose manifest `type` is `wasm` is bound only under it.
+#[cfg(feature = "lab")]
 pub const PORTABLE_PLATFORM: &str = "*";
 
 /// The labels a variant binding may hold, in byte order: the portable label
@@ -31,6 +32,7 @@ pub const PORTABLE_PLATFORM: &str = "*";
 /// it lives only in the binding. A stand-in payload may hold a label's words
 /// (the variant fixtures' do, only so their CIDs differ), but the lab never
 /// reads them: a label is the signer's claim.
+#[cfg(feature = "lab")]
 pub const VARIANT_PLATFORMS: [&str; 4] = [
     PORTABLE_PLATFORM,
     "aarch64-darwin",
@@ -209,6 +211,10 @@ pub enum Refusal {
     /// takes that word with a colon in test output for a harness error, so a
     /// failing assertion that printed this refusal would never count.)
     Unreadable { path: String, reason: String },
+    /// The walk met more than its [`Budget`] allows. `limit` names which
+    /// of the four limits; `path` is the entry at which it was passed.
+    /// Nothing past the limit was read.
+    OverBudget { limit: &'static str, path: String },
     /// A name check, or [`LabCid`]'s parse, was given a claim that is not a
     /// lab CID: not `b` and the canonical lowercase base32 of a CIDv1 dag-pb
     /// sha2-256 directory root (`01 70 12 20` and 32 bytes). The claim is
@@ -220,26 +226,34 @@ pub enum Refusal {
     NameMismatch { actual: LabCid, claimed: String },
     /// The signer DID is not one canonical Ed25519 `did:key`. `reason` is the
     /// decoder's own text.
+    #[cfg(feature = "lab")]
     MalformedSignerDid { did: String, reason: String },
     /// The signer DID is not an exact member of the explicit accepted list.
+    #[cfg(feature = "lab")]
     SignerNotAccepted { did: String },
     /// The Ed25519 signature does not verify over the signed name. A wrong
     /// key, a changed signature and a name moved onto other bytes all meet
     /// this one check.
+    #[cfg(feature = "lab")]
     SignatureDoesNotVerify { did: String, name: String },
     /// A package record binds a CID that is not the checked bundle's. `record`
     /// is the record's CID, kept only to say what was refused; `bundle` is the
     /// lab CID of the checked bytes.
+    #[cfg(feature = "lab")]
     RecordNamesAnotherCid { record: String, bundle: LabCid },
     /// A variant list holds no variant. `list` says whose: `binding` (the
     /// binding's pairs) or `given` (the pairs given to sign or verify).
+    #[cfg(feature = "lab")]
     NoVariants { list: &'static str },
     /// A variant list holds a label that is not one of [`VARIANT_PLATFORMS`].
+    #[cfg(feature = "lab")]
     UnknownPlatform { list: &'static str, label: String },
     /// A variant list holds one label twice.
+    #[cfg(feature = "lab")]
     DuplicatePlatform { list: &'static str, label: String },
     /// The platforms given are not the binding's platforms. Both lists are
     /// sorted in byte order.
+    #[cfg(feature = "lab")]
     PlatformsDiffer {
         binding: Vec<String>,
         given: Vec<String>,
@@ -247,6 +261,7 @@ pub enum Refusal {
     /// A binding names, for `platform`, a CID that is not the given bundle's.
     /// `binding` is the binding's CID, kept only to say what was refused;
     /// `bundle` is the lab CID of the checked bytes given for that platform.
+    #[cfg(feature = "lab")]
     VariantNamesAnotherCid {
         platform: String,
         binding: String,
@@ -254,15 +269,18 @@ pub enum Refusal {
     },
     /// A binding names a recipe CID that is not the lab CID of the recipe
     /// bytes given. `binding` is the binding's CID; `recipe` is the bytes'.
+    #[cfg(feature = "lab")]
     RecipeNamesAnotherCid { binding: String, recipe: LabCid },
     /// A variant list holds the portable label [`PORTABLE_PLATFORM`] and
     /// another label. `labels` is the whole list, sorted in byte order.
+    #[cfg(feature = "lab")]
     PortableNotAlone {
         list: &'static str,
         labels: Vec<String>,
     },
     /// A bundle whose manifest `type` is `wasm` is bound under `platform`, a
     /// label that is not [`PORTABLE_PLATFORM`]. `bundle` is its lab CID.
+    #[cfg(feature = "lab")]
     WasmNotPortable { platform: String, bundle: LabCid },
 }
 
@@ -313,6 +331,9 @@ impl fmt::Display for Refusal {
             ),
             Refusal::Changed { path } => write!(f, "{path} changed while the bundle was named"),
             Refusal::Unreadable { path, reason } => write!(f, "could not read {path}: {reason}"),
+            Refusal::OverBudget { limit, path } => {
+                write!(f, "{path} passes the walk's limit on {limit}")
+            }
             Refusal::NotALabCid { claimed } => write!(
                 f,
                 "the claim {claimed:?} is not a lab CID: a lab package CID is a 59-character CIDv1 bafybei... directory root"
@@ -320,36 +341,45 @@ impl fmt::Display for Refusal {
             Refusal::NameMismatch { actual, claimed } => {
                 write!(f, "bundle bytes name {actual}; the claim is {claimed}")
             }
+            #[cfg(feature = "lab")]
             Refusal::MalformedSignerDid { did, reason } => write!(
                 f,
                 "signer DID {did} is not a canonical Ed25519 did:key: {reason}"
             ),
+            #[cfg(feature = "lab")]
             Refusal::SignerNotAccepted { did } => {
                 write!(f, "signer {did} is not in the accepted list")
             }
+            #[cfg(feature = "lab")]
             Refusal::SignatureDoesNotVerify { did, name } => {
                 write!(f, "signature by {did} does not verify over {name}")
             }
+            #[cfg(feature = "lab")]
             Refusal::RecordNamesAnotherCid { record, bundle } => {
                 write!(f, "record names {record}; the bundle names {bundle}")
             }
+            #[cfg(feature = "lab")]
             Refusal::NoVariants { list } => write!(
                 f,
                 "the {list} variant list is empty: a binding holds at least one variant"
             ),
+            #[cfg(feature = "lab")]
             Refusal::UnknownPlatform { list, label } => write!(
                 f,
                 "the {list} variant list holds the platform {label:?}, which is not one of {}",
                 VARIANT_PLATFORMS.join(", ")
             ),
+            #[cfg(feature = "lab")]
             Refusal::DuplicatePlatform { list, label } => write!(
                 f,
                 "the {list} variant list holds the platform {label} twice: one CID per platform"
             ),
+            #[cfg(feature = "lab")]
             Refusal::PlatformsDiffer { binding, given } => write!(
                 f,
                 "the binding holds the platforms {binding:?}; the given variants are {given:?}"
             ),
+            #[cfg(feature = "lab")]
             Refusal::VariantNamesAnotherCid {
                 platform,
                 binding,
@@ -358,14 +388,17 @@ impl fmt::Display for Refusal {
                 f,
                 "the binding names {binding} for {platform}; the bundle given for {platform} names {bundle}"
             ),
+            #[cfg(feature = "lab")]
             Refusal::RecipeNamesAnotherCid { binding, recipe } => write!(
                 f,
                 "the binding names the recipe {binding}; the recipe bytes name {recipe}"
             ),
+            #[cfg(feature = "lab")]
             Refusal::PortableNotAlone { list, labels } => write!(
                 f,
                 "the {list} variant list holds the labels {labels:?}: the portable label {PORTABLE_PLATFORM} stands alone"
             ),
+            #[cfg(feature = "lab")]
             Refusal::WasmNotPortable { platform, bundle } => write!(
                 f,
                 "the bundle {bundle} is a WASM app bound under {platform}: a WASM app has one portable variant, bound under {PORTABLE_PLATFORM}"
@@ -375,6 +408,107 @@ impl fmt::Display for Refusal {
 }
 
 impl std::error::Error for Refusal {}
+
+/// Whether this build holds the lab's own refusals (signatures, records and
+/// platform variants). They are compiled only under the `lab` feature, which
+/// only `lab/capsule-identity` turns on. A production crate asserts this is
+/// `false` at compile time, so that it cannot be built with them.
+pub const LAB_REFUSALS: bool = cfg!(feature = "lab");
+
+/// The most one walk may take in. Each limit is checked while the walk
+/// lists, before the thing that would pass it costs anything: a file before
+/// it is read, a folder before it is opened, an entry before its path is
+/// built or the listing keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    /// Files and folders under the root, counted as they are listed.
+    pub max_entries: usize,
+    /// The sizes of all files, each taken from its open handle before the
+    /// file is read; a file is read no further than that size.
+    pub max_total_bytes: u64,
+    /// Parts in an entry's path: `a/b/c.txt` has three. A folder whose
+    /// entries would have more is not opened.
+    pub max_depth: usize,
+    /// Bytes in an entry's whole path under the root.
+    pub max_path_bytes: usize,
+}
+
+impl Budget {
+    /// No limit: the walk as [`checked_bundle`] has always made it.
+    pub const UNLIMITED: Budget = Budget {
+        max_entries: usize::MAX,
+        max_total_bytes: u64::MAX,
+        max_depth: usize::MAX,
+        max_path_bytes: usize::MAX,
+    };
+}
+
+/// What one walk has taken in so far, held against its [`Budget`].
+struct Tally {
+    budget: Budget,
+    entries: usize,
+    bytes: u64,
+}
+
+impl Tally {
+    fn new(budget: Budget) -> Self {
+        Tally {
+            budget,
+            entries: 0,
+            bytes: 0,
+        }
+    }
+
+    /// One listed entry, before its path is built and before the listing
+    /// keeps it. `folder` is the path of the folder being listed and
+    /// `name_bytes` the length of the entry's name there: its path would be
+    /// the two joined by `/`. A refusal names the folder, not the entry,
+    /// because the entry's path is never made.
+    fn entry(&mut self, folder: &str, name_bytes: usize) -> Result<(), Refusal> {
+        self.entries += 1;
+        if self.entries > self.budget.max_entries {
+            return Err(over("entries", &an_entry_of(folder)));
+        }
+        let path_bytes = match folder.len() {
+            0 => name_bytes,
+            folder_bytes => folder_bytes.saturating_add(1).saturating_add(name_bytes),
+        };
+        if path_bytes > self.budget.max_path_bytes {
+            return Err(over("path bytes", &an_entry_of(folder)));
+        }
+        Ok(())
+    }
+
+    /// A folder, before it is opened: its entries would be one part deeper.
+    fn folder(&self, path: &str) -> Result<(), Refusal> {
+        if path.split('/').count() >= self.budget.max_depth {
+            return Err(over("depth", path));
+        }
+        Ok(())
+    }
+
+    /// A file's size, before the file is read.
+    fn file(&mut self, size: u64, path: &str) -> Result<(), Refusal> {
+        self.bytes = self.bytes.saturating_add(size);
+        if self.bytes > self.budget.max_total_bytes {
+            return Err(over("total bytes", path));
+        }
+        Ok(())
+    }
+}
+
+fn over(limit: &'static str, path: &str) -> Refusal {
+    Refusal::OverBudget {
+        limit,
+        path: path.to_owned(),
+    }
+}
+
+/// How a refusal names an entry whose own path was not built: its folder,
+/// then `/…`. The root is `.`.
+fn an_entry_of(folder: &str) -> String {
+    format!("{}/…", shown(folder))
+}
 
 /// Name the bundle at `bundle` by its lab CID.
 ///
@@ -418,9 +552,25 @@ pub fn checked_bundle(bundle: &Path) -> Result<CheckedBundle, Refusal> {
 /// value.
 pub fn checked_bundle_observed(
     bundle: &Path,
+    observe: impl FnMut(Moment, &str),
+) -> Result<CheckedBundle, Refusal> {
+    checked_bundle_within_observed(bundle, Budget::UNLIMITED, observe)
+}
+
+/// [`checked_bundle`] under a [`Budget`]: the same walk and the same manifest
+/// check, refused as [`Refusal::OverBudget`] as soon as a limit is passed.
+pub fn checked_bundle_within(bundle: &Path, budget: Budget) -> Result<CheckedBundle, Refusal> {
+    checked_bundle_within_observed(bundle, budget, |_, _| {})
+}
+
+/// [`checked_bundle_observed`] under a [`Budget`]. This is the one walk; the
+/// other entry points call it.
+pub fn checked_bundle_within_observed(
+    bundle: &Path,
+    budget: Budget,
     mut observe: impl FnMut(Moment, &str),
 ) -> Result<CheckedBundle, Refusal> {
-    let entries = collect_entries(bundle, &mut observe)?;
+    let entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;
     let manifest = entries
         .iter()
         .find(|entry| entry.path == MANIFEST_FILE)
@@ -974,9 +1124,10 @@ struct Folder {
 fn collect_entries(
     bundle: &Path,
     observe: &mut dyn FnMut(Moment, &str),
+    tally: &mut Tally,
 ) -> Result<Vec<BundleEntry>, Refusal> {
     let root = open_checked(CWD, bundle, EntryKind::Directory, "")?;
-    let listing = list_folder(root.as_fd(), "")?;
+    let listing = list_folder(root.as_fd(), "", tally)?;
     let mut folders = vec![Folder {
         handle: root,
         listing,
@@ -996,14 +1147,19 @@ fn collect_entries(
             EntryKind::Special(kind) => return Err(Refusal::NotRegularFile { path, kind }),
             kind => kind,
         };
+        if kind == EntryKind::Directory {
+            // Before it is opened: a folder past the depth limit costs no
+            // handle and no listing.
+            tally.folder(&path)?;
+        }
         observe(Moment::BeforeOpen, &path);
         let handle = open_checked(folder.handle.as_fd(), name.as_c_str(), kind, &path)?;
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
-            let listing = list_folder(handle.as_fd(), &path)?;
+            let listing = list_folder(handle.as_fd(), &path, tally)?;
             folders.push(Folder { handle, listing });
         } else {
-            let content = read_file(handle, &path)?;
+            let content = read_file(handle, &path, tally)?;
             entries.push(BundleEntry { path, content });
         }
     }
@@ -1016,6 +1172,7 @@ fn collect_entries(
 fn list_folder(
     folder: BorrowedFd<'_>,
     prefix: &str,
+    tally: &mut Tally,
 ) -> Result<std::vec::IntoIter<Listed>, Refusal> {
     let mut listing = Vec::new();
     for item in Dir::read_from(folder).map_err(|error| unreadable(prefix, error))? {
@@ -1024,8 +1181,10 @@ fn list_folder(
         if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }
+        tally.entry(prefix, name.to_bytes().len())?;
+        let path = entry_path(prefix, OsStr::from_bytes(name.to_bytes()))?;
         listing.push(Listed {
-            path: entry_path(prefix, OsStr::from_bytes(name.to_bytes()))?,
+            path,
             name: name.to_owned(),
             file_type: item.file_type(),
         });
@@ -1085,11 +1244,29 @@ fn open_refusal(path: &str, listed: EntryKind, errno: Errno) -> Refusal {
 }
 
 /// The bytes of the regular file open at `handle`, read from that handle.
-fn read_file(handle: OwnedFd, path: &str) -> Result<Vec<u8>, Refusal> {
+fn read_file(handle: OwnedFd, path: &str, tally: &mut Tally) -> Result<Vec<u8>, Refusal> {
     let mut content = Vec::new();
+    if tally.budget == Budget::UNLIMITED {
+        File::from(handle)
+            .read_to_end(&mut content)
+            .map_err(|error| unreadable(path, error))?;
+        return Ok(content);
+    }
+    // Under a budget the size comes from the open handle and is counted
+    // before a byte is read, and the read stops at that size.
+    let size = fstat(&handle)
+        .map_err(|error| unreadable(path, error))?
+        .st_size as u64;
+    tally.file(size, path)?;
     File::from(handle)
+        .take(size)
         .read_to_end(&mut content)
         .map_err(|error| unreadable(path, error))?;
+    if content.len() as u64 != size {
+        return Err(Refusal::Changed {
+            path: path.to_owned(),
+        });
+    }
     Ok(content)
 }
 

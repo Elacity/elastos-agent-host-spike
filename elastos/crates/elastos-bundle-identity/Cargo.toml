@@ -10,3 +10,9 @@ elastos-common = { path = "../elastos-common" }
 rustix = { version = "=1.1.4", features = ["fs"] }
 serde_json = "1.0"
 sha2 = "0.10"
+
+[features]
+# The lab's own refusals (its test signatures, records and platform variants).
+# Only `lab/capsule-identity` turns this on. A production crate that depends on
+# this one asserts at compile time that it is off.
+lab = []

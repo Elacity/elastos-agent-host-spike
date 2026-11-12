@@ -239,6 +239,20 @@ impl Runtime {
         Ok(())
     }
 
+    /// Check a bundle's signature file against the keys this Home trusts:
+    /// the same verifier, with the same keys, as every other admission here.
+    pub async fn check_bundle_signature(
+        &self,
+        file: &Path,
+        cid: &elastos_bundle_identity::LabCid,
+    ) -> std::result::Result<
+        crate::bundle_admission::AcceptedSignature,
+        crate::bundle_admission::BundleRefusal,
+    > {
+        let verifier = self.signature_verifier.read().await;
+        crate::bundle_admission::check_bundle_signature(file, cid, &verifier)
+    }
+
     /// Load and run a capsule from a local directory
     pub async fn run_local(&self, path: &Path, args: Vec<String>) -> Result<CapsuleHandle> {
         self.run_local_with_principal(path, args, None).await
@@ -414,7 +428,7 @@ impl Runtime {
 
         let verifier = self.signature_verifier.read().await;
 
-        if !verifier.is_enabled() {
+        if verifier.trusted_key_count() == 0 {
             return Err(ElastosError::InvalidManifest(
                 "Capsule signature verification has no trusted keys configured".into(),
             ));
