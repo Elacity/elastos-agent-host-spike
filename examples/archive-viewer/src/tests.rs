@@ -2254,7 +2254,12 @@ fn the_format_comes_from_the_content_not_the_name() {
 #[test]
 fn an_object_that_is_neither_zip_nor_tar_is_refused() {
     let bus = run_fixture(request(TAR, &[]), TAR, b"not an archive".to_vec());
-    assert_eq!(view(&bus)["refused"]["code"], "unknown_format");
+    let view = view(&bus);
+    assert_eq!(view["refused"]["code"], "unknown_format");
+    assert!(view["refused"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("ustar"));
     assert!(entries(&bus).is_empty());
 }
 
@@ -2342,9 +2347,39 @@ fn a_magic_that_is_not_ustar_nul_00_is_not_tar() {
         let sum: u64 = archive[..512].iter().map(|&byte| u64::from(byte)).sum();
         write_at(&mut archive, 148, &tar_checksum_field(sum));
         let bus = run_fixture(request(TAR, &[]), TAR, archive);
-        assert_eq!(view(&bus)["refused"]["code"], "unknown_format");
+        let view = view(&bus);
+        assert_eq!(view["refused"]["code"], "unknown_format");
+        assert!(
+            view["refused"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ustar"),
+            "the reason names the format this reader supports"
+        );
         assert!(entries(&bus).is_empty());
     }
+}
+
+#[test]
+fn an_old_tar_without_magic_refuses_with_the_ustar_message() {
+    // An old tar header has no magic at all. The reader lists ustar, and its
+    // reason says so instead of calling the object not a tar archive.
+    let mut archive = tar_build(&[TarSpec::file("a.txt")]);
+    write_at(&mut archive, 257, &[0u8; 8]);
+    write_at(&mut archive, 148, b"        ");
+    let sum: u64 = archive[..512].iter().map(|&byte| u64::from(byte)).sum();
+    write_at(&mut archive, 148, &tar_checksum_field(sum));
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    let view = view(&bus);
+    assert_eq!(view["refused"]["code"], "unknown_format");
+    assert!(
+        view["refused"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ustar"),
+        "the reason names the format this reader supports"
+    );
+    assert!(entries(&bus).is_empty());
 }
 
 #[test]

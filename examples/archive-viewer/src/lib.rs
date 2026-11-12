@@ -1,5 +1,5 @@
-//! Archive viewer core, read-only: one ZIP or uncompressed tar archive,
-//! listed but not extracted.
+//! Archive viewer core, read-only: one ZIP or ustar tar archive, listed
+//! but not extracted.
 //!
 //! Runtime calls `lifecycle.run`. The guest reads a request object naming one
 //! archive, asks for a read grant on that one object, and reaches every byte
@@ -131,7 +131,7 @@ fn detect(reader: &mut zip::Reader<'_>) -> Result<Format, zip::ParseError> {
     }
     Err(Refused::new(
         "unknown_format",
-        "the object is neither a ZIP archive nor an uncompressed tar archive",
+        "the object is not a ZIP archive or a ustar tar archive; this reader lists ZIP and ustar only",
     )
     .into())
 }

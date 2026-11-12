@@ -740,3 +740,17 @@ bytes left, and eight previews shown at the compressed-data cap.
 - The view-cap plant now writes the oversized view: the debug assertion
   before the write is gone, so F32 reaches the written view's length
   assertion in both view tests.
+
+2026-11-12, task 009: the format refusal names ustar.
+
+A GNU-format tar and an old tar with no magic reach `unknown_format` because
+`detect` probes only for ZIP and ustar. The message said the object was not an
+uncompressed tar archive, which was not true.
+
+### What changed
+
+- The `unknown_format` message now says the object is not a ZIP or ustar
+  archive and that this reader lists ZIP and ustar only.
+- `a_magic_that_is_not_ustar_nul_00_is_not_tar`, the not-an-archive test and
+  the new `an_old_tar_without_magic_refuses_with_the_ustar_message` check that
+  the reason names ustar.
