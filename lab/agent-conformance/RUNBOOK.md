@@ -10,10 +10,13 @@ The command uses cached dependencies, the pinned Rust toolchain and its
 `wasm32-unknown-unknown` target and the system's `sha256sum` or `shasum` tool.
 Reserve 12 GiB for builds plus 2 GiB free. The
 lease procedure is in [scripts/README.md](../../scripts/README.md#local-pre-push-gate).
-The command prints typed `version identity: {...}` observations above one table
+The command prints typed `version identity: {...}` observations and
+`runtime launched: path=... sha256=...` lines above one table
 from Cargo's test inventory and result lines. Native records identify `elastos`
 and `localhost-provider` by SHA-256. Probe records carry the component SHA-256
 and complete bundle lab CID, with separate `build_only` and `launched` kinds.
+A launch line is printed only after the suite started the Runtime it was given,
+and carries the path started and the hash taken immediately before the start.
 Cargo's `--show-output` supplies these records from this invocation. The existing
 build helpers hash the native binaries; the staging path names the exact probe
 manifest and payload through `capsule_identity::checked_bundle`.
@@ -327,29 +330,36 @@ installed bytes belong to, not that the release is genuine. The suite does not
 run on the installed data folder. It does not check the hash of the bundle the
 demo ran.
 
-`installed_runtime_ran (A14)` appears beside it and passes only when all three
-hold: `AGENT_CONFORMANCE_RUNTIME_BINARY` named a binary, the identity line the
-suite printed names that path beside its SHA-256, and the path resolves to
-`installed_runtime.binary_path`, the installed binary the report was given.
-`runtime_sha256`, the SHA-256 the harness took of that file and took again
-immediately before each launch, must then equal
-`installed_runtime.binary_sha256`. So the row says the suite launched the
-installed path, and that path hashed to the installed binary's SHA-256
-immediately before every launch. Nothing here sees the bytes the operating
-system then executed. The receipt records `installed_binary_launch_status`
+`installed_runtime_ran (A14)` appears beside it and passes only when
+`AGENT_CONFORMANCE_RUNTIME_BINARY` named a binary and the suite printed at least
+one launch line for it, `runtime launched: path=<path> sha256=<SHA-256>`. The
+harness prints that line only after its start of the named binary returned, and
+it carries the path it started and the SHA-256 it took of that file immediately
+before the start. The identity line the suite prints when the binary is named
+comes before any launch and is not launch evidence. Every launch line must name
+a path that resolves to `installed_runtime.binary_path`, the installed binary
+the report was given, and a SHA-256 equal to
+`installed_runtime.binary_sha256`. So the row says the suite started the
+installed path after that path hashed to the installed binary's SHA-256
+immediately before the start. Nothing here sees the bytes the operating system
+then executed. The receipt records `installed_binary_launch_status`
 (`launched_installed_path_hash_matched` or
 `not_launched_installed_path_hash_matched`), `installed_binary_launch_failures`,
 and `runtime_data_folder`, which states that the Runtime under test ran with a
-throwaway data folder the suite created, not the installed data folder. A path
-that is not the installed path fails the row with
+throwaway data folder the suite created, not the installed data folder. No
+launch line at all fails the row with
+`no launch of the installed path was recorded`; a launch of a path that is not
+the installed path fails it with
 `the suite launched <path>, not the installed binary <path>`; a difference in
 hash names both hashes; and an installed Runtime whose chain did not match
-leaves nothing to compare. Identity lines are read from the whole test output,
-which cannot say which test printed a line, so a run that names two different
-Runtime hashes fails this row with `suite recorded more than one Runtime
-SHA-256`, and two different Runtime paths fail it with `suite recorded more than
-one Runtime path`, as well as `versions_receipt`. This row says nothing about
-behaviour on the installed data folder: that folder is never used by a run.
+leaves nothing to compare. A launch line whose fields do not parse fails
+`versions_receipt` with `malformed Runtime launch line`. Identity lines are
+still read from the whole test output, which cannot say which test printed a
+line, so a run that names two different Runtime hashes fails
+`versions_receipt` with `conflicting elastos SHA-256`, and two different Runtime
+paths fail it with `conflicting elastos path`; neither is launch evidence. This
+row says nothing about behaviour on the installed data folder: that folder is
+never used by a run.
 
 The suite launches the installed binary only when
 `AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
@@ -357,11 +367,13 @@ launch the named binary where it is and build no Runtime. The suite hashes the
 named binary again immediately before every launch; when the bytes differ from
 the first hash it does not launch them, prints
 `given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
-and the run fails. This does not show a swap made between that hash and the
-operating system starting the process, or what a started Runtime then starts
-by itself. Without that variable the suite builds the checkout's Runtime; its
-identity line names no path, and `installed_runtime_ran` then fails with
-`the suite built its own Runtime instead of launching the installed path`, even
+and the run fails. When the bytes match and the process starts, it prints
+`runtime launched: path=<path> sha256=<hash>` once for that start, with the
+resolved path and the hash it just took. This does not show a swap made between
+that hash and the operating system starting the process, or what a started
+Runtime then starts by itself. Without that variable the suite builds the checkout's Runtime; it
+prints no launch line, and `installed_runtime_ran` then fails with
+`no launch of the installed path was recorded`, even
 when the built bytes hash the same as the installed binary. When no installed
 Runtime was given the receipt has no such row. Only the Runtime is given; the
 localhost provider, the probe and every Home the Runtime runs in still come
@@ -516,7 +528,7 @@ What each A14 row means:
 | `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
-| `installed_runtime_ran` | the suite launched the installed path, and the harness's SHA-256 of that file, taken immediately before each launch, equals the installed binary's; nothing shows the bytes the operating system then executed; it started with a throwaway data folder, not the installed one |
+| `installed_runtime_ran` | the suite printed at least one launch line for the installed path, and the harness's SHA-256 of that file, taken immediately before each recorded launch, equals the installed binary's; nothing shows the bytes the operating system then executed; it started with a throwaway data folder, not the installed one |
 
 What the receipt does not prove:
 

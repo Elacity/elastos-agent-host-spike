@@ -53,30 +53,84 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
 /// Printed, with both hashes, when a given Runtime is refused at a launch.
 pub const CHANGED: &str = "given Runtime changed: ";
 
+/// Printed only after the operating system started a given Runtime whose
+/// pre-launch hash matched. The identity line printed when the binary was named
+/// comes before any launch, so it is not launch evidence; the receipt's
+/// installed-path row reads these lines alone.
+pub const LAUNCHED: &str = "runtime launched: ";
+
+/// One launch of the given Runtime: the path that was started and the SHA-256
+/// taken of that file immediately before the start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    pub path: String,
+    pub sha256: String,
+}
+
+impl Launch {
+    /// The line the harness prints after its `spawn` returned Ok.
+    pub fn line(&self) -> String {
+        format!("{LAUNCHED}path={} sha256={}", self.path, self.sha256)
+    }
+
+    /// Reads a line `line` printed. Any other output yields `None`, so nothing
+    /// else can stand in for a launch.
+    pub fn parse(line: &str) -> Option<Self> {
+        let rest = line.strip_prefix(LAUNCHED)?;
+        let (path, sha256) = rest.rsplit_once(" sha256=")?;
+        let path = path.strip_prefix("path=")?;
+        let lowercase_hex = sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if path.is_empty() || sha256.len() != 64 || !lowercase_hex {
+            return None;
+        }
+        Some(Self {
+            path: path.into(),
+            sha256: sha256.into(),
+        })
+    }
+}
+
 /// The harness calls this immediately before it starts any program. A given
 /// Runtime is hashed again here, once per launch, and is refused unless it
 /// still has the bytes first recorded for it, so a file replaced after that
-/// first hash is not launched under the recorded hash. The differing hash is
-/// also printed as an identity line, so the receipt records the conflict even
-/// if a caller drops the error.
+/// first hash is not launched under the recorded hash. A launch that passes
+/// returns the record to print once `spawn` has returned Ok; a run that never
+/// starts the runtime has no such record. The differing hash is also printed
+/// as an identity line, so the receipt records the conflict even if a caller
+/// drops the error.
 ///
 /// What this does not show: a replacement made after this hash and before the
 /// operating system starts the process, or what a started Runtime then starts
 /// by itself.
-pub fn unchanged_before_launch(program: &Path) -> Result<(), &'static str> {
+pub fn unchanged_before_launch(program: &Path) -> Result<Option<Launch>, &'static str> {
     let Some(given) = std::env::var_os(RUNTIME_BINARY) else {
-        return Ok(());
+        return Ok(None);
     };
     if program != Path::new(&given) {
-        return Ok(());
+        return Ok(None);
     }
     let first = runtime_under_test()?;
+    // Resolved before the hash, so the record names the file that was hashed
+    // as the installed path comparison sees it. A path that cannot be resolved
+    // is refused only after the hash, which keeps a missing file's own reason.
+    let canonical = std::fs::canonicalize(program);
     let Ok(now) = sha256_file(program) else {
         println!("{CHANGED}it could not be hashed again before a launch; not launched");
         return Err("given Runtime binary could not be hashed again before a launch; not launched");
     };
     if now == first.sha256 {
-        return Ok(());
+        let Ok(canonical) = canonical else {
+            println!("{CHANGED}its path could not be resolved before a launch; not launched");
+            return Err(
+                "given Runtime binary path could not be resolved before a launch; not launched",
+            );
+        };
+        return Ok(Some(Launch {
+            path: canonical.to_string_lossy().into_owned(),
+            sha256: now,
+        }));
     }
     println!(
         "{CHANGED}first hashed {}, {now} immediately before a launch; not launched",

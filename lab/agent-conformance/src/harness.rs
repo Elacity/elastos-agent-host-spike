@@ -254,10 +254,16 @@ impl ThrowawayHome {
         }
         // A given Runtime must still have the bytes first hashed for it. This
         // is the last step before the process is started.
-        crate::runtime::unchanged_before_launch(program)?;
+        let launch = crate::runtime::unchanged_before_launch(program)?;
         let child = command
             .spawn()
             .map_err(|_| "could not start child process")?;
+        // The record is printed only after the start returned: the receipt's
+        // installed-path row reads these lines, and an identity line printed
+        // when the binary was named comes before any launch.
+        if let Some(launch) = launch {
+            println!("{}", launch.line());
+        }
         if args.first() == Some(&"run") {
             self.run_starts.set(self.run_starts.get() + 1);
         }

@@ -177,6 +177,7 @@ use agent_conformance::identity::{
     sha256, stage_probe, Observation, ProbeIdentity, MANIFEST, PREFIX,
 };
 use agent_conformance::report::{write_run, GitIdentity};
+use agent_conformance::runtime::Launch;
 use serde_json::Value;
 use std::{fs, path::Path};
 
@@ -1793,7 +1794,19 @@ impl InstalledFixture {
             sha256: sha256(runtime),
             path: path.map(|path| path.to_string_lossy().into_owned()),
         };
-        render(&observations, git, Some(installed))
+        // A suite that started the given Runtime prints one launch line per
+        // start, after the start returned.
+        let launches: Vec<Launch> = path
+            .map(|path| Launch {
+                path: fs::canonicalize(path)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                sha256: sha256(runtime),
+            })
+            .into_iter()
+            .collect();
+        render(&observations, &launches, git, Some(installed))
     }
 }
 
@@ -1801,17 +1814,23 @@ fn bound(
     installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
 ) -> (agent_conformance::report::RunReport, Value) {
     let (observations, git) = synthetic(1, false);
-    render(&observations, git, installed)
+    render(&observations, &[], git, installed)
 }
 
 fn render(
     observations: &[Observation],
+    launches: &[Launch],
     git: GitIdentity,
     installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
 ) -> (agent_conformance::report::RunReport, Value) {
+    let output = output(observations)
+        + &launches
+            .iter()
+            .map(|launch| launch.line() + "\n")
+            .collect::<String>();
     let report = agent_conformance::report::render_bound_run(
         &format!("{LIVE}: test\n"),
-        &output(observations),
+        &output,
         true,
         Ok(git),
         agent_conformance::report::Bound {
@@ -2302,8 +2321,8 @@ fn installed_path_row_needs_the_named_installed_path() {
     let home = ThrowawayHome::new().unwrap();
     let fixture = InstalledFixture::new(&home.root().join("installed"));
 
-    // A checkout build with the installed bytes has no named path: the row
-    // fails even though the hashes match.
+    // A checkout build with the installed bytes prints no launch line: the row
+    // fails even though the hashes match, because no launch was recorded.
     let (report, document) = fixture.receipt_after_launching(b"installed runtime", None);
     assert!(
         report
@@ -2314,9 +2333,7 @@ fn installed_path_row_needs_the_named_installed_path() {
     );
     assert_eq!(
         document["installed_binary_launch_failures"],
-        serde_json::json!([
-            "the suite built its own Runtime instead of launching the installed path"
-        ])
+        serde_json::json!(["no launch of the installed path was recorded"])
     );
     assert_eq!(
         document["installed_binary_launch_status"],
@@ -2363,18 +2380,26 @@ fn two_runtime_hashes_do_not_show_the_installed_path_was_launched() {
         sha256: sha256(bytes),
         path: Some(fixture.binary.to_string_lossy().into_owned()),
     };
-    let ran = |first: &[u8], second: &[u8]| {
+    let launch = |bytes: &[u8]| Launch {
+        path: fs::canonicalize(&fixture.binary)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        sha256: sha256(bytes),
+    };
+    let ran = |first: &[u8], second: &[u8], launches: &[Launch]| {
         let mut both = observations.clone();
         both[0] = elastos(first);
         both.push(elastos(second));
-        render(&both, git.clone(), Some(installed()))
+        render(&both, launches, git.clone(), Some(installed()))
     };
-    // Whichever hash the output names first, the installed one or the other.
+    // Whichever hash the identity lines name first, the installed one or the
+    // other, two identity lines are no launch evidence.
     for (first, second) in [
         (&b"installed runtime"[..], &b"another runtime"[..]),
         (b"another runtime", b"installed runtime"),
     ] {
-        let (report, document) = ran(first, second);
+        let (report, document) = ran(first, second, &[]);
         assert!(report.table.contains("installed_runtime (A14) | PASS | "));
         assert!(
             report
@@ -2385,7 +2410,7 @@ fn two_runtime_hashes_do_not_show_the_installed_path_was_launched() {
         );
         assert_eq!(
             document["installed_binary_launch_failures"],
-            serde_json::json!(["suite recorded more than one Runtime SHA-256"])
+            serde_json::json!(["no launch of the installed path was recorded"])
         );
         assert_eq!(
             document["installed_binary_launch_status"],
@@ -2397,8 +2422,13 @@ fn two_runtime_hashes_do_not_show_the_installed_path_was_launched() {
             serde_json::json!(["conflicting elastos SHA-256"])
         );
     }
-    // The same hash named twice is one hash.
-    let (report, document) = ran(b"installed runtime", b"installed runtime");
+    // The same hash named twice is one hash, and a launch record for the
+    // installed path is what the row reads.
+    let (report, document) = ran(
+        b"installed runtime",
+        b"installed runtime",
+        &[launch(b"installed runtime")],
+    );
     assert!(report
         .table
         .contains("installed_runtime_ran (A14) | PASS | "));
@@ -2407,8 +2437,8 @@ fn two_runtime_hashes_do_not_show_the_installed_path_was_launched() {
 }
 
 #[test]
-fn a_suite_without_a_runtime_hash_did_not_launch_the_installed_path() {
-    use agent_conformance::report::{installed_binary_launched_failures, RuntimeIdentity};
+fn a_suite_without_a_launch_record_did_not_launch_the_installed_path() {
+    use agent_conformance::report::installed_binary_launched_failures;
     let home = ThrowawayHome::new().unwrap();
     let fixture = InstalledFixture::new(&home.root().join("installed"));
     let installed = agent_conformance::report::read_installed_runtime(
@@ -2418,14 +2448,118 @@ fn a_suite_without_a_runtime_hash_did_not_launch_the_installed_path() {
     )
     .unwrap();
     assert_eq!(
-        installed_binary_launched_failures(None, Some(&installed)),
-        ["suite recorded no Runtime SHA-256"]
+        installed_binary_launched_failures(&[], Some(&installed)),
+        ["no launch of the installed path was recorded"]
     );
-    let named = RuntimeIdentity {
-        path: Some(installed.binary_path.to_string_lossy().into_owned()),
+    let launched = Launch {
+        path: fs::canonicalize(&installed.binary_path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
         sha256: installed.binary_sha256.clone(),
     };
-    assert!(installed_binary_launched_failures(Some(&named), Some(&installed)).is_empty());
+    assert!(installed_binary_launched_failures(&[launched], Some(&installed)).is_empty());
+    home.finish().unwrap();
+}
+
+#[test]
+fn an_identity_line_without_a_launch_record_is_no_launch() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    );
+    let (mut observations, git) = synthetic(1, false);
+    // The identity line names the installed path and its hash, but the harness
+    // never started it: this line is printed when the binary is named.
+    observations[0] = Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(b"installed runtime"),
+        path: Some(fixture.binary.to_string_lossy().into_owned()),
+    };
+    let (report, document) = render(&observations, &[], git, Some(installed));
+    assert!(report.table.contains("installed_runtime (A14) | PASS | "));
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | FAIL | "),
+        "{}",
+        report.table
+    );
+    assert_eq!(
+        document["installed_binary_launch_failures"],
+        serde_json::json!(["no launch of the installed path was recorded"])
+    );
+    assert_eq!(
+        document["installed_binary_launch_status"],
+        "not_launched_installed_path_hash_matched"
+    );
+    home.finish().unwrap();
+}
+
+#[test]
+fn a_malformed_launch_line_fails_the_receipt() {
+    use agent_conformance::report::render_run;
+    let (observations, git) = synthetic(1, false);
+    let output = output(&observations) + "runtime launched: path=/tmp/elastos sha256=nope\n";
+    let report = render_run(&format!("{LIVE}: test\n"), &output, true, Ok(git), Some(""));
+    assert!(!report.passed);
+    assert!(
+        report
+            .failures
+            .contains(&"malformed Runtime launch line".to_string()),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn every_launch_record_must_name_the_installed_path_and_hash() {
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    );
+    let (observations, git) = synthetic(1, false);
+    let launch = |path: &Path, bytes: &[u8]| Launch {
+        path: fs::canonicalize(path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        sha256: sha256(bytes),
+    };
+    // One start of the installed path does not excuse a later start of
+    // another path or of other bytes.
+    let other = fixture.binary.with_file_name("other-elastos");
+    fs::write(&other, b"installed runtime").unwrap();
+    let (report, document) = render(
+        &observations,
+        &[
+            launch(&fixture.binary, b"installed runtime"),
+            launch(&other, b"installed runtime"),
+        ],
+        git.clone(),
+        Some(installed),
+    );
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | FAIL | "),
+        "{}",
+        report.table
+    );
+    assert_eq!(
+        document["installed_binary_launch_failures"],
+        serde_json::json!([format!(
+            "the suite launched {}, not the installed binary {}",
+            fs::canonicalize(&other).unwrap().display(),
+            fs::canonicalize(&fixture.binary).unwrap().display()
+        )])
+    );
     home.finish().unwrap();
 }
 
@@ -2433,7 +2567,7 @@ fn a_suite_without_a_runtime_hash_did_not_launch_the_installed_path() {
 fn receipt_names_the_staged_bundles_and_calls_them_staged() {
     use agent_conformance::report::STAGED_BUNDLE_SCOPE;
     let (observations, git) = synthetic(1, false);
-    let (report, document) = render(&observations, git.clone(), None);
+    let (report, document) = render(&observations, &[], git.clone(), None);
     assert!(
         report.table.contains(&format!(
             "staged_bundle (A14) | PASS | {STAGED_BUNDLE_SCOPE}\n"
@@ -2459,7 +2593,7 @@ fn receipt_names_the_staged_bundles_and_calls_them_staged() {
             other => other,
         })
         .collect();
-    let (report, document) = render(&built_only, git, None);
+    let (report, document) = render(&built_only, &[], git, None);
     assert!(report.table.contains(&format!(
         "staged_bundle (A14) | FAIL | {STAGED_BUNDLE_SCOPE}\n"
     )));
@@ -2490,10 +2624,18 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
         path: Some(fixture.binary.to_string_lossy().into_owned()),
     };
     let reviews = [review("codex", "pass", &git.commit)];
+    let launch = Launch {
+        path: fs::canonicalize(&fixture.binary)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        sha256: sha256(b"installed runtime"),
+    };
+    let evidence = output(&observations) + &(launch.line() + "\n");
     let receipt = |reviews, installed| {
         agent_conformance::report::render_bound_run(
             &format!("{LIVE}: test\n"),
-            &output(&observations),
+            &evidence,
             true,
             Ok(git.clone()),
             agent_conformance::report::Bound {

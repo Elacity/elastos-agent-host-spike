@@ -50,7 +50,7 @@ else
     status=$?
 fi
 check_tree
-sed -n '/^version identity:/p; /^given Runtime changed:/p; /^operator census:/p; /^cleanup census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^instance overlap:/p; /^cancel settlement:/p; /^kill settlement:/p; /^absent-policy settlement:/p; /^fixture controller:/p; /^fixture read:/p; /^session grant/p; /^host key read:/p; /^agent-host /p; /^FAILURE /p; /^SKIPPED /p' "$run_dir/results"
+sed -n '/^version identity:/p; /^runtime launched:/p; /^given Runtime changed:/p; /^operator census:/p; /^cleanup census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^instance overlap:/p; /^cancel settlement:/p; /^kill settlement:/p; /^absent-policy settlement:/p; /^fixture controller:/p; /^fixture read:/p; /^session grant/p; /^host key read:/p; /^agent-host /p; /^FAILURE /p; /^SKIPPED /p' "$run_dir/results"
 printf 'process_isolation rows: process isolation, not capsule isolation; diagnostic results only\n'
 printf 'instance rows: two_instances_overlap_with_separate_grants and instance_grant_does_not_authorise_sibling each run one shared journey; process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9\n'
 if AGENT_CONFORMANCE_TREE_DIRTY_DURING_RUN="$tree_dirty" "$CARGO_TARGET_DIR/debug/report" "$run_dir/list" "$run_dir/results" "$status" "$run_dir/VERSIONS.json"; then

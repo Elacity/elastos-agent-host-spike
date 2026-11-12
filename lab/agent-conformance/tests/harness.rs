@@ -382,6 +382,9 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
     let given = home.root().join("given-elastos");
     fs::write(&given, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&given, fs::Permissions::from_mode(0o755)).unwrap();
+    // The child removes this file at its last launch, so its resolved path is
+    // taken while the file is still there.
+    let given_path = fs::canonicalize(&given).unwrap();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "given_runtime_changed_after_its_first_hash_is_not_launched",
@@ -411,15 +414,32 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
     );
     // The receipt's collector sees both hashes, so it records the conflict.
     // Each line names the given path beside its hash.
-    for hash in [first, swapped] {
+    for hash in [&first, &swapped] {
         let line = Observation::Native {
             role: "elastos".into(),
-            sha256: hash,
+            sha256: hash.clone(),
             path: Some(given.to_string_lossy().into_owned()),
         }
         .line();
         assert!(stdout.contains(&format!("{line}\n")), "{stdout:?}");
     }
+    // Each successful start printed one launch line, after the start returned:
+    // the path it started, resolved, and the hash checked just before it. The
+    // refused starts printed none, so the two starts are the two lines.
+    let launched = agent_conformance::runtime::Launch {
+        path: given_path.to_string_lossy().into_owned(),
+        sha256: first.clone(),
+    };
+    assert_eq!(
+        stdout.matches(&format!("{}\n", launched.line())).count(),
+        2,
+        "{stdout:?}"
+    );
+    assert_eq!(
+        stdout.matches(agent_conformance::runtime::LAUNCHED).count(),
+        2,
+        "{stdout:?}"
+    );
     assert!(stdout.contains(
         "given Runtime changed: it could not be hashed again before a launch; not launched\n"
     ));
