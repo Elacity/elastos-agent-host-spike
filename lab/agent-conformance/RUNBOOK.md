@@ -306,10 +306,10 @@ failures (`could not read release.json`), as is each hash that differs
 following a symbolic link at its final name and must be a regular file, as the
 Runtime itself requires of them: a link there fails the row with its own reason
 (`release.json is a symbolic link`). The folders above those names are not
-checked, so a link in a parent folder is followed. An unmatched Runtime is recorded as
-`null`. Like an unbound review, an unmatched chain leaves this row FAIL without
-changing `command_success`, so a receipt backs A14 only when every A14 row
-reads PASS. Naming one variable without the other fails the command. With
+checked, so a link in a parent folder is followed. An unmatched Runtime is
+recorded as `null`. Like an unbound review, an unmatched chain leaves this row
+FAIL without changing `command_success`, so a receipt backs A14 only when every
+A14 row reads PASS. Naming one variable without the other fails the command. With
 neither, the receipt has no installed Runtime row or field. There is no default
 location: the report never looks for an installation on its own.
 
@@ -326,8 +326,9 @@ installed Runtime whose chain did not match leaves nothing to compare. Identity
 lines are read from the whole test output, which cannot say which test printed
 a line, so a run that names two different Runtime hashes fails this row with
 `suite recorded more than one Runtime SHA-256`, as well as `versions_receipt`,
-whichever hash came first. The
-suite launches the installed binary only when
+whichever hash came first.
+
+The suite launches the installed binary only when
 `AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
 launch the named binary where it is and build no Runtime. The suite hashes the
 named binary again immediately before every launch; when the bytes differ from
@@ -337,9 +338,10 @@ and the run fails. This does not show a swap made between that hash and the
 operating system starting the process. Without that variable the suite builds
 the checkout's Runtime. This row then fails only when an installed Runtime was
 given and the built Runtime's hash differs from the installed binary's; when no
-installed Runtime was given the receipt has no such row. Only the Runtime is given;
-the localhost provider, the probe and every Home the Runtime runs in still come
-from the checkout, so the installation's data folder is never used by a run.
+installed Runtime was given the receipt has no such row. Only the Runtime is
+given; the localhost provider, the probe and every Home the Runtime runs in
+still come from the checkout, so the installation's data folder is never used
+by a run.
 
 A receipt with reviews and an installed Runtime on macOS, from the repository
 root on a clean tree, with the reviews file kept outside the repository:

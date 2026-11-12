@@ -396,7 +396,11 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
     // The child prints identity lines for its stand-in Runtime. They are only
     // ever shown escaped, so they cannot enter this run's own output as lines.
     let stdout = String::from_utf8(child.stdout).unwrap();
-    assert!(child.status.success(), "{stdout:?} {:?}", child.stderr);
+    assert!(
+        child.status.success(),
+        "{stdout:?} {:?}",
+        String::from_utf8_lossy(&child.stderr)
+    );
     let first = sha256(b"#!/bin/sh\nexit 0\n");
     let swapped = sha256(swapped_script(&given).as_bytes());
     assert!(

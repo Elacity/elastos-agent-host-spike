@@ -1460,7 +1460,7 @@ fn reviews_file_inside_the_repository_cannot_bind() {
 
     // The row: reviews that would bind do not when their file is refused.
     let (observations, git) = synthetic(1, false);
-    let reviews = [review("codex", "pass", &git.commit)];
+    let reviews = [review("first", "pass", &git.commit)];
     let row = |reviews_file_failure: Option<String>| {
         let report = agent_conformance::report::render_bound_run(
             &format!("{LIVE}: test\n"),
