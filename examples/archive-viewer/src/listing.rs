@@ -111,6 +111,10 @@ pub struct Listing {
     pub size: u64,
     pub entries: Vec<Entry>,
     pub refused: Option<Refused>,
+    /// Why a listing that walks the object stopped before its end marker:
+    /// the entries above are the ones the run read. A tar walk marks a spent
+    /// read budget here; ZIP's directory gives its whole listing at once.
+    pub stopped: Option<Refused>,
 }
 
 /// The suffixes that name a nested archive (N1). The entry is listed as

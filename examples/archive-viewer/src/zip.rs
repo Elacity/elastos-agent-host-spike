@@ -83,17 +83,19 @@ pub fn listing(reader: &mut Reader<'_>) -> Result<Listing, Refusal> {
             size,
             entries,
             refused: None,
+            stopped: None,
         }),
         Err(ParseError::Refused(refused)) => Ok(Listing {
             size: 0,
             entries: Vec::new(),
             refused: Some(refused),
+            stopped: None,
         }),
         Err(ParseError::Refusal(refusal)) => Err(refusal),
     }
 }
 
-enum ParseError {
+pub(crate) enum ParseError {
     Refused(Refused),
     Refusal(Refusal),
 }
@@ -104,7 +106,7 @@ impl From<Refused> for ParseError {
     }
 }
 
-fn read(reader: &mut Reader<'_>, offset: u64, length: u64) -> Result<Vec<u8>, ParseError> {
+pub(crate) fn read(reader: &mut Reader<'_>, offset: u64, length: u64) -> Result<Vec<u8>, ParseError> {
     match reader.read(offset, length) {
         Ok(bytes) => Ok(bytes),
         Err(ReadError::Refusal(refusal)) => Err(ParseError::Refusal(refusal)),
@@ -127,7 +129,7 @@ fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
 }
 
 /// The object's size, found with one-byte probes.
-fn object_size(reader: &mut Reader<'_>) -> Result<u64, ParseError> {
+pub(crate) fn object_size(reader: &mut Reader<'_>) -> Result<u64, ParseError> {
     let mut low = 0u64;
     let mut high = MAX_ARCHIVE_BYTES + 1;
     while low < high {
@@ -171,17 +173,7 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>), ParseError> {
         )
         .into());
     }
-    let mut candidates = Vec::new();
-    for at in 0..tail.len().saturating_sub(END_RECORD_BYTES as usize - 1) {
-        if u32_at(&tail, at) != Some(END_SIGNATURE) {
-            continue;
-        }
-        let comment = u16_at(&tail, at + 20).unwrap_or(0);
-        let end = tail_start + at as u64 + END_RECORD_BYTES + u64::from(comment);
-        if end == size {
-            candidates.push(at);
-        }
-    }
+    let candidates = end_candidates(&tail, tail_start, size);
     match candidates.len() {
         1 => {}
         0 => {
@@ -287,6 +279,38 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>), ParseError> {
     block_duplicates(&mut entries);
     check_local_headers(reader, &mut entries, directory_offset)?;
     Ok((size, entries))
+}
+
+/// The offsets in `tail` where an end record ends exactly at `size`.
+fn end_candidates(tail: &[u8], tail_start: u64, size: u64) -> Vec<usize> {
+    let mut candidates = Vec::new();
+    for at in 0..tail.len().saturating_sub(END_RECORD_BYTES as usize - 1) {
+        if u32_at(tail, at) != Some(END_SIGNATURE) {
+            continue;
+        }
+        let comment = u16_at(tail, at + 20).unwrap_or(0);
+        let end = tail_start + at as u64 + END_RECORD_BYTES + u64::from(comment);
+        if end == size {
+            candidates.push(at);
+        }
+    }
+    candidates
+}
+
+/// Whether the object carries an end record that ends at its last byte. The
+/// format dispatch asks this once; `parse` below then reads the records.
+pub(crate) fn is_archive(reader: &mut Reader<'_>) -> Result<bool, ParseError> {
+    let size = object_size(reader)?;
+    if size < END_RECORD_BYTES {
+        return Ok(false);
+    }
+    let tail_start = size.saturating_sub(END_RECORD_BYTES + MAX_COMMENT_BYTES);
+    let tail_length = size - tail_start;
+    let tail = read(reader, tail_start, tail_length)?;
+    if tail.len() as u64 != tail_length {
+        return Ok(false);
+    }
+    Ok(!end_candidates(&tail, tail_start, size).is_empty())
 }
 
 fn parse_directory(directory: &[u8], directory_size: u64) -> Result<Vec<Entry>, ParseError> {

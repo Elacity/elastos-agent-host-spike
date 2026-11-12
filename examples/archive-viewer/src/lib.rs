@@ -25,6 +25,7 @@
 mod listing;
 mod preview;
 mod request;
+mod tar;
 mod zip;
 
 #[cfg(test)]
@@ -100,6 +101,38 @@ pub struct Skipped {
     pub message: String,
 }
 
+/// The two formats this viewer lists. `detect` picks one once from content;
+/// the matching listing then reads the same object through the same budget.
+enum Format {
+    Zip,
+    Tar,
+}
+
+/// The object's format, from its first block: a ustar header names tar; a
+/// ZIP end record that ends at the object's last byte names ZIP. Anything
+/// else is refused with its own reason before a listing runs.
+fn detect(reader: &mut zip::Reader<'_>) -> Result<Format, zip::ParseError> {
+    // A ZIP's local-header signature is at offset 0; a ustar magic is later
+    // in the first block. Read no more than each probe needs, so a listing
+    // never touches an entry's data to choose the format.
+    let start = zip::read(reader, 0, 4)?;
+    if start.starts_with(b"PK\x03\x04") || start.starts_with(b"PK\x05\x06") {
+        return Ok(Format::Zip);
+    }
+    let head = zip::read(reader, 0, tar::PROBE_BYTES)?;
+    if tar::is_header(&head) {
+        return Ok(Format::Tar);
+    }
+    if zip::is_archive(reader)? {
+        return Ok(Format::Zip);
+    }
+    Err(Refused::new(
+        "unknown_format",
+        "the object is neither a ZIP archive nor an uncompressed tar archive",
+    )
+    .into())
+}
+
 /// Reads the request and the archive, checks a local header for each entry the
 /// request names, inflates the listed files within the caps, and writes the
 /// view. Returns the view text.
@@ -119,7 +152,17 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
     let mut left = MAX_READ_BYTES;
     let listing = {
         let mut reader = zip::Reader::new(bus, &request.uri, &archive_grant, &mut left);
-        zip::listing(&mut reader)?
+        match detect(&mut reader) {
+            Ok(Format::Zip) => zip::listing(&mut reader)?,
+            Ok(Format::Tar) => tar::listing(&mut reader)?,
+            Err(zip::ParseError::Refused(refused)) => Listing {
+                size: 0,
+                entries: Vec::new(),
+                refused: Some(refused),
+                stopped: None,
+            },
+            Err(zip::ParseError::Refusal(refusal)) => return Err(refusal),
+        }
     };
 
     let (previews, skipped, _) = previews_for(
@@ -145,6 +188,7 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
                     code: "view_too_large",
                     message: format!("the listing is {over} bytes, the limit is {MAX_VIEW_BYTES}"),
                 }),
+                stopped: None,
             },
             &[],
             &[],
@@ -257,6 +301,13 @@ pub fn view_json(
     }
     out.push_str(r#","schema":"#);
     push_str(&mut out, VIEW_SCHEMA);
+    if let Some(stopped) = &listing.stopped {
+        out.push_str(r#","stopped":{"code":"#);
+        push_str(&mut out, stopped.code);
+        out.push_str(r#","message":"#);
+        push_str(&mut out, &stopped.message);
+        out.push('}');
+    }
     out.push_str(r#","skipped":["#);
     for (position, skip) in skipped.iter().enumerate() {
         if position > 0 {
