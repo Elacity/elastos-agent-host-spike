@@ -64,12 +64,42 @@ fn require_entries(document: &serde_json::Value) -> Result<&[serde_json::Value],
 }
 
 /// Read the file an edit names, resolved from examples/agent-host the way the
-/// runner resolves it. Every path that resolves is read and counted, including
-/// one outside this crate; a path that does not resolve is an error naming it.
+/// runner resolves it. Every path that resolves inside the repository is read
+/// and counted, including one outside this crate; a path that does not resolve
+/// is an error naming it.
+///
+/// The runner refuses three paths before it reads a file, and the refusals here
+/// carry the same words so one reason states the rule for both readers: an
+/// absolute name, a name whose folder resolves outside the repository, and a
+/// symbolic link at the name as written (decided before any link is followed).
 fn read_entry_file(crate_root: &Path, file: &str) -> Result<String, String> {
     let lane_base = crate_root.join("../../examples/agent-host");
-    let target = lane_base
-        .join(file)
+    let path = lane_base.join(file);
+    if Path::new(file).is_absolute() {
+        return Err(format!(
+            "{file}: the path is absolute; edit paths are relative to examples/agent-host"
+        ));
+    }
+    let folder = path
+        .parent()
+        .expect("a joined path has a parent")
+        .canonicalize()
+        .map_err(|error| format!("{file} does not resolve: {error}"))?;
+    let repository = crate_root
+        .join("../..")
+        .canonicalize()
+        .map_err(|error| format!("{file} does not resolve: {error}"))?;
+    if folder != repository && !folder.starts_with(&repository) {
+        return Err(format!(
+            "{file}: the path leaves the repository; edit paths are relative to examples/agent-host"
+        ));
+    }
+    if path.is_symlink() {
+        return Err(format!(
+            "{file}: the file is a symbolic link; an edit names the file itself"
+        ));
+    }
+    let target = path
         .canonicalize()
         .map_err(|error| format!("{file} does not resolve: {error}"))?;
     std::fs::read_to_string(&target).map_err(|error| format!("{file} does not read: {error}"))
@@ -140,6 +170,57 @@ mod rules {
         let error = read_entry_file(&crate_root, "tests/does-not-exist.rs").unwrap_err();
         assert!(error.contains("tests/does-not-exist.rs"), "{error}");
         assert!(error.contains("does not resolve"), "{error}");
+    }
+
+    /// A stand-in repository with the shape this one has: `<temp>/lab/
+    /// agent-conformance` as the crate root and `<temp>/examples/agent-host`
+    /// beside it, so a test can name a path outside it or plant a link in it.
+    fn stand_in_repository() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let repository = tempfile::tempdir().expect("the stand-in repository is created");
+        let host = repository.path().join("examples/agent-host");
+        std::fs::create_dir_all(&host).expect("the stand-in host folder is created");
+        let crate_root = repository.path().join("lab/agent-conformance");
+        std::fs::create_dir_all(&crate_root).expect("the stand-in crate root is created");
+        std::fs::write(host.join("planted.rs"), "x y\n").expect("the stand-in file is written");
+        (repository, crate_root, host)
+    }
+
+    fn this_crate_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .canonicalize()
+            .expect("the crate root resolves")
+    }
+
+    #[test]
+    fn refuses_an_absolute_edit_path() {
+        let error = read_entry_file(&this_crate_root(), "/etc/hosts").unwrap_err();
+        assert_eq!(
+            error,
+            "/etc/hosts: the path is absolute; edit paths are relative to examples/agent-host"
+        );
+    }
+
+    #[test]
+    fn refuses_a_path_whose_folder_resolves_outside_the_repository() {
+        let (_repository, crate_root, _host) = stand_in_repository();
+        let error = read_entry_file(&crate_root, "../../../../elsewhere.rs").unwrap_err();
+        assert_eq!(
+            error,
+            "../../../../elsewhere.rs: the path leaves the repository; \
+             edit paths are relative to examples/agent-host"
+        );
+    }
+
+    #[test]
+    fn refuses_a_symbolic_link_at_the_edit_path() {
+        let (_repository, crate_root, host) = stand_in_repository();
+        std::os::unix::fs::symlink(host.join("planted.rs"), host.join("linked.rs"))
+            .expect("the stand-in link is created");
+        let error = read_entry_file(&crate_root, "linked.rs").unwrap_err();
+        assert_eq!(
+            error,
+            "linked.rs: the file is a symbolic link; an edit names the file itself"
+        );
     }
 
     #[test]
