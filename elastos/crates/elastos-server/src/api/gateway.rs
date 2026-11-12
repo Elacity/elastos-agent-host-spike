@@ -41,6 +41,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use url::form_urlencoded;
 
+#[path = "gateway_agents.rs"]
+mod gateway_agents;
 #[path = "gateway_assistant.rs"]
 mod gateway_assistant;
 #[path = "gateway_assistant_workspace_v2.rs"]
@@ -120,6 +122,7 @@ mod gateway_transaction_effects;
 mod gateway_wallet;
 #[path = "gateway_wallet_adapter.rs"]
 mod gateway_wallet_adapter;
+use gateway_agents::*;
 #[cfg(test)]
 use gateway_browser::browser_runtime_stream_socket_path;
 use gateway_capsule_catalog::*;
@@ -816,6 +819,11 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             "/api/apps/system/access/guest-registration",
             post(system_guest_registration_update),
         )
+        .route("/api/apps/system/agents", get(agents_list))
+        .route("/api/apps/system/agents/enable", post(agents_enable))
+        .route("/api/apps/system/agents/disable", post(agents_disable))
+        .route("/api/apps/system/agents/create", post(agents_create))
+        .route("/api/apps/system/agents/retire", post(agents_retire))
         .route(
             "/api/apps/system/community",
             get(system_community_membership_get).post(system_community_membership_update),
