@@ -558,6 +558,12 @@ fn the_start_by_cid_reads_the_slot_once_and_fetches_nothing() {
         "resolve_capsule_dir",
         "resource_authority_bounds",
         "dev_mode",
+        // Nothing is registered as running, and nothing reads the
+        // presentation keys: no window, no projection.
+        "register_capsule",
+        "projections",
+        "window_policy",
+        "icon",
     ] {
         assert!(!body.contains(never), "{never}");
     }
