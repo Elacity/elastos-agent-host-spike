@@ -27,7 +27,11 @@ pub async fn settle_and_revoke(state: &CapabilityState, session_id: &str, cause:
             continue;
         }
         if let RequestStatus::Granted { token, .. } = &request.status {
-            state.capability_manager.revoke(*token.id(), &reason).await;
+            // The token is revoked in this process either way; an unsaved
+            // revoke list is logged and the rest of the session still settles.
+            if let Err(error) = state.capability_manager.revoke(*token.id(), &reason).await {
+                tracing::error!(%error, "settle {session_id}: revocation persistence failed");
+            }
             store
                 .revoke_request_by(request.id.as_str(), &reason, Settler::Runtime)
                 .await;

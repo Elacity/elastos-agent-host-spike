@@ -1547,6 +1547,7 @@ impl Supervisor {
         let collaboration_presence_product_port = self.collaboration_presence_product_port.clone();
         let collaboration_discovery_service = self.collaboration_discovery_service.clone();
         let carrier_endpoint = self.carrier_endpoint.clone();
+        let capability_manager = self.capability_manager.clone();
 
         let task = tokio::spawn({
             let listen_addr = listen_addr.clone();
@@ -1558,6 +1559,7 @@ impl Supervisor {
                         &listen_addr,
                         Some(registry),
                         crate::api::gateway::GatewayCollaborationContext {
+                            capability_manager,
                             chat_product_port: collaboration_chat_product_port,
                             presence_product_port: collaboration_presence_product_port,
                             discovery_service: collaboration_discovery_service,
@@ -1692,6 +1694,7 @@ mod tests {
         capsules.insert(
             "provider-test".to_string(),
             CapsuleEntry {
+                extra: Default::default(),
                 cid: "bafy-provider-test".to_string(),
                 sha256: String::new(),
                 size: 0,
@@ -1703,6 +1706,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -1998,6 +2002,7 @@ mod tests {
         Supervisor::new(
             tempfile::tempdir().unwrap().keep(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -2011,6 +2016,7 @@ mod tests {
         let mut platforms = std::collections::HashMap::new();
         platforms.insert(crate::setup::detect_platform(), platform_info);
         Component {
+            extra: Default::default(),
             version: None,
             install_path: Some(install_path.to_string()),
             repository: None,
@@ -2032,6 +2038,121 @@ mod tests {
             "entrypoint": "rootfs.ext4",
         }))
         .unwrap()
+    }
+
+    /// A capsule folder the supervisor already holds. With a capability alone,
+    /// the loaded manifest's ceiling is that capability (the control). With
+    /// asks beside the capability, and with asks alone, the ceiling is empty
+    /// and a request for that resource is refused: the bounds function decides
+    /// it, whatever else the manifest holds.
+    #[tokio::test]
+    async fn a_loaded_manifest_with_asks_has_an_empty_ceiling() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "asks-fixture";
+        let capsule_dir = temp.path().join("capsules").join(name);
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-asks-test\n").unwrap();
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            name.to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-asks-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            temp.path().to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let capability = serde_json::json!(["elastos://did/*"]);
+        let asks = serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]);
+        let mut ceilings = Vec::new();
+        for (capabilities, asks) in [
+            (capability.clone(), serde_json::json!([])),
+            (capability, asks.clone()),
+            (serde_json::json!([]), asks),
+        ] {
+            let manifest = serde_json::json!({
+                "schema": "elastos.capsule/v1", "name": name, "version": "0.1.0",
+                "role": "app", "type": "data", "entrypoint": "index.html",
+                "capabilities": capabilities, "asks": asks,
+            });
+            std::fs::write(
+                capsule_dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let (_, loaded) = supervisor.load_capsule_manifest(name).await.unwrap();
+            let ceiling = loaded.resource_authority_bounds();
+            let allowed = crate::resource_bridge::manifest_allows_resource(
+                &ceiling,
+                "elastos://did/key",
+                None,
+                None,
+            );
+            ceilings.push((ceiling, allowed));
+        }
+        assert_eq!(
+            ceilings,
+            vec![
+                (vec!["elastos://did/*".to_string()], true),
+                (Vec::new(), false),
+                (Vec::new(), false),
+            ]
+        );
+    }
+
+    /// The supervisor's launch of a capsule it already holds stops at its
+    /// manifest parse when the manifest pins a requirement. The serde text is
+    /// under the context line, so the whole chain is read (`{:#}`).
+    #[tokio::test]
+    async fn the_supervisors_launch_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        use crate::runtime::tests::{write_fixture_capsule, PINNED_MANIFEST};
+        let temp = tempfile::tempdir().unwrap();
+        let capsule_dir = write_fixture_capsule(&temp.path().join("capsules"), PINNED_MANIFEST);
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-pinned-test\n").unwrap();
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "pinned-fixture".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-pinned-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            temp.path().to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let error = supervisor
+            .launch_capsule("pinned-fixture", serde_json::json!({}), None)
+            .await
+            .unwrap_err();
+        let chain = format!("{error:#}");
+        let expected = "parsing capsule.json for 'pinned-fixture': unknown field `cid`";
+        assert!(chain.starts_with(expected), "{chain}");
+        assert!(supervisor.running.read().await.is_empty());
     }
 
     fn dead_vm_capsule(handle: &str, route: ProviderRoute) -> RunningCapsule {
@@ -2128,6 +2249,7 @@ mod tests {
             "vmlinux".to_string(),
             make_external_component(
                 PlatformInfo {
+                    extra: Default::default(),
                     url: None,
                     cid: None,
                     release_path: None,
@@ -2147,6 +2269,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external,
@@ -2185,6 +2308,7 @@ mod tests {
             "vmlinux".to_string(),
             make_external_component(
                 PlatformInfo {
+                    extra: Default::default(),
                     url: None,
                     cid: None,
                     release_path: None,
@@ -2204,6 +2328,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external,
@@ -2230,6 +2355,7 @@ mod tests {
             "crosvm".to_string(),
             make_external_component(
                 PlatformInfo {
+                    extra: Default::default(),
                     url: None,
                     cid: None,
                     release_path: None,
@@ -2249,6 +2375,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external,
@@ -2317,6 +2444,7 @@ mod tests {
         capsules.insert(
             "carrier-service".to_string(),
             CapsuleEntry {
+                extra: Default::default(),
                 cid: "bafy-test-cid".to_string(),
                 sha256: "test-artifact".to_string(),
                 size: 0,
@@ -2328,6 +2456,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -2363,6 +2492,7 @@ mod tests {
         capsules.insert(
             "carrier-service".to_string(),
             CapsuleEntry {
+                extra: Default::default(),
                 cid: "bafy-test-cid".to_string(),
                 sha256: "test-artifact".to_string(),
                 size: 0,
@@ -2374,6 +2504,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -2490,6 +2621,7 @@ mod tests {
         .unwrap();
         let data = tempfile::tempdir().unwrap().keep();
         let registry = ComponentsManifest {
+            extra: Default::default(),
             model_catalog: None,
             collaboration_network: None,
             external: std::collections::HashMap::new(),

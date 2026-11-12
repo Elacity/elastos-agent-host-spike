@@ -111,7 +111,7 @@ function inspectGraph(manifestPath, graphName) {
     ["iroh-gossip", ["0.101.0"]],
     ["iroh-mdns-address-lookup", ["0.4.0"]],
     ["distributed-topic-tracker", ["0.3.5"]],
-    ["hickory-proto", ["0.26.1"]],
+    ["hickory-proto", ["0.26.2"]],
     ["hickory-resolver", ["0.26.1"]],
     ["ed25519-dalek", ["2.2.0", "3.0.0-rc.0"]],
     ["crossbeam-epoch", ["0.9.20"]],
@@ -142,7 +142,7 @@ function inspectGraph(manifestPath, graphName) {
   requireReachable(
     metadata,
     graphName,
-    { name: "elastos-identity", version: "2.0.0" },
+    { name: "elastos-identity", version: "2.0.1" },
     { name: "ed25519-dalek", version: "2.2.0" },
   );
   requireReachable(

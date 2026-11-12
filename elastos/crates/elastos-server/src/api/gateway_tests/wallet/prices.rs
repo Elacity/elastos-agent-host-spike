@@ -122,10 +122,7 @@ fn test_wallet_price_fetch_audit_records_external_effect() {
         .expect("wallet price fetch audit event");
     assert_ne!(requested.event_id, event.event_id);
     assert_eq!(event.result, "completed");
-    assert_eq!(
-        event.principal_id.as_deref(),
-        Some(context.principal_id.as_str())
-    );
+    assert_eq!(event.principal_id.as_deref(), Some(context.principal_id()));
     assert_eq!(
         event.session_id.as_deref(),
         Some(context.session_id.as_str())

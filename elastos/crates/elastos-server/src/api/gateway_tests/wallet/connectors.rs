@@ -65,16 +65,29 @@ async fn test_home_wallet_connector_bridge_rejects_invalid_authority_before_wall
         &authority,
     );
     let token_for = |context: HomeLaunchTokenContext| {
-        issue_home_projection_launch_token_with_context(
-            dir.path(),
-            WALLET_METAMASK_CAPSULE_ID,
-            WALLET_METAMASK_CAPSULE_ID,
-            &context,
-        )
-        .unwrap()
+        // Issuance rejects these bindings; sign isolated malformed fixtures to
+        // retain coverage of the bridge's verification before provider calls.
+        let codec = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut envelope: serde_json::Value =
+            serde_json::from_slice(&codec.decode(&valid_connector_token).unwrap()).unwrap();
+        envelope["payload"]["principal_id"] = json!(context.principal_id());
+        envelope["payload"]["session_id"] = json!(context.session_id);
+        envelope["payload"]["proof_binding_id"] = json!(context.proof_binding_id);
+        envelope["payload"]["grant_id"] = json!(context.grant_id);
+        let (key, _) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let (signature, signer) = crate::crypto::domain_separated_sign(
+            &key,
+            HOME_LAUNCH_TOKEN_DOMAIN,
+            serde_json::to_string(&envelope["payload"])
+                .unwrap()
+                .as_bytes(),
+        );
+        envelope["signature"] = json!(signature);
+        envelope["signer_did"] = json!(signer);
+        codec.encode(serde_json::to_vec(&envelope).unwrap())
     };
     let wrong_principal = token_for(HomeLaunchTokenContext {
-        principal_id: "principal:wrong".to_string(),
+        root: crate::auth::ResolvedPrincipalRoot::for_test_principal("principal:wrong"),
         ..context.clone()
     });
     let wrong_session = token_for(HomeLaunchTokenContext {
@@ -704,7 +717,7 @@ async fn test_wallet_connector_approvals_are_scoped_to_connector() {
         approvals: TokioMutex::new(vec![
             json!({
                 "request_id": "wallet-approval:metamask",
-                "principal_id": context.principal_id.clone(),
+                "principal_id": context.principal_id(),
                 "status": "pending",
                 "intent": "transaction_intent",
                 "capsule_id": "documents",
@@ -719,7 +732,7 @@ async fn test_wallet_connector_approvals_are_scoped_to_connector() {
             }),
             json!({
                 "request_id": "wallet-approval:bitcoin",
-                "principal_id": context.principal_id,
+                "principal_id": context.principal_id(),
                 "status": "pending",
                 "intent": "bitcoin_bip322_proof",
                 "capsule_id": "documents",
@@ -837,7 +850,7 @@ async fn test_unisat_connector_lists_only_unisat_bitcoin_accounts() {
 async fn test_wallet_app_can_approve_wallet_scoped_external_request() {
     let dir = tempfile::tempdir().unwrap();
     let context = local_home_launch_token_context(dir.path()).unwrap();
-    let principal_id = context.principal_id.clone();
+    let principal_id = context.principal_id().to_string();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_CAPSULE_ID, &context).unwrap();
     let wallet_authority =

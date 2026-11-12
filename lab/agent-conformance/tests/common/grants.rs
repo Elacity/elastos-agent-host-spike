@@ -812,11 +812,7 @@ impl Controller {
                 self.decisions.granted += 1;
                 self.print_checked("fixture controller: matched, granted")?;
             } else {
-                let reason = if field(request, "resource")? == "elastos://net/stream" {
-                    "fixture denies unlisted elastos://net/stream".to_owned()
-                } else {
-                    self.fixture.deny_reason.clone()
-                };
+                let reason = self.fixture.deny_reason.clone();
                 self.deny(request, &reason)?;
             }
         }
@@ -2920,7 +2916,10 @@ mod tests {
         let sibling = json!({"request_id":"sibling-b", "session_id":"session-b",
             "resource":"fixture-a", "action":"read", "reason":"agent conformance: instance-2 sibling"});
         assert_eq!(overlap.ready_after_cancel(&[]), Ok(false));
-        assert_eq!(overlap.ready_after_cancel(&[sibling.clone()]), Ok(true));
+        assert_eq!(
+            overlap.ready_after_cancel(std::slice::from_ref(&sibling)),
+            Ok(true)
+        );
         let mut retry = sibling.clone();
         retry["session_id"] = json!("session-a");
         assert_eq!(
@@ -3129,7 +3128,10 @@ mod tests {
         let sibling = json!({"request_id":"sibling-b", "session_id":"session-b",
             "resource":"fixture-a", "action":"read", "reason":"agent conformance: instance-2 sibling"});
         assert_eq!(overlap.ready_after_cancel(&[]), Ok(false));
-        assert_eq!(overlap.ready_after_cancel(&[sibling.clone()]), Ok(true));
+        assert_eq!(
+            overlap.ready_after_cancel(std::slice::from_ref(&sibling)),
+            Ok(true)
+        );
         for session in ["session-a", "new-session"] {
             let retry = json!({"request_id":"retry", "session_id":session,
                 "resource":"fixture-a", "action":"read", "reason":"agent conformance: instance-1 own"});
@@ -3156,7 +3158,10 @@ mod tests {
         ];
         let sibling = json!({"request_id":"sibling-b", "session_id":"session-b",
             "resource":"fixture-a", "action":"read", "reason":"agent conformance: instance-2 sibling"});
-        assert_eq!(overlap.ready_after_cancel(&[sibling.clone()]), Ok(true));
+        assert_eq!(
+            overlap.ready_after_cancel(std::slice::from_ref(&sibling)),
+            Ok(true)
+        );
         let reason = "no-retry check: unexpected request after worker kill";
         for (field, value) in [
             ("request_id", "first-a"),

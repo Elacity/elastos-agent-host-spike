@@ -22,9 +22,12 @@ redteam() {
   # local pre-push both run it. A skip is not a pass: unittest exits 0 on an
   # all-skipped run, so the exact run is checked below.
   # The full receipt probe builds three copies and takes 8-11 minutes; it stays
-  # a local command, not part of this gate. It needs rustc 1.91.0, which is
-  # older than this repository's own pin, so name it (without RUSTC every test
-  # is skipped, and an all-skipped run exits 0):
+  # a local command, not part of this gate. It needs rustc 1.91.0, the lab
+  # lane's own pin, which is older than this repository's. The probe runs
+  # rustc from the lane's folder, where rustup picks 1.91.0 by itself; RUSTC
+  # names that compiler outright, so that a rustc first on PATH that is not
+  # rustup's cannot stand in for it (a wrong version skips the tests, and an
+  # all-skipped run exits 0):
   #   RUSTC="$(rustup which --toolchain 1.91.0 rustc)" \
   #     python3 -I -m unittest discover -s lab/redteam/py \
   #     -p test_wasm_capsule_receipt.py -v
@@ -42,6 +45,9 @@ redteam() {
 
 product_ui() {
   node --version
+  node scripts/check-system-esp-projections.mjs
+  node scripts/marketplace-product-behavior-smoke.mjs
+  bash scripts/browser-source-home-config-smoke.sh
   node scripts/check-chat-ui-artifacts.mjs check
   node scripts/home-shell-regression-smoke.mjs
   node scripts/home-shell-bridge-smoke.mjs
@@ -63,6 +69,11 @@ release() {
   python3 scripts/fixture-git-env-test.py
   python3 scripts/release-platform-input-test.py
   python3 scripts/prepare-release-platform-test.py
+  python3 scripts/browser-vm-linux-network.test.py
+  python3 scripts/browser-root-helper.test.py
+  python3 scripts/owned-removal-test.py
+  python3 scripts/setup-source-home-native-browser-test.py
+  bash scripts/setup-source-home-browser-artifacts-smoke.sh
   python3 scripts/media-tools-build-test.py
   python3 scripts/verify-linux-arm64-package-test.py
   python3 scripts/verify-linux-engine-test.py

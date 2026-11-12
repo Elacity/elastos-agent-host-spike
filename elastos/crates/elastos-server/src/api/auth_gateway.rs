@@ -3152,6 +3152,7 @@ async fn recovery_kit_import_inner(
         crate::auth::begin_declarative_principal_root_protection_activation_with_candidate(
             &state.data_dir,
             &protection,
+            crate::auth::PrincipalKind::Human,
             &candidate_data_key,
             &protected_object_inventory,
         )?;
@@ -4401,7 +4402,6 @@ pub(in crate::api) async fn evm_verify_for_wallet_link(
         &app,
         &super::gateway::HomeLaunchTokenContext::resolved(
             context.root().clone(),
-            session.principal_id.clone(),
             session.session_id.clone(),
             Some(session.proof_binding_id.clone()),
             session.grant_id.clone(),
@@ -4555,14 +4555,14 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
     }
     if !bitcoin_message_has_resource(
         &input.message,
-        &format!("elastos://principal/{}", context.principal_id),
+        &format!("elastos://principal/{}", context.principal_id()),
     ) {
         anyhow::bail!("Bitcoin wallet proof is not bound to this runtime principal");
     }
 
     let session =
         crate::auth::load_active_session_grant(&state.data_dir, &context.session_id, now)?;
-    if session.principal_id != context.principal_id
+    if session.principal_id != context.principal_id()
         || session.proof_binding_id != session_proof_binding_id
         || session.grant_id != context.grant_id
     {
@@ -4574,7 +4574,7 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
     let principal = crate::auth::upsert_principal_for_binding_as_role(
         &state.data_dir,
         binding,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
         session_principal.role,
         now,
     )?;
@@ -4596,7 +4596,7 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.wallet.linked",
-            principal_id: Some(context.principal_id.clone()),
+            principal_id: Some(context.principal_id().to_string()),
             proof_binding_id: Some(principal.proof_binding_id.clone()),
             session_id: Some(context.session_id.clone()),
             challenge_id: Some(challenge_id),
@@ -4613,7 +4613,6 @@ pub(in crate::api) async fn btc_verify_for_wallet_link(
         &app,
         &super::gateway::HomeLaunchTokenContext::resolved(
             context.root().clone(),
-            session.principal_id.clone(),
             session.session_id.clone(),
             Some(session.proof_binding_id.clone()),
             session.grant_id.clone(),
@@ -5029,6 +5028,7 @@ mod tests {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: data_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
@@ -5290,6 +5290,7 @@ mod tests {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: data_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
@@ -6876,6 +6877,15 @@ mod tests {
         let guest_principal =
             crate::auth::load_principal_for_proof_binding(temp.path(), &result.proof_binding_id)
                 .unwrap();
+        assert_eq!(
+            guest_principal.principal_id,
+            "person:local:2593f70e690c5fd60c68d97b92299963"
+        );
+        assert_eq!(
+            guest_principal.localhost_root,
+            "localhost://Users/562ca2c614da7e9c292e3f7f"
+        );
+        assert_eq!(guest_principal.kind, crate::auth::PrincipalKind::Human);
         assert_eq!(guest_principal.display_name, "Private guest label");
         assert_eq!(
             guest_principal.initial_profile_display_name.as_deref(),
@@ -7802,9 +7812,14 @@ mod tests {
                 crate::auth::load_principal_for_proof_binding(temp.path(), &grant.proof_binding_id)
                     .unwrap();
             r4_fixture::store(temp.path(), kind);
-            r4_fixture::set_kind(temp.path(), r4_fixture::ID, kind, root);
-            let kit = create_recovery_kit_for_principal(r4_fixture::ID, root, None, 1_800_000_000)
-                .unwrap();
+            r4_fixture::set_kind(temp.path(), r4_fixture::principal_id(kind), kind, root);
+            let kit = create_recovery_kit_for_principal(
+                r4_fixture::principal_id(kind),
+                root,
+                None,
+                1_800_000_000,
+            )
+            .unwrap();
             if !remove_recovered {
                 let archive = crate::auth::recovery_archive_from_kit(temp.path(), &kit).unwrap();
                 let protection = protection_from_recovery_kit(
@@ -7815,10 +7830,37 @@ mod tests {
                     Some(archive),
                 )
                 .unwrap();
-                crate::auth::store_principal_root_protection(temp.path(), protection).unwrap();
+                if kind == PrincipalKind::Agent {
+                    // Setup used to store this through the production store.
+                    // That store now refuses an agent root protection. The
+                    // reassignment still needs the entry in the file.
+                    let refused = crate::auth::store_principal_root_protection(
+                        temp.path(),
+                        protection.clone(),
+                    )
+                    .expect_err("the production store refuses an added agent root protection");
+                    assert_eq!(
+                        refused.to_string(),
+                        "agent admission protection change refused: agent root protection added (5 named operations exist and none is authorized)"
+                    );
+                    crate::auth::plant_principal_root_protection(temp.path(), &protection);
+                    assert!(
+                        crate::auth::load_auth_state(temp.path())
+                            .unwrap()
+                            .principal_root_protections
+                            .iter()
+                            .any(|stored| {
+                                stored.principal_id == r4_fixture::principal_id(kind)
+                                    && stored.localhost_root == root
+                            }),
+                        "the agent root protection is stored for the reassignment"
+                    );
+                } else {
+                    crate::auth::store_principal_root_protection(temp.path(), protection).unwrap();
+                }
             }
             if remove_recovered {
-                r4_fixture::remove(temp.path(), r4_fixture::ID);
+                r4_fixture::remove(temp.path(), r4_fixture::principal_id(kind));
             }
             if lookup_error {
                 RECOVERED_PRINCIPAL_LOOKUP_FAILURES
@@ -7844,10 +7886,9 @@ mod tests {
                 let response = result.unwrap();
                 assert_eq!(response.status, "reassigned");
                 assert_eq!(response.localhost_root, root);
-                assert!(after
-                    .principals
-                    .iter()
-                    .any(|p| { p.principal_id == r4_fixture::ID && p.localhost_root == root }));
+                assert!(after.principals.iter().any(|p| {
+                    p.principal_id == r4_fixture::principal_id(kind) && p.localhost_root == root
+                }));
                 assert!(after.audit[before.audit.len()..].iter().any(|e| {
                     e.event_type == "auth.recovery_kit.reassigned" && e.result == "ok"
                 }));
@@ -8070,6 +8111,7 @@ mod tests {
     fn configured_principal_root_readiness_rejects_declared_plaintext() {
         let temp = tempfile::tempdir().unwrap();
         let principal_id = "person:local:startup-readiness";
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
         let protection =
             crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
         let object_uri = format!(
@@ -8090,6 +8132,127 @@ mod tests {
         assert_eq!(outcome.principal_id, principal_id);
         assert_eq!(outcome.plaintext_object_count, 1);
         assert_eq!(std::fs::read(object_path).unwrap(), b"legacy save");
+    }
+
+    #[test]
+    fn configured_readiness_keeps_recordless_stored_human_protection_and_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:recordless-readiness";
+        let record = crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let root = record.localhost_root;
+        crate::auth::store_test_principal_root_protection_for(temp.path(), principal_id, &root);
+        let uri = format!("{root}/.AppData/LocalHost/GBA/ucity/rom-id.sav");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(temp.path(), &uri).unwrap();
+        crate::auth::write_principal_root_object(
+            temp.path(),
+            principal_id,
+            &root,
+            &uri,
+            &path,
+            b"protected object",
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
+        state
+            .principals
+            .retain(|record| record.principal_id != principal_id);
+        crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
+        assert!(
+            crate::auth::stored_principal_record(temp.path(), principal_id)
+                .unwrap()
+                .is_none()
+        );
+
+        verify_configured_principal_roots_ready(temp.path())
+            .expect("stored Human protection must keep Home ready without a record");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let read_err =
+            crate::auth::read_principal_root_object(temp.path(), principal_id, &root, &uri, &path)
+                .expect_err("record-less string read must be refused");
+        assert!(read_err
+            .to_string()
+            .contains("principal has no stored record"));
+        let write_err = crate::auth::write_principal_root_object(
+            temp.path(),
+            principal_id,
+            &root,
+            &uri,
+            &path,
+            b"replacement",
+        )
+        .expect_err("record-less string write must be refused");
+        assert!(write_err
+            .to_string()
+            .contains("principal has no stored record"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn configured_readiness_keeps_recordless_noncanonical_stored_human_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:recordless-noncanonical-readiness";
+        let root = "localhost://Users/stored-noncanonical-root";
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
+        let record = state
+            .principals
+            .iter_mut()
+            .find(|record| record.principal_id == principal_id)
+            .unwrap();
+        assert_ne!(record.localhost_root, root);
+        record.localhost_root = root.to_string();
+        crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
+        crate::auth::store_test_principal_root_protection_for(temp.path(), principal_id, root);
+        let uri = format!("{root}/.AppData/LocalHost/GBA/ucity/rom-id.sav");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(temp.path(), &uri).unwrap();
+        crate::auth::write_principal_root_object(
+            temp.path(),
+            principal_id,
+            root,
+            &uri,
+            &path,
+            b"protected object",
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut state = crate::auth::load_auth_state(temp.path()).unwrap();
+        state
+            .principals
+            .retain(|record| record.principal_id != principal_id);
+        crate::auth::save_auth_state(temp.path(), &state, None).unwrap();
+        assert!(
+            crate::auth::stored_principal_record(temp.path(), principal_id)
+                .unwrap()
+                .is_none()
+        );
+
+        verify_configured_principal_roots_ready(temp.path())
+            .expect("stored noncanonical Human protection must keep Home ready without a record");
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn configured_readiness_refuses_recordless_usersai_protection() {
+        // The protection belongs to a valid agent. save_auth_state refuses to
+        // remove an admission record, so the record is dropped by a direct edit.
+        // The readiness check then sees a UsersAI protection with no principal.
+        let temp = tempfile::tempdir().unwrap();
+        let agent = crate::auth::valid_agent::plant(temp.path());
+        crate::auth::store_test_principal_root_protection_for(
+            temp.path(),
+            &agent.principal_id,
+            &agent.localhost_root,
+        );
+        crate::auth::r4_fixture::remove(temp.path(), &agent.principal_id);
+        let error = verify_configured_principal_roots_ready(temp.path())
+            .expect_err("record-less UsersAI protection must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("record-less stored protection requires its own localhost://Users/ root"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -8305,6 +8468,11 @@ mod tests {
         let current_principal =
             crate::auth::load_principal_for_proof_binding(temp.path(), &current.proof_binding_id)
                 .unwrap();
+        crate::auth::store_test_principal_root_protection_for(
+            temp.path(),
+            &current_principal.principal_id,
+            &current_principal.localhost_root,
+        );
         assert_ne!(old_principal.principal_id, current_principal.principal_id);
         assert_ne!(
             old_principal.localhost_root,
@@ -8326,6 +8494,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.status, "reassigned");
+        verify_configured_principal_roots_ready(temp.path())
+            .expect("reassignment must leave the importer protection ready");
         assert_eq!(response.principal_id, old_principal.principal_id);
         assert_eq!(response.localhost_root, old_principal.localhost_root);
         assert_eq!(

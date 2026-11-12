@@ -39,7 +39,7 @@ async fn browser_profile_reset_removes_only_principal_profile_disk() {
     let context = local_home_launch_token_context(dir.path()).unwrap();
     let profile_uri = format!(
         "{}/BrowserProfiles/default/profile.ext4",
-        crate::auth::principal_localhost_root(&context.principal_id)
+        crate::auth::principal_localhost_root(context.principal_id())
     );
     let profile_disk = rooted_localhost_fs_path(dir.path(), &profile_uri).unwrap();
     std::fs::create_dir_all(profile_disk.parent().unwrap()).unwrap();
@@ -114,7 +114,7 @@ async fn browser_profile_reset_requires_browser_launch_token() {
     let context = local_home_launch_token_context(dir.path()).unwrap();
     let profile_uri = format!(
         "{}/BrowserProfiles/default/profile.ext4",
-        crate::auth::principal_localhost_root(&context.principal_id)
+        crate::auth::principal_localhost_root(context.principal_id())
     );
     let profile_disk = rooted_localhost_fs_path(dir.path(), &profile_uri).unwrap();
     std::fs::create_dir_all(profile_disk.parent().unwrap()).unwrap();
@@ -157,7 +157,7 @@ async fn browser_profile_reset_refuses_live_principal_session() {
     let context = local_home_launch_token_context(dir.path()).unwrap();
     let profile_uri = format!(
         "{}/BrowserProfiles/default/profile.ext4",
-        crate::auth::principal_localhost_root(&context.principal_id)
+        crate::auth::principal_localhost_root(context.principal_id())
     );
     let profile_disk = rooted_localhost_fs_path(dir.path(), &profile_uri).unwrap();
     std::fs::create_dir_all(profile_disk.parent().unwrap()).unwrap();
@@ -165,7 +165,7 @@ async fn browser_profile_reset_refuses_live_principal_session() {
 
     let reservation = reserve_browser_launch(
         dir.path(),
-        &context.principal_id,
+        context.principal_id(),
         BrowserLaunchLifecycle {
             owner_launch_id: "launch:profile-reset-test".to_string(),
             browser_instance: None,
@@ -224,7 +224,7 @@ async fn browser_profile_reset_refuses_live_principal_session() {
     release_browser_page_for_principal(
         dir.path(),
         "profile-reset-live-page",
-        &context.principal_id,
+        context.principal_id(),
         "launch:profile-reset-test",
     )
     .await;
@@ -238,7 +238,7 @@ async fn browser_profile_reset_refuses_native_writer_without_registry_session() 
     let context = local_home_launch_token_context(dir.path()).unwrap();
     let uri = format!(
         "{}/BrowserProfiles/default/profile.ext4",
-        crate::auth::principal_localhost_root(&context.principal_id)
+        crate::auth::principal_localhost_root(context.principal_id())
     );
     let disk = rooted_localhost_fs_path(dir.path(), &uri).unwrap();
     std::fs::create_dir_all(disk.parent().unwrap()).unwrap();

@@ -19,7 +19,9 @@ import { createServer } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
 
 import { LONG_PRESS_MS } from "../capsules/home-gui/browser/shell-touch.js";
 import { EXTERNAL_LINK_OPEN_GUARD_MS } from "../capsules/home/browser/home-external-link.js";
@@ -596,16 +598,6 @@ async function listen() {
   return `http://127.0.0.1:${address.port}`;
 }
 
-function playwrightSpecifier() {
-  const configured = process.env.ELASTOS_PLAYWRIGHT_MODULE || "";
-  if (configured) {
-    return configured.startsWith("file:") ? configured : pathToFileURL(resolve(configured)).href;
-  }
-  return pathToFileURL(
-    join(repoRoot, "elastos/tools/browser-playwright-engine/node_modules/playwright/index.js"),
-  ).href;
-}
-
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -714,7 +706,42 @@ function geometry() {
   };
 }
 
+// A cold font cache lays text out in the fallback face and a warm cache in
+// Inter, and the two have different metrics. Every capsule declares Inter as
+// an optional face and the fixture serves it with no-store, so this wait
+// cannot warm a later document's cache: it only lets this document's own font
+// load settle before its boxes are read. A frame that is still navigating has
+// no document to settle; the capsule measurements record null for it, while
+// the shell measurement has no catch and fails its check.
+async function waitForDocumentFonts(target) {
+  const timeoutMs = browserWaitTimeoutMs();
+  // A font load that never settles fails the check instead of hanging it.
+  const settled = await target.evaluate(async (limitMs) => {
+    // A frame that is still parsing has no body yet; measure the family the
+    // parsed text uses and keep the wait harmless there.
+    const styled = document.body || document.documentElement;
+    const family = getComputedStyle(styled).fontFamily.split(",")[0].trim();
+    const loading = (async () => {
+      // A family the document does not declare has no face to load; the
+      // measurement then uses the same fallback it always did.
+      if (family) {
+        await document.fonts.load(`16px ${family}`).catch(() => null);
+      }
+      await document.fonts.ready;
+    })();
+    let timer;
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(false), limitMs); });
+    const result = await Promise.race([loading.then(() => true), deadline]);
+    clearTimeout(timer);
+    return result;
+  }, timeoutMs).catch(() => null);
+  if (settled === false) {
+    throw new Error(`document fonts must settle within ${timeoutMs} ms`);
+  }
+}
+
 async function measure(frame, label) {
+  await waitForDocumentFonts(frame);
   const metrics = await frame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX });
   const shape = await frame.evaluate(geometry);
   return { surface: label, ...metrics, geometry: shape };
@@ -860,6 +887,9 @@ async function measureCapsuleFrame(page, target) {
   if (!capsuleFrame) {
     return { capsule: null, capsuleLayout: null };
   }
+  // A frame that is still navigating has no document to settle; the capsule
+  // measurements below already record null in that case.
+  await waitForDocumentFonts(capsuleFrame);
   return {
     capsule: await capsuleFrame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX }).catch(() => null),
     capsuleLayout: await capsuleFrame.evaluate(() => ({
@@ -3638,10 +3668,10 @@ function summarize(run) {
 
 async function launchEngine(playwright, engineId) {
   const engine = playwright[engineId];
-  const executable = engineId === "chromium" && process.env.ELASTOS_BROWSER_EXECUTABLE
-    ? process.env.ELASTOS_BROWSER_EXECUTABLE
+  const executable = engineId === "chromium"
+    ? (process.env.ELASTOS_BROWSER_EXECUTABLE || productSmokeLaunchOptions().executablePath)
     : engine.executablePath();
-  if (!existsSync(executable)) {
+  if (!executable || !existsSync(executable)) {
     return null;
   }
   const args = engineId === "chromium"
@@ -3676,8 +3706,7 @@ const report = { generatedAt: new Date().toISOString(), origin, source: sourceTr
 const failures = sourceFailures(report.source);
 const skippedEngines = [];
 try {
-  const imported = await import(playwrightSpecifier());
-  const playwright = imported.default || imported;
+  const playwright = await importProductSmokePlaywright();
   for (const engineId of requestedEngines) {
     assert(engineId === "chromium" || engineId === "webkit", `unsupported engine ${engineId}`);
     const browser = await launchEngine(playwright, engineId);
@@ -3709,11 +3738,11 @@ try {
   }
   assert(
     report.runs.length > 0,
-    `home-phone-layout-smoke ran no engine; requested ${requestedEngines.join(",")} but none is installed under elastos/tools/browser-playwright-engine`,
+    `home-phone-layout-smoke ran no engine; requested ${requestedEngines.join(",")} but Playwright Chromium is not installed`,
   );
   assert(
     !requestedEngines.includes("chromium") || report.runs.some((run) => run.engine === "chromium"),
-    "home-phone-layout-smoke needs the chromium engine from elastos/tools/browser-playwright-engine",
+    "home-phone-layout-smoke needs Playwright Chromium",
   );
   report.capsuleErrors = capsuleErrors;
   report.consoleErrors = consoleErrors;

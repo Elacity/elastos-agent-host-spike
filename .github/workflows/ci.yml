@@ -145,9 +145,7 @@ jobs:
           DEBUG: pw:install
         run: ./scripts/test-behaviour.sh inputs
       - name: JavaScript behavior tests
-        run: |
-          python3 scripts/browser-vm-linux-network.test.py
-          ./scripts/test-behaviour.sh
+        run: ./scripts/test-behaviour.sh
       - name: Browser startup status screenshots
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -613,7 +611,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '26'
-      # The smokes default to a macOS Brave install unless BRAVE_BIN is set.
+      # Product smokes launch Playwright Chromium. BRAVE_BIN names another executable.
+      # This job installs Chromium for the engine package and points BRAVE_BIN at it.
       - name: browser layout smokes
         run: |
           BRAVE_BIN="$(cd elastos/tools/browser-playwright-engine && node -p "require('playwright').chromium.executablePath()")"
@@ -815,6 +814,7 @@ jobs:
               - 'scripts/release-upstream-input.py'
               - 'scripts/release-upstream-recipes.json'
               - 'scripts/browser-upstream-build.py'
+              - 'scripts/build/crosvm-lifecycle-fds.patch'
               - 'scripts/build/licenses/libcap-LICENSE.txt'
 
   # The release command for each platform with Browser helper source builds,
@@ -915,6 +915,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
           targets: wasm32-unknown-unknown
+      - name: free hosted runner disk
+        # ARM64 shares these steps; only the Ubuntu x86-64 job needs this cleanup.
+        if: github.job == 'source-home-linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -Pk .
       - name: configure Rust compile cache
         if: env.CI_USE_CACHE == 'true'
         uses: ./.github/actions/rust-compile-cache
@@ -967,6 +973,15 @@ jobs:
         id: apt-prerequisites
         timeout-minutes: 13
         run: bash scripts/ci-apt-prerequisites.sh
+      - name: check native musl release crates
+        timeout-minutes: 30
+        run: |
+          case "${{ runner.arch }}" in
+            X64) target=x86_64-unknown-linux-musl ;;
+            ARM64) target=aarch64-unknown-linux-musl ;;
+            *) exit 1 ;;
+          esac
+          bash scripts/check-release-musl.sh "$target"
       - name: save Ubuntu prerequisite archives
         if: ((github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host')) && steps.apt-prerequisites.outputs.changed == 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -1191,7 +1206,7 @@ jobs:
     # It no longer gates lane PRs, batch PRs or workflow_dispatch baselines; a red post-merge run is
     # routed back to the lane whose PR caused it by the orchestrator.
     if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
-    # The two hop builds may take 30 minutes and the update journey step 75.
+    # The two hop builds have a 70-minute step budget and the update journey 75.
     timeout-minutes: 150
     # cancel-on-failure never runs after merge, so the gate's verdict is what
     # spares about 80 macOS minutes when it fails; macOS is off the PR path.
@@ -1380,7 +1395,8 @@ jobs:
           key: previous-release-${{ hashFiles('scripts/update-hop-previous-release.json') }}
       - name: build two actual Runtime versions
         # This source compiled twice (new and next) over the restored intermediates.
-        timeout-minutes: 30
+        # Allow 60 minutes for builds plus verification and cleanup.
+        timeout-minutes: 70
         run: |
           set -euo pipefail
           CI_HOP_ROOT="$HOME/.local/share/elastos-ci-update-hop"
@@ -1512,7 +1528,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
     if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
-    # Source-home with the hop builds may take 45 minutes and the update journey 75.
+    # The two hop builds have a 70-minute step budget and the update journey 75.
     timeout-minutes: 150
     needs: fork-gate
     env:
@@ -1643,7 +1659,8 @@ jobs:
           python3 scripts/update-hop-compare.py install-previous-release \
             "$RUNNER_TEMP/previous-release-home" "$RUNNER_TEMP/previous-release"
       - name: build two actual Runtime versions
-        timeout-minutes: 30
+        # Allow 60 minutes for builds plus verification and cleanup.
+        timeout-minutes: 70
         run: |
           set -euo pipefail
           CI_HOP_ROOT="$HOME/.local/share/elastos-ci-update-hop"

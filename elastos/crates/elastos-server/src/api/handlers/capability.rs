@@ -97,6 +97,17 @@ pub async fn request_capability(
         ));
     }
 
+    if input.resource == "elastos://browser/internet" {
+        return Ok(Json(RequestCapabilityOutput {
+            status: "denied".into(),
+            request_id: None,
+            token: None,
+            reason: Some(
+                "The Home owner grants Browser internet access from its current Inbox request."
+                    .into(),
+            ),
+        }));
+    }
     if is_system_only_backend_resource(&input.resource) {
         return Ok(Json(RequestCapabilityOutput {
             status: "denied".to_string(),
@@ -686,7 +697,13 @@ pub async fn revoke_capability(
             state
                 .capability_manager
                 .revoke(*token.id(), "Revoked by user via API")
-                .await;
+                .await
+                .map_err(|error| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Revocation could not be saved: {error}"),
+                    )
+                })?;
 
             // Mark the request as revoked in the pending store
             state
@@ -879,6 +896,31 @@ pub async fn get_audit_event_types(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn review559_exit_and_net_are_system_only_resources() {
+        for scheme in ["exit", "net"] {
+            for suffix in ["", "/http", "?query", "#fragment"] {
+                let resource = format!("elastos://{scheme}{suffix}");
+                assert!(is_system_only_backend_resource(&resource));
+                let result = request_capability(
+                    State(test_state()),
+                    Extension(Session::new_capsule("test-app".into())),
+                    Json(RequestCapabilityInput {
+                        resource,
+                        action: "write".into(),
+                        reason: "fixture".into(),
+                    }),
+                )
+                .await
+                .unwrap()
+                .0;
+                assert_eq!(result.status, "denied");
+                assert!(result.request_id.is_none());
+                assert!(result.token.is_none());
+            }
+        }
+    }
 
     #[test]
     fn test_supported_resource_schemes() {
@@ -1114,7 +1156,10 @@ mod tests {
         let (live_a, _) = grant_in(&state, "session-a", None, None).await;
         let (live_b, _) = grant_in(&state, "session-b", None, None).await;
         let (revoked, token) = grant_in(&state, "session-a", None, None).await;
-        manager.revoke(*token.id(), "operator detached").await; // record stays granted
+        manager
+            .revoke(*token.id(), "operator detached")
+            .await
+            .unwrap(); // record stays granted
         let (spent, token) = grant_in(&state, "session-b", Some(1), None).await;
         let resource = ResourceId::new("elastos://content/publish");
         let used = manager.validate(&token, "session-b", Action::Write, &resource, None);
@@ -1188,7 +1233,10 @@ mod tests {
         manager.revoke_all("key rotated");
         let (live, _) = grant_in(&state, "session-live", None, None).await;
         let (revoked, token) = grant_in(&state, "session-dead", None, None).await;
-        manager.revoke(*token.id(), "operator detached").await;
+        manager
+            .revoke(*token.id(), "operator detached")
+            .await
+            .unwrap();
         let mut spent = Vec::new();
         for n in 0..MAX_PENDING_REQUESTS - 3 {
             let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
@@ -1532,6 +1580,25 @@ mod tests {
         let want = record(&id, "session-d", "expired", None);
         let message = "a grant-written expiry reads expired with no settler";
         assert_eq!(by_id.get(&id).cloned(), want, "{message}");
+    }
+
+    #[tokio::test]
+    async fn browser_internet_is_not_a_generic_app_capability() {
+        let output = request_capability(
+            State(test_state()),
+            Extension(Session::new_capsule("browser".into())),
+            Json(RequestCapabilityInput {
+                resource: "elastos://browser/internet".into(),
+                action: "execute".into(),
+                reason: "Browser".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(output.status, "denied");
+        assert!(output.request_id.is_none());
+        assert!(output.token.is_none());
     }
 
     #[tokio::test]

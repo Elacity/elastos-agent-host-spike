@@ -355,4 +355,29 @@ mod tests {
             assert!(error.to_string().contains(expected), "{error}");
         }
     }
+
+    // A manifest whose requirement carries a `cid`: a pin. Only
+    // `PinnedManifest` reads one; the ordinary manifest type refuses the key.
+    const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    /// A pinned manifest does not start through `run`: the command stops at
+    /// its own manifest parse, with that parse's error and nothing around it.
+    #[tokio::test]
+    async fn run_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("capsule.json"), PINNED).unwrap();
+        let error = run_capsule(
+            Some(directory.path().to_path_buf()),
+            None,
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().starts_with("unknown field `cid`"),
+            "{error}"
+        );
+    }
 }

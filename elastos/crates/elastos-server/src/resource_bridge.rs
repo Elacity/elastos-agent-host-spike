@@ -257,7 +257,7 @@ fn resource_invoke_dispatch(
     })
 }
 
-fn manifest_allows_resource(
+pub(crate) fn manifest_allows_resource(
     manifest_capabilities: &[String],
     resource: &str,
     principal_id: Option<&str>,
@@ -1700,6 +1700,139 @@ mod tests {
         assert!(!manifest_allows_resource(&bounds, &resource, None, None));
     }
 
+    /// An ask grants nothing: a manifest that states asks has an empty ceiling,
+    /// so the ceiling check refuses a request for the very resource it asks
+    /// for. The same resource as a capability is the control.
+    #[test]
+    fn a_manifest_with_asks_is_refused_the_resource_it_asks_for() {
+        let manifest = |extra: serde_json::Value| -> elastos_common::CapsuleManifest {
+            let mut value = serde_json::json!({
+                "schema": "elastos.capsule/v1", "name": "asks-bridge", "version": "0.1.0",
+                "role": "app", "type": "data", "entrypoint": "index.html"
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let manifest: elastos_common::CapsuleManifest = serde_json::from_value(value).unwrap();
+            manifest.validate().unwrap();
+            manifest
+        };
+        let resource = "elastos://did/key";
+        let granted = manifest(serde_json::json!({"capabilities": ["elastos://did/*"]}));
+        assert!(manifest_allows_resource(
+            &granted.resource_authority_bounds(),
+            resource,
+            None,
+            None
+        ));
+        let asked = manifest(serde_json::json!({
+            "asks": [{"resource": "elastos://did/*", "actions": ["read"]}]
+        }));
+        assert!(!manifest_allows_resource(
+            &asked.resource_authority_bounds(),
+            resource,
+            None,
+            None
+        ));
+    }
+
+    /// The production text of a source file: comment lines dropped, and
+    /// everything from its test module on left out.
+    fn production_text(source: &str) -> String {
+        let markers = ["\nmod tests {", "\npub(crate) mod tests {"];
+        let end = markers
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min();
+        source[..end.unwrap_or(source.len())]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every `.rs` file under `dir` that is not test code by its place.
+    fn production_files(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains("tests") || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                production_files(&path, found);
+            } else if name.ends_with(".rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Every place that fills a capsule's ceiling asks the one function that
+    /// decides it, and none of those files reads a manifest's capability list
+    /// or storage permissions itself. So a rule placed in that function (such
+    /// as the empty ceiling of a manifest with asks) holds wherever a capsule
+    /// is started. And those four are the only production callers of that
+    /// function under `elastos/crates`: a fifth has to be added here.
+    ///
+    /// What this cannot show: a workspace member outside `elastos/crates`
+    /// (two live under `capsules/`; neither calls the function today), a call
+    /// split across lines, and a fifth file that fills a ceiling straight
+    /// from a manifest's capability list without calling the function at all.
+    #[test]
+    fn every_place_that_fills_a_ceiling_asks_the_one_bounds_function() {
+        for (file, source, fill) in [
+            (
+                "runtime.rs",
+                include_str!("runtime.rs"),
+                "handle.manifest.resource_authority_bounds(),",
+            ),
+            (
+                "supervisor.rs",
+                include_str!("supervisor.rs"),
+                "manifest_capabilities: manifest.resource_authority_bounds(),",
+            ),
+            (
+                "run_cmd.rs",
+                include_str!("run_cmd.rs"),
+                "let manifest_capabilities = manifest.resource_authority_bounds();",
+            ),
+            (
+                "capsule_cmd.rs",
+                include_str!("capsule_cmd.rs"),
+                "let manifest_capabilities = manifest.resource_authority_bounds();",
+            ),
+        ] {
+            let production = production_text(source);
+            assert_eq!(production.matches(fill).count(), 1, "{file}: {fill}");
+            for direct in ["manifest.capabilities", "permissions.storage"] {
+                assert!(!production.contains(direct), "{file} reads {direct}");
+            }
+        }
+
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut callers = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            let calls = text.matches(".resource_authority_bounds()").count();
+            if calls > 0 {
+                let name = file.strip_prefix(crates).unwrap().to_string_lossy();
+                callers.push((name.into_owned(), calls));
+            }
+        }
+        callers.sort();
+        let expected = [
+            "elastos-server/src/capsule_cmd.rs",
+            "elastos-server/src/run_cmd.rs",
+            "elastos-server/src/runtime.rs",
+            "elastos-server/src/supervisor.rs",
+        ]
+        .map(|name| (name.to_string(), 1));
+        assert_eq!(callers, expected);
+    }
+
     /// A temp data dir holding a stored Human record for `principal_id`.
     fn stored_human_dir(principal_id: &str) -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
@@ -1732,16 +1865,17 @@ mod tests {
     /// A5-S3a-2: a stored Agent owns UsersAI/self only; a Human owns no UsersAI root.
     #[test]
     fn a_stored_agent_is_scoped_to_its_own_usersai_root() {
-        let id = "agent:local:scoped";
-        let temp = stored_human_dir(id);
-        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
+        let root = crate::auth::valid_agent::ROOT;
         let (want, dir) = (format!("{root}/a.md"), Some(temp.path()));
         assert!(root.starts_with("localhost://UsersAI/"), "{root}");
         let scope = |uri: &str| scope_current_user_alias(uri, Some(id), dir);
         let not_area = |area: &str| format!("{area} is not this principal's root area");
         assert_eq!(scope("localhost://UsersAI/self/a.md").unwrap(), want);
         assert_eq!(scope(&want).unwrap(), want);
-        let human_root = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let human_root = format!("{}/a.md", crate::auth::valid_agent::USERS_ROOT);
         for uri in ["localhost://Users/self/a.md", &human_root] {
             assert_eq!(scope(uri).unwrap_err(), not_area("Users"));
         }
@@ -1761,13 +1895,13 @@ mod tests {
     /// so the same id's Users root is refused with a data dir present.
     #[test]
     fn the_protected_path_refuses_a_stored_agent_the_users_root_of_its_id() {
-        let id = "agent:local:protected";
-        let temp = stored_human_dir(id);
-        crate::auth::tests::mint_agent_record(temp.path(), id, None);
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
         let mut ctx = bridge_context();
         ctx.principal_id = Some(id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
-        let path = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let path = format!("{}/a.md", crate::auth::valid_agent::USERS_ROOT);
         let request = serde_json::json!({"path": path, "content": "x"});
         let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
         assert_eq!(refused["code"], "principal_context_required", "{refused}");
@@ -1827,9 +1961,10 @@ mod tests {
     /// UsersAI root storage instead of dispatching it.
     #[tokio::test]
     async fn usersai_root_storage_takes_the_protected_path() {
-        let id = "agent:local:protected-ai";
-        let temp = stored_human_dir(id);
-        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
+        let root = crate::auth::valid_agent::ROOT;
         let mut ctx = bridge_context();
         ctx.principal_id = Some(id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
