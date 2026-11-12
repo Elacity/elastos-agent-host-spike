@@ -5150,9 +5150,34 @@ async fn unreadable_background_image_get_answers_only_the_file_name() {
     let text = String::from_utf8_lossy(&body);
     assert!(!status.is_success(), "{text}");
     assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert!(
+        !text.contains(&authority.principal_id),
+        "the answer leaves out the person id: {text}"
+    );
+    assert!(
         text.contains("background image background-image.png could not be read"),
         "{text}"
     );
+}
+
+/// An upload whose image folder cannot be created answers one fixed sentence.
+/// The creation error names the folder, which holds the data folder and the
+/// person's root, so the answer leaves both out.
+#[tokio::test]
+async fn blocked_image_folder_upload_answers_one_fixed_sentence() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let folder = appearance_image_folder(dir.path(), &authority.principal_id);
+    crate::auth::create_owner_only_dir_all(dir.path(), folder.parent().unwrap()).unwrap();
+    std::fs::write(&folder, b"not a folder").unwrap();
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/png", "new image").await;
     assert!(
         !text.contains(dir.path().to_string_lossy().as_ref()),
         "the answer leaves out the data folder: {text}"
@@ -5161,6 +5186,9 @@ async fn unreadable_background_image_get_answers_only_the_file_name() {
         !text.contains(&authority.principal_id),
         "the answer leaves out the person id: {text}"
     );
+    assert_eq!(text, "background image could not be saved");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(std::fs::read(&folder).unwrap(), b"not a folder");
 }
 
 #[tokio::test]

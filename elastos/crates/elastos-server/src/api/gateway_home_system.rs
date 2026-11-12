@@ -8623,11 +8623,53 @@ fn home_reset_background_image_with(
     home_appearance_summary(data_dir, context)
 }
 
-/// Builds the answer for an image this process cannot read. The read error
-/// carries the data folder path, so the log keeps the full error and the
-/// response names only the image file. Upload, reset and GET share this.
+/// The one sentence each background-image route answers for an error that is
+/// not a deliberate answer. The full error stays in the log, because it can
+/// carry the data folder path and the person id.
+const BACKGROUND_IMAGE_SAVE_FAILED: &str = "background image could not be saved";
+const BACKGROUND_IMAGE_RESET_FAILED: &str = "background image could not be reset";
+const BACKGROUND_IMAGE_READ_FAILED: &str = "background image could not be read";
+
+/// An upload the route refuses before it touches any image. The text is one
+/// fixed sentence that names no path, so the route answers it as it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackgroundImageRequestError(&'static str);
+
+impl std::fmt::Display for BackgroundImageRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for BackgroundImageRequestError {}
+
+fn background_image_request_error(message: &'static str) -> anyhow::Error {
+    BackgroundImageRequestError(message).into()
+}
+
+/// An image this process cannot read. The read error carries the data folder
+/// path, so the log keeps the full error and the answer names only the file.
+#[derive(Debug)]
+struct HomeBackgroundImageReadFailure {
+    file_name: &'static str,
+}
+
+impl std::fmt::Display for HomeBackgroundImageReadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "background image {} could not be read",
+            self.file_name
+        )
+    }
+}
+
+impl std::error::Error for HomeBackgroundImageReadFailure {}
+
+/// Builds the answer for an image this process cannot read. Upload, reset and
+/// GET share this.
 fn home_background_image_read_failure(
-    file_name: &str,
+    file_name: &'static str,
     path: &std::path::Path,
     err: &anyhow::Error,
 ) -> anyhow::Error {
@@ -8636,7 +8678,36 @@ fn home_background_image_read_failure(
         error = %format!("{err:#}"),
         "could not read a background image"
     );
-    anyhow::anyhow!("background image {file_name} could not be read")
+    HomeBackgroundImageReadFailure { file_name }.into()
+}
+
+/// Answers one background-image route's error. A deliberate answer keeps its
+/// own text: the typed held-record refusal, the fixed upload validation
+/// sentences, and the unreadable-image sentence that names only the file.
+/// Every other error keeps its full text in the log, because it can carry the
+/// data folder path and the person id, and the client gets `sentence` with the
+/// status the error answers today.
+fn background_image_route_error(
+    err: anyhow::Error,
+    sentence: &'static str,
+    respond: fn(anyhow::Error) -> Response,
+) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
+    if err.downcast_ref::<BackgroundImageRequestError>().is_some()
+        || err
+            .downcast_ref::<HomeBackgroundImageReadFailure>()
+            .is_some()
+    {
+        return respond(err);
+    }
+    tracing::warn!(
+        error = %format!("{err:#}"),
+        "background image request failed"
+    );
+    let status = respond(err).status();
+    (status, sentence).into_response()
 }
 
 /// Reads every existing background image and returns the paths it found,
@@ -8728,13 +8799,19 @@ fn parse_background_image_upload(
         "image/jpeg" => "background-image.jpg",
         "image/webp" => "background-image.webp",
         "image/gif" => "background-image.gif",
-        _ => anyhow::bail!("background image must be PNG, JPEG, WebP, or GIF"),
+        _ => {
+            return Err(background_image_request_error(
+                "background image must be PNG, JPEG, WebP, or GIF",
+            ))
+        }
     };
     if body.is_empty() {
-        anyhow::bail!("background image is empty");
+        return Err(background_image_request_error("background image is empty"));
     }
     if body.len() > HOME_BACKGROUND_IMAGE_MAX_BYTES {
-        anyhow::bail!("background image is larger than 5 MB");
+        return Err(background_image_request_error(
+            "background image is larger than 5 MB",
+        ));
     }
     Ok((file_name, body.to_vec()))
 }
@@ -8813,17 +8890,31 @@ pub(super) async fn system_background_image_update(
     let context =
         match require_home_launch_token_context(&state.data_dir, &headers, SYSTEM_CAPSULE_ID) {
             Ok(context) => context,
-            Err(err) => return system_error_response(err),
+            Err(err) => {
+                return background_image_route_error(
+                    err,
+                    BACKGROUND_IMAGE_SAVE_FAILED,
+                    system_error_response,
+                )
+            }
         };
 
     let upload = match parse_background_image_upload(&headers, &body) {
         Ok(upload) => upload,
-        Err(err) => return system_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_SAVE_FAILED,
+                system_error_response,
+            )
+        }
     };
 
     match home_save_background_image(&state.data_dir, &context, upload.0, upload.1) {
         Ok(summary) => Json(summary).into_response(),
-        Err(err) => system_error_response(err),
+        Err(err) => {
+            background_image_route_error(err, BACKGROUND_IMAGE_SAVE_FAILED, system_error_response)
+        }
     }
 }
 
@@ -8834,12 +8925,20 @@ pub(super) async fn system_background_image_reset(
     let context =
         match require_home_launch_token_context(&state.data_dir, &headers, SYSTEM_CAPSULE_ID) {
             Ok(context) => context,
-            Err(err) => return system_error_response(err),
+            Err(err) => {
+                return background_image_route_error(
+                    err,
+                    BACKGROUND_IMAGE_RESET_FAILED,
+                    system_error_response,
+                )
+            }
         };
 
     match home_reset_background_image(&state.data_dir, &context) {
         Ok(summary) => Json(summary).into_response(),
-        Err(err) => system_error_response(err),
+        Err(err) => {
+            background_image_route_error(err, BACKGROUND_IMAGE_RESET_FAILED, system_error_response)
+        }
     }
 }
 
@@ -8866,19 +8965,37 @@ pub(super) async fn home_background_image(
 ) -> Response {
     let context = match require_home_token_context(&state.data_dir, &headers) {
         Ok(context) => context,
-        Err(err) => return home_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     };
 
     // The lock covers choosing and reading the image, so a read never sees a
     // half-finished upload or reset. Nothing between these steps awaits.
     let _guard = match home_background_image_lock() {
         Ok(guard) => guard,
-        Err(err) => return home_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     };
     let entry = match home_background_image_entry(&state.data_dir, &context) {
         Ok(Some(entry)) => entry,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(err) => return home_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     };
     match home_background_image_bytes(&state.data_dir, &context, &entry) {
         Ok(bytes) => {
@@ -8905,11 +9022,11 @@ pub(super) async fn home_background_image(
             // The read error can carry the image path, which holds the person
             // id. The log keeps the full error and the response names only the
             // image file, as upload and reset do.
-            home_error_response(home_background_image_read_failure(
-                entry.file_name,
-                &entry.path,
-                &err,
-            ))
+            background_image_route_error(
+                home_background_image_read_failure(entry.file_name, &entry.path, &err),
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
         }
     }
 }
