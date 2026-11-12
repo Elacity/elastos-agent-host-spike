@@ -3,11 +3,13 @@
 //! orphan a plant silently, so this test checks every edit before the runner
 //! has to report NO MATCH.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Check one entry against the text of each file its edits name. `read` returns
 /// `Some(text)` for a file this test owns, `None` for a file it does not, and
-/// `Err` for a file that does not resolve.
+/// `Err` for a file that does not resolve. Edits apply in entry order to the
+/// text the earlier edits left, as the runner applies them.
 fn check_entry(
     id: &str,
     entry: &serde_json::Value,
@@ -17,6 +19,7 @@ fn check_entry(
         .as_array()
         .filter(|edits| !edits.is_empty())
         .ok_or_else(|| format!("{id}: entry lists no edits"))?;
+    let mut texts: BTreeMap<String, Option<String>> = BTreeMap::new();
     for edit in edits {
         let file = edit["file"]
             .as_str()
@@ -33,7 +36,11 @@ fn check_entry(
         if old == new {
             return Err(format!("{id}: its new text equals its old text"));
         }
-        let Some(text) = read(file).map_err(|error| format!("{id}: {error}"))? else {
+        if !texts.contains_key(file) {
+            let text = read(file).map_err(|error| format!("{id}: {error}"))?;
+            texts.insert(file.to_owned(), text);
+        }
+        let Some(text) = texts.get_mut(file).and_then(Option::as_mut) else {
             continue;
         };
         let found = text.matches(old).count();
@@ -42,6 +49,7 @@ fn check_entry(
                 "{id}: its old text occurs {found} times in {file}; a plant needs exactly one"
             ));
         }
+        *text = text.replace(old, new);
     }
     Ok(())
 }
@@ -139,6 +147,15 @@ mod rules {
         let error = read_entry_file(&crate_root, "tests/does-not-exist.rs").unwrap_err();
         assert!(error.contains("tests/does-not-exist.rs"), "{error}");
         assert!(error.contains("does not resolve"), "{error}");
+    }
+
+    #[test]
+    fn counts_each_edit_against_the_text_the_earlier_edits_left() {
+        let entry = json!({"edits": [
+            {"file": "x", "old": "x", "new": "a a"},
+            {"file": "x", "old": "a a", "new": "b"},
+        ]});
+        assert_eq!(check_entry("F-chain", &entry, &read_some("x")), Ok(()));
     }
 
     #[test]
