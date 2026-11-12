@@ -1027,6 +1027,10 @@ function promptCloseFailures(run) {
 const LINK_DESTINATION_ORIGIN = "https://links.example";
 // A press that began inside the guard is held until well after it.
 const EARLY_PRESS_HOLD_MS = EXTERNAL_LINK_OPEN_GUARD_MS + 300;
+// An early press that never reached Open link, or that began after the guard,
+// tested nothing, so it is arranged again with a fresh sheet. Each try costs
+// about two seconds (guard, hold, settle), and a kind gets this many in total.
+const EARLY_PRESS_ATTEMPTS = 3;
 async function probeExternalLink(page, dir, target) {
   const context = page.context();
   const destinationRequests = [];
@@ -1152,7 +1156,12 @@ async function probeExternalLink(page, dir, target) {
       const press = {
         kind,
         url,
+        // `pressedAfterMs` is what the guard assertion measures: the press must
+        // begin inside the guard. `sheetSeen` and `pressSeen` name which half of
+        // that measurement the page never recorded, for the failure message.
         pressedAfterMs: timing.shownAt === null || timing.pressAt === null ? null : Math.round(timing.pressAt - timing.shownAt),
+        sheetSeen: timing.shownAt !== null,
+        pressSeen: timing.pressAt !== null,
         pages: context.pages().length - before.pages,
         requests: destinationRequests.length - before.requests,
         sheetShown,
@@ -1164,36 +1173,57 @@ async function probeExternalLink(page, dir, target) {
       }
       return press;
     };
-    for (const kind of ["pointer", "space", "enter-repeat"]) {
-      const url = `${LINK_DESTINATION_ORIGIN}/early-${kind}`;
-      let press = await earlyPress(kind, url);
-      // On a slow machine the press can reach Open link only after the guard
-      // has ended. That is an ordinary press, it opens its address once, and
-      // it tested nothing about the guard. Such a turn is kept on record and
-      // the sheet is shown again for a fresh address, at most twice. Every
-      // other outcome, and the guard's own assertions, stand as they are.
-      const shownAgain = [];
-      while (shownAgain.length < 2 && press.pressedAfterMs !== null && press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS
-        && !press.sheetShown && press.pages === 1 && press.requests === 1) {
-        shownAgain.push(press);
-        press = await earlyPress(kind, `${url}-shown-again-${shownAgain.length}`);
-      }
-      if (shownAgain.length) press.shownAgain = shownAgain;
-      earlyPresses.push(press);
-      if (!press.sheetShown) {
-        // The early press opened the link; that is reported below.
-        continue;
-      }
-      const retried = context.waitForEvent("page", { timeout: BOOT_TIMEOUT_MS });
+    // A fresh tap on the shown sheet opens its address once and takes the
+    // sheet down, which is also how a re-arranged early press starts from a
+    // hidden sheet again.
+    const freshTap = async (press, label) => {
+      const opened = context.waitForEvent("page", { timeout: BOOT_TIMEOUT_MS });
       // A touch tap, not a mouse click: its click can follow pointerup late.
-      await pointerOnTopPageControl(page.locator("#home-link-open"), { label: `fresh tap after the early ${kind} press` });
+      await pointerOnTopPageControl(page.locator("#home-link-open"), { label });
       await page.locator("#home-link-open").tap();
-      const retry = await retried;
+      const retry = await opened;
       await retry.waitForLoadState("domcontentloaded");
       press.retryUrl = retry.url();
       press.retryOpenerIsNull = await retry.evaluate(() => window.opener === null);
       await retry.close();
       await page.bringToFront();
+    };
+    for (const kind of ["pointer", "space", "enter-repeat"]) {
+      const url = `${LINK_DESTINATION_ORIGIN}/early-${kind}`;
+      let press = await earlyPress(kind, url);
+      // Two outcomes tested nothing about the guard, and both are the check's
+      // own precondition rather than a guard result. Open link never saw the
+      // press, so nothing was held during the guard. Or the press reached it
+      // only after the guard, so it was an ordinary press that opened its own
+      // address once. Either way the turn is kept on record and the sheet is
+      // shown again for a fresh address, up to EARLY_PRESS_ATTEMPTS tries in
+      // total. Every other outcome, and the guard's own assertions, stand as
+      // they are.
+      const earlier = [];
+      for (let attempt = 2; attempt <= EARLY_PRESS_ATTEMPTS; attempt += 1) {
+        if (press.pressedAfterMs !== null && press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS
+          && !press.sheetShown && press.pages === 1 && press.requests === 1) {
+          earlier.push(press);
+          press = await earlyPress(kind, `${url}-shown-again-${earlier.length}`);
+          continue;
+        }
+        if (press.pressedAfterMs === null && press.sheetShown && press.pages === 0 && press.requests === 0) {
+          earlier.push(press);
+          // The address this sheet shows is opened by the fresh tap, so the
+          // next try starts from a hidden sheet.
+          await freshTap(press, `fresh tap after the unseen early ${kind} press`);
+          press = await earlyPress(kind, `${url}-press-unseen-${earlier.length}`);
+          continue;
+        }
+        break;
+      }
+      if (earlier.length) press.earlier = earlier;
+      earlyPresses.push(press);
+      if (!press.sheetShown) {
+        // The early press opened the link; that is reported below.
+        continue;
+      }
+      await freshTap(press, `fresh tap after the early ${kind} press`);
     }
     await ask(`${LINK_DESTINATION_ORIGIN}/escape`);
     await shown("link sheet for Escape");
@@ -1264,20 +1294,37 @@ function externalLinkFailures(run) {
     failures.push(`${label}: Open link must open exactly the address with no opener and no referrer. Got ${JSON.stringify(probe.opened)}`);
   }
   for (const press of probe.earlyPresses) {
-    if (press.pressedAfterMs === null || press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS) {
-      failures.push(`${label}: the early ${press.kind} press must begin inside the ${EXTERNAL_LINK_OPEN_GUARD_MS} ms guard to test it. Got ${JSON.stringify(press)}`);
+    const tries = (press.earlier || []).length + 1;
+    if (press.pressedAfterMs === null) {
+      // The check's own precondition, not the guard: nothing was held during
+      // the guard, so the guard was never tested. The message names the half
+      // of the timing the page did not record.
+      const unrecorded = !press.sheetSeen
+        ? "the sheet's show was not observed, so the guard's start is unknown"
+        : "Open link never saw the press";
+      failures.push(`${label}: precondition not met after ${tries} tries: ${unrecorded}, so the early ${press.kind} press inside the ${EXTERNAL_LINK_OPEN_GUARD_MS} ms guard was not tested (this is not a guard failure). Got ${JSON.stringify(press)}`);
+    } else if (press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS) {
+      failures.push(`${label}: precondition not met after ${tries} tries: the early ${press.kind} press began ${press.pressedAfterMs} ms after the sheet showed, past the ${EXTERNAL_LINK_OPEN_GUARD_MS} ms guard, so the guard was not tested (this is not a guard failure). Got ${JSON.stringify(press)}`);
     } else if (press.pages !== 0 || press.requests !== 0 || !press.sheetShown) {
       failures.push(`${label}: an early ${press.kind} press held past the guard must open nothing and keep the sheet. Got ${JSON.stringify(press)}`);
     } else if (press.retryUrl !== press.url || !press.retryOpenerIsNull) {
       failures.push(`${label}: a fresh press after an early ${press.kind} press must open the link once with no opener. Got ${JSON.stringify(press)}`);
     }
+    // A try set aside for a fresh one still had to open the address its sheet
+    // showed when it was tapped afresh.
+    for (const attempt of press.earlier || []) {
+      if (attempt.retryUrl !== undefined && (attempt.retryUrl !== attempt.url || !attempt.retryOpenerIsNull)) {
+        failures.push(`${label}: a fresh press after an early ${attempt.kind} press must open the link once with no opener. Got ${JSON.stringify(attempt)}`);
+      }
+    }
   }
   if (!probe.afterEscape || !probe.duringCooldown || !probe.afterCancel) {
     failures.push(`${label}: Escape and Cancel must close the sheet, and the app must wait out its cool-down. Got ${JSON.stringify({ afterEscape: probe.afterEscape, duringCooldown: probe.duringCooldown, afterCancel: probe.afterCancel })}`);
   }
-  // A turn whose press began after the guard opened its own address once,
-  // before the sheet was shown again for the address the case then used.
-  const expectedRequests = [probe.address, ...probe.earlyPresses.flatMap((press) => [...(press.shownAgain || []).map((late) => late.url), press.url])];
+  // Every try's address is requested exactly once, in the order the tries ran:
+  // by the press itself when it began after the guard, or by the fresh tap that
+  // took its sheet down otherwise.
+  const expectedRequests = [probe.address, ...probe.earlyPresses.flatMap((press) => [...(press.earlier || []), press].map((attempt) => attempt.url))];
   if (JSON.stringify(probe.destinationRequests) !== JSON.stringify(expectedRequests) || probe.pagesAfter !== probe.pagesBefore) {
     failures.push(`${label}: each destination must be requested once, only after a press that began after the guard. Got ${JSON.stringify(probe.destinationRequests)}`);
   }
