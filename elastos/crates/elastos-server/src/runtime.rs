@@ -480,8 +480,15 @@ impl Runtime {
     /// and each pinned one alike, in this order: the store has a slot for
     /// `cid`; one walk of it, inside what is `left` of the closure's budget;
     /// the files recompute to `cid`; the signature beside it is accepted;
-    /// and only then its manifest is one this start takes and its component
-    /// imports only the contract. What the walk took in comes off `left`.
+    /// and only then this start judges its manifest and its component's
+    /// imports. What the walk took in comes off `left`.
+    ///
+    /// The walk is not blind to the manifest: to name a bundle it parses
+    /// and validates `capsule.json` with the Runtime's reader, before the
+    /// CID and the signature are known to be right, and refuses what that
+    /// reader refuses. It keeps the name, the role and the type from it and
+    /// decides nothing else by it. The manifest that can start, and the
+    /// pins that are followed, come from the judgement after the signature.
     async fn admit_closure_member(
         &self,
         data_dir: &Path,

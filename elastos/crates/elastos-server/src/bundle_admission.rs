@@ -451,13 +451,17 @@ pub struct AdmittedBundle {
 /// Decide, from the walked bytes alone, whether a start by CID takes this
 /// bundle's manifest. The order: every key as written is on
 /// [`BUNDLE_MANIFEST_KEYS`], before the manifest is parsed as a type; the
-/// Runtime's reader of a manifest that may pin parses and validates it, and
-/// here, and nowhere else, the ordinary manifest is taken out of what it
-/// read, with the pins; it is an app component of the one contract; its
-/// entrypoint is one of the walked files; every requirement has a plain
-/// name and a pin. Nothing is read from disk here. The start calls this
-/// only for a bundle whose files recomputed to the CID asked for and whose
-/// signature was accepted.
+/// Runtime's reader of a manifest that may pin checks the pins and gives
+/// them; here, and nowhere else in the server, the pins are then taken off
+/// and the ordinary manifest type parses and validates what is left, so the
+/// manifest that can start exists only beside its pins, in the value this
+/// returns; it is an app component of the one contract; its entrypoint is
+/// one of the walked files; every requirement has a plain name and a pin.
+/// Nothing is read from disk here. The start calls this only for a bundle
+/// whose files recomputed to the CID asked for and whose signature was
+/// accepted. (The walk before it has already parsed and validated the same
+/// bytes once, with that same reader, for the bundle's name and the form of
+/// its pins: see `Runtime::run_by_bundle`'s per-bundle checks.)
 pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, BundleRefusal> {
     let invalid = BundleRefusal::ManifestInvalid;
     let bytes = bundle
@@ -471,14 +475,37 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
     {
         return Err(BundleRefusal::ManifestFieldRefused(key.clone()));
     }
-    let (manifest, pins) = PinnedManifest::parse(bytes)
+    // The Runtime's one reader of pins judges them; it hands out no manifest.
+    let pins = PinnedManifest::parse(bytes)
         .map_err(|error| match error {
             PinnedManifestError::Unparsed(why) | PinnedManifestError::Invalid(why) => invalid(why),
             PinnedManifestError::Pin { code, requirement } => {
                 invalid(format!("{code}: requirement {requirement:?}"))
             }
         })?
-        .into_manifest_and_pins();
+        .pins()
+        .to_vec();
+    // The manifest that can start is read here, from the same bytes, by the
+    // ordinary type, which refuses a pin: so the pins, which that reader
+    // has checked and `pins` now holds, are taken off first. Without a pin
+    // the bytes are read as they are.
+    let manifest: CapsuleManifest = if pins.is_empty() {
+        serde_json::from_slice(bytes)
+    } else {
+        let mut unpinned: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
+        let requires = unpinned
+            .get_mut("requires")
+            .and_then(|it| it.as_array_mut());
+        for requirement in requires.into_iter().flatten() {
+            if let Some(requirement) = requirement.as_object_mut() {
+                requirement.remove("cid");
+            }
+        }
+        serde_json::from_value(unpinned)
+    }
+    .map_err(|error| invalid(error.to_string()))?;
+    manifest.validate().map_err(invalid)?;
     let component_of_the_contract = manifest.role == CapsuleRole::App
         && manifest.capsule_type == CapsuleType::Wasm
         && manifest.runtime_abi == Some(CapsuleRuntimeAbi::ElastosComponentV1)

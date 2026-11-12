@@ -194,7 +194,8 @@ impl ComponentProvider {
     /// this one activation's entry and on nothing else, so it can never seal
     /// another capsule. The entry is taken away when the start returns; a
     /// start that is cancelled before it returns leaves its entry behind,
-    /// still sealed.
+    /// still sealed and still marked running, and `stop` does not take away
+    /// an entry that is marked running.
     pub async fn load_admitted_sealed(
         &self,
         bytes: Vec<u8>,

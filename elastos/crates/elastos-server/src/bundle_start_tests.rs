@@ -962,41 +962,63 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     }
 }
 
-/// The ordinary manifest comes out of a pinned one at one place in the
-/// crates: where the start by CID judges a bundle's manifest, which the pin
-/// above holds to after that bundle's CID and signature checks. (The name is
-/// split so that this file is not a caller.)
+/// The pins come off a manifest at one place in the server: where the start
+/// by CID judges a bundle's manifest, which the pin above holds to after
+/// that bundle's CID and signature checks. The Runtime's reader of pins
+/// still hands out no manifest (its own test, in the common crate, is as it
+/// was). What comes out is the manifest exactly as the ordinary type reads
+/// the same text without the pin, beside the pins; the bundle's own bytes
+/// are not changed. (The needle is split so that this file is not counted.)
 #[test]
-fn the_way_out_of_a_pinned_manifest_has_one_caller() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
+    use crate::bundle_admission::admit_bundle_manifest;
+    use elastos_bundle_identity::checked_bundle_within as walk;
+    let sources = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
-    for item in fs::read_dir(&crates).expect("the crates") {
-        let sources = item.expect("entry").path().join("src");
-        if sources.is_dir() {
-            rust_files(&sources, &mut files);
-        }
-    }
-    assert!(files.len() > 200, "found {} source files", files.len());
-    let way_out = ["into_manifest", "_and_pins("].concat();
-    let mut users: Vec<(String, usize)> = files
+    rust_files(&sources, &mut files);
+    let taken_off = [".remove(", "\"cid\")"].concat();
+    let mut places: Vec<(String, usize)> = files
         .iter()
         .map(|path| {
-            let uses = fs::read_to_string(path).expect("read");
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            (name, uses.matches(&way_out).count())
+            let text = fs::read_to_string(path).expect("read");
+            let name = path.strip_prefix(&sources).unwrap().to_string_lossy();
+            (name.into_owned(), text.matches(&taken_off).count())
         })
-        .filter(|(_, uses)| *uses > 0)
+        .filter(|(_, count)| *count > 0)
         .collect();
-    users.sort();
-    // The server's one call; and the type's own file: the definition and
-    // the two lines its own test pins.
+    places.sort();
+    // The second is a test of the update controller, which takes the `cid`
+    // off a release's descriptor of an external provider: not a manifest,
+    // and not a pin.
     assert_eq!(
-        users,
+        places,
         [
             ("bundle_admission.rs".to_string(), 1),
-            ("pinned_manifest.rs".to_string(), 3)
+            ("update_controller/tests.rs".to_string(), 1)
         ]
     );
+
+    let dir = tempfile::tempdir().unwrap();
+    let pinning = manifest_pinning("pinning", &[("needed", ASKS_NOTHING_CID)]);
+    fs::write(dir.path().join("capsule.json"), &pinning).unwrap();
+    fs::write(dir.path().join(ENTRYPOINT), quiet_component()).unwrap();
+    let walked = walk(dir.path(), BUNDLE_WALK_BUDGET).unwrap();
+    let admitted = admit_bundle_manifest(&walked).unwrap();
+    assert_eq!(
+        admitted.pins,
+        [("needed".to_string(), ASKS_NOTHING_CID.to_string())]
+    );
+    let without_the_pin = manifest_with(
+        "pinning",
+        "requires",
+        serde_json::json!([{"name": "needed", "kind": "capsule"}]),
+    );
+    let ordinary: elastos_common::CapsuleManifest = serde_json::from_str(&without_the_pin).unwrap();
+    assert_eq!(
+        serde_json::to_value(&admitted.manifest).unwrap(),
+        serde_json::to_value(&ordinary).unwrap()
+    );
+    assert_eq!(walked.entry("capsule.json").unwrap(), pinning.as_bytes());
 }
 
 /// C-walk, the control. A bundle that pins staged bundles starts, and it is
