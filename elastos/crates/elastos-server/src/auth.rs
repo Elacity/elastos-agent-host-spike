@@ -19340,9 +19340,8 @@ pub(crate) mod tests {
     fn typed_io_refuses_a_quarantined_record() {
         let data_dir = tempfile::tempdir().unwrap();
         r4_fixture::store(data_dir.path(), PrincipalKind::Human);
-        let root =
-            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), r4_fixture::ID)
-                .unwrap();
+        let root = ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), r4_fixture::ID)
+            .unwrap();
         r4_fixture::set_kind(
             data_dir.path(),
             r4_fixture::ID,
