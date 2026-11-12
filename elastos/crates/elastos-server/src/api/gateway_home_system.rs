@@ -8513,7 +8513,6 @@ fn home_save_background_image(
     bytes: Vec<u8>,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let path = home_appearance_path(data_dir, context, file_name)?;
-    remove_home_background_images(data_dir, context)?;
     crate::auth::write_principal_root_object_resolved(
         data_dir,
         context.root(),
@@ -8521,6 +8520,7 @@ fn home_save_background_image(
         &path,
         &bytes,
     )?;
+    remove_home_background_images(data_dir, context, Some(file_name))?;
     home_appearance_summary(data_dir, context)
 }
 
@@ -8528,19 +8528,24 @@ fn home_reset_background_image(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<HomeAppearanceSummary> {
-    remove_home_background_images(data_dir, context)?;
+    remove_home_background_images(data_dir, context, None)?;
     home_appearance_summary(data_dir, context)
 }
 
 /// Upload and reset replace the background, but never delete a damaged
 /// image: the refusal is the damage notice that names the file, as for every
-/// other Home state save (#447). Every image is checked before any is removed.
+/// other Home state save (#447). Every image other than `keep` is checked
+/// before any is removed; `keep` is the file an upload just wrote.
 fn remove_home_background_images(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
+    keep: Option<&str>,
 ) -> anyhow::Result<()> {
     let mut paths = Vec::with_capacity(HOME_BACKGROUND_IMAGE_FILES.len());
     for &(file_name, _content_type) in HOME_BACKGROUND_IMAGE_FILES {
+        if keep == Some(file_name) {
+            continue;
+        }
         let path = home_appearance_path(data_dir, context, file_name)?;
         if path.is_file() {
             if let Err(err) = crate::auth::read_principal_root_object_resolved(
@@ -9765,7 +9770,7 @@ mod stored_root_tests {
         assert_only_file_named(&data_dir, &entry.path);
         let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
         assert_eq!(bytes, b"parent image");
-        remove_home_background_images(&data_dir, &context).unwrap();
+        remove_home_background_images(&data_dir, &context, None).unwrap();
         assert!(!entry.path.exists());
         let child_root = format!(
             "localhost://Users/{}",
@@ -9776,6 +9781,44 @@ mod stored_root_tests {
         let child_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
         assert!(!child_path.exists());
+    }
+
+    /// A second background image replaces the first: the success path leaves
+    /// exactly one image file, the one just saved.
+    #[test]
+    fn second_background_image_replaces_the_first() {
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"first image".to_vec(),
+        )
+        .unwrap();
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"second image".to_vec(),
+        )
+        .unwrap();
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.content_type, "image/jpeg");
+        let present: Vec<&str> = HOME_BACKGROUND_IMAGE_FILES
+            .iter()
+            .map(|(file_name, _)| *file_name)
+            .filter(|file_name| {
+                home_appearance_path(&data_dir, &context, file_name)
+                    .unwrap()
+                    .is_file()
+            })
+            .collect();
+        assert_eq!(present, ["background-image.jpg"]);
+        let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
+        assert_eq!(bytes, b"second image");
     }
 
     #[test]
@@ -10085,10 +10128,7 @@ mod r8d_passkey_rows {
     }
 
     /// A later image upload is refused the same way as the first, and the
-    /// child creates nothing. By reading, `home_save_background_image` calls
-    /// `remove_home_background_images` before
-    /// `write_principal_root_object_resolved`; this row does not show that
-    /// order.
+    /// child creates nothing.
     #[test]
     fn r8d_child_background_image_replace_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
@@ -10103,6 +10143,37 @@ mod r8d_passkey_rows {
             );
         }
         person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: `home_save_background_image` with a second name, on a child
+    /// that already holds an image saved before the held-root rule. The save
+    /// is refused before any image is removed, so the seeded image stays in
+    /// place byte for byte.
+    #[test]
+    fn r8d_child_refused_background_image_save_keeps_the_seeded_image() {
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
+        let child = person.child.path();
+        let seeded = home_appearance_path(child, &person.ctx, "background-image.png").unwrap();
+        std::fs::create_dir_all(seeded.parent().unwrap()).unwrap();
+        std::fs::write(&seeded, b"seeded child image").unwrap();
+        let error = home_save_background_image(
+            child,
+            &person.ctx,
+            "background-image.jpg",
+            b"r8d image".to_vec(),
+        )
+        .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        assert_eq!(std::fs::read(&seeded).unwrap(), b"seeded child image");
+        let relative = seeded
+            .strip_prefix(child)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        person.assert_child_holds_only(&[relative.as_str()]);
     }
 
     /// Entry: `home_save_appearance_preferences` with one field set. The
