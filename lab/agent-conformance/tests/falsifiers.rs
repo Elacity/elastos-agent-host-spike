@@ -154,13 +154,32 @@ mod rules {
     fn rejects_an_entry_without_edits_and_an_unresolved_file() {
         let empty = json!({"edits": []});
         let error = check_entry("F-empty", &empty, &read_some("")).unwrap_err();
-        assert!(error.contains("F-empty"), "{error}");
+        assert_eq!(error, "F-empty: entry lists no edits");
+
+        let absent = json!({"id": "F-absent", "title": "no edits key"});
+        let error = check_entry("F-absent", &absent, &read_some("")).unwrap_err();
+        assert_eq!(error, "F-absent: entry lists no edits");
 
         let entry = json!({"edits": [{"file": "gone", "old": "a", "new": "b"}]});
         let read = |_: &str| Err("gone does not resolve: missing".to_owned());
         let error = check_entry("F-missing", &entry, &read).unwrap_err();
         assert!(error.contains("F-missing"), "{error}");
         assert!(error.contains("does not resolve"), "{error}");
+    }
+
+    #[test]
+    fn rejects_an_edit_that_names_no_file_no_old_text_or_no_new_text() {
+        let no_file = json!({"edits": [{"old": "a", "new": "b"}]});
+        let error = check_entry("F-nofile", &no_file, &read_some("a")).unwrap_err();
+        assert_eq!(error, "F-nofile: an edit names no file");
+
+        let no_old = json!({"edits": [{"file": "x", "new": "b"}]});
+        let error = check_entry("F-noold", &no_old, &read_some("a")).unwrap_err();
+        assert_eq!(error, "F-noold: an edit has no old text");
+
+        let no_new = json!({"edits": [{"file": "x", "old": "a"}]});
+        let error = check_entry("F-nonew", &no_new, &read_some("a")).unwrap_err();
+        assert_eq!(error, "F-nonew: an edit has no new text");
     }
 
     #[test]
