@@ -6575,6 +6575,18 @@ fn authorize_principal_protection(state: &AuthState, principal_id: &str) -> anyh
 pub(crate) const OWNER_ROOT_IN_SIGN_IN_FILE: &str =
     "a protection in the sign-in file never carries an owner-root wrap";
 
+/// Typed form of that refusal, so a caller can tell it from other save errors.
+#[derive(Debug)]
+pub(crate) struct OwnerRootInSignInFile;
+
+impl std::fmt::Display for OwnerRootInSignInFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(OWNER_ROOT_IN_SIGN_IN_FILE)
+    }
+}
+
+impl std::error::Error for OwnerRootInSignInFile {}
+
 /// Validates a protection kept in the sign-in file. An owner-root wrap is
 /// kept only in the agent records file, so a protection here that carries
 /// one is refused, on store and whenever it is read.
@@ -6590,7 +6602,7 @@ fn refuse_owner_root_protector(protection: &PrincipalRootProtectionV1) -> anyhow
         .iter()
         .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
     {
-        anyhow::bail!(OWNER_ROOT_IN_SIGN_IN_FILE);
+        return Err(OwnerRootInSignInFile.into());
     }
     Ok(())
 }
@@ -20357,6 +20369,10 @@ pub(crate) mod tests {
             .push(owner_root_in_sign_in_file_protection(&id, &root));
         let error = save_auth_state(data_dir.path(), &state, None)
             .expect_err("an added owner-root protection was refused");
+        assert!(
+            error.downcast_ref::<OwnerRootInSignInFile>().is_some(),
+            "{error}"
+        );
         assert_eq!(error.to_string(), OWNER_ROOT_IN_SIGN_IN_FILE, "{error}");
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
@@ -20377,6 +20393,10 @@ pub(crate) mod tests {
         protection.protectors[0].kind = PrincipalRootProtectorKind::OwnerRoot;
         let error = save_auth_state(data_dir.path(), &state, None)
             .expect_err("a changed owner-root protection was refused");
+        assert!(
+            error.downcast_ref::<OwnerRootInSignInFile>().is_some(),
+            "{error}"
+        );
         assert_eq!(error.to_string(), OWNER_ROOT_IN_SIGN_IN_FILE, "{error}");
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
