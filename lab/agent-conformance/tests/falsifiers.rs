@@ -7,19 +7,18 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Check one entry against the text of each file its edits name. `read` returns
-/// `Some(text)` for a file this test owns, `None` for a file it does not, and
-/// `Err` for a file that does not resolve. Edits apply in entry order to the
-/// text the earlier edits left, as the runner applies them.
+/// the file text, and an error for a file that does not resolve. Edits apply in
+/// entry order to the text the earlier edits left, as the runner applies them.
 fn check_entry(
     id: &str,
     entry: &serde_json::Value,
-    read: &dyn Fn(&str) -> Result<Option<String>, String>,
+    read: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<(), String> {
     let edits = entry["edits"]
         .as_array()
         .filter(|edits| !edits.is_empty())
         .ok_or_else(|| format!("{id}: entry lists no edits"))?;
-    let mut texts: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut texts: BTreeMap<String, String> = BTreeMap::new();
     for edit in edits {
         let file = edit["file"]
             .as_str()
@@ -40,9 +39,7 @@ fn check_entry(
             let text = read(file).map_err(|error| format!("{id}: {error}"))?;
             texts.insert(file.to_owned(), text);
         }
-        let Some(text) = texts.get_mut(file).and_then(Option::as_mut) else {
-            continue;
-        };
+        let text = texts.get_mut(file).expect("the file was read in this pass");
         let found = text.matches(old).count();
         if found != 1 {
             return Err(format!(
@@ -67,19 +64,15 @@ fn require_entries(document: &serde_json::Value) -> Result<&[serde_json::Value],
 }
 
 /// Read the file an edit names, resolved from examples/agent-host the way the
-/// runner resolves it. `None` means the file resolves outside this crate.
-fn read_entry_file(crate_root: &Path, file: &str) -> Result<Option<String>, String> {
+/// runner resolves it. Every path that resolves is read and counted, including
+/// one outside this crate; a path that does not resolve is an error naming it.
+fn read_entry_file(crate_root: &Path, file: &str) -> Result<String, String> {
     let lane_base = crate_root.join("../../examples/agent-host");
     let target = lane_base
         .join(file)
         .canonicalize()
         .map_err(|error| format!("{file} does not resolve: {error}"))?;
-    if !target.starts_with(crate_root) {
-        return Ok(None);
-    }
-    std::fs::read_to_string(&target)
-        .map(Some)
-        .map_err(|error| format!("{file} does not read: {error}"))
+    std::fs::read_to_string(&target).map_err(|error| format!("{file} does not read: {error}"))
 }
 
 #[test]
@@ -107,8 +100,8 @@ mod rules {
     use serde_json::json;
     use std::path::Path;
 
-    fn read_some(text: &'static str) -> impl Fn(&str) -> Result<Option<String>, String> {
-        move |_| Ok(Some(text.to_owned()))
+    fn read_some(text: &'static str) -> impl Fn(&str) -> Result<String, String> {
+        move |_| Ok(text.to_owned())
     }
 
     #[test]
