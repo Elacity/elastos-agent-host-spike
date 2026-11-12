@@ -2264,12 +2264,16 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(checkout, "persist-credentials"), "false")
         self.assertNotIn("uses:", decide)
         self.assertIn("        id: decide\n", decide)
-        # The step runs the base branch's copy of the rule, from outside the checkout, and
-        # no expression is pasted into its shell.
+        # The step runs the rule held by the event's base commit, from outside the checkout. No
+        # expression is pasted into its shell and no branch name, which moves, picks the rule.
         script = self.decide_script(SOURCE)
         self.assertNotIn("${{", script)
+        self.assertNotIn("BASE_REF", script)
         self.assertEqual(script.count("ci-installed-app-paths"), 1)
-        self.assertIn('if git show "origin/${BASE_REF}:' + RULE + '" > "$rule" \\\n', script)
+        self.assertIn('if [[ "$BASE_SHA" =~ ^[0-9a-f]{40,64}$ ]] \\\n    && git show "${BASE_SHA}:' + RULE + '" > "$rule" \\\n', script)
+        # The answer is compared byte for byte.
+        self.assertIn("    && printf 'run=false\\n' | cmp -s - \"$answer\"; then\n", script)
+        self.assertEqual(field(decide, "BASE_SHA"), "${{ github.event.pull_request.base.sha }}")
         self.assertEqual(re.findall(r"(?m)^rule=.*$", script), ['rule="$RUNNER_TEMP/installed-app-paths-rule.py"'])
         self.assertEqual(re.findall(r"python3[^\n]*", script), ['python3 -I "$rule" \\'])
         # The rule imports nothing a pull request's tree could supply.
@@ -2303,9 +2307,11 @@ class ReleasePolicyTests(unittest.TestCase):
         # The run block is its 10-space lines; the next job's leading comment follows it.
         return textwrap.dedent(re.match(r"(?:(?: {10}[^\n]*)?\n)*", decide.split("        run: |\n", 1)[1])[0])
 
-    def run_decide(self, base_rule, changes, source=SOURCE):
+    def run_decide(self, base_rule, changes, source=SOURCE, later_rule=None, base_sha=None):
         """The decide step's output for a pull request that writes changes, in a throwaway
-        repository whose base branch holds base_rule as the rule script (None: holds none)."""
+        repository whose base commit holds base_rule as the rule script (None: holds none).
+        later_rule is the rule the base branch gains after the event; base_sha replaces the
+        base commit the event names."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             repo, temp, output = root / "repo", root / "temp", root / "output"
@@ -2322,12 +2328,22 @@ class ReleasePolicyTests(unittest.TestCase):
 
             subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], env=env, check=True, capture_output=True)
             commit({"lab/note.md": "note\n", **({} if base_rule is None else {RULE: base_rule})})
-            subprocess.run(["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"], env=env, check=True)
+
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+            base = git("rev-parse", "HEAD")
+            git("checkout", "-q", "-b", "work")
             commit(changes)
-            head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], env=env, text=True).strip()
+            head = git("rev-parse", "HEAD")
+            if later_rule is not None:
+                git("checkout", "-q", "main")
+                commit({RULE: later_rule})
+                git("checkout", "-q", "work")
+            git("update-ref", "refs/remotes/origin/main", "main")
             result = subprocess.run(["bash", "-e", "-c", self.decide_script(source)], cwd=repo, capture_output=True, text=True,
-                                    timeout=60, env={**env, "BASE_REF": "main", "HEAD_SHA": head, "RUNNER_TEMP": str(temp),
-                                                     "GITHUB_OUTPUT": str(output)})
+                                    timeout=60, env={**env, "BASE_REF": "main", "BASE_SHA": base if base_sha is None else base_sha,
+                                                     "HEAD_SHA": head, "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(output)})
             self.assertEqual(result.returncode, 0, result.stderr)
             return output.read_text()
 
@@ -2349,12 +2365,22 @@ class ReleasePolicyTests(unittest.TestCase):
         # A base branch without the rule runs the jobs, as on the pull request that adds the rule.
         self.assertEqual(self.run_decide(None, notes), "run=true\n")
         self.assertEqual(self.run_decide(None, {**notes, RULE: always_skip}), "run=true\n")
-        # So does a rule that fails, says nothing, or says anything but the one word.
+        # The rule is the one in the event's base commit, whatever the base branch holds later.
+        self.assertEqual(self.run_decide(honest, code, later_rule=always_skip), "run=true\n")
+        self.assertEqual(self.run_decide(always_skip, code, later_rule=honest), "run=false\n")
+        self.assertEqual(self.run_decide(None, notes, later_rule=always_skip), "run=true\n")
+        # A base commit that is not in the checkout, or a name where a commit belongs, runs the jobs.
+        for base_sha in ("0" * 40, "", "main", "origin/main", "HEAD", "work^", "-h", "0" * 39, "0" * 65):
+            with self.subTest(base_sha=base_sha):
+                self.assertEqual(self.run_decide(honest, notes, base_sha=base_sha), "run=true\n")
+        # So does a rule that fails, says nothing, or says anything but the one line, byte for byte.
         for name, rule in {"exits 1": "raise SystemExit(1)\n", "skip, then exits 1": writes("run=false\n", 1),
                            "no answer": "pass\n", "not Python": "(\n", "empty": "", "another word": writes("run=maybe\n"),
                            "two answers": writes("run=false\nrun=true\n"), "skip twice": writes("run=false\nrun=false\n"),
                            "a longer line": writes("run=false \n"), "a second output": writes("run=false\nother=1\n"),
-                           "capitals": writes("run=False\n")}.items():
+                           "capitals": writes("run=False\n"), "skip, then a blank line": writes("run=false\n\n"),
+                           "skip, then blank lines": writes("run=false\n\n\n"), "a blank line first": writes("\nrun=false\n"),
+                           "no line end": writes("run=false"), "a carriage return": writes("run=false\r\n")}.items():
             with self.subTest(base_rule=name):
                 self.assertEqual(self.run_decide(rule, notes), "run=true\n")
 
