@@ -12707,17 +12707,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&temp);
         return Err(err.into());
     }
-    // The rename replaced the file, so the write has happened. A parent
-    // directory sync failure affects only whether that replacement survives a
-    // power loss, and the caller cannot undo the rename, so log it and report
-    // success. A crash before the sync can restore the previous file.
-    if let Err(err) = sync_parent_directory(path) {
-        tracing::warn!(
-            path = %path.display(),
-            error = %err,
-            "directory sync after a rename failed; the replaced file is in place"
-        );
-    }
+    sync_parent_directory(path)?;
     Ok(())
 }
 

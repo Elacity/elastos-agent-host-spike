@@ -8592,6 +8592,9 @@ fn home_save_background_image_with(
     //   below. The reader shows the image written last, so the new image is
     //   the one served.
     // - a removal error: that older file stays, and the error names it.
+    // - a directory sync error after the rename: the new image is in place
+    //   but the upload answers an error. The shared write helper keeps that
+    //   error for every caller, so this route does not hide it.
     crate::auth::write_principal_root_object_resolved(
         data_dir,
         context.root(),
