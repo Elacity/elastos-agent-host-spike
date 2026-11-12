@@ -227,11 +227,14 @@ fn checked_bundle_checks_the_manifest_once() {
         ),
         "checked_bundle_observed is not the seam with no limit:\n{unbudgeted}"
     );
+    // The Runtime's parse and its validate() are both inside the Runtime's
+    // own reader, which the library calls once; it makes neither call itself.
+    assert_eq!(code.matches("PinnedManifest::parse(").count(), 1);
     for runtime_check in ["serde_json::from_slice", ".validate()"] {
         assert_eq!(
             code.matches(runtime_check).count(),
-            1,
-            "{runtime_check} is not in one place"
+            0,
+            "the library makes the Runtime's check {runtime_check} itself"
         );
     }
 }

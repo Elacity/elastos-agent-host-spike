@@ -370,7 +370,6 @@ version = "2.0.1"
 dependencies = [
  "elastos-common",
  "rustix",
- "serde_json",
  "sha2",
 ]
 

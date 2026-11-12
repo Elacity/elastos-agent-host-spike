@@ -1075,11 +1075,17 @@ content bundle is the same template's `content.capsule.json` and
 `sample.example`, copied into the lane with its `viewer` set to the viewer's
 string name, which is the form the Runtime manifest type parses.
 
-The Runtime's manifest requirement today is `{name, kind}` only
-(`elastos/crates/elastos-common/src/manifest.rs:276-279`), so the CID key is a
-refused unknown field before any bundle is resolved, and no launch can name,
-let alone check, content by its CID. `requires_cid_is_refused_today` records
-that refusal from the real route; its control removes only `requires[0].cid`
+The ordinary manifest type's requirement is `{name, kind}` only
+(`CapsuleRequirement` in `elastos/crates/elastos-common/src/manifest.rs`) and
+still refuses a CID key. The Runtime has a second reader, `PinnedManifest`
+(`elastos/crates/elastos-common/src/pinned_manifest.rs`), which reads
+`requires[].cid` and checks each pin's form, and the one bundle check now
+parses with it. So a viewer bundle that pins its content is staged and named:
+`a_viewer_that_pins_its_content_is_staged_and_named` records that from the
+real route, with the same manifest without the pin (another name) and a pin
+of the wrong form (refused, in that reader's words). **No launch reads a pin
+yet**, so nothing can open, let alone check, content by its CID. The control
+`the_plain_staged_probe_is_still_a_bundle` removes only `requires[0].cid`
 from the same manifest and passes. No ignored journey exists: the three that
 were here could not test the CID rule, so they were deleted instead of kept
 as passing-on-failure placeholders. A real journey needs all of these:
@@ -1105,4 +1111,4 @@ as passing-on-failure placeholders. A real journey needs all of these:
 
 | Blocked test | Blocker ID | Runtime change that enables acceptance |
 | --- | --- | --- |
-| (not written: the three ignored journeys were deleted) | AC-M2E-CONTENT-CID | Anders: the elastos-common manifest reader accepts `requires[].cid`, launch resolves that CID to a registered content capsule whose name equals the requirement's CID and refuses a mismatch with its own reason, and a probe effect opens the content and checks its bytes. A path or a name in that field stays a refusal. Sash's yes is needed before the reader patch is packed. |
+| (not written: the three ignored journeys were deleted) | AC-M2E-CONTENT-CID | Anders: a launch reads `requires[].cid`, resolves that CID to a registered content capsule whose name equals the requirement's CID and refuses a mismatch with its own reason, and a probe effect opens the content and checks its bytes. A path or a name in that field stays a refusal. The reader of that field exists (`PinnedManifest` in elastos-common, on the main line) and the bundle check names a bundle that uses it; no start path calls it yet. |

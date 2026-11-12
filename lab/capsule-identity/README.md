@@ -24,9 +24,13 @@ sign that printed lab CID, and a check can say whether that key did.
   capsule identity. It is not the Runtime's published name (see
   [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)).
 - The one schema check is the Runtime's own. `capsule.json` at the bundle root
-  is parsed as `elastos_common::CapsuleManifest`, which refuses an unknown
-  field, and then checked with its `validate()`. Each refusal keeps the
-  Runtime's own text. The lab adds no field, no schema and no parser.
+  is read with `elastos_common::PinnedManifest::parse`, the Runtime's reader
+  for a manifest that may pin a requirement by CID (`requires[].cid`). It
+  checks each pin's form, parses everything else as
+  `elastos_common::CapsuleManifest`, which refuses an unknown field, and
+  checks that with its `validate()`. Each refusal keeps the Runtime's own
+  text or code. A pin is checked for its form only: nothing here finds or
+  reads the capsule it names. The lab adds no field, no schema and no parser.
 
 ## The encoding
 
@@ -186,14 +190,16 @@ with an empty, `.` or `..` part, two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
 claimed name by calling `lab_cid`; it computes no name of its own.
 
-The CIDv1 bytes and the base32 text are one marked copy (`cid_bytes`, one
-encoder, one decoder). Since M2 part B it lives, with the walk and the rest
+The CIDv1 bytes and the base32 text are one marked copy (`cid_bytes` and one
+encoder; the claim check reads a CID's text with the Runtime's `cid_form`, so
+the copy has no decoder). Since M2 part B it lives, with the walk and the rest
 of the identity code, in the workspace crate `elastos-bundle-identity`
 (`elastos/crates/elastos-bundle-identity/src/lib.rs`), moved there text for
 text. This crate re-exports that crate's public names and has no encoder of
-its own. `cid_bytes`, the base32 printer (`printed_cid`) and the base32
-decoder (`decode_base32`) are private there and are reached through
-`LabCid`'s printing and parsing; the two functions that build the tree,
+its own. `cid_bytes` and the base32 printer (`printed_cid`) are private
+there and are reached through `LabCid`'s printing; `LabCid`'s parsing reads
+the text with `cid_form`, in `elastos-common`, and that crate has the one
+base32 decoder; the two functions that build the tree,
 `encode_entries` and `encode_listed_files`, are public there and re-exported
 here. In the Runtime's workspace the `cid` 0.11 crate is used only by
 `elastos-server` and `elastos-namespace`, which neither this crate nor the
@@ -448,7 +454,7 @@ claimed)` (`tests/check_name.rs`):
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
-| A wrong lab CID is refused with both values; a claim that is not a lab CID is refused as one, before any bundle is read | `claimed_name_is_checked_never_trusted` | F-CI3g (no comparison), F-CI3h (no `b`), F-CI3k (any CID bytes), F-CI3l (characters outside the alphabet dropped), F-CI3m (uppercase), F-CI3p (order), F-CI18l (no re-encode) |
+| A wrong lab CID is refused with both values; a claim that is not a lab CID is refused as one, before any bundle is read | `claimed_name_is_checked_never_trusted` | F-CI3g (no comparison), F-CI3h (no `b`), F-CI3k (any 59-character text that starts with `bafkrei`), F-CI3l (characters outside the alphabet dropped), F-CI3m (uppercase), F-CI3p (order), F-CI18l (no re-encode) |
 | `lab_cid`'s refusals pass through | `check_name_preserves_lab_cid_refusals` | F-CI3n |
 | `check_name` names the bundle only by calling `lab_cid` | `check_name_uses_the_single_naming_path` | F-CI3o |
 
@@ -557,8 +563,9 @@ the bytes it hands out are the bytes its lab CID names.
   from that same check, and `manifest_name()` hands it out. M2-S2 added the
   manifest's `role` the same way: `manifest_role()` hands out the spelling the
   manifest states, through the infallible `CapsuleRole::as_str`, with no
-  default. `check_manifest` returns both values from its one `CapsuleManifest`
-  parse, so a caller that needs the name or the role never parses
+  default. `check_manifest` returns both values from its one read of the
+  manifest (`PinnedManifest::parse`, which parses the `CapsuleManifest` once),
+  so a caller that needs the name or the role never parses
   `capsule.json` again (P10). Both are identity data the manifest states, not
   a decision.
 - The entries come in the walk's order. The encoder sorts each directory's
@@ -811,7 +818,7 @@ not loosen, skip or copy the manifest check.
 | --- | --- | --- |
 | The listing of the copy's five files gets the pin, the value `encode_entries` gives for the same files; on a temp copy whose `viewer` is the Runtime type's string, `lab_cid` of the folder equals `encode_listed_files` of that folder's listing | `photo_listing_gets_the_lab_cid_of_its_folder` | F-CI47a (the root is the photo rule's raw-listing CID: the SHA-256 of a `{path,size,sha256}` JSON listing, not of the directory block), F-CI47b (every leaf's Tsize is 0) |
 | README's Python rule recomputes the photo pin | `readme_python_recomputes_every_lab_cid_pin` | F-CI47a |
-| `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime type refuses is read as plain JSON) |
+| `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime's reader does not parse is named all the same) |
 | A listed file over one chunk is refused with its path; one of exactly one chunk is a leaf | `listed_file_over_the_chunk_limit_is_refused` | F-CI47c (`encode_listed_files` has no size refusal) |
 | A listed file over one leaf is still refused, its text names its path, its length and `encode_entries`, and `encode_entries` names the same file from its bytes (task 048) | `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c |
 | The listing's lab CID gets the one package record from `sign_cid_record`, with the record's exact payload, and `verify_cid_record` passes it; no folder is walked (task 049) | `a_closure_listing_gets_a_package_record_by_its_cid` | F-CI49c |
@@ -1416,7 +1423,7 @@ second, platform-specific CID through a binding (PRINCIPLES 13). The rule
 keys on the manifest type, not on the label: a `type: data` bundle such as
 `content-sample` binds under `*` or under a platform label. Whether a bundle
 is `wasm` comes from the one manifest check: `check_manifest` returns it
-from its one `CapsuleManifest` parse, and the walk keeps it in the
+from its one read of the manifest (`PinnedManifest::parse`), and the walk keeps it in the
 `CheckedBundle` it makes. Nothing else parses `capsule.json` (P10). The
 payload bytes, the schema and the domain are 015's: `*` is written into the
 payload like any other label. Only "`*` for `wasm`" is a rule; other capsule
@@ -1448,7 +1455,7 @@ admission, launch, rotation or delegation. It runs no build.
 | `agent-host` under `aarch64-darwin` is refused with reason (e2), at signing and in both verifiers | `a_wasm_app_under_a_platform_label_is_refused` | F-CI16a, F-CI16h |
 | `*` with `x86_64-linux` is refused with reason (c), at signing, in the given list and in the binding's list; `*` alone passes | `the_portable_label_stands_alone` | F-CI16b, F-CI16i |
 | `content-sample` (`type: data`) binds under `*` and under `aarch64-darwin`: the rule keys on the manifest type | `a_portable_data_capsule_binds_under_the_portable_label` | F-CI16c |
-| The WASM type comes from the one `CapsuleManifest` parse in `check_manifest`, kept by the seam | `wasm_type_comes_from_the_one_manifest_check` | F-CI16d |
+| The WASM type comes from the one read of the manifest in `check_manifest` (`PinnedManifest::parse`), kept by the seam | `wasm_type_comes_from_the_one_manifest_check` | F-CI16d |
 | Two faults at once, at (e2) and each check next to it ((e), (f), (g)): the earlier check answers | `wasm_variant_refusal_order_is_stable` | F-CI16f, F-CI16g |
 | A limit, not a feature: a signed under `x86_64-linux` and b under `aarch64-darwin`, against the words in their payloads, pass both verifiers with the pinned CIDs | `a_variant_label_is_the_signers_claim` | F-CI17a |
 
@@ -1746,7 +1753,7 @@ RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-id
 The package is its own workspace (empty `[workspace]` table) with its own
 `Cargo.lock`, so the Runtime's workspace never grows for it. Dependencies:
 `elastos-bundle-identity` by path (the identity code: the walk and the
-encoder), `elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
+encoder), `elastos-common` by path (read only, for `CapsuleManifest` and `PinnedManifest`), `elastos-identity`
 by path (read only, for the one `did:key` encoder and decoder), `hex` (since
 task 018 only the tests use it), `serde_json`, `sha2`, and `ed25519-dalek` 2.1 with its `rand_core` feature.
 `rustix` 1.1.4 with its `fs` feature (safe `openat`, `fstat` and listing
@@ -1962,7 +1969,8 @@ returns the WASM flag and the manifest's `name`, and the seam reads
 `let (wasm, name) = check_manifest(&manifest.content)?;`, so F-CI1k, F-CI1l,
 F-CI3a, F-CI3b, F-CI3i and F-CI12a anchor on that line, F-CI1f and F-CI9c
 set an empty name beside the `false` flag, and F-CI1g's fallback returns
-`Ok((false, String::new()))`. `CheckedBundle` gained its `name` field, so
+`Ok((false, String::new()))` (as it was at task 036; see the paragraph on M2
+slice Q1 below for what F-CI1g plants now). `CheckedBundle` gained its `name` field, so
 F-CI9a, F-CI9b, F-CI9d, F-CI9e and F-CI9j build or define it with that field.
 The stand-in's record lookup moved into `check_records`, so F-CI32c now
 replaces the record check there and F-CI32d answers `Ok(())` where no record
@@ -2083,7 +2091,8 @@ F-CI1d prints without the `b`; F-CI1r keeps a second link of one name. F-CI3b
 joins absolute paths as folders (a leading `/` would be refused, not named).
 F-CI3d and F-CI3j keep their edits, with titles that no longer say stream.
 The hex claim check is now the base32 one: F-CI3g skips the compare, F-CI3h
-takes the claim without its `b`, F-CI3k drops the CID-bytes check, F-CI3l
+takes the claim without its `b`, F-CI3k lets through any 59-character text
+that starts with `bafkrei` (a raw leaf's CID is one such text), F-CI3l
 drops characters outside the alphabet first, F-CI3m lowercases the claim
 first, F-CI9i reads the claim itself without the `b`, F-CI4j signs the text
 without the `b`, and F-CI13a to F-CI13c plant their bugs in the parse, which
@@ -2091,13 +2100,31 @@ now keeps the claim check's root. F-CI14d and F-CI14e anchor on
 `MANIFEST_FILE` and `NAME_SIGNATURE_DOMAIN`, since the two constants they
 anchored on are gone. F-CI15ae compares only the `bafybei` start.
 
+M2 slice Q1 (a bundle whose manifest pins a requirement can be named) moved
+ten older edits, each with its same tests. The claim check now calls the
+Runtime's `cid_form` and the identity crate has no decoder, so F-CI3h, F-CI3l,
+F-CI3m and F-CI18l plant around that one call in `lab_cid_digits`, and F-CI9i
+and F-CI13a call `cid_form` themselves. F-CI3k and F-CI13a no longer take any
+CID bytes: each lets through any 59-character text that starts with `bafkrei`,
+whether or not it is a CID at all; a raw leaf's CID is one such text, and it
+is the one their tests use. `check_manifest` now parses with
+`PinnedManifest::parse`, which also calls `validate()`, so there is no parse
+line and no `validate()` line left to edit: F-CI1g and F-CI1h each put an
+early return before that call, `Ok((false, String::new(), String::new()))`
+when the reader's answer is `Unparsed` (F-CI1g) or `Invalid` (F-CI1h), so a
+bundle whose manifest the reader does not parse, or that fails its
+`validate()`, is named all the same. F-CI16c anchors on
+`manifest.capsule_type()`. The edits around the call leave `cid_form`
+itself as it is; its own tests are in `elastos-common`.
+
 Task 016 moved seventeen older edits, each with its same bug and the same
 tests. The seam now keeps `check_manifest`'s answer
 (`let wasm = check_manifest(&manifest.content)?;`), so F-CI1k, F-CI1l,
 F-CI3a, F-CI3b, F-CI3i and F-CI12a anchor on that line, F-CI1f keeps the flag
 `false` when it skips a missing manifest, and F-CI9c's seam keeps no flag.
 `check_manifest` now ends `validate()...?;` and `Ok(wasm)`, so F-CI1h drops
-the `validate()` line and F-CI1g's fallback returns `Ok(false)`.
+the `validate()` line and F-CI1g's fallback returns `Ok(false)` (as they were
+at task 016; the paragraph on M2 slice Q1 above says what both plant now).
 `CheckedBundle` gained its `wasm` field, so F-CI9a, F-CI9b, F-CI9d, F-CI9e and
 F-CI9j build or define it with that field. Check (e2) sits between (e) and
 (f), so F-CI15t swaps (e) and (f) with (e2) after them. Signing now walks with

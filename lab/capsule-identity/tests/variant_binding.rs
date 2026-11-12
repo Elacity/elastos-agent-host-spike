@@ -1170,30 +1170,35 @@ fn wasm_type_comes_from_the_one_manifest_check() {
     // the seam keeps what that one call returns. Nothing else parses
     // capsule.json or names the manifest type.
     let code = library_code();
-    let parse = ": CapsuleManifest = serde_json::from_slice";
+    let parse = "PinnedManifest::parse(";
     assert_eq!(code.matches(parse).count(), 1, "{parse}");
     let check = library_item(&code, "fn check_manifest(");
     assert_eq!(check.matches(parse).count(), 1, "{check}");
     assert_eq!(
         check
-            .matches("manifest.capsule_type == CapsuleType::Wasm")
+            .matches("manifest.capsule_type() == &CapsuleType::Wasm")
             .count(),
         1,
         "{check}"
     );
-    // The `use` line, then check_manifest: nowhere else, apart from the two
-    // refusal texts that name the Runtime's checks.
+    // The `use` line, then check_manifest: nowhere else. The library no
+    // longer names `CapsuleManifest` in code, only in the two refusal texts
+    // that name the Runtime's checks, and it parses no JSON itself: the
+    // Runtime's reader of a manifest that may pin a requirement does both.
     for (text, count) in [
-        ("CapsuleManifest", 4),
+        ("CapsuleManifest", 2),
         ("CapsuleType", 2),
         ("capsule_type", 1),
-        ("serde_json::", 1),
+        ("serde_json::", 0),
+        ("PinnedManifestError::", 3),
     ] {
         assert_eq!(code.matches(text).count(), count, "{text}");
     }
     assert_eq!(
-        code.matches("use elastos_common::{CapsuleManifest, CapsuleType};")
-            .count(),
+        code.matches(
+            "use elastos_common::{cid_form, CapsuleType, PinnedManifest, PinnedManifestError};"
+        )
+        .count(),
         1
     );
     let seam = library_item(&code, "pub fn checked_bundle_within_observed(");

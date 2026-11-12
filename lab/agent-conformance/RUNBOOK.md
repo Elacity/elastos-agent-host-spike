@@ -915,6 +915,6 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 
 ## Content capsule named by its CID (M2 exit (e), PH6)
 
-- `requires_cid_is_refused_today` stages the viewer probe through the staging route and records the refusal the manifest reader gives now (`unknown field cid`). It goes red when the Runtime reads `requires[].cid`.
-- `the_plain_staged_probe_is_still_a_bundle` is the control: the same manifest with only `requires[0].cid` removed passes the same check, so the refusal is that key alone.
+- `a_viewer_that_pins_its_content_is_staged_and_named` stages the viewer probe, whose manifest pins the content bundle's CID in `requires[]`, through the staging route. The one bundle check names it; the same manifest without the pin gets another name; a pin written in capitals is refused with the Runtime reader's own text (`pin_form_invalid`). It launches nothing: no launch reads a pin yet.
+- `the_plain_staged_probe_is_still_a_bundle` is the control: the same manifest with only `requires[0].cid` removed passes the same check.
 - No ignored journey exists. A real journey for AC-M2E-CONTENT-CID needs a probe effect that opens the content and checks its bytes, a content registration path in the throwaway Home, a negative case that asserts the Runtime's own CID-mismatch refusal, and entry through the route. GAPS.md lists all four with the Runtime change. The deleted ignored journeys accepted any failed exit, so they could not test the CID rule.

@@ -136,8 +136,10 @@ fn by_cid(data_dir: &Path) -> PathBuf {
     data_dir.join("capsules").join("by-cid")
 }
 
-/// Read a signature file, at most [`MAX_SIGNATURE_FILE_BYTES`] of it. Only
-/// [`check_bundle_signature`] calls this, at its place in the order.
+/// Read a signature file of at most [`MAX_SIGNATURE_FILE_BYTES`]. The read
+/// takes one byte more than that, which is how it learns that a file is over
+/// the cap; no more of such a file is read. Only [`check_bundle_signature`]
+/// calls this, at its place in the order.
 fn read_signature_file(path: &Path) -> Result<Vec<u8>, BundleRefusal> {
     let unread = |error: std::io::Error| {
         BundleRefusal::SignatureUnparsed(format!("could not read the signature file: {error}"))
@@ -185,8 +187,9 @@ pub struct AcceptedSignature {
 /// `did:key` and the bytes that were checked.
 ///
 /// The order is fixed: the file exists; the Home trusts at least one key;
-/// only then is the file read, at most [`MAX_SIGNATURE_FILE_BYTES`] of it,
-/// and it parses and names this CID; the signer is one canonical Ed25519
+/// only then is the file read (up to [`MAX_SIGNATURE_FILE_BYTES`] and one
+/// byte more, to tell a file over the cap), and it parses and names this CID;
+/// the signer is one canonical Ed25519
 /// `did:key`; the signature verifies strictly for that key over the CID text;
 /// and only then, that key is one the Home trusts. There is no `dev_mode`
 /// here: a bundle named by CID is never admitted unsigned.
@@ -222,9 +225,11 @@ pub fn check_bundle_signature(
             "schema is not {BUNDLE_SIGNATURE_SCHEMA}"
         )));
     }
-    if parsed.signature.len() != 128 || !parsed.signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+    // One spelling of a signature: lower-case hex, as `sign-payload` prints it.
+    let lower_hex = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+    if parsed.signature.len() != 128 || !parsed.signature.bytes().all(lower_hex) {
         return Err(BundleRefusal::SignatureUnparsed(
-            "signature is not 128 hex characters".into(),
+            "signature is not 128 lower-case hex characters".into(),
         ));
     }
     let computed = cid.to_string();
@@ -284,6 +289,7 @@ pub fn walk_refusal(refusal: Refusal) -> BundleRefusal {
         Refusal::Changed { .. } => "bundle_walk_changed",
         Refusal::Unreadable { .. } => "bundle_walk_unreadable",
         Refusal::OverBudget { .. } => "bundle_walk_over_budget",
+        Refusal::PinRefused { .. } => "bundle_walk_pin_refused",
         Refusal::NotALabCid { .. } => "bundle_walk_not_a_cid",
         Refusal::NameMismatch { .. } => "bundle_walk_name_mismatch",
     };
@@ -478,10 +484,35 @@ pub(crate) mod tests {
         }))
         .unwrap();
         let short = file_for(CID_A, &signer, &signature[..127]);
+        // The same signature in capitals: a second spelling, refused.
+        let capitals = file_for(CID_A, &signer, &signature.to_uppercase());
+        assert_ne!(signature.to_uppercase(), signature);
+        // A key written twice, with the same value both times.
+        let twice = String::from_utf8(file_for(CID_A, &signer, &signature))
+            .unwrap()
+            .replacen('{', &format!("{{\"cid\":\"{CID_A}\","), 1)
+            .into_bytes();
         let not_hex = file_for(CID_A, &signer, &format!("{}g", &signature[..127]));
-        for file in [unknown_key, other_schema, short, not_hex, b"{".to_vec()] {
-            let refusal = check(Some(&file), CID_A, &verifier).expect_err("another shape");
-            assert_eq!(refusal.code(), "bundle_signature_unparsed", "{refusal}");
+        let repeated = check(Some(&twice), CID_A, &verifier).expect_err("a repeated key");
+        assert!(
+            repeated.to_string().contains("duplicate field `cid`"),
+            "{repeated}"
+        );
+        for (case, file) in [
+            ("unknown key", unknown_key),
+            ("other schema", other_schema),
+            ("127 characters", short),
+            ("not hex", not_hex),
+            ("capitals", capitals),
+            ("a repeated key", twice),
+            ("not json", b"{".to_vec()),
+        ] {
+            let refusal = check(Some(&file), CID_A, &verifier).expect_err(case);
+            assert_eq!(
+                refusal.code(),
+                "bundle_signature_unparsed",
+                "{case}: {refusal}"
+            );
         }
     }
 
@@ -672,6 +703,15 @@ pub(crate) mod tests {
         assert_eq!(
             walk_refusal(Refusal::NoManifest).code(),
             "bundle_walk_no_manifest"
+        );
+        let refusal = walk_refusal(Refusal::PinRefused {
+            code: "pin_form_invalid",
+            requirement: "content".into(),
+        });
+        assert_eq!(refusal.code(), "bundle_walk_pin_refused");
+        assert_eq!(
+            refusal.to_string(),
+            "bundle_walk_pin_refused: the Runtime refuses the pinned manifest capsule.json (pin_form_invalid): requirement \"content\""
         );
     }
 
