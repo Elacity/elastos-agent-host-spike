@@ -378,6 +378,42 @@ def job_inputs(workflow, source, job, leaves=frozenset(), follows=frozenset()):
 
 
 RULE = "scripts/ci-installed-app-paths.py"
+TEST_TARGET = re.compile(r"""(?:cargo|CARGO_BIN\}?)["',]*\s+["']?(?:test|clippy|bench)\b|--(?:tests|all-targets|benches|examples)\b""")
+
+
+def installed_app_lines(source, texts=None):
+    """(file, line) for each line outside a comment that the installed-app jobs run or reach:
+    their steps, then every tracked script under scripts/ that such a line names by repository
+    path or, from its own folder, by file name. texts replaces the text of a script."""
+    scripts = {name for name in TRACKED if name.startswith("scripts/") and name.endswith((".sh", ".py", ".mjs", ".js"))}
+    queue = [("", step) for job in sorted(INSTALLED_APP_JOBS) for step in steps(job, jobs(source))]
+    reached, lines = set(), []
+    while queue:
+        name, text = queue.pop()
+        for line in text.splitlines():
+            if line.lstrip().startswith(("#", "//", "*")):
+                continue
+            lines.append((name or "ci.yml", line.strip()))
+            for token in re.findall(r"[\w./-]+", line):
+                parts = token.strip("/").split("/")
+                for tail in ("/".join(parts[start:]) for start in range(len(parts))):
+                    for script in {tail, os.path.dirname(name) + "/" + tail} & scripts - reached:
+                        reached.add(script)
+                        queue.append((script, (texts or {}).get(script) or (REPO / script).read_text(errors="replace")))
+    return lines
+
+
+def notes_named(lines, rule):
+    """(file, path) for each notes path a line names: anything under a bare docs/ or lab/, and
+    a tracked file the rule would skip, with or without one leading variable such as $ROOT."""
+    found = set()
+    for name, line in lines:
+        for token in re.findall(r"[\w./-]+", line):
+            path = re.sub(r"\A[A-Z][A-Z_]*/", "", token.strip("/"))
+            folder = path in ("docs", "lab") and token != path  # written as a path: $ROOT/lab, lab/
+            if folder or path.startswith(("docs/", "lab/")) or (path in TRACKED and rule.is_notes_or_lab(path)):
+                found.add((name, path))
+    return found
 
 
 def glob_regex(pattern):
@@ -2343,6 +2379,36 @@ class ReleasePolicyTests(unittest.TestCase):
             for job in sorted(INSTALLED_APP_JOBS):
                 found = {name for name in job_inputs(WORKFLOW, changed, job) if rule.is_notes_or_lab(name)}
                 self.assertIn(path, found, (job, planted))
+        # Line by line: the jobs' steps and every script they reach name no notes path but in two
+        # messages, and build one test target, in the elastos workspace, which names no lab crate.
+        messages = {("scripts/check-versioning.sh", "docs/VERSIONING.md"), ("scripts/publish-release.sh", "docs/VERSIONING.md")}
+        test_targets = {("scripts/pinned-model-consumer-proof.sh",
+                         '"$CARGO_BIN" test --locked -p elastos-server --lib -- --ignored --nocapture \\')}
+
+        def seen(source=SOURCE, texts=None):
+            lines = installed_app_lines(source, texts)
+            return notes_named(lines, rule), {(name, line) for name, line in lines if TEST_TARGET.search(line)}
+
+        self.assertEqual(seen(), (messages, test_targets))
+        reached = {name for name, _ in installed_app_lines(SOURCE)}
+        self.assertLessEqual({"ci.yml", "scripts/setup-source-home.sh", "scripts/update-hop-compare.py", "scripts/check-release-musl.sh",
+                              "scripts/ci-installed-journeys.py", "scripts/install-source-home-runtime.py"}, reached)
+        # A reached script that reads a bare docs/ path, and a step or script that builds the
+        # model-provider capsule's test targets with no lab/ on its command line, are both seen.
+        installer = "scripts/install-source-home-runtime.py"
+        for planted in ("    text = open('docs/INSTALL.md').read()", "cat docs/INSTALL.md", 'cp -R "${ROOT}/lab" "$HOME"',
+                        'head -1 "$REPO_ROOT/PRINCIPLES.md"', "ls docs/*.md"):
+            notes, _ = seen(texts={installer: (REPO / installer).read_text() + planted + "\n"})
+            self.assertEqual({name for name, _ in notes - messages}, {installer}, planted)
+            notes, _ = seen(SOURCE.replace(call, f"          {planted.strip()}\n{call}"))
+            self.assertEqual({name for name, _ in notes - messages}, {"ci.yml"}, planted)
+        for planted in ("(cd capsules/model-provider && cargo test --locked)",
+                        '"$CARGO_BIN" test --locked --manifest-path "${ROOT}/capsules/model-provider/Cargo.toml"',
+                        "cargo build --locked --release --all-targets", "cargo clippy --tests"):
+            _, built = seen(SOURCE.replace(call, f"          {planted}\n{call}"))
+            self.assertEqual(built - test_targets, {("ci.yml", planted)})
+            _, built = seen(texts={"scripts/setup-source-home.sh": (REPO / "scripts/setup-source-home.sh").read_text() + planted + "\n"})
+            self.assertEqual(built - test_targets, {("scripts/setup-source-home.sh", planted)})
 
     def test_pull_request_runs_cancel_at_the_first_failed_job(self):
         watcher = JOBS["cancel-on-failure"]
