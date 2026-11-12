@@ -20,6 +20,11 @@ if [ -L "$lane/target" ]; then
 fi
 mkdir -p "$lane/target"
 run_dir=$(mktemp -d "$lane/target/run-table.XXXXXX")
+# Launch evidence comes only from this run-private file: the harness appends one
+# record per successful start of the given Runtime, and the report reads this
+# file alone. `mktemp` creates it empty with mode 0600.
+launch_record=$(mktemp "$run_dir/launches.XXXXXX")
+export AGENT_CONFORMANCE_LAUNCH_RECORD="$launch_record"
 export CARGO_NET_OFFLINE=true
 export CARGO_TARGET_DIR="$lane/target/host"
 export CARGO_BUILD_BUILD_DIR="$lane/target/host-build"
@@ -50,7 +55,9 @@ else
     status=$?
 fi
 check_tree
-sed -n '/^version identity:/p; /^runtime launched:/p; /^given Runtime changed:/p; /^operator census:/p; /^cleanup census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^instance overlap:/p; /^cancel settlement:/p; /^kill settlement:/p; /^absent-policy settlement:/p; /^fixture controller:/p; /^fixture read:/p; /^session grant/p; /^host key read:/p; /^agent-host /p; /^FAILURE /p; /^SKIPPED /p' "$run_dir/results"
+sed -n '/^version identity:/p; /^given Runtime changed:/p; /^operator census:/p; /^cleanup census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^instance overlap:/p; /^cancel settlement:/p; /^kill settlement:/p; /^absent-policy settlement:/p; /^fixture controller:/p; /^fixture read:/p; /^session grant/p; /^host key read:/p; /^agent-host /p; /^FAILURE /p; /^SKIPPED /p' "$run_dir/results"
+mode=$(stat -c %a "$launch_record" 2>/dev/null || stat -f %Lp "$launch_record")
+printf 'launch record file: %s (%s record(s), mode %s)\n' "$launch_record" "$(awk 'END {print NR}' "$launch_record")" "$mode"
 printf 'process_isolation rows: process isolation, not capsule isolation; diagnostic results only\n'
 printf 'instance rows: two_instances_overlap_with_separate_grants and instance_grant_does_not_authorise_sibling each run one shared journey; process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9\n'
 if AGENT_CONFORMANCE_TREE_DIRTY_DURING_RUN="$tree_dirty" "$CARGO_TARGET_DIR/debug/report" "$run_dir/list" "$run_dir/results" "$status" "$run_dir/VERSIONS.json"; then

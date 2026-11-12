@@ -26,9 +26,9 @@ pub enum Observation {
     Native {
         role: String,
         sha256: String,
-        /// The absolute path the suite was told to launch. The Runtime prints
-        /// it beside its hash; a Runtime the suite built prints no path, so the
-        /// receipt can tell a named path from a checkout build.
+        /// The absolute path the suite was named as the Runtime to launch. The
+        /// Runtime prints it beside its hash; a Runtime the suite built prints
+        /// no path, so the receipt can tell a named path from a checkout build.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },

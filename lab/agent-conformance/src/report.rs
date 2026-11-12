@@ -1,7 +1,7 @@
 //! Cargo owns inventory/results. This parser owns both the table and receipt.
 
 use crate::identity::{sha256, Observation, ProbeIdentity, PREFIX};
-use crate::runtime::{Launch, LAUNCHED};
+use crate::runtime::Launch;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
@@ -113,9 +113,6 @@ struct Evidence {
     skipped: BTreeMap<String, Vec<String>>,
     reasons: BTreeMap<String, Vec<String>>,
     identities: Identities,
-    /// The launch lines the harness printed after each successful start of the
-    /// given Runtime. Read from the whole output, like the identity lines.
-    launches: Vec<Launch>,
     failures: Vec<String>,
     duplicate_inventory: bool,
 }
@@ -161,12 +158,6 @@ impl Evidence {
                 if let Err(reason) = result {
                     evidence.failures.push(reason);
                 }
-            } else if let Some(launch) = Launch::parse(line) {
-                evidence.launches.push(launch);
-            } else if line.starts_with(LAUNCHED) {
-                evidence
-                    .failures
-                    .push("malformed Runtime launch line".into());
             } else if let Some((name, result)) = line
                 .strip_prefix("test ")
                 .and_then(|s| s.split_once(" ... "))
@@ -392,7 +383,7 @@ struct Identities {
     /// and a line does not say which test printed it, so a second, different
     /// hash is a failure wherever it came from, and the first one is not
     /// treated as the Runtime that ran. Nothing here shows a launch; the
-    /// launch lines carry that.
+    /// launch record file carries that.
     runtime: Option<RuntimeIdentity>,
     provider: Option<String>,
     built: BTreeMap<String, ProbeIdentity>,
@@ -400,8 +391,8 @@ struct Identities {
 }
 
 /// The Runtime identity the suite printed: the SHA-256 it took of the file
-/// first, and the named path it was told to launch. `path` is None when the
-/// suite built its own Runtime, which was told no path.
+/// first, and the path it was named to launch. `path` is None when the suite
+/// built its own Runtime, which was named no path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeIdentity {
     pub path: Option<String>,
@@ -593,7 +584,7 @@ pub fn reviews_file_failure(reviews: &Path, repository: &Path) -> Option<String>
 /// which release the installed bytes match, not that the release is genuine.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct InstalledRuntime {
-    /// The installed binary path the report was given, as given. The launched
+    /// The installed binary path the report was given, as given. The recorded
     /// path is compared with it after both are resolved to canonical paths.
     pub binary_path: PathBuf,
     pub version: String,
@@ -715,22 +706,62 @@ pub fn release_commit_failures(
     }
 }
 
+/// The launch records the receipt grades: one record per successful start of
+/// the given Runtime, read from the run-private file the runner made. A test's
+/// own output carries no record, so text that looks like a launch cannot stand
+/// in for one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaunchRecord {
+    /// The runner named no record file: the harness recorded nothing.
+    Missing,
+    /// The file could not be read, or held a line the harness would not write.
+    Unreadable(String),
+    /// The records, in the order the harness appended them.
+    Records(Vec<Launch>),
+}
+
+impl LaunchRecord {
+    /// Reads the file at `path`. Every non-empty line must be one record the
+    /// harness writes; a line that is not is refused as a whole, so a partly
+    /// understood file is no evidence.
+    pub fn read(path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::Unreadable("could not read the launch record file".into());
+        };
+        let mut launches = Vec::new();
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let Some(launch) = Launch::parse_record(line) else {
+                return Self::Unreadable("malformed launch record".into());
+            };
+            launches.push(launch);
+        }
+        Self::Records(launches)
+    }
+}
+
 /// Every reason the receipt cannot show that the suite launched the installed
-/// path; empty means at least one launch record exists and every record names
-/// the installed binary's path with the SHA-256 the harness took of that file
-/// immediately before that launch. `launches` are the lines the harness
-/// printed after each successful start; the identity line printed when the
-/// binary was named comes before any launch and is not one of them.
-/// `installed` is the installed Runtime once its hash chain matched and bound
-/// to this commit. The check is of paths and hashes: it does not see the bytes
-/// the operating system then executed, and the Runtime ran with a throwaway
-/// data folder.
+/// path; empty means the record file holds at least one record and every
+/// record names the installed binary's path with the SHA-256 the harness took
+/// of that file immediately before that launch. `record` is read from the
+/// file the runner named; the identity line printed when the binary was named
+/// comes before any launch and is not a record. `installed` is the installed
+/// Runtime once its hash chain matched and bound to this commit. The check is
+/// of paths and hashes: it does not see the bytes the operating system then
+/// executed, and the Runtime ran with a throwaway data folder.
 pub fn installed_binary_launched_failures(
-    launches: &[Launch],
+    record: &LaunchRecord,
     installed: Option<&InstalledRuntime>,
 ) -> Vec<String> {
     let Some(installed) = installed else {
         return vec!["no matched installed Runtime to compare".into()];
+    };
+    let launches = match record {
+        LaunchRecord::Missing => return vec!["no launch record file".into()],
+        LaunchRecord::Unreadable(reason) => return vec![reason.clone()],
+        LaunchRecord::Records(launches) => launches,
     };
     if launches.is_empty() {
         return vec!["no launch of the installed path was recorded".into()];
@@ -905,6 +936,7 @@ pub fn write_reviewed_run(
         reviews_file_failure: None,
         tree_check_failure: None,
         installed: None,
+        launch_record: LaunchRecord::Missing,
     };
     write_bound_run(listed, output, cargo_ok, git, bound, receipt, gaps)
 }
@@ -925,6 +957,10 @@ pub struct Bound<'a> {
     /// `None` means no installed Runtime was given: the receipt then carries no
     /// installed Runtime row or field at all.
     pub installed: Option<Result<InstalledRuntime, Vec<String>>>,
+    /// The launch records read from the run-private file the runner named.
+    /// `Missing` means the runner named no file, so the installed-path row has
+    /// no launch evidence.
+    pub launch_record: LaunchRecord,
 }
 
 /// `write_reviewed_run` with the installed Runtime. Like review binding, the
@@ -979,6 +1015,7 @@ pub fn render_reviewed_run(
         reviews_file_failure: None,
         tree_check_failure: None,
         installed: None,
+        launch_record: LaunchRecord::Missing,
     };
     render_bound_run(listed, output, cargo_ok, git, bound, gaps)
 }
@@ -998,6 +1035,7 @@ pub fn render_bound_run(
         reviews_file_failure,
         tree_check_failure,
         installed,
+        launch_record,
     } = bound;
     let mut evidence = Evidence::parse(listed, output, gaps);
     let (mut table, suite_ok) = evidence.table(cargo_ok);
@@ -1058,11 +1096,11 @@ pub fn render_bound_run(
         if unstaged.is_empty() { "PASS" } else { "FAIL" }
     ));
     // Whether the suite launched the installed path is asked only when an
-    // installed Runtime was given, and it rests on the launch records alone:
-    // the identity line printed when the binary was named comes before any
-    // launch.
+    // installed Runtime was given, and it rests on the record file alone: the
+    // identity line printed when the binary was named comes before any launch,
+    // and a test's own output carries no record.
     let not_launched = installed.as_ref().map(|installed| {
-        installed_binary_launched_failures(&evidence.launches, installed.as_ref().ok())
+        installed_binary_launched_failures(&launch_record, installed.as_ref().ok())
     });
     if let Some(installed) = &installed {
         table.push_str(&format!(

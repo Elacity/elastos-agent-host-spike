@@ -385,6 +385,8 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
     // The child removes this file at its last launch, so its resolved path is
     // taken while the file is still there.
     let given_path = fs::canonicalize(&given).unwrap();
+    // The child records into its own fresh, empty file, not this run's.
+    fs::write(home.root().join("launches"), b"").unwrap();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "given_runtime_changed_after_its_first_hash_is_not_launched",
@@ -393,6 +395,10 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
             "--test-threads=1",
         ])
         .env("AGENT_CONFORMANCE_RUNTIME_BINARY", &given)
+        .env(
+            agent_conformance::runtime::LAUNCH_RECORD_FILE,
+            home.root().join("launches"),
+        )
         .env(SWAP_CHILD, "1")
         .output()
         .unwrap();
@@ -423,23 +429,22 @@ fn given_runtime_changed_after_its_first_hash_is_not_launched() {
         .line();
         assert!(stdout.contains(&format!("{line}\n")), "{stdout:?}");
     }
-    // Each successful start printed one launch line, after the start returned:
+    // Each successful start appended one record to the file the runner named:
     // the path it started, resolved, and the hash checked just before it. The
-    // refused starts printed none, so the two starts are the two lines.
+    // refused starts appended none, so the two starts are the two records. The
+    // same text in test output is not a record.
     let launched = agent_conformance::runtime::Launch {
         path: given_path.to_string_lossy().into_owned(),
         sha256: first.clone(),
     };
+    let records = fs::read_to_string(home.root().join("launches")).unwrap();
     assert_eq!(
-        stdout.matches(&format!("{}\n", launched.line())).count(),
-        2,
-        "{stdout:?}"
+        records.lines().collect::<Vec<_>>(),
+        [launched.record(), launched.record()],
+        "{records:?}"
     );
-    assert_eq!(
-        stdout.matches(agent_conformance::runtime::LAUNCHED).count(),
-        2,
-        "{stdout:?}"
-    );
+    assert!(!stdout.contains(&launched.record()), "{stdout:?}");
+    assert!(!stdout.contains("runtime launched:"), "{stdout:?}");
     assert!(stdout.contains(
         "given Runtime changed: it could not be hashed again before a launch; not launched\n"
     ));

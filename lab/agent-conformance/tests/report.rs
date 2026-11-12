@@ -1337,6 +1337,7 @@ fn a_tree_dirty_around_the_run_fails_review_binding() {
                 reviews_file_failure: None,
                 tree_check_failure,
                 installed: None,
+                launch_record: agent_conformance::report::LaunchRecord::Missing,
             },
             Some(""),
         );
@@ -1557,6 +1558,7 @@ fn reviews_file_inside_the_repository_cannot_bind() {
                 reviews_file_failure,
                 tree_check_failure: None,
                 installed: None,
+                launch_record: agent_conformance::report::LaunchRecord::Missing,
             },
             Some(""),
         );
@@ -1794,8 +1796,8 @@ impl InstalledFixture {
             sha256: sha256(runtime),
             path: path.map(|path| path.to_string_lossy().into_owned()),
         };
-        // A suite that started the given Runtime prints one launch line per
-        // start, after the start returned.
+        // A suite that started the given Runtime writes one record per start,
+        // after the start returned.
         let launches: Vec<Launch> = path
             .map(|path| Launch {
                 path: fs::canonicalize(path)
@@ -1823,14 +1825,32 @@ fn render(
     git: GitIdentity,
     installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
 ) -> (agent_conformance::report::RunReport, Value) {
-    let output = output(observations)
-        + &launches
-            .iter()
-            .map(|launch| launch.line() + "\n")
-            .collect::<String>();
+    // The harness writes these records to the run-private file; the report
+    // reads that file and never a test's output.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("launches");
+    let records: String = launches
+        .iter()
+        .map(|launch| launch.record() + "\n")
+        .collect();
+    fs::write(&path, records).unwrap();
+    render_record(
+        observations,
+        agent_conformance::report::LaunchRecord::read(&path),
+        git,
+        installed,
+    )
+}
+
+fn render_record(
+    observations: &[Observation],
+    launch_record: agent_conformance::report::LaunchRecord,
+    git: GitIdentity,
+    installed: Option<Result<agent_conformance::report::InstalledRuntime, Vec<String>>>,
+) -> (agent_conformance::report::RunReport, Value) {
     let report = agent_conformance::report::render_bound_run(
         &format!("{LIVE}: test\n"),
-        &output,
+        &output(observations),
         true,
         Ok(git),
         agent_conformance::report::Bound {
@@ -1838,6 +1858,7 @@ fn render(
             reviews_file_failure: None,
             tree_check_failure: None,
             installed,
+            launch_record,
         },
         Some(""),
     );
@@ -2188,17 +2209,21 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
     let results_path = home.root().join("results");
     fs::write(&listed_path, format!("{LIVE}: test\n")).unwrap();
     fs::write(&results_path, output(&observations)).unwrap();
-    let run = |receipt: &str, binary: bool, data: bool| {
+    let run = |receipt: &str, binary: bool, data: bool, record: Option<&Path>| {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_report"));
         command
             .env_remove("AGENT_CONFORMANCE_REVIEWS")
             .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
-            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA");
+            .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
+            .env_remove(agent_conformance::runtime::LAUNCH_RECORD_FILE);
         if binary {
             command.env("AGENT_CONFORMANCE_INSTALLED_BINARY", &fixture.binary);
         }
         if data {
             command.env("AGENT_CONFORMANCE_INSTALLED_DATA", &fixture.data);
+        }
+        if let Some(record) = record {
+            command.env(agent_conformance::runtime::LAUNCH_RECORD_FILE, record);
         }
         command
             .arg(&listed_path)
@@ -2208,7 +2233,7 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
             .output()
             .unwrap()
     };
-    let result = run("matched.json", true, true);
+    let result = run("matched.json", true, true, None);
     assert!(result.status.success(), "{result:?}");
     assert!(String::from_utf8(result.stdout)
         .unwrap()
@@ -2223,8 +2248,37 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
         receipt["installed_runtime"]["release_sha256"],
         sha256(&fixture.release)
     );
+    // The command named no record file, so the launch row has no evidence.
+    assert_eq!(
+        receipt["installed_binary_launch_failures"],
+        serde_json::json!(["no launch record file"])
+    );
 
-    let result = run("absent.json", false, false);
+    // The command reads the records from the file it names, and passes the row
+    // when one record names the installed path and its hash.
+    let record = home.root().join("launches");
+    let installed_path = fs::canonicalize(&fixture.binary).unwrap();
+    fs::write(
+        &record,
+        format!(
+            "path={} sha256={}\n",
+            installed_path.display(),
+            sha256(b"installed runtime")
+        ),
+    )
+    .unwrap();
+    let result = run("launched.json", true, true, Some(&record));
+    assert!(result.status.success(), "{result:?}");
+    assert!(String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("installed_runtime_ran (A14) | PASS | "));
+    let receipt = read_receipt(&home.root().join("launched.json"));
+    assert_eq!(
+        receipt["installed_binary_launch_status"],
+        "launched_installed_path_hash_matched"
+    );
+
+    let result = run("absent.json", false, false, None);
     assert!(result.status.success(), "{result:?}");
     let table = String::from_utf8(result.stdout).unwrap();
     let receipt = read_receipt(&home.root().join("absent.json"));
@@ -2232,7 +2286,7 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
 
     // Half a location is a mistake in the command, not an absent Runtime.
     for (name, binary, data) in [("binary.json", true, false), ("data.json", false, true)] {
-        let result = run(name, binary, data);
+        let result = run(name, binary, data, None);
         assert_eq!(result.status.code(), Some(1));
         assert_eq!(
             String::from_utf8(result.stderr).unwrap(),
@@ -2242,7 +2296,7 @@ fn report_cli_reads_an_installed_runtime_only_when_given() {
     }
 
     fs::write(&fixture.binary, b"another runtime").unwrap();
-    let result = run("unmatched.json", true, true);
+    let result = run("unmatched.json", true, true, None);
     assert!(result.status.success(), "{result:?}");
     assert!(String::from_utf8(result.stdout)
         .unwrap()
@@ -2321,7 +2375,7 @@ fn installed_path_row_needs_the_named_installed_path() {
     let home = ThrowawayHome::new().unwrap();
     let fixture = InstalledFixture::new(&home.root().join("installed"));
 
-    // A checkout build with the installed bytes prints no launch line: the row
+    // A checkout build with the installed bytes records no launch: the row
     // fails even though the hashes match, because no launch was recorded.
     let (report, document) = fixture.receipt_after_launching(b"installed runtime", None);
     assert!(
@@ -2448,7 +2502,10 @@ fn a_suite_without_a_launch_record_did_not_launch_the_installed_path() {
     )
     .unwrap();
     assert_eq!(
-        installed_binary_launched_failures(&[], Some(&installed)),
+        installed_binary_launched_failures(
+            &agent_conformance::report::LaunchRecord::Records(Vec::new()),
+            Some(&installed)
+        ),
         ["no launch of the installed path was recorded"]
     );
     let launched = Launch {
@@ -2458,7 +2515,11 @@ fn a_suite_without_a_launch_record_did_not_launch_the_installed_path() {
             .into_owned(),
         sha256: installed.binary_sha256.clone(),
     };
-    assert!(installed_binary_launched_failures(&[launched], Some(&installed)).is_empty());
+    assert!(installed_binary_launched_failures(
+        &agent_conformance::report::LaunchRecord::Records(vec![launched]),
+        Some(&installed)
+    )
+    .is_empty());
     home.finish().unwrap();
 }
 
@@ -2500,19 +2561,145 @@ fn an_identity_line_without_a_launch_record_is_no_launch() {
 }
 
 #[test]
-fn a_malformed_launch_line_fails_the_receipt() {
-    use agent_conformance::report::render_run;
-    let (observations, git) = synthetic(1, false);
-    let output = output(&observations) + "runtime launched: path=/tmp/elastos sha256=nope\n";
-    let report = render_run(&format!("{LIVE}: test\n"), &output, true, Ok(git), Some(""));
-    assert!(!report.passed);
+fn a_malformed_launch_record_fails_the_installed_path_row() {
+    use agent_conformance::report::LaunchRecord;
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    );
+    let (mut observations, git) = synthetic(1, false);
+    observations[0] = Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(b"installed runtime"),
+        path: Some(fixture.binary.to_string_lossy().into_owned()),
+    };
+    // A record file the harness could not have written is no evidence, even
+    // when it carries text shaped like a launch.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("launches");
+    fs::write(&path, b"runtime launched: path=/tmp/elastos sha256=nope\n").unwrap();
+    let (report, document) = render_record(
+        &observations,
+        LaunchRecord::read(&path),
+        git,
+        Some(installed),
+    );
+    assert!(report.table.contains("installed_runtime (A14) | PASS | "));
     assert!(
         report
-            .failures
-            .contains(&"malformed Runtime launch line".to_string()),
-        "{:?}",
-        report.failures
+            .table
+            .contains("installed_runtime_ran (A14) | FAIL | "),
+        "{}",
+        report.table
     );
+    assert_eq!(
+        document["installed_binary_launch_failures"],
+        serde_json::json!(["malformed launch record"])
+    );
+    assert_eq!(
+        document["installed_binary_launch_status"],
+        "not_launched_installed_path_hash_matched"
+    );
+    assert!(report.table.contains("versions_receipt (A14) | PASS\n"));
+    home.finish().unwrap();
+}
+
+#[test]
+fn test_output_that_looks_like_a_launch_is_not_launch_evidence() {
+    use agent_conformance::report::{Bound, LaunchRecord};
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    );
+    let (mut observations, git) = synthetic(1, false);
+    observations[0] = Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(b"installed runtime"),
+        path: Some(fixture.binary.to_string_lossy().into_owned()),
+    };
+    let launch = Launch {
+        path: fs::canonicalize(&fixture.binary)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        sha256: sha256(b"installed runtime"),
+    };
+    // A test prints exactly the record the harness would write, but the record
+    // file stays empty: only the file is launch evidence, so the row fails.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("launches");
+    fs::write(&path, b"").unwrap();
+    let output = output(&observations) + &(launch.record() + "\n");
+    let report = agent_conformance::report::render_bound_run(
+        &format!("{LIVE}: test\n"),
+        &output,
+        true,
+        Ok(git),
+        Bound {
+            reviews: None,
+            reviews_file_failure: None,
+            tree_check_failure: None,
+            installed: Some(installed),
+            launch_record: LaunchRecord::read(&path),
+        },
+        Some(""),
+    );
+    let document: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | FAIL | "),
+        "{}",
+        report.table
+    );
+    assert_eq!(
+        document["installed_binary_launch_failures"],
+        serde_json::json!(["no launch of the installed path was recorded"])
+    );
+    assert!(report.table.contains("versions_receipt (A14) | PASS\n"));
+    home.finish().unwrap();
+}
+
+#[test]
+fn a_run_without_a_launch_record_file_has_no_launch_evidence() {
+    use agent_conformance::report::LaunchRecord;
+    let home = ThrowawayHome::new().unwrap();
+    let fixture = InstalledFixture::new(&home.root().join("installed"));
+    let installed = agent_conformance::report::read_installed_runtime(
+        &fixture.binary,
+        &fixture.data,
+        agent_conformance::report::release_platform(),
+    );
+    let (mut observations, git) = synthetic(1, false);
+    observations[0] = Observation::Native {
+        role: "elastos".into(),
+        sha256: sha256(b"installed runtime"),
+        path: Some(fixture.binary.to_string_lossy().into_owned()),
+    };
+    let (report, document) =
+        render_record(&observations, LaunchRecord::Missing, git, Some(installed));
+    assert!(
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | FAIL | "),
+        "{}",
+        report.table
+    );
+    assert_eq!(
+        document["installed_binary_launch_failures"],
+        serde_json::json!(["no launch record file"])
+    );
+    assert_eq!(
+        document["installed_binary_launch_status"],
+        "not_launched_installed_path_hash_matched"
+    );
+    home.finish().unwrap();
 }
 
 #[test]
@@ -2631,7 +2818,10 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
             .into_owned(),
         sha256: sha256(b"installed runtime"),
     };
-    let evidence = output(&observations) + &(launch.line() + "\n");
+    let directory = tempfile::tempdir().unwrap();
+    let record_path = directory.path().join("launches");
+    fs::write(&record_path, launch.record() + "\n").unwrap();
+    let evidence = output(&observations);
     let receipt = |reviews, installed| {
         agent_conformance::report::render_bound_run(
             &format!("{LIVE}: test\n"),
@@ -2643,6 +2833,7 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
                 reviews_file_failure: None,
                 tree_check_failure: None,
                 installed,
+                launch_record: agent_conformance::report::LaunchRecord::read(&record_path),
             },
             Some(""),
         )

@@ -1,7 +1,8 @@
 //! Identify the native binaries under test. `harness` owns every Runtime launch.
 
 use crate::build::{lane, offline_build};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -32,11 +33,12 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
         .get_or_init(|| match std::env::var_os(RUNTIME_BINARY) {
             Some(given) => given_native(Path::new(&given), "elastos").inspect(|given| {
                 // Printed here, not in `given_native`: a version identity line
-                // enters the receipt, so only the Runtime the suite launches
+                // enters the receipt, so only the Runtime named for the suite
                 // may print one.
                 println!("elastos given, not built");
                 // The path is printed beside the hash so the receipt can check
-                // that the path the suite launched is the installed binary's.
+                // that the named path is the installed binary's. This line
+                // comes before any launch and is not launch evidence.
                 crate::identity::Observation::Native {
                     role: "elastos".into(),
                     sha256: given.sha256.clone(),
@@ -53,11 +55,10 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
 /// Printed, with both hashes, when a given Runtime is refused at a launch.
 pub const CHANGED: &str = "given Runtime changed: ";
 
-/// Printed only after the operating system started a given Runtime whose
-/// pre-launch hash matched. The identity line printed when the binary was named
-/// comes before any launch, so it is not launch evidence; the receipt's
-/// installed-path row reads these lines alone.
-pub const LAUNCHED: &str = "runtime launched: ";
+/// Names the run-private file that receives one record per successful start of
+/// the given Runtime. The runner creates it empty for each run and the harness
+/// appends to it and nowhere else; test output carries no launch record.
+pub const LAUNCH_RECORD_FILE: &str = "AGENT_CONFORMANCE_LAUNCH_RECORD";
 
 /// One launch of the given Runtime: the path that was started and the SHA-256
 /// taken of that file immediately before the start.
@@ -68,16 +69,16 @@ pub struct Launch {
 }
 
 impl Launch {
-    /// The line the harness prints after its `spawn` returned Ok.
-    pub fn line(&self) -> String {
-        format!("{LAUNCHED}path={} sha256={}", self.path, self.sha256)
+    /// One line of the record file. The harness writes this line after its
+    /// `spawn` returned Ok and nowhere else.
+    pub fn record(&self) -> String {
+        format!("path={} sha256={}", self.path, self.sha256)
     }
 
-    /// Reads a line `line` printed. Any other output yields `None`, so nothing
-    /// else can stand in for a launch.
-    pub fn parse(line: &str) -> Option<Self> {
-        let rest = line.strip_prefix(LAUNCHED)?;
-        let (path, sha256) = rest.rsplit_once(" sha256=")?;
+    /// Reads one line the harness wrote. Any other text yields `None`, so test
+    /// output cannot stand in for a record.
+    pub fn parse_record(line: &str) -> Option<Self> {
+        let (path, sha256) = line.rsplit_once(" sha256=")?;
         let path = path.strip_prefix("path=")?;
         let lowercase_hex = sha256
             .bytes()
@@ -92,14 +93,29 @@ impl Launch {
     }
 }
 
+/// Appends one record to the run-private file the runner named, and to no
+/// other output. The harness calls this only after `spawn` returned Ok, so a
+/// refused start leaves no record. Without the variable the harness records
+/// nothing; the report then has no launch evidence and its row fails.
+pub fn record_launch(launch: &Launch) -> Result<(), &'static str> {
+    let Some(path) = std::env::var_os(LAUNCH_RECORD_FILE) else {
+        return Ok(());
+    };
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .map_err(|_| "could not open the launch record file")?;
+    writeln!(file, "{}", launch.record()).map_err(|_| "could not append a launch record")
+}
+
 /// The harness calls this immediately before it starts any program. A given
 /// Runtime is hashed again here, once per launch, and is refused unless it
 /// still has the bytes first recorded for it, so a file replaced after that
 /// first hash is not launched under the recorded hash. A launch that passes
-/// returns the record to print once `spawn` has returned Ok; a run that never
-/// starts the runtime has no such record. The differing hash is also printed
-/// as an identity line, so the receipt records the conflict even if a caller
-/// drops the error.
+/// returns the record for `record_launch` to append once `spawn` has returned
+/// Ok; a run that never starts the runtime has no such record. The differing
+/// hash is also printed as an identity line, so the receipt records the
+/// conflict even if a caller drops the error.
 ///
 /// What this does not show: a replacement made after this hash and before the
 /// operating system starts the process, or what a started Runtime then starts

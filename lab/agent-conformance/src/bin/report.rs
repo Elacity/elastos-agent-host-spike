@@ -105,6 +105,13 @@ fn main() {
         .and_then(std::ffi::OsStr::to_str)
         == Some("1"))
     .then(|| "tree was dirty during the run".to_owned());
+    // The launch records come from the run-private file `run.sh` made and
+    // named. Test output is never read for them, and an unset variable leaves
+    // the installed-path row with no launch evidence.
+    let launch_record = match env::var_os(agent_conformance::runtime::LAUNCH_RECORD_FILE) {
+        None => report::LaunchRecord::Missing,
+        Some(path) => report::LaunchRecord::read(Path::new(&path)),
+    };
     let result = report::write_bound_run(
         &listed,
         &output,
@@ -115,6 +122,7 @@ fn main() {
             reviews_file_failure,
             tree_check_failure,
             installed,
+            launch_record,
         },
         receipt,
         gaps.as_deref(),
