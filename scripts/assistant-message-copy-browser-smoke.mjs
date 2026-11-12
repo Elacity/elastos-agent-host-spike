@@ -267,6 +267,24 @@ try {
     }
   }
 
+  // The browser sends a press to the page it last drew at that spot. Until it
+  // has drawn Home's prompt over the Assistant frame, a press on a prompt
+  // button goes to that frame and Home never hears of it. A pointer move goes
+  // the same way, so the pointer is put on the button until Home's own page
+  // reports a move there. Then the button is pressed, once.
+  async function pressHomePrompt(selector, label) {
+    const button = page.locator(selector);
+    await button.evaluate(node => {
+      window.__home.pointerOnButton = false;
+      node.addEventListener("mousemove", () => { window.__home.pointerOnButton = true; }, { once: true });
+    });
+    for (const deadline = Date.now() + 3000; !(await page.evaluate(() => window.__home.pointerOnButton));) {
+      if (Date.now() > deadline) throw new Error(`${label}: the pointer did not reach Home's ${selector} within 3000 ms`);
+      await button.hover({ timeout: 3000 });
+    }
+    await button.click();
+  }
+
   async function copyThroughHome(button, expected, label, hover = null) {
     stage = label;
     await resetClipboard("clipboard before copy");
@@ -276,7 +294,7 @@ try {
       const said = await status(button).textContent({ timeout: 500 }).catch(() => "");
       throw new Error(`${label}: Copy did not ask Home to write the clipboard${said ? ` (it said "${said}")` : ""}`);
     });
-    await page.locator("#home-clipboard-allow").click();
+    await pressHomePrompt("#home-clipboard-allow", label);
     const allowedAt = Date.now();
     await waitForCopyStatus(label, "Copied", expected, button, hover,
       () => status(button).filter({ hasText: "Copied" }).waitFor({ timeout: copyStatusTimeout }),
@@ -300,7 +318,7 @@ try {
   await sent.hover();
   await sent.locator("[data-copy-message]").click();
   await promptRoot().waitFor({ state: "visible", timeout: 3000 });
-  await page.locator("#home-clipboard-cancel").click();
+  await pressHomePrompt("#home-clipboard-cancel", "cancelled copy");
   const cancelledAt = Date.now();
   const sentCopy = sent.locator("[data-copy-message]");
   await waitForCopyStatus("cancelled copy", "Copy cancelled.", "clipboard before cancel", sentCopy, sent,
