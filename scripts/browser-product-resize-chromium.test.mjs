@@ -71,12 +71,20 @@ async function captureScreenshot(cdp, page, size) {
       null,
       { timeout: Math.max(1, deadline - Date.now()) },
     ).catch(() => {});
+    if (deadline - Date.now() <= 0) {
+      throw unmet();
+    }
     try {
-      return await withTimeout(
+      const shot = await withTimeout(
         cdp.send("Page.captureScreenshot"),
-        Math.max(1, deadline - Date.now()),
+        deadline - Date.now(),
         "Page.captureScreenshot",
       );
+      // A capture that arrives after the budget is still a missed budget.
+      if (Date.now() > deadline) {
+        throw unmet();
+      }
+      return shot;
     } catch (error) {
       refusals += 1;
       lastError = error;

@@ -1206,14 +1206,20 @@ async function probeExternalLink(page, dir, target) {
       };
       const attemptPress = async (label, call) => {
         timeLeft(`starting ${label}`);
+        let result;
         try {
-          return await call();
+          result = await call();
         } catch (error) {
           if (deadline - Date.now() <= 0) {
             throw new Error(`precondition not met: the early ${kind} press turn ran out of its ${EARLY_PRESS_TURN_MS} ms during ${label}; this is not a guard failure. Last error: ${error.message}`);
           }
           throw error;
         }
+        // A try that finishes after the turn's budget is still a missed budget.
+        if (Date.now() > deadline) {
+          throw new Error(`precondition not met: the early ${kind} press turn finished ${label} after its ${EARLY_PRESS_TURN_MS} ms; this is not a guard failure`);
+        }
+        return result;
       };
       let press = await attemptPress("try 1", () => earlyPress(kind, url, timeLeft));
       // Two outcomes tested nothing about the guard, and both are the check's
@@ -1323,8 +1329,9 @@ function externalLinkFailures(run) {
   for (const press of probe.earlyPresses) {
     const tries = (press.earlier || []).length + 1;
     if (press.pressedAfterMs === null) {
-      // The check's own precondition, not the guard: nothing was held during
-      // the guard, so the guard was never tested. The message names the half
+      // The check's own precondition, not the guard: either no press was held
+      // during the guard or the sheet's show went unrecorded, so the guard was
+      // never measured. The message names the half
       // of the timing the page did not record.
       const unrecorded = !press.sheetSeen
         ? "the sheet's show was not observed, so the guard's start is unknown"
