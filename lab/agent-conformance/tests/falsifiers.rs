@@ -3,20 +3,22 @@
 //! orphan a plant silently, so this test checks every edit before the runner
 //! has to report NO MATCH.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Check one entry against the text of each file its edits name. `read` returns
-/// `Some(text)` for a file this test owns, `None` for a file it does not, and
-/// `Err` for a file that does not resolve.
+/// the file text, and an error for a file that does not resolve. Edits apply in
+/// entry order to the text the earlier edits left, as the runner applies them.
 fn check_entry(
     id: &str,
     entry: &serde_json::Value,
-    read: &dyn Fn(&str) -> Result<Option<String>, String>,
+    read: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<(), String> {
     let edits = entry["edits"]
         .as_array()
         .filter(|edits| !edits.is_empty())
         .ok_or_else(|| format!("{id}: entry lists no edits"))?;
+    let mut texts: BTreeMap<String, String> = BTreeMap::new();
     for edit in edits {
         let file = edit["file"]
             .as_str()
@@ -33,17 +35,44 @@ fn check_entry(
         if old == new {
             return Err(format!("{id}: its new text equals its old text"));
         }
-        let Some(text) = read(file).map_err(|error| format!("{id}: {error}"))? else {
-            continue;
-        };
+        if !texts.contains_key(file) {
+            let text = read(file).map_err(|error| format!("{id}: {error}"))?;
+            texts.insert(file.to_owned(), text);
+        }
+        let text = texts.get_mut(file).expect("the file was read in this pass");
         let found = text.matches(old).count();
         if found != 1 {
             return Err(format!(
                 "{id}: its old text occurs {found} times in {file}; a plant needs exactly one"
             ));
         }
+        *text = text.replace(old, new);
     }
     Ok(())
+}
+
+/// The falsifier list, refused when the document names none. An empty list
+/// would let the entry test pass while checking nothing.
+fn require_entries(document: &serde_json::Value) -> Result<&[serde_json::Value], String> {
+    let entries = document["falsifiers"]
+        .as_array()
+        .ok_or("falsifiers.json lists no entries")?;
+    if entries.is_empty() {
+        return Err("falsifiers.json lists no entries".to_owned());
+    }
+    Ok(entries)
+}
+
+/// Read the file an edit names, resolved from examples/agent-host the way the
+/// runner resolves it. Every path that resolves is read and counted, including
+/// one outside this crate; a path that does not resolve is an error naming it.
+fn read_entry_file(crate_root: &Path, file: &str) -> Result<String, String> {
+    let lane_base = crate_root.join("../../examples/agent-host");
+    let target = lane_base
+        .join(file)
+        .canonicalize()
+        .map_err(|error| format!("{file} does not resolve: {error}"))?;
+    std::fs::read_to_string(&target).map_err(|error| format!("{file} does not read: {error}"))
 }
 
 #[test]
@@ -53,24 +82,10 @@ fn every_lab_falsifier_edit_still_applies() {
     let data = std::fs::read_to_string(crate_root.join("falsifiers.json"))
         .expect("falsifiers.json sits beside the crate manifest");
     let document: serde_json::Value = serde_json::from_str(&data).expect("falsifiers.json is JSON");
-    let entries = document["falsifiers"]
-        .as_array()
-        .expect("falsifiers.json lists entries");
+    let entries = require_entries(&document).expect("falsifiers.json lists entries");
 
     // The runner reads `file` while its working directory is examples/agent-host.
-    let lane_base = crate_root.join("../../examples/agent-host");
-    let read = |file: &str| {
-        let target = lane_base
-            .join(file)
-            .canonicalize()
-            .map_err(|error| format!("{file} does not resolve: {error}"))?;
-        if !target.starts_with(&crate_root) {
-            return Ok(None);
-        }
-        std::fs::read_to_string(&target)
-            .map(Some)
-            .map_err(|error| format!("{file} does not read: {error}"))
-    };
+    let read = |file: &str| read_entry_file(&crate_root, file);
     for entry in entries {
         let id = entry["id"].as_str().expect("every entry has an id");
         if let Err(reason) = check_entry(id, entry, &read) {
@@ -81,11 +96,12 @@ fn every_lab_falsifier_edit_still_applies() {
 
 #[cfg(test)]
 mod rules {
-    use super::check_entry;
+    use super::{check_entry, read_entry_file, require_entries};
     use serde_json::json;
+    use std::path::Path;
 
-    fn read_some(text: &'static str) -> impl Fn(&str) -> Result<Option<String>, String> {
-        move |_| Ok(Some(text.to_owned()))
+    fn read_some(text: &'static str) -> impl Fn(&str) -> Result<String, String> {
+        move |_| Ok(text.to_owned())
     }
 
     #[test]
@@ -115,5 +131,46 @@ mod rules {
         let error = check_entry("F-missing", &entry, &read).unwrap_err();
         assert!(error.contains("F-missing"), "{error}");
         assert!(error.contains("does not resolve"), "{error}");
+    }
+
+    #[test]
+    fn refuses_to_read_a_file_that_does_not_resolve() {
+        let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crate_root = crate_root.canonicalize().expect("the crate root resolves");
+        let error = read_entry_file(&crate_root, "tests/does-not-exist.rs").unwrap_err();
+        assert!(error.contains("tests/does-not-exist.rs"), "{error}");
+        assert!(error.contains("does not resolve"), "{error}");
+    }
+
+    #[test]
+    fn counts_each_edit_against_the_text_the_earlier_edits_left() {
+        let entry = json!({"edits": [
+            {"file": "x", "old": "x", "new": "a a"},
+            {"file": "x", "old": "a a", "new": "b"},
+        ]});
+        assert_eq!(check_entry("F-chain", &entry, &read_some("x")), Ok(()));
+    }
+
+    #[test]
+    fn rejects_old_text_that_occurs_twice_or_not_at_all() {
+        let entry = json!({"edits": [{"file": "x", "old": "a", "new": "b"}]});
+        let error = check_entry("F-twice", &entry, &read_some("a a")).unwrap_err();
+        assert!(error.contains("occurs 2 times"), "{error}");
+
+        let error = check_entry("F-absent", &entry, &read_some("b")).unwrap_err();
+        assert!(error.contains("occurs 0 times"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_document_that_lists_no_entries() {
+        let error = require_entries(&json!({"falsifiers": []})).unwrap_err();
+        assert_eq!(error, "falsifiers.json lists no entries");
+
+        let error = require_entries(&json!({"edits": []})).unwrap_err();
+        assert_eq!(error, "falsifiers.json lists no entries");
+
+        let document = json!({"falsifiers": [{"id": "F-one"}]});
+        let entries = require_entries(&document).unwrap();
+        assert_eq!(entries.len(), 1);
     }
 }
