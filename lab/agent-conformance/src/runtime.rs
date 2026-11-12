@@ -28,7 +28,17 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
     static RUNTIME: OnceLock<Result<BinaryUnderTest, String>> = OnceLock::new();
     RUNTIME
         .get_or_init(|| match std::env::var_os(RUNTIME_BINARY) {
-            Some(given) => given_native(Path::new(&given), "elastos"),
+            Some(given) => given_native(Path::new(&given), "elastos").inspect(|given| {
+                // Printed here, not in `given_native`: a version identity line
+                // enters the receipt, so only the Runtime the suite launches
+                // may print one.
+                println!("elastos given, not built");
+                crate::identity::Observation::Native {
+                    role: "elastos".into(),
+                    sha256: given.sha256.clone(),
+                }
+                .emit();
+            }),
             None => build_native("elastos-server", "elastos"),
         })
         .as_ref()
@@ -88,7 +98,7 @@ fn build_native(package: &str, name: &str) -> Result<BinaryUnderTest, String> {
 }
 
 /// Identify a binary that was given, not built. It is hashed where it is and
-/// never copied or changed; its path stays out of the printed evidence.
+/// never copied or changed, and nothing is printed.
 fn given_native(binary: &Path, name: &str) -> Result<BinaryUnderTest, String> {
     if !binary.is_absolute() {
         return Err(format!("given {name} binary needs an absolute path"));
@@ -97,12 +107,6 @@ fn given_native(binary: &Path, name: &str) -> Result<BinaryUnderTest, String> {
         return Err(format!("given {name} binary is not a file"));
     }
     let sha256 = sha256_file(binary)?;
-    println!("{name} given, not built");
-    crate::identity::Observation::Native {
-        role: name.into(),
-        sha256: sha256.clone(),
-    }
-    .emit();
     Ok(BinaryUnderTest {
         binary: binary.to_path_buf(),
         sha256,
