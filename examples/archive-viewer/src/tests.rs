@@ -2327,7 +2327,9 @@ fn an_octal_field_with_other_padding_refuses_the_archive() {
 #[test]
 fn a_magic_that_is_not_ustar_nul_00_is_not_tar() {
     // GNU's `ustar  \0` and a wrong version are other formats, and the whole
-    // object is unknown rather than a tar listing on the wrong bytes.
+    // object is unknown rather than a tar listing on the wrong bytes. Each
+    // header's checksum is recomputed for its changed magic, so a reader that
+    // skips the magic check takes the bytes as tar, not as a bad checksum.
     for patch in [
         &[(262, b' '), (263, b' '), (264, 0)][..],
         &[(263, b'0'), (264, b'1')][..],
@@ -2336,6 +2338,9 @@ fn a_magic_that_is_not_ustar_nul_00_is_not_tar() {
         for &(at, byte) in patch {
             archive[at] = byte;
         }
+        write_at(&mut archive, 148, b"        ");
+        let sum: u64 = archive[..512].iter().map(|&byte| u64::from(byte)).sum();
+        write_at(&mut archive, 148, &tar_checksum_field(sum));
         let bus = run_fixture(request(TAR, &[]), TAR, archive);
         assert_eq!(view(&bus)["refused"]["code"], "unknown_format");
         assert!(entries(&bus).is_empty());

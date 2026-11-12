@@ -205,7 +205,6 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
             &[],
         );
     }
-    debug_assert!(text.len() as u64 <= MAX_VIEW_BYTES, "{} bytes", text.len());
     let write_grant = grant(bus, VIEW_URI, "write", "write the checked listing")?;
     bus::write_bytes(bus, VIEW_URI, &write_grant, text.as_bytes()).map_err(|error| {
         Refusal::Call {

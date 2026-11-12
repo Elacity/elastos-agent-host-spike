@@ -731,3 +731,12 @@ bytes left, and eight previews shown at the compressed-data cap.
 - `the_worst_archives_run_and_write_their_views` and
   `the_worst_archives_reach_their_caps` assert the three new shapes and their
   sizes.
+
+2026-11-12, task 009: two plants reach the assertions they name.
+
+- T16's fixture recomputes the header checksum after its magic changes, so a
+  reader that skips the version check takes the bytes as tar and the test
+  fails on its `unknown_format` assertion, not on a stale checksum.
+- The view-cap plant now writes the oversized view: the debug assertion
+  before the write is gone, so F32 reaches the written view's length
+  assertion in both view tests.
