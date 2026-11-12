@@ -259,6 +259,59 @@ command. A write refusal names its cause, including `AlreadyExists` or
 and symlink targets. A report-build failure stops before suite execution and
 retains its build output; the command cannot issue a receipt without its writer.
 
+`review_binding (A14)` passes only when `AGENT_CONFORMANCE_REVIEWS` names a
+JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
+verdict `pass` and the exact commit the receipt's `repository` names, and the
+tree is clean when the report is written. That is checked after the suite
+runs, so the row does not show that the results came from that tree. Reviews
+live outside the commit they read: keep the file outside the repository, since
+an untracked file inside it makes the tree dirty. The receipt records
+`reviews`, `review_status` (`bound` or `unbound`) and `review_failures`. An
+unreadable or malformed reviews file fails the command; an unbound review
+leaves this row FAIL without changing `command_success`, so CI still reports
+unreviewed candidates. A14 needs every A14 row to pass. The report checks only
+that each review names this commit; who reviewed, and whether two model
+families did, stays with the reviewer list.
+
+`installed_runtime (A14)` appears only when an installed Runtime is given, by
+two variables together: `AGENT_CONFORMANCE_INSTALLED_BINARY` names its binary
+and `AGENT_CONFORMANCE_INSTALLED_DATA` its data folder (the installer can put
+the binary elsewhere, so both are named). The report reads the binary, and from
+the data folder `installation/release-head.json`, `installation/release.json`
+and `components.json`, and checks the hash chain for this machine's platform:
+the release head names the SHA-256 of `release.json`, which names the SHA-256
+of the binary and of `components.json`. The receipt then records
+`installed_runtime` (version, platform, source commit and the three hashes),
+`installed_runtime_status` (`matched` or `unmatched`) and
+`installed_runtime_failures`. A file that cannot be read is named in the
+failures (`could not read release.json`), as is each hash that differs
+(`binary does not match the release`); an unmatched Runtime is recorded as
+`null`. Like an unbound review, an unmatched chain leaves this row FAIL without
+changing `command_success`, so a receipt backs A14 only when all three A14 rows
+read PASS. Naming one variable without the other fails the command. With
+neither, the receipt has no installed Runtime row or field. There is no default
+location: the report never looks for an installation on its own.
+
+This row does not check signatures, so it shows which release the installed
+bytes belong to, not that the release is genuine. It does not check the hash of
+the bundle the demo ran. It does not compare the installed binary with
+`runtime_sha256`, the Runtime the suite launched; both are recorded, and a
+reader compares `installed_runtime.binary_sha256` with `runtime_sha256` to see
+whether they are the same bytes.
+
+A receipt with reviews and an installed Runtime on macOS, from the repository
+root on a clean tree, with the reviews file kept outside the repository:
+
+```bash
+AGENT_CONFORMANCE_REVIEWS="$HOME/a14-reviews.json" \
+AGENT_CONFORMANCE_INSTALLED_BINARY="$HOME/.local/bin/elastos" \
+AGENT_CONFORMANCE_INSTALLED_DATA="$HOME/Library/Application Support/elastos" \
+lab/agent-conformance/run.sh
+```
+
+On Linux the data folder is `$HOME/.local/share/elastos`, or
+`$XDG_DATA_HOME/elastos` when that is set.
+
 `identity_status` describes identity coverage. `suite_outcome` describes the
 Cargo rows, including FAIL and BLOCKED; `command_success` combines both gates.
 A complete identity record preserves each journey's grade. The parser accepts
