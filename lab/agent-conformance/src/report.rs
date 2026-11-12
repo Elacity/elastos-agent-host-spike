@@ -4,7 +4,7 @@ use crate::identity::{sha256, Observation, ProbeIdentity, PREFIX};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -671,6 +671,12 @@ pub fn release_platform() -> &'static str {
 /// `components.json`. A file that cannot be read is its own reason, named by
 /// file; nothing is checked until all four are read.
 ///
+/// Each of the four is opened without following a link at its final name, and
+/// must be a regular file: the Runtime admits its installed files the same way,
+/// so a link there is refused with its own reason, not read through to some
+/// other file. The open itself refuses the link, so there is no gap between a
+/// check and the read. The folders above the four names are not checked.
+///
 /// What this does not check:
 /// - signatures: only hashes are compared, so a match shows which release the
 ///   installed bytes belong to, not that the release is genuine;
@@ -685,8 +691,12 @@ pub fn read_installed_runtime(
 ) -> Result<InstalledRuntime, Vec<String>> {
     let mut failures = Vec::new();
     let mut read = |path: &Path, name: &str| {
-        std::fs::read(path).unwrap_or_else(|_| {
-            failures.push(format!("could not read {name}"));
+        read_installed_file(path).unwrap_or_else(|reason| {
+            failures.push(match reason {
+                Unread::Link => format!("{name} is a symbolic link"),
+                Unread::NotAFile => format!("{name} is not a regular file"),
+                Unread::Other => format!("could not read {name}"),
+            });
             Vec::new()
         })
     };
@@ -700,6 +710,37 @@ pub fn read_installed_runtime(
         return Err(failures);
     }
     installed_runtime(&head, &release, platform, &program, &components)
+}
+
+enum Unread {
+    Link,
+    NotAFile,
+    Other,
+}
+
+/// The bytes of the regular file at `path`, never those of a link's target.
+fn read_installed_file(path: &Path) -> Result<Vec<u8>, Unread> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // NOFOLLOW makes the open fail on a link at the final name. NONBLOCK keeps
+    // the open from waiting on a pipe placed there; it does nothing to a file.
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits() as i32)
+        .open(path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                Unread::Link
+            } else {
+                Unread::Other
+            }
+        })?;
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return Err(Unread::NotAFile);
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| Unread::Other)?;
+    Ok(bytes)
 }
 
 /// A missing, repeated or unlisted result fails closed. Cargo failure is also

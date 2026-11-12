@@ -1806,6 +1806,58 @@ fn missing_release_record_fails_with_its_own_reason() {
     home.finish().unwrap();
 }
 
+#[test]
+fn installed_files_are_not_read_through_a_link() {
+    use std::os::unix::fs::symlink;
+    let home = ThrowawayHome::new().unwrap();
+    for (index, (file, name)) in [
+        ("data/installation/release-head.json", "release-head.json"),
+        ("data/installation/release.json", "release.json"),
+        ("bin/elastos", "the installed binary"),
+        ("data/components.json", "components.json"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = home.root().join(format!("installed-{index}"));
+        let fixture = InstalledFixture::new(&root);
+        assert!(fixture
+            .receipt()
+            .0
+            .table
+            .contains("installed_runtime (A14) | PASS\n"));
+        // The same bytes, reached through a link at the installed name: the
+        // hash chain would match if the link were followed.
+        let (path, moved) = (root.join(file), root.join("moved"));
+        fs::rename(&path, &moved).unwrap();
+        symlink(&moved, &path).unwrap();
+        let (report, document) = fixture.receipt();
+        assert_eq!(
+            document["installed_runtime_failures"],
+            serde_json::json!([format!("{name} is a symbolic link")])
+        );
+        assert!(
+            report.table.contains("installed_runtime (A14) | FAIL\n"),
+            "{}",
+            report.table
+        );
+        // A link whose target is missing is refused as a link too.
+        fs::remove_file(&moved).unwrap();
+        assert_eq!(
+            fixture.receipt().1["installed_runtime_failures"],
+            serde_json::json!([format!("{name} is a symbolic link")])
+        );
+        // A folder at the name is not a file to read.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(
+            fixture.receipt().1["installed_runtime_failures"],
+            serde_json::json!([format!("{name} is not a regular file")])
+        );
+    }
+    home.finish().unwrap();
+}
+
 fn names_installed_runtime(document: &Value, table: &str) -> bool {
     table.contains("installed_runtime")
         || document

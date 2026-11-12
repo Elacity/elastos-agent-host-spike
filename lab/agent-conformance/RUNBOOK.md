@@ -302,7 +302,11 @@ of the binary and of `components.json`. The receipt then records
 `installed_runtime_status` (`matched` or `unmatched`) and
 `installed_runtime_failures`. A file that cannot be read is named in the
 failures (`could not read release.json`), as is each hash that differs
-(`binary does not match the release`); an unmatched Runtime is recorded as
+(`binary does not match the release`). Each of the four files is opened without
+following a symbolic link at its final name and must be a regular file, as the
+Runtime itself requires of them: a link there fails the row with its own reason
+(`release.json is a symbolic link`). The folders above those names are not
+checked, so a link in a parent folder is followed. An unmatched Runtime is recorded as
 `null`. Like an unbound review, an unmatched chain leaves this row FAIL without
 changing `command_success`, so a receipt backs A14 only when every A14 row
 reads PASS. Naming one variable without the other fails the command. With
