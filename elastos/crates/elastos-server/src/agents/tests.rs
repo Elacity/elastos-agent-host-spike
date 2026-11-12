@@ -2,16 +2,16 @@
 //! `feature_on`; the rest run in every build.
 
 use super::*;
-use elastos_runtime::auth::{
-    PrincipalRootCryptoProfileV1, PrincipalRootProtectorEnvelopeV1, PrincipalRootProtectorV1,
-    ProofBinding, PRINCIPAL_ROOT_PROTECTION_SCHEMA,
-};
+use elastos_runtime::auth::ProofBinding;
 use serde_json::{json, Value};
 
 pub(crate) const OWNER_ID: &str = "person:local:agents-owner";
 const SESSION_ID: &str = "session:agents-test";
 const AGENT_A: &str = "agent:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const AGENT_B: &str = "agent:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+type EditAgent = fn(&mut StoredAgent);
+type EditFile = fn(&mut AgentRecordsFile);
 
 /// A Home with one admin person who has storage protection.
 pub(crate) struct Home {
@@ -394,7 +394,7 @@ fn a_record_that_fails_the_agent_record_rule_refuses_the_file() {
 #[test]
 fn a_protection_that_is_not_the_owner_root_wrap_refuses_the_file() {
     let home = Home::new();
-    let cases: [(&str, fn(&mut StoredAgent)); 4] = [
+    let cases: [(&str, EditAgent); 4] = [
         ("another kind", |agent| {
             agent.protection.protectors[0].kind = PrincipalRootProtectorKind::RecoveryPhrase
         }),
@@ -463,7 +463,7 @@ fn only_the_listed_operations_change_the_file() {
         stored_agent(OWNER_ID, AGENT_A),
         stored_agent(OWNER_ID, AGENT_B),
     ]);
-    let next = |change: fn(&mut AgentRecordsFile)| {
+    let next = |change: EditFile| {
         let mut after = before.clone();
         after.sequence += 1;
         change(&mut after);
@@ -499,7 +499,7 @@ fn only_the_listed_operations_change_the_file() {
     assert!(permits(Operation::Enable, &disabled, &enabled_again));
 
     // Anything else, under each operation.
-    let refused: [(Operation, fn(&mut AgentRecordsFile), &str); 9] = [
+    let refused: [(Operation, EditFile, &str); 9] = [
         (Operation::Enable, |_| {}, "enable when already on"),
         (
             Operation::Disable,
@@ -616,4 +616,115 @@ fn the_writer_never_writes_a_file_a_load_would_refuse() {
         "agent file change refused: agent admission owner missing"
     );
     assert_eq!(home.agent_bytes(), written, "nothing was written");
+}
+
+fn owner_protection(home: &Home) -> PrincipalRootProtectionV1 {
+    crate::auth::load_principal_root_protection(
+        home.path(),
+        &home.owner.principal_id,
+        &home.owner.localhost_root,
+    )
+    .unwrap()
+    .unwrap()
+}
+
+/// Opens a wrap with `wrap_key`, as the key reader of a later step will.
+fn unwrap_data_key(
+    wrap_key: &[u8; 32],
+    envelope: &PrincipalRootProtectorEnvelopeV1,
+) -> anyhow::Result<Vec<u8>> {
+    crate::auth::decrypt_aes256_gcm_bytes(
+        wrap_key,
+        &crate::auth::b64_url_decode(&envelope.nonce)?,
+        &crate::auth::b64_url_decode(&envelope.wrapped_data_key)?,
+    )
+}
+
+#[test]
+fn the_wrap_key_binds_each_input() {
+    let home = Home::new();
+    let owner = owner_protection(&home);
+    let agent = stored_agent(OWNER_ID, AGENT_A).protection;
+    let key = |agent: &PrincipalRootProtectionV1| {
+        *crate::auth::owner_root_wrap_key(home.path(), &owner, agent).unwrap()
+    };
+    let base = key(&agent);
+    assert_eq!(key(&agent), base, "the same inputs give the same key");
+
+    // Three pairs. Each differs from the base in one input only.
+    let mut other_id = agent.clone();
+    other_id.principal_id = AGENT_B.to_string();
+    assert_ne!(key(&other_id), base, "the agent id is bound");
+
+    let mut other_root = agent.clone();
+    other_root.localhost_root =
+        crate::auth::principal_kind_localhost_root(AGENT_B, PrincipalKind::Agent);
+    assert_ne!(key(&other_root), base, "the agent root is bound");
+
+    let mut other_key_id = agent.clone();
+    other_key_id.data_key_id = format!("pdek:{}", "1".repeat(32));
+    assert_ne!(key(&other_key_id), base, "the agent key id is bound");
+}
+
+#[test]
+fn the_wrap_key_is_the_owners_alone() {
+    let home = Home::new();
+    let owner = owner_protection(&home);
+    let agent = stored_agent(OWNER_ID, AGENT_A).protection;
+    let base = *crate::auth::owner_root_wrap_key(home.path(), &owner, &agent).unwrap();
+
+    let other = crate::auth::store_test_principal_root_protection(home.path(), "person:local:b");
+    let theirs = *crate::auth::owner_root_wrap_key(home.path(), &other, &agent).unwrap();
+    assert_ne!(theirs, base, "another person derives another key");
+
+    // An owner protection that is itself an owner-root wrap is refused.
+    let mut chained = owner.clone();
+    chained
+        .protectors
+        .push(stored_agent(OWNER_ID, AGENT_B).protection.protectors[0].clone());
+    let error = crate::auth::owner_root_wrap_key(home.path(), &chained, &agent).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "an owner-root wrap needs an owner that is not itself wrapped"
+    );
+}
+
+#[test]
+fn two_wraps_of_one_key_differ() {
+    let (wrap_key, data_key) = ([7u8; 32], [9u8; 32]);
+    let first = wrap_data_key(&wrap_key, &data_key).unwrap();
+    let second = wrap_data_key(&wrap_key, &data_key).unwrap();
+    assert_ne!(first.nonce, second.nonce, "each wrap draws its own nonce");
+    assert_ne!(first.wrapped_data_key, second.wrapped_data_key);
+    for envelope in [first, second] {
+        assert_eq!(unwrap_data_key(&wrap_key, &envelope).unwrap(), data_key);
+    }
+}
+
+#[test]
+fn a_new_agent_protection_opens_under_its_own_derived_key_only() {
+    let home = Home::new();
+    let owner = owner_protection(&home);
+    let root = crate::auth::principal_kind_localhost_root(AGENT_A, PrincipalKind::Agent);
+    let protection = protect_agent_root(home.path(), &owner, AGENT_A, &root, 9).unwrap();
+    let mut agent = stored_agent(OWNER_ID, AGENT_A);
+    agent.protection = protection.clone();
+    assert!(protection_is_sound(&agent), "create's protection loads");
+
+    let envelope = protection.protectors[0].envelope.as_ref().unwrap();
+    let wrap_key = crate::auth::owner_root_wrap_key(home.path(), &owner, &protection).unwrap();
+    let data_key = unwrap_data_key(&wrap_key, envelope).unwrap();
+    assert_eq!(
+        crate::auth::principal_data_key_id(&data_key),
+        protection.data_key_id,
+        "the wrap holds the key the protection names"
+    );
+
+    let mut other = protection.clone();
+    other.principal_id = AGENT_B.to_string();
+    let other_key = crate::auth::owner_root_wrap_key(home.path(), &owner, &other).unwrap();
+    assert!(
+        unwrap_data_key(&other_key, envelope).is_err(),
+        "a key derived for another agent opens nothing"
+    );
 }

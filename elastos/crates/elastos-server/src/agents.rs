@@ -34,9 +34,12 @@ use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Context;
 use elastos_runtime::auth::{
-    validate_principal_root_protection, PrincipalRootProtectionV1, PrincipalRootProtectorKind,
+    validate_principal_root_protection, PrincipalRootCryptoProfileV1, PrincipalRootProtectionV1,
+    PrincipalRootProtectorEnvelopeV1, PrincipalRootProtectorKind, PrincipalRootProtectorV1,
     ProofBindingKind, RuntimeAuditEventV1, DEFAULT_PRINCIPAL_ROOT_CIPHER,
+    PRINCIPAL_ROOT_PROTECTION_SCHEMA,
 };
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -479,4 +482,63 @@ fn write(
             signature: None,
         },
     )
+}
+
+/// Wraps an agent's data key under the key `auth` derived for it. The nonce
+/// is fresh and random each time, so two wraps of one key never match.
+fn wrap_data_key(
+    wrap_key: &[u8; 32],
+    data_key: &[u8; 32],
+) -> anyhow::Result<PrincipalRootProtectorEnvelopeV1> {
+    let mut nonce = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    Ok(PrincipalRootProtectorEnvelopeV1 {
+        cipher: DEFAULT_PRINCIPAL_ROOT_CIPHER.to_string(),
+        kdf: OWNER_ROOT_KDF.to_string(),
+        salt: OWNER_ROOT_ENVELOPE_SALT.to_string(),
+        nonce: crate::auth::b64_url(&nonce),
+        wrapped_data_key: crate::auth::encrypt_aes256_gcm_bytes(wrap_key, &nonce, data_key)?,
+    })
+}
+
+/// A new data key for an agent's root, wrapped under its owner's root. The
+/// key itself is erased when this returns; only the wrap is kept.
+fn protect_agent_root(
+    data_dir: &Path,
+    owner: &PrincipalRootProtectionV1,
+    agent_id: &str,
+    localhost_root: &str,
+    now: u64,
+) -> anyhow::Result<PrincipalRootProtectionV1> {
+    let mut data_key = zeroize::Zeroizing::new([0u8; 32]);
+    rand::rngs::OsRng.fill_bytes(data_key.as_mut_slice());
+    let mut protection = PrincipalRootProtectionV1 {
+        schema: PRINCIPAL_ROOT_PROTECTION_SCHEMA.to_string(),
+        principal_id: agent_id.to_string(),
+        localhost_root: localhost_root.to_string(),
+        data_key_id: crate::auth::principal_data_key_id(data_key.as_slice()),
+        crypto: PrincipalRootCryptoProfileV1 {
+            recovery_kdf: OWNER_ROOT_KDF.to_string(),
+            ..PrincipalRootCryptoProfileV1::default()
+        },
+        protectors: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    let wrap_key = crate::auth::owner_root_wrap_key(data_dir, owner, &protection)?;
+    protection.protectors.push(PrincipalRootProtectorV1 {
+        protector_id: format!(
+            "protector:owner-root:{}",
+            agent_id.trim_start_matches("agent:v2:")
+        ),
+        kind: PrincipalRootProtectorKind::OwnerRoot,
+        label: "Owner root".to_string(),
+        subject: Some(owner.principal_id.clone()),
+        created_at: now,
+        verified_at: None,
+        envelope: Some(wrap_data_key(&wrap_key, &data_key)?),
+        archive: None,
+        profile_coverage: None,
+    });
+    Ok(protection)
 }
