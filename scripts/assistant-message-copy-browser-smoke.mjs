@@ -17,6 +17,7 @@ import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./system-uiux-fixture.mjs";
 import { productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { pressTopPageControl } from "./lib/home-top-page-press.mjs";
 
 const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const schema = "elastos.assistant.workspace/v2";
@@ -276,7 +277,9 @@ try {
       const said = await status(button).textContent({ timeout: 500 }).catch(() => "");
       throw new Error(`${label}: Copy did not ask Home to write the clipboard${said ? ` (it said "${said}")` : ""}`);
     });
-    await page.locator("#home-clipboard-allow").click();
+    // Home's prompt is drawn over the Assistant frame: see the helper for why
+    // the pointer is put on Allow before the press.
+    await pressTopPageControl(page.locator("#home-clipboard-allow"), { label });
     const allowedAt = Date.now();
     await waitForCopyStatus(label, "Copied", expected, button, hover,
       () => status(button).filter({ hasText: "Copied" }).waitFor({ timeout: copyStatusTimeout }),
@@ -300,7 +303,7 @@ try {
   await sent.hover();
   await sent.locator("[data-copy-message]").click();
   await promptRoot().waitFor({ state: "visible", timeout: 3000 });
-  await page.locator("#home-clipboard-cancel").click();
+  await pressTopPageControl(page.locator("#home-clipboard-cancel"), { label: "cancelled copy" });
   const cancelledAt = Date.now();
   const sentCopy = sent.locator("[data-copy-message]");
   await waitForCopyStatus("cancelled copy", "Copy cancelled.", "clipboard before cancel", sentCopy, sent,

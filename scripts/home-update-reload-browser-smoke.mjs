@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, jsonResponse, makeAppearanceRecord, makeSystemSummary, startSystemFixtureServer }
   from "./system-uiux-fixture.mjs";
 import { productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { pressTopPageControl } from "./lib/home-top-page-press.mjs";
 
 const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const screenshots = process.env.HOME_UPDATE_RELOAD_SCREENSHOTS || "";
@@ -244,7 +245,9 @@ try {
   stage = "Reload";
   const pagesBefore = counts.page;
   await page.evaluate(() => { window.__beforeReload = true; });
-  await bar(page).getByRole("button", { name: "Reload" }).click();
+  // The bar is drawn over the shell frame and has just come back from under a
+  // sheet: the helper sees the pointer reach Home's page before the press.
+  await pressTopPageControl(bar(page).getByRole("button", { name: "Reload" }), { label: "Reload on the update bar" });
   await page.waitForFunction(() => window.__beforeReload !== true && document.body?.dataset.homeStatus === "ready",
     null, { timeout: 15_000 });
   assert.equal(counts.page, pagesBefore + 1, "Reload loads the Home page again");
