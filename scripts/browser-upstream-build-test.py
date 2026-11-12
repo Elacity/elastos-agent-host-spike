@@ -491,14 +491,14 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
             ambient['RUSTFLAGS'] = 'foreign-fixture'
             def run(args, **kwargs):
                 calls.append(args)
-                if args[:2] == ['cargo', '+1.91.0']:
+                if args[:2] == ['cargo', '+1.95.0']:
                     env = kwargs['env']
                     self.assertTrue(all(key not in env for key in ambient if key != 'RUSTFLAGS'))
                     self.assertIn('target-feature=+crt-static', env['RUSTFLAGS'])
                     self.assertNotIn('foreign-fixture', env['RUSTFLAGS'])
                     self.assertEqual(env['CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER'], 'musl-gcc')
                     self.assertEqual(env['CC_aarch64_unknown_linux_musl'], 'musl-gcc')
-                if args[:3] == ['cargo', '+1.91.0', 'vendor']:
+                if args[:3] == ['cargo', '+1.95.0', 'vendor']:
                     self.assertEqual(args[3:], ['--locked', '--versioned-dirs', 'registry-vendor'])
                     vendor = kwargs['cwd'] / 'registry-vendor/fixture-1.0.0'
                     vendor.mkdir(parents=True)
@@ -507,7 +507,7 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0,
                         '[source.crates-io]\nreplace-with="vendored-sources"\n'
                         '[source.vendored-sources]\ndirectory="registry-vendor"\n', '')
-                if args[:3] == ['cargo', '+1.91.0', 'build']:
+                if args[:3] == ['cargo', '+1.95.0', 'build']:
                     self.assertEqual(args[3:-2], ['--locked', '--offline', '--release', '--target',
                         'aarch64-unknown-linux-musl', '-p', 'vhost-device-vsock'])
                     src = kwargs['cwd']
@@ -589,7 +589,7 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                 calls.append(args)
                 if args[:2] == ['git', 'apply']:
                     return real_run(args, **kwargs)
-                if args[:3] == ['cargo', '+1.91.0', 'vendor']:
+                if args[:3] == ['cargo', '+1.95.0', 'vendor']:
                     directory = kwargs['cwd'] / args[-1]
                     if directory.exists():
                         import shutil
@@ -597,7 +597,7 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                     directory.mkdir()
                     (directory / 'registry-crate.txt').write_bytes(b'locked registry fixture')
                     return subprocess.CompletedProcess(args, 0, '[source.vendored-sources]\ndirectory="registry-vendor"\n', '')
-                if args[:3] == ['cargo', '+1.91.0', 'build']:
+                if args[:3] == ['cargo', '+1.95.0', 'build']:
                     src, env = kwargs['cwd'], kwargs['env']
                     last_build.update(cwd=src, env=env.copy(), jobs=args[args.index('-j') + 1])
                     self.assertEqual(args[args.index('--features') + 1], 'net,qcow')
@@ -622,8 +622,8 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                     # Cargo hard-links each release binary into deps/.
                     (binary.parent / 'deps').mkdir()
                     os.link(binary, binary.parent / 'deps/crosvm-0123456789abcdef')
-                if args[:3] == ['cargo', '+1.91.0', 'test']:
-                    self.assertEqual(args, ['cargo', '+1.91.0', 'test', '--locked', '--offline', '--release',
+                if args[:3] == ['cargo', '+1.95.0', 'test']:
+                    self.assertEqual(args, ['cargo', '+1.95.0', 'test', '--locked', '--offline', '--release',
                         '--target', 'aarch64-unknown-linux-musl', '-p', 'device_virtio_block', '--features',
                         'devices/test-util', '--lib', 'lifecycle_', '-j', last_build['jobs'], '--', '--nocapture'])
                     self.assertEqual(kwargs['cwd'], last_build['cwd'])

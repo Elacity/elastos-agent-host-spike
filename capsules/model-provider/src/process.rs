@@ -34,10 +34,7 @@ fn run_stdio_io(mut reader: impl BufRead, mut writer: impl Write) -> Result<()> 
     let mut frame = Vec::new();
     let mut provider = ProviderCoordinatorHandle::start();
 
-    loop {
-        let Some(frame_status) = read_next_frame(&mut reader, &mut frame)? else {
-            break;
-        };
+    while let Some(frame_status) = read_next_frame(&mut reader, &mut frame)? {
         let response = match frame_status {
             FrameStatus::Complete => match parse_frame(&frame) {
                 Ok(line) => match parse_request(line) {

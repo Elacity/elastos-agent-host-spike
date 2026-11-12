@@ -595,6 +595,9 @@ REVIEWED_ACTIONS = {
     "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad": NO_CACHE,
     "dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0": NO_CACHE,
     "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067": NO_CACHE,
+    # The 1.95.0 branch commit: a composite action of shell steps only (rustup install, then
+    # settings), with no nested action. Its `cachekey` output is a string; it writes no cache.
+    "dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591": NO_CACHE,
     # Writers whose guard save_sites checks: ci.yml only.
     "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830": GUARDED,
     "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6": GUARDED,

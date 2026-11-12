@@ -426,7 +426,7 @@ def build_browser_native(recipe, payload, cache, upstream):
                        + str(work) + '=/usr/src/elastos-browser')
             env['CC_aarch64_unknown_linux_musl'] = env['CC']
             env['CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER'] = env['CC']
-            vendor = subprocess.run(['cargo', '+1.91.0', 'vendor', '--locked', '--versioned-dirs', 'registry-vendor'],
+            vendor = subprocess.run(['cargo', '+1.95.0', 'vendor', '--locked', '--versioned-dirs', 'registry-vendor'],
                                     cwd=source, env=env, check=True, capture_output=True, text=True)
             config = source / '.cargo/config.toml'
             config.parent.mkdir(exist_ok=True)
@@ -434,7 +434,7 @@ def build_browser_native(recipe, payload, cache, upstream):
                 output.write('\n' + vendor.stdout)
             target = 'aarch64-unknown-linux-musl'
             # The pinned package uses its default backend_vsock feature set.
-            subprocess.run(['cargo', '+1.91.0', 'build', '--locked', '--offline', '--release',
+            subprocess.run(['cargo', '+1.95.0', 'build', '--locked', '--offline', '--release',
                             '--target', target, '-p', 'vhost-device-vsock', '-j', jobs],
                            cwd=source, env=env, check=True)
             binaries['vhost-device-vsock'] = source / 'target' / target / 'release/vhost-device-vsock'
@@ -478,7 +478,7 @@ def build_browser_native(recipe, payload, cache, upstream):
             # retain its sources/licences, then compile with network disabled.
             # The pinned tree owns vendor/generic path crates. Keep Cargo's
             # replaceable registry output separate from those source members.
-            vendor = subprocess.run(['cargo', '+1.91.0', 'vendor', '--locked', '--versioned-dirs', 'registry-vendor'],
+            vendor = subprocess.run(['cargo', '+1.95.0', 'vendor', '--locked', '--versioned-dirs', 'registry-vendor'],
                                     cwd=source, env=env, check=True, capture_output=True, text=True)
             config = source / '.cargo/config.toml'
             config.parent.mkdir(exist_ok=True)
@@ -493,10 +493,10 @@ def build_browser_native(recipe, payload, cache, upstream):
             env['CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER'] = env['CC']
             # qcow: a Linux launch boots a per-launch qcow2 overlay over the
             # read-only rootfs seed instead of copying the seed.
-            subprocess.run(['cargo', '+1.91.0', 'build', '--locked', '--offline', '--release',
+            subprocess.run(['cargo', '+1.95.0', 'build', '--locked', '--offline', '--release',
                             '--target', target, '--no-default-features', '--features', 'net,qcow',
                             '--bin', 'crosvm', '-j', jobs], cwd=source, env=env, check=True)
-            subprocess.run(['cargo', '+1.91.0', 'test', '--locked', '--offline', '--release',
+            subprocess.run(['cargo', '+1.95.0', 'test', '--locked', '--offline', '--release',
                             '--target', target, '-p', 'device_virtio_block', '--features',
                             'devices/test-util', '--lib', 'lifecycle_',
                             '-j', jobs, '--', '--nocapture'], cwd=source, env=env, check=True)

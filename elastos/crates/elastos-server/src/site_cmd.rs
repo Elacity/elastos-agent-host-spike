@@ -773,7 +773,7 @@ fn load_site_releases(target: &str) -> anyhow::Result<Vec<SiteReleaseRecord>> {
         let release: SiteReleaseRecord = serde_json::from_slice(&bytes)?;
         entries.push(release);
     }
-    entries.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.published_at));
     Ok(entries)
 }
 
@@ -816,7 +816,7 @@ fn load_site_channels(target: &str) -> anyhow::Result<Vec<SiteReleaseChannelReco
         let channel: SiteReleaseChannelRecord = serde_json::from_slice(&bytes)?;
         entries.push(channel);
     }
-    entries.sort_by(|a, b| b.promoted_at.cmp(&a.promoted_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.promoted_at));
     Ok(entries)
 }
 
@@ -837,7 +837,7 @@ fn load_site_history(target: &str) -> anyhow::Result<Vec<SiteHeadEnvelope>> {
         let head: SiteHeadEnvelope = serde_json::from_slice(&bytes)?;
         entries.push(head);
     }
-    entries.sort_by(|a, b| b.payload.activated_at.cmp(&a.payload.activated_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.payload.activated_at));
     Ok(entries)
 }
 
