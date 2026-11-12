@@ -537,8 +537,8 @@ CASES = [
      ["a_header_with_a_bad_checksum_refuses_the_archive"]),
     ("T2 the size field is not octal",
      "src/tar.rs",
-     "            _ => return None,\n        }\n    }\n    digits.then_some(value)",
-     "            _ => break,\n        }\n    }\n    digits.then_some(value)",
+     "            _ => return None,",
+     "            _ => break,",
      ["a_size_that_is_not_octal_refuses_the_archive"]),
     ("T3 an entry's data may pass the object",
      "src/tar.rs",
@@ -547,14 +547,8 @@ CASES = [
      ["an_entry_whose_size_passes_the_object_refuses_the_archive"]),
     ("T4 the prefix is not part of the path",
      "src/tar.rs",
-     "        if !prefix.is_empty() {\n"
-     "            path.extend_from_slice(&prefix);\n"
-     "            path.push(b'/');\n"
-     "        }",
-     "        if false && !prefix.is_empty() {\n"
-     "            path.extend_from_slice(&prefix);\n"
-     "            path.push(b'/');\n"
-     "        }",
+     "        if !prefix.is_empty() {",
+     "        if false && !prefix.is_empty() {",
      ["a_tar_prefix_is_still_subject_to_the_name_rules"]),
     ("T5 a non-regular typeflag is listed as a file",
      "src/tar.rs",
@@ -578,9 +572,8 @@ CASES = [
      ["too_many_tar_entries_refuse_the_archive"]),
     ("T9 a ZIP end record wins over the first tar header",
      "src/lib.rs",
-     "    if tar::is_header(&head) {\n        return Ok(Format::Tar);\n    }",
-     "    if tar::is_header(&head) && !zip::is_archive(reader)? {\n"
-     "        return Ok(Format::Tar);\n    }",
+     "    if tar::is_header(&head) {",
+     "    if tar::is_header(&head) && !zip::is_archive(reader)? {",
      ["the_first_block_decides_between_tar_and_zip"]),
     ("T10 a nested tar archive is listed as a file",
      "src/tar.rs",
