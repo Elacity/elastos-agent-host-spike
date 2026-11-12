@@ -415,7 +415,7 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "            let content = read_file(handle, &path)?;\n",
+          "old": "            let content = read_file(handle, &path, tally)?;\n",
           "new": "            let content = std::fs::read(bundle.join(&path)).map_err(|error| unreadable(&path, error))?;\n"
         }
       ],
@@ -432,8 +432,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "            let listing = list_folder(handle.as_fd(), &path)?;\n",
-          "new": "            let by_path = File::open(bundle.join(&path)).map_err(|error| unreadable(&path, error))?;\n            let listing = list_folder(by_path.as_fd(), &path)?;\n"
+          "old": "            let listing = list_folder(handle.as_fd(), &path, tally)?;\n",
+          "new": "            let by_path = File::open(bundle.join(&path)).map_err(|error| unreadable(&path, error))?;\n            let listing = list_folder(by_path.as_fd(), &path, tally)?;\n"
         }
       ],
       "tests": [
@@ -578,8 +578,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "    let entries = collect_entries(bundle, &mut observe)?;\n",
-          "new": "    let mut entries = collect_entries(bundle, &mut observe)?;\n    entries.extend(collect_entries(bundle.parent().unwrap_or(bundle), &mut observe)?);\n"
+          "old": "    let entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;\n",
+          "new": "    let mut entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;\n    entries.extend(collect_entries(bundle.parent().unwrap_or(bundle), &mut observe)?);\n"
         }
       ],
       "tests": [
@@ -594,8 +594,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n",
-          "new": "            let mtime = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mtime;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mtime\"),\n                content: mtime.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n"
+          "old": "            let content = read_file(handle, &path, tally)?;\n            entries.push(BundleEntry { path, content });\n",
+          "new": "            let mtime = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mtime;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mtime\"),\n                content: mtime.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path, tally)?;\n            entries.push(BundleEntry { path, content });\n"
         }
       ],
       "tests": [
@@ -670,8 +670,8 @@
       "edits": [
         {
           "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
-          "old": "            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n",
-          "new": "            let mode = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mode;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mode\"),\n                content: mode.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n"
+          "old": "            let content = read_file(handle, &path, tally)?;\n            entries.push(BundleEntry { path, content });\n",
+          "new": "            let mode = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mode;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mode\"),\n                content: mode.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path, tally)?;\n            entries.push(BundleEntry { path, content });\n"
         }
       ],
       "tests": [

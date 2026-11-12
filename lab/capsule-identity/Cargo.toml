@@ -13,7 +13,7 @@ license = "MIT"
 
 [dependencies]
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-elastos-bundle-identity = { path = "../../elastos/crates/elastos-bundle-identity" }
+elastos-bundle-identity = { path = "../../elastos/crates/elastos-bundle-identity", features = ["lab"] }
 elastos-common = { path = "../../elastos/crates/elastos-common" }
 elastos-identity = { path = "../../elastos/crates/elastos-identity" }
 hex = "0.4"

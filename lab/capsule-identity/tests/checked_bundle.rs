@@ -212,11 +212,20 @@ fn checked_bundle_checks_the_manifest_once() {
         2,
         "check_manifest is not defined once and called once"
     );
-    let seam = library_item(&code, "pub fn checked_bundle_observed(");
+    // The seam is the walk under a budget; the unbudgeted entry point is that
+    // same function with no limit, and does nothing of its own.
+    let seam = library_item(&code, "pub fn checked_bundle_within_observed(");
     assert_eq!(
         seam.matches("check_manifest(").count(),
         1,
         "the seam does not check the manifest:\n{seam}"
+    );
+    let unbudgeted = library_item(&code, "pub fn checked_bundle_observed(");
+    assert!(
+        unbudgeted.contains(
+            "{\n    checked_bundle_within_observed(bundle, Budget::UNLIMITED, observe)\n}"
+        ),
+        "checked_bundle_observed is not the seam with no limit:\n{unbudgeted}"
     );
     for runtime_check in ["serde_json::from_slice", ".validate()"] {
         assert_eq!(
@@ -281,7 +290,7 @@ fn checked_bundle_fields_are_private() {
                 .any(|word| code[..*at].ends_with(word))
         })
         .count();
-    let seam = library_item(&code, "pub fn checked_bundle_observed(");
+    let seam = library_item(&code, "pub fn checked_bundle_within_observed(");
     assert_eq!(
         (builds, seam.matches("CheckedBundle {").count()),
         (1, 1),
