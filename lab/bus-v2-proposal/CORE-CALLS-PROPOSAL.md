@@ -75,6 +75,24 @@ The Runtime resolves `Users/self` to a person principal and a localhost root. Th
 
 The Runtime reaches the person principal through `elastos/crates/elastos-server/src/auth.rs::upsert_principal_for_binding`. That function asks the binding for its id at `elastos/crates/elastos-server/src/auth.rs:4743`, and it derives the principal id from that proof-binding id at `elastos/crates/elastos-server/src/auth.rs:4744` through `local_person_principal_id`. The `ProofBinding` record at `elastos/crates/elastos-auth/src/lib.rs:41` is the evidence the Runtime accepted as control of a principal, and it is not the principal. The derivation writes no grant and admits nothing; it names the principal that a later admission decision may use, and the agent principal stays a separate question in section 7.
 
+`ProofBinding::id` returns the binding's evidence string. A passkey with a passkey record uses `proof:passkey:{rp_id}:{hash}`, where `hash` is the hex of the first 16 bytes of SHA-256 over `rp_id:credential_id`; without that record, it uses `proof:passkey:unknown:{hash}`, with the hash taken from `subject`. An EVM account uses `proof:wallet:eip155:{chain}:{subject}`, with an absent `chain_id` read as zero. A BTC address uses `proof:wallet:bip122:{subject}`. A DID key or Elastos binding uses `proof:{subject}`. An Essentials binding uses `proof:essentials:{subject}`. The id is the evidence string `local_person_principal_id` hashes, the evidence is distinct from the principal, and the derivation writes no grant. The agent principal stays a separate question in section 7. A3 stays open.
+
+The method that builds the evidence string starts at `elastos/crates/elastos-auth/src/lib.rs:85`.
+
+        pub fn id(&self) -> String {
+
+The passkey format line is `elastos/crates/elastos-auth/src/lib.rs:94`.
+
+                            "proof:passkey:{}:{}",
+
+The EVM account format line is `elastos/crates/elastos-auth/src/lib.rs:105`.
+
+                        "proof:wallet:eip155:{}:{}",
+
+The BTC address format line is `elastos/crates/elastos-auth/src/lib.rs:110`.
+
+                ProofBindingKind::BtcAddress => format!("proof:wallet:bip122:{}", self.subject),
+
 `elastos/crates/elastos-server/src/auth.rs::principal_localhost_root` builds the localhost root from a principal id. The body hashes that id with SHA-256 and returns `localhost://Users/` plus the hex of the first 12 bytes of the digest.
 
     pub fn principal_localhost_root(principal_id: &str) -> String {
@@ -859,6 +877,40 @@ The model service is a separate Runtime path. `elastos/crates/elastos-server/src
     ];
 
 "The caller opens the model URL" is the `direct_url` bearer path, and that path is request construction. "The Runtime grants the call and carries it" is the hosted-effect URL, the Runtime socket, the grant check and `forward`. The Runtime hosted transport is the production path. A4 stays open.
+
+On the destination side, this Runtime holds one `ModelServiceGrant` record per `remote_model` grant, with the provider principal, requester principal, requester endpoint, grant id, revision, expiry, approved offer set and revision, and the flag that records whether the provider may share a hosted offer. The record is principal-scoped under `MODEL_GRANT_SCOPE`, whose value is `principal_scoped_remote_model_grant`. The approved offer set names one exact approved offer and its exact revision. The `validate` function refuses the record when the requester principal differs or the requester endpoint differs from the source endpoint. The record's expiry is bounded by its own `MODEL_GRANT_TTL_SECS` constant: `expires_at - revision` is at most six hours. The consumer capsule allowlist admits exactly `assistant` and `home-agent`; `offers_list` alone also admits marketplace. A4 stays open.
+
+The scope line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:29`.
+
+    pub(crate) const MODEL_GRANT_SCOPE: &str = "principal_scoped_remote_model_grant";
+
+The TTL constant line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:30`.
+
+    pub(crate) const MODEL_GRANT_TTL_SECS: u64 = 6 * 3600;
+
+The record declaration line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:70`.
+
+    pub(crate) struct ModelServiceGrant {
+
+The validate declaration line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:86`.
+
+        pub fn validate(
+
+The requester-principal comparison line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:94`.
+
+                    && requester_principal_id == self.requester_principal_id,
+
+The TTL comparison line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:102`.
+
+                    && self.expires_at - self.revision <= MODEL_GRANT_TTL_SECS,
+
+The approved-offer id comparison line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:107`.
+
+                    && self.approved_offer_ids.iter().all(|id| safe_id(id, 256)),
+
+The consumer capsule allowlist test line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:1256`.
+
+                MODEL_CONSUMER_CAPSULES.contains(value)
 
 ## 5. Budgets
 
@@ -2061,7 +2113,7 @@ Proposal: section 0, A7, usage reservation.
 
 Open question for A7 (Rong I-1369-b): with no verifier deadline on the propose line, an uncertain hold ends only on a measured settle, so a provider that never reports would pin that budget for the grant's life. Proposal: the Runtime ends an uncertain hold at grant end or revoke and charges it in full, the same rule as session holds, which are settled at end or revoke and never refunded. The lab does not implement this. A7 stays open.
 
-`lab/grant-binding/src/ledger.rs::settle` resolves the call first, then charges the measured figure. A known SettleOutcome uses that measured figure as the charge. `lab/grant-binding/src/ledger.rs:249` contains `let charge = measured;`. `lab/grant-binding/src/ledger.rs::model_settle_known_outcome_charges_the_measured_figure` expects that charge to equal the measured figure, the charged total to gain it, and the held total to return to zero. `lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_settled_charge` sets reported_usage to 1 and still expects the charge to equal the measured figure. The unknown arm of settle returns before it changes the held total or the charged total. `lab/grant-binding/src/ledger.rs:234` contains `return Err(SettleRefuse::UnknownOutcome);`. `lab/grant-binding/src/ledger.rs::model_unknown_outcome_keeps_the_hold` expects that refusal, with `expect_err("unknown outcome")` and `unknown outcome keeps the hold`. The held total stays at the reserved amount. `lab/grant-binding/src/ledger.rs::release` resolves the call first, removes the open hold, and subtracts the stored amount from the held total. It does not change the charged total. `lab/grant-binding/src/ledger.rs:295` contains `ledger.held -= amount;`. `lab/grant-binding/src/ledger.rs::model_release_returns_the_unused_hold` expects `Ok(())`, a held total of zero, and a charged total of zero. This citation is design input for A7. These settle and release functions are the lab reference model, and the lab model is not the Runtime. An unknown outcome in this lab model keeps the hold. Release in this lab model returns the unused hold and charges nothing. This paragraph does not answer the question above. A7 stays open.
+`lab/grant-binding/src/ledger.rs::settle` resolves the call first, then charges the measured figure. A known SettleOutcome uses that measured figure as the charge. `lab/grant-binding/src/ledger.rs:356` contains `let charge = measured;`. `lab/grant-binding/src/ledger.rs::model_settle_known_outcome_charges_the_measured_figure` expects that charge to equal the measured figure, the charged total to gain it, and the held total to return to zero. `lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_settled_charge` sets reported_usage to 1 and still expects the charge to equal the measured figure. The unknown arm of settle returns before it changes the held total or the charged total. `lab/grant-binding/src/ledger.rs:341` contains `return Err(SettleRefuse::UnknownOutcome);`. `lab/grant-binding/src/ledger.rs::model_unknown_outcome_keeps_the_hold` expects that refusal, with `expect_err("unknown outcome")` and `unknown outcome keeps the hold`. The held total stays at the reserved amount. `lab/grant-binding/src/ledger.rs::release` resolves the call first, removes the open hold, and subtracts the stored amount from the held total. It does not change the charged total. `lab/grant-binding/src/ledger.rs:417` contains `ledger.held -= amount;`. `lab/grant-binding/src/ledger.rs::model_release_returns_the_unused_hold` expects `Ok(())`, a held total of zero, and a charged total of zero. This citation is design input for A7. These settle and release functions are the lab reference model, and the lab model is not the Runtime. An unknown outcome in this lab model keeps the hold. Release in this lab model returns the unused hold and charges nothing. This paragraph does not answer the question above. A7 stays open.
 
 `lab/grant-binding/src/ledger.rs::admit` sets the ledger ceiling and leaves outstanding holds as they are. The fn line is `pub fn admit(&self, ceiling: u64) {`. The doc line is `Sets the allowance ceiling. Outstanding holds stay as they are.` The assignment is `.ceiling = ceiling`. The function returns no refusal. `lab/grant-binding/src/ledger.rs::model_reserve_before_admit_is_refused` reserves 1 before any admit. The fn line is `fn model_reserve_before_admit_is_refused() {`. The expect_err line is `expect_err("reserve before admit")`. The refusal is OverCeiling with ceiling 0, held 0, and asked 1. The fields are `ReserveRefuse::OverCeiling { ceiling: 0, held: 0, asked: 1 }`. The text is `reservation exceeds the ceiling`. The held total stays 0 and the open set stays empty. The assert is `assert!(after_refusal.open.is_empty());`. admit of 1 then lets a reserve of 1 succeed, and the held total is 1. The admit line is `verifier.admit(1);`. The expect line is `expect("admit opens the ceiling")`. The held assert is `assert_eq!(books(&verifier).held, 1);`. `lab/grant-binding/src/ledger.rs::model_lower_ceiling_leaves_the_hold` admits 10, reserves 8, then admits 4. The fn line is `fn model_lower_ceiling_leaves_the_hold() {`. The admit line is `verifier.admit(10);`. The reserve of 8 is `verifier.reserve(&call, &guest(handle), 8).expect("reserve");`. The later admit is `verifier.admit(4);`. The held total stays 8. The assert is `assert_eq!(after.held, 8);`. A further reserve of 1 is refused with OverCeiling ceiling 4, held 8, and asked 1, and the held total stays 8. The expect_err line is `expect_err("lower ceiling")`. The fields are `ReserveRefuse::OverCeiling { ceiling: 4, held: 8, asked: 1 }`. The text is `reservation exceeds the ceiling`. This citation is design input for A7. These admit functions are the lab reference model, and the lab model is not the Runtime. A reserve before admit meets a ceiling of zero. A later admit leaves an outstanding hold in place. This paragraph does not answer the budget question. A7 stays open.
 
