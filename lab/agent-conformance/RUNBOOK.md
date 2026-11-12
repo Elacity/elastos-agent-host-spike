@@ -328,9 +328,10 @@ run on the installed data folder. It does not check the hash of the bundle the
 demo ran.
 
 `installed_runtime_ran (A14)` appears beside it and passes only when
-`runtime_sha256`, the SHA-256 the Runtime printed for itself, equals
-`installed_runtime.binary_sha256`: the installed binary is the program the
-suite launched. The receipt records `installed_binary_ran_status` (`ran` or
+`runtime_sha256`, the SHA-256 the harness took of the named binary and
+printed before launch, equals `installed_runtime.binary_sha256`: the suite
+launched the installed path, and its bytes hashed the same immediately before
+each launch. It does not see the bytes the operating system then executed. The receipt records `installed_binary_ran_status` (`ran` or
 `not shown`), `installed_binary_ran_failures`, and `runtime_data_folder`, which
 states that the Runtime under test ran with a throwaway data folder the suite
 created, not the installed data folder. A difference names both hashes, and an
@@ -506,7 +507,7 @@ What each A14 row means:
 | `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
-| `installed_runtime_ran` | the installed binary is the program the suite launched, by the SHA-256 it printed; it ran with a throwaway data folder, not the installed one |
+| `installed_runtime_ran` | the suite launched the installed path, whose SHA-256, taken by the harness immediately before each launch, equals the installed binary's; it ran with a throwaway data folder, not the installed one |
 
 What the receipt does not prove:
 

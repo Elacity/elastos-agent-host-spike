@@ -29,12 +29,13 @@ pub const STAGED_BUNDLE_SCOPE: &str =
 pub const INSTALLED_RUNTIME_SCOPE: &str =
     "release head, release and components hash-check each other and name this repository commit; records only, the installed data folder did not run";
 
-/// What the runtime-ran row covers: the program the suite started is the
-/// installed binary, by the SHA-256 that program printed. It ran with a
-/// throwaway data folder, so this says nothing about behaviour on the installed
-/// data.
+/// What the runtime-ran row covers: the suite launched the installed path, and
+/// the SHA-256 the harness took of that file, again immediately before each
+/// launch, equals the installed binary's. It does not see the bytes the
+/// operating system then executed. It ran with a throwaway data folder, so this
+/// says nothing about behaviour on the installed data.
 pub const INSTALLED_RUNTIME_BINARY_SCOPE: &str =
-    "the installed binary is the program the suite launched, by the SHA-256 it printed; it ran with a throwaway data folder, not the installed one";
+    "the suite launched the installed path, whose SHA-256, taken by the harness immediately before each launch, equals the installed binary's; it ran with a throwaway data folder, not the installed one";
 
 /// The data folder the Runtime under test ran with, as the receipt states it.
 pub const RUNTIME_DATA_FOLDER: &str =
@@ -849,7 +850,8 @@ pub struct Bound<'a> {
     pub reviews_file_failure: Option<String>,
     /// From a check around the suite: why the tree was not clean then. `None`
     /// when every such check saw a clean tree. `review_binding` fails on it, so
-    /// a tree that is dirty before, after or during the run cannot bind reviews.
+    /// a tree found dirty before or after the suite, or when the receipt is
+    /// written, cannot bind reviews.
     pub tree_check_failure: Option<String>,
     /// `None` means no installed Runtime was given: the receipt then carries no
     /// installed Runtime row or field at all.
