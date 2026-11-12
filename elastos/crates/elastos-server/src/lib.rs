@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod binaries;
 pub mod browser_app_hosts;
+pub mod bundle_admission;
 pub(crate) mod capsule_record;
 pub mod carrier;
 pub mod carrier_service;

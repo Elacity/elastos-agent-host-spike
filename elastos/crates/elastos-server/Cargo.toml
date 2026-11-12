@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 elastos-runtime = { path = "../elastos-runtime" }
 elastos-namespace = { path = "../elastos-namespace" }
+elastos-bundle-identity = { path = "../elastos-bundle-identity" }
 elastos-common = { path = "../elastos-common" }
 elastos-storage = { path = "../elastos-storage" }
 elastos-compute = { path = "../elastos-compute" }
