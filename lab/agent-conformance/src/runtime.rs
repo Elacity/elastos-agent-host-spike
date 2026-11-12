@@ -175,8 +175,86 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::given_native;
+    use super::{given_native, runtime_under_test, RUNTIME_BINARY};
     use crate::harness::ThrowawayHome;
+    use crate::identity::{sha256, Observation, PREFIX};
+    use std::path::{Path, PathBuf};
+
+    /// Set in the second process of a test that needs one.
+    const SECOND: &str = "AGENT_CONFORMANCE_TEST_SECOND_PROCESS";
+
+    /// The given binary, when this is the second process of a test.
+    fn in_second_process() -> Option<PathBuf> {
+        std::env::var_os(SECOND)?;
+        std::env::var_os(RUNTIME_BINARY).map(PathBuf::from)
+    }
+
+    /// Runs one test of this file again in a second process with `given` as the
+    /// given Runtime, and returns what it printed. A second process is needed
+    /// because the given Runtime is read once per process, and because a test
+    /// cannot read what it printed itself. Its PATH is `empty`, a folder with
+    /// no programs: nothing can be built there, so a test that expects the
+    /// given binary fails at once if a build is tried instead.
+    ///
+    /// The stand-in's identity lines must never reach this run's own output as
+    /// lines, so callers show the returned text escaped only.
+    fn second_process(test: &str, given: &Path, empty: &Path) -> String {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                &format!("runtime::tests::{test}"),
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(RUNTIME_BINARY, given)
+            .env(SECOND, "1")
+            .env("PATH", empty)
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success() && printed.contains("test result: ok. 1 passed"),
+            "{printed:?} {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        printed
+    }
+
+    #[test]
+    fn runtime_under_test_is_the_given_binary_when_one_is_named() {
+        if let Some(given) = in_second_process() {
+            let runtime = runtime_under_test().unwrap();
+            assert_eq!(runtime.binary, given);
+            assert_eq!(runtime.sha256, sha256(b"given runtime"));
+            assert!(std::ptr::eq(runtime, runtime_under_test().unwrap()));
+            return;
+        }
+        let home = ThrowawayHome::new().unwrap();
+        let given = home.root().join("given-elastos");
+        std::fs::write(&given, b"given runtime").unwrap();
+        let printed = second_process(
+            "runtime_under_test_is_the_given_binary_when_one_is_named",
+            &given,
+            home.temp(),
+        );
+        assert!(
+            printed.contains("elastos given, not built\n"),
+            "{printed:?}"
+        );
+        // One identity line, for the given bytes: this is the line the receipt
+        // takes the Runtime's hash from.
+        let identities: Vec<_> = printed
+            .lines()
+            .filter(|line| line.contains(PREFIX))
+            .collect();
+        let expected = Observation::Native {
+            role: "elastos".into(),
+            sha256: sha256(b"given runtime"),
+        }
+        .line();
+        assert_eq!(identities, [expected], "{printed:?}");
+        home.finish().unwrap();
+    }
 
     #[test]
     fn given_runtime_is_identified_where_it_is() {
