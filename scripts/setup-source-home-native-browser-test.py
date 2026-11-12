@@ -133,7 +133,7 @@ class NativeSourceHomeTest(unittest.TestCase):
         write(self.repo / 'model-catalog.json', '{"catalog":"fixture"}\n')
         write(self.runtime, '#!' + sys.executable + '\n' + RUNTIME, 0o700)
         write(self.commands / 'cargo', '#!' + sys.executable + '\n' + CARGO, 0o700)
-        write(self.commands / 'rustc', '#!/bin/sh\necho rustc 1.91.0\n', 0o700)
+        write(self.commands / 'rustc', '#!/bin/sh\necho rustc 1.95.0\n', 0o700)
         write(self.commands / 'uname', '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo "${FIXTURE_ARCH:-aarch64}";; *) exit 99;; esac\n', 0o700)
         write(self.commands / 'df', '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\nfixture 100000000 1 90000000 1%% /\n"\n', 0o700)
         write(self.commands / 'git', '#!/bin/sh\ncase "$3" in status) exit 0;; rev-parse) printf "%040d\\n" 1;; *) exit 99;; esac\n', 0o700)

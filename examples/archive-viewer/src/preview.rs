@@ -25,7 +25,8 @@ use docs_model::{self, ModelError};
 use miniz_oxide::inflate::core::{decompress_with_limit, inflate_flags, DecompressorOxide};
 use miniz_oxide::inflate::TINFLStatus;
 
-use crate::zip::{Entry, ReadError, Reader, Reason};
+use crate::listing::{Entry, Reason};
+use crate::zip::{ReadError, Reader};
 
 /// B1: an entry is shown only if its declared uncompressed size is at most
 /// this.
@@ -177,14 +178,18 @@ pub fn preview(
         });
     }
 
-    // L7: the CRC-32 of the output must be the directory's.
-    if crc32(&output) != entry.crc {
-        return Ok(Outcome {
-            produced,
-            read,
-            consumed,
-            blocks: Err("crc_mismatch"),
-        });
+    // L7: the CRC-32 of the output must be the record's, where the format
+    // carries one. A tar entry has none, so its bytes are held by L8's length
+    // and the read's own length check above.
+    if let Some(crc) = entry.crc {
+        if crc32(&output) != crc {
+            return Ok(Outcome {
+                produced,
+                read,
+                consumed,
+                blocks: Err("crc_mismatch"),
+            });
+        }
     }
     let text = match text::check_whole(&output) {
         Ok(text) => text,

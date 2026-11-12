@@ -148,7 +148,18 @@ export function readView(value) {
     const reason = cut(own(refusedIn, "message"), MAX_MESSAGE_CHARS, "This archive could not be read.");
     refused = { message: reason.trim() ? reason : "This archive could not be read." };
   }
-  return { archive, entries, previews, skipped, refused };
+
+  const stoppedIn = own(value, "stopped");
+  let stopped = null;
+  if (stoppedIn !== undefined) {
+    // A partial listing says so: entries drawn beside it are not the archive.
+    if (!stoppedIn || typeof stoppedIn !== "object" || Array.isArray(stoppedIn)) {
+      throw new Error("These are not Archive views.");
+    }
+    const reason = cut(own(stoppedIn, "message"), MAX_MESSAGE_CHARS, "This listing is partial.");
+    stopped = { message: reason.trim() ? reason : "This listing is partial." };
+  }
+  return { archive, entries, previews, skipped, refused, stopped };
 }
 
 /** The only request this page makes. */
@@ -249,7 +260,8 @@ export function mountReader(env) {
         view.previews.appendChild(drawPreview(doc, preview, pathFor));
       }
 
-      if (read.entries.length === 0) setStatus("This archive has no entries to show.");
+      if (read.stopped) setStatus(read.stopped.message);
+      else if (read.entries.length === 0) setStatus("This archive has no entries to show.");
       else if (read.previews.length === 0) setStatus("No text preview is shown.");
     } catch (error) {
       setStatus(error.message);

@@ -718,10 +718,10 @@ impl RuntimeMintIntent {
         }
         match self.protect_state {
             RuntimeMintIntentProtectState::OpenHandlePendingCancel(handle)
-            | RuntimeMintIntentProtectState::OpenHandlePendingClose(handle) => {
-                if handle == [0u8; MAX_PROVIDER_OPAQUE_HANDLE_BYTES_V1] {
-                    return Err(RuntimeMintJournalError::InvalidSelection);
-                }
+            | RuntimeMintIntentProtectState::OpenHandlePendingClose(handle)
+                if handle == [0u8; MAX_PROVIDER_OPAQUE_HANDLE_BYTES_V1] =>
+            {
+                return Err(RuntimeMintJournalError::InvalidSelection);
             }
             RuntimeMintIntentProtectState::Completed(mint_id)
                 if mint_id == Digest32::new([0; 32]) =>

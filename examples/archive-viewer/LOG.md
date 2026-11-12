@@ -528,3 +528,229 @@ one renderer, shipped beside the page, and are not copied into it.
 2026-10-27, task 024: a kill leaves the snapshot; a normal failure removes it.
 
 2026-10-27, task 017: the archive page ships the kit client; the Photos page still keeps its own copy.
+
+2026-11-12, task 009: the format-independent listing rules have one owner.
+
+The name, path, kind, status and duplicate rules left `src/zip.rs` for
+`src/listing.rs`, so the tar reader can feed its decoded entries into the same
+rules instead of carrying a second copy.
+
+### What changed
+
+- New `src/listing.rs` owns `Refused`, `Reason`, `Entry`, `Kind`, `Status` and
+  `Listing`, plus `archive_name` (N1), `name_text` (P4), `entry_status` (P9,
+  L9, methods and encryption), `path_rules` (P1 to P4, P8) and
+  `block_duplicates` (P5). The code moved verbatim, so the same inputs give the
+  same listing.
+- `src/zip.rs` keeps the ZIP byte parsing (the end record, the directory, the
+  local-header checks B4a and L5), `kind_of`, which reads ZIP attributes, and
+  `Reader`. It imports the shared rules and types. `Entry`'s record fields are
+  crate-visible so the ZIP reader can fill them; the rules did not change.
+- `src/lib.rs` re-exports the types from `listing`; `src/preview.rs` and
+  `src/tests.rs` name them through the new module.
+- `falsify.py` snapshots `src/listing.rs`, and the cases whose rule moved
+  anchor there.
+
+### Falsifiers re-anchored (`src/zip.rs` to `src/listing.rs`)
+
+F7, F8, F9, F10, F11, F12, F13, F14, the trailing-slash segment case of F15,
+F29, F30 and F40. Their plants, named tests and expected failures did not
+change.
+
+### One-owner falsifier
+
+- **F44** `the shared listing rule has one owner` plants a change in
+  `src/listing.rs` (P8's `path.len() > MAX_NAME_BYTES` becomes `+ 1`) and
+  requires `a_name_over_its_cap_is_blocked` to fail. The module holds the only
+  copy of that comparison, so a copy elsewhere would leave the test green.
+  `falsify.py --check` finds every moved anchor once.
+
+### Measurements
+
+- Guest tests: 90 pass, with the same names and count as before the move.
+- `falsify.py --check`: all 77 anchors found once.
+- `falsify.py`: 73 guest cases caught, each isolated, F44 included.
+- `verify.sh` and `verify.sh --runtime` passed at this head; the owning issue
+  holds the logs.
+
+### Notes
+
+- This slice holds no tar code and no rule change. The preview path, the host
+  test, the page and `kind_of` are outside the move; `kind_of` stays in the
+  ZIP reader because it reads ZIP attributes.
+- A tar reader feeds its decoded entries to `src/listing.rs` and gets the same
+  P1 to P9, L9 and P5 ruling and the same `Listing` shape.
+
+2026-11-12, task 010: uncompressed tar lists through the shared rules.
+
+tar has no directory, so the listing walks one 512-byte ustar header per entry
+and stops at the two zero blocks that end the archive. The tar reader decodes a
+header into an `Entry` and calls `src/listing.rs` for the name, path, kind,
+status and duplicate rules; no rule has a second copy.
+
+### What changed
+
+- New `src/tar.rs`: the header walk over the counted `Reader`. It checks each
+  header's ustar magic and checksum, parses the octal size and refuses a header
+  whose data would pass the object, builds the path from `prefix` and `name`,
+  maps typeflag `0` and NUL to a file (an archive name to N1's `archive`) and
+  `5` to a directory, and blocks every other type through P9. It never reads an
+  entry's data to list it.
+- A spent read budget stops the walk, lists the entries read so far and marks
+  the listing `read_budget` in a new `Listing::stopped` field; the view writes
+  it as `"stopped":{"code","message"}`. A 257th header refuses the archive as
+  `too_many_entries`, the P8 cap.
+- `src/lib.rs` detects the format once: a ZIP local-header or end-record
+  signature at offset 0, else a ustar magic at 257, else a ZIP end record at
+  the object's last byte, else `unknown_format`. One branch calls the matching
+  listing.
+- `src/zip.rs` exposes its reader, read helper, size probe and error to the
+  second format; the ZIP parsing and its rules are unchanged.
+
+### Tests and falsifiers
+
+- 13 tests for tar: listing shape, content-based dispatch, unknown object,
+  checksum, octal size, data bound, prefix path, non-regular types, duplicates,
+  nested archive, end marker, read-budget stop and entry cap; one more proves
+  the first tar header wins over a later ZIP end record.
+- Ten anchors T1 to T10 cover those tar rules. The path, duplicate, count and
+  read-budget cases also name the tar tests, so the shared rule has one copy to
+  break.
+- Guest suite: 104 tests pass. `falsify.py --check`: all 87 anchors found once.
+  The full run catches every case and leaves every unnamed test passing.
+
+### Remaining
+
+- pax (`x`, `g`) and GNU long name/link (`L`, `K`) extension headers refuse
+  the whole archive as `extension_header` until their metadata is applied.
+  Many tars made by common tools carry pax headers, so this refusal is common
+  until then.
+- tar previews and the tar fuel gate are the next work; `tar.gz` and any
+  compressed tar need Bus v2 streams, outside this app's Bus v1 path.
+
+2026-11-12, task 011: tar previews and the tar fuel gate.
+
+A shown tar entry now takes the ZIP stored entry's preview path, and the worst
+tar archive within the caps is measured in the real component. With that, tar
+on Bus v1 is complete on the listing, preview and fuel gate; BACKLOG item 2
+(uncompressed tar) is done.
+
+### What changed
+
+- `src/lib.rs` keeps the format `detect` chose and passes it to the preview
+  pass. A tar entry reads the shared status map and then the one
+  `preview::preview` call a ZIP stored entry takes: the same B1 size check, the
+  same text check and the same docs-model typed blocks. There is no second
+  preview routine, no inflate and no bomb ratio or total cap on a tar entry: it
+  is stored, so its declared size is its only bound.
+- `Entry::crc` is now `Option<u32>`: ZIP sets it, tar leaves it unset, and the
+  L7 compare runs only where the record carries one. `listing::shown_status`
+  is the one status-to-skip-reason map both formats read; the ZIP local-header
+  check calls it first.
+- The tar reader was not changed, and the page and the view schema were not
+  touched: the same `elastos.archive-viewer.view/v1` objects, drawn unchanged.
+
+### Tests and falsifiers
+
+- Five guest tests: a tar text entry's blocks equal the ZIP stored entry's, a
+  binary entry is skipped `not_text`, an over-cap entry is skipped `oversize`
+  before any read of its data, a blocked entry is skipped with its status, and
+  a view over 64 KiB is refused `view_too_large`. Guest suite: 123 tests pass.
+- T21 makes every tar entry unshowable and is caught by those five.
+- F2, F32 and F33 now also name the tar test they break; F27, F25d and F30b
+  anchor on the optional CRC and the shared status map, and F30b names the
+  blocked-entry test it breaks. Each plant is one line, caught with every
+  unnamed test passing.
+- `falsify.py --check`: all 98 anchors found once.
+
+### Measurements (Bus v1, 100,000,000 fuel, gate 80%)
+
+The gate's new archive is 64 headers, the most a run lists at about 212,000
+fuel a header, plus one entry at the largest text preview (B1, 16 KiB). It
+reads 50,176 bytes of archive within the 64 KiB run budget.
+
+| Archive | Fuel | Share |
+|---|---|---|
+| the worst tar archive | 20,821,517 | 20.8% |
+
+The F36 mutant (the counted reader asks one byte a call) puts the same tar
+archive at 100,000,000 fuel (100%, out of fuel) and the gate test fails; the
+other host tests pass under it.
+
+### Remaining
+
+- `tar.gz`, `.gz` and every compressed tar need Bus v2 streams. Nested and
+  image entries on Bus v2 are the same. The bundle and container build are
+  outside this lane.
+
+2026-11-12, task 009: tar record types are a closed list.
+
+A typeflag outside the five record types this reader understands can change
+how the following bytes or entries are read, so the whole archive is refused.
+
+### What changed
+
+- `src/tar.rs` accepts a file (`0`, NUL), a directory (`5`), and a hard link,
+  symbolic link, character device, block device or FIFO (`1` to `4`, `6`).
+  Every other flag refuses the archive: `x`, `g`, `L` and `K` keep
+  `extension_header`; every other byte is `unsupported_type`, and its message
+  names the flag (`0x53 ('S')`).
+- A non-zero size on `1`, `2`, `3`, `4` or `6` is `other_type_size`: ustar
+  gives those types no data, and stepping over bytes that are not there would
+  lose the next header.
+- Three guest tests: each supported type with a following file, one flag from
+  each refused class with a following file, and a size on each link or device
+  type. T22 plants the closed list as `if false`; it is caught by the two
+  refusal tests, with every unnamed test passing.
+
+2026-11-12, task 009: the fuel gate measures the worst tar shapes.
+
+The old fixture was 64 headers and one 16 KiB preview, 20.8% of the
+100,000,000-fuel budget, so use could almost quadruple before the gate failed.
+The gate now runs the shapes the read and preview budgets allow and fails
+above 35,000,000 fuel.
+
+### Measurements (Bus v1, 100,000,000 fuel)
+
+| Archive | Fuel | Share |
+|---|---|---|
+| the longest tar header walk (127 listed) | 24,522,888 | 24.5% |
+| the tar headers and one 16 KiB preview at the read cap (93 listed) | 26,216,994 | 26.2% |
+| the most tar previews in one request (8 shown, 24 KiB) | 14,443,197 | 14.4% |
+| the old 64-header shape | 20,821,375 | 20.8% |
+
+The ceiling is 35,000,000 fuel, 1.335 times the largest measured shape. The
+host test asserts each fixture reaches its cap: 127 entries with the 128th
+header unread, 93 entries with the preview shown and fewer than 512 read
+bytes left, and eight previews shown at the compressed-data cap.
+
+### Tests and falsifiers
+
+- `worst_archives_stay_under_their_fuel_ceiling` replaces the 80% test; F36
+  names it and its mutant still crosses the ceiling.
+- `the_worst_archives_run_and_write_their_views` and
+  `the_worst_archives_reach_their_caps` assert the three new shapes and their
+  sizes.
+
+2026-11-12, task 009: two plants reach the assertions they name.
+
+- T16's fixture recomputes the header checksum after its magic changes, so a
+  reader that skips the version check takes the bytes as tar and the test
+  fails on its `unknown_format` assertion, not on a stale checksum.
+- The view-cap plant now writes the oversized view: the debug assertion
+  before the write is gone, so F32 reaches the written view's length
+  assertion in both view tests.
+
+2026-11-12, task 009: the format refusal names ustar.
+
+A GNU-format tar and an old tar with no magic reach `unknown_format` because
+`detect` probes only for ZIP and ustar. The message said the object was not an
+uncompressed tar archive, which was not true.
+
+### What changed
+
+- The `unknown_format` message now says the object is not a ZIP or ustar
+  archive and that this reader lists ZIP and ustar only.
+- `a_magic_that_is_not_ustar_nul_00_is_not_tar`, the not-an-archive test and
+  the new `an_old_tar_without_magic_refuses_with_the_ustar_message` check that
+  the reason names ustar.

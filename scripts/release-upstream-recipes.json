@@ -397,7 +397,7 @@
           "name": "sources/browser-upstream-build.py",
           "source": {
             "path": "scripts/browser-upstream-build.py",
-            "checksum": "sha256:5c5c240ed501fe6aee36017eb3a5a3f319be65f6fdcec8fe159371e30109474c",
+            "checksum": "sha256:a9aac1e1bd060230a7b1a163e1ba6c6c6d8fe930060b0f6662904f1469014215",
             "max_bytes": 1048576
           }
         }
@@ -488,7 +488,7 @@
           "name": "sources/browser-upstream-build.py",
           "source": {
             "path": "scripts/browser-upstream-build.py",
-            "checksum": "sha256:5c5c240ed501fe6aee36017eb3a5a3f319be65f6fdcec8fe159371e30109474c",
+            "checksum": "sha256:a9aac1e1bd060230a7b1a163e1ba6c6c6d8fe930060b0f6662904f1469014215",
             "max_bytes": 1048576
           }
         }
@@ -622,7 +622,7 @@
           "source": {
             "path": "scripts/browser-upstream-build.py",
             "max_bytes": 1048576,
-            "checksum": "sha256:5c5c240ed501fe6aee36017eb3a5a3f319be65f6fdcec8fe159371e30109474c"
+            "checksum": "sha256:a9aac1e1bd060230a7b1a163e1ba6c6c6d8fe930060b0f6662904f1469014215"
           }
         }
       ]
@@ -692,7 +692,7 @@
           "source": {
             "path": "scripts/browser-upstream-build.py",
             "max_bytes": 1048576,
-            "checksum": "sha256:5c5c240ed501fe6aee36017eb3a5a3f319be65f6fdcec8fe159371e30109474c"
+            "checksum": "sha256:a9aac1e1bd060230a7b1a163e1ba6c6c6d8fe930060b0f6662904f1469014215"
           }
         }
       ]
@@ -737,7 +737,7 @@
           "source": {
             "path": "scripts/browser-upstream-build.py",
             "max_bytes": 1048576,
-            "checksum": "sha256:5c5c240ed501fe6aee36017eb3a5a3f319be65f6fdcec8fe159371e30109474c"
+            "checksum": "sha256:a9aac1e1bd060230a7b1a163e1ba6c6c6d8fe930060b0f6662904f1469014215"
           }
         }
       ]
@@ -782,7 +782,7 @@
           "source": {
             "path": "scripts/browser-upstream-build.py",
             "max_bytes": 1048576,
-            "checksum": "sha256:5c5c240ed501fe6aee36017eb3a5a3f319be65f6fdcec8fe159371e30109474c"
+            "checksum": "sha256:a9aac1e1bd060230a7b1a163e1ba6c6c6d8fe930060b0f6662904f1469014215"
           }
         }
       ]
@@ -862,7 +862,7 @@
           "source": {
             "path": "scripts/browser-upstream-build.py",
             "max_bytes": 1048576,
-            "checksum": "sha256:5c5c240ed501fe6aee36017eb3a5a3f319be65f6fdcec8fe159371e30109474c"
+            "checksum": "sha256:a9aac1e1bd060230a7b1a163e1ba6c6c6d8fe930060b0f6662904f1469014215"
           }
         },
         {
@@ -930,7 +930,7 @@
           "name": "sources/browser-upstream-build.py",
           "source": {
             "path": "scripts/browser-upstream-build.py",
-            "checksum": "sha256:5c5c240ed501fe6aee36017eb3a5a3f319be65f6fdcec8fe159371e30109474c",
+            "checksum": "sha256:a9aac1e1bd060230a7b1a163e1ba6c6c6d8fe930060b0f6662904f1469014215",
             "max_bytes": 1048576
           }
         }

@@ -42,7 +42,7 @@ app meets each one.
 
 | Layer | How the archive viewer meets it |
 |---|---|
-| **Own RTOS** | All archive parsing runs inside a fuel-metered component. Today the Runtime parses archives in its own process (`elastos-server/src/library.rs`, `zip` and `tar` crates); this app moves that work into the sandbox, which is the reason the roadmap gives for this app ("archive parsing is a classic attack surface"). On Bus v1 the run has the fixed 100,000,000 fuel, and the worst archive within the caps must use at most 80% of it. On Bus v2 the guest runs under fuel slices and the epoch deadline. There is no file system, clock or socket for the parser to reach. Rong's POSIX-compatible WASM inside the capsule (Wasmer as a proof of concept) is an open engine question; this app stays on Wasmtime. |
+| **Own RTOS** | All archive parsing runs inside a fuel-metered component. Today the Runtime parses archives in its own process (`elastos-server/src/library.rs`, `zip` and `tar` crates); this app moves that work into the sandbox, which is the reason the roadmap gives for this app ("archive parsing is a classic attack surface"). On Bus v1 the run has the fixed 100,000,000 fuel, and the fuel gate fails a rise of a third above the largest shape measured within the caps. On Bus v2 the guest runs under fuel slices and the epoch deadline. There is no file system, clock or socket for the parser to reach. Rong's POSIX-compatible WASM inside the capsule (Wasmer as a proof of concept) is an open engine question; this app stays on Wasmtime. |
 | **Trap down** | Every byte of the archive comes through `providers.invoke` with a grant for that one archive object, asked for with one action (`read`). The only write is the app's own view object, under its own grant and storage prefix. There is no extract operation: the capsule has no grant on Documents or Library to write to, and asks for none. A content failure skips one entry; an authority failure stops the run with a `bus-error` that names the resource. |
 | **Component Model** | The core imports only `elastos:bus` (`types`, `runtime`, `capabilities`, `providers`), and admission checks it. The archive crates were built for `wasm32-unknown-unknown` and checked to add no import at all ([Crates](#crates)). |
 | **Double-checking** | The core trusts no part of the archive. The end record, the central directory, each local header and the bytes that come out of the decompressor are each checked against the others: sizes, offsets, names, methods and CRC. A declared size is shown as declared, never used to size a buffer or to skip a check. The page checks the view's schema; Runtime checks every grant. The entitlement token check (pattern 7) is not needed: this is a free first-party viewer (below). |
@@ -217,7 +217,8 @@ A name is shown as text, never used as a path. The rules decide its status:
 
 - **S1, Bus v1.** The run has fixed fuel and a trap is an authority-looking stop, so a content failure must
   never trap (PATTERNS 1). B1 to B3 bound the inflate work; the fuel gate (below) runs the worst archive of each
-  hostile class through the real `ComponentProvider` and requires at most 80%.
+  hostile class through the real `ComponentProvider` and requires no more than 36,600,000 fuel, a third above
+  the largest shape measured.
 - **S2, Bus v2.** Inflate runs in slices that yield; a stop during an inflate ends the run as cancelled; the
   epoch backstop ends one that never yields (the Bus v2 proof's limits).
 - **S3, memory.** The inflate state is about 43 KiB (43,296 bytes, measured natively: a 32 KiB dictionary plus
@@ -251,9 +252,9 @@ writing.
 
 ## Limits and the fuel budget
 
-Bus v1, one run, 100,000,000 fuel, gate 80%. Read costs about 415 fuel a byte (measured for the photo viewer);
-write about 200 a byte (estimated for the documents viewer, and higher with the shared write path: the gate
-decides); inflate 30 and CRC 8.3 a byte (measured here).
+Bus v1, one run, 100,000,000 fuel; the gate fails above 36,600,000 fuel. Read costs about 415 fuel a byte
+(measured for the photo viewer); write about 200 a byte (estimated for the documents viewer, and higher with
+the shared write path: the gate decides); inflate 30 and CRC 8.3 a byte (measured here).
 
 | Step | Cap | Estimated fuel |
 |---|---|---|
@@ -266,7 +267,7 @@ decides); inflate 30 and CRC 8.3 a byte (measured here).
 | CRC | 64 KiB | 0.5 M |
 | Text checks, docs-model blocks | the shown entries | measure |
 | View object | 64 KiB in all: listing at most 24 KiB, previews the rest | 13 to 26 M |
-| **Total** | | **about 38 to 53 M**, under the 80 M gate with room for parsing |
+| **Total** | | **about 38 to 53 M** as upper estimates; the largest measured shape uses 27.4 M |
 
 This budget would leave room for at most one 16 KiB image a run, which is why images wait for Bus v2
 (decision 4). Bus v2 streams remove the JSON byte arrays, so its caps are set again from measurements there,
@@ -344,7 +345,7 @@ rebuild the component and run in `ComponentProvider`.
 | F33 | Text checks | the whole-text check is removed | `a_text_entry_that_is_not_text_is_skipped` |
 | F34 | Images (Bus v2) | the header check is removed | `an_entry_named_png_that_is_not_one_is_not_drawn` |
 | F35 | Grant | the archive read uses no grant (in the component) | `no_grant_stops_the_run_through_the_runtime` |
-| F36 | Fuel | the counted reader asks for one byte per call and the inflate loop copies the window per output byte (measured fuel regressions; they change no rule and no output) | `worst_archives_stay_under_80_percent_of_the_runtime_fuel` (the gate records the highest measured fuel under the mutant and requires it above 80%) |
+| F36 | Fuel | the counted reader asks for one byte per call and the inflate loop copies the window per output byte (measured fuel regressions; they change no rule and no output) | `worst_archives_stay_under_their_fuel_ceiling` (the gate fails above 36,600,000 fuel, a third above the largest measured shape, and the mutant crosses it) |
 | F37 | Page | a path is drawn as markup | `an_entry_path_is_text` |
 | F38 | Page (Bus v1) | an image entry is drawn | `the_page_draws_no_image_on_bus_v1` |
 | F39 | Page | an inherited property name picks a kind | `a_kind_named_after_an_inherited_property_is_not_drawn` |
@@ -359,12 +360,13 @@ row. Each mutant changes only its own rule, so each named test fails independent
 over a bounded 16-byte inflate step and asserts the ratio status, the consumed count and the produced count at
 the step that trips, so it does not depend on the fuel gate. F43 asserts the complete listing, the read trace
 and that the declared total never reaches a buffer, under the host's 128 MiB limit. F36's mutant adds fuel cost
-only and changes no rule: the gate's measured fuel must cross 80% under it. The Bus v2 limits (S2 and the
-resident guest's S3) are tested with that proof when its guest is built.
+only and changes no rule: the gate's measured fuel must cross the 36,600,000 ceiling under it. The Bus v2
+limits (S2 and the resident guest's S3) are tested with that proof when its guest is built.
 
 The fuel gate (F36) runs one archive per hostile class at its caps: the largest directory, the most names at
-their longest, the most shown entries, a bomb at the ratio cap, a text entry of the worst inflate cost, and the
-largest view. F3 is not the fuel proof.
+their longest, the most shown entries, a bomb at the ratio cap, a text entry of the worst inflate cost, the
+largest view, and the tar shapes the read budget allows: 127 headers, 93 headers with one 16 KiB preview,
+eight previews in one request, and 69 headers beside those eight previews. F3 is not the fuel proof.
 
 ## Order of work
 

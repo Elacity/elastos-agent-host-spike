@@ -137,7 +137,7 @@ jobs:
           echo "RELEASE_ROOT=$root" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown,aarch64-apple-darwin
       - name: prepare hosted capacity and native tools
         timeout-minutes: 20
@@ -409,7 +409,7 @@ jobs:
           echo "RELEASE_ROOT=$root" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown,${{ matrix.target }}
       - name: install host prerequisites
         timeout-minutes: 15
@@ -538,7 +538,7 @@ jobs:
           [[ ! -e "$SEED_TARGET" ]]
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
       - name: build Runtime N and the IPFS provider in a fresh Cargo directory
         timeout-minutes: 60
         env:

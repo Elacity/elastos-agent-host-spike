@@ -305,6 +305,9 @@ pub enum PrincipalRootProtectorKind {
     RecoveryKit,
     WebAuthnPrf,
     DidRecovery,
+    /// An agent's data key wrapped under its owner's root. It appears only in
+    /// the agent records file; a person's protection never carries it.
+    OwnerRoot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
