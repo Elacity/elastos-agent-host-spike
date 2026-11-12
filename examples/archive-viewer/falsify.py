@@ -613,6 +613,28 @@ CASES = [
      "            if archive_name(path) {",
      "            if archive_name(path) && false {",
      ["a_nested_tar_archive_is_listed_not_opened"]),
+    ("T17 a ustar byte later in the block wins over the ZIP signature",
+     "src/lib.rs",
+     '    if start.starts_with(b"PK\\x03\\x04") || start.starts_with(b"PK\\x05\\x06") {',
+     '    if (start.starts_with(b"PK\\x03\\x04") || start.starts_with(b"PK\\x05\\x06"))\n'
+     '        && zip::read(reader, 257, 1)? != b"u"\n'
+     "    {",
+     ["a_zip_with_ustar_bytes_later_in_its_first_block_is_still_zip"]),
+    ("T18 a full-width name is cut to nothing",
+     "src/tar.rs",
+     "        .unwrap_or(bytes.len());",
+     "        .unwrap_or(0);",
+     ["a_full_width_tar_name_and_prefix_are_kept"]),
+    ("T19 an empty name is listed",
+     "src/listing.rs",
+     '        .any(|part| part.is_empty() || part == "." || part == "..")',
+     '        .any(|part| part == "." || part == "..")',
+     ["an_empty_tar_name_is_blocked", "dot_and_empty_segments_are_blocked"]),
+    ("T20 a short final header is not refused",
+     "src/tar.rs",
+     "        if block.len() < BLOCK_BYTES as usize {",
+     "        if false {",
+     ["a_final_header_shorter_than_a_block_refuses_the_archive"]),
 ]
 
 

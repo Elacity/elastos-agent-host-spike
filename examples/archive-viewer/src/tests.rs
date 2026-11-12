@@ -2386,6 +2386,40 @@ fn a_non_regular_tar_typeflag_is_blocked() {
 }
 
 #[test]
+fn a_full_width_tar_name_and_prefix_are_kept() {
+    // Both fields fill their fixed width with no NUL, so each is used whole:
+    // 155 prefix bytes, a slash and 100 name bytes, past the 255-byte cap.
+    let name = "n".repeat(100);
+    let prefix = "p".repeat(155);
+    let bus = tar_fixture(&[TarSpec::file(&name).prefix(&prefix)]);
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"].as_str().unwrap().len(), 256);
+    assert_eq!(entries[0]["status"], "blocked");
+    assert_eq!(entries[0]["reason"], "name_too_long");
+}
+
+#[test]
+fn an_empty_tar_name_is_blocked() {
+    let bus = tar_fixture(&[TarSpec::file("")]);
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["status"], "blocked");
+    assert_eq!(entries[0]["reason"], "dot_segment");
+}
+
+#[test]
+fn a_final_header_shorter_than_a_block_refuses_the_archive() {
+    let mut archive = tar_build(&[TarSpec::file("a.txt"), TarSpec::file("b.txt")]);
+    // The second header starts at 512 but the object ends after 100 of its
+    // bytes.
+    archive.truncate(512 + 100);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "header_truncated");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
 fn a_tar_extension_header_refuses_the_archive() {
     // pax (`x`, `g`) and GNU (`L`, `K`) extension headers change what the
     // next header means, and this reader does not apply them.
@@ -2549,6 +2583,18 @@ fn too_many_tar_entries_refuse_the_archive() {
     let listing = tar::listing(&mut reader).expect("a content refusal is a listing");
     assert_eq!(listing.refused.unwrap().code, "too_many_entries");
     assert!(listing.entries.is_empty());
+}
+
+#[test]
+fn a_zip_with_ustar_bytes_later_in_its_first_block_is_still_zip() {
+    // The first four bytes are ZIP's local-header signature; ustar bytes in
+    // the entry's data at offset 257 do not change the format.
+    let mut archive = build(&[stored("a.txt", &[b'x'; 400])], &[]);
+    write_at(&mut archive, 257, b"ustar\0\x30\x30");
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert!(view(&bus).get("refused").is_none(), "the ZIP listing runs");
+    assert!(view(&bus).get("stopped").is_none());
+    assert_eq!(entries(&bus)[0]["path"], "a.txt");
 }
 
 #[test]
