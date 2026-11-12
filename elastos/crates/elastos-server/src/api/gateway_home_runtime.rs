@@ -1,5 +1,31 @@
 use super::*;
 
+/// Home launch migrates the legacy Services peer-contacts object before it
+/// serves the target. A person whose stored record is kept on another Runtime
+/// reaches that write with no protection here, so the migration refuses and
+/// the launch continues with the legacy file in place. Every other migration
+/// error still fails the launch.
+fn migrate_legacy_services_peer_contacts_for_launch(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<()> {
+    match super::gateway_home_system::migrate_legacy_services_peer_contacts(data_dir, context) {
+        Ok(()) => Ok(()),
+        Err(err)
+            if err
+                .chain()
+                .any(|cause| cause.is::<crate::auth::ProtectedRecordKeptElsewhere>()) =>
+        {
+            tracing::warn!(
+                error = %err,
+                "Home launch skipped the legacy Services peer contacts migration"
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
 fn home_projection_token_error(err: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
     if err.to_string() == "home launch token auth session is not active" {
         (
@@ -69,10 +95,7 @@ pub(super) async fn home_launch(
     let provider_registry = state.provider_registry.clone();
     let sync_services = target_summary.target == INBOX_CAPSULE_ID;
     let services_sync_error = tokio::task::spawn_blocking(move || {
-        super::gateway_home_system::migrate_legacy_services_peer_contacts(
-            &data_dir,
-            &launch_context,
-        )?;
+        migrate_legacy_services_peer_contacts_for_launch(&data_dir, &launch_context)?;
         Ok::<_, anyhow::Error>(sync_services.then(|| {
             super::gateway_home_system::home_services_sync_access_requests(
                 &data_dir,
@@ -1963,6 +1986,47 @@ mod tests {
             home_projection_token_error(anyhow::anyhow!("failed to load signing key"));
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"], "failed to load signing key");
+    }
+
+    /// A child reaches Home launch with a legacy Services peer-contacts object
+    /// in its own folder. The person's record is kept on the parent, so the
+    /// migration's write refuses; launch proceeds and the legacy file stays,
+    /// with no new object beside it.
+    #[test]
+    fn a_refused_legacy_contacts_migration_does_not_fail_launch() {
+        use super::super::gateway_tests::r8d_passkey_rows::passkey_person;
+
+        let person = passkey_person(SERVICES_CAPSULE_ID);
+        let child = person.child.path();
+        let root = person.ctx.root().localhost_root();
+        let legacy_uri = format!("{root}/.AppData/ElastOS/Home/people-contacts.json");
+        let legacy_path =
+            elastos_common::localhost::rooted_localhost_fs_path(child, &legacy_uri).unwrap();
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "schema": "elastos.people.contacts-state/v1",
+            "principal_id": person.ctx.principal_id(),
+            "localhost_root": root,
+            "updated_at": 7,
+        }))
+        .unwrap();
+        std::fs::write(&legacy_path, &legacy).unwrap();
+        migrate_legacy_services_peer_contacts_for_launch(child, &person.ctx)
+            .expect("launch proceeds past a refused migration");
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy);
+        let current_uri = format!("{root}/.AppData/ElastOS/Home/services-peer-contacts.json");
+        let current_path =
+            elastos_common::localhost::rooted_localhost_fs_path(child, &current_uri).unwrap();
+        assert!(
+            !current_path.exists(),
+            "the refused migration wrote an object"
+        );
+        let relative = legacy_path
+            .strip_prefix(child)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        person.assert_child_holds_only(&[relative.as_str()]);
     }
 
     /// Home's launch of an installed capsule whose manifest pins a
