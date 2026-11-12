@@ -1319,6 +1319,88 @@ fn receipt_records_review_binding_beside_command_success() {
 }
 
 #[test]
+fn a_tree_dirty_around_the_run_fails_review_binding() {
+    use agent_conformance::report::render_bound_run;
+    let (observations, git) = synthetic(1, false);
+    let reviews = [review("codex", "pass", &git.commit)];
+    let render = |tree_check_failure: Option<String>| {
+        let report = render_bound_run(
+            &format!("{LIVE}: test\n"),
+            &output(&observations),
+            true,
+            Ok(git.clone()),
+            agent_conformance::report::Bound {
+                reviews: Some(&reviews),
+                reviews_file_failure: None,
+                tree_check_failure,
+                installed: None,
+            },
+            Some(""),
+        );
+        let document: Value = serde_json::from_slice(&report.receipt_bytes).unwrap();
+        (report, document)
+    };
+    let (report, document) = render(None);
+    assert!(report.table.contains("review_binding (A14) | PASS\n"));
+    assert_eq!(document["review_status"], "bound");
+
+    // A check around the suite saw a dirty tree: a passing review still cannot
+    // bind, and the reason is recorded.
+    let (report, document) = render(Some("tree was dirty during the run".into()));
+    assert!(report.table.contains("review_binding (A14) | FAIL\n"));
+    assert_eq!(document["review_status"], "unbound");
+    assert_eq!(
+        document["review_failures"],
+        serde_json::json!(["tree was dirty during the run"])
+    );
+    // Its own row: the suite's result stays.
+    assert_eq!(document["command_success"], true);
+}
+
+#[test]
+fn report_cli_records_a_tree_dirty_during_the_run() {
+    let home = ThrowawayHome::new().unwrap();
+    let (observations, _) = synthetic(4, false);
+    let commit = GitIdentity::read(&agent_conformance::build::repository())
+        .unwrap()
+        .commit;
+    let listed_path = home.root().join("list");
+    let results_path = home.root().join("results");
+    let reviews_path = home.root().join("reviews.json");
+    fs::write(&listed_path, format!("{LIVE}: test\n")).unwrap();
+    fs::write(&results_path, output(&observations)).unwrap();
+    fs::write(
+        &reviews_path,
+        serde_json::to_vec(&[review("codex", "pass", &commit)]).unwrap(),
+    )
+    .unwrap();
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_report"))
+        .env("AGENT_CONFORMANCE_REVIEWS", &reviews_path)
+        .env("AGENT_CONFORMANCE_TREE_DIRTY_DURING_RUN", "1")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_BINARY")
+        .env_remove("AGENT_CONFORMANCE_INSTALLED_DATA")
+        .arg(&listed_path)
+        .arg(&results_path)
+        .arg("0")
+        .arg(home.root().join("receipt.json"))
+        .output()
+        .unwrap();
+    // A failing binding is its own row: the command still succeeds.
+    assert!(result.status.success(), "{result:?}");
+    assert!(String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("review_binding (A14) | FAIL\n"));
+    let receipt = read_receipt(&home.root().join("receipt.json"));
+    assert_eq!(receipt["review_status"], "unbound");
+    assert!(receipt["review_failures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|failure| failure == "tree was dirty during the run"));
+    home.finish().unwrap();
+}
+
+#[test]
 fn report_cli_reads_reviews_and_refuses_a_malformed_file() {
     let home = ThrowawayHome::new().unwrap();
     let (observations, _) = synthetic(4, false);
@@ -1470,6 +1552,7 @@ fn reviews_file_inside_the_repository_cannot_bind() {
             agent_conformance::report::Bound {
                 reviews: Some(&reviews),
                 reviews_file_failure,
+                tree_check_failure: None,
                 installed: None,
             },
             Some(""),
@@ -1719,6 +1802,7 @@ fn render(
         agent_conformance::report::Bound {
             reviews: None,
             reviews_file_failure: None,
+            tree_check_failure: None,
             installed,
         },
         Some(""),
@@ -2335,6 +2419,7 @@ fn a14_rows_pass_only_when_every_row_is_present_and_passes() {
             agent_conformance::report::Bound {
                 reviews,
                 reviews_file_failure: None,
+                tree_check_failure: None,
                 installed,
             },
             Some(""),

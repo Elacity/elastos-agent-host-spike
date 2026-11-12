@@ -833,6 +833,7 @@ pub fn write_reviewed_run(
     let bound = Bound {
         reviews,
         reviews_file_failure: None,
+        tree_check_failure: None,
         installed: None,
     };
     write_bound_run(listed, output, cargo_ok, git, bound, receipt, gaps)
@@ -846,6 +847,10 @@ pub struct Bound<'a> {
     /// cannot bind, whatever the reviews say. `None` when it can, or when the
     /// reviews did not come from a file.
     pub reviews_file_failure: Option<String>,
+    /// From a check around the suite: why the tree was not clean then. `None`
+    /// when every such check saw a clean tree. `review_binding` fails on it, so
+    /// a tree that is dirty before, after or during the run cannot bind reviews.
+    pub tree_check_failure: Option<String>,
     /// `None` means no installed Runtime was given: the receipt then carries no
     /// installed Runtime row or field at all.
     pub installed: Option<Result<InstalledRuntime, Vec<String>>>,
@@ -900,6 +905,7 @@ pub fn render_reviewed_run(
     let bound = Bound {
         reviews,
         reviews_file_failure: None,
+        tree_check_failure: None,
         installed: None,
     };
     render_bound_run(listed, output, cargo_ok, git, bound, gaps)
@@ -918,6 +924,7 @@ pub fn render_bound_run(
     let Bound {
         reviews,
         reviews_file_failure,
+        tree_check_failure,
         installed,
     } = bound;
     let mut evidence = Evidence::parse(listed, output, gaps);
@@ -954,6 +961,7 @@ pub fn render_bound_run(
     });
     let mut unbound = review_failures(reviews, git.as_ref());
     unbound.extend(reviews_file_failure);
+    unbound.extend(tree_check_failure);
     unbound.sort();
     table.push_str(if unbound.is_empty() {
         "review_binding (A14) | PASS\n"

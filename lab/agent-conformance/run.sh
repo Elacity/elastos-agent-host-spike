@@ -26,6 +26,16 @@ export CARGO_BUILD_BUILD_DIR="$lane/target/host-build"
 export RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0
 export TMPDIR="$run_dir"
 manifest="$lane/Cargo.toml"
+# A review binds to the tested commit only on a clean tree. The tree is checked
+# here, after the suite below, and again when the report is written; a dirty
+# answer at any check leaves review_binding FAIL.
+tree_dirty=0
+check_tree() {
+    if [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then
+        tree_dirty=1
+    fi
+}
+check_tree
 # Prepare this checkout's report before collecting evidence, including failed suites.
 if ! cargo build --locked --manifest-path "$manifest" --bin report >"$run_dir/report-build" 2>&1; then
     printf 'versions receipt failure: report build failed; retained output: %s\n' "$run_dir" >&2
@@ -39,10 +49,11 @@ if cargo test --locked --manifest-path "$manifest" ${features[@]+"${features[@]}
 else
     status=$?
 fi
+check_tree
 sed -n '/^version identity:/p; /^given Runtime changed:/p; /^operator census:/p; /^cleanup census:/p; /^probe refusal effect:/p; /^parallel process isolation:/p; /^instance overlap:/p; /^cancel settlement:/p; /^kill settlement:/p; /^absent-policy settlement:/p; /^fixture controller:/p; /^fixture read:/p; /^session grant/p; /^host key read:/p; /^agent-host /p; /^FAILURE /p; /^SKIPPED /p' "$run_dir/results"
 printf 'process_isolation rows: process isolation, not capsule isolation; diagnostic results only\n'
 printf 'instance rows: two_instances_overlap_with_separate_grants and instance_grant_does_not_authorise_sibling each run one shared journey; process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9\n'
-if "$CARGO_TARGET_DIR/debug/report" "$run_dir/list" "$run_dir/results" "$status" "$run_dir/VERSIONS.json"; then
+if AGENT_CONFORMANCE_TREE_DIRTY_DURING_RUN="$tree_dirty" "$CARGO_TARGET_DIR/debug/report" "$run_dir/list" "$run_dir/results" "$status" "$run_dir/VERSIONS.json"; then
     rm -- "$run_dir/list" "$run_dir/results" "$run_dir/build" "$run_dir/report-build"
 else
     printf 'retained Cargo output: %s\n' "$run_dir" >&2

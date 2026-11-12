@@ -98,6 +98,13 @@ fn main() {
             process::exit(1);
         }
     };
+    // The suite's runner checks the tree before and after the tests and passes
+    // its result here. The Git identity above is checked again at this write.
+    let tree_check_failure = (env::var_os("AGENT_CONFORMANCE_TREE_DIRTY_DURING_RUN")
+        .as_deref()
+        .and_then(std::ffi::OsStr::to_str)
+        == Some("1"))
+    .then(|| "tree was dirty during the run".to_owned());
     let result = report::write_bound_run(
         &listed,
         &output,
@@ -106,6 +113,7 @@ fn main() {
         report::Bound {
             reviews: reviews.as_deref(),
             reviews_file_failure,
+            tree_check_failure,
             installed,
         },
         receipt,

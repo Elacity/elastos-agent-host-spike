@@ -262,8 +262,12 @@ retains its build output; the command cannot issue a receipt without its writer.
 `review_binding (A14)` passes only when `AGENT_CONFORMANCE_REVIEWS` names a
 JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
 verdict `pass` and the exact commit the receipt's `repository` names, and the
-tree is clean when the report is written. That is checked after the suite
-runs, so the row does not show that the results came from that tree. Reviews
+tree is clean at every check: before the suite, after it, and when the report
+is written. `run.sh` performs the first two checks and passes their result to
+the report; a dirty answer at either one leaves this row FAIL with
+`tree was dirty during the run`. The commit the report records is read at the
+last check, so the row still does not show that the results came from that
+tree: a change made and undone between two checks is not seen. Reviews
 live outside the commit they read, so the file must be outside the repository.
 The report resolves the path first, links included and a relative path from
 the current directory: a file that is inside the work tree, or is named in a
@@ -514,7 +518,8 @@ What the receipt does not prove:
 - that the reviews are independent or by whom: the row checks only the commit
   and the verdict each review states;
 - that the rows came from the reviewed tree: the tree is checked clean before
-  the run and when the report is written, not during it;
+  the suite, after it, and when the report is written; a change made and undone
+  between two checks is not seen;
 - capsule isolation: the rows remain process isolation, and the BLOCKED rows
   stay blocked.
 
