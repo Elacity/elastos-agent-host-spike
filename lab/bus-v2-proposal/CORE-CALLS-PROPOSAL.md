@@ -860,6 +860,40 @@ The model service is a separate Runtime path. `elastos/crates/elastos-server/src
 
 "The caller opens the model URL" is the `direct_url` bearer path, and that path is request construction. "The Runtime grants the call and carries it" is the hosted-effect URL, the Runtime socket, the grant check and `forward`. The Runtime hosted transport is the production path. A4 stays open.
 
+On the destination side, this Runtime holds one `ModelServiceGrant` record per `remote_model` grant, with the provider principal, requester principal, requester endpoint, grant id, revision, expiry, approved offer set and revision, and the flag that records whether the provider may share a hosted offer. The record is principal-scoped under `MODEL_GRANT_SCOPE`, whose value is `principal_scoped_remote_model_grant`. The approved offer set names one exact approved offer and its exact revision. The `validate` function refuses the record when the requester principal differs or the requester endpoint differs from the source endpoint. The record's expiry is bounded by its own `MODEL_GRANT_TTL_SECS` constant: `expires_at - revision` is at most six hours. The consumer capsule allowlist admits exactly `assistant` and `home-agent`; `offers_list` alone also admits marketplace. A4 stays open.
+
+The scope line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:29`.
+
+    pub(crate) const MODEL_GRANT_SCOPE: &str = "principal_scoped_remote_model_grant";
+
+The TTL constant line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:30`.
+
+    pub(crate) const MODEL_GRANT_TTL_SECS: u64 = 6 * 3600;
+
+The record declaration line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:70`.
+
+    pub(crate) struct ModelServiceGrant {
+
+The validate declaration line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:86`.
+
+        pub fn validate(
+
+The requester-principal comparison line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:94`.
+
+                    && requester_principal_id == self.requester_principal_id,
+
+The TTL comparison line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:102`.
+
+                    && self.expires_at - self.revision <= MODEL_GRANT_TTL_SECS,
+
+The approved-offer id comparison line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:107`.
+
+                    && self.approved_offer_ids.iter().all(|id| safe_id(id, 256)),
+
+The consumer capsule allowlist test line is `elastos/crates/elastos-server/src/api/gateway_model_service.rs:1256`.
+
+                MODEL_CONSUMER_CAPSULES.contains(value)
+
 ## 5. Budgets
 
 This section is design input for A7. A7 stays open.
