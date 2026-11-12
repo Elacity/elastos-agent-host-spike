@@ -56,9 +56,17 @@ struct ComponentActivation {
     component: Component,
     status: CapsuleStatus,
     manifest: CapsuleManifest,
+    /// Loaded with no bridge: see [`ComponentProvider::load_admitted_sealed`].
+    sealed: bool,
 }
 
+/// What a sealed component gets for any call to the bridge.
+pub const SEALED_BRIDGE: &str = "this capsule was started with no authority: it has no bridge";
+
 struct ComponentState {
+    /// A sealed activation's call to the bridge is refused here, before any
+    /// handler is looked at.
+    sealed: bool,
     hostcall: Option<BridgeHostcall>,
     capsule_id: String,
     principal_id: Option<String>,
@@ -176,6 +184,28 @@ impl ComponentProvider {
         bytes: Vec<u8>,
         manifest: CapsuleManifest,
     ) -> Result<CapsuleHandle> {
+        self.load_checked(bytes, manifest, false).await
+    }
+
+    /// [`ComponentProvider::load_admitted`] for a capsule that is given no
+    /// authority. The activation is sealed: when it runs, every call it makes
+    /// to the bridge is refused by this provider, and no handler sees it,
+    /// whichever handler is installed and whenever. The seal is part of the
+    /// activation, so it ends with it, however that run ends.
+    pub async fn load_admitted_sealed(
+        &self,
+        bytes: Vec<u8>,
+        manifest: CapsuleManifest,
+    ) -> Result<CapsuleHandle> {
+        self.load_checked(bytes, manifest, true).await
+    }
+
+    async fn load_checked(
+        &self,
+        bytes: Vec<u8>,
+        manifest: CapsuleManifest,
+        sealed: bool,
+    ) -> Result<CapsuleHandle> {
         Self::require_component_manifest(&manifest)?;
         if bytes.len() > COMPONENT_MAX_BYTES {
             return Err(ElastosError::Compute(format!(
@@ -220,6 +250,7 @@ impl ComponentProvider {
                 component,
                 status: CapsuleStatus::Loading,
                 manifest: manifest.clone(),
+                sealed,
             },
         );
 
@@ -332,12 +363,16 @@ impl ComputeProvider for ComponentProvider {
     }
 
     async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
-        let (engine, component) = {
+        let (engine, component, sealed) = {
             let instances = self.instances.read().await;
             let instance = instances
                 .get(&handle.id)
                 .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
-            (instance.engine.clone(), instance.component.clone())
+            (
+                instance.engine.clone(),
+                instance.component.clone(),
+                instance.sealed,
+            )
         };
 
         {
@@ -356,7 +391,10 @@ impl ComputeProvider for ComponentProvider {
             .cloned()
             .flatten();
         let capsule_id = handle.id.0.clone();
-        let state = ComponentState::new(hostcall, capsule_id, principal_id);
+        let state = ComponentState {
+            sealed,
+            ..ComponentState::new(hostcall, capsule_id, principal_id)
+        };
         let result = tokio::task::spawn_blocking(move || {
             Self::instantiate_component(&engine, &component, state)
         })
@@ -466,6 +504,7 @@ impl ComponentState {
         principal_id: Option<String>,
     ) -> Self {
         Self {
+            sealed: false,
             hostcall,
             capsule_id,
             principal_id,
@@ -491,6 +530,9 @@ impl ComponentState {
         &mut self,
         request: RuntimeRequest,
     ) -> std::result::Result<RuntimeResponse, elastos::bus::types::BusError> {
+        if self.sealed {
+            return Err(bus_error("denied", SEALED_BRIDGE));
+        }
         let hostcall = self
             .hostcall
             .clone()
@@ -1036,6 +1078,56 @@ mod tests {
         ));
         assert!(provider.instances.read().await.is_empty());
         assert_eq!(provider.compile_slot.available_permits(), 1);
+    }
+
+    /// A sealed activation has no bridge. Its call is refused by the provider
+    /// with the seal's words, and no handler sees it: not one installed
+    /// before the load, and not one that replaces it before the start. The
+    /// control is the same component loaded the ordinary way: its call
+    /// reaches the handler.
+    #[tokio::test]
+    async fn a_sealed_activation_reaches_no_bridge_handler() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1");
+        let manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(fixture.join("capsule.json")).unwrap()).unwrap();
+        let bytes = std::fs::read(fixture.join("bus-v1-conformance.component.wasm")).unwrap();
+        let provider = ComponentProvider::new();
+        let reached = Arc::new(Mutex::new(Vec::new()));
+        let install = |name: &'static str| {
+            let reached = reached.clone();
+            provider.set_bus_hostcall(Arc::new(move |_line, _capsule, _principal| {
+                reached.lock().unwrap().push(name);
+                Err("the test's handler was reached".to_string())
+            }));
+        };
+        for sealed in [true, false] {
+            install("installed before the load");
+            let loaded = if sealed {
+                provider
+                    .load_admitted_sealed(bytes.clone(), manifest.clone())
+                    .await
+            } else {
+                provider
+                    .load_admitted(bytes.clone(), manifest.clone())
+                    .await
+            };
+            let handle = loaded.unwrap();
+            install("installed after the load");
+            // The fixture goes on to its bridge call only for this person.
+            let person = Some("person:local:bus-conformance".to_string());
+            provider.set_bridge_principal(&handle.id, person).await;
+            let error = provider.start(&handle).await.unwrap_err().to_string();
+            let reached: Vec<&str> = std::mem::take(&mut *reached.lock().unwrap());
+            if sealed {
+                assert!(error.contains(SEALED_BRIDGE), "{error}");
+                assert!(error.contains("BusError::Denied"), "{error}");
+                assert_eq!(reached, Vec::<&str>::new());
+            } else {
+                assert!(error.contains("the test's handler was reached"), "{error}");
+                assert_eq!(reached, ["installed after the load"]);
+            }
+        }
     }
 
     fn state_with_deadline(run_deadline: Duration) -> ComponentState {

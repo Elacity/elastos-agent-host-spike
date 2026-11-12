@@ -668,6 +668,8 @@ mod tests {
                 walks += 1;
             }
         }
-        assert_eq!(walks, 4, "the walks the server makes");
+        // Staging makes four (the name, the source, a slot that is there,
+        // the slot it wrote); the start by CID makes one, of the slot.
+        assert_eq!(walks, 5, "the walks the server makes");
     }
 }
