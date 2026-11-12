@@ -2,9 +2,13 @@
 //! a second guest in the same host, on one single-threaded executor.
 mod common;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bus2_host::{run_resident, Ending, Event, HostState, Limits, Outcome, StubObject, Ticker};
+use bus2_host::{
+    run_resident, run_resident_watched, Ending, Event, HostState, Limits, Outcome, Progress,
+    StubObject, Ticker,
+};
 use wasmtime::component::Component;
 
 const PHOTO: &str = "localhost://Users/self/Pictures/a.png";
@@ -136,70 +140,105 @@ fn a_busy_guest_does_not_starve_a_second_guest() {
     assert!(slices > 7 * BUSY_BUDGET_IN_SLICES, "{slices} slices");
 }
 
+/// What the photo guest's side saw of the busy guest at one moment.
+#[derive(Clone, Copy, Debug)]
+struct BusySeen {
+    /// The busy guest had got past start-up: `lifecycle.run` had been called.
+    running: bool,
+    /// The busy guest's run had ended.
+    ended: bool,
+    yields: u64,
+    ticks: u64,
+}
+
 /// The same two guests with the real ticker: the thread that advances the
-/// epoch every 10 ms. The photo guest must finish next to the busy one; then
-/// the busy guest's events close, and it must be cancelled after its grace
-/// period.
+/// epoch every 10 ms. The photo guest must do its job and stop while the busy
+/// guest is running; then the busy guest's events close, and it must be
+/// cancelled after its grace period.
 ///
 /// This test is coverage, not a detector. No falsifier names it, and the two
 /// counted tests are the ones that catch a missing refill or a missing yield.
-/// It asserts on what happened (the endings, who finished first, that ticks
-/// arrived). Its three time limits only tell a guest that got its turns from
-/// one that was starved, and they are wide on purpose:
-/// - the photo guest needs one or two turns, about 5 ms on the machine this
-///   was written on. Before each of its turns the busy guest runs for at most
-///   one fuel slice (under 1 ms there) or until the next tick. A loaded CI
-///   runner a hundred times slower still needs well under a second. The limit
-///   is 10 s;
-/// - the cancel lands at the busy guest's first yield after the grace period,
-///   again one slice or one tick away. The limit is 10 s on top of the grace
-///   period;
-/// - the watchdog allows 60 s for a run that takes about 0.6 s. The guests
-///   are compiled before it starts, because compiling is what a loaded
-///   machine slows down most.
 ///
-/// A starved photo guest cannot pass inside those limits. With this budget a
-/// busy guest that never yields holds the thread for more than 30 s on a
-/// fast machine and longer on a slow one, so the photo guest is late for its
-/// 10 s, or the watchdog ends the test.
+/// How it knows the two guests ran together, with no sleep and no time limit:
+/// - the photo guest starts on a signal from the host (`Progress`): the busy
+///   guest is past start-up, and has given the thread back at least once
+///   since then, so it is executing its run;
+/// - the photo guest's events stay open until the busy guest has given the
+///   thread back 8 more times and has seen one more tick of the real ticker,
+///   so the busy guest executes, and is refilled and told to yield by a
+///   tick, during the photo guest's life, not only before and after it;
+/// - when the photo guest has stopped, the busy guest's run has not ended, and
+///   its counts of yields and ticks have grown by that much. Only then are
+///   the busy guest's events closed.
+///
+/// What would make it fail: a busy guest that has not entered its run when
+/// the photo guest starts (`at_start.running` is false), or one that has
+/// already ended, at the photo guest's start or at its end (`ended` is true;
+/// the waits below give up when the busy guest ends, so this is an assertion
+/// that fails, not a hang). Both were tried by hand.
+///
+/// The numbers, each an upper limit only, and why each is safe on a machine
+/// several times slower than the one this was written on:
+/// - 120 s for the whole test, compiling the two guests included. There the
+///   test takes about 1.6 s: about 1.1 s to compile, 0.5 s of grace period,
+///   and some 15 ms for the rest. Ten times slower is 16 s;
+/// - a deadline of 3000 ticks for each guest. The ticker makes a tick last at
+///   least 10 ms, so the deadline is at least 30 s after a guest starts, and
+///   a run takes about 0.5 s. Nothing here expects the deadline: it is what
+///   ends a guest that never gives the thread back, so that a failing test
+///   can stop its worker (`within_then_stop`);
+/// - a budget of 10^11 units of fuel a tick for the busy guest, ten times
+///   the default. It lasts for more than 3 s of executing at full speed
+///   there, and longer on a slower machine, so a ticker thread that is late
+///   by hundreds of ticks on a loaded machine does not end the guest as
+///   fuel-exhausted;
+/// - 30 s of grace for the photo guest, which stops within a turn or two
+///   of its events closing.
+///
+/// The one lower limit is the busy guest's own grace period: the cancel must
+/// not come before it. No machine is too slow for that.
 #[test]
 fn with_the_real_ticker_a_busy_guest_lets_a_second_guest_finish_and_is_then_cancelled() {
+    const WHOLE_TEST: Duration = Duration::from_secs(120);
     const GRACE: Duration = Duration::from_millis(500);
-    const PHOTO_DUE: Duration = Duration::from_millis(50);
-    const PHOTO_WITHIN: Duration = Duration::from_secs(10);
-    const CANCEL_WITHIN: Duration = Duration::from_secs(10);
+    const MAX_TICKS: u64 = 3000;
+    const HOLD_FOR_BUSY_YIELDS: u64 = 8;
 
-    let engine = bus2_host::engine().unwrap();
-    let busy = Component::new(&engine, common::guest("bus2_busy_guest")).unwrap();
-    let photo = Component::new(&engine, common::guest("bus2_photo_guest")).unwrap();
-    // Neither guest is ended by a deadline here: only what the test is about
-    // can end them. The busy guest's budget is a hundred times the default,
-    // so a ticker thread that is late by whole seconds on a loaded machine
-    // does not end it as fuel-exhausted.
-    let busy_limits = Limits {
-        grace: GRACE,
-        max_ticks: u64::MAX,
-        fuel_per_tick: 100 * Limits::default().fuel_per_tick,
-        ..Limits::default()
-    };
-    let photo_limits = Limits {
-        grace: Duration::from_secs(30),
-        max_ticks: u64::MAX,
-        ..Limits::default()
-    };
-
-    let ((busy, closed_at, busy_ended), (photo, photo_ended)) =
-        common::within(Duration::from_secs(60), async move {
+    let ((busy, closed_at, busy_ended_at), (photo, at_start, at_finish, photo_ended_at)) =
+        common::within_then_stop(WHOLE_TEST, async move {
+            let engine = bus2_host::engine().unwrap();
+            let busy = Component::new(&engine, common::guest("bus2_busy_guest")).unwrap();
+            let photo = Component::new(&engine, common::guest("bus2_photo_guest")).unwrap();
+            let busy_limits = Limits {
+                grace: GRACE,
+                max_ticks: MAX_TICKS,
+                fuel_per_tick: 10 * Limits::default().fuel_per_tick,
+                ..Limits::default()
+            };
+            let photo_limits = Limits {
+                grace: Duration::from_secs(30),
+                max_ticks: MAX_TICKS,
+                ..Limits::default()
+            };
             let _ticker = Ticker::start(&engine, Duration::from_millis(10));
+            let progress = Progress::default();
+            let busy_ended = AtomicBool::new(false);
+            let busy_seen = || BusySeen {
+                running: progress.running(),
+                ended: busy_ended.load(Ordering::Relaxed),
+                yields: progress.yields(),
+                ticks: progress.ticks(),
+            };
             let (photo_is_done, photo_done) = tokio::sync::oneshot::channel::<()>();
             let started = Instant::now();
             let a = async {
                 let mut closed_at = None;
-                let outcome = run_resident(
+                let outcome = run_resident_watched(
                     &engine,
                     &busy,
                     HostState::default(),
                     busy_limits,
+                    &progress,
                     async |_events| {
                         // Hold the events open until the photo guest is done.
                         let _ = photo_done.await;
@@ -209,11 +248,20 @@ fn with_the_real_ticker_a_busy_guest_lets_a_second_guest_finish_and_is_then_canc
                 )
                 .await
                 .unwrap();
+                busy_ended.store(true, Ordering::Relaxed);
                 (outcome, closed_at, started.elapsed())
             };
             let b = async {
-                // Let the busy guest get going first.
-                tokio::time::sleep(PHOTO_DUE).await;
+                // Wait, a turn at a time, for the busy guest to enter its
+                // run, and then for it to give the thread back once more.
+                while !busy_seen().running && !busy_seen().ended {
+                    tokio::task::yield_now().await;
+                }
+                let entered = busy_seen();
+                while busy_seen().yields == entered.yields && !busy_seen().ended {
+                    tokio::task::yield_now().await;
+                }
+                let at_start = busy_seen();
                 let outcome = run_resident(
                     &engine,
                     &photo,
@@ -221,37 +269,64 @@ fn with_the_real_ticker_a_busy_guest_lets_a_second_guest_finish_and_is_then_canc
                     photo_limits,
                     async |events| {
                         events.send(Event::Message(PHOTO.as_bytes().to_vec()));
+                        // Hold the events open until the busy guest has
+                        // given the thread back 8 more times and has seen
+                        // one more tick.
+                        while (busy_seen().yields < at_start.yields + HOLD_FOR_BUSY_YIELDS
+                            || busy_seen().ticks == at_start.ticks)
+                            && !busy_seen().ended
+                        {
+                            tokio::task::yield_now().await;
+                        }
                     },
                 )
                 .await
                 .unwrap();
-                let ended = started.elapsed();
+                let at_finish = busy_seen();
+                let ended_at = started.elapsed();
                 let _ = photo_is_done.send(());
-                (outcome, ended)
+                (outcome, at_start, at_finish, ended_at)
             };
             tokio::join!(a, b)
         });
     println!(
-        "real ticker: photo guest done after {photo_ended:?}; busy guest's events closed after \
-         {closed_at:?}; it ended after {busy_ended:?} ({} yields, {} ticks)",
+        "real ticker: busy guest when the photo guest started: {at_start:?}; when it had \
+         stopped, after {photo_ended_at:?}: {at_finish:?}; busy guest's events closed after \
+         {closed_at:?}; it ended after {busy_ended_at:?} ({} yields, {} ticks)",
         busy.yields, busy.ticks
     );
 
-    // The photo guest did its whole job while the busy guest was running.
+    // The two guests ran together.
+    assert!(
+        at_start.running && !at_start.ended,
+        "the busy guest was not in its run when the photo guest started: {at_start:?}"
+    );
+    assert!(
+        !at_finish.ended,
+        "the busy guest had ended before the photo guest stopped: {at_finish:?}"
+    );
+    assert!(
+        at_finish.yields >= at_start.yields + HOLD_FOR_BUSY_YIELDS
+            && at_finish.ticks > at_start.ticks,
+        "the busy guest did not execute during the photo guest's life: {at_start:?}, {at_finish:?}"
+    );
+
+    // The photo guest did its whole job next to it.
     assert_eq!(photo.ending, Ending::Stopped);
     assert_eq!(photo.state.frames.len(), 1);
-    let closed_at = closed_at.expect("the busy guest's events were closed");
-    assert!(photo_ended <= closed_at, "{photo_ended:?} <= {closed_at:?}");
-    assert!(photo_ended < PHOTO_DUE + PHOTO_WITHIN, "{photo_ended:?}");
 
-    // The busy guest was still running then, saw real ticks, and was ended
-    // by the cancel after its grace period, not by fuel or by a deadline.
+    // The busy guest went on after that, saw real ticks, and was ended by
+    // the cancel after its grace period, not by fuel or by its deadline.
+    let closed_at = closed_at.expect("the busy guest's events were closed");
+    assert!(
+        photo_ended_at <= closed_at,
+        "{photo_ended_at:?} <= {closed_at:?}"
+    );
     assert!(busy.started);
     assert_eq!(busy.ending, Ending::CancelledAfterGrace);
-    assert!(busy.ticks >= 1, "{} ticks", busy.ticks);
-    let after_close = busy_ended - closed_at;
+    assert!(busy.yields > at_finish.yields, "{} yields", busy.yields);
+    let after_close = busy_ended_at - closed_at;
     assert!(after_close >= GRACE, "{after_close:?}");
-    assert!(after_close < GRACE + CANCEL_WITHIN, "{after_close:?}");
 }
 
 #[test]
