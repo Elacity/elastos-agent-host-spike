@@ -7255,6 +7255,7 @@ pub fn write_principal_root_object(
             require_protection: false,
             create_only: false,
             precondition: None,
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7283,6 +7284,7 @@ pub(crate) fn write_principal_root_object_resolved(
             require_protection: false,
             create_only: false,
             precondition: None,
+            create_owner_only_parent: true,
         },
     )
 }
@@ -7310,6 +7312,7 @@ pub(crate) fn create_principal_root_object(
             require_protection: false,
             create_only: true,
             precondition: None,
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7333,6 +7336,7 @@ pub(crate) fn write_protected_principal_root_object(
             require_protection: true,
             create_only: false,
             precondition: None,
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7361,6 +7365,7 @@ pub(crate) fn write_protected_principal_root_object_resolved(
             require_protection: true,
             create_only: false,
             precondition: None,
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7415,6 +7420,7 @@ pub(crate) fn write_principal_root_object_if_revision(
             require_protection: false,
             create_only: matches!(precondition, PrincipalRootObjectPrecondition::Absent),
             precondition: Some(precondition),
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7444,6 +7450,7 @@ pub(crate) fn write_principal_root_object_if_revision_resolved(
             require_protection: false,
             create_only: matches!(precondition, PrincipalRootObjectPrecondition::Absent),
             precondition: Some(precondition),
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7452,6 +7459,13 @@ struct PrincipalRootObjectWriteOptions<'a> {
     require_protection: bool,
     create_only: bool,
     precondition: Option<PrincipalRootObjectPrecondition<'a>>,
+    /// Set only by the plain held-root write. After every check and the
+    /// protection decision, make the file's parent folder owner-only: create
+    /// it, or narrow an existing folder this process owns. Without this
+    /// option the atomic write still creates a missing parent, with default
+    /// permissions. The option sets the folder's permissions; it does not
+    /// decide whether the folder exists.
+    create_owner_only_parent: bool,
 }
 
 /// Internal access to a group of local object operations under the existing mutation lock.
@@ -7516,6 +7530,7 @@ impl<'a> PrincipalRootObjectMutation<'a> {
                 require_protection: false,
                 create_only: false,
                 precondition: None,
+                create_owner_only_parent: false,
             },
         )
     }
@@ -7648,6 +7663,11 @@ fn write_principal_root_object_locked_unchecked(
     };
     if options.require_protection {
         ensure_protected_principal_root_object_parent(data_dir, path)?;
+    }
+    if options.create_owner_only_parent {
+        if let Some(parent) = path.parent() {
+            create_owner_only_dir_all(data_dir, parent)?;
+        }
     }
     if options.create_only {
         if let Some(parent) = path.parent() {
@@ -15633,6 +15653,7 @@ pub(crate) mod tests {
                 require_protection: true,
                 create_only: true,
                 precondition: None,
+                create_owner_only_parent: false,
             },
         )
         .unwrap();
@@ -15676,6 +15697,7 @@ pub(crate) mod tests {
                 require_protection: true,
                 create_only: true,
                 precondition: None,
+                create_owner_only_parent: false,
             },
         )
         .unwrap_err();
@@ -19332,6 +19354,105 @@ pub(crate) mod tests {
         assert_eq!(
             error.to_string(),
             "principal-root object URI is outside the resolved root"
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn plain_twin_creates_its_parent_only_after_its_checks() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let principal_id = format!("device:{did}");
+        let root = ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &principal_id)
+            .unwrap();
+
+        // A refused write leaves no folder for the file it would have made.
+        let foreign_uri = "localhost://Users/foreign-root/notes.md";
+        let foreign_path = rooted_localhost_fs_path(data_dir.path(), foreign_uri).unwrap();
+        let error = write_principal_root_object_resolved(
+            data_dir.path(),
+            &root,
+            foreign_uri,
+            &foreign_path,
+            b"foreign",
+        )
+        .expect_err("foreign URI must be refused");
+        assert_eq!(
+            error.to_string(),
+            "principal-root object URI is outside the resolved root"
+        );
+        assert!(!foreign_path.exists());
+        assert!(
+            !foreign_path.parent().unwrap().exists(),
+            "the refused write made its parent"
+        );
+
+        // An accepted write makes a fresh parent owner-only.
+        let uri = format!("{}/PlainTwin/notes.md", root.localhost_root());
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        write_principal_root_object_resolved(data_dir.path(), &root, &uri, &path, b"plain")
+            .expect("in-root plain write");
+        assert_eq!(std::fs::read(&path).unwrap(), b"plain");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "fresh parent mode is {mode:o}");
+
+            // A parent this process made earlier with group and other access
+            // is narrowed, so the result does not depend on the process umask.
+            let uri = format!("{}/PlainTwinNarrowed/notes.md", root.localhost_root());
+            let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+            let parent = path.parent().unwrap();
+            std::fs::create_dir_all(parent).unwrap();
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+            write_principal_root_object_resolved(data_dir.path(), &root, &uri, &path, b"narrowed")
+                .expect("in-root plain write into an existing parent");
+            assert_eq!(std::fs::read(&path).unwrap(), b"narrowed");
+            let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "existing parent mode is {mode:o}");
+        }
+    }
+
+    #[test]
+    fn plain_twin_leaves_no_parent_when_its_protection_key_is_unrecoverable() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:plain-twin-unrecoverable";
+        let protection = store_test_principal_root_protection(data_dir.path(), principal_id);
+        // The record still passes validation and load; only the data-key
+        // recovery from its Recovery Kit archive fails.
+        let mut unrecoverable = protection.clone();
+        unrecoverable.protectors[0].archive = None;
+        plant_principal_root_protection(data_dir.path(), &unrecoverable);
+        assert!(
+            load_principal_root_protection(
+                data_dir.path(),
+                principal_id,
+                &protection.localhost_root
+            )
+            .unwrap()
+            .is_some(),
+            "the protection decision still reads the stored record"
+        );
+        let root =
+            ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), principal_id).unwrap();
+        let uri = format!("{}/PlainTwin/notes.md", root.localhost_root());
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        assert!(!path.parent().unwrap().exists());
+        let error =
+            write_principal_root_object_resolved(data_dir.path(), &root, &uri, &path, b"plain")
+                .expect_err("an unrecoverable data key refuses the write");
+        assert_eq!(
+            error.to_string(),
+            "principal-root protection has no recoverable data key archive"
+        );
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the refused write made its parent"
         );
         assert!(!path.exists());
     }

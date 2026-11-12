@@ -3007,10 +3007,6 @@ fn home_save_services_selection_state(
     state: &HomeServicesSelectionState,
 ) -> anyhow::Result<()> {
     let path = home_services_selection_state_path(data_dir, context)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
     let raw = serde_json::to_vec_pretty(state)?;
     if raw.len() > HOME_SERVICES_STATE_MAX_BYTES {
         anyhow::bail!("Services state is too large");
@@ -3107,10 +3103,6 @@ fn home_save_services_requests_state(
     state: &HomeServicesRequestsState,
 ) -> anyhow::Result<()> {
     let path = home_services_requests_state_path(data_dir, context)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
     let raw = serde_json::to_vec_pretty(state)?;
     if raw.len() > HOME_SERVICES_REQUESTS_MAX_BYTES {
         anyhow::bail!("Services requests state is too large");
@@ -6800,9 +6792,6 @@ fn home_save_active_shell(
         anyhow::bail!("Home active shell state is too large");
     }
     let path = home_active_shell_state_path(data_dir, context)?;
-    if let Some(parent) = path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
     write_home_state_object_resolved(
         data_dir,
         context.root(),
@@ -7190,9 +7179,6 @@ fn home_save_browser_state(
         anyhow::bail!("Home browser state is too large");
     }
     let path = home_browser_state_path(data_dir, context)?;
-    if let Some(parent) = path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
     write_home_state_object_resolved(
         data_dir,
         context.root(),
@@ -7276,9 +7262,6 @@ pub(super) fn migrate_legacy_services_peer_contacts(
         return Ok(());
     }
     state.schema = HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string();
-    if let Some(parent) = new_path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
     crate::auth::write_principal_root_object_resolved(
         data_dir,
         context.root(),
@@ -8379,9 +8362,6 @@ fn home_save_appearance_preferences(
             anyhow::bail!("appearance preferences are too large");
         }
         let path = home_appearance_path(data_dir, context, HOME_APPEARANCE_PREFERENCES_FILE)?;
-        if let Some(parent) = path.parent() {
-            crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-        }
         write_home_state_object_resolved(
             data_dir,
             context.root(),
@@ -8509,9 +8489,6 @@ fn home_save_background_overlay(
     opacity: f64,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let path = home_appearance_path(data_dir, context, HOME_BACKGROUND_OVERLAY_FILE)?;
-    if let Some(parent) = path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
     let payload = serde_json::json!({
         "enabled": enabled,
         "opacity": home_clamp_background_overlay_opacity(opacity),
@@ -8533,9 +8510,6 @@ fn home_save_background_image(
     bytes: Vec<u8>,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let path = home_appearance_path(data_dir, context, file_name)?;
-    if let Some(parent) = path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
     remove_home_background_images(data_dir, context)?;
     crate::auth::write_principal_root_object_resolved(
         data_dir,
@@ -9440,6 +9414,85 @@ mod stored_root_tests {
         let child_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
         assert!(!child_path.exists());
+    }
+
+    /// A data directory and a launch context whose stored record is
+    /// quarantined after the context resolved its root.
+    fn quarantined_context() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        HomeLaunchTokenContext,
+    ) {
+        let (temp, data_dir) = state_dir();
+        crate::auth::r4_fixture::store(&data_dir, crate::auth::PrincipalKind::Human);
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(
+            &data_dir,
+            &data_dir,
+            crate::auth::r4_fixture::ID,
+        )
+        .unwrap();
+        crate::auth::r4_fixture::set_kind(
+            &data_dir,
+            crate::auth::r4_fixture::ID,
+            crate::auth::PrincipalKind::Agent,
+            root.localhost_root(),
+        );
+        let context = HomeLaunchTokenContext::resolved(
+            root,
+            "session".to_string(),
+            None,
+            "grant".to_string(),
+        );
+        (temp, data_dir, context)
+    }
+
+    #[test]
+    fn a_refused_services_state_save_leaves_no_home_folder() {
+        let (_temp, data_dir, context) = quarantined_context();
+        let state = home_services_default_selection_state(&context);
+        let path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(!path.parent().unwrap().exists());
+        let error = home_save_services_selection_state(&data_dir, &context, &state)
+            .expect_err("a quarantined record is refused");
+        let text = format!("{error:#}");
+        assert!(text.starts_with("could not write "), "{text}");
+        assert!(
+            text.contains("quarantined agent record: agent kind binding mismatch"),
+            "{text}"
+        );
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the refused save left its Home folder"
+        );
+    }
+
+    #[test]
+    fn a_refused_appearance_save_leaves_no_appearance_folder() {
+        let (_temp, data_dir, context) = quarantined_context();
+        let path =
+            home_appearance_path(&data_dir, &context, HOME_APPEARANCE_PREFERENCES_FILE).unwrap();
+        let appearance = path.parent().unwrap();
+        let home = appearance.parent().unwrap();
+        assert!(!home.exists());
+        let error = home_save_appearance_preferences(
+            &data_dir,
+            &context,
+            HomeAppearancePreferencesUpdate {
+                theme: Some("light".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("a quarantined record is refused");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("quarantined agent record: agent kind binding mismatch"),
+            "{text}"
+        );
+        assert!(
+            !appearance.exists(),
+            "the refused save left its Appearance folder"
+        );
+        assert!(!home.exists(), "the refused save left its Home folder");
     }
 
     #[test]
