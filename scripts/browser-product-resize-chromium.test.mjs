@@ -33,18 +33,37 @@ function close(server) {
 
 // This check's precondition is that the browser returns a screenshot at all;
 // its assertion is that the screenshot's width and height match the geometry
-// just set. The pinned headless shell refuses a capture with "Unable to capture
-// screenshot" while it is still committing the frame after a geometry change or
-// a press, so a refusal is arranged again here within a stated budget. A
-// screenshot that did arrive is asserted at its exact size, unchanged.
+// just set. A likely cause of a refused capture ("Unable to capture
+// screenshot") is the pinned headless shell still committing the frame after a
+// geometry change or a press; the log proves the refusal, not the frame commit,
+// and a slow or stalled capture cannot be ruled out either. So every try is
+// bounded by the time left in a stated budget, and a capture that does arrive
+// is asserted at its exact size, unchanged.
 const SCREENSHOT_ARRANGE_MS = 5_000;
 const SCREENSHOT_RETRY_MS = 50;
+
+// A capture call that never settles must not hold the check past its budget.
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not answer within ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 async function captureScreenshot(cdp, page, size) {
   const deadline = Date.now() + SCREENSHOT_ARRANGE_MS;
   let refusals = 0;
   let lastError = null;
+  const unmet = () => new Error(
+    `precondition not met: ${size.width}x${size.height} screenshot was not returned within ${SCREENSHOT_ARRANGE_MS} ms; it was refused ${refusals} times. `
+    + "The target, draft, corner and press assertions passed first; this is not a screenshot-size failure. "
+    + `Last error: ${lastError?.message}`,
+  );
   for (;;) {
+    if (deadline - Date.now() <= 0) {
+      throw unmet();
+    }
     // Ask for a drawn frame first, bounded so a stalled page cannot hang the
     // check; the retry below still covers a frame that never came.
     await page.waitForFunction(
@@ -53,19 +72,19 @@ async function captureScreenshot(cdp, page, size) {
       { timeout: Math.max(1, deadline - Date.now()) },
     ).catch(() => {});
     try {
-      return await cdp.send("Page.captureScreenshot");
+      return await withTimeout(
+        cdp.send("Page.captureScreenshot"),
+        Math.max(1, deadline - Date.now()),
+        "Page.captureScreenshot",
+      );
     } catch (error) {
       refusals += 1;
       lastError = error;
     }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `precondition not met: ${size.width}x${size.height} screenshot was refused ${refusals} times within ${SCREENSHOT_ARRANGE_MS} ms. `
-        + "The target, draft, corner and press assertions passed first; this is not a screenshot-size failure. "
-        + `Last refusal: ${lastError?.message}`,
-      );
+    if (deadline - Date.now() <= 0) {
+      throw unmet();
     }
-    await new Promise((resolve) => setTimeout(resolve, SCREENSHOT_RETRY_MS));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(SCREENSHOT_RETRY_MS, deadline - Date.now())));
   }
 }
 

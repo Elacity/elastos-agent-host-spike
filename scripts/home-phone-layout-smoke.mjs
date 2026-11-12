@@ -1028,9 +1028,12 @@ const LINK_DESTINATION_ORIGIN = "https://links.example";
 // A press that began inside the guard is held until well after it.
 const EARLY_PRESS_HOLD_MS = EXTERNAL_LINK_OPEN_GUARD_MS + 300;
 // An early press that never reached Open link, or that began after the guard,
-// tested nothing, so it is arranged again with a fresh sheet. Each try costs
-// about two seconds (guard, hold, settle), and a kind gets this many in total.
+// tested nothing, so it is arranged again with a fresh sheet. A kind gets this
+// many tries in total, and all of them share one stated deadline: the sheet and
+// page waits take the time left, and a turn that runs out fails as the check's
+// own precondition rather than as a guard result.
 const EARLY_PRESS_ATTEMPTS = 3;
+const EARLY_PRESS_TURN_MS = 45_000;
 async function probeExternalLink(page, dir, target) {
   const context = page.context();
   const destinationRequests = [];
@@ -1102,7 +1105,7 @@ async function probeExternalLink(page, dir, target) {
     // press held past the guard, an early held Space and an early Enter with
     // key repeat open nothing; a fresh tap on the same sheet then opens once.
     const earlyPresses = [];
-    const earlyPress = async (kind, url) => {
+    const earlyPress = async (kind, url, timeLeft) => {
       await page.evaluate(() => {
         const root = document.querySelector("#home-link-prompt");
         const timing = { shownAt: null, pressAt: null };
@@ -1123,8 +1126,8 @@ async function probeExternalLink(page, dir, target) {
       // Watched in the page, frame by frame: the locator wait below re-checks
       // only every 500 ms once its first tries have passed, which alone can
       // carry the press past the guard.
-      await page.waitForFunction(() => !document.querySelector("#home-link-prompt").hidden, null, { timeout: BOOT_TIMEOUT_MS });
-      await page.locator("#home-link-prompt").waitFor({ state: "visible", timeout: BOOT_TIMEOUT_MS });
+      await page.waitForFunction(() => !document.querySelector("#home-link-prompt").hidden, null, { timeout: timeLeft("the sheet's show") });
+      await page.locator("#home-link-prompt").waitFor({ state: "visible", timeout: timeLeft("the sheet's show") });
       const before = { pages: context.pages().length, requests: destinationRequests.length };
       if (kind === "pointer") {
         // The button is pressed once Home's page reports the pointer on it: a
@@ -1151,7 +1154,7 @@ async function probeExternalLink(page, dir, target) {
       if (!sheetShown && destinationRequests.length > before.requests) {
         // The press opened the link. Its tab can be listed a moment after its
         // request, and it is counted and closed below.
-        await waitFor(() => context.pages().length > before.pages, BOOT_TIMEOUT_MS, "the tab a press opened");
+        await waitFor(() => context.pages().length > before.pages, timeLeft("the tab a press opened"), "the tab a press opened");
       }
       const press = {
         kind,
@@ -1176,13 +1179,13 @@ async function probeExternalLink(page, dir, target) {
     // A fresh tap on the shown sheet opens its address once and takes the
     // sheet down, which is also how a re-arranged early press starts from a
     // hidden sheet again.
-    const freshTap = async (press, label) => {
-      const opened = context.waitForEvent("page", { timeout: BOOT_TIMEOUT_MS });
+    const freshTap = async (press, label, timeLeft) => {
+      const opened = context.waitForEvent("page", { timeout: timeLeft("the fresh tap's page") });
       // A touch tap, not a mouse click: its click can follow pointerup late.
       await pointerOnTopPageControl(page.locator("#home-link-open"), { label });
       await page.locator("#home-link-open").tap();
       const retry = await opened;
-      await retry.waitForLoadState("domcontentloaded");
+      await retry.waitForLoadState("domcontentloaded", { timeout: timeLeft("the fresh tap's page load") });
       press.retryUrl = retry.url();
       press.retryOpenerIsNull = await retry.evaluate(() => window.opener === null);
       await retry.close();
@@ -1190,29 +1193,53 @@ async function probeExternalLink(page, dir, target) {
     };
     for (const kind of ["pointer", "space", "enter-repeat"]) {
       const url = `${LINK_DESTINATION_ORIGIN}/early-${kind}`;
-      let press = await earlyPress(kind, url);
+      // One deadline for every try of this kind: each sheet, page and fresh-tap
+      // wait takes only the time left, and a turn that runs out fails as the
+      // unmet precondition it is.
+      const deadline = Date.now() + EARLY_PRESS_TURN_MS;
+      const timeLeft = (what) => {
+        const left = deadline - Date.now();
+        if (left <= 0) {
+          throw new Error(`precondition not met: the early ${kind} press turn used its ${EARLY_PRESS_TURN_MS} ms before ${what}; this is not a guard failure`);
+        }
+        return left;
+      };
+      const attemptPress = async (label, call) => {
+        timeLeft(`starting ${label}`);
+        try {
+          return await call();
+        } catch (error) {
+          if (deadline - Date.now() <= 0) {
+            throw new Error(`precondition not met: the early ${kind} press turn ran out of its ${EARLY_PRESS_TURN_MS} ms during ${label}; this is not a guard failure. Last error: ${error.message}`);
+          }
+          throw error;
+        }
+      };
+      let press = await attemptPress("try 1", () => earlyPress(kind, url, timeLeft));
       // Two outcomes tested nothing about the guard, and both are the check's
-      // own precondition rather than a guard result. Open link never saw the
-      // press, so nothing was held during the guard. Or the press reached it
-      // only after the guard, so it was an ordinary press that opened its own
-      // address once. Either way the turn is kept on record and the sheet is
-      // shown again for a fresh address, up to EARLY_PRESS_ATTEMPTS tries in
-      // total. Every other outcome, and the guard's own assertions, stand as
-      // they are.
+      // own precondition rather than a guard result. A likely cause of an
+      // unmeasurable press (`pressedAfterMs: null`) is that Open link never saw
+      // the press, so nothing was held during the guard; the page not recording
+      // the sheet's show is another possible cause, and the log cannot tell the
+      // two apart. Or the press reached Open link only after the guard, so it
+      // was an ordinary press that opened its own address once. Either way the
+      // turn is kept on record and the sheet is shown again for a fresh
+      // address, up to EARLY_PRESS_ATTEMPTS tries within EARLY_PRESS_TURN_MS.
+      // Every other outcome, and the guard's own assertions, stand as they are.
       const earlier = [];
       for (let attempt = 2; attempt <= EARLY_PRESS_ATTEMPTS; attempt += 1) {
         if (press.pressedAfterMs !== null && press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS
           && !press.sheetShown && press.pages === 1 && press.requests === 1) {
           earlier.push(press);
-          press = await earlyPress(kind, `${url}-shown-again-${earlier.length}`);
+          press = await attemptPress(`try ${attempt}`, () => earlyPress(kind, `${url}-shown-again-${earlier.length}`, timeLeft));
           continue;
         }
         if (press.pressedAfterMs === null && press.sheetShown && press.pages === 0 && press.requests === 0) {
           earlier.push(press);
           // The address this sheet shows is opened by the fresh tap, so the
           // next try starts from a hidden sheet.
-          await freshTap(press, `fresh tap after the unseen early ${kind} press`);
-          press = await earlyPress(kind, `${url}-press-unseen-${earlier.length}`);
+          await attemptPress(`the fresh tap before try ${attempt}`, () => freshTap(press, `fresh tap after the unseen early ${kind} press`, timeLeft));
+          press = await attemptPress(`try ${attempt}`, () => earlyPress(kind, `${url}-press-unseen-${earlier.length}`, timeLeft));
           continue;
         }
         break;
@@ -1223,7 +1250,7 @@ async function probeExternalLink(page, dir, target) {
         // The early press opened the link; that is reported below.
         continue;
       }
-      await freshTap(press, `fresh tap after the early ${kind} press`);
+      await attemptPress("the fresh tap after the last try", () => freshTap(press, `fresh tap after the early ${kind} press`, timeLeft));
     }
     await ask(`${LINK_DESTINATION_ORIGIN}/escape`);
     await shown("link sheet for Escape");
