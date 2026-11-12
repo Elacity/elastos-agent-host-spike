@@ -1285,6 +1285,9 @@ mod r8d_passkey_rows {
         )
         .unwrap_or_else(|error| panic!("{error:#}"));
         assert_eq!(target.object_uri, format!("{ROOT}/{GBA_RELATIVE}"));
+        assert!(crate::api::browser_capsules::is_viewer_capsule(
+            child, GBA_VIEWER
+        ));
         let bytes = b"r8d child viewer note".to_vec();
         let error = viewer_storage_write(
             child,
@@ -1311,6 +1314,9 @@ mod r8d_passkey_rows {
         let person = passkey_person(DOCUMENTS);
         let child = person.child.path();
         documents_viewer(child);
+        assert!(crate::api::browser_capsules::is_viewer_capsule(
+            child, DOCUMENTS
+        ));
         let error = viewer_storage_target_for_context(
             child,
             &person.ctx,

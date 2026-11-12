@@ -10031,7 +10031,7 @@ mod r8d_passkey_rows {
         assert_eq!(name.as_deref(), Some("Parent Person"));
     }
 
-    /// Entry: `home_save_background_image` (line 8519) with the name
+    /// Entry: `home_save_background_image` with the name
     /// `background-image.png`. The child holds no protection for this
     /// person's root, so the save is refused and creates nothing.
     #[test]
@@ -10052,9 +10052,9 @@ mod r8d_passkey_rows {
         person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_background_overlay` (line 8495) with opacity 0.4,
-    /// which is not the default. The child holds no protection for this
-    /// person's root, so the save is refused and creates nothing.
+    /// Entry: `home_save_background_overlay` with opacity 0.4, which is not
+    /// the default. The child holds no protection for this person's root, so
+    /// the save is refused and creates nothing.
     #[test]
     fn r8d_child_background_overlay_save_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
@@ -10070,9 +10070,9 @@ mod r8d_passkey_rows {
 
     /// A later image upload is refused the same way as the first, and the
     /// child creates nothing. By reading, `home_save_background_image` calls
-    /// `remove_home_background_images` (line 8529) before
-    /// `write_principal_root_object_resolved` (line 8530); this row does not
-    /// show that order.
+    /// `remove_home_background_images` before
+    /// `write_principal_root_object_resolved`; this row does not show that
+    /// order.
     #[test]
     fn r8d_child_background_image_replace_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
@@ -10089,9 +10089,9 @@ mod r8d_passkey_rows {
         person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_appearance_preferences` (line 8330) with one field
-    /// set. The child holds no protection for this person's root, so the
-    /// save is refused and creates nothing.
+    /// Entry: `home_save_appearance_preferences` with one field set. The
+    /// child holds no protection for this person's root, so the save is
+    /// refused and creates nothing.
     #[test]
     fn r8d_child_appearance_preferences_save_for_the_passkey_person() {
         let person = passkey_person(HOME_CAPSULE_ID);
@@ -10107,9 +10107,9 @@ mod r8d_passkey_rows {
         person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_browser_state` (line 7177) with an empty update.
-    /// The child holds no protection for this person's root, so the save is
-    /// refused and creates nothing.
+    /// Entry: `home_save_browser_state` with an empty update. The child
+    /// holds no protection for this person's root, so the save is refused
+    /// and creates nothing.
     #[test]
     fn r8d_child_browser_state_save_for_the_passkey_person() {
         let person = passkey_person(HOME_CAPSULE_ID);
@@ -10124,12 +10124,12 @@ mod r8d_passkey_rows {
         person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_services_selection_state` (line 3004) with the
-    /// person's default state. This row calls the storage function directly;
-    /// the route (`services_offer_update`, line 2664) calls it at line 2888
-    /// after it reads the Home state, checks the offer and builds the state,
-    /// and those steps do not run here. The child holds no protection for
-    /// this person's root, so the save is refused and creates nothing.
+    /// Entry: `home_save_services_selection_state` with the person's default
+    /// state. This row calls the storage function directly; the route
+    /// `services_offer_update` calls it after it reads the Home state, checks
+    /// the offer and builds the state, and those steps do not run here. The
+    /// child holds no protection for this person's root, so the save is
+    /// refused and creates nothing.
     /// `home_state_write_error` puts the file's path on top of the refusal,
     /// so the row reads through that context.
     #[test]
@@ -10146,15 +10146,13 @@ mod r8d_passkey_rows {
         person.assert_child_holds_only(&[]);
     }
 
-    /// Entry: `home_save_services_requests_state` (line 3104) with the
-    /// person's default state. This row calls the storage function directly.
-    /// By reading, no route reaches this save for this person on a child
-    /// today: `home_services_sync_access_requests` returns with no known peer
-    /// (lines 4897-4899) before its save, and
-    /// `home_services_record_access_decision` returns "service request not
-    /// found" (line 5450) before its save (line 5549). The child holds no
-    /// protection for this person's root, so the save is refused and creates
-    /// nothing.
+    /// Entry: `home_save_services_requests_state` with the person's default
+    /// state. This row calls the storage function directly. By reading, no
+    /// route reaches this save for this person on a child today:
+    /// `home_services_sync_access_requests` returns with no known peer before
+    /// its save, and `home_services_record_access_decision` returns "service
+    /// request not found" before its save. The child holds no protection for
+    /// this person's root, so the save is refused and creates nothing.
     #[test]
     fn r8d_child_services_requests_save_for_the_passkey_person() {
         let person = passkey_person(SERVICES_CAPSULE_ID);
