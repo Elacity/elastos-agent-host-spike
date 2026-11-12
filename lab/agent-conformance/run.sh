@@ -63,15 +63,19 @@ canonical_path() {
 }
 
 # Run one command with a time limit, without `timeout`, which macOS lacks.
+# The watcher runs in its own process group so that stopping it also stops the
+# sleep it started: a leftover sleep would outlive this command.
 launch_limited() {
     local limit=$1 child watcher status=0
     shift
     "$@" &
     child=$!
+    set -m
     ( sleep "$limit"; kill -9 "$child" 2>/dev/null ) >/dev/null 2>&1 &
     watcher=$!
+    set +m
     wait "$child" || status=$?
-    kill -9 "$watcher" 2>/dev/null || true
+    kill -9 -- -"$watcher" 2>/dev/null || true
     wait "$watcher" 2>/dev/null || true
     return "$status"
 }
