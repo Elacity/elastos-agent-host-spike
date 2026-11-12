@@ -7255,6 +7255,7 @@ pub fn write_principal_root_object(
             require_protection: false,
             create_only: false,
             precondition: None,
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7283,6 +7284,7 @@ pub(crate) fn write_principal_root_object_resolved(
             require_protection: false,
             create_only: false,
             precondition: None,
+            create_owner_only_parent: true,
         },
     )
 }
@@ -7310,6 +7312,7 @@ pub(crate) fn create_principal_root_object(
             require_protection: false,
             create_only: true,
             precondition: None,
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7333,6 +7336,7 @@ pub(crate) fn write_protected_principal_root_object(
             require_protection: true,
             create_only: false,
             precondition: None,
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7361,6 +7365,7 @@ pub(crate) fn write_protected_principal_root_object_resolved(
             require_protection: true,
             create_only: false,
             precondition: None,
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7415,6 +7420,7 @@ pub(crate) fn write_principal_root_object_if_revision(
             require_protection: false,
             create_only: matches!(precondition, PrincipalRootObjectPrecondition::Absent),
             precondition: Some(precondition),
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7444,6 +7450,7 @@ pub(crate) fn write_principal_root_object_if_revision_resolved(
             require_protection: false,
             create_only: matches!(precondition, PrincipalRootObjectPrecondition::Absent),
             precondition: Some(precondition),
+            create_owner_only_parent: false,
         },
     )
 }
@@ -7452,6 +7459,9 @@ struct PrincipalRootObjectWriteOptions<'a> {
     require_protection: bool,
     create_only: bool,
     precondition: Option<PrincipalRootObjectPrecondition<'a>>,
+    /// Set only by the plain held-root write: make its parent after every
+    /// check and the protection decision, so a refusal leaves nothing behind.
+    create_owner_only_parent: bool,
 }
 
 /// Internal access to a group of local object operations under the existing mutation lock.
@@ -7516,6 +7526,7 @@ impl<'a> PrincipalRootObjectMutation<'a> {
                 require_protection: false,
                 create_only: false,
                 precondition: None,
+                create_owner_only_parent: false,
             },
         )
     }
@@ -7648,6 +7659,11 @@ fn write_principal_root_object_locked_unchecked(
     };
     if options.require_protection {
         ensure_protected_principal_root_object_parent(data_dir, path)?;
+    }
+    if options.create_owner_only_parent {
+        if let Some(parent) = path.parent() {
+            create_owner_only_dir_all(data_dir, parent)?;
+        }
     }
     if options.create_only {
         if let Some(parent) = path.parent() {
@@ -15633,6 +15649,7 @@ pub(crate) mod tests {
                 require_protection: true,
                 create_only: true,
                 precondition: None,
+                create_owner_only_parent: false,
             },
         )
         .unwrap();
@@ -15676,6 +15693,7 @@ pub(crate) mod tests {
                 require_protection: true,
                 create_only: true,
                 precondition: None,
+                create_owner_only_parent: false,
             },
         )
         .unwrap_err();
@@ -19334,6 +19352,53 @@ pub(crate) mod tests {
             "principal-root object URI is outside the resolved root"
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn plain_twin_creates_its_parent_only_after_its_checks() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let principal_id = format!("device:{did}");
+        let root = ResolvedPrincipalRoot::resolve(data_dir.path(), data_dir.path(), &principal_id)
+            .unwrap();
+
+        // A refused write leaves no folder for the file it would have made.
+        let foreign_uri = "localhost://Users/foreign-root/notes.md";
+        let foreign_path = rooted_localhost_fs_path(data_dir.path(), foreign_uri).unwrap();
+        let error = write_principal_root_object_resolved(
+            data_dir.path(),
+            &root,
+            foreign_uri,
+            &foreign_path,
+            b"foreign",
+        )
+        .expect_err("foreign URI must be refused");
+        assert_eq!(
+            error.to_string(),
+            "principal-root object URI is outside the resolved root"
+        );
+        assert!(!foreign_path.exists());
+        assert!(
+            !foreign_path.parent().unwrap().exists(),
+            "the refused write made its parent"
+        );
+
+        // An accepted write makes its parent owner-only.
+        let uri = format!("{}/PlainTwin/notes.md", root.localhost_root());
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        write_principal_root_object_resolved(data_dir.path(), &root, &uri, &path, b"plain")
+            .expect("in-root plain write");
+        assert_eq!(std::fs::read(&path).unwrap(), b"plain");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "parent mode is {mode:o}");
+        }
     }
 
     #[test]
