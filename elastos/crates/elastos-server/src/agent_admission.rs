@@ -4,10 +4,10 @@
 //!   its own data folder is a child of another Runtime and creates none.
 //! - The Agent Host an agent is created for is installed from this Home's
 //!   signed release, at the path that release records, and its manifest is
-//!   signed by one of that release's publisher keys. An unsigned package is
+//!   signed by the one key that signed that release. An unsigned package is
 //!   refused whatever `dev_mode` says, and so is one the release records but
-//!   no key signed. Keys trusted only by this Home's own configuration are
-//!   not asked.
+//!   no key signed. Other configured publisher keys, and keys trusted only by
+//!   this Home's own configuration, are not asked.
 //!
 //! This proves the package is the one the signed release installed at that
 //! path. It does not hash the unpacked files.
@@ -62,8 +62,14 @@ pub(crate) fn verify_agent_host(
         return Err(refuse("is not from an installed signed release"));
     };
     let binary = std::fs::canonicalize(&source.install_path)?;
-    let components =
-        crate::installed_release::read_signed_components(data_dir, &binary, &source, false)?;
+    // The release envelope and its components, read and verified against the
+    // configured publisher keys. Its `signer_did` is the key that verified it.
+    let (release, components) =
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+    let release: serde_json::Value = serde_json::from_slice(&release)?;
+    let Some(release_signer) = release["signer_did"].as_str() else {
+        return Err(refuse("is from a release with no signer"));
+    };
     let components: crate::setup::ComponentsManifest = serde_json::from_slice(&components)?;
     let (Some(component), Some(entry)) = (
         components.external.get(agent_host),
@@ -100,9 +106,7 @@ pub(crate) fn verify_agent_host(
         return Err(refuse("has a manifest that is not valid for it"));
     }
     let mut verifier = SignatureVerifier::new();
-    for did in &source.publisher_dids {
-        verifier.add_trusted_key(crate::crypto::decode_did_key(did)?)?;
-    }
+    verifier.add_trusted_key(crate::crypto::decode_did_key(release_signer)?)?;
     let Ok(content) = std::fs::read(dir.join(entrypoint)) else {
         return Err(refuse("has no entrypoint file"));
     };
@@ -112,7 +116,7 @@ pub(crate) fn verify_agent_host(
             .is_ok_and(|key| key.is_some());
     if !key_signed {
         return Err(refuse(
-            "is not signed by a publisher key of the installed release",
+            "is not signed by the key that signed its installed release",
         ));
     }
     Ok(VerifiedAgentHost(AgentHostPackage {
@@ -238,7 +242,7 @@ pub(crate) mod tests {
         crate::setup::verify_installed_release_capsule(&home.data, AGENT_HOST, &dir).unwrap();
         assert_eq!(
             refusal(&home.data, AGENT_HOST),
-            "agent host 'agent-host' is not signed by a publisher key of the installed release"
+            "agent host 'agent-host' is not signed by the key that signed its installed release"
         );
     }
 
@@ -247,7 +251,26 @@ pub(crate) mod tests {
         let home = installed_agent_host(Signed::ByStranger);
         assert_eq!(
             refusal(&home.data, AGENT_HOST),
-            "agent host 'agent-host' is not signed by a publisher key of the installed release"
+            "agent host 'agent-host' is not signed by the key that signed its installed release"
+        );
+    }
+
+    #[test]
+    fn a_key_added_to_the_configuration_that_did_not_sign_the_release_is_refused() {
+        let home = installed_agent_host(Signed::ByStranger);
+        // Key 9 signed the Agent Host. It joins the configured publisher keys;
+        // the installed release is still the one key 71 signed.
+        let mut sources = crate::sources::load_trusted_sources(&home.data).unwrap();
+        let stranger = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        sources.sources[0]
+            .publisher_dids
+            .push(crate::crypto::encode_signing_key_did(&stranger));
+        crate::sources::save_trusted_sources(&home.data, &sources).unwrap();
+        let dir = home.data.join("capsules").join(AGENT_HOST);
+        crate::setup::verify_installed_release_capsule(&home.data, AGENT_HOST, &dir).unwrap();
+        assert_eq!(
+            refusal(&home.data, AGENT_HOST),
+            "agent host 'agent-host' is not signed by the key that signed its installed release"
         );
     }
 
