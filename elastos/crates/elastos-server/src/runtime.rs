@@ -243,9 +243,12 @@ impl Runtime {
     /// the same verifier, with the same keys, as every other admission here.
     pub async fn check_bundle_signature(
         &self,
-        file: Option<&[u8]>,
+        file: &Path,
         cid: &elastos_bundle_identity::LabCid,
-    ) -> std::result::Result<String, crate::bundle_admission::BundleRefusal> {
+    ) -> std::result::Result<
+        crate::bundle_admission::AcceptedSignature,
+        crate::bundle_admission::BundleRefusal,
+    > {
         let verifier = self.signature_verifier.read().await;
         crate::bundle_admission::check_bundle_signature(file, cid, &verifier)
     }

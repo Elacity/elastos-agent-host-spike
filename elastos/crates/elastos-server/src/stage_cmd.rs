@@ -14,8 +14,7 @@ use std::path::Path;
 use elastos_bundle_identity::{checked_bundle_within, CheckedBundle, LabCid};
 
 use crate::bundle_admission::{
-    bundle_signature_path, bundle_slot, read_signature_file, walk_refusal, BundleRefusal,
-    BUNDLE_WALK_BUDGET,
+    bundle_signature_path, bundle_slot, walk_refusal, BundleRefusal, BUNDLE_WALK_BUDGET,
 };
 use crate::runtime::Runtime;
 
@@ -65,11 +64,9 @@ async fn stage_bundle_observed(
     after_walk();
     let cid = bundle.cid();
 
-    let offered = read_signature_file(signature)?;
-    let signer_did = runtime
-        .check_bundle_signature(offered.as_deref(), &cid)
-        .await?;
-    let offered = offered.ok_or(BundleRefusal::Unsigned)?;
+    // The check reads the signature file itself, at its place in the order,
+    // and hands back the bytes it checked.
+    let accepted = runtime.check_bundle_signature(signature, &cid).await?;
 
     let slot = bundle_slot(data_dir, &cid);
     let files_written = if fs::symlink_metadata(&slot).is_ok() {
@@ -96,13 +93,13 @@ async fn stage_bundle_observed(
     // any earlier one in one step.
     let signature_path = bundle_signature_path(data_dir, &cid);
     let mut file = tempfile::NamedTempFile::new_in(parent_of(&signature_path)?).map_err(store)?;
-    file.write_all(&offered).map_err(store)?;
+    file.write_all(&accepted.file).map_err(store)?;
     file.persist(&signature_path)
         .map_err(|error| store(error.error))?;
 
     Ok(Staged {
         cid: cid.to_string(),
-        signer_did,
+        signer_did: accepted.signer_did,
         files_written,
     })
 }
@@ -462,6 +459,16 @@ mod tests {
             .await
             .expect_err("no trust");
         assert_eq!(refusal, BundleRefusal::TrustSetEmpty);
+        // It gives that same answer for a signature file over the size cap:
+        // the trust set is asked before the file is read.
+        let mut over = signed(CID_A, &publisher);
+        over.resize(4097, b' ');
+        let signature = home.write("over.sig.json", &over);
+        let refusal = home
+            .stage(&fixture("web-app"), &signature)
+            .await
+            .expect_err("no trust, too large");
+        assert_eq!(refusal, BundleRefusal::TrustSetEmpty);
         let absent = home.dir.path().join("absent.sig.json");
         let refusal = home
             .stage(&fixture("web-app"), &absent)
@@ -619,6 +626,10 @@ mod tests {
             ["lab_cid", "_observed("].concat(),
             ["check_name", "("].concat(),
             ["Budget::", "UNLIMITED"].concat(),
+            // The encoder takes entries a caller already holds, under no
+            // budget. The server hands it none.
+            ["encode_entries", "("].concat(),
+            ["encode_listed_files", "("].concat(),
         ];
         let bounded = ["checked_bundle", "_within("].concat();
         fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {

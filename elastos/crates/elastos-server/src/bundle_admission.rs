@@ -39,9 +39,13 @@ pub const BUNDLE_SIGNATURE_SCHEMA: &str = "elastos.capsule.bundle-signature/v1";
 ///   longer one. It is a bound, not a promise: the store's own folder comes
 ///   before a bundle's path, so a path near the limit can still be too long
 ///   to write there, and that bundle is then not staged.
-/// - 4,096 entries and 64 MiB: the walk holds every byte it reads, so the
-///   byte limit is its memory bound. The largest example bundle today is
-///   under 1 MiB.
+/// - 4,096 entries and 64 MiB of file bytes. The walk holds every file byte
+///   it reads, and that is its largest holding, so 64 MiB bounds that part.
+///   It is not a bound on all the memory a walk takes: the entries' paths
+///   and the folder listings come on top (bounded by the entry and path
+///   limits: 4,096 paths of at most 1,024 bytes), and so do the blocks the
+///   encoder builds to name the files, which grow with the same entries.
+///   The largest example bundle today is under 1 MiB.
 pub const BUNDLE_WALK_BUDGET: Budget = Budget {
     max_entries: 4_096,
     max_total_bytes: 64 * 1024 * 1024,
@@ -132,15 +136,18 @@ fn by_cid(data_dir: &Path) -> PathBuf {
     data_dir.join("capsules").join("by-cid")
 }
 
-/// Read a signature file, at most [`MAX_SIGNATURE_FILE_BYTES`] of it. A file
-/// that is not there is `None`, which the check refuses as unsigned.
-pub fn read_signature_file(path: &Path) -> Result<Option<Vec<u8>>, BundleRefusal> {
+/// Read a signature file, at most [`MAX_SIGNATURE_FILE_BYTES`] of it. Only
+/// [`check_bundle_signature`] calls this, at its place in the order.
+fn read_signature_file(path: &Path) -> Result<Vec<u8>, BundleRefusal> {
     let unread = |error: std::io::Error| {
         BundleRefusal::SignatureUnparsed(format!("could not read the signature file: {error}"))
     };
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // It was there a moment ago, when the check began.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(BundleRefusal::Unsigned)
+        }
         Err(error) => return Err(unread(error)),
     };
     let mut bytes = Vec::new();
@@ -152,7 +159,7 @@ pub fn read_signature_file(path: &Path) -> Result<Option<Vec<u8>>, BundleRefusal
             "the signature file is over {MAX_SIGNATURE_FILE_BYTES} bytes"
         )));
     }
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 /// The signature file beside a bundle, exactly: no other key is allowed.
@@ -165,11 +172,21 @@ struct BundleSignatureFile {
     signature: String,
 }
 
-/// Check the signature file `file` for the bundle the Runtime computed `cid`
-/// for, against the keys `verifier` trusts. Returns the signer's `did:key`.
+/// A signature file that passed [`check_bundle_signature`]: who signed, and
+/// the file's bytes as that check read them, once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedSignature {
+    pub signer_did: String,
+    pub file: Vec<u8>,
+}
+
+/// Check the signature file at `file` for the bundle the Runtime computed
+/// `cid` for, against the keys `verifier` trusts. Returns the signer's
+/// `did:key` and the bytes that were checked.
 ///
 /// The order is fixed: the file exists; the Home trusts at least one key;
-/// the file parses and names this CID; the signer is one canonical Ed25519
+/// only then is the file read, at most [`MAX_SIGNATURE_FILE_BYTES`] of it,
+/// and it parses and names this CID; the signer is one canonical Ed25519
 /// `did:key`; the signature verifies strictly for that key over the CID text;
 /// and only then, that key is one the Home trusts. There is no `dev_mode`
 /// here: a bundle named by CID is never admitted unsigned.
@@ -186,41 +203,45 @@ struct BundleSignatureFile {
 /// on a file they supplied. BEFORE ANY ROUTE LETS A REMOTE CALLER REACH THIS
 /// FUNCTION, ITS TIME MUST BE MADE THE SAME FOR THOSE THREE.
 pub fn check_bundle_signature(
-    file: Option<&[u8]>,
+    file: &Path,
     cid: &LabCid,
     verifier: &SignatureVerifier,
-) -> Result<String, BundleRefusal> {
-    let file = file.ok_or(BundleRefusal::Unsigned)?;
+) -> Result<AcceptedSignature, BundleRefusal> {
+    let missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    if matches!(std::fs::metadata(file), Err(error) if missing(&error)) {
+        return Err(BundleRefusal::Unsigned);
+    }
     if verifier.trusted_key_count() == 0 {
         return Err(BundleRefusal::TrustSetEmpty);
     }
-    let file: BundleSignatureFile = serde_json::from_slice(file)
+    let bytes = read_signature_file(file)?;
+    let parsed: BundleSignatureFile = serde_json::from_slice(&bytes)
         .map_err(|error| BundleRefusal::SignatureUnparsed(error.to_string()))?;
-    if file.schema != BUNDLE_SIGNATURE_SCHEMA {
+    if parsed.schema != BUNDLE_SIGNATURE_SCHEMA {
         return Err(BundleRefusal::SignatureUnparsed(format!(
             "schema is not {BUNDLE_SIGNATURE_SCHEMA}"
         )));
     }
-    if file.signature.len() != 128 || !file.signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if parsed.signature.len() != 128 || !parsed.signature.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(BundleRefusal::SignatureUnparsed(
             "signature is not 128 hex characters".into(),
         ));
     }
     let computed = cid.to_string();
-    if file.cid != computed {
+    if parsed.cid != computed {
         return Err(BundleRefusal::SignatureNamesAnotherCid {
-            file: file.cid,
+            file: parsed.cid,
             computed,
         });
     }
-    let Ok(key) = crate::crypto::decode_did_key(&file.signer_did) else {
+    let Ok(key) = crate::crypto::decode_did_key(&parsed.signer_did) else {
         return Err(not_accepted(&computed));
     };
     if crate::crypto::verify_domain_separated_signature(
-        &file.signer_did,
+        &parsed.signer_did,
         BUNDLE_SIGNATURE_DOMAIN,
         computed.as_bytes(),
-        &file.signature,
+        &parsed.signature,
     )
     .is_err()
     {
@@ -229,7 +250,10 @@ pub fn check_bundle_signature(
     if !verifier.trusts(&key) {
         return Err(not_accepted(&computed));
     }
-    Ok(file.signer_did)
+    Ok(AcceptedSignature {
+        signer_did: parsed.signer_did,
+        file: bytes,
+    })
 }
 
 /// The one refusal, and the one log line, for a signer that is not a
@@ -329,12 +353,69 @@ pub(crate) mod tests {
         text.parse().expect("a recorded CID")
     }
 
+    /// The check on a file that holds `file`, or on a path where no file is;
+    /// its answer's signer. The bytes it hands back are the file's.
     fn check(
         file: Option<&[u8]>,
         cid_text: &str,
         verifier: &SignatureVerifier,
     ) -> Result<String, BundleRefusal> {
-        check_bundle_signature(file, &cid(cid_text), verifier)
+        let folder = tempfile::tempdir().expect("a folder");
+        let path = folder.path().join("offered.sig.json");
+        if let Some(bytes) = file {
+            std::fs::write(&path, bytes).expect("write the signature file");
+        }
+        let accepted = check_bundle_signature(&path, &cid(cid_text), verifier)?;
+        assert_eq!(Some(accepted.file.as_slice()), file);
+        Ok(accepted.signer_did)
+    }
+
+    #[test]
+    fn an_empty_trust_set_refuses_before_a_byte_of_the_file_is_read() {
+        let publisher = key(1);
+        let (empty, trusts) = (trusting(&[]), trusting(&[&publisher]));
+        // A valid signature file, padded with spaces to one byte over the cap.
+        let mut over = signed(CID_A, &publisher);
+        over.resize(MAX_SIGNATURE_FILE_BYTES as usize + 1, b' ');
+        assert_eq!(
+            check(Some(&over), CID_A, &empty),
+            Err(BundleRefusal::TrustSetEmpty)
+        );
+        // With a trusted key the same file is refused for its size, and one
+        // byte shorter it is accepted: so the size was the file's only fault.
+        let refusal = check(Some(&over), CID_A, &trusts).expect_err("over the cap");
+        assert_eq!(
+            refusal.to_string(),
+            "bundle_signature_unparsed: the signature file is over 4096 bytes"
+        );
+        over.pop();
+        assert!(check(Some(&over), CID_A, &trusts).is_ok());
+
+        // A folder where the file should be cannot be read at all. With no
+        // trusted key that is never found out.
+        let folder = tempfile::tempdir().expect("a folder");
+        assert_eq!(
+            check_bundle_signature(folder.path(), &cid(CID_A), &empty),
+            Err(BundleRefusal::TrustSetEmpty)
+        );
+        let refusal = check_bundle_signature(folder.path(), &cid(CID_A), &trusts)
+            .expect_err("a folder is not a signature file");
+        assert_eq!(refusal.code(), "bundle_signature_unparsed", "{refusal}");
+
+        // And in the source: the read comes after the trust set is asked.
+        let code = production();
+        let body = &code[code
+            .find("pub fn check_bundle_signature(")
+            .expect("the check")..];
+        let asked = body
+            .find("trusted_key_count() == 0")
+            .expect("the trust set");
+        let read = body.find("read_signature_file(file)").expect("the read");
+        assert!(
+            asked < read,
+            "the file is read before the trust set is asked"
+        );
+        assert_eq!(code.matches("read_signature_file(").count(), 2, "one call");
     }
 
     #[test]
