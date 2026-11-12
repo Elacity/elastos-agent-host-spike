@@ -8574,7 +8574,6 @@ fn home_save_background_image_with(
     checkpoint: &mut dyn ImageOperationCheckpoint,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let _guard = home_background_image_lock()?;
-    home_remove_staged_background_image_files(data_dir, context);
     let path = home_appearance_path(data_dir, context, file_name)?;
     // Every existing image is read first, the destination name included, so a
     // damaged one refuses the upload before anything is written: the bytes the
@@ -8583,8 +8582,9 @@ fn home_save_background_image_with(
     checkpoint.reached(ImageOperationPoint::Checked);
     // Crash points of this save, and what each leaves:
     // - before the write: every existing image as it was.
-    // - while staging: a `.background-image.<format>.<16 hex>.tmp` file beside
-    //   the images, which the next upload or reset removes by that name.
+    // - while staging: one `.background-image.<format>.<16 hex>.tmp` file
+    //   beside the images. No reader opens a staged name and its name is
+    //   fixed, so the file is never served and is harmless.
     // - a failed staging or rename: the temporary file is removed and every
     //   existing image stays.
     // - after the rename: the new bytes under the destination name, with an
@@ -8621,7 +8621,6 @@ fn home_reset_background_image_with(
     checkpoint: &mut dyn ImageOperationCheckpoint,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let _guard = home_background_image_lock()?;
-    home_remove_staged_background_image_files(data_dir, context);
     let existing = home_background_image_paths_checked(data_dir, context)?;
     checkpoint.reached(ImageOperationPoint::Checked);
     // A crash during the removal leaves the images it had not yet removed.
@@ -8656,68 +8655,6 @@ fn home_background_image_paths_checked(
         paths.push(path);
     }
     Ok(paths)
-}
-
-/// Removes temporary files a staging step left beside the images. Only the
-/// fixed staging name `.<image file name>.<16 lowercase hex digits>.tmp` is
-/// matched, so a crash while staging leaves a file the next upload or reset
-/// discards and no other name in the folder is touched. A removal error leaves
-/// that file and logs it; the reader never opens a staged name, so the
-/// operation continues.
-fn home_remove_staged_background_image_files(
-    data_dir: &std::path::Path,
-    context: &HomeLaunchTokenContext,
-) {
-    let Ok(image_path) = home_appearance_path(data_dir, context, HOME_BACKGROUND_IMAGE_FILES[0].0)
-    else {
-        return;
-    };
-    let Some(folder) = image_path.parent() else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !is_staged_background_image_name(name) {
-            continue;
-        }
-        match std::fs::remove_file(entry.path()) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => tracing::warn!(
-                path = %entry.path().display(),
-                error = %err,
-                "could not remove a staged background image file"
-            ),
-        }
-    }
-}
-
-/// True for the fixed staging name a background image write uses:
-/// `.background-image.<format>.<16 lowercase hex digits>.tmp`.
-fn is_staged_background_image_name(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix(".background-image.") else {
-        return false;
-    };
-    let Some(rest) = rest.strip_suffix(".tmp") else {
-        return false;
-    };
-    let Some((format, hex)) = rest.split_once('.') else {
-        return false;
-    };
-    let known_format = HOME_BACKGROUND_IMAGE_FILES
-        .iter()
-        .any(|(file_name, _)| file_name.strip_prefix("background-image.") == Some(format));
-    known_format
-        && hex.len() == 16
-        && hex
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Removes the listed image files except `keep`, the destination an upload
@@ -10416,56 +10353,6 @@ mod stored_root_tests {
             ["background-image.jpg", "background-image.png"],
             "neither route removed or added a file"
         );
-    }
-
-    /// The next upload and reset remove a staged file an interrupted save left,
-    /// matched by its fixed staging name only.
-    #[test]
-    fn background_image_operations_remove_a_leftover_staged_file() {
-        let (_temp, data_dir) = state_dir();
-        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
-        let png =
-            seed_background_image(&data_dir, &context, "background-image.png", b"first image");
-        let folder = png.parent().unwrap();
-        let staged = folder.join(".background-image.png.0123456789abcdef.tmp");
-        let staged_other_format = folder.join(".background-image.webp.0123456789abcdef.tmp");
-        let short_hex = folder.join(".background-image.png.0123456789abcde.tmp");
-        let non_hex = folder.join(".background-image.png.0123456789abcdeg.tmp");
-        let suffix = folder.join(".background-image.png.0123456789abcdef.tmp.bak");
-        let other_name = folder.join(".appearance.0123456789abcdef.tmp");
-        for path in [
-            &staged,
-            &staged_other_format,
-            &short_hex,
-            &non_hex,
-            &suffix,
-            &other_name,
-        ] {
-            std::fs::write(path, b"staged").unwrap();
-        }
-        home_save_background_image(
-            &data_dir,
-            &context,
-            "background-image.png",
-            b"second image".to_vec(),
-        )
-        .unwrap();
-        assert!(!staged.exists(), "a matching staged file is removed");
-        assert!(!staged_other_format.exists());
-        for kept in [&short_hex, &non_hex, &suffix, &other_name] {
-            assert!(
-                kept.exists(),
-                "a name outside the staging pattern stays: {kept:?}"
-            );
-        }
-        let staged_jpg = folder.join(".background-image.jpg.0123456789abcdef.tmp");
-        std::fs::write(&staged_jpg, b"staged").unwrap();
-        home_reset_background_image(&data_dir, &context).unwrap();
-        assert!(!png.exists());
-        assert!(!staged_jpg.exists());
-        for kept in [&short_hex, &non_hex, &suffix, &other_name] {
-            assert!(kept.exists());
-        }
     }
 
     /// A save whose removal of an older image fails reports the failure, names
