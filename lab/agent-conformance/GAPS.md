@@ -1111,4 +1111,4 @@ as passing-on-failure placeholders. A real journey needs all of these:
 
 | Blocked test | Blocker ID | Runtime change that enables acceptance |
 | --- | --- | --- |
-| (not written: the three ignored journeys were deleted) | AC-M2E-CONTENT-CID | Anders: the elastos-common manifest reader accepts `requires[].cid`, launch resolves that CID to a registered content capsule whose name equals the requirement's CID and refuses a mismatch with its own reason, and a probe effect opens the content and checks its bytes. A path or a name in that field stays a refusal. Sash's yes is needed before the reader patch is packed. |
+| (not written: the three ignored journeys were deleted) | AC-M2E-CONTENT-CID | Anders: a launch reads `requires[].cid`, resolves that CID to a registered content capsule whose name equals the requirement's CID and refuses a mismatch with its own reason, and a probe effect opens the content and checks its bytes. A path or a name in that field stays a refusal. The reader of that field exists (`PinnedManifest` in elastos-common, on the main line) and the bundle check names a bundle that uses it; no start path calls it yet. |

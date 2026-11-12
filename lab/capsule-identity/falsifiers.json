@@ -675,7 +675,7 @@
     },
     {
       "id": "F-CI3k",
-      "title": "the form check lets a raw leaf's CID through: any 59-character text that starts with bafkrei passes",
+      "title": "the form check lets through any 59-character text that starts with bafkrei, a raw leaf's CID among them",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
