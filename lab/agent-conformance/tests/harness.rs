@@ -364,3 +364,107 @@ fn parallel_collection_refuses_live_descendants() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Set for the second process of `given_runtime_changed_after_its_first_hash_is_not_launched`.
+const SWAP_CHILD: &str = "AGENT_CONFORMANCE_TEST_SWAP_CHILD";
+const CHANGED: &str = "given Runtime binary changed after it was first hashed; not launched";
+
+#[test]
+fn given_runtime_changed_after_its_first_hash_is_not_launched() {
+    use agent_conformance::identity::{sha256, Observation};
+    use std::os::unix::fs::PermissionsExt;
+    if std::env::var_os(SWAP_CHILD).is_some() {
+        return swap_the_given_runtime_between_launches();
+    }
+    // The given Runtime is read once per process, so the swap runs in a second
+    // process of this test with a harmless script as its given Runtime.
+    let home = ThrowawayHome::new().unwrap();
+    let given = home.root().join("given-elastos");
+    fs::write(&given, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&given, fs::Permissions::from_mode(0o755)).unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "given_runtime_changed_after_its_first_hash_is_not_launched",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("AGENT_CONFORMANCE_RUNTIME_BINARY", &given)
+        .env(SWAP_CHILD, "1")
+        .output()
+        .unwrap();
+    // The child prints identity lines for its stand-in Runtime. They are only
+    // ever shown escaped, so they cannot enter this run's own output as lines.
+    let stdout = String::from_utf8(child.stdout).unwrap();
+    assert!(child.status.success(), "{stdout:?} {:?}", child.stderr);
+    let first = sha256(b"#!/bin/sh\nexit 0\n");
+    let swapped = sha256(swapped_script(&given).as_bytes());
+    assert!(
+        stdout.contains(&format!(
+            "given Runtime changed: first hashed {first}, {swapped} immediately before a launch; not launched\n"
+        )),
+        "{stdout:?}"
+    );
+    // The receipt's collector sees both hashes, so it records the conflict.
+    for hash in [first, swapped] {
+        let line = Observation::Native {
+            role: "elastos".into(),
+            sha256: hash,
+        }
+        .line();
+        assert!(stdout.contains(&format!("{line}\n")), "{stdout:?}");
+    }
+    assert!(stdout.contains(
+        "given Runtime changed: it could not be hashed again before a launch; not launched\n"
+    ));
+    assert!(!given.with_file_name("swapped-ran").exists());
+    home.finish().unwrap();
+}
+
+/// What the given file is replaced with: it would leave a marker if it ran.
+fn swapped_script(given: &Path) -> String {
+    format!(
+        "#!/bin/sh\n: >'{}'\n",
+        given.with_file_name("swapped-ran").display()
+    )
+}
+
+fn swap_the_given_runtime_between_launches() {
+    let runtime = agent_conformance::runtime::runtime_under_test().unwrap();
+    let given = &runtime.binary;
+    let home = ThrowawayHome::new().unwrap();
+    let launch = || home.launch(given, &[], Duration::from_secs(5));
+    assert!(launch().unwrap().status.success());
+
+    let original = fs::read(given).unwrap();
+    fs::write(given, swapped_script(given)).unwrap();
+    assert_eq!(launch().err(), Some(CHANGED));
+    // Every way to start a program goes through the same check.
+    assert_eq!(home.start(given, &[]).err(), Some(CHANGED));
+    let launches = [Launch {
+        home: &home,
+        program: given,
+        args: Vec::new(),
+    }];
+    assert_eq!(
+        RunningInstances::start(&launches, None).err(),
+        Some(CHANGED)
+    );
+    assert!(!given.with_file_name("swapped-ran").exists());
+    // Another program is not held to the given Runtime's hash.
+    assert!(home
+        .launch(Path::new("/usr/bin/true"), &[], Duration::from_secs(5))
+        .unwrap()
+        .status
+        .success());
+
+    // The first bytes back in place launch again; a missing file does not.
+    fs::write(given, &original).unwrap();
+    assert!(launch().unwrap().status.success());
+    fs::remove_file(given).unwrap();
+    assert_eq!(
+        launch().err(),
+        Some("given Runtime binary could not be hashed again before a launch; not launched")
+    );
+    home.finish().unwrap();
+}

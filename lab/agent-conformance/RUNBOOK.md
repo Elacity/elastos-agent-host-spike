@@ -316,7 +316,12 @@ equals `installed_runtime.binary_sha256`. The receipt records
 installed Runtime whose chain did not match leaves nothing to compare. The
 suite launches the installed binary only when
 `AGENT_CONFORMANCE_RUNTIME_BINARY` names it: that variable makes the suite
-launch the named binary where it is and build no Runtime. Without it the suite
+launch the named binary where it is and build no Runtime. The suite hashes the
+named binary again immediately before every launch; when the bytes differ from
+the first hash it does not launch them, prints
+`given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
+and the run fails. This does not show a swap made between that hash and the
+operating system starting the process. Without it the suite
 builds the checkout's Runtime and this row fails. Only the Runtime is given;
 the localhost provider, the probe and every Home the Runtime runs in still come
 from the checkout, so the installation's data folder is never used by a run.

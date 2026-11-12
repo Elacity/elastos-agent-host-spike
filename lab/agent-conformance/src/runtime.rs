@@ -45,6 +45,45 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
         .map_err(String::as_str)
 }
 
+/// Printed, with both hashes, when a given Runtime is refused at a launch.
+pub const CHANGED: &str = "given Runtime changed: ";
+
+/// The harness calls this immediately before it starts any program. A given
+/// Runtime is hashed again here, once per launch, and is refused unless it
+/// still has the bytes first recorded for it, so a file replaced after that
+/// first hash is not launched under the recorded hash. The differing hash is
+/// also printed as an identity line, so the receipt records the conflict even
+/// if a caller drops the error.
+///
+/// What this does not show: a replacement made after this hash and before the
+/// operating system starts the process.
+pub fn unchanged_before_launch(program: &Path) -> Result<(), &'static str> {
+    let Some(given) = std::env::var_os(RUNTIME_BINARY) else {
+        return Ok(());
+    };
+    if program != Path::new(&given) {
+        return Ok(());
+    }
+    let first = runtime_under_test()?;
+    let Ok(now) = sha256_file(program) else {
+        println!("{CHANGED}it could not be hashed again before a launch; not launched");
+        return Err("given Runtime binary could not be hashed again before a launch; not launched");
+    };
+    if now == first.sha256 {
+        return Ok(());
+    }
+    println!(
+        "{CHANGED}first hashed {}, {now} immediately before a launch; not launched",
+        first.sha256
+    );
+    crate::identity::Observation::Native {
+        role: "elastos".into(),
+        sha256: now,
+    }
+    .emit();
+    Err("given Runtime binary changed after it was first hashed; not launched")
+}
+
 /// Share the Runtime build settings and cache the provider result, including failure.
 pub fn localhost_provider_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
     static PROVIDER: OnceLock<Result<BinaryUnderTest, String>> = OnceLock::new();
