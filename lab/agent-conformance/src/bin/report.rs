@@ -20,6 +20,30 @@ fn main() {
         }
         process::exit(1);
     }
+    if args.len() == 3 && args[1] == "--a14" {
+        // Read a written receipt back for the owner's command: every A14 row
+        // and its reasons, and a failing exit unless all of them pass.
+        let rows = fs::read(&args[2])
+            .map_err(|_| "could not read the receipt".to_owned())
+            .and_then(|receipt| report::a14_rows(&receipt));
+        match rows {
+            Ok(rows) => {
+                for row in &rows {
+                    let grade = if row.passed { "PASS" } else { "FAIL" };
+                    if row.reasons.is_empty() {
+                        println!("{} (A14) | {grade}", row.name);
+                    } else {
+                        println!("{} (A14) | {grade} | {}", row.name, row.reasons.join("; "));
+                    }
+                }
+                if rows.iter().all(|row| row.passed) {
+                    return;
+                }
+            }
+            Err(reason) => eprintln!("A14 rows: {reason}"),
+        }
+        process::exit(1);
+    }
     if args.len() != 5 {
         eprintln!(
             "versions receipt failure: expected inventory, results, Cargo status and receipt path"

@@ -935,6 +935,66 @@ pub fn render_bound_run(
     }
 }
 
+/// One A14 row read back from a receipt: its name, whether it reads PASS, and
+/// the reasons the receipt gives when it does not.
+#[derive(Debug, PartialEq, Eq)]
+pub struct A14Row {
+    pub name: &'static str,
+    pub passed: bool,
+    pub reasons: Vec<String>,
+}
+
+/// The A14 rows of a written receipt, for the owner's command. All five must
+/// be present: a receipt made without an installed Runtime has no installed
+/// rows, and that is a failure here, named as a missing row. The rows are read
+/// from the receipt's own table after the table is checked against the hash the
+/// receipt records for it.
+pub fn a14_rows(receipt: &[u8]) -> Result<Vec<A14Row>, String> {
+    let document: serde_json::Value =
+        serde_json::from_slice(receipt).map_err(|_| "malformed receipt")?;
+    let table = document["report"]["table"]
+        .as_str()
+        .ok_or("receipt has no table")?;
+    if document["report"]["sha256"].as_str() != Some(sha256(table.as_bytes()).as_str()) {
+        return Err("receipt table does not match its recorded hash".into());
+    }
+    let rows = [
+        ("versions_receipt", "missing_or_invalid"),
+        ("review_binding", "review_failures"),
+        ("staged_bundle", "staged_bundle_failures"),
+        ("installed_runtime", "installed_runtime_failures"),
+        ("installed_runtime_ran", "installed_runtime_ran_failures"),
+    ];
+    Ok(rows
+        .into_iter()
+        .map(|(name, field)| {
+            let prefix = format!("{name} (A14) | ");
+            let grades: Vec<_> = table
+                .lines()
+                .filter_map(|line| line.strip_prefix(prefix.as_str()))
+                .map(|rest| rest.split(" | ").next().unwrap_or_default())
+                .collect();
+            let passed = grades == ["PASS"];
+            let mut reasons: Vec<String> = document[field]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|reason| reason.as_str().map(str::to_owned))
+                .collect();
+            if grades.is_empty() {
+                reasons.push("row missing from the receipt".into());
+            } else if !passed && reasons.is_empty() {
+                reasons.push("receipt gives no reason".into());
+            }
+            A14Row {
+                name,
+                passed,
+                reasons,
+            }
+        })
+        .collect())
+}
+
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() {
         return Err("receipt serialization failed".into());
