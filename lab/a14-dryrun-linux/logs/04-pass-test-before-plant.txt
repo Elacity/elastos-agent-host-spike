@@ -1,0 +1,11 @@
+exit: 0
+seconds: 0.127
+started: 2026-10-26T23:24:45Z
+
+test_pass_writes_a14_pass_in_this_runs_summary (test_version_binding.RunBinding.test_pass_writes_a14_pass_in_this_runs_summary)
+Pins A14: PASS. to summary.txt. Removing write_summary on the PASS path fails this. ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.007s
+
+OK
