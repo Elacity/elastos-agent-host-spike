@@ -9299,28 +9299,25 @@ const OWNER_ROOT_WRAP_INFO: &str = "elastos/usersai-owner-root/v1";
 
 /// Derives the key that wraps an agent's data key under its owner's root:
 /// HKDF-SHA256 over the owner's data key, bound to the owner, the agent, the
-/// agent's root and the agent's data key id. The owner's data key never
-/// leaves this function. Only the derived key is returned, and it is erased
-/// when dropped. An owner whose own protection is wrapped under another root
-/// is refused, so wraps never chain.
+/// agent's root and the agent's data key id. The owner's protection is
+/// loaded here and its data key never leaves this function. Only the derived
+/// key is returned, and it is erased when dropped. `None`: the owner has no
+/// storage protection.
 pub(crate) fn owner_root_wrap_key(
     data_dir: &Path,
-    owner: &PrincipalRootProtectionV1,
+    owner_id: &str,
+    owner_root: &str,
     agent: &PrincipalRootProtectionV1,
-) -> anyhow::Result<zeroize::Zeroizing<[u8; 32]>> {
-    if owner
-        .protectors
-        .iter()
-        .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
-    {
-        anyhow::bail!("an owner-root wrap needs an owner that is not itself wrapped");
-    }
+) -> anyhow::Result<Option<zeroize::Zeroizing<[u8; 32]>>> {
+    let Some(owner) = load_principal_root_protection(data_dir, owner_id, owner_root)? else {
+        return Ok(None);
+    };
     let owner_key =
-        zeroize::Zeroizing::new(principal_root_data_key_from_protection(data_dir, owner)?);
+        zeroize::Zeroizing::new(principal_root_data_key_from_protection(data_dir, &owner)?);
     let mut info = Vec::new();
     for part in [
         OWNER_ROOT_WRAP_INFO,
-        owner.principal_id.as_str(),
+        owner_id,
         agent.principal_id.as_str(),
         agent.localhost_root.as_str(),
         agent.data_key_id.as_str(),
@@ -9332,7 +9329,7 @@ pub(crate) fn owner_root_wrap_key(
     Hkdf::<Sha256>::new(None, owner_key.as_slice())
         .expand(&info, key.as_mut_slice())
         .map_err(|_| anyhow!("owner-root wrap key derivation failed"))?;
-    Ok(key)
+    Ok(Some(key))
 }
 
 /// Checks the object URI against the root the minted kind owns. The caller

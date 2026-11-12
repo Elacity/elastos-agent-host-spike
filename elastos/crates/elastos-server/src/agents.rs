@@ -506,14 +506,16 @@ fn wrap_data_key(
 }
 
 /// A new data key for an agent's root, wrapped under its owner's root. The
-/// key itself is erased when this returns; only the wrap is kept.
+/// key itself is erased when this returns; only the wrap is kept. This
+/// module never sees the owner's protection: `auth` loads it and hands back
+/// only the derived wrap key. `None`: the owner has no storage protection.
 fn protect_agent_root(
     data_dir: &Path,
-    owner: &PrincipalRootProtectionV1,
+    owner: &PrincipalRecord,
     agent_id: &str,
     localhost_root: &str,
     now: u64,
-) -> anyhow::Result<PrincipalRootProtectionV1> {
+) -> anyhow::Result<Option<PrincipalRootProtectionV1>> {
     let mut data_key = zeroize::Zeroizing::new([0u8; 32]);
     rand::rngs::OsRng.fill_bytes(data_key.as_mut_slice());
     let mut protection = PrincipalRootProtectionV1 {
@@ -529,7 +531,15 @@ fn protect_agent_root(
         created_at: now,
         updated_at: now,
     };
-    let wrap_key = crate::auth::owner_root_wrap_key(data_dir, owner, &protection)?;
+    let Some(wrap_key) = crate::auth::owner_root_wrap_key(
+        data_dir,
+        &owner.principal_id,
+        &owner.localhost_root,
+        &protection,
+    )?
+    else {
+        return Ok(None);
+    };
     protection.protectors.push(PrincipalRootProtectorV1 {
         protector_id: format!(
             "protector:owner-root:{}",
@@ -544,7 +554,7 @@ fn protect_agent_root(
         archive: None,
         profile_coverage: None,
     });
-    Ok(protection)
+    Ok(Some(protection))
 }
 
 /// The refusal for create, list and retire while agents are off for a Home.
@@ -743,21 +753,15 @@ fn create_in_any_build(
     if live >= MAX_LIVE_AGENTS_PER_OWNER {
         return refused(AT_THE_LIMIT);
     }
-    let Some(owner_protection) = crate::auth::load_principal_root_protection(
-        data_dir,
-        &owner.principal_id,
-        &owner.localhost_root,
-    )?
-    else {
+    let id = crate::auth::fresh_agent_id();
+    let root = crate::auth::principal_kind_localhost_root(&id, PrincipalKind::Agent);
+    let Some(protection) = protect_agent_root(data_dir, owner, &id, &root, now)? else {
         return refused(OWNER_UNPROTECTED);
     };
     let host = admit(&request.agent_host)?;
-
-    let id = crate::auth::fresh_agent_id();
-    let root = crate::auth::principal_kind_localhost_root(&id, PrincipalKind::Agent);
     let binding = ProofBinding::agent_admission(&id, now);
     let agent = StoredAgent {
-        protection: protect_agent_root(data_dir, &owner_protection, &id, &root, now)?,
+        protection,
         record: PrincipalRecord {
             principal_id: id,
             proof_binding_id: binding.id(),

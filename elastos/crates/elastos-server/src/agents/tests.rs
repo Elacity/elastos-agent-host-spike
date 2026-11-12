@@ -630,6 +630,68 @@ fn owner_protection(home: &Home) -> PrincipalRootProtectionV1 {
     .unwrap()
 }
 
+/// The wrap key `auth` derives for `agent` under the stored person `owner`.
+fn wrap_key(home: &Home, owner: &PrincipalRecord, agent: &PrincipalRootProtectionV1) -> [u8; 32] {
+    *crate::auth::owner_root_wrap_key(
+        home.path(),
+        &owner.principal_id,
+        &owner.localhost_root,
+        agent,
+    )
+    .unwrap()
+    .expect("the owner has storage protection")
+}
+
+/// A second person whose storage protection holds the same data key as the
+/// Home's owner: their own Recovery Kit, wrapping the owner's key.
+fn person_with_the_owners_data_key(home: &Home, principal_id: &str) -> PrincipalRecord {
+    let owner = owner_protection(home);
+    let archive = owner.protectors[0].archive.as_ref().unwrap();
+    let mut kit = crate::auth::recovery_kit_from_archive(home.path(), archive).unwrap();
+    let data_key = crate::auth::recovery_kit_data_key(&kit).unwrap();
+    let person = crate::auth::store_test_human_principal(home.path(), principal_id);
+    kit.principal_id = person.principal_id.clone();
+    kit.localhost_root = person.localhost_root.clone();
+    let salt = crate::auth::b64_url_decode(&kit.salt).unwrap();
+    let nonce = crate::auth::b64_url_decode(&kit.nonce).unwrap();
+    let wrapping = crate::auth::derive_recovery_wrapping_key(
+        &kit.recovery_phrase,
+        &salt,
+        &kit.principal_id,
+        &kit.localhost_root,
+    )
+    .unwrap();
+    kit.wrapped_data_key =
+        crate::auth::encrypt_aes256_gcm_bytes(&wrapping, &nonce, &data_key).unwrap();
+    let descriptor = json!({
+        "schema": "elastos.principal.root-descriptor/v1",
+        "principal_id": kit.principal_id,
+        "localhost_root": kit.localhost_root,
+        "data_key_id": kit.data_key_id,
+        "created_at": kit.created_at,
+    });
+    let descriptor_nonce = [3u8; 12];
+    let sealed = crate::auth::encrypt_aes256_gcm_bytes(
+        &data_key,
+        &descriptor_nonce,
+        &serde_json::to_vec(&descriptor).unwrap(),
+    )
+    .unwrap();
+    kit.encrypted_root_descriptor = format!(
+        "aes-256-gcm:v1:{}:{sealed}",
+        crate::auth::b64_url(&descriptor_nonce)
+    );
+    crate::auth::verify_recovery_kit_material(&kit).unwrap();
+    let mut protection = owner.clone();
+    protection.principal_id = kit.principal_id.clone();
+    protection.localhost_root = kit.localhost_root.clone();
+    let protector = &mut protection.protectors[0];
+    protector.archive = Some(crate::auth::recovery_archive_from_kit(home.path(), &kit).unwrap());
+    protector.envelope.as_mut().unwrap().wrapped_data_key = kit.wrapped_data_key.clone();
+    crate::auth::store_principal_root_protection(home.path(), protection).unwrap();
+    person
+}
+
 /// Opens a wrap with `wrap_key`, as the key reader of a later step will.
 fn unwrap_data_key(
     wrap_key: &[u8; 32],
@@ -645,11 +707,8 @@ fn unwrap_data_key(
 #[test]
 fn the_wrap_key_binds_each_input() {
     let home = Home::new();
-    let owner = owner_protection(&home);
     let agent = stored_agent(OWNER_ID, AGENT_A).protection;
-    let key = |agent: &PrincipalRootProtectionV1| {
-        *crate::auth::owner_root_wrap_key(home.path(), &owner, agent).unwrap()
-    };
+    let key = |agent: &PrincipalRootProtectionV1| wrap_key(&home, &home.owner, agent);
     let base = key(&agent);
     assert_eq!(key(&agent), base, "the same inputs give the same key");
 
@@ -671,23 +730,58 @@ fn the_wrap_key_binds_each_input() {
 #[test]
 fn the_wrap_key_is_the_owners_alone() {
     let home = Home::new();
-    let owner = owner_protection(&home);
     let agent = stored_agent(OWNER_ID, AGENT_A).protection;
-    let base = *crate::auth::owner_root_wrap_key(home.path(), &owner, &agent).unwrap();
+    let base = wrap_key(&home, &home.owner, &agent);
 
     let other = crate::auth::store_test_principal_root_protection(home.path(), "person:local:b");
-    let theirs = *crate::auth::owner_root_wrap_key(home.path(), &other, &agent).unwrap();
-    assert_ne!(theirs, base, "another person derives another key");
+    let other = crate::auth::stored_principal_record(home.path(), &other.principal_id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        wrap_key(&home, &other, &agent),
+        base,
+        "another person derives another key"
+    );
 
-    // An owner protection that is itself an owner-root wrap is refused.
-    let mut chained = owner.clone();
-    chained
-        .protectors
-        .push(stored_agent(OWNER_ID, AGENT_B).protection.protectors[0].clone());
-    let error = crate::auth::owner_root_wrap_key(home.path(), &chained, &agent).unwrap_err();
+    // A person with no storage protection derives nothing.
+    let bare = crate::auth::store_test_human_principal(home.path(), "person:local:bare");
+    let none = crate::auth::owner_root_wrap_key(
+        home.path(),
+        &bare.principal_id,
+        &bare.localhost_root,
+        &agent,
+    );
+    assert!(none.unwrap().is_none());
+}
+
+#[test]
+fn the_wrap_key_binds_the_owner_id() {
+    // Two people whose protections hold one and the same data key: only the
+    // owner id differs between the two derivations.
+    let home = Home::new();
+    let twin = person_with_the_owners_data_key(&home, "person:local:twin");
+    let twin_protection = crate::auth::load_principal_root_protection(
+        home.path(),
+        &twin.principal_id,
+        &twin.localhost_root,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
-        error.to_string(),
-        "an owner-root wrap needs an owner that is not itself wrapped"
+        twin_protection.data_key_id,
+        owner_protection(&home).data_key_id,
+        "the twin holds the owner's data key"
+    );
+
+    let root = crate::auth::principal_kind_localhost_root(AGENT_A, PrincipalKind::Agent);
+    let wrapped = protect_agent_root(home.path(), &home.owner, AGENT_A, &root, 9)
+        .unwrap()
+        .unwrap();
+    let envelope = wrapped.protectors[0].envelope.as_ref().unwrap();
+    assert!(unwrap_data_key(&wrap_key(&home, &home.owner, &wrapped), envelope).is_ok());
+    assert!(
+        unwrap_data_key(&wrap_key(&home, &twin, &wrapped), envelope).is_err(),
+        "the owner id is bound: the twin cannot open the owner's wrap"
     );
 }
 
@@ -706,16 +800,16 @@ fn two_wraps_of_one_key_differ() {
 #[test]
 fn a_new_agent_protection_opens_under_its_own_derived_key_only() {
     let home = Home::new();
-    let owner = owner_protection(&home);
     let root = crate::auth::principal_kind_localhost_root(AGENT_A, PrincipalKind::Agent);
-    let protection = protect_agent_root(home.path(), &owner, AGENT_A, &root, 9).unwrap();
+    let protection = protect_agent_root(home.path(), &home.owner, AGENT_A, &root, 9)
+        .unwrap()
+        .unwrap();
     let mut agent = stored_agent(OWNER_ID, AGENT_A);
     agent.protection = protection.clone();
     assert!(protection_is_sound(&agent), "create's protection loads");
 
     let envelope = protection.protectors[0].envelope.as_ref().unwrap();
-    let wrap_key = crate::auth::owner_root_wrap_key(home.path(), &owner, &protection).unwrap();
-    let data_key = unwrap_data_key(&wrap_key, envelope).unwrap();
+    let data_key = unwrap_data_key(&wrap_key(&home, &home.owner, &protection), envelope).unwrap();
     assert_eq!(
         crate::auth::principal_data_key_id(&data_key),
         protection.data_key_id,
@@ -724,9 +818,8 @@ fn a_new_agent_protection_opens_under_its_own_derived_key_only() {
 
     let mut other = protection.clone();
     other.principal_id = AGENT_B.to_string();
-    let other_key = crate::auth::owner_root_wrap_key(home.path(), &owner, &other).unwrap();
     assert!(
-        unwrap_data_key(&other_key, envelope).is_err(),
+        unwrap_data_key(&wrap_key(&home, &home.owner, &other), envelope).is_err(),
         "a key derived for another agent opens nothing"
     );
 }
@@ -916,11 +1009,8 @@ fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
 
     // The one protection opens under the owner's derived key.
     let protection = &agent.protection;
-    let wrap_key =
-        crate::auth::owner_root_wrap_key(home.path(), &owner_protection(&home), protection)
-            .unwrap();
     let envelope = protection.protectors[0].envelope.as_ref().unwrap();
-    let data_key = unwrap_data_key(&wrap_key, envelope).unwrap();
+    let data_key = unwrap_data_key(&wrap_key(&home, &home.owner, protection), envelope).unwrap();
     assert_eq!(
         crate::auth::principal_data_key_id(&data_key),
         protection.data_key_id
@@ -1317,7 +1407,7 @@ fn a_refused_file_keeps_its_bytes_and_refuses_every_operation() {
         .principals
         .iter()
         .any(|principal| principal.principal_id == OWNER_ID));
-    assert!(owner_protection(&home).principal_id == OWNER_ID);
+    assert_eq!(owner_protection(&home).principal_id, OWNER_ID);
 }
 
 #[cfg(not(feature = "prototype-agents"))]
@@ -1415,8 +1505,15 @@ fn the_cargo_feature_is_read_in_one_place() {
 }
 
 #[test]
-fn agents_rs_names_no_owner_key_function_and_reads_no_environment() {
-    let source = include_str!("../agents.rs");
+fn the_agent_files_name_no_owner_key_function_and_read_no_environment() {
+    let sources = [
+        ("agents.rs", include_str!("../agents.rs")),
+        ("agent_admission.rs", include_str!("../agent_admission.rs")),
+        (
+            "gateway_agents.rs",
+            include_str!("../api/gateway_agents.rs"),
+        ),
+    ];
     // Every function of `auth` that returns the owner's key, a key that
     // opens it, a fresh secret, or the material a person recovers with.
     let key_functions = [
@@ -1434,6 +1531,10 @@ fn agents_rs_names_no_owner_key_function_and_reads_no_environment() {
         "complete_owner_recovery",
         "attach_recovery_archive",
         "verify_recovery_kit_material",
+        // The owner's protection record: it carries the encrypted Recovery Kit.
+        "load_principal_root_protection",
+        "principal_root_protections",
+        "encrypted_recovery_kit",
     ];
     // Broader than the names: no word for opening a ciphertext, and nothing
     // of the person's kit or code.
@@ -1447,11 +1548,22 @@ fn agents_rs_names_no_owner_key_function_and_reads_no_environment() {
         "data_key_from",
     ];
     let environment = ["env::", "var_os", "env!(", "option_env!"];
-    for forbidden in key_functions.iter().chain(&words).chain(&environment) {
-        assert!(!source.contains(forbidden), "agents.rs names `{forbidden}`");
+    // An inline test module is test code, not the module's own.
+    let sources = sources.map(|(name, source)| {
+        let production = source.split("#[cfg(test)]\npub(crate) mod tests {");
+        (name, production.into_iter().next().unwrap())
+    });
+    for (name, source) in sources {
+        for forbidden in key_functions.iter().chain(&words).chain(&environment) {
+            assert!(!source.contains(forbidden), "{name} names `{forbidden}`");
+        }
     }
-    // The one key function it may call returns a derived key only.
-    assert_eq!(source.matches("owner_root_wrap_key(").count(), 1);
+    // The one key function they may call returns a derived key only.
+    let calls: Vec<usize> = sources
+        .iter()
+        .map(|(_, source)| source.matches("owner_root_wrap_key(").count())
+        .collect();
+    assert_eq!(calls, [1, 0, 0]);
 }
 
 #[test]
