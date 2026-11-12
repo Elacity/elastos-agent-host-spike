@@ -1935,7 +1935,9 @@ fn installed_release_binds_to_the_repository_commit() {
     assert_eq!(document["installed_runtime"], Value::Null);
     // Nothing matched is left for the ran row to compare.
     assert!(
-        report.table.contains("installed_runtime_ran (A14) | FAIL | "),
+        report
+            .table
+            .contains("installed_runtime_ran (A14) | FAIL | "),
         "{}",
         report.table
     );
