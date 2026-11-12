@@ -202,41 +202,67 @@ try {
   const resetClipboard = text => page.evaluate(value => navigator.clipboard.writeText(value), text);
   const promptRoot = () => page.locator("#home-clipboard-prompt");
   const status = button => button.locator("xpath=following-sibling::*[contains(@class,'agent-copy-status')]");
+  // The status waits below and the line that reports them share this number.
+  const copyStatusTimeout = 3000;
+  const factTimeout = 1000;
 
   // A copy status wait that, on timeout, adds what the page held at that
   // moment so the next failure says why. The wait keeps its own condition and
-  // 3000 ms limit; a pass prints nothing new. Reads that fail never replace
-  // the timeout error.
-  async function waitForCopyStatus(label, expected, button, row, wait, since) {
+  // limit; a pass prints nothing new. Every read is bounded so a stalled frame
+  // still ends in the original error, and a failed read never replaces it.
+  async function waitForCopyStatus(label, expected, expectedClipboard, button, row, wait, since) {
     try {
       await wait();
     } catch (error) {
       const fact = async (name, read) => {
-        try { return `${name}: ${await read()}`; }
-        catch (reason) { return `${name}: could not read: ${reason?.message || reason}`; }
+        let timer;
+        try {
+          const value = await Promise.race([
+            read(),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error("timed out")), factTimeout);
+            }),
+          ]);
+          return `${name}: ${value}`;
+        } catch (reason) {
+          return `${name}: could not read: ${reason?.message || reason}`;
+        } finally {
+          clearTimeout(timer);
+        }
       };
       const facts = await Promise.all([
         fact("statuses in the room frame", async () => JSON.stringify(
-          await frame.locator(".agent-copy-status").evaluateAll(nodes =>
-            nodes.map(node => ({ text: node.textContent, connected: node.isConnected }))))),
-        fact("clicked button connected", async () => {
-          if (await button.count() === 0) return "no (no longer in the document)";
-          return await button.evaluate(node => node.isConnected) ? "yes" : "no";
+          await frame.locator(".agent-copy-status").evaluateAll(nodes => nodes.map(node => node.textContent)))),
+        fact("clicked button data-copy-pending", async () => {
+          const pending = await button.evaluate(node => node.getAttribute("data-copy-pending"), undefined,
+            { timeout: factTimeout });
+          return pending === null ? "absent" : `present, ${JSON.stringify(pending)}`;
         }),
+        fact("buttons matching the clicked locator now", async () => String(await button.count())),
         fact("copy buttons in the target row", async () => row
           ? String(await row.locator("[data-copy-message]").count())
           : "none (the pasted-text editor is not a message row)"),
-        fact("Home clipboard prompt", async () => await promptRoot().isVisible() ? "visible" : "hidden"),
+        fact("Home clipboard prompt", async () => await promptRoot().isVisible({ timeout: factTimeout }) ? "visible" : "hidden"),
         fact("written", async () => {
           const written = await page.evaluate(() => window.__home?.written ?? null);
           if (!Array.isArray(written)) return "absent";
           const last = written.at(-1);
           return `present, ${written.length} entries, last ${typeof last === "string" ? last.length : 0} chars`;
         }),
+        // Lengths and equality only; the clipboard text is never printed.
+        fact("clipboard vs the text this stage expects", async () => {
+          const held = await page.evaluate(() => navigator.clipboard.readText());
+          return held === expectedClipboard
+            ? `equal, ${held.length} chars held, ${expectedClipboard.length} expected`
+            : `different, ${held.length} chars held, ${expectedClipboard.length} expected`;
+        }),
         `${since.label}: ${Date.now() - since.at} ms`,
       ]);
-      const line = `copy status at "${label}" waited 3000 ms for "${expected}": ${facts.join("; ")}`;
+      const line = `copy status at "${label}" waited ${copyStatusTimeout} ms for "${expected}": ${facts.join("; ")}`;
       if (error && typeof error === "object") error.message = `${error.message}\n${line}`;
+      // Node prints an uncaught error from its stack, so the line needs to be
+      // printed here as well as appended to the message.
+      console.error(line);
       throw error;
     }
   }
@@ -252,8 +278,8 @@ try {
     });
     await page.locator("#home-clipboard-allow").click();
     const allowedAt = Date.now();
-    await waitForCopyStatus(label, "Copied", button, hover,
-      () => status(button).filter({ hasText: "Copied" }).waitFor({ timeout: 3000 }),
+    await waitForCopyStatus(label, "Copied", expected, button, hover,
+      () => status(button).filter({ hasText: "Copied" }).waitFor({ timeout: copyStatusTimeout }),
       { label: "click on Allow to timeout", at: allowedAt });
     assert.equal(await clipboard(), expected, `${label}: the clipboard holds the exact text`);
   }
@@ -277,8 +303,8 @@ try {
   await page.locator("#home-clipboard-cancel").click();
   const cancelledAt = Date.now();
   const sentCopy = sent.locator("[data-copy-message]");
-  await waitForCopyStatus("cancelled copy", "Copy cancelled.", sentCopy, sent,
-    () => status(sentCopy).filter({ hasText: "Copy cancelled." }).waitFor({ timeout: 3000 }),
+  await waitForCopyStatus("cancelled copy", "Copy cancelled.", "clipboard before cancel", sentCopy, sent,
+    () => status(sentCopy).filter({ hasText: "Copy cancelled." }).waitFor({ timeout: copyStatusTimeout }),
     { label: "click on Cancel to timeout", at: cancelledAt });
   assert.equal(await clipboard(), "clipboard before cancel", "a cancelled copy leaves the clipboard alone");
 
@@ -288,8 +314,8 @@ try {
   const longCopy = long.locator("[data-copy-message]");
   await longCopy.click();
   const oversizedAt = Date.now();
-  await waitForCopyStatus("oversized copy", "Too long to copy.", longCopy, long,
-    () => status(longCopy).filter({ hasText: "Too long to copy." }).waitFor({ timeout: 3000 }),
+  await waitForCopyStatus("oversized copy", "Too long to copy.", "clipboard before cancel", longCopy, long,
+    () => status(longCopy).filter({ hasText: "Too long to copy." }).waitFor({ timeout: copyStatusTimeout }),
     { label: "copy click to timeout", at: oversizedAt });
   assert.equal(await promptRoot().isVisible(), false, "an oversized copy is refused before Home is asked");
 
@@ -334,8 +360,11 @@ try {
   await staleCopy.click();
   const staleAt = Date.now();
   const staleStatus = status(staleCopy);
-  await waitForCopyStatus("Home page from before the update", "Reload Home to copy.", staleCopy, stale,
-    () => staleStatus.waitFor({ timeout: 3000 }),
+  // This wait has no text filter: it waits for any status to be visible, and
+  // the old Home page leaves the clipboard holding the last text written.
+  await waitForCopyStatus("Home page from before the update", "any status to be visible", streamed.join(""),
+    staleCopy, stale,
+    () => staleStatus.waitFor({ timeout: copyStatusTimeout }),
     { label: "copy click to timeout", at: staleAt });
   assert.equal(await staleStatus.textContent(), "Reload Home to copy.", "Copy under the old Home page says to reload Home");
   assert.equal(await promptRoot().isVisible(), false, "the old Home page asks nothing");
