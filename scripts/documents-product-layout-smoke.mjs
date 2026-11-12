@@ -977,16 +977,28 @@ async function run() {
       // New keeps an edited document too, and a new one is listed until saved.
       await manualPage.locator("#editor").fill("# Alpha\n\nAlso kept.");
       await manualPage.locator("#new-document").click();
+      // New focuses the title field on a short timer (documents.js
+      // startDraftDocument, 10 ms). A fill focuses and selects its field, then
+      // sends the text to whatever holds focus, so wait for the page's own
+      // focus step before filling: otherwise the body's text can land in the
+      // title and the draft is kept as "FreshA new idea.".
       await manualPage.waitForFunction(() => document.getElementById("title-input")?.value === "" &&
-        document.getElementById("editor")?.value === "", null, { timeout: BROWSER_WAIT_TIMEOUT_MS });
+        document.getElementById("editor")?.value === "" && document.activeElement?.id === "title-input",
+        null, { timeout: BROWSER_WAIT_TIMEOUT_MS });
       assert(!(await manualPage.locator("#confirm-modal.open").count()), "New must not ask.");
       await manualPage.locator("#title-input").fill("Fresh");
       await manualPage.locator("#editor").fill("A new idea.");
       // Beta keeps this draft only if the page already marks the new document
-      // unsaved when it is clicked: keepUnsavedCurrent reads state.dirty. Wait
-      // for that state instead of clicking into a pause.
-      await manualPage.waitForFunction(() => document.getElementById("save-button")?.classList.contains("has-unsaved") &&
-        document.getElementById("title-input")?.value === "Fresh", null, { timeout: BROWSER_WAIT_TIMEOUT_MS });
+      // unsaved when it is clicked: keepUnsavedCurrent reads state.dirty. Read
+      // the page once here, with no waiting, so a failure below or in the row
+      // check reports what the page held when Beta was clicked.
+      const draft = await manualPage.evaluate(() => ({
+        title: document.getElementById("title-input")?.value,
+        body: document.getElementById("editor")?.value,
+        unsaved: document.getElementById("save-button")?.classList.contains("has-unsaved"),
+      }));
+      assert(draft.title === "Fresh" && draft.body === "A new idea.",
+        `The new draft must hold the typed title and body. Got ${JSON.stringify(draft)}`);
       await manualPage.locator('.document-list-item[data-doc-did="doc-beta"]').click();
       await manualPage.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
       assert(await manualPage.locator("#editor").inputValue() === "# Beta\n\nFirst manual edit.",
