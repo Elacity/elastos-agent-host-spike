@@ -9416,9 +9416,14 @@ mod stored_root_tests {
         assert!(!child_path.exists());
     }
 
-    #[test]
-    fn a_refused_services_state_save_leaves_no_home_folder() {
-        let (_temp, data_dir) = state_dir();
+    /// A data directory and a launch context whose stored record is
+    /// quarantined after the context resolved its root.
+    fn quarantined_context() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        HomeLaunchTokenContext,
+    ) {
+        let (temp, data_dir) = state_dir();
         crate::auth::r4_fixture::store(&data_dir, crate::auth::PrincipalKind::Human);
         let root = crate::auth::ResolvedPrincipalRoot::resolve(
             &data_dir,
@@ -9438,6 +9443,12 @@ mod stored_root_tests {
             None,
             "grant".to_string(),
         );
+        (temp, data_dir, context)
+    }
+
+    #[test]
+    fn a_refused_services_state_save_leaves_no_home_folder() {
+        let (_temp, data_dir, context) = quarantined_context();
         let state = home_services_default_selection_state(&context);
         let path = home_services_selection_state_path(&data_dir, &context).unwrap();
         assert!(!path.parent().unwrap().exists());
@@ -9453,6 +9464,35 @@ mod stored_root_tests {
             !path.parent().unwrap().exists(),
             "the refused save left its Home folder"
         );
+    }
+
+    #[test]
+    fn a_refused_appearance_save_leaves_no_appearance_folder() {
+        let (_temp, data_dir, context) = quarantined_context();
+        let path =
+            home_appearance_path(&data_dir, &context, HOME_APPEARANCE_PREFERENCES_FILE).unwrap();
+        let appearance = path.parent().unwrap();
+        let home = appearance.parent().unwrap();
+        assert!(!home.exists());
+        let error = home_save_appearance_preferences(
+            &data_dir,
+            &context,
+            HomeAppearancePreferencesUpdate {
+                theme: Some("light".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("a quarantined record is refused");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("quarantined agent record: agent kind binding mismatch"),
+            "{text}"
+        );
+        assert!(
+            !appearance.exists(),
+            "the refused save left its Appearance folder"
+        );
+        assert!(!home.exists(), "the refused save left its Home folder");
     }
 
     #[test]
