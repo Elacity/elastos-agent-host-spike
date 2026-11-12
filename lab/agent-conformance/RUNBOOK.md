@@ -304,6 +304,15 @@ unreviewed candidates. A14 needs every A14 row to pass. The report checks only
 that each review names this commit; who reviewed, and whether two model
 families did, stays with the reviewer list.
 
+**A14 threat model.** The code at the reviewed commit — the suite, its tests,
+`run.sh` and the report — is trusted, because each review names that exact
+commit and the tree must be clean before the suite, after it, and when the
+report is written. An A14 row must not pass by accident, by a test that
+misbehaves, or by anything the suite run leaves behind. A deliberate change
+written into the reviewed commit is outside this model: review binding is what
+covers it. Same-user code cannot be fenced off without operating-system
+isolation, which this tool does not claim.
+
 `staged_bundle (A14)` passes when the suite launched at least one bundle and
 the receipt names it. The bundles are the ones the suite stages from this
 checkout in a throwaway Home: the conformance probe for each effect, and with
@@ -358,15 +367,22 @@ again; both hashes match `installed_runtime.binary_sha256`, and the record
 names a path that resolves to `installed_runtime.binary_path`. The record
 folder lies outside every path the suite was given, its path is never given to
 a test process, no library function writes a record, and no record file
-existed while the suite ran, so a test process cannot produce this line. The
-identity line the suite prints when the binary is named comes before any launch
-and is not a record, and no test's own output is read as one. What this does
-not show: the suite's own launches use the `AGENT_CONFORMANCE_RUNTIME_BINARY`
-path with the harness's pre-launch hash, and nothing sees the bytes the
-operating system executed. The liveness check covers the process group each
-suite command was started in; a process that leaves its group before the check
-can still act unseen, and the row then rests on the launch above, not on the
-absence of such a process. The receipt records
+existed while the suite ran, so no test process is handed the record or its
+path. `run.sh` builds the report before the suite in a folder the suite can
+write: it hashes that binary then, hashes it again after the suite, and
+refuses a difference with `reporter changed during the suite: <first> <now>`;
+it runs a copy of the verified bytes from a folder no test process was given.
+A test that misbehaves, or anything the suite run leaves behind, therefore
+cannot make this line pass; a test process that rewrites the reviewed code
+deliberately is outside the A14 threat model above, which review binding
+covers. The identity line the suite prints when the binary is named comes
+before any launch and is not a record, and no test's own output is read as
+one. What this does not show: the suite's own launches use the
+`AGENT_CONFORMANCE_RUNTIME_BINARY` path with the harness's pre-launch hash, and
+nothing sees the bytes the operating system executed. The liveness check
+covers the process group each suite command was started in; a process that
+leaves its group before the check can still act unseen, and the row then rests
+on the launch above, not on the absence of such a process. The receipt records
 `installed_binary_launch_status`
 (`run_sh_launched_installed_path_hash_matched` or
 `not_run_sh_launched_installed_path_hash_matched`),
@@ -552,7 +568,7 @@ What each A14 row means:
 | `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
-| `installed_runtime_ran` | `run.sh` made the record after the suite and its liveness check, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
+| `installed_runtime_ran` | `run.sh` hashed the report it built before the suite, hashed it again after the suite and its liveness check, refused a change, and ran a copy of the verified bytes; it made the record after that, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
 
 What the receipt does not prove:
 

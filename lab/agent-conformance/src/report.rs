@@ -35,7 +35,11 @@ pub const INSTALLED_RUNTIME_SCOPE: &str =
 /// launched it once, saw it answer, and hashed it again; both hashes match the
 /// installed record. Nothing here sees the bytes the operating system then
 /// executed, and the suite's own launches use the named path with the
-/// harness's pre-launch hash.
+/// harness's pre-launch hash. The report's own bytes are the ones hashed
+/// before the suite: `run.sh` hashes the report it built, hashes it again
+/// after the suite, refuses a change with `reporter changed during the suite:
+/// <first> <now>`, and runs a copy of the verified bytes from a folder no test
+/// process was given.
 pub const INSTALLED_RUNTIME_BINARY_SCOPE: &str =
     "run.sh made the record after the suite and its liveness check, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record; what this does not show: the suite's own launches use the named path with the harness's pre-launch hash, and nothing sees the bytes the operating system then executed";
 
@@ -755,6 +759,18 @@ impl LaunchRecord {
 /// it only after the suite has exited and its liveness check found no
 /// surviving suite process, into a folder it makes then that no test process
 /// is given, and names its path only to the report.
+///
+/// The A14 threat model: the code at the reviewed commit — the suite, its
+/// tests, `run.sh` and this report — is trusted, because each review names
+/// that exact commit and the tree must be clean before the suite, after it and
+/// when the report is written. This row must not pass by accident, by a test
+/// that misbehaves, or by anything the suite run leaves behind. A deliberate
+/// change written into the reviewed commit is outside this model: review
+/// binding covers it, and same-user code cannot be fenced off without
+/// operating-system isolation, which this tool does not claim. `run.sh` hashes
+/// the report it built before the suite and again after it, refuses a change
+/// with `reporter changed during the suite: <first> <now>`, and runs a copy of
+/// the verified bytes from a folder no test process was given.
 pub fn installed_binary_launched_failures(
     record: &LaunchRecord,
     installed: Option<&InstalledRuntime>,

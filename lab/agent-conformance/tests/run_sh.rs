@@ -26,6 +26,7 @@ struct Lane {
     suite_marker: PathBuf,
     suite_pid_file: PathBuf,
     linger: bool,
+    rewrite_reporter: bool,
 }
 
 impl Lane {
@@ -76,6 +77,7 @@ impl Lane {
             suite_marker: PathBuf::new(),
             suite_pid_file: PathBuf::new(),
             linger: false,
+            rewrite_reporter: false,
         }
     }
 
@@ -126,6 +128,9 @@ impl Lane {
             .env("TEST_SUITE_PID_FILE", &self.suite_pid_file);
         if self.linger {
             command.env("TEST_SUITE_LINGER", "1");
+        }
+        if self.rewrite_reporter {
+            command.env("TEST_REWRITE_REPORTER", "1");
         }
         command.output().unwrap()
     }
@@ -234,6 +239,15 @@ WRAPPER
     test)
         env > "$TEST_SUITE_ENV"
         : > "$TEST_SUITE_MARKER"
+        if [ -n "${TEST_REWRITE_REPORTER:-}" ]; then
+            cat >"$target/debug/report" <<'REPLACEMENT'
+#!/bin/sh
+printf 'installed_runtime_ran (A14) | PASS\n'
+printf 'launch record file: none (0 record(s), mode -)\n'
+exit 0
+REPLACEMENT
+            chmod 700 "$target/debug/report"
+        fi
         if [ -n "${TEST_SUITE_LINGER:-}" ]; then
             sleep 60 &
             echo $! >> "$TEST_SUITE_PID_FILE"
@@ -518,4 +532,37 @@ fn a_lingering_suite_process_makes_run_sh_refuse_to_record() {
     assert_eq!(lane.record_folders(), Vec::<String>::new());
     // The installed binary was never launched.
     assert!(!lane.launch_log.exists(), "{}", lane.launch_log.display());
+}
+
+#[test]
+fn a_suite_that_rewrites_the_reporter_makes_run_sh_refuse() {
+    let mut lane = Lane::new();
+    lane.install(ANSWERING.as_bytes());
+    // The suite writes the folder the report was built in. Here it replaces the
+    // report with one that prints a PASS without launching anything.
+    lane.rewrite_reporter = true;
+    let output = lane.run();
+    let stdout = lane.stdout(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stdout {stdout:?}");
+    let line = stderr
+        .lines()
+        .find(|line| line.starts_with("reporter changed during the suite: "))
+        .unwrap_or_else(|| panic!("no refusal in {stderr:?}"));
+    let hashes: Vec<_> = line["reporter changed during the suite: ".len()..]
+        .split_whitespace()
+        .collect();
+    assert_eq!(hashes.len(), 2, "{line:?}");
+    for hash in &hashes {
+        assert_eq!(hash.len(), 64, "{line:?}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{line:?}");
+    }
+    assert_ne!(hashes[0], hashes[1], "{line:?}");
+    // No row and no record: the replaced report never ran, and the installed
+    // binary was never launched.
+    assert!(!stdout.contains("PASS"), "{stdout:?}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(!lane.launch_log.exists(), "{}", lane.launch_log.display());
+    assert!(!lane.report_args.exists(), "{}", lane.report_args.display());
+    assert_eq!(lane.record_folders(), Vec::<String>::new());
 }

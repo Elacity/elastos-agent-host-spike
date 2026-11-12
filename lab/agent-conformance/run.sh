@@ -111,6 +111,9 @@ if ! cargo build --locked --manifest-path "$manifest" --bin report >"$run_dir/re
     exit 1
 fi
 report_bin="$CARGO_TARGET_DIR/debug/report"
+# The suite can write this folder, so the bytes built here are what gets
+# reported: their hash is taken now and again after the suite.
+report_first=$(sha256_of "$report_bin")
 "$report_bin" --check-earlier-runs
 
 # The suite runs first. Nothing is recorded while it runs.
@@ -132,6 +135,37 @@ for group in ${suite_groups[@]+"${suite_groups[@]}"}; do
         printf 'suite process still alive: process group %s\n' "$group" >&2
     fi
 done
+
+# The suite was given this folder and can write it. The report that prints the
+# row is the one built before the suite: hash it again now, refuse a change,
+# and run a copy of exactly those bytes from a folder no test process is given.
+report_now=$(sha256_of "$report_bin")
+if [ "$report_now" != "$report_first" ]; then
+    printf 'reporter changed during the suite: %s %s\n' "$report_first" "$report_now" >&2
+    exit 1
+fi
+report_copy_dir=
+if report_copy_dir=$(mktemp -d "$base_tmp/a14-report-bin.XXXXXX" 2>/dev/null); then
+    case "$report_copy_dir" in
+        "$lane"|"$lane"/*|"$run_dir"|"$run_dir"/*)
+            rm -rf -- "$report_copy_dir" 2>/dev/null || true
+            report_copy_dir=
+            printf 'refusing a report folder under a path the suite was given\n' >&2
+            exit 1
+            ;;
+    esac
+    cp -- "$report_bin" "$report_copy_dir/report"
+    report_now=$(sha256_of "$report_copy_dir/report")
+    if [ "$report_now" != "$report_first" ]; then
+        printf 'reporter changed during the suite: %s %s\n' "$report_first" "$report_now" >&2
+        rm -rf -- "$report_copy_dir" 2>/dev/null || true
+        exit 1
+    fi
+    report_bin="$report_copy_dir/report"
+else
+    printf 'no private folder for the report binary\n' >&2
+    exit 1
+fi
 
 # Only now, with the suite finished, make a new private folder outside every
 # path the suite was given, hash the installed binary, launch it once, and hash
@@ -225,6 +259,9 @@ fi
 # The report has read the record; the receipt output above keeps a copy.
 if [ -n "$record_dir" ]; then
     rm -rf -- "$record_dir" 2>/dev/null || true
+fi
+if [ -n "$report_copy_dir" ]; then
+    rm -rf -- "$report_copy_dir" 2>/dev/null || true
 fi
 if [ -n "$report_failed" ]; then
     exit 1
