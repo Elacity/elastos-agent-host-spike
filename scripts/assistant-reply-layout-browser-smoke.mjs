@@ -20,6 +20,10 @@ import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./system-uiux-fixture.mjs";
 import { productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
+
+// A DOM wait fails on a wrong page, not on a slow runner: same predicate, more time.
+const BROWSER_WAIT_TIMEOUT_MS = browserWaitTimeoutMs();
 
 const cpuRate = process.env.ASSISTANT_LAYOUT_CPU_RATE ? Number(process.env.ASSISTANT_LAYOUT_CPU_RATE) : null;
 assert.ok(cpuRate === null || [1, 4, 6].includes(cpuRate), "CPU rate is 1, 4 or 6");
@@ -276,7 +280,7 @@ try {
     const before = await composerHeight();
     await input.fill(Array.from({ length: 6 }, (_, i) => `Follow-up line ${i + 1}`).join("\n"));
     await frame.waitForFunction((height) =>
-      document.querySelector(".taskbar.is-agent-face").getBoundingClientRect().height > height, before, { timeout: 5000 });
+      document.querySelector(".taskbar.is-agent-face").getBoundingClientRect().height > height, before, { timeout: BROWSER_WAIT_TIMEOUT_MS });
   };
   const seen = {};
 
@@ -304,8 +308,8 @@ try {
     { sequence: 2, kind: "completed", data: {} },
   ];
   await room.locator(".agent-msg-agent.is-streaming").waitFor({ state: "detached", timeout: 15000 });
-  await room.locator(".agent-msg-agent").last().filter({ hasText: "Streamed step 25" }).waitFor({ timeout: 5000 });
-  await frame.waitForFunction(() => typeof window.__finishReply === "function", null, { timeout: 5000 });
+  await room.locator(".agent-msg-agent").last().filter({ hasText: "Streamed step 25" }).waitFor({ timeout: BROWSER_WAIT_TIMEOUT_MS });
+  await frame.waitForFunction(() => typeof window.__finishReply === "function", null, { timeout: BROWSER_WAIT_TIMEOUT_MS });
   beforeClamp = await frame.evaluate(newestClearance, ".agent-msg-agent");
   const beforeShrink = beforeClamp.scrollTop;
   await page.setViewportSize({ width: 1280, height: 1600 });
@@ -313,10 +317,10 @@ try {
   await frame.waitForFunction((top) => {
     const scroller = document.querySelector("#agent-harness-stream");
     return scroller.scrollTop < top - 1 && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1;
-  }, beforeShrink, { timeout: 5000 });
+  }, beforeShrink, { timeout: BROWSER_WAIT_TIMEOUT_MS });
   await frame.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
   await frame.evaluate(() => { window.__finishReply(); delete window.__finishReply; });
-  await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').last().waitFor({ timeout: 5000 });
+  await room.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').last().waitFor({ timeout: BROWSER_WAIT_TIMEOUT_MS });
   seen.reply = await expectNewestAboveComposer(".agent-msg-agent", "the newest reply");
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuRate ?? 1 });
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -422,7 +426,7 @@ try {
   const atEnd = () => frame.waitForFunction(() => {
     const scroller = document.querySelector("#agent-harness-stream");
     return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 8;
-  }, null, { timeout: 5000 });
+  }, null, { timeout: BROWSER_WAIT_TIMEOUT_MS });
   // Beside the messages, inside the transcript (frame and page share
   // coordinates: both frames fill the page).
   const gutter = () => frame.evaluate(() => {
@@ -480,7 +484,7 @@ try {
       await page.waitForTimeout(10);
     };
     while (sent < 8) await pushChunk();
-    await room.locator(".agent-msg-agent.is-streaming").filter({ hasText: chunks[sent - 1].trim().slice(-15) }).waitFor({ timeout: 5000 });
+    await room.locator(".agent-msg-agent.is-streaming").filter({ hasText: chunks[sent - 1].trim().slice(-15) }).waitFor({ timeout: BROWSER_WAIT_TIMEOUT_MS });
     // A new message makes the room shrink and grow again as its reply starts
     // (the scroll position clamps down): the room still follows to the end.
     await atEnd().catch(async () => assert.fail(`${label}: the room follows the start of the reply: ${JSON.stringify(await scrollState())}`));

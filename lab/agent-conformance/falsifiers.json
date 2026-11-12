@@ -255,9 +255,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/agent-conformance/tests/common/operator.rs",
-          "old": "    if count == 0 || !api_seen {",
-          "new": "    if false && (count == 0 || !api_seen) {"
+          "file": "../../lab/agent-conformance/src/census.rs",
+          "old": "    if files.is_empty() || !api_seen {",
+          "new": "    if false && (files.is_empty() || !api_seen) {"
         }
       ],
       "tests": [
@@ -659,8 +659,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/common/grants.rs",
-          "old": "    if !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))",
-          "new": "    if false && !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))"
+          "old": "    if status != 200 && status != 403 {",
+          "new": "    if false && status != 200 && status != 403 {"
         }
       ],
       "tests": [
@@ -842,8 +842,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
-          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         }
       ],
       "tests": [
@@ -858,13 +858,18 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
-          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    let mut _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"120\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         },
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    if require_live_grants {",
-          "new": "    drop(_leftover);\n    if require_live_grants {"
+          "new": "    _leftover.stop().unwrap();\n    drop(_leftover);\n    if require_live_grants {"
+        },
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "        home.finish().unwrap();\n        return;",
+          "new": "        _leftover.stop().unwrap();\n        drop(_leftover);\n        home.finish().unwrap();\n        return;"
         }
       ],
       "tests": [

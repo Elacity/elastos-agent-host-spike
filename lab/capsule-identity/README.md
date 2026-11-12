@@ -186,12 +186,20 @@ with an empty, `.` or `..` part, two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
 claimed name by calling `lab_cid`; it computes no name of its own.
 
-The CIDv1 bytes and the base32 text are one marked lab copy inside
-`src/lib.rs` (`cid_bytes`, one encoder, one decoder). The Runtime's `cid`
-0.11 crate lives only in `elastos-server` and `elastos-namespace`, which the
-lab does not link, and any new crate here would make the locks of
-`lab/wasm-capsule` and `lab/agent-conformance` (both path-depend on this
-crate) stale. So the lab adds no crate.
+The CIDv1 bytes and the base32 text are one marked copy (`cid_bytes`, one
+encoder, one decoder). Since M2 part B it lives, with the walk and the rest
+of the identity code, in the workspace crate `elastos-bundle-identity`
+(`elastos/crates/elastos-bundle-identity/src/lib.rs`), moved there text for
+text. This crate re-exports that crate's public names and has no encoder of
+its own. `cid_bytes`, the base32 printer (`printed_cid`) and the base32
+decoder (`decode_base32`) are private there and are reached through
+`LabCid`'s printing and parsing; the two functions that build the tree,
+`encode_entries` and `encode_listed_files`, are public there and re-exported
+here. In the Runtime's workspace the `cid` 0.11 crate is used only by
+`elastos-server` and `elastos-namespace`, which neither this crate nor the
+identity crate links. The move added one dependency here, the identity crate
+itself; the lockfiles of the crates that path-depend on this one gained its
+entry with it.
 
 Each profile setting has a named test and a falsifier (`tests/encoding.rs`;
 every pin is also recomputed by the Python block above, written from these
@@ -629,13 +637,15 @@ The tests are in `tests/parse.rs`.
 
 ## For a lab that uses the lab CID
 
-Three lab crates outside this lane have a path dependency on this crate. Each
+Four lab crates outside this lane have a path dependency on this crate. Each
 manifest is listed below with what that crate uses: `pins` (its tests pin a
-printed lab CID), `parse` (it reads a printed lab CID with `LabCid`'s parse, or
-makes values with `encode_entries`), or `both`.
+printed lab CID), `parse` (it uses this crate's parse, encode, naming or
+signing calls and pins none: `LabCid`'s parse, `encode_entries`,
+`checked_bundle`, `sign_bundle`), or `both`.
 
 ```text
 lab/agent-conformance/Cargo.toml  parse
+lab/plan-approval/Cargo.toml  parse
 lab/wasm-capsule/Cargo.toml  both
 lab/wasm-capsule/tools/Cargo.toml  pins
 ```
@@ -644,6 +654,10 @@ lab/wasm-capsule/tools/Cargo.toml  pins
   `parse::<LabCid>()` (`src/report.rs`), makes its synthetic values with
   `encode_entries`, and names bundles with `checked_bundle`. It pins no lab
   CID.
+- `lab/plan-approval` (`plan-approval`), a dev-dependency: its tests include
+  `lab/agent-conformance/tests/common/signed_bundle.rs` by path
+  (`src/lib.rs`), which names a bundle with `checked_bundle` and signs it with
+  `sign_bundle`. It pins no lab CID; it names and signs bundles only.
 - `lab/wasm-capsule` (wasm-capsule-lab), the `capsule` package, a
   dev-dependency: its tests pin two lab CIDs (`tests/common/mod.rs`,
   `tests/bundle.rs`) and parse a printed one (`tests/run.rs`).
@@ -651,7 +665,8 @@ lab/wasm-capsule/tools/Cargo.toml  pins
   `lab_cid` (re-exported as `bundle_identity`). The two pins above are of what
   it prints, so a change in what `lab_cid` prints reaches it through them.
 
-Read at `b75ffefdb`. `every_lab_cid_consumer_is_in_the_adoption_note`
+Read at `b75ffefdb`; `lab/plan-approval` read at `03f4c3f5`.
+`every_lab_cid_consumer_is_in_the_adoption_note`
 (`tests/adoption.rs`) keeps the list true, and it reads no TOML itself. It
 lists every git-tracked `Cargo.toml` under `lab/`, at any depth, outside this
 lane (`git ls-files`), and asks Cargo's own reader about each one:
@@ -1693,8 +1708,8 @@ Kubo's output. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
 `the_lab_cid_claim_stays_computed_by_the_lab` keeps this: these two sections
 and the module doc of `src/lib.rs` say the claim word for word, this section
-states the gate, and no `*.md` file of the lane outside `tests/` and no file
-under `src/` holds a phrase from its list of equality claims (`EQUALITY_CLAIMS` in
+states the gate, and no `*.md` file of the lane outside `tests/`, no file
+under `src/`, and no file under the identity crate's `src/` holds a phrase from its list of equality claims (`EQUALITY_CLAIMS` in
 `tests/common/mod.rs`), in any case and across line breaks. The scan reads
 every such file that git tracks or would track: an untracked file that git
 does not ignore counts, so a new doc is read before it is committed, and an
@@ -1730,12 +1745,14 @@ RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-id
 
 The package is its own workspace (empty `[workspace]` table) with its own
 `Cargo.lock`, so the Runtime's workspace never grows for it. Dependencies:
-`elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
+`elastos-bundle-identity` by path (the identity code: the walk and the
+encoder), `elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
 by path (read only, for the one `did:key` encoder and decoder), `hex` (since
-task 018 only the tests use it), `serde_json`, `sha2`, `ed25519-dalek` 2.1 with its `rand_core` feature, and
-`rustix` 1.1.4 with its `fs` feature, for safe `openat`, `fstat` and listing
-from a handle (`std` cannot open relative to a handle, and the crate forbids
-`unsafe`). Dev-dependencies: `tempfile` and `rand` 0.8 (the operating system's
+task 018 only the tests use it), `serde_json`, `sha2`, and `ed25519-dalek` 2.1 with its `rand_core` feature.
+`rustix` 1.1.4 with its `fs` feature (safe `openat`, `fstat` and listing
+from a handle: `std` cannot open relative to a handle, and both crates forbid
+`unsafe`) is the identity crate's dependency now; here it is a dev-dependency,
+for the tests that stage and swap entries. Dev-dependencies: `rustix`, `tempfile` and `rand` 0.8 (the operating system's
 generator in tests). There is no dependency on `elastos-server` or
 `elastos-runtime`. All resolve offline from the local cargo cache.
 `zerocopy` is locked at 0.8.62 because 0.8.63's derive crate is not in that
@@ -1753,9 +1770,13 @@ them with its cause.
 
 ```
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
-src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
-                         the encoder, the walk, the test-key signature, the shared
-                         digest, the lab package record and the lab variant binding
+src/lib.rs               the re-export of the identity crate's public names
+                         (checked_bundle, lab_cid, check_name and its checked form,
+                         encode_entries, encode_listed_files; the walk and the
+                         tree builder behind them are in
+                         elastos/crates/elastos-bundle-identity), and this
+                         crate's own: the test-key signature, the shared digest,
+                         the lab package record and the lab variant binding
 fixtures/                content-sample, web-app, wc001-core, agent-host, provider,
                          model, provider-variant-a, provider-variant-b
 consumer-fixtures/       photo-stand-in-photo-set: the photo lane's PH6 fixture,
@@ -1768,7 +1789,8 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          the refusal asserts both signature checks share, the
                          key-material scan, the python3 -I run of README's blocks,
                          the cargo metadata scan for lab crates that use this one,
-                         the claim scan of the lane's docs and src/, the check
+                         the claim scan of the lane's docs and src/ and of the
+                         identity crate's src/, the check
                          of the falsifier list's inventory, the lab stand-in
                          launcher (StandInRuntime)
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's
@@ -1857,9 +1879,13 @@ only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
 recovery list (`PROVIDER_TARGETS` in `examples/agent-host/falsify.py`) names
 five files of this lane: `src/lib.rs`, `tests/common/mod.rs`,
-`fixtures/wc001-core/capsule.json`, `.gitignore` and `README.md`. F-CI4h
+`fixtures/wc001-core/capsule.json`, `.gitignore` and `README.md`, and a sixth
+outside it: `elastos/crates/elastos-bundle-identity/src/lib.rs`, where the
+identity code lives since it moved there, text for text. F-CI4h
 edits this lane's `.gitignore`, F-CI4i edits this file, and every other entry
-edits one of the first three. Task 014 moved the key-material scan, byte for
+edits one of the first three or the sixth. Where this file says below that
+an entry edits `src/lib.rs`, the edit is in the sixth file if the code it
+names moved. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
 `new` and tests unchanged. Task 019's entries edit only `src/lib.rs`
