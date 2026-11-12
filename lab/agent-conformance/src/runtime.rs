@@ -1,4 +1,4 @@
-//! Identify the checkout's native binaries. `harness` owns every Runtime launch.
+//! Identify the native binaries under test. `harness` owns every Runtime launch.
 
 use crate::build::{lane, offline_build};
 use std::fs::File;
@@ -13,12 +13,24 @@ pub struct BinaryUnderTest {
     pub sha256: String,
 }
 
+/// Names a Runtime binary for the suite to launch instead of building one.
+pub const RUNTIME_BINARY: &str = "AGENT_CONFORMANCE_RUNTIME_BINARY";
+
 /// Cache failures too: each test process attempts at most one Runtime build.
 /// The caller holds the repository's shared heavy-build lease.
+///
+/// With `AGENT_CONFORMANCE_RUNTIME_BINARY` set, the suite launches that binary
+/// where it is and builds no Runtime; unset, it builds the checkout's Runtime
+/// as before. Only the Runtime is given: the localhost provider, the probe and
+/// every Home the Runtime runs in still come from this checkout, so a given
+/// Runtime never reads its own installation's data folder.
 pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
     static RUNTIME: OnceLock<Result<BinaryUnderTest, String>> = OnceLock::new();
     RUNTIME
-        .get_or_init(|| build_native("elastos-server", "elastos"))
+        .get_or_init(|| match std::env::var_os(RUNTIME_BINARY) {
+            Some(given) => given_native(Path::new(&given), "elastos"),
+            None => build_native("elastos-server", "elastos"),
+        })
         .as_ref()
         .map_err(String::as_str)
 }
@@ -75,6 +87,28 @@ fn build_native(package: &str, name: &str) -> Result<BinaryUnderTest, String> {
     Ok(BinaryUnderTest { binary, sha256 })
 }
 
+/// Identify a binary that was given, not built. It is hashed where it is and
+/// never copied or changed; its path stays out of the printed evidence.
+fn given_native(binary: &Path, name: &str) -> Result<BinaryUnderTest, String> {
+    if !binary.is_absolute() {
+        return Err(format!("given {name} binary needs an absolute path"));
+    }
+    if !binary.is_file() {
+        return Err(format!("given {name} binary is not a file"));
+    }
+    let sha256 = sha256_file(binary)?;
+    println!("{name} given, not built");
+    crate::identity::Observation::Native {
+        role: name.into(),
+        sha256: sha256.clone(),
+    }
+    .emit();
+    Ok(BinaryUnderTest {
+        binary: binary.to_path_buf(),
+        sha256,
+    })
+}
+
 /// Hash built and installed copies through the same std-only path.
 pub fn sha256_file(path: &Path) -> Result<String, String> {
     // macOS supplies shasum. Hash the bytes through stdin, without running the
@@ -94,4 +128,29 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
         ));
     }
     Ok(hash.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::given_native;
+    use crate::harness::ThrowawayHome;
+
+    #[test]
+    fn given_runtime_is_identified_where_it_is() {
+        let home = ThrowawayHome::new().unwrap();
+        let binary = home.root().join("given-elastos");
+        std::fs::write(&binary, b"given runtime").unwrap();
+        let given = given_native(&binary, "elastos").unwrap();
+        assert_eq!(given.binary, binary);
+        assert_eq!(given.sha256, crate::identity::sha256(b"given runtime"));
+        assert_eq!(
+            given_native(std::path::Path::new("given-elastos"), "elastos").unwrap_err(),
+            "given elastos binary needs an absolute path"
+        );
+        assert_eq!(
+            given_native(&home.root().join("absent"), "elastos").unwrap_err(),
+            "given elastos binary is not a file"
+        );
+        home.finish().unwrap();
+    }
 }
