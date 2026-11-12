@@ -859,17 +859,17 @@
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
-          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
+          "new": "    let mut _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         },
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    if require_live_grants {",
-          "new": "    drop(_leftover);\n    if require_live_grants {"
+          "new": "    _leftover.stop().unwrap();\n    drop(_leftover);\n    if require_live_grants {"
         },
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "        home.finish().unwrap();\n        return;",
-          "new": "        drop(_leftover);\n        home.finish().unwrap();\n        return;"
+          "new": "        _leftover.stop().unwrap();\n        drop(_leftover);\n        home.finish().unwrap();\n        return;"
         }
       ],
       "tests": [
