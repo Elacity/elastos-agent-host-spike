@@ -30,13 +30,14 @@ pub const STAGED_BUNDLE_SCOPE: &str =
 pub const INSTALLED_RUNTIME_SCOPE: &str =
     "release head, release and components hash-check each other and name this repository commit; records only, the installed data folder did not run";
 
-/// What the runtime-ran row covers: `run.sh` hashed the installed binary,
+/// What the runtime-ran row covers: after the suite and its liveness check,
+/// `run.sh` made a private record folder, hashed the installed binary,
 /// launched it once, saw it answer, and hashed it again; both hashes match the
 /// installed record. Nothing here sees the bytes the operating system then
 /// executed, and the suite's own launches use the named path with the
 /// harness's pre-launch hash.
 pub const INSTALLED_RUNTIME_BINARY_SCOPE: &str =
-    "run.sh hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record; what this does not show: the suite's own launches use the named path with the harness's pre-launch hash, and nothing sees the bytes the operating system then executed";
+    "run.sh made the record after the suite and its liveness check, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record; what this does not show: the suite's own launches use the named path with the harness's pre-launch hash, and nothing sees the bytes the operating system then executed";
 
 /// The data folder the Runtime under test ran with, as the receipt states it.
 pub const RUNTIME_DATA_FOLDER: &str =
@@ -706,10 +707,10 @@ pub fn release_commit_failures(
     }
 }
 
-/// The launch record the receipt grades: one record `run.sh` wrote to its
-/// run-private file, passed to the report on its own command line. A test's
-/// own output carries no record, so text that looks like a launch cannot stand
-/// in for one.
+/// The launch record the receipt grades: one record `run.sh` wrote after the
+/// suite to the private folder it made then, and passed to the report on its
+/// own command line. A test's own output carries no record, so text that looks
+/// like a launch cannot stand in for one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchRecord {
     /// The report was named no record file: nothing was recorded.
@@ -751,8 +752,9 @@ impl LaunchRecord {
 /// `installed` is the installed Runtime once its hash chain matched and bound
 /// to this commit. The check is of paths and hashes: it does not see the bytes
 /// the operating system then executed. The file is `run.sh`'s: `run.sh` writes
-/// it before the suite and names its path only to the report, so no test
-/// process can write it.
+/// it only after the suite has exited and its liveness check found no
+/// surviving suite process, into a folder it makes then that no test process
+/// is given, and names its path only to the report.
 pub fn installed_binary_launched_failures(
     record: &LaunchRecord,
     installed: Option<&InstalledRuntime>,
@@ -961,9 +963,9 @@ pub struct Bound<'a> {
     /// `None` means no installed Runtime was given: the receipt then carries no
     /// installed Runtime row or field at all.
     pub installed: Option<Result<InstalledRuntime, Vec<String>>>,
-    /// The launch record read from the run-private file run.sh named on the
-    /// command line. `Missing` means the report was named no file, so the
-    /// installed-path row has no launch evidence.
+    /// The launch record read from the private folder run.sh made after the
+    /// suite and named on the command line. `Missing` means the report was
+    /// named no file, so the installed-path row has no launch evidence.
     pub launch_record: LaunchRecord,
 }
 
@@ -1100,9 +1102,9 @@ pub fn render_bound_run(
     ));
     // Whether run.sh launched the installed path is asked only when an
     // installed Runtime was given, and it rests on the record file alone: the
-    // identity line printed when the binary was named comes before any launch,
-    // a test's own output carries no record, and no test process is given the
-    // file's path.
+    // file is made after the suite, the identity line printed when the binary
+    // was named comes before any launch, a test's own output carries no record,
+    // and no test process is given the file's path.
     let not_launched = installed.as_ref().map(|installed| {
         installed_binary_launched_failures(&launch_record, installed.as_ref().ok())
     });

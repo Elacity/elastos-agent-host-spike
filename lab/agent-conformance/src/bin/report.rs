@@ -123,9 +123,9 @@ fn main() {
         .and_then(std::ffi::OsStr::to_str)
         == Some("1"))
     .then(|| "tree was dirty during the run".to_owned());
-    // The launch record file is run.sh's: it writes the file and names its path
-    // on this command line, after the suite. No test process is given it, and
-    // test output is never read as launch evidence.
+    // The launch record file is run.sh's: it makes the file after the suite has
+    // exited and names its path on this command line. No test process is given
+    // it, and test output is never read as launch evidence.
     let launch_record = match args.get(5) {
         None => report::LaunchRecord::Missing,
         Some(path) => report::LaunchRecord::read(Path::new(path)),

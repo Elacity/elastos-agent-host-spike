@@ -1,6 +1,8 @@
 //! Drives the real `run.sh` against a stand-in Cargo and a stand-in installed
-//! binary. `run.sh` is the only writer of the launch record, and the record's
-//! path never reaches a test process: these tests observe both.
+//! binary. `run.sh` is the only writer of the launch record, writes it only
+//! after the suite has finished, and gives its path to no test process: these
+//! tests observe all of that, including a record a test plants where the old
+//! code used to keep one.
 
 use agent_conformance::identity::sha256;
 use agent_conformance::report::release_platform;
@@ -20,6 +22,10 @@ struct Lane {
     data: PathBuf,
     suite_env: PathBuf,
     report_args: PathBuf,
+    launch_log: PathBuf,
+    suite_marker: PathBuf,
+    suite_pid_file: PathBuf,
+    linger: bool,
 }
 
 impl Lane {
@@ -66,6 +72,10 @@ impl Lane {
             data: PathBuf::new(),
             suite_env,
             report_args,
+            launch_log: PathBuf::new(),
+            suite_marker: PathBuf::new(),
+            suite_pid_file: PathBuf::new(),
+            linger: false,
         }
     }
 
@@ -94,11 +104,15 @@ impl Lane {
         fs::write(data.join("installation/release-head.json"), head).unwrap();
         self.installed = installed;
         self.data = data;
+        self.launch_log = self._root.path().join("launch-log");
+        self.suite_marker = self._root.path().join("suite-marker");
+        self.suite_pid_file = self._root.path().join("suite-pids");
     }
 
     fn run(&self) -> Output {
         let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.bin.display());
-        Command::new(self.lane.join("run.sh"))
+        let mut command = Command::new(self.lane.join("run.sh"));
+        command
             .env_remove("AGENT_CONFORMANCE_LAUNCH_RECORD")
             .env("PATH", path)
             .env("AGENT_CONFORMANCE_INSTALLED_BINARY", &self.installed)
@@ -107,37 +121,85 @@ impl Lane {
             .env("TEST_SUITE_ENV", &self.suite_env)
             .env("TEST_REPORT_ARGS", &self.report_args)
             .env("TEST_REPORT_ENV", self.repo.join("report-env"))
-            .output()
-            .unwrap()
+            .env("TEST_LAUNCH_LOG", &self.launch_log)
+            .env("TEST_SUITE_MARKER", &self.suite_marker)
+            .env("TEST_SUITE_PID_FILE", &self.suite_pid_file);
+        if self.linger {
+            command.env("TEST_SUITE_LINGER", "1");
+        }
+        command.output().unwrap()
     }
 
-    fn record_path(&self, output: &Output) -> PathBuf {
-        let stdout = String::from_utf8(output.stdout.clone()).unwrap();
-        let line = stdout
+    fn stdout(&self, output: &Output) -> String {
+        String::from_utf8(output.stdout.clone()).unwrap()
+    }
+
+    /// The receipt's `launch record file:` line.
+    fn record_line(&self, output: &Output) -> String {
+        let stdout = self.stdout(output);
+        stdout
             .lines()
             .find(|line| line.starts_with("launch record file: "))
-            .unwrap_or_else(|| panic!("no launch record line in {stdout:?}"));
-        PathBuf::from(
-            line["launch record file: ".len()..]
-                .split(" (")
-                .next()
-                .unwrap(),
-        )
+            .unwrap_or_else(|| panic!("no launch record line in {stdout:?}"))
+            .to_owned()
+    }
+
+    /// The path the receipt says the record was written to; `None` when the
+    /// receipt says no record was made.
+    fn record_path(&self, output: &Output) -> Option<PathBuf> {
+        let line = self.record_line(output);
+        let path = line["launch record file: ".len()..]
+            .split(" (")
+            .next()
+            .unwrap();
+        (path != "none").then(|| PathBuf::from(path))
+    }
+
+    /// The record text copied into the receipt output, which stays after the
+    /// record folder is removed.
+    fn record_contents(&self, output: &Output) -> String {
+        let stdout = self.stdout(output);
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("launch record contents: "))
+            .unwrap_or_else(|| panic!("no launch record contents in {stdout:?}"))
+            .to_owned()
+    }
+
+    /// Any folder under the lane target that holds launch records: none may
+    /// appear, whatever a test planted there.
+    fn record_folders(&self) -> Vec<String> {
+        fs::read_dir(self.lane.join("target"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("launch-record."))
+            .collect()
     }
 
     fn suite_environment(&self) -> String {
         fs::read_to_string(&self.suite_env).unwrap()
     }
 
-    fn report_record_argument(&self) -> String {
-        let args = fs::read_to_string(&self.report_args).unwrap();
-        args.lines().last().unwrap().to_owned()
+    fn report_arguments(&self) -> Vec<String> {
+        fs::read_to_string(&self.report_args)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 
-    fn record(&self, output: &Output) -> (PathBuf, String) {
-        let path = self.record_path(output);
-        let text = fs::read_to_string(&path).unwrap();
-        (path, text)
+    fn assert_no_record(&self, output: &Output) {
+        assert_eq!(
+            self.record_line(output),
+            "launch record file: none (0 record(s), mode -)"
+        );
+        assert_eq!(self.record_contents(output), "");
+        assert_eq!(
+            self.report_arguments().len(),
+            4,
+            "{:?}",
+            self.report_arguments()
+        );
     }
 }
 
@@ -150,8 +212,9 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
-/// Stand-in Cargo: it writes the report wrapper, and records the environment
-/// every test process would inherit.
+/// Stand-in Cargo: it writes the report wrapper, records the environment every
+/// test process would inherit, marks that the suite ran, and, when asked,
+/// leaves a process behind in its group.
 const CARGO: &str = r#"#!/bin/sh
 target=${CARGO_TARGET_DIR:?}
 case "$1" in
@@ -170,24 +233,45 @@ WRAPPER
         ;;
     test)
         env > "$TEST_SUITE_ENV"
+        : > "$TEST_SUITE_MARKER"
+        if [ -n "${TEST_SUITE_LINGER:-}" ]; then
+            sleep 60 &
+            echo $! >> "$TEST_SUITE_PID_FILE"
+        fi
         exit 0
         ;;
 esac
 exit 0
 "#;
 
-const ANSWERING: &str = "#!/bin/sh\necho 'elastos 9.9.9'\n";
+/// Answers with a version and records whether the suite had already run when
+/// it was launched.
+const ANSWERING: &str = r#"#!/bin/sh
+if [ -n "${TEST_LAUNCH_LOG:-}" ]; then
+    if [ -e "${TEST_SUITE_MARKER:-/nonexistent}" ]; then
+        printf 'after-suite\n' >>"$TEST_LAUNCH_LOG"
+    else
+        printf 'before-suite\n' >>"$TEST_LAUNCH_LOG"
+    fi
+fi
+echo 'elastos 9.9.9'
+"#;
 
 #[test]
-fn run_sh_writes_one_record_only_after_the_installed_binary_answers() {
+fn run_sh_writes_one_record_only_after_the_suite_and_the_installed_binary_answer() {
     let mut lane = Lane::new();
     lane.install(ANSWERING.as_bytes());
     let output = lane.run();
-    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    let stdout = lane.stdout(&output);
     assert!(
         output.status.success(),
         "stderr {:?}; stdout {stdout:?}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    // The installed binary was launched after the suite, not before it.
+    assert_eq!(
+        fs::read_to_string(&lane.launch_log).unwrap(),
+        "after-suite\n"
     );
     let binary = sha256(ANSWERING.as_bytes());
     assert!(
@@ -196,19 +280,29 @@ fn run_sh_writes_one_record_only_after_the_installed_binary_answers() {
         )),
         "{stdout:?}"
     );
-    let (path, record) = lane.record(&output);
+    let path = lane
+        .record_path(&output)
+        .unwrap_or_else(|| panic!("no record path in {stdout:?}"));
     assert_eq!(
-        record,
+        lane.record_contents(&output),
         format!(
-            "path={} sha256={} answer=elastos 9.9.9\n",
+            "path={} sha256={} answer=elastos 9.9.9",
             fs::canonicalize(&lane.installed).unwrap().display(),
             binary
         )
     );
     assert_eq!(
-        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
+        lane.record_line(&output),
+        format!(
+            "launch record file: {} (1 record(s), mode 600)",
+            path.display()
+        )
     );
+    // The record folder is outside everything the suite was given, and is
+    // removed once the report has read it; the receipt output keeps the copy.
+    assert!(!path.starts_with(&lane.repo), "{}", path.display());
+    assert!(!path.exists(), "{}", path.display());
+    assert_eq!(lane.record_folders(), Vec::<String>::new());
     // The suite's environment never names the record: no variable and no value.
     let suite = lane.suite_environment();
     assert!(
@@ -219,7 +313,9 @@ fn run_sh_writes_one_record_only_after_the_installed_binary_answers() {
     );
     assert!(!suite.contains(&path.display().to_string()), "{suite}");
     // The report is given the path on its command line, after the suite.
-    assert_eq!(lane.report_record_argument(), path.display().to_string());
+    let arguments = lane.report_arguments();
+    assert_eq!(arguments.len(), 5, "{arguments:?}");
+    assert_eq!(arguments.last().unwrap(), &path.display().to_string());
 }
 
 #[test]
@@ -228,7 +324,7 @@ fn a_binary_that_changes_between_the_two_hashes_leaves_no_record() {
     let mut lane = Lane::new();
     lane.install(changing.as_bytes());
     let output = lane.run();
-    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    let stdout = lane.stdout(&output);
     assert!(
         output.status.success(),
         "stderr {:?}; stdout {stdout:?}",
@@ -239,12 +335,12 @@ fn a_binary_that_changes_between_the_two_hashes_leaves_no_record() {
             .contains("launch record: none; the installed binary changed between the two hashes\n"),
         "{stdout:?}"
     );
-    let (path, record) = lane.record(&output);
-    assert!(record.is_empty(), "{record:?}");
+    lane.assert_no_record(&output);
+    assert_eq!(lane.record_folders(), Vec::<String>::new());
     assert!(
         !lane
             .suite_environment()
-            .contains(&path.display().to_string()),
+            .contains("AGENT_CONFORMANCE_LAUNCH_RECORD"),
         "{}",
         lane.suite_environment()
     );
@@ -256,7 +352,7 @@ fn a_binary_that_fails_to_start_leaves_no_record() {
     lane.install(ANSWERING.as_bytes());
     fs::set_permissions(&lane.installed, fs::Permissions::from_mode(0o600)).unwrap();
     let output = lane.run();
-    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    let stdout = lane.stdout(&output);
     assert!(
         output.status.success(),
         "stderr {:?}; stdout {stdout:?}",
@@ -267,12 +363,12 @@ fn a_binary_that_fails_to_start_leaves_no_record() {
             .contains("launch record: none; the installed binary did not answer with a version\n"),
         "{stdout:?}"
     );
-    let (path, record) = lane.record(&output);
-    assert!(record.is_empty(), "{record:?}");
+    lane.assert_no_record(&output);
+    assert_eq!(lane.record_folders(), Vec::<String>::new());
     assert!(
         !lane
             .suite_environment()
-            .contains(&path.display().to_string()),
+            .contains("AGENT_CONFORMANCE_LAUNCH_RECORD"),
         "{}",
         lane.suite_environment()
     );
@@ -283,7 +379,7 @@ fn a_binary_that_answers_without_a_version_leaves_no_record() {
     let mut lane = Lane::new();
     lane.install(b"#!/bin/sh\necho 'hello'\n");
     let output = lane.run();
-    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    let stdout = lane.stdout(&output);
     assert!(
         output.status.success(),
         "stderr {:?}; stdout {stdout:?}",
@@ -294,12 +390,12 @@ fn a_binary_that_answers_without_a_version_leaves_no_record() {
             .contains("launch record: none; the installed binary did not answer with a version\n"),
         "{stdout:?}"
     );
-    let (path, record) = lane.record(&output);
-    assert!(record.is_empty(), "{record:?}");
+    lane.assert_no_record(&output);
+    assert_eq!(lane.record_folders(), Vec::<String>::new());
     assert!(
         !lane
             .suite_environment()
-            .contains(&path.display().to_string()),
+            .contains("AGENT_CONFORMANCE_LAUNCH_RECORD"),
         "{}",
         lane.suite_environment()
     );
@@ -316,7 +412,7 @@ fn run_sh_writes_no_record_when_the_installed_binary_does_not_match_its_record()
     )
     .unwrap();
     let output = lane.run();
-    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    let stdout = lane.stdout(&output);
     assert!(
         output.status.success(),
         "stderr {:?}; stdout {stdout:?}",
@@ -328,6 +424,98 @@ fn run_sh_writes_no_record_when_the_installed_binary_does_not_match_its_record()
         ),
         "{stdout:?}"
     );
-    let (_, record) = lane.record(&output);
-    assert!(record.is_empty(), "{record:?}");
+    lane.assert_no_record(&output);
+    assert_eq!(lane.record_folders(), Vec::<String>::new());
+}
+
+#[test]
+fn a_pre_created_record_at_the_old_location_is_no_evidence() {
+    let mut lane = Lane::new();
+    lane.install(ANSWERING.as_bytes());
+    // A test can write anywhere under the lane, including the place the record
+    // used to sit: plant the exact line a passing record would hold there.
+    let planted_dir = lane.lane.join("target/launch-record.planted");
+    fs::create_dir_all(&planted_dir).unwrap();
+    let planted = format!(
+        "path={} sha256={} answer=elastos 9.9.9\n",
+        fs::canonicalize(&lane.installed).unwrap().display(),
+        sha256(ANSWERING.as_bytes())
+    );
+    fs::write(planted_dir.join("launches"), &planted).unwrap();
+    // The installed record names other bytes, so no launch can qualify and a
+    // record could come only from the planted file.
+    fs::write(
+        &lane.installed,
+        b"#!/bin/sh\necho 'elastos 9.9.9'\n# other\n",
+    )
+    .unwrap();
+    let output = lane.run();
+    let stdout = lane.stdout(&output);
+    assert!(
+        output.status.success(),
+        "stderr {:?}; stdout {stdout:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains(
+            "launch record: none; the installed binary does not match its installed record\n"
+        ),
+        "{stdout:?}"
+    );
+    lane.assert_no_record(&output);
+    // The planted file stays exactly as the test left it, and no record folder
+    // of `run.sh`'s appeared beside it.
+    assert_eq!(
+        fs::read_to_string(planted_dir.join("launches")).unwrap(),
+        planted
+    );
+    assert_eq!(
+        lane.record_folders(),
+        vec!["launch-record.planted".to_owned()]
+    );
+    assert!(
+        lane.report_arguments()
+            .iter()
+            .all(|argument| !argument.contains("launch-record")),
+        "{:?}",
+        lane.report_arguments()
+    );
+}
+
+#[test]
+fn a_lingering_suite_process_makes_run_sh_refuse_to_record() {
+    let mut lane = Lane::new();
+    lane.install(ANSWERING.as_bytes());
+    lane.linger = true;
+    let output = lane.run();
+    // The stand-in suite's processes outlive it; stop them before asserting.
+    let pids = fs::read_to_string(&lane.suite_pid_file)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(!pids.is_empty(), "the stand-in suite left no process");
+    for pid in &pids {
+        let _ = Command::new("kill").args(["-9", pid]).status();
+    }
+    let stdout = lane.stdout(&output);
+    assert!(
+        output.status.success(),
+        "stderr {:?}; stdout {stdout:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("launch record: none; a process started for the suite is still alive\n"),
+        "{stdout:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("suite process still alive: process group "),
+        "{:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    lane.assert_no_record(&output);
+    assert_eq!(lane.record_folders(), Vec::<String>::new());
+    // The installed binary was never launched.
+    assert!(!lane.launch_log.exists(), "{}", lane.launch_log.display());
 }

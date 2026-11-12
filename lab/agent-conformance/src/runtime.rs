@@ -54,11 +54,12 @@ pub fn runtime_under_test() -> Result<&'static BinaryUnderTest, &'static str> {
 /// Printed, with both hashes, when a given Runtime is refused at a launch.
 pub const CHANGED: &str = "given Runtime changed: ";
 
-/// One record from the run-private launch file `run.sh` writes: the canonical
-/// path it started, the SHA-256 of that file immediately before the start, and
-/// the answer the launch printed. `run.sh` is the only writer; no library
-/// function appends a record, and the type's fields are private, so test code
-/// cannot produce one.
+/// One record from the launch file `run.sh` writes after the suite into the
+/// private folder it makes then: the canonical path it started, the SHA-256 of
+/// that file immediately before the start, and the answer the launch printed.
+/// `run.sh` is the only writer; no library function appends a record, the
+/// type's fields are private, and the file exists only after the suite has
+/// finished, so test code cannot produce one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
     pub(crate) path: String,

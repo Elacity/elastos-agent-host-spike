@@ -14,17 +14,28 @@ The command prints typed `version identity: {...}` observations above one table
 from Cargo's test inventory and result lines. Native records identify `elastos`
 and `localhost-provider` by SHA-256. Probe records carry the component SHA-256
 and complete bundle lab CID, with separate `build_only` and `launched` kinds.
-The command writes the installed-path launch record itself, and only when an
+The suite runs first. After it has exited, the command checks that no process
+it started for the suite is still alive: each suite command runs in its own
+process group, and a surviving member stops the record with the note
+`a process started for the suite is still alive`. Only then, and only when an
 installed Runtime is named by `AGENT_CONFORMANCE_INSTALLED_BINARY` and
-`AGENT_CONFORMANCE_INSTALLED_DATA`: it hashes the binary, launches it once
-with `--version` under a throwaway Home and a 30-second limit, and hashes it
-again. Only when the launch exited 0 and printed a version, and both hashes
-equal the installed record's binary hash, does it write one record
-`path=<canonical path> sha256=<hash> answer=<first line>` to a run-private file
-with mode 0600. The file's path never enters a test process: the suite's
-environment carries no such variable, no library function writes a record, and
-the report is given the path on its command line after the suite. The report
-reads launch evidence from that file alone, never from Cargo's output. The
+`AGENT_CONFORMANCE_INSTALLED_DATA`, it makes a new private folder outside the
+lane target and outside every path the suite was given, hashes the binary,
+launches it once with `--version` under a throwaway Home and a 30-second
+limit, and hashes it again. Only when the launch exited 0 and printed a
+version, and both hashes equal the installed record's binary hash, does it
+write one record `path=<canonical path> sha256=<hash> answer=<first line>` with
+mode 0600 into that folder, through a temporary name in the same folder and a
+rename. No record file exists anywhere before that moment; a failed step leaves
+none and the report is named no record. The folder's path never enters a test
+process, no library function writes a record, and the report is given the path
+on its command line after the suite. The command prints the record's contents
+into its receipt output and removes the folder once the report has read it. The
+report reads launch evidence from that record alone, never from Cargo's output.
+Limit: the liveness check covers the process group each suite command was
+started in. A process that leaves its group before the check can still act
+unseen; the record then rests on the launch above, not on the absence of such a
+process. The
 existing
 build helpers hash the native binaries; the staging path names the exact probe
 manifest and payload through `capsule_identity::checked_bundle`.
@@ -339,16 +350,23 @@ run on the installed data folder. It does not check the hash of the bundle the
 demo ran.
 
 `installed_runtime_ran (A14)` appears beside it and passes only when `run.sh`
-wrote exactly one record to the run-private file it passed to the report.
-`run.sh` hashed the installed binary, launched it once, saw it answer, and
-hashed it again; both hashes match `installed_runtime.binary_sha256`, and the
-record names a path that resolves to `installed_runtime.binary_path`. No test
-process is given the record's path and no library function writes a record, so
-the suite cannot produce this line. The identity line the suite prints when the
-binary is named comes before any launch and is not a record, and no test's own
-output is read as one. What this does not show: the suite's own launches use
-the `AGENT_CONFORMANCE_RUNTIME_BINARY` path with the harness's pre-launch hash,
-and nothing sees the bytes the operating system executed. The receipt records
+wrote exactly one record to the private folder it made and passed to the
+report. `run.sh` made that record only after the suite had exited and its
+liveness check had found no surviving suite process, and only after it had
+hashed the installed binary, launched it once, seen it answer, and hashed it
+again; both hashes match `installed_runtime.binary_sha256`, and the record
+names a path that resolves to `installed_runtime.binary_path`. The record
+folder lies outside every path the suite was given, its path is never given to
+a test process, no library function writes a record, and no record file
+existed while the suite ran, so a test process cannot produce this line. The
+identity line the suite prints when the binary is named comes before any launch
+and is not a record, and no test's own output is read as one. What this does
+not show: the suite's own launches use the `AGENT_CONFORMANCE_RUNTIME_BINARY`
+path with the harness's pre-launch hash, and nothing sees the bytes the
+operating system executed. The liveness check covers the process group each
+suite command was started in; a process that leaves its group before the check
+can still act unseen, and the row then rests on the launch above, not on the
+absence of such a process. The receipt records
 `installed_binary_launch_status`
 (`run_sh_launched_installed_path_hash_matched` or
 `not_run_sh_launched_installed_path_hash_matched`),
@@ -519,11 +537,12 @@ its reasons through `report --a14 <receipt>`, copies the receipt folder to
 own output as `demo-output.log`, and prints that path. It exits 0 only when
 the suite passed and every A14 row reads PASS; the receipt folder is kept
 either way. It writes nothing under the install paths: the installed binary is
-launched where it is, in throwaway Homes under this lane's `target`. Before
-anything runs it works out where the receipts folder and its temporary folder
-(`TMPDIR`, else `/tmp`) really are, links resolved, and stops with a message if
-either is inside the installed data folder or the folder holding the installed
-binary.
+launched where it is, the suite's throwaway Homes are under this lane's
+`target`, and the record launch's throwaway Home is under the temporary folder
+this command checked. Before anything runs it works out where the receipts
+folder and its temporary folder (`TMPDIR`, else `/tmp`) really are, links
+resolved, and stops with a message if either is inside the installed data
+folder or the folder holding the installed binary.
 
 What each A14 row means:
 
@@ -533,7 +552,7 @@ What each A14 row means:
 | `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
 | `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
 | `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
-| `installed_runtime_ran` | `run.sh` hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
+| `installed_runtime_ran` | `run.sh` made the record after the suite and its liveness check, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
 
 What the receipt does not prove:
 
