@@ -568,6 +568,25 @@ fn tar_with_several_previews() -> Vec<u8> {
     tar(&entries)
 }
 
+/// The most tar headers the read budget leaves beside eight previews at the
+/// compressed cap: 69 empty headers, then eight 3,072-byte text entries
+/// (24 KiB, the whole B2 cap) shown in one request. The listing reads every
+/// header and both zero blocks, leaving room for the eight preview reads; one
+/// more header would leave the last preview under its 3,072 bytes. In all the
+/// run reads within one header-sized read of its 64 KiB budget.
+const COMBINED_HEADERS: usize = 69;
+
+fn tar_with_headers_and_eight_previews() -> Vec<u8> {
+    const PREVIEW_BYTES: usize = 3_072;
+    let mut entries: Vec<(String, Vec<u8>)> = (0..COMBINED_HEADERS)
+        .map(|n| (format!("h{n:02}.txt"), Vec::new()))
+        .collect();
+    for n in 0..MAX_REQUEST_SHOW {
+        entries.push((format!("p{n}.txt"), plain_text(PREVIEW_BYTES)));
+    }
+    tar(&entries)
+}
+
 /// The archives the fuel gate runs, one per hostile class at its caps
 /// (DESIGN.md, "The fuel gate (F36)").
 fn worst_archives() -> Vec<(&'static str, Bridge)> {
@@ -613,6 +632,14 @@ fn worst_archives() -> Vec<(&'static str, Bridge)> {
         (
             "the most tar previews in one request",
             bridge_at(TAR, tar_with_several_previews(), &show_all),
+        ),
+        (
+            "the most headers beside eight previews",
+            bridge_at(
+                TAR,
+                tar_with_headers_and_eight_previews(),
+                &(COMBINED_HEADERS..COMBINED_HEADERS + MAX_REQUEST_SHOW).collect::<Vec<_>>(),
+            ),
         ),
     ]
 }
@@ -980,6 +1007,33 @@ async fn the_worst_archives_run_and_write_their_views() {
                 assert_eq!(view["previews"].as_array().unwrap().len(), MAX_REQUEST_SHOW);
                 assert!(view.get("stopped").is_none());
             }
+            "the most headers beside eight previews" => {
+                assert_eq!(
+                    view["entries"].as_array().unwrap().len(),
+                    COMBINED_HEADERS + MAX_REQUEST_SHOW
+                );
+                let previews = view["previews"].as_array().unwrap();
+                assert_eq!(previews.len(), MAX_REQUEST_SHOW);
+                let shown: usize = previews
+                    .iter()
+                    .map(|preview| {
+                        preview["blocks"][0]["spans"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .len()
+                    })
+                    .sum();
+                assert_eq!(
+                    shown, MAX_COMPRESSED_BYTES,
+                    "eight previews at the compressed cap are all shown"
+                );
+                assert!(view.get("stopped").is_none());
+                assert!(
+                    bridge.bytes_served[TAR] + 512 > MAX_READ_BYTES,
+                    "{} bytes served",
+                    bridge.bytes_served[TAR]
+                );
+            }
             _ => {}
         }
     }
@@ -1052,9 +1106,9 @@ fn the_worst_archives_reach_their_caps() {
         "the worst tar archive fits one run's reads"
     );
 
-    // The three shapes the fuel gate measures. Each is at its intended cap,
+    // The four shapes the fuel gate measures. Each is at its intended cap,
     // not stopped early: 128 headers so 127 are listed, 93 headers with the
-    // largest preview, and eight previews.
+    // largest preview, eight previews, and the most headers beside them.
     let walk = longest_tar_walk();
     assert_eq!(walk.len(), 128 * 512 + 1024);
 
@@ -1064,6 +1118,16 @@ fn the_worst_archives_reach_their_caps() {
     let previews = tar_with_several_previews();
     assert_eq!(previews.len(), MAX_REQUEST_SHOW * (512 + 6 * 512) + 1024);
     assert_eq!(MAX_REQUEST_SHOW * 3_072, MAX_COMPRESSED_BYTES);
+
+    // The most headers beside eight previews: 69 empty headers and eight
+    // 3,072-byte entries. One more header would leave the last preview under
+    // its 3,072 bytes, and the eight preview reads leave the run within one
+    // header-sized read of its budget.
+    let beside = tar_with_headers_and_eight_previews();
+    assert_eq!(
+        beside.len(),
+        (COMBINED_HEADERS + MAX_REQUEST_SHOW) * 512 + MAX_COMPRESSED_BYTES + 1024
+    );
 }
 
 /// The worst text is chosen by measurement, not assumption: one 16 KiB entry
@@ -1138,11 +1202,13 @@ mod measure {
 
 /// F36: one archive per hostile class at its caps, at the Runtime's fixed
 /// 100,000,000 fuel, stays under a ceiling a third above the largest shape
-/// measured. The largest is the 93-header archive with its 16 KiB preview at
-/// 26,216,994 fuel; the ceiling is 35,000,000 fuel, 1.335 times that. A run
-/// that spends the whole budget is recorded as 100% and fails the gate: the
-/// cap, not the trap, is the rule.
-const FUEL_CEILING: u64 = 35_000_000;
+/// measured. The four tar shapes measure 24,521,609 fuel (127 headers),
+/// 26,215,599 (93 headers and a 16 KiB preview), 14,443,276 (eight previews)
+/// and 27,419,824 (69 headers beside eight previews). The largest is the last;
+/// the ceiling is 36,600,000 fuel, 1.335 times it. A run that spends the whole
+/// budget is recorded as 100% and fails the gate: the cap, not the trap, is
+/// the rule.
+const FUEL_CEILING: u64 = 36_600_000;
 
 #[test]
 fn worst_archives_stay_under_their_fuel_ceiling() {

@@ -217,7 +217,7 @@ A name is shown as text, never used as a path. The rules decide its status:
 
 - **S1, Bus v1.** The run has fixed fuel and a trap is an authority-looking stop, so a content failure must
   never trap (PATTERNS 1). B1 to B3 bound the inflate work; the fuel gate (below) runs the worst archive of each
-  hostile class through the real `ComponentProvider` and requires no more than 35,000,000 fuel, a third above
+  hostile class through the real `ComponentProvider` and requires no more than 36,600,000 fuel, a third above
   the largest shape measured.
 - **S2, Bus v2.** Inflate runs in slices that yield; a stop during an inflate ends the run as cancelled; the
   epoch backstop ends one that never yields (the Bus v2 proof's limits).
@@ -252,7 +252,7 @@ writing.
 
 ## Limits and the fuel budget
 
-Bus v1, one run, 100,000,000 fuel; the gate fails above 35,000,000 fuel. Read costs about 415 fuel a byte
+Bus v1, one run, 100,000,000 fuel; the gate fails above 36,600,000 fuel. Read costs about 415 fuel a byte
 (measured for the photo viewer); write about 200 a byte (estimated for the documents viewer, and higher with
 the shared write path: the gate decides); inflate 30 and CRC 8.3 a byte (measured here).
 
@@ -267,7 +267,7 @@ the shared write path: the gate decides); inflate 30 and CRC 8.3 a byte (measure
 | CRC | 64 KiB | 0.5 M |
 | Text checks, docs-model blocks | the shown entries | measure |
 | View object | 64 KiB in all: listing at most 24 KiB, previews the rest | 13 to 26 M |
-| **Total** | | **about 38 to 53 M** as upper estimates; the largest measured shape uses 26.2 M |
+| **Total** | | **about 38 to 53 M** as upper estimates; the largest measured shape uses 27.4 M |
 
 This budget would leave room for at most one 16 KiB image a run, which is why images wait for Bus v2
 (decision 4). Bus v2 streams remove the JSON byte arrays, so its caps are set again from measurements there,
@@ -345,7 +345,7 @@ rebuild the component and run in `ComponentProvider`.
 | F33 | Text checks | the whole-text check is removed | `a_text_entry_that_is_not_text_is_skipped` |
 | F34 | Images (Bus v2) | the header check is removed | `an_entry_named_png_that_is_not_one_is_not_drawn` |
 | F35 | Grant | the archive read uses no grant (in the component) | `no_grant_stops_the_run_through_the_runtime` |
-| F36 | Fuel | the counted reader asks for one byte per call and the inflate loop copies the window per output byte (measured fuel regressions; they change no rule and no output) | `worst_archives_stay_under_their_fuel_ceiling` (the gate fails above 35,000,000 fuel, a third above the largest measured shape, and the mutant crosses it) |
+| F36 | Fuel | the counted reader asks for one byte per call and the inflate loop copies the window per output byte (measured fuel regressions; they change no rule and no output) | `worst_archives_stay_under_their_fuel_ceiling` (the gate fails above 36,600,000 fuel, a third above the largest measured shape, and the mutant crosses it) |
 | F37 | Page | a path is drawn as markup | `an_entry_path_is_text` |
 | F38 | Page (Bus v1) | an image entry is drawn | `the_page_draws_no_image_on_bus_v1` |
 | F39 | Page | an inherited property name picks a kind | `a_kind_named_after_an_inherited_property_is_not_drawn` |
@@ -360,13 +360,13 @@ row. Each mutant changes only its own rule, so each named test fails independent
 over a bounded 16-byte inflate step and asserts the ratio status, the consumed count and the produced count at
 the step that trips, so it does not depend on the fuel gate. F43 asserts the complete listing, the read trace
 and that the declared total never reaches a buffer, under the host's 128 MiB limit. F36's mutant adds fuel cost
-only and changes no rule: the gate's measured fuel must cross the 35,000,000 ceiling under it. The Bus v2
+only and changes no rule: the gate's measured fuel must cross the 36,600,000 ceiling under it. The Bus v2
 limits (S2 and the resident guest's S3) are tested with that proof when its guest is built.
 
 The fuel gate (F36) runs one archive per hostile class at its caps: the largest directory, the most names at
 their longest, the most shown entries, a bomb at the ratio cap, a text entry of the worst inflate cost, the
-largest view, and the tar shapes the read budget allows: 127 headers, 93 headers with one 16 KiB preview, and
-eight previews in one request. F3 is not the fuel proof.
+largest view, and the tar shapes the read budget allows: 127 headers, 93 headers with one 16 KiB preview,
+eight previews in one request, and 69 headers beside those eight previews. F3 is not the fuel proof.
 
 ## Order of work
 
