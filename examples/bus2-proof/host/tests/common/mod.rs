@@ -53,6 +53,61 @@ pub fn within<R: Send + 'static>(
     }
 }
 
+/// A clock that a test moves by hand, for a proof that must hold on a fast
+/// machine, a slow one and a loaded one alike. No `Ticker` runs next to it.
+///
+/// It wraps the future that runs the guests and counts its turns: a turn ends
+/// each time that future gives the thread back to the executor unfinished.
+/// After every `turns_per_tick` turns it advances the engine's epoch by one
+/// tick. So a tick is a counted amount of guest work (a busy guest gives the
+/// thread back once per fuel slice), not an amount of time, and a guest that
+/// never gives the thread back never sees a tick.
+pub struct HandClock {
+    engine: wasmtime::Engine,
+    turns_per_tick: u64,
+    turns: std::sync::atomic::AtomicU64,
+}
+
+impl HandClock {
+    pub fn new(engine: &wasmtime::Engine, turns_per_tick: u64) -> HandClock {
+        HandClock {
+            engine: engine.clone(),
+            turns_per_tick,
+            turns: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// The ticks so far.
+    pub fn ticks(&self) -> u64 {
+        self.turns.load(std::sync::atomic::Ordering::Relaxed) / self.turns_per_tick
+    }
+
+    /// Runs `work` to its end, counting its turns and advancing the epoch.
+    pub async fn run<R>(&self, work: impl std::future::Future<Output = R>) -> R {
+        use std::sync::atomic::Ordering;
+        let mut work = std::pin::pin!(work);
+        std::future::poll_fn(|context| {
+            let poll = work.as_mut().poll(context);
+            if poll.is_pending() {
+                let turns = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
+                if turns.is_multiple_of(self.turns_per_tick) {
+                    self.engine.increment_epoch();
+                }
+            }
+            poll
+        })
+        .await
+    }
+
+    /// Waits, one turn at a time, until the clock shows `tick`. Only for use
+    /// inside `run`.
+    pub async fn at_tick(&self, tick: u64) {
+        while self.ticks() < tick {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
 // ---- Test credentials ----
 //
 // The photo guest pins the test publisher's key in its capsule.json. The
