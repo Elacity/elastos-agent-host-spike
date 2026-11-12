@@ -31,6 +31,71 @@ function close(server) {
   return new Promise((resolve) => server.close(resolve));
 }
 
+// This check's precondition is that the browser returns a screenshot at all;
+// its assertion is that the screenshot's width and height match the geometry
+// just set. A likely cause of a refused capture ("Unable to capture
+// screenshot") is the pinned headless shell still committing the frame after a
+// geometry change or a press; the log proves the refusal, not the frame commit,
+// and a slow or stalled capture cannot be ruled out either. So every try is
+// bounded by the time left in a stated budget, and a capture that does arrive
+// is asserted at its exact size, unchanged.
+const SCREENSHOT_ARRANGE_MS = 5_000;
+const SCREENSHOT_RETRY_MS = 50;
+
+// A capture call that never settles must not hold the check past its budget.
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not answer within ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function captureScreenshot(cdp, page, size) {
+  const deadline = Date.now() + SCREENSHOT_ARRANGE_MS;
+  let refusals = 0;
+  let lastError = null;
+  const unmet = () => new Error(
+    `precondition not met: ${size.width}x${size.height} screenshot was not returned within ${SCREENSHOT_ARRANGE_MS} ms; it was refused ${refusals} times. `
+    + "The target, draft, corner and press assertions passed first; this is not a screenshot-size failure. "
+    + `Last error: ${lastError?.message}`,
+  );
+  for (;;) {
+    if (deadline - Date.now() <= 0) {
+      throw unmet();
+    }
+    // Ask for a drawn frame first, bounded so a stalled page cannot hang the
+    // check; the retry below still covers a frame that never came.
+    await page.waitForFunction(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))),
+      null,
+      { timeout: Math.max(1, deadline - Date.now()) },
+    ).catch(() => {});
+    if (deadline - Date.now() <= 0) {
+      throw unmet();
+    }
+    try {
+      const shot = await withTimeout(
+        cdp.send("Page.captureScreenshot"),
+        deadline - Date.now(),
+        "Page.captureScreenshot",
+      );
+      // A capture that arrives after the budget is still a missed budget.
+      if (Date.now() > deadline) {
+        throw unmet();
+      }
+      return shot;
+    } catch (error) {
+      refusals += 1;
+      lastError = error;
+    }
+    if (deadline - Date.now() <= 0) {
+      throw unmet();
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(SCREENSHOT_RETRY_MS, deadline - Date.now())));
+  }
+}
+
 test("Chromium keeps its target and form while DPR-1 layout follows portrait and landscape", async () => {
   const proxyRequests = [];
   const proxy = http.createServer((request, response) => {
@@ -140,7 +205,7 @@ test("Chromium keeps its target and form while DPR-1 layout follows portrait and
       await page.evaluate(() => { globalThis.clickedCorners = []; });
       for (const [x, y] of [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]]) await page.mouse.click(x, y);
       assert.deepEqual(await page.evaluate(() => globalThis.clickedCorners), ["tl", "tr", "bl", "br"]);
-      const screenshot = await cdp.send("Page.captureScreenshot");
+      const screenshot = await captureScreenshot(cdp, page, { width, height });
       const png = Buffer.from(screenshot.data, "base64");
       assert.equal(png.readUInt32BE(16), width); assert.equal(png.readUInt32BE(20), height);
     }
