@@ -2358,9 +2358,10 @@ fn the_tar_read_budget_lists_what_fit_and_marks_the_run() {
 
 #[test]
 fn too_many_tar_entries_refuse_the_archive() {
-    // The read budget would stop a longer walk first, so the cap is proven
-    // with the same reader over a larger allowance.
-    let specs: Vec<TarSpec> = (0..MAX_ENTRIES + 1)
+    // 257 entries: more than the shared cap of 256, and the read budget would
+    // stop a longer walk first, so the cap is proven with the same reader
+    // over a larger allowance.
+    let specs: Vec<TarSpec> = (0..257)
         .map(|index| TarSpec::file(&format!("e{index}.txt")))
         .collect();
     let archive = tar_build(&specs);
