@@ -109,6 +109,34 @@ pub struct Outcome {
     pub state: HostState,
 }
 
+/// A live view of one run, for a caller that has to know how far the run has
+/// got while it is still going on. Make one per run and pass it to
+/// `run_resident_watched`; clones show the same run.
+#[derive(Clone, Default)]
+pub struct Progress {
+    running: Arc<AtomicBool>,
+    yields: Arc<AtomicU64>,
+    ticks: Arc<AtomicU64>,
+}
+
+impl Progress {
+    /// Whether start-up has finished and `lifecycle.run` has been called. It
+    /// stays true after the run has ended.
+    pub fn running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    /// `Outcome::yields` so far.
+    pub fn yields(&self) -> u64 {
+        self.yields.load(Ordering::Relaxed)
+    }
+
+    /// `Outcome::ticks` so far.
+    pub fn ticks(&self) -> u64 {
+        self.ticks.load(Ordering::Relaxed)
+    }
+}
+
 /// The host's write end of a guest's events. Dropping it closes the stream,
 /// which is how the host asks the guest to stop.
 pub struct Events(UnboundedSender<Event>);
@@ -179,6 +207,20 @@ pub async fn run_resident(
     limits: Limits,
     drive: impl AsyncFnOnce(Events),
 ) -> Result<Outcome> {
+    let progress = Progress::default();
+    run_resident_watched(engine, component, state, limits, &progress, drive).await
+}
+
+/// `run_resident`, with a live view of the run: `progress` shows, while the
+/// run goes on, the same flag and counts that the run itself keeps.
+pub async fn run_resident_watched(
+    engine: &Engine,
+    component: &Component,
+    state: HostState,
+    limits: Limits,
+    progress: &Progress,
+    drive: impl AsyncFnOnce(Events),
+) -> Result<Outcome> {
     let linker = linker(engine)?;
     let mut store = Store::new(engine, state);
 
@@ -195,9 +237,9 @@ pub async fn run_resident(
         limits.fuel_per_tick,
         limits.yield_each_tick,
     );
-    let running = Arc::new(AtomicBool::new(false));
+    let running = progress.running.clone();
     let refill = running.clone();
-    let ticks_seen = Arc::new(AtomicU64::new(0));
+    let ticks_seen = progress.ticks.clone();
     let seen = ticks_seen.clone();
     let mut ticks = 0u64;
     store.epoch_deadline_callback(move |mut context| {
@@ -252,6 +294,7 @@ pub async fn run_resident(
             let poll = job.as_mut().poll(context);
             if poll.is_pending() {
                 yields += 1;
+                progress.yields.store(yields, Ordering::Relaxed);
             }
             poll
         });
