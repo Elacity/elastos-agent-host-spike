@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 const REQUEST: &str = "localhost://Users/self/.AppData/App/archive-viewer/open.json";
 const VIEW: &str = "localhost://Users/self/.AppData/App/archive-viewer/view.json";
 const ARCHIVE: &str = "localhost://Users/self/Documents/trip.zip";
+const TAR: &str = "localhost://Users/self/Documents/trip.tar";
 const REQUEST_SCHEMA: &str = "elastos.archive-viewer.open/v1";
 const VIEW_SCHEMA: &str = "elastos.archive-viewer.view/v1";
 
@@ -66,11 +67,17 @@ fn manifest() -> CapsuleManifest {
 
 /// A bridge holding the request, the archive and the view write.
 fn bridge_with(archive: Vec<u8>, show: &[usize]) -> Bridge {
+    bridge_at(ARCHIVE, archive, show)
+}
+
+/// The same bridge for an archive named by another URI. The format still
+/// comes from the content; the name is the person's file.
+fn bridge_at(uri: &str, archive: Vec<u8>, show: &[usize]) -> Bridge {
     let mut bridge = Bridge::default();
-    bridge.put(REQUEST, request(ARCHIVE, show));
+    bridge.put(REQUEST, request(uri, show));
     bridge.allow(REQUEST, "read");
-    bridge.put(ARCHIVE, archive);
-    bridge.allow(ARCHIVE, "read");
+    bridge.put(uri, archive);
+    bridge.allow(uri, "read");
     bridge.allow(VIEW, "write");
     bridge
 }
@@ -288,6 +295,33 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
+/// Builds a ustar archive byte by byte: one 512-byte header per entry, its
+/// data and padding, then the two zero blocks that end the listing. The size
+/// is octal and the checksum is the unsigned byte sum, its own field spaces.
+fn tar(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, data) in entries {
+        let mut block = vec![0u8; 512];
+        block[..name.len()].copy_from_slice(name.as_bytes());
+        block[100..108].copy_from_slice(b"0000644\0");
+        block[108..116].copy_from_slice(b"0000000\0");
+        block[116..124].copy_from_slice(b"0000000\0");
+        block[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+        block[136..148].copy_from_slice(b"00000000000\0");
+        block[148..156].copy_from_slice(b"        ");
+        block[156] = b'0';
+        block[257..263].copy_from_slice(b"ustar\0");
+        block[263..265].copy_from_slice(b"00");
+        let sum: u64 = block.iter().map(|&byte| u64::from(byte)).sum();
+        block[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        out.extend_from_slice(&block);
+        out.extend_from_slice(data);
+        out.resize(out.len() + (512 - data.len() % 512) % 512, 0);
+    }
+    out.extend([0u8; 1024]);
+    out
+}
+
 /// Printable text with a moderate deflate ratio: a repeating 200-byte block.
 fn text_block(len: usize) -> Vec<u8> {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -489,6 +523,19 @@ fn largest_view() -> Vec<Fixture> {
     fixtures
 }
 
+/// The worst tar archive within the caps: the most entries a Bus v1 run can
+/// list at about 212,000 fuel a 512-byte header, plus one entry at the largest
+/// text preview the caps allow (B1, 16 KiB). The listing walks 64 headers and
+/// reads the one shown entry's 16 KiB through the same counted reader.
+fn worst_tar() -> Vec<u8> {
+    let mut entries: Vec<(String, Vec<u8>)> =
+        vec![("t.txt".to_string(), plain_text(MAX_PREVIEW_BYTES as usize))];
+    for n in 1..64 {
+        entries.push((format!("e{n:02}.txt"), Vec::new()));
+    }
+    tar(&entries)
+}
+
 /// The archives the fuel gate runs, one per hostile class at its caps
 /// (DESIGN.md, "The fuel gate (F36)").
 fn worst_archives() -> Vec<(&'static str, Bridge)> {
@@ -522,6 +569,7 @@ fn worst_archives() -> Vec<(&'static str, Bridge)> {
             "the largest view",
             bridge_with(zip(&largest_view()), &[MAX_ENTRIES - 2, MAX_ENTRIES - 1]),
         ),
+        ("the worst tar archive", bridge_at(TAR, worst_tar(), &[0])),
     ]
 }
 
@@ -852,6 +900,19 @@ async fn the_worst_archives_run_and_write_their_views() {
                     text.len()
                 );
             }
+            "the worst tar archive" => {
+                assert_eq!(view["entries"].as_array().unwrap().len(), 64);
+                let previews = view["previews"].as_array().unwrap();
+                assert_eq!(previews.len(), 1);
+                assert_eq!(
+                    previews[0]["blocks"][0]["spans"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    MAX_PREVIEW_BYTES
+                );
+                assert_eq!(view["previews"][0]["index"], 0);
+            }
             _ => {}
         }
     }
@@ -911,6 +972,18 @@ fn the_worst_archives_reach_their_caps() {
     assert!(bomb.text.len() <= compressed * 100 + 1024);
 
     assert!(directory_bytes(&largest_view()) <= MAX_DIRECTORY_BYTES);
+
+    // The worst tar archive: 64 headers, the largest text preview, and every
+    // byte one run reads inside the shared budget.
+    let tar = worst_tar();
+    let headers = 64 * 512;
+    assert_eq!(tar.len(), headers + MAX_PREVIEW_BYTES + 1024);
+    // The format probe, the size probes and both zero blocks are all a run
+    // reads besides the headers and the one preview.
+    assert!(
+        headers + MAX_PREVIEW_BYTES + 1024 + 265 + 4 <= MAX_READ_BYTES,
+        "the worst tar archive fits one run's reads"
+    );
 }
 
 /// The worst text is chosen by measurement, not assumption: one 16 KiB entry
