@@ -1318,7 +1318,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1333,7 +1333,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
     );
     let _principal = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
     );
     let _session = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
@@ -1353,7 +1353,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["authority"]["signed_in"], true);
-    assert_eq!(payload["authority"]["principal_id"], context.principal_id);
+    assert_eq!(payload["authority"]["principal_id"], context.principal_id());
 }
 
 #[tokio::test]
@@ -1375,7 +1375,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1413,7 +1413,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1428,7 +1428,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
     );
     let _principal = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
     );
     let _session = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
@@ -1702,7 +1702,7 @@ async fn test_home_summary_reports_identity_and_launch_targets() {
     } else {
         assert!(
             browser.is_none(),
-            "Browser is hidden on hosts without a local Engine"
+            "Browser is hidden on unsupported platforms"
         );
     }
     assert!(targets
@@ -3209,6 +3209,7 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
         anonymous_dir.path(),
         receipt.clone(),
         anonymous.endpoint().as_ref(),
+        gateway_browser_internet::transport_fixture(),
     )
     .await
     .unwrap();
@@ -3252,9 +3253,14 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
         socket.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
     });
-    let attached = browser_attach_runtime_stream_path(left.path(), receipt, Some(&endpoint))
-        .await
-        .unwrap();
+    let attached = browser_attach_runtime_stream_path(
+        left.path(),
+        receipt,
+        Some(&endpoint),
+        gateway_browser_internet::transport_fixture(),
+    )
+    .await
+    .unwrap();
     let runtime_path = std::path::PathBuf::from(
         attached["adapter_ipc"]["runtime_stream_path"]
             .as_str()
@@ -5439,7 +5445,7 @@ async fn test_home_summary_and_events_include_browser_wallet_approvals() {
     let summary_json: serde_json::Value = serde_json::from_slice(&summary_body).unwrap();
     assert_eq!(summary_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        summary_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&summary_json["notifications"], "wallet_approval_request")[0]["title"],
         "Transaction approval request"
     );
 
@@ -9150,7 +9156,7 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
         &[CHAT_ROOM_CAPSULE_ID],
     )
     .expect("runtime launch grant validates for chat-room");
-    assert_eq!(grant_context.principal_id, authority.principal_id);
+    assert_eq!(grant_context.principal_id(), authority.principal_id);
 
     let summary = app
         .clone()
@@ -10834,6 +10840,7 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     .is_err());
     // Exercise the actual Browser summary caller with a consumer that has no local Engine.
     let mut consumer_state = test_state(left.path());
+    consumer_state.browser_internet = granted_browser_internet(left.path());
     consumer_state.provider_registry = Some(consumer_registry.clone());
     consumer_state.carrier_endpoint = Some(endpoint.clone());
     consumer_state.collaboration_discovery_service = Some(
@@ -11091,15 +11098,8 @@ fn p2a_i_b_local_model_offer_unshared_for_provider_without_stored_record() {
             "updated_at": 0,
             "local_offer_ids": [MODEL_LOCAL_OFFER],
         });
-        crate::auth::write_principal_root_object(
-            dir.path(),
-            principal_id,
-            &localhost_root,
-            &object_uri,
-            &path,
-            &serde_json::to_vec_pretty(&state).unwrap(),
-        )
-        .unwrap();
+        // Plant the legacy path; the provider id has no stored record.
+        std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["local_offer_ids"], json!([MODEL_LOCAL_OFFER]));
@@ -13328,7 +13328,7 @@ async fn gateway_context_resolves_a_person_stored_in_the_auth_store() {
         None,
         "grant:home-cli-test",
     );
-    assert_eq!(context.unwrap().principal_id, "person:home-cli-test");
+    assert_eq!(context.unwrap().principal_id(), "person:home-cli-test");
 }
 
 /// Proof-bound row (Rong 0344 L-1499-1): with a proof binding, the active
@@ -13367,7 +13367,7 @@ async fn gateway_context_checks_a_proof_bound_grant_in_the_auth_store() {
         .contains("auth session not found"));
     crate::auth::store_session_grant(auth.path(), grant).unwrap();
     let context = context_from().unwrap();
-    assert_eq!(context.principal_id, "person:home-cli-test");
+    assert_eq!(context.principal_id(), "person:home-cli-test");
     assert_eq!(
         context.proof_binding_id.as_deref(),
         Some("proof:passkey:home-cli-test")

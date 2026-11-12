@@ -325,7 +325,7 @@ mod tests {
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, Some(grant))
                 .unwrap();
 
-        assert_eq!(principal.as_deref(), Some(context.principal_id.as_str()));
+        assert_eq!(principal.as_deref(), Some(context.principal_id()));
     }
 
     #[test]
@@ -356,6 +356,54 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("not authorized"));
+    }
+
+    /// `POST /api/capsules` with a launch grant, for a pinned manifest: the
+    /// handler's own manifest parse refuses it, before the grant is looked at.
+    #[test]
+    fn a_launch_with_a_grant_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        use crate::runtime::tests::{write_fixture_capsule, PINNED_MANIFEST};
+        let dir = tempfile::tempdir().unwrap();
+        let capsule_dir = write_fixture_capsule(dir.path(), PINNED_MANIFEST);
+        let grant = Some("any-grant".to_string());
+        let err =
+            principal_from_launch_request(Some(dir.path()), &capsule_dir, None, grant).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let expected = "parse capsule manifest for launch grant: unknown field `cid`";
+        assert!(err.1.starts_with(expected), "{}", err.1);
+    }
+
+    /// `POST /api/capsules` without a grant, for a pinned manifest: the
+    /// request reaches the launch entry, whose parse refuses it. Nothing is
+    /// launched, so no launch is written to the audit log.
+    #[tokio::test]
+    async fn a_launch_without_a_grant_stops_at_the_launch_entry_for_a_pinned_requirement() {
+        use crate::runtime::tests::{test_runtime, write_fixture_capsule, PINNED_MANIFEST};
+        let (runtime, temp) = test_runtime().await;
+        runtime
+            .configure_capsule_admission(temp.path(), &[], true)
+            .await
+            .unwrap();
+        let capsule_dir = write_fixture_capsule(temp.path(), PINNED_MANIFEST);
+        let audit_log = std::sync::Arc::new(AuditLog::new());
+        let response = launch_capsule(
+            Extension(std::sync::Arc::new(runtime)),
+            Extension(audit_log.clone()),
+            Extension(None::<std::path::PathBuf>),
+            Json(LaunchRequest {
+                path: capsule_dir.to_string_lossy().into_owned(),
+                principal_id: None,
+                launch_grant: None,
+            }),
+        )
+        .await;
+        let Err((status, message)) = response else {
+            panic!("a pinned manifest was launched");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let expected = "Invalid manifest: Failed to parse capsule.json: unknown field `cid`";
+        assert!(message.starts_with(expected), "{message}");
+        assert!(audit_log.recent_events(2).is_empty());
     }
 
     /// S1: the audit for the real instance handle names the verified signer.

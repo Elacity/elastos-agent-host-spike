@@ -316,13 +316,7 @@ pub async fn viewer_storage_get(
         Ok(metadata) if metadata.is_file() => {}
         _ => return (StatusCode::BAD_REQUEST, "viewer storage file unavailable").into_response(),
     }
-    match crate::auth::read_principal_root_object(
-        &state.data_dir,
-        &target.principal_id,
-        &target.localhost_root,
-        &target.object_uri,
-        &target.path,
-    ) {
+    match viewer_storage_read(&state.data_dir, &target) {
         Ok(bytes) => {
             let revision = crate::auth::principal_root_object_revision(
                 &target.principal_id,
@@ -366,15 +360,7 @@ pub async fn viewer_storage_put(
                 .into_response()
         }
     };
-    match crate::auth::write_principal_root_object_if_revision(
-        &state.data_dir,
-        &target.principal_id,
-        &target.localhost_root,
-        &target.object_uri,
-        &target.path,
-        body.as_ref(),
-        precondition,
-    ) {
+    match viewer_storage_write(&state.data_dir, &target, body.as_ref(), precondition) {
         Ok(()) => {
             let revision = crate::auth::principal_root_object_revision(
                 &target.principal_id,
@@ -437,7 +423,7 @@ async fn viewer_library_object(
     if viewer == "documents" {
         crate::library::refuse_linked_library_object(
             &state.data_dir,
-            &context.principal_id,
+            context.principal_id(),
             &request.uri,
         )?;
     }
@@ -693,8 +679,33 @@ fn append_viewer_library_audit(
 struct ViewerStorageTarget {
     path: PathBuf,
     principal_id: String,
-    localhost_root: String,
+    root: crate::auth::ResolvedPrincipalRoot,
     object_uri: String,
+}
+
+fn viewer_storage_read(data_dir: &FsPath, target: &ViewerStorageTarget) -> anyhow::Result<Vec<u8>> {
+    crate::auth::read_principal_root_object_resolved(
+        data_dir,
+        &target.root,
+        &target.object_uri,
+        &target.path,
+    )
+}
+
+fn viewer_storage_write(
+    data_dir: &FsPath,
+    target: &ViewerStorageTarget,
+    bytes: &[u8],
+    precondition: crate::auth::PrincipalRootObjectPrecondition<'_>,
+) -> anyhow::Result<()> {
+    crate::auth::write_principal_root_object_if_revision_resolved(
+        data_dir,
+        &target.root,
+        &target.object_uri,
+        &target.path,
+        bytes,
+        precondition,
+    )
 }
 
 fn require_viewer_library_launch_context(
@@ -786,11 +797,10 @@ fn viewer_storage_target_for_context(
         anyhow::bail!("viewer storage does not support .AppData/Agents/ (agent journals)");
     }
     let principal_id = context.principal_id().to_string();
-    let localhost_root = viewer_target_root(context);
     Ok(ViewerStorageTarget {
         path: dir.join(file_name),
         principal_id,
-        localhost_root,
+        root: context.root().clone(),
         object_uri,
     })
 }
@@ -861,6 +871,7 @@ fn principal_scoped_storage_uri(storage: &str, context: &HomeLaunchTokenContext)
     principal_scoped_storage_uri_for_root(storage, context.root().localhost_root())
 }
 
+#[cfg(test)]
 fn viewer_target_root(context: &HomeLaunchTokenContext) -> String {
     context.root().localhost_root().to_string()
 }
@@ -933,7 +944,8 @@ fn viewer_error_response(err: anyhow::Error) -> Response {
 #[cfg(test)]
 mod r4_root_tests {
     use super::*;
-    use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+    use crate::api::gateway::r3_stored_root_tests::verified_parent_device_context;
+    use crate::auth::r4_fixture::{store, AGENT_ID, AGENT_ROOT, HUMAN_ROOT, ID};
     use crate::auth::PrincipalKind;
 
     fn active_viewer(data_dir: &FsPath) {
@@ -961,6 +973,85 @@ mod r4_root_tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn parent_signed_viewer_storage_round_trips_under_parent_root() {
+        let dir = tempfile::tempdir().unwrap();
+        active_viewer(dir.path());
+        let (context, parent_root, child_root, token) =
+            verified_parent_device_context(dir.path(), "documents");
+        assert_eq!(context.root().localhost_root(), parent_root);
+        let state = GatewayState {
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            carrier_endpoint: None,
+            collaboration_discovery_service: None,
+            browser_internet: Default::default(),
+            identity_manager: Arc::new(std::sync::OnceLock::new()),
+            cache_dir: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "null".parse().unwrap());
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        headers.insert("if-none-match", "*".parse().unwrap());
+        let route = (
+            "documents".into(),
+            "documents".into(),
+            "save".into(),
+            "note.md".into(),
+        );
+        let denied = viewer_storage_put(
+            State(state.clone()),
+            Path(route.clone()),
+            headers.clone(),
+            Bytes::from_static(b"parent bytes"),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let denied_body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&denied_body).contains("home launch token"));
+        let target = viewer_storage_target_for_context(
+            dir.path(),
+            &context,
+            "documents",
+            "documents",
+            "save",
+            "note.md",
+        )
+        .unwrap();
+        let child_uri = format!("{child_root}/Documents/note.md");
+        let child_path = rooted_localhost_fs_path(dir.path(), &child_uri).unwrap();
+        std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        std::fs::write(&child_path, b"child decoy").unwrap();
+        let written = viewer_storage_write(
+            dir.path(),
+            &target,
+            b"parent bytes",
+            crate::auth::PrincipalRootObjectPrecondition::Absent,
+        );
+        assert!(
+            written.is_ok(),
+            "verified parent storage write: {written:?}"
+        );
+        assert_eq!(
+            viewer_storage_read(dir.path(), &target).map_err(|error| error.to_string()),
+            Ok(b"parent bytes".to_vec())
+        );
+        let denied_read = viewer_storage_get(State(state), Path(route), headers).await;
+        assert_eq!(denied_read.status(), StatusCode::UNAUTHORIZED);
+        let parent_uri = format!("{parent_root}/Documents/note.md");
+        assert!(rooted_localhost_fs_path(dir.path(), &parent_uri)
+            .unwrap()
+            .is_file());
+        assert_eq!(std::fs::read(&child_path).unwrap(), b"child decoy");
+        assert!(!crate::auth::principal_object_io::reads(dir.path()).contains(&child_path));
+        assert!(!crate::auth::principal_object_io::writes(dir.path()).contains(&child_path));
+    }
+
     #[test]
     fn r4_viewer_target_and_storage_grant_reach_agent_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -968,25 +1059,27 @@ mod r4_root_tests {
         active_viewer(dir.path());
         elastos_identity::load_or_create_did(dir.path()).unwrap();
         let now = crate::auth::now_ts();
-        let proof_binding_id = format!("test-binding:{ID}");
-        crate::auth::store_session_grant(
+        let proof_binding_id = crate::auth::stored_principal_record(dir.path(), AGENT_ID)
+            .unwrap()
+            .unwrap()
+            .proof_binding_id;
+        crate::auth::plant_session_grant(
             dir.path(),
             elastos_runtime::auth::AuthSessionGrantV1 {
                 schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
                 grant_id: "grant:r4-viewer".into(),
                 session_id: "session:r4-viewer".into(),
-                principal_id: ID.into(),
+                principal_id: AGENT_ID.into(),
                 proof_binding_id: proof_binding_id.clone(),
                 issued_at: now,
                 expires_at: now + 600,
                 apps: vec!["documents".into()],
             },
-        )
-        .unwrap();
-        let root = crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), ID).unwrap();
+        );
+        let root =
+            crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), AGENT_ID).unwrap();
         let context = HomeLaunchTokenContext::resolved(
             root,
-            ID.into(),
             "session:r4-viewer".into(),
             Some(proof_binding_id),
             "grant:r4-viewer".into(),
@@ -1011,7 +1104,8 @@ mod r4_root_tests {
         )
         .expect("R4 viewer request reaches stored Agent root");
         assert_eq!(
-            live_target.localhost_root, AGENT_ROOT,
+            live_target.root.localhost_root(),
+            AGENT_ROOT,
             "R4 viewer request root"
         );
         assert_eq!(
@@ -1034,7 +1128,11 @@ mod r4_root_tests {
             "note.md",
         )
         .expect("R4 viewer target reaches stored Agent root");
-        assert_eq!(target.localhost_root, AGENT_ROOT, "R4 viewer target root");
+        assert_eq!(
+            target.root.localhost_root(),
+            AGENT_ROOT,
+            "R4 viewer target root"
+        );
         assert_eq!(target.object_uri, format!("{AGENT_ROOT}/Documents/note.md"));
     }
 
@@ -1045,7 +1143,6 @@ mod r4_root_tests {
         let id = "remote:00000000000000000000000000000000";
         let context = HomeLaunchTokenContext::resolved(
             crate::auth::ResolvedPrincipalRoot::remote(id).unwrap(),
-            id.into(),
             "session".into(),
             None,
             "grant".into(),
@@ -1073,15 +1170,14 @@ mod r4_root_tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             store(dir.path(), kind);
-            let root =
-                crate::auth::ResolvedPrincipalRoot::resolve(dir.path(), dir.path(), ID).unwrap();
-            let context = HomeLaunchTokenContext::resolved(
-                root,
-                ID.to_string(),
-                "session".into(),
-                None,
-                "grant".into(),
-            );
+            let root = crate::auth::ResolvedPrincipalRoot::resolve(
+                dir.path(),
+                dir.path(),
+                crate::auth::r4_fixture::principal_id(kind),
+            )
+            .unwrap();
+            let context =
+                HomeLaunchTokenContext::resolved(root, "session".into(), None, "grant".into());
             assert_eq!(
                 viewer_target_root(&context),
                 expected,
@@ -1097,5 +1193,143 @@ mod r4_root_tests {
                 "R4 viewer root check"
             );
         }
+    }
+}
+
+/// R8d evidence rows for Viewer storage, for a parent passkey person on a
+/// child Runtime. Entry: `viewer_storage_target_for_context` (line 771), which
+/// `viewer_storage_put` calls and which builds the target for the person's
+/// root; the first row then calls `viewer_storage_write` (line 695).
+#[cfg(test)]
+mod r8d_passkey_rows {
+    use super::*;
+    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{passkey_person, ROOT};
+
+    const GBA_VIEWER: &str = "gba-emulator";
+    const DOCUMENTS: &str = "documents";
+    const GBA_RELATIVE: &str = ".AppData/LocalHost/GBA/r8d-note.gba";
+
+    /// The `gba-emulator` viewer: the name, role and storage grant that
+    /// `capsules/gba-emulator/capsule.json` ships. No capsule bytes run.
+    fn gba_viewer(data_dir: &FsPath) {
+        let capsule = data_dir.join("capsules/gba-emulator");
+        std::fs::create_dir_all(capsule.join("browser")).unwrap();
+        std::fs::write(capsule.join("browser/index.html"), "viewer").unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            serde_json::to_vec(&json!({
+                "schema": "elastos.capsule/v1", "name": "gba-emulator", "version": "0.2.0",
+                "author": "elastos", "role": "viewer", "type": "wasm",
+                "entrypoint": "browser/index.html",
+                "permissions": {"storage": ["localhost://Users/self/.AppData/LocalHost/GBA/*"]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&json!({"external": {"gba-emulator": {
+                "install_path": "capsules/gba-emulator", "platforms": {}
+            }}, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The `documents` viewer as `capsules/documents/capsule.json` ships it:
+    /// a viewer whose manifest declares no storage grant. No capsule bytes
+    /// run.
+    fn documents_viewer(data_dir: &FsPath) {
+        let capsule = data_dir.join("capsules/documents");
+        std::fs::create_dir_all(capsule.join("browser")).unwrap();
+        std::fs::write(capsule.join("browser/index.html"), "viewer").unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            serde_json::to_vec(&json!({
+                "schema": "elastos.capsule/v1", "name": "documents", "version": "0.2.0",
+                "author": "elastos", "role": "viewer", "type": "wasm",
+                "entrypoint": "browser/index.html"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&json!({"external": {"documents": {
+                "install_path": "capsules/documents", "platforms": {}
+            }}, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Today the child's viewer storage write with the `Absent` precondition
+    /// leaves the bytes as given under the person's root.
+    #[test]
+    fn r8d_child_viewer_storage_save_for_the_passkey_person() {
+        let person = passkey_person(GBA_VIEWER);
+        let child = person.child.path();
+        gba_viewer(child);
+        let target = viewer_storage_target_for_context(
+            child,
+            &person.ctx,
+            GBA_VIEWER,
+            GBA_VIEWER,
+            "save",
+            "r8d-note.gba",
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(target.object_uri, format!("{ROOT}/{GBA_RELATIVE}"));
+        let bytes = b"r8d child viewer note".to_vec();
+        viewer_storage_write(
+            child,
+            &target,
+            &bytes,
+            crate::auth::PrincipalRootObjectPrecondition::Absent,
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+        let relative = format!("{}/{GBA_RELATIVE}", ROOT.trim_start_matches("localhost://"));
+        assert_eq!(
+            std::fs::read(child.join(&relative)).unwrap(),
+            bytes,
+            "{relative} holds the bytes it was given"
+        );
+        let expected = [
+            "capsules/gba-emulator/browser/index.html".to_string(),
+            "capsules/gba-emulator/capsule.json".to_string(),
+            "components.json".to_string(),
+            relative,
+        ];
+        let also: Vec<&str> = expected.iter().map(String::as_str).collect();
+        person.assert_child_holds_only(&also);
+    }
+
+    /// Today a viewer whose manifest declares no storage grant is refused,
+    /// and nothing is written.
+    #[test]
+    fn r8d_child_viewer_storage_save_is_refused_for_a_viewer_without_a_storage_grant() {
+        let person = passkey_person(DOCUMENTS);
+        let child = person.child.path();
+        documents_viewer(child);
+        let error = viewer_storage_target_for_context(
+            child,
+            &person.ctx,
+            DOCUMENTS,
+            DOCUMENTS,
+            "save",
+            "r8d-note.md",
+        )
+        .err()
+        .expect("the shipped documents viewer has no storage grant");
+        assert_eq!(error.to_string(), "viewer capsule has no storage grant");
+        assert_eq!(
+            viewer_error_response(error).status(),
+            StatusCode::BAD_REQUEST
+        );
+        person.assert_child_holds_only(&[
+            "capsules/documents/browser/index.html",
+            "capsules/documents/capsule.json",
+            "components.json",
+        ]);
     }
 }

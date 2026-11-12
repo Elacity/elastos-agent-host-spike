@@ -97,9 +97,7 @@ impl Evidence {
         let mut evidence = Self::default();
         for line in listed.lines() {
             if let Some(name) = line.strip_suffix(": test") {
-                if !test_name(name) {
-                    evidence.duplicate_inventory = true;
-                } else if evidence.rows.insert(name.into(), Vec::new()).is_some() {
+                if !test_name(name) || evidence.rows.insert(name.into(), Vec::new()).is_some() {
                     evidence.duplicate_inventory = true;
                 }
             }
@@ -332,7 +330,6 @@ fn required_effects(test: &str) -> &'static [&'static str] {
         | "killed_worker_settlement_recorded_without_retry" => &["instance-1", "instance-2"],
         "host_key_read_is_refused" => &["host-key-read"],
         "ungranted_effect_is_refused" => &["read"],
-        "ungranted_network_is_refused" => &["network"],
         "agent_cannot_read_human_space_without_grant" => &["human-read"],
         "ungranted_memory_write_is_refused" => &["memory-write"],
         "no_policy_file_does_not_mean_allow" => &["granted-read"],
@@ -398,10 +395,10 @@ impl Identities {
         if !hex(&probe.component_sha256, 64) {
             return Err(format!("malformed component SHA-256: {}", probe.effect));
         }
-        if !probe
+        if probe
             .bundle_lab_cid
             .parse::<capsule_identity::LabCid>()
-            .is_ok()
+            .is_err()
         {
             return Err(format!("malformed bundle lab CID: {}", probe.effect));
         }

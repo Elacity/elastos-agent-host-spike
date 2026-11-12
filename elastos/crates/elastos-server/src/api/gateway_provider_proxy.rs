@@ -1728,6 +1728,12 @@ pub(super) async fn gateway_provider_proxy(
     /* The verified capsule behind the launch token: model runs are bound and
     audited to it, never to a fixed name. */
     let launch_capsule_id = required.launch_context.executable_actor.clone();
+    if scheme == "net" && matches!(op.as_str(), "http" | "connect" | "resolve" | "stream") {
+        return (
+            StatusCode::GONE,
+            format!("legacy /api/provider/net/{op} is disabled; Browser streams must be opened through /api/apps/browser/open"),
+        ).into_response();
+    }
     let registry = match state.provider_registry.as_ref().cloned() {
         Some(registry) => registry,
         None => {
@@ -1812,9 +1818,7 @@ pub(super) async fn gateway_provider_proxy(
                         StatusCode::CONFLICT,
                         Json(serde_json::json!({
                             "status": "error", "code": "remote_model_invocation_refused",
-                            "message": if reason == elastos_model_contract::MODEL_REQUEST_EXPIRED_CODE {
-                                elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE
-                            } else { "This invocation was refused before provider dispatch." },
+                            "message": super::gateway_model_service::invocation_refusal_message(&reason),
                             "reason": reason, "refusal": binding,
                         })),
                     )
@@ -1903,16 +1907,6 @@ pub(super) async fn gateway_provider_proxy(
         }
     }
 
-    if scheme == "net" && op == "http" {
-        return gateway_browser::gateway_browser_net_http(registry.as_ref(), &request).await;
-    }
-    if scheme == "net" && op == "stream" {
-        return (
-            StatusCode::GONE,
-            "legacy /api/provider/net/stream is disabled; Browser streams must be opened through /api/apps/browser/open",
-        )
-            .into_response();
-    }
     if scheme == "inspect" && op == "request_act" {
         return gateway_inspect_action_request(&state, &context, &request).await;
     }
@@ -4400,7 +4394,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             store(dir.path(), kind);
             assert_eq!(
-                super::runtime_custody_buyer_root(dir.path(), ID).unwrap(),
+                super::runtime_custody_buyer_root(
+                    dir.path(),
+                    crate::auth::r4_fixture::principal_id(kind)
+                )
+                .unwrap(),
                 expected,
                 "R4 buyer profile root"
             );

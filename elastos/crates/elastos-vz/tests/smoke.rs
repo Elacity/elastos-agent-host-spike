@@ -68,6 +68,7 @@ fn microvm_manifest(name: &str) -> CapsuleManifest {
         window_policy: None,
         model_content: None,
         agent: None,
+        asks: Vec::new(),
         signature: None,
     }
 }

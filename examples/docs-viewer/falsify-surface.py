@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""Break each rule of the Documents surface page, see its test fail, restore it.
+
+Usage: python3 -I falsify-surface.py [--check]
+
+The page glue lives in surface/browser/reader.js. The launch client and the
+docs-model renderer each have one owner in examples/capsule-kit/surface/.
+A client or renderer mutant is written to its owner and then copied to the
+page's shipped browser/ file, as the build does, so the page tests see it and
+the copy stays pinned to the owner. Each drift case edits only a shipped
+copy, and only its own test must fail.
+
+Each falsifier replaces exact text (it must occur once), runs the named node
+tests, and requires them to FAIL. It also runs the whole test file and
+requires its failing set to be exactly the declared set: every other test
+passes. The files are restored from their saved bytes afterwards, also on
+error or Ctrl-C. --check only confirms every anchor occurs once.
+
+The runner is the capsule kit's (examples/capsule-kit/falsify).
+"""
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+SURFACE = pathlib.Path(__file__).resolve().parent / "surface"
+PAGE = SURFACE / "browser" / "reader.js"
+CLIENT = REPO / "capsule-kit" / "surface" / "page-client.js"
+CLIENT_COPY = SURFACE / "browser" / "page-client.js"
+OWNER = REPO / "capsule-kit" / "surface" / "docs-render.js"
+COPY = SURFACE / "browser" / "docs-render.js"
+TESTS = SURFACE / "reader.test.mjs"
+
+DRIFT = "the shipped renderer matches the kit owner"
+CLIENT_DRIFT = "the shipped client matches the kit owner"
+
+# Page-glue rules: (name, exact old text, new text, tests that must fail)
+PAGE_CASES = [
+    (
+        "a title is shown as markup",
+        "        button.textContent = document.title;",
+        "        button.innerHTML = document.title;",
+        [
+            "markup in a document stays text",
+            "the page has no way to hold or reach anything else",
+            "the titles and the arrow keys switch documents, in shelf order",
+        ],
+    ),
+    (
+        "a skipped message is shown as markup",
+        "line.textContent = skip.order === null",
+        "line.innerHTML = skip.order === null",
+        ["markup in a document stays text", "the page has no way to hold or reach anything else"],
+    ),
+    (
+        "requests are made without a launch token",
+        "  if (!token) {\n",
+        "  if (false) {\n",
+        ["without a launch token it asks for nothing"],
+    ),
+    (
+        "the pages schema is not checked",
+        'if (!value || typeof value !== "object" || value.schema !== PAGES_SCHEMA) {',
+        'if (!value || typeof value !== "object") {',
+        ["pages that are not ones are refused"],
+    ),
+    (
+        "any number of documents is taken",
+        "  if (documentsIn.length > MAX_DOCUMENTS) {",
+        "  if (false) {",
+        ["pages that are not ones are refused"],
+    ),
+    (
+        "any number of blocks is taken",
+        "    if (!blocksIn || blocksIn.length > MAX_BLOCKS) {",
+        "    if (!blocksIn) {",
+        ["a document with a block it cannot read is not shown, and the rest are"],
+    ),
+    (
+        "a document keeps its uri",
+        "    documents.push({ order, title:",
+        "    documents.push({ order, uri: document.uri, title:",
+        ["it never requests a path: the uri fields are dropped unread"],
+    ),
+]
+
+# Launch-client rules: kit-owner anchors, only the page's node tests.
+CLIENT_CASES = [
+    (
+        "the launch client follows redirects",
+        'redirect: "error",',
+        'redirect: "follow",',
+        ["it makes one request, a GET with the launch token and nothing else"],
+    ),
+    (
+        "the launch client carries cookies",
+        'credentials: "omit",',
+        'credentials: "include",',
+        ["it makes one request, a GET with the launch token and nothing else"],
+    ),
+    (
+        "the launch client reads another fragment key",
+        '.get("home_token")',
+        '.get("other_token")',
+        [
+            "the token comes from the fragment only",
+            "it draws each block kind as its element, with text only",
+            "markup in a document stays text",
+            "it never requests a path: the uri fields are dropped unread",
+            "it makes one request, a GET with the launch token and nothing else",
+            "a refusal is shown as its text",
+            "pages that are not ones are refused",
+            "the titles and the arrow keys switch documents, in shelf order",
+            "it reads the pages the core writes, every block, and shows their markup as text",
+        ],
+    ),
+    (
+        "the launch client leaves the reason untrimmed",
+        "body.error.trim()",
+        "body.error",
+        ["a blank server reason shows the status"],
+    ),
+]
+
+# Renderer rules: the anchors are in the kit's one owner.
+RENDER_CASES = [
+    (
+        "a span is shown as markup",
+        "      element.textContent = span.text;",
+        "      element.innerHTML = span.text;",
+        [
+            "markup in a document stays text",
+            "the page has no way to hold or reach anything else",
+            "it draws each block kind as its element, with text only",
+            "it reads the pages the core writes, every block, and shows their markup as text",
+            "the titles and the arrow keys switch documents, in shelf order",
+        ],
+    ),
+    (
+        "code is shown as markup",
+        "      code.textContent = block.text;",
+        "      code.innerHTML = block.text;",
+        [
+            "markup in a document stays text",
+            "the page has no way to hold or reach anything else",
+            "it draws each block kind as its element, with text only",
+        ],
+    ),
+    (
+        "a text is not cut short",
+        "  return text.length > chars ?",
+        "  return false && text.length > chars ?",
+        ["a refusal is shown as its text"],
+    ),
+    (
+        "an unknown block kind is drawn",
+        "    default:\n      return null;",
+        '    default:\n      return { kind: "rule" };',
+        ["a document with a block it cannot read is not shown, and the rest are"],
+    ),
+    (
+        "an unknown style becomes its own element",
+        '    tag: styleTag(span && span.style),',
+        '    tag: (span && span.style) || "span",',
+        [
+            "a style named after an inherited property is plain",
+            "an unknown style is plain and a heading level stays within 1 to 6",
+            "it draws each block kind as its element, with text only",
+            "markup in a document stays text",
+        ],
+    ),
+    (
+        "a style is looked up through the prototype",
+        '  return typeof style === "string" && Object.hasOwn(STYLES, style) ? STYLES[style] : "span";',
+        '  return STYLES[style] || "span";',
+        ["a style named after an inherited property is plain"],
+    ),
+    (
+        "a heading level is not kept within 1 to 6",
+        "level: Math.min(6, Math.max(1, block.level)),",
+        "level: block.level,",
+        ["an unknown style is plain and a heading level stays within 1 to 6"],
+    ),
+    (
+        "a request is made in the renderer",
+        "/** Draws one block as elements; every text goes through textContent. */",
+        'export function unexpectedRequest() { return fetch("/api/apps/home/state"); }\n\n'
+        "/** Draws one block as elements; every text goes through textContent. */",
+        ["the page has no way to hold or reach anything else"],
+    ),
+]
+
+# The one-owner rule: one byte of the shipped copy differs from the owner.
+DRIFT_CASES = [
+    (
+        DRIFT,
+        COPY,
+        "export const MAX_BLOCKS = 512;",
+        "export const MAX_BLOCKS = 512 ;",
+        [DRIFT],
+    ),
+    (
+        CLIENT_DRIFT,
+        CLIENT_COPY,
+        'export const TOKEN_HEADER = "x-elastos-home-token";',
+        'export const TOKEN_HEADER = "x-elastos-home-token" ;',
+        [CLIENT_DRIFT],
+    ),
+]
+
+
+def test_fails(name):
+    return kit.node_test_fails(TESTS, name)
+
+
+def sync_copy():
+    """The build's copy step: the shipped file is the owner's bytes."""
+    COPY.write_bytes(OWNER.read_bytes())
+
+
+def sync_client():
+    """The build's client copy step: ship the kit owner's bytes."""
+    CLIENT_COPY.write_bytes(CLIENT.read_bytes())
+
+
+def main():
+    page = [(name, PAGE, [(old, new)], tests) for name, old, new, tests in PAGE_CASES]
+    client = [
+        (name, CLIENT, [(old, new)], tests, [(CLIENT_COPY, "")])
+        for name, old, new, tests in CLIENT_CASES
+    ]
+    render = [
+        (name, OWNER, [(old, new)], tests, [(COPY, "")])
+        for name, old, new, tests in RENDER_CASES
+    ]
+    drift = [(name, path, [(old, new)], tests) for name, path, old, new, tests in DRIFT_CASES]
+    every_failure = lambda: kit.node_test_failures(TESTS)  # noqa: E731
+    kit.main(
+        [
+            (page, None, test_fails, None, True, every_failure),
+            (client, sync_client, test_fails, None, True, every_failure),
+            (render, sync_copy, test_fails, None, True, every_failure),
+            (drift, None, test_fails, None, True, every_failure),
+        ],
+        done=f"all {len(page) + len(client) + len(render) + len(drift)} surface falsifiers caught",
+    )
+
+
+if __name__ == "__main__":
+    main()
