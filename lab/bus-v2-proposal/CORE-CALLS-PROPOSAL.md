@@ -353,7 +353,7 @@ For the agent identity, a capability request calls `scope_current_user_alias` wi
     /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
     pub principal_id: Option<String>,
 
-`elastos/crates/elastos-server/src/resource_bridge.rs:925` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
+`elastos/crates/elastos-server/src/resource_bridge.rs:931` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
 
                 let scoped_resource =
                     match scope_current_user_alias(resource, ctx.principal_id.as_deref()) {
@@ -386,7 +386,7 @@ For the agent identity, a capability request calls `scope_current_user_alias` wi
 
 For the session, the pending request's session id is the bridge capsule id. The identity host copies `capsule_id` into `session`. A status read of another session is refused. The shell grant passes `request.session_id` into `grant`.
 
-`elastos/crates/elastos-server/src/resource_bridge.rs:984` is the session id stored by that same `handle_request` body. The body builds a resource id from the scoped name and calls `create_request_with_reason`. The session argument is `SessionId` of `ctx.capsule_id.clone()`.
+`elastos/crates/elastos-server/src/resource_bridge.rs:990` is the session id stored by that same `handle_request` body. The body builds a resource id from the scoped name and calls `create_request_with_reason`. The session argument is `SessionId` of `ctx.capsule_id.clone()`.
 
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
@@ -433,6 +433,16 @@ Resident A3 credit depends on the RA-6 path. `lab/agent-conformance/standin-runt
         constraints,
         None, // No expiry for now (session-scoped)
     );
+
+A grant ends only where the store ends it. `elastos/crates/elastos-runtime/src/capability/manager.rs:436` is the epoch test that `validate` runs on every call. That body audits the failure as epoch_revoked and returns TokenRevoked.
+
+        if !self.store.is_epoch_valid(token.constraints.epoch) {
+
+`elastos/crates/elastos-runtime/src/capability/manager.rs:442` is the per-token revocation test on that same `validate` path. That body audits the failure as individually_revoked and returns the same TokenRevoked.
+
+        if self.store.is_token_revoked(&token.id).await {
+
+The shell grant passes no expiry, so nothing times that token out: `elastos/crates/elastos-server/src/api/handlers/capability.rs:345` is the `None` argument in the grant block quoted above. A grant therefore lives for its session until the store moves the epoch or revokes that token. `test_wrong_capsule` shows the caller check, and no test in this section shows the epoch or the revocation path, so this paragraph claims none.
 
 For the capsule instance, `grant` stores its capsule id argument on the token. `validate` refuses a caller whose capsule id differs, and `test_wrong_capsule` shows that refusal. The component invoke passes `BridgeContext.capsule_id` as that caller. The bridge comment says this field is the capsule identity for token minting, a session id or a capsule name.
 
@@ -546,7 +556,7 @@ For the capsule instance, `grant` stores its capsule id argument on the token. `
         assert!(matches!(result, Err(ValidationError::WrongCapsule { .. })));
     }
 
-`elastos/crates/elastos-server/src/resource_bridge.rs:394` is the caller in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
+`elastos/crates/elastos-server/src/resource_bridge.rs:398` is the `validate` call in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
 
     if bridge_ctx
         .capability_manager
@@ -1147,11 +1157,11 @@ Read records a step. `examples/agent-host/src/lib.rs::propose_read` sets the kin
         journal.epoch == epoch
     }
 
-The typed localhost operation `read` maps to `Action::Read` on `elastos/crates/elastos-server/src/provider_resource.rs:189`.
+The typed localhost operation `read` maps to `Action::Read` on `elastos/crates/elastos-server/src/provider_resource.rs:189`. Today's typed localhost operation list already holds the operation read, so it carries the read ask and the contract needs no new name for it.
 
             "read" | "list" | "stat" | "exists" | "resolve" | "ping" => Some(Action::Read),
 
-Edit and restore replace shown text. `examples/agent-host/src/lib.rs::propose_edit` creates no write. `examples/agent-host/src/lib.rs:2421-2422` carries that statement. The start line contains `This does not` and the end line contains `write.`
+Edit and restore replace shown text. `examples/agent-host/src/lib.rs::propose_edit` creates no write. `examples/agent-host/src/lib.rs:2421-2422` carries that statement. The start line contains `This does not` and the end line contains `write.` Today's typed localhost operation list has no name for the edit ask, so the contract must be extended for it. Today's typed localhost operation list has no name for the restore ask, so the contract must be extended for it.
 
     /// Record an edit proposal. An unread target, a stale version, empty old
     /// text, old text that is not exactly once in what that version has shown
@@ -1629,13 +1639,13 @@ On the peer scheme, provider_operation_action maps the operation `init` to `Acti
                 _ => None,
             },
 
-The project ask is the resource propose_init stores. The contract must be extended for a typed operation for run, for child, and for init.
+The project ask is the resource propose_init stores. Today's typed localhost operation list has no name for the run ask, so the contract must be extended for it. Today's typed localhost operation list has no name for the child ask, so the contract must be extended for it. Today's typed localhost operation list has no name for the init ask, so the contract must be extended for it.
 
 The two hosted asks point at section 4. ask_kind_name names Hosted as `hosted`. `examples/agent-host/src/lib.rs:8191` is that match arm.
 
             ProposalKind::Hosted => Some("hosted"),
 
-The two resources are `Models/` and `<principal>/.AppData/Models/`. propose_hosted records the hosted step. declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. Section 4 already maps those asks: the guest records a hosted step and the Runtime grants the call and carries it. The hosted rows point at section 4 and do not restate it.
+The two resources are `Models/` and `<principal>/.AppData/Models/`. propose_hosted records the hosted step. declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. Section 4 already maps those asks: the guest records a hosted step and the Runtime grants the call and carries it. The hosted row whose resource is Models/ is mapped in section 4, and the hosted row whose resource is the principal AppData Models directory is mapped there too, so neither row is mapped in this section. Today's typed localhost operation list has no name for the hosted ask, so the contract must be extended for both of those rows.
 
 On the `model` scheme, provider_operation_action maps `offers_list`, `runs_get`, and `runs_events` to `Action::Read`, and `runs_create` and `runs_cancel` to `Action::Execute`. `elastos/crates/elastos-server/src/provider_resource.rs:163` is the read arm. `elastos/crates/elastos-server/src/provider_resource.rs:164` is the execute arm. `elastos/crates/elastos-server/src/provider_resource.rs:165` is the `_ => None` that closes the model match. MODEL_OPERATIONS names those five strings. Section 4 names those five strings. The ask name is `hosted`. localhost_resource holds the supported-operation list. localhost_op_required_action maps a name on that list to an action. The localhost operation list section 6 already quoted has no `hosted`.
 
@@ -1780,7 +1790,7 @@ A precondition that is present calls `write_principal_root_object_if_revision`. 
 
                     Some(precondition) => crate::auth::write_principal_root_object_if_revision(
 
-The guest ask is `journal-append`. The invoked operation is `write`, which is on the localhost list section 6 already quoted, and that list's `write` arm maps to `Action::Write`. The body is the whole encoding. The bridge refuses the append flag on an agent journal and stores `content.clone()` when that flag is false. Today's checks write the whole journal under create_only or if_revision, and they refuse append on an agent journal. The child-journal operation stays the second journal in the project-ask paragraphs. The contract must be extended for a typed operation named hosted, and for a typed operation that names journal-append apart from write. Every ask in the asks file is mapped in this section.
+The guest ask is `journal-append`. The invoked operation is `write`, which is on the localhost list section 6 already quoted, and that list's `write` arm maps to `Action::Write`. The body is the whole encoding. The bridge refuses the append flag on an agent journal and stores `content.clone()` when that flag is false. Today's checks write the whole journal under create_only or if_revision, and they refuse append on an agent journal. The child-journal operation stays the second journal in the project-ask paragraphs. The contract must be extended for a typed operation that names journal-append apart from write. Section 6 states the extension status of each of the nine asks, and the two hosted asks are mapped in section 4, not here.
 
 This citation is design input for B2. `lab/grant-binding/src/ops.rs::create_child_journal` calls operate with ChildJournal, checks the path with resource_name against the stored owned root, and returns bind_grant of that path. The fn line is `pub fn create_child_journal(`. The operate line is `self.operate(call, request, Operation::ChildJournal)?;`. The path check is `super::resource_name(&grant.identity, path, Some(&grant.owned_root))`. The return is `self.bind_grant(grant.instance, path, grant.rights)`. The doc line reads: The new handle is `bind_grant` of that path. `lab/grant-binding/src/ops.rs::model_child_journal_create_without_the_right_is_refused` binds append and overwrite with child_journal false, then create_child_journal of UsersAI/agent-1/journal/page.md fails. The fn line is `fn model_child_journal_create_without_the_right_is_refused() {`. The expect_err line is `expect_err("child journal is its own right")`. The assert_eq of the refusal is `OperateRefuse::ChildJournalNotGranted`, and the assert_eq of the refusal string is `child journal is its own right`. That call returns no handle. `lab/grant-binding/src/ops.rs::model_child_journal_returns_its_own_handle` binds the parent at UsersAI/agent-1/journal and creates UsersAI/agent-1/journal/page.md. The fn line is `fn model_child_journal_returns_its_own_handle() {`. The child handle is not the parent handle. The assert_ne line is `assert_ne!(child, parent);`. use_grant of the child handle reads owned root UsersAI/agent-1/journal/page.md, identity agent-1, session session-a, and the same instance. The owned-root assert_eq is `assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");`. The identity assert_eq is `assert_eq!(child_decision.identity, "agent-1");`. The session assert_eq is `assert_eq!(child_decision.session, "session-a");`. The instance assert_eq is `assert_eq!(child_decision.instance, instance);`. The child rights stay append false, overwrite false, and child_journal true. The child rights assert compares child_decision.rights with append false, overwrite false, and child_journal true. use_path of UsersAI/agent-1/journal/page.md on the child handle is allowed. The expect line is `expect("the child handle binds its own root")`. use_path of UsersAI/agent-1/journal on the child handle is refused with `use path leaves the owned root`. The expect_err line is `expect_err("the parent root leaves the child root")` and the assert_eq of the refusal string is `use path leaves the owned root`. use_grant of the parent handle still reads owned root UsersAI/agent-1/journal. The assert_eq line is `assert_eq!(parent_decision.owned_root, "UsersAI/agent-1/journal");`. use_path of UsersAI/agent-1/journal/page.md on the parent handle is allowed. The expect line is `expect("the parent handle keeps the parent root")`. These create-child-journal functions are the lab reference model, and the lab model is not the Runtime. ChildJournal stays the lab variant. This paragraph does not choose it as the contract name for the child ask. B2 stays open.
 
@@ -1972,12 +1982,13 @@ Proposal: section 0, A4, hosted model call.
 
 Section 5 shows the guest writes zeros, the journal check is room for history, the concurrency check counts non-terminal runs, the slot stores a time, and the usage function refuses an empty report. Section 5 states the account A7 asks for and cites no lab/grant-binding test.
 
-`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the outstanding total plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:167` is the line that states that hold. The comparison is `total <= ledger.ceiling`.
+`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the total it compares plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:236` is the first line of the comment that states that hold. The total it compares is the identity's own open holds when that identity has its own ceiling and the stored total of every open hold otherwise; `lab/grant-binding/src/ledger.rs:259` chooses that total, `lab/grant-binding/src/ledger.rs:265` takes that identity's ceiling, and `lab/grant-binding/src/ledger.rs:270` is the comparison that refuses the request.
 
-    /// Holds `amount` on the ledger when the outstanding total plus `amount`
-    /// stays at or under the ceiling. A binding refusal records nothing, a sum
-    /// that does not fit in `u64` is over the ceiling, and the request's
-    /// reported usage does not lower the hold.
+    /// Holds `amount` on the ledger when the total this identity compares plus
+    /// `amount` stays at or under the ceiling. A binding refusal records nothing,
+    /// a total that does not fit in `u64` is over the ceiling, a stored sum of
+    /// every open hold plus `amount` that does not fit in `u64` is a sum
+    /// overflow, and the request's reported usage does not lower the hold.
     pub fn reserve(
         &self,
         call: &Call,
@@ -1986,8 +1997,25 @@ Section 5 shows the guest writes zeros, the journal check is room for history, t
     ) -> Result<Reservation, ReserveRefuse> {
         self.resolve(*call, request.handle)
             .map_err(ReserveRefuse::Binding)?;
+        let identity = self
+            .grants
+            .get(&request.handle)
+            .expect("resolved grant")
+            .identity
+            .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
+        let shared = held;
+        let own = held_for_identity(&ledger.open, &self.grants, &identity);
+        let held = if ledger.ceilings.contains_key(&identity) {
+            own
+        } else {
+            shared
+        };
+        ledger.ceiling = ledger.admitted;
+        if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
+            ledger.ceiling = agent_ceiling;
+        }
         let ledger: &mut Ledger = &mut ledger;
         let total = match held.checked_add(amount) {
             Some(total) if total <= ledger.ceiling => total,
@@ -1999,7 +2027,23 @@ Section 5 shows the guest writes zeros, the journal check is room for history, t
                 })
             }
         };
+        let put_back = if ledger.ceilings.contains_key(&identity) {
+            match shared.checked_add(amount) {
+                Some(shared_total) => Some(shared_total),
+                None => {
+                    return Err(ReserveRefuse::SumOverflow {
+                        held: shared,
+                        asked: amount,
+                    })
+                }
+            }
+        } else {
+            None
+        };
         ledger.held = total;
+        if let Some(shared_total) = put_back {
+            ledger.held = shared_total;
+        }
         ledger.next_reservation += 1;
         ledger.open.insert(
             ledger.next_reservation,
@@ -2007,6 +2051,8 @@ Section 5 shows the guest writes zeros, the journal check is room for history, t
                 handle: request.handle,
                 amount,
                 uncertain: false,
+                timed_out: false,
+                deadline: 0,
             },
         );
         Ok(Reservation {
