@@ -116,4 +116,14 @@ mod rules {
         assert!(error.contains("F-missing"), "{error}");
         assert!(error.contains("does not resolve"), "{error}");
     }
+
+    #[test]
+    fn rejects_old_text_that_occurs_twice_or_not_at_all() {
+        let entry = json!({"edits": [{"file": "x", "old": "a", "new": "b"}]});
+        let error = check_entry("F-twice", &entry, &read_some("a a")).unwrap_err();
+        assert!(error.contains("occurs 2 times"), "{error}");
+
+        let error = check_entry("F-absent", &entry, &read_some("b")).unwrap_err();
+        assert!(error.contains("occurs 0 times"), "{error}");
+    }
 }
