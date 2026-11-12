@@ -2201,11 +2201,7 @@ fn a_tar_archive_lists_its_entries() {
 fn the_format_comes_from_the_content_not_the_name() {
     // A ZIP at the tar fixture's URI and a tar at the ZIP fixture's URI both
     // list: one decision reads the first bytes, not the request's name.
-    let bus = run_fixture(
-        request(TAR, &[]),
-        TAR,
-        build(&[Spec::file("z.txt")], &[]),
-    );
+    let bus = run_fixture(request(TAR, &[]), TAR, build(&[Spec::file("z.txt")], &[]));
     assert_eq!(entries(&bus)[0]["path"], "z.txt");
     assert!(view(&bus).get("refused").is_none());
     let bus = run_fixture(
@@ -2344,11 +2340,17 @@ fn the_tar_read_budget_lists_what_fit_and_marks_the_run() {
         .collect();
     let bus = tar_fixture(&specs);
     let view = view(&bus);
-    assert!(view.get("refused").is_none(), "a spent budget is not a refusal");
+    assert!(
+        view.get("refused").is_none(),
+        "a spent budget is not a refusal"
+    );
     assert_eq!(view["stopped"]["code"], "read_budget");
     let count = entries(&bus).len();
     assert!(count > 0, "the entries that fit are listed");
-    assert!(count < specs.len(), "the walk stopped before the last entry");
+    assert!(
+        count < specs.len(),
+        "the walk stopped before the last entry"
+    );
     assert!(
         bus.bytes_served(TAR) <= MAX_READ_BYTES,
         "read {} bytes",
@@ -2365,11 +2367,8 @@ fn too_many_tar_entries_refuse_the_archive() {
         .map(|index| TarSpec::file(&format!("e{index}.txt")))
         .collect();
     let archive = tar_build(&specs);
-    let mut bus = FakeBus::default()
-        .object(TAR, archive)
-        .allow(TAR, "read");
-    let grant =
-        capsule_kit_guest::grant(&mut bus, TAR, "read", "test the tar entry cap").unwrap();
+    let mut bus = FakeBus::default().object(TAR, archive).allow(TAR, "read");
+    let grant = capsule_kit_guest::grant(&mut bus, TAR, "read", "test the tar entry cap").unwrap();
     let mut left = 1 << 20;
     let mut reader = zip::Reader::new(&mut bus, TAR, &grant, &mut left);
     let listing = tar::listing(&mut reader).expect("a content refusal is a listing");

@@ -106,7 +106,11 @@ impl From<Refused> for ParseError {
     }
 }
 
-pub(crate) fn read(reader: &mut Reader<'_>, offset: u64, length: u64) -> Result<Vec<u8>, ParseError> {
+pub(crate) fn read(
+    reader: &mut Reader<'_>,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>, ParseError> {
     match reader.read(offset, length) {
         Ok(bytes) => Ok(bytes),
         Err(ReadError::Refusal(refusal)) => Err(ParseError::Refusal(refusal)),

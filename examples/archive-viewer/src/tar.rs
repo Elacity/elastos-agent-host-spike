@@ -85,7 +85,10 @@ pub(crate) fn is_header(block: &[u8]) -> bool {
 /// The bytes of one fixed field, cut at its first NUL.
 fn field(block: &[u8], start: usize, end: usize) -> Vec<u8> {
     let bytes = &block[start..end];
-    let len = bytes.iter().position(|&byte| byte == 0).unwrap_or(bytes.len());
+    let len = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
     bytes[..len].to_vec()
 }
 
@@ -202,7 +205,10 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
         if block.len() < BLOCK_BYTES as usize {
             return Err(Refused::new(
                 "header_truncated",
-                format!("the header at {offset} answers {} of {BLOCK_BYTES} bytes", block.len()),
+                format!(
+                    "the header at {offset} answers {} of {BLOCK_BYTES} bytes",
+                    block.len()
+                ),
             )
             .into());
         }
@@ -254,7 +260,9 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
         let end = offset
             .checked_add(BLOCK_BYTES)
             .and_then(|start| start.checked_add(declared));
-        let blocks = declared.checked_add(BLOCK_BYTES - 1).map(|v| v / BLOCK_BYTES);
+        let blocks = declared
+            .checked_add(BLOCK_BYTES - 1)
+            .map(|v| v / BLOCK_BYTES);
         let next = offset.checked_add(BLOCK_BYTES).and_then(|start| {
             blocks
                 .and_then(|blocks| blocks.checked_mul(BLOCK_BYTES))
