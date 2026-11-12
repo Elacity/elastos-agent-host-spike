@@ -244,6 +244,10 @@ const MODELS_REQUESTS = ["/api/capsules/catalog", "/api/capsules/interfaces"];
 // message (capsules/system/browser/model-management.js). Two 2xx answers plus
 // this exact text is the settled state; any other text, or a missing or
 // non-2xx answer, is a failure rather than a settled view.
+// This wait only lets the layout check leave the Models tab after its two
+// requests have finished. It does not prove the Models view works: any error
+// on load()'s catch path shows this same text. Whether models load and bind
+// is not this layout smoke's job.
 const MODELS_SETTLED_TEXT =
   "Models are unavailable. Check your connection and trusted catalog, then retry.";
 const MODELS_SETTLE_LIMIT_MS = 5_000;
