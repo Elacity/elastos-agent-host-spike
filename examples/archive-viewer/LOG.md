@@ -528,3 +528,55 @@ one renderer, shipped beside the page, and are not copied into it.
 2026-10-27, task 024: a kill leaves the snapshot; a normal failure removes it.
 
 2026-10-27, task 017: the archive page ships the kit client; the Photos page still keeps its own copy.
+
+2026-11-12, task 009: the format-independent listing rules have one owner.
+
+The name, path, kind, status and duplicate rules left `src/zip.rs` for
+`src/listing.rs`, so the tar reader can feed its decoded entries into the same
+rules instead of carrying a second copy.
+
+### What changed
+
+- New `src/listing.rs` owns `Refused`, `Reason`, `Entry`, `Kind`, `Status` and
+  `Listing`, plus `archive_name` (N1), `name_text` (P4), `entry_status` (P9,
+  L9, methods and encryption), `path_rules` (P1 to P4, P8) and
+  `block_duplicates` (P5). The code moved verbatim, so the same inputs give the
+  same listing.
+- `src/zip.rs` keeps the ZIP byte parsing (the end record, the directory, the
+  local-header checks B4a and L5), `kind_of`, which reads ZIP attributes, and
+  `Reader`. It imports the shared rules and types. `Entry`'s record fields are
+  crate-visible so the ZIP reader can fill them; the rules did not change.
+- `src/lib.rs` re-exports the types from `listing`; `src/preview.rs` and
+  `src/tests.rs` name them through the new module.
+- `falsify.py` snapshots `src/listing.rs`, and the cases whose rule moved
+  anchor there.
+
+### Falsifiers re-anchored (`src/zip.rs` to `src/listing.rs`)
+
+F7, F8, F9, F10, F11, F12, F13, F14, the trailing-slash segment case of F15,
+F29, F30 and F40. Their plants, named tests and expected failures did not
+change.
+
+### One-owner falsifier
+
+- **F44** `the shared listing rule has one owner` plants a change in
+  `src/listing.rs` (P8's `path.len() > MAX_NAME_BYTES` becomes `+ 1`) and
+  requires `a_name_over_its_cap_is_blocked` to fail. The module holds the only
+  copy of that comparison, so a copy elsewhere would leave the test green.
+  `falsify.py --check` finds every moved anchor once.
+
+### Measurements
+
+- Guest tests: 90 pass, with the same names and count as before the move.
+- `falsify.py --check`: all 77 anchors found once.
+- `falsify.py`: 73 guest cases caught, each isolated, F44 included.
+- `verify.sh` and `verify.sh --runtime` passed at this head; the owning issue
+  holds the logs.
+
+### Notes
+
+- This slice holds no tar code and no rule change. The preview path, the host
+  test, the page and `kind_of` are outside the move; `kind_of` stays in the
+  ZIP reader because it reads ZIP attributes.
+- A tar reader feeds its decoded entries to `src/listing.rs` and gets the same
+  P1 to P9, L9 and P5 ruling and the same `Listing` shape.
