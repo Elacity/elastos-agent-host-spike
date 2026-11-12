@@ -257,6 +257,31 @@ mod tests {
     }
 
     #[test]
+    fn identifying_a_given_binary_prints_no_identity_line() {
+        if let Some(given) = in_second_process() {
+            let identified = given_native(&given, "elastos").unwrap();
+            assert_eq!(identified.sha256, sha256(b"some other file"));
+            return;
+        }
+        // Every identity line in a run's output enters the receipt, so only the
+        // Runtime the suite chose may print one. Identifying a file does not.
+        let home = ThrowawayHome::new().unwrap();
+        let given = home.root().join("given-elastos");
+        std::fs::write(&given, b"some other file").unwrap();
+        let printed = second_process(
+            "identifying_a_given_binary_prints_no_identity_line",
+            &given,
+            home.temp(),
+        );
+        assert!(!printed.contains(PREFIX), "{printed:?}");
+        assert!(
+            !printed.contains(&sha256(b"some other file")),
+            "{printed:?}"
+        );
+        home.finish().unwrap();
+    }
+
+    #[test]
     fn given_runtime_is_identified_where_it_is() {
         let home = ThrowawayHome::new().unwrap();
         let binary = home.root().join("given-elastos");
