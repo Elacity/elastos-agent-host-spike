@@ -5109,6 +5109,60 @@ async fn different_name_image_upload_with_a_damaged_sibling_is_refused() {
     );
 }
 
+/// A GET of an image this process cannot open answers with the fixed sentence
+/// naming the image file. The read error carries the file path, which holds the
+/// data folder and the person id, so the answer must leave both out.
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_background_image_get_answers_only_the_file_name() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let path = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"locked image",
+        false,
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/home/appearance/background-image")
+                .header("x-elastos-home-token", authority.home_token.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains("background image background-image.png could not be read"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert!(
+        !text.contains(&authority.principal_id),
+        "the answer leaves out the person id: {text}"
+    );
+}
+
 #[tokio::test]
 async fn test_recovery_readiness_projects_unavailable_and_first_profile_fails_closed() {
     let dir = tempfile::tempdir().unwrap();

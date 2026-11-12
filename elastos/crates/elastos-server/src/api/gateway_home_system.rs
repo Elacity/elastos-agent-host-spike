@@ -8100,6 +8100,7 @@ pub(super) async fn system_community_membership_update(
 struct HomeBackgroundImageEntry {
     path: PathBuf,
     object_uri: String,
+    file_name: &'static str,
     content_type: &'static str,
     version: String,
 }
@@ -8431,6 +8432,7 @@ fn home_background_image_entry(
         return Ok(Some(HomeBackgroundImageEntry {
             path,
             object_uri: home_appearance_object_uri(context, file_name),
+            file_name,
             content_type,
             version,
         }));
@@ -8569,15 +8571,18 @@ fn home_save_background_image_with(
     // Crash points of this save, and what each leaves:
     // - before the write: every existing image as it was.
     // - while staging: one `.background-image.<format>.<16 hex>.tmp` file
-    //   beside the images. No reader opens a staged name and its name is
-    //   fixed, so the file is never served and is harmless.
-    // - a failed staging or rename: the temporary file is removed and every
-    //   existing image stays.
+    //   beside the images. The 16 hex digits are random, no reader opens a
+    //   staged name, and its cleanup is best effort, so a leftover is never
+    //   served and is harmless.
+    // - a failed staging or rename: the shared write helper tries to remove
+    //   the temporary file and every existing image stays. That cleanup is
+    //   best effort, so the temporary file can remain.
     // - after the rename and before the removal below: the new bytes under
     //   the destination name beside any older image of another format. The
     //   reader serves the first name that exists (png, then jpg, webp, gif),
-    //   so an older image can stay on screen until the next upload or reset,
-    //   and both remove every other format under the image lock.
+    //   so an older image can stay on screen until a later upload or reset
+    //   succeeds, and both then remove every other format under the image
+    //   lock.
     // - a removal error: that older file stays, and the error names it.
     // - a directory sync error after the rename: the new image is in place
     //   but the upload answers an error. The shared write helper keeps that
@@ -8618,6 +8623,22 @@ fn home_reset_background_image_with(
     home_appearance_summary(data_dir, context)
 }
 
+/// Builds the answer for an image this process cannot read. The read error
+/// carries the data folder path, so the log keeps the full error and the
+/// response names only the image file. Upload, reset and GET share this.
+fn home_background_image_read_failure(
+    file_name: &str,
+    path: &std::path::Path,
+    err: &anyhow::Error,
+) -> anyhow::Error {
+    tracing::warn!(
+        path = %path.display(),
+        error = %format!("{err:#}"),
+        "could not read a background image"
+    );
+    anyhow::anyhow!("background image {file_name} could not be read")
+}
+
 /// Reads every existing background image and returns the paths it found,
 /// refusing on any read error. Upload and reset call this before they write or
 /// remove anything, so an image this process cannot read refuses the operation
@@ -8640,12 +8661,7 @@ fn home_background_image_paths_checked(
             &home_appearance_object_uri(context, file_name),
             &path,
         ) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %format!("{err:#}"),
-                "could not read a background image"
-            );
-            anyhow::bail!("background image {file_name} could not be read");
+            return Err(home_background_image_read_failure(file_name, &path, &err));
         }
         paths.push(path);
     }
@@ -8885,7 +8901,16 @@ pub(super) async fn home_background_image(
             );
             response
         }
-        Err(err) => home_error_response(anyhow::anyhow!(err)),
+        Err(err) => {
+            // The read error can carry the image path, which holds the person
+            // id. The log keeps the full error and the response names only the
+            // image file, as upload and reset do.
+            home_error_response(home_background_image_read_failure(
+                entry.file_name,
+                &entry.path,
+                &err,
+            ))
+        }
     }
 }
 
