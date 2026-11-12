@@ -2124,6 +2124,36 @@ fn tar_checksum_field(value: u64) -> Vec<u8> {
     field
 }
 
+/// The unsigned checksum of a header, its own field read as spaces.
+fn tar_sum(block: &[u8]) -> u64 {
+    block
+        .iter()
+        .enumerate()
+        .map(|(at, &byte)| {
+            if (148..156).contains(&at) {
+                u64::from(b' ')
+            } else {
+                u64::from(byte)
+            }
+        })
+        .sum()
+}
+
+/// The signed checksum of a header, its own field read as spaces.
+fn tar_signed_sum(block: &[u8]) -> i64 {
+    block
+        .iter()
+        .enumerate()
+        .map(|(at, &byte)| {
+            if (148..156).contains(&at) {
+                i64::from(b' ')
+            } else {
+                i64::from(byte as i8)
+            }
+        })
+        .sum()
+}
+
 /// One 512-byte ustar header, byte by byte.
 fn tar_header(spec: &TarSpec) -> Vec<u8> {
     let mut block = vec![0u8; 512];
@@ -2235,6 +2265,81 @@ fn a_size_that_is_not_octal_refuses_the_archive() {
     spec.size_field = Some(b"00000000008\0".to_vec());
     let bus = tar_fixture(&[spec]);
     assert_eq!(view(&bus)["refused"]["code"], "size_not_octal");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_signed_checksum_header_is_accepted() {
+    // A name with bytes past 0x7F makes the signed and unsigned sums differ;
+    // a writer may store either one.
+    let mut spec = TarSpec::file("");
+    spec.name = vec![0xFF; 6];
+    let probe = tar_header(&spec);
+    spec.checksum = Some(tar_signed_sum(&probe) as u64);
+    let bus = tar_fixture(&[spec]);
+    assert!(
+        view(&bus).get("refused").is_none(),
+        "the signed sum is accepted"
+    );
+    let entries = entries(&bus);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["status"], "blocked");
+    assert_eq!(entries[0]["reason"], "not_ascii");
+}
+
+#[test]
+fn a_base_256_size_refuses_the_archive() {
+    let mut spec = TarSpec::file("a.txt");
+    spec.size_field = Some(vec![0x80; 12]);
+    let bus = tar_fixture(&[spec]);
+    assert_eq!(view(&bus)["refused"]["code"], "size_base256");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn an_octal_field_with_other_padding_refuses_the_archive() {
+    // A size with a stray byte after its space padding is not octal.
+    let mut spec = TarSpec::file("a.txt");
+    spec.size_field = Some(b"0000000001 9".to_vec());
+    let bus = tar_fixture(&[spec]);
+    assert_eq!(view(&bus)["refused"]["code"], "size_not_octal");
+    assert!(entries(&bus).is_empty());
+
+    // A checksum field with the right value and a stray byte after the space
+    // is refused, not read as that value.
+    let mut archive = tar_build(&[TarSpec::file("a.txt")]);
+    let sum = tar_sum(&archive[..512]);
+    let field = format!("{sum:06o} x");
+    write_at(&mut archive, 148, field.as_bytes());
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "header_checksum");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn a_magic_that_is_not_ustar_nul_00_is_not_tar() {
+    // GNU's `ustar  \0` and a wrong version are other formats, and the whole
+    // object is unknown rather than a tar listing on the wrong bytes.
+    for patch in [
+        &[(262, b' '), (263, b' '), (264, 0)][..],
+        &[(263, b'0'), (264, b'1')][..],
+    ] {
+        let mut archive = tar_build(&[TarSpec::file("a.txt")]);
+        for &(at, byte) in patch {
+            archive[at] = byte;
+        }
+        let bus = run_fixture(request(TAR, &[]), TAR, archive);
+        assert_eq!(view(&bus)["refused"]["code"], "unknown_format");
+        assert!(entries(&bus).is_empty());
+    }
+}
+
+#[test]
+fn a_later_header_with_a_wrong_magic_refuses_the_archive() {
+    let mut archive = tar_build(&[TarSpec::file("a.txt"), TarSpec::file("b.txt")]);
+    archive[512 + 262] = b'x';
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "header_magic");
     assert!(entries(&bus).is_empty());
 }
 

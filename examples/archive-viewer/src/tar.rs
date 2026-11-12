@@ -21,8 +21,9 @@ use crate::MAX_ENTRIES;
 
 /// The ustar header and data step.
 pub(crate) const BLOCK_BYTES: u64 = 512;
-/// The bytes a ustar magic lives in: a detection probe reads no more.
-pub(crate) const PROBE_BYTES: u64 = 263;
+/// The bytes a ustar magic and its version live in: a detection probe reads
+/// no more.
+pub(crate) const PROBE_BYTES: u64 = 265;
 
 const NAME: usize = 0;
 const NAME_END: usize = 100;
@@ -32,7 +33,6 @@ const CHECKSUM: usize = 148;
 const CHECKSUM_END: usize = 156;
 const TYPEFLAG: usize = 156;
 const MAGIC: usize = 257;
-const MAGIC_END: usize = 263;
 const PREFIX: usize = 345;
 const PREFIX_END: usize = 500;
 
@@ -76,10 +76,16 @@ pub fn listing(reader: &mut Reader<'_>) -> Result<Listing, Refusal> {
     }
 }
 
-/// Whether these bytes begin with a ustar header. The format dispatch asks
-/// this on the object's first block; the checksum is checked in `parse`.
+/// Whether these bytes begin with a ustar header: the magic is exactly
+/// `ustar`, then NUL, then version `00`. Anything else is another format.
+/// The format dispatch asks this on the object's first block; the checksum
+/// is checked in `parse`.
 pub(crate) fn is_header(block: &[u8]) -> bool {
-    block.len() >= MAGIC_END && &block[MAGIC..MAGIC_END - 1] == b"ustar"
+    let magic = block.len() >= PROBE_BYTES as usize
+        && &block[MAGIC..MAGIC + 5] == b"ustar"
+        && block[MAGIC + 5] == 0;
+    let version = block.len() >= PROBE_BYTES as usize && &block[MAGIC + 6..MAGIC + 8] == b"00";
+    magic && version
 }
 
 /// The bytes of one fixed field, cut at its first NUL.
@@ -92,23 +98,32 @@ fn field(block: &[u8], start: usize, end: usize) -> Vec<u8> {
     bytes[..len].to_vec()
 }
 
-/// An octal number: optional leading spaces, octal digits, then NUL or a
-/// space ends the field. Any other byte is not a number.
+/// An octal number: optional leading spaces, one or more octal digits, then
+/// only NUL or space padding to the end of the field. Any other byte is not a
+/// number, and a field with no digits is not one either.
 fn octal(bytes: &[u8]) -> Option<u64> {
     let mut value = 0u64;
-    let mut digits = false;
-    for &byte in bytes {
-        match byte {
-            b'0'..=b'7' => {
-                digits = true;
-                value = value.checked_mul(8)?.checked_add(u64::from(byte - b'0'))?;
-            }
-            b' ' if !digits => continue,
-            0 | b' ' => break,
-            _ => return None,
-        }
+    let mut at = 0usize;
+    while at < bytes.len() && bytes[at] == b' ' {
+        at += 1;
     }
-    digits.then_some(value)
+    let first_digit = at;
+    while at < bytes.len() && matches!(bytes[at], b'0'..=b'7') {
+        value = value
+            .checked_mul(8)?
+            .checked_add(u64::from(bytes[at] - b'0'))?;
+        at += 1;
+    }
+    if at == first_digit {
+        return None;
+    }
+    while at < bytes.len() {
+        if bytes[at] != 0 && bytes[at] != b' ' {
+            return None;
+        }
+        at += 1;
+    }
+    Some(value)
 }
 
 /// The header's checksum, computed with its own field read as spaces.
@@ -121,6 +136,22 @@ fn checksum(block: &[u8]) -> u64 {
                 u64::from(b' ')
             } else {
                 u64::from(byte)
+            }
+        })
+        .sum()
+}
+
+/// The same checksum with each byte read as signed 8-bit, as some writers
+/// store it. The checksum field is spaces here too.
+fn signed_checksum(block: &[u8]) -> i64 {
+    block
+        .iter()
+        .enumerate()
+        .map(|(at, &byte)| {
+            if (CHECKSUM..CHECKSUM_END).contains(&at) {
+                i64::from(b' ')
+            } else {
+                i64::from(byte as i8)
             }
         })
         .sum()
@@ -256,10 +287,24 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
             .into());
         }
         let stored = octal(&block[CHECKSUM..CHECKSUM_END]);
-        if stored != Some(checksum(&block)) {
+        // The stored value is the unsigned byte sum or the signed one; the
+        // checksum field itself counts as spaces in both.
+        let unsigned = checksum(&block);
+        let signed = signed_checksum(&block);
+        let matches = stored == Some(unsigned) || stored.map(|value| value as i64) == Some(signed);
+        if !matches {
             return Err(Refused::new(
                 "header_checksum",
                 format!("the header at {offset} does not match its checksum"),
+            )
+            .into());
+        }
+        // A base-256 size marks the number with its high bit; this reader
+        // reads octal sizes only.
+        if block[SIZE] & 0x80 != 0 {
+            return Err(Refused::new(
+                "size_base256",
+                format!("the header at {offset} has a base-256 size, which is not supported"),
             )
             .into());
         }
