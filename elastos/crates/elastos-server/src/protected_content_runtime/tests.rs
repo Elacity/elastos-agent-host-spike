@@ -1163,6 +1163,22 @@ fn runtime_custody_listing_record_for_test(
     published_at: u64,
 ) -> super::RuntimeCustodyListingRecord {
     let draft = mint_draft_for_composition_journal_test();
+    runtime_custody_listing_record_for_draft(
+        &draft,
+        mint_id,
+        publisher_principal_id,
+        display_name,
+        published_at,
+    )
+}
+
+fn runtime_custody_listing_record_for_draft(
+    draft: &RuntimeMintDraft,
+    mint_id: Digest32,
+    publisher_principal_id: &str,
+    display_name: &str,
+    published_at: u64,
+) -> super::RuntimeCustodyListingRecord {
     let publisher_profile_did = derived_device_key_for_seed(0x66).1;
     let content_id = super::runtime_protected_content_id(draft.encrypted_content()).unwrap();
     let package = super::RuntimePortableListingPackage {
@@ -1249,6 +1265,15 @@ async fn runtime_custody_prebuy_availability_harness(
     provider_seed: u8,
     provider_config: ContentAvailabilityTestConfig,
 ) -> RuntimeCustodyPrebuyAvailabilityHarness {
+    runtime_custody_prebuy_availability_harness_with_policy(provider_seed, provider_config, None)
+        .await
+}
+
+async fn runtime_custody_prebuy_availability_harness_with_policy(
+    provider_seed: u8,
+    provider_config: ContentAvailabilityTestConfig,
+    policy_identity: Option<elastos_protected_content_contracts::RightsPolicyIdentityV1>,
+) -> RuntimeCustodyPrebuyAvailabilityHarness {
     let temp = tempfile::tempdir().unwrap();
     let data_dir = temp.path().join("data");
     owner_only_dir(&data_dir);
@@ -1256,7 +1281,7 @@ async fn runtime_custody_prebuy_availability_harness(
     write_device_key(&data_dir, 0x61);
     write_library_publish_test_composition(&data_dir);
 
-    let mint_draft = mint_draft_for_composition_journal_test();
+    let mint_draft = mint_draft_for_composition_journal_test_with_policy(policy_identity);
     let fixture_now = crate::auth::now_ts();
     let mint_journal = runtime_mint_journal(&data_dir);
     mint_journal.persist_bound(&mint_draft).unwrap();
@@ -1317,7 +1342,8 @@ async fn runtime_custody_prebuy_availability_harness(
     assert_eq!(available.draft().mint_id(), mint_draft.mint_id());
     assert!(available.content_availability().is_some());
 
-    let listing = runtime_custody_listing_record_for_test(
+    let listing = runtime_custody_listing_record_for_draft(
+        &mint_draft,
         mint_draft.mint_id(),
         "person:local:creator",
         "protected-video.mp4",
@@ -2323,8 +2349,8 @@ fn install_profile_authority_keeping_device_key(
     data_dir: &Path,
     principal_id: &str,
 ) -> (String, ProfileIdentityV1) {
-    let proof_binding_id =
-        store_profile_signing_passkey(data_dir, principal_id, "credential-protected-content");
+    let credential_id = format!("credential-protected-content-{principal_id}");
+    let proof_binding_id = store_profile_signing_passkey(data_dir, principal_id, &credential_id);
     crate::auth::store_test_principal_root_protection(data_dir, principal_id);
     let localhost_root = crate::auth::principal_localhost_root(principal_id);
     let profile = crate::collaboration_profile_authority::update_profile_authority(
@@ -3748,7 +3774,7 @@ fn write_chain_provider_config(data_dir: &Path, config: &Value) {
 #[cfg(unix)]
 fn safe_ancestor_tempdir() -> tempfile::TempDir {
     // The media prerequisite import walks every ancestor of the source tool
-    // path and rejects group/world-writable directories. std temp lives under
+    // path and rejects world-writable directories. std temp lives under
     // /tmp (mode 1777) on Linux, so fixtures built there are structurally
     // unsafe; anchor them under the build target dir, whose ancestors are
     // developer- or runner-owned.
@@ -3960,6 +3986,38 @@ fn media_prerequisite_import_is_bounded_private_idempotent_and_never_executes_to
 
 #[cfg(unix)]
 #[test]
+fn media_source_accepts_group_writable_ancestors_and_keeps_file_guards() {
+    let temp = safe_ancestor_tempdir();
+    let shared = temp.path().join("group-shared");
+    owner_only_dir(&shared);
+    let tools = shared.join("tools");
+    owner_only_dir(&tools);
+    let tool = tools.join("ffmpeg");
+    write_media_prerequisite(&tool, b"private executable", 0o700);
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o775)).unwrap();
+    let mut source = super::open_runtime_media_tool(&tools, "ffmpeg").unwrap();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut source.file, &mut bytes).unwrap();
+    assert_eq!(bytes, b"private executable");
+    assert_eq!(fs::metadata(&shared).unwrap().mode() & 0o1777, 0o775);
+    drop(source);
+
+    for mode in [0o720, 0o777] {
+        fs::set_permissions(&tool, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(super::open_runtime_media_tool(&tools, "ffmpeg").is_err());
+        assert_eq!(fs::metadata(&tool).unwrap().mode() & 0o777, mode);
+    }
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    for mode in [0o777, 0o1777] {
+        fs::set_permissions(&shared, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(super::open_runtime_media_tool(&tools, "ffmpeg").is_err());
+        assert_eq!(fs::metadata(&shared).unwrap().mode() & 0o1777, mode);
+    }
+    assert_eq!(fs::read(&tool).unwrap(), b"private executable");
+}
+
+#[cfg(unix)]
+#[test]
 fn media_prerequisite_rejects_missing_unsafe_and_oversized_tools_before_config() {
     let temp = safe_ancestor_tempdir();
     let missing_data = temp.path().join("missing-data");
@@ -4030,7 +4088,7 @@ fn media_prerequisite_rejects_missing_unsafe_and_oversized_tools_before_config()
     owner_only_dir(&unsafe_parent_tools);
     write_media_prerequisite(&unsafe_parent_tools.join("ffmpeg"), b"ffmpeg", 0o700);
     write_media_prerequisite(&unsafe_parent_tools.join("ffprobe"), b"ffprobe", 0o700);
-    fs::set_permissions(&unsafe_parent_tools, fs::Permissions::from_mode(0o775)).unwrap();
+    fs::set_permissions(&unsafe_parent_tools, fs::Permissions::from_mode(0o777)).unwrap();
     let refusal = prepare_runtime_media_provider_prerequisite(
         &unsafe_parent_data,
         &unsafe_parent_tools,
@@ -4038,28 +4096,19 @@ fn media_prerequisite_rejects_missing_unsafe_and_oversized_tools_before_config()
     )
     .unwrap_err()
     .to_string();
-    let fix = format!(
-        "chmod go-w '{}'",
-        fs::canonicalize(&unsafe_parent_tools).unwrap().display()
-    );
     assert!(
         refusal.contains("prerequisite parent is unsafe"),
         "{refusal}"
     );
-    assert!(refusal.contains(&fix), "{refusal}");
-    assert!(std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&fix)
-        .status()
-        .unwrap()
-        .success());
+    assert!(!refusal.contains("chmod"), "{refusal}");
+    assert!(!refusal.contains("chown"), "{refusal}");
     assert_eq!(
         fs::metadata(&unsafe_parent_tools)
             .unwrap()
             .permissions()
             .mode()
             & 0o777,
-        0o755
+        0o777
     );
 
     let linked_data = temp.path().join("linked-data");
@@ -4275,6 +4324,12 @@ fn assert_runtime_custody_transports(
 
 #[cfg(unix)]
 fn mint_draft_for_composition_journal_test() -> RuntimeMintDraft {
+    mint_draft_for_composition_journal_test_with_policy(None)
+}
+
+fn mint_draft_for_composition_journal_test_with_policy(
+    policy_identity: Option<elastos_protected_content_contracts::RightsPolicyIdentityV1>,
+) -> RuntimeMintDraft {
     let epoch = signed_custody_epoch();
     let envelope = custody_envelope_for_media_with_epoch(0x41, &epoch);
     let (init_segment, encrypted_segments) = media_components(0x41);
@@ -4301,7 +4356,7 @@ fn mint_draft_for_composition_journal_test() -> RuntimeMintDraft {
         MEDIA_CODECS_V1,
         content_access_id(0x41),
         envelope.key_envelope_identity().unwrap(),
-        policy_body().policy_identity().unwrap(),
+        policy_identity.unwrap_or_else(|| policy_body().policy_identity().unwrap()),
         envelope.manifest().content_key_commitment(),
         envelope.manifest().threshold(),
         mint_nodes,
@@ -5001,6 +5056,7 @@ fn runtime_custody_composition_loads_valid_owner_only_config_with_local_and_carr
         ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
             peer_did,
             timeout_ms: None,
+            reply_wait_ms: None,
         }) if peer_did == &peer_did_1
     ));
     assert!(matches!(
@@ -5008,6 +5064,7 @@ fn runtime_custody_composition_loads_valid_owner_only_config_with_local_and_carr
         ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
             peer_did,
             timeout_ms: None,
+            reply_wait_ms: None,
         }) if peer_did == &peer_did_2
     ));
 
@@ -5022,10 +5079,12 @@ fn runtime_custody_composition_loads_valid_owner_only_config_with_local_and_carr
             ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
                 peer_did: peer_did_1.clone(),
                 timeout_ms: None,
+                reply_wait_ms: None,
             }),
             ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
                 peer_did: peer_did_2.clone(),
                 timeout_ms: None,
+                reply_wait_ms: None,
             }),
         ],
     );
@@ -5098,6 +5157,7 @@ fn runtime_custody_composition_accepts_three_remote_routes() {
             ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
                 peer_did: actual,
                 timeout_ms: None,
+                reply_wait_ms: None,
             }) if actual == peer_did
         ));
     }
@@ -5112,14 +5172,17 @@ fn runtime_custody_composition_accepts_three_remote_routes() {
             ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
                 peer_did: peers[0].clone(),
                 timeout_ms: None,
+                reply_wait_ms: None,
             }),
             ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
                 peer_did: peers[1].clone(),
                 timeout_ms: None,
+                reply_wait_ms: None,
             }),
             ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
                 peer_did: peers[2].clone(),
                 timeout_ms: None,
+                reply_wait_ms: None,
             }),
         ],
     );
@@ -8397,6 +8460,7 @@ fn media_preparation_source_input(
     root: &Path,
     principal_id: &str,
 ) -> RuntimeCustodyLibrarySourceInput {
+    crate::auth::store_test_human_principal(&root.join("data"), principal_id);
     RuntimeCustodyLibrarySourceInput {
         object_uri: format!(
             "{}/Documents/source.mp4",
@@ -13418,5 +13482,357 @@ async fn runtime_media_preparation_stages_plaintext_from_a_protected_principal_r
     assert_eq!(
         fs::read(staging_root.join(operation_id).join("input.bin")).unwrap(),
         plaintext
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_media_source_uses_the_stored_principal_root() {
+    use crate::auth::{r4_fixture, PrincipalKind};
+    for (kind, root) in [
+        (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+        (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        r4_fixture::store(data_dir, kind);
+        let uri = format!("{root}/Documents/source.mp4");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for ancestor in path
+            .parent()
+            .unwrap()
+            .ancestors()
+            .take_while(|p| *p != data_dir)
+        {
+            fs::set_permissions(ancestor, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(&path, b"stored-root source").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let actual =
+            super::read_runtime_media_source(data_dir, r4_fixture::principal_id(kind), &uri, &path);
+        assert_eq!(
+            actual.as_ref().map(Vec::as_slice).unwrap_or(&[]),
+            b"stored-root source",
+            "{root}: {actual:?}"
+        );
+        r4_fixture::remove(data_dir, r4_fixture::principal_id(kind));
+        let error =
+            super::read_runtime_media_source(data_dir, r4_fixture::principal_id(kind), &uri, &path)
+                .unwrap_err();
+        assert!(error.to_string().contains("input is invalid"), "{error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_custody_profile_uses_the_stored_principal_root() {
+    use crate::auth::{r4_fixture, PrincipalKind};
+    for (kind, root) in [
+        (PrincipalKind::Agent, r4_fixture::AGENT_ROOT),
+        (PrincipalKind::Human, r4_fixture::HUMAN_ROOT),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        owner_only_dir(data_dir);
+        elastos_identity::load_or_create_did(data_dir).unwrap();
+        let (principal_id, profile) = if kind == PrincipalKind::Agent {
+            let agent = crate::auth::valid_agent::plant(data_dir);
+            crate::auth::store_test_principal_root_protection_for(
+                data_dir,
+                &agent.principal_id,
+                root,
+            );
+            let profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+                data_dir,
+                &agent.principal_id,
+                root,
+                "R7 profile",
+                None,
+                crate::auth::now_ts(),
+            )
+            .unwrap();
+            (agent.principal_id, profile)
+        } else {
+            let proof = store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7");
+            r4_fixture::set_kind(data_dir, r4_fixture::ID, kind, root);
+            crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
+            let profile = crate::collaboration_profile_authority::update_profile_authority(
+                data_dir,
+                r4_fixture::ID,
+                root,
+                &proof,
+                "R7 profile",
+                None,
+                crate::auth::now_ts(),
+            )
+            .unwrap();
+            (r4_fixture::ID.to_string(), profile)
+        };
+        let actual = super::load_runtime_custody_profile_did(data_dir, &principal_id);
+        assert_eq!(
+            actual.as_deref().unwrap_or(""),
+            profile.document().profile_did.as_str(),
+            "{root}: {actual:?}"
+        );
+        r4_fixture::remove(data_dir, &principal_id);
+        let error = super::load_runtime_custody_profile_did(data_dir, &principal_id).unwrap_err();
+        assert!(error.to_string().contains("unavailable"), "{error}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_custody_open_uses_the_stored_release_root() {
+    use crate::auth::{r4_fixture, PrincipalKind};
+    let policy = policy_body_for(
+        media_identity(0x41).encrypted_content().clone(),
+        content_access_id(0x41),
+        RightsActionV1::View,
+    );
+    // A recovered Human root is stored verbatim. It is not the id-rule root.
+    let stored_root = "localhost://Users/recovered-release-root";
+    let id_rule_root = "localhost://Users/b2caa01d2e3d5fb2ec0d1478";
+    assert_eq!(
+        crate::auth::principal_localhost_root(r4_fixture::ID).as_str(),
+        id_rule_root
+    );
+    assert_ne!(stored_root, id_rule_root);
+    {
+        let root = stored_root;
+        let harness = runtime_custody_prebuy_availability_harness_with_policy(
+            0x61,
+            ContentAvailabilityTestConfig::accepted_now(),
+            Some(policy.policy_identity().unwrap()),
+        )
+        .await;
+        let data_dir = &harness.data_dir;
+        write_library_publish_test_composition(data_dir);
+        elastos_identity::load_or_create_did(data_dir).unwrap();
+        let proof = store_profile_signing_passkey(data_dir, r4_fixture::ID, "credential-r7-open");
+        crate::auth::store_test_principal_root_protection_for(
+            data_dir,
+            r4_fixture::ID,
+            id_rule_root,
+        );
+        let decoy = crate::collaboration_profile_authority::update_profile_authority(
+            data_dir,
+            r4_fixture::ID,
+            id_rule_root,
+            &proof,
+            "id-rule decoy",
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        r4_fixture::set_kind(data_dir, r4_fixture::ID, PrincipalKind::Human, stored_root);
+        crate::auth::store_test_principal_root_protection_for(data_dir, r4_fixture::ID, root);
+        let profile = crate::collaboration_profile_authority::update_profile_authority(
+            data_dir,
+            r4_fixture::ID,
+            root,
+            &proof,
+            "R7 viewer",
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        assert_ne!(profile.document().profile_did, decoy.document().profile_did);
+        let principal_id = r4_fixture::ID.to_string();
+        let mint = runtime_mint_journal(data_dir)
+            .load(harness.mint_id)
+            .unwrap();
+        persist_runtime_custody_purchase_for_mint(
+            data_dir,
+            &mint,
+            &principal_id,
+            &profile.document().profile_did,
+            crate::auth::now_ts(),
+        );
+        let decrypt = PrepareOnlyCleanupDecryptProvider::with_expected_issuer_seed(0x61);
+        harness
+            .registry
+            .register_runtime_provider_target(PROTECTED_CONTENT_DECRYPT_PROVIDER_ID, decrypt)
+            .await
+            .unwrap();
+        harness
+            .registry
+            .register_sub_provider("wallet", Arc::new(LibraryReleaseWalletProvider))
+            .await
+            .unwrap();
+        let chain = RecordingProvider::new(
+            CHAIN_PROVIDER_ID,
+            ok_provider_response(json!({
+                "schema": CHAIN_PROTECTED_CONTENT_POLICY_SCHEMA_V1,
+                "policy_body": format!("0x{}", hex::encode(policy.canonical_bytes().unwrap())),
+            })),
+        );
+        harness
+            .registry
+            .register_sub_provider(CHAIN_PROVIDER_ID, chain)
+            .await
+            .unwrap();
+        let custody = RecordingProvider::new(CUSTODY_PROVIDER_ID, ok_provider_response(json!({})));
+        harness
+            .registry
+            .register_runtime_provider_target(CUSTODY_PROVIDER_ID, custody.clone())
+            .await
+            .unwrap();
+        let open_input = || super::RuntimeCustodyViewerOpenInput {
+            principal_id: principal_id.clone(),
+            mint_id: hex::encode(harness.mint_id.as_bytes()),
+            launch_id: Some(TEST_VIEWER_LAUNCH_ID.to_string()),
+            proof_binding_id: Some(proof.clone()),
+            session_id: Some("runtime-session:alpha".to_string()),
+            grant_id: Some("grant:alpha".to_string()),
+        };
+        let result =
+            super::open_runtime_custody_viewer(data_dir, harness.registry.clone(), open_input())
+                .await;
+        assert!(
+            result.is_err(),
+            "fixture custody provider refuses after assembly"
+        );
+        let requests = custody.requests().await;
+        assert!(
+            !requests.is_empty(),
+            "{root}: release assembly did not reach custody: {result:?}"
+        );
+        let stored_key = *ProfileIdentityV1::from_did_key(&profile.document().profile_did)
+            .unwrap()
+            .public_key_bytes();
+        let decoy_key = *ProfileIdentityV1::from_did_key(&decoy.document().profile_did)
+            .unwrap()
+            .public_key_bytes();
+        let names_key = |key: [u8; 32]| {
+            requests.iter().any(|request| {
+                let Some(bytes) = request
+                    .get("signed_runtime_release_operation")
+                    .and_then(Value::as_array)
+                else {
+                    return false;
+                };
+                let operation: Vec<u8> = bytes
+                    .iter()
+                    .filter_map(|byte| byte.as_u64().map(|value| value as u8))
+                    .collect();
+                operation.len() == bytes.len()
+                    && operation
+                        .windows(key.len())
+                        .any(|window| window == key.as_slice())
+            })
+        };
+        assert!(
+            names_key(stored_key),
+            "custody request did not name the stored root localhost://Users/recovered-release-root"
+        );
+        assert!(
+            !names_key(decoy_key),
+            "custody request named the id-rule root localhost://Users/b2caa01d2e3d5fb2ec0d1478"
+        );
+        r4_fixture::remove(data_dir, &principal_id);
+        let missing =
+            super::open_runtime_custody_viewer(data_dir, harness.registry.clone(), open_input())
+                .await;
+        assert!(missing.unwrap_err().to_string().contains("unavailable"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_custody_open_for_an_agent_is_refused_before_custody() {
+    use crate::auth::r4_fixture;
+    let policy = policy_body_for(
+        media_identity(0x41).encrypted_content().clone(),
+        content_access_id(0x41),
+        RightsActionV1::View,
+    );
+    let harness = runtime_custody_prebuy_availability_harness_with_policy(
+        0x61,
+        ContentAvailabilityTestConfig::accepted_now(),
+        Some(policy.policy_identity().unwrap()),
+    )
+    .await;
+    let data_dir = &harness.data_dir;
+    write_library_publish_test_composition(data_dir);
+    elastos_identity::load_or_create_did(data_dir).unwrap();
+    let root = r4_fixture::AGENT_ROOT;
+    let agent = crate::auth::valid_agent::plant(data_dir);
+    crate::auth::store_test_principal_root_protection_for(data_dir, &agent.principal_id, root);
+    let profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+        data_dir,
+        &agent.principal_id,
+        root,
+        "R7 viewer",
+        None,
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    let mint = runtime_mint_journal(data_dir)
+        .load(harness.mint_id)
+        .unwrap();
+    persist_runtime_custody_purchase_for_mint(
+        data_dir,
+        &mint,
+        &agent.principal_id,
+        &profile.document().profile_did,
+        crate::auth::now_ts(),
+    );
+    let decrypt = PrepareOnlyCleanupDecryptProvider::with_expected_issuer_seed(0x61);
+    harness
+        .registry
+        .register_runtime_provider_target(PROTECTED_CONTENT_DECRYPT_PROVIDER_ID, decrypt)
+        .await
+        .unwrap();
+    harness
+        .registry
+        .register_sub_provider("wallet", Arc::new(LibraryReleaseWalletProvider))
+        .await
+        .unwrap();
+    let chain = RecordingProvider::new(
+        CHAIN_PROVIDER_ID,
+        ok_provider_response(json!({
+            "schema": CHAIN_PROTECTED_CONTENT_POLICY_SCHEMA_V1,
+            "policy_body": format!("0x{}", hex::encode(policy.canonical_bytes().unwrap())),
+        })),
+    );
+    harness
+        .registry
+        .register_sub_provider(CHAIN_PROVIDER_ID, chain)
+        .await
+        .unwrap();
+    let custody = RecordingProvider::new(CUSTODY_PROVIDER_ID, ok_provider_response(json!({})));
+    harness
+        .registry
+        .register_runtime_provider_target(CUSTODY_PROVIDER_ID, custody.clone())
+        .await
+        .unwrap();
+    let result = super::open_runtime_custody_viewer(
+        data_dir,
+        harness.registry.clone(),
+        super::RuntimeCustodyViewerOpenInput {
+            principal_id: agent.principal_id.clone(),
+            mint_id: hex::encode(harness.mint_id.as_bytes()),
+            launch_id: Some(TEST_VIEWER_LAUNCH_ID.to_string()),
+            proof_binding_id: Some(agent.proof_binding_id.clone()),
+            session_id: Some("runtime-session:alpha".to_string()),
+            grant_id: Some("grant:alpha".to_string()),
+        },
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Runtime custody viewer release approval is unavailable"
+    );
+    assert!(custody.requests().await.is_empty());
+    // v1: an agent has no proof that can authorise a release; see the identity design, open question on agents and protected content.
+    let refused = crate::collaboration_profile_authority::require_profile_authority_passkey_binding(
+        data_dir,
+        &agent.principal_id,
+        Some(&agent.proof_binding_id),
+    );
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "proof-bound passkey session required"
     );
 }

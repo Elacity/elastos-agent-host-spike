@@ -1022,19 +1022,30 @@ impl Controller {
         )?;
         let expected = installed.binary_sha256;
         drop(writer);
+        // Every earlier Home this controller owned has stopped by now. Fixture Homes
+        // bind an ephemeral port instead.
+        #[cfg(not(test))]
+        refuse_browser_home_port_in_use(&self.receipt.data_dir, BROWSER_HOME_PORT)?;
         let generation = hex::encode(rand::random::<[u8; 16]>());
+        println!(
+            "Starting Home. This can take up to {} minutes on a slow computer.",
+            READY_TIMEOUT.as_secs() / 60
+        );
         async {
             self.spawn(
                 &generation,
                 false,
                 &format!("Home {} start", source.installed_version),
             )?;
-            self.wait_ready(
+            let ready = self.wait_ready(
                 &generation,
                 &source.installed_version,
                 &expected,
                 READY_TIMEOUT,
-            )
+            );
+            note_while_starting(ready, |seconds| {
+                println!("Still starting Home ({seconds} s)...")
+            })
             .await
         }
         .await
@@ -1300,6 +1311,10 @@ impl Controller {
                 }
                 .context(crate::update::UpdateSourceUnavailable)?;
                 if cid == choice.head_cid {
+                    // Bytes that differ from the chosen CID may be transport damage: retryable.
+                    crate::update::mismatched(crate::update::verify_release_metadata_cid(
+                        &cid, &bytes,
+                    ))?;
                     crate::update::refused(verify_update_choice(&bytes, &choice, &trusted))?;
                 }
                 Ok(bytes)
@@ -1403,6 +1418,7 @@ impl Controller {
             record.phase,
             RestartPhase::CandidateReady | RestartPhase::PreviousReady
         ) {
+            transaction.repair_restart_support(record.phase == RestartPhase::PreviousReady)?;
             crate::update::verify_restart_support(&transaction)?;
             transaction.finish_restart()?;
             self.finish_request()?;
@@ -1416,6 +1432,7 @@ impl Controller {
         if record.phase == RestartPhase::PreviousRunning {
             // The failed previous generation is gone (proved above); the restored
             // release is started again.
+            transaction.repair_restart_support(true)?;
             transaction.retire_previous_start()?;
         } else {
             transaction.restore_for_restart()?;
@@ -1454,6 +1471,26 @@ impl Controller {
             }
             eprintln!("The previous Home did not start ({error:#}). Trying again.");
             attempt += 1;
+        }
+    }
+}
+
+/// The first start can take most of [`READY_TIMEOUT`] on a slow device (a
+/// Jetson is ready after 49-79 s), so the terminal hears from it on this interval.
+const START_NOTE_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Runs `start`, calling `note` with the seconds waited every [`START_NOTE_INTERVAL`].
+async fn note_while_starting<T>(
+    start: impl std::future::Future<Output = T>,
+    mut note: impl FnMut(u64),
+) -> T {
+    let started = tokio::time::Instant::now();
+    let mut notes = tokio::time::interval_at(started + START_NOTE_INTERVAL, START_NOTE_INTERVAL);
+    tokio::pin!(start);
+    loop {
+        tokio::select! {
+            result = &mut start => return result,
+            _ = notes.tick() => note(started.elapsed().as_secs()),
         }
     }
 }
@@ -1564,7 +1601,6 @@ pub(crate) fn verify_update_choice(
     choice: &UpdateRequest,
     source: &TrustedSource,
 ) -> Result<()> {
-    crate::update::verify_release_metadata_cid(&choice.head_cid, bytes)?;
     let (head, signer) = crate::crypto::verify_release_envelope_against_dids(
         bytes,
         "elastos.release.head.v1",
@@ -1617,7 +1653,7 @@ fn admit_release_digest(signed: &[u8], source: &TrustedSource) -> Result<String>
             && payload["version"].as_str() == Some(source.installed_version.as_str()),
         "Installed signed release version is incompatible."
     );
-    crate::update::verify_source_channel(source, payload["channel"].as_str().unwrap_or(""))?;
+    crate::update::verify_installed_channel(source, payload["channel"].as_str().unwrap_or(""))?;
     let expected = payload["platforms"][crate::update::detect_release_platform()]["binary"]
         ["sha256"]
         .as_str()
@@ -2140,7 +2176,7 @@ pub(crate) async fn finalize_principal_root_backups_after_start(data_dir: PathBu
         match finalize_after_start_attempt(&data_dir).await {
             Ok(Some(removed)) => {
                 if removed > 0 {
-                    tracing::info!(removed, "Verified migration backup payload removed.");
+                    tracing::debug!(removed, "Verified migration backup payload removed.");
                 }
                 return;
             }
@@ -2287,6 +2323,36 @@ async fn response_bytes(response: reqwest::Response, limit: usize) -> Result<Vec
 /// The browser Home always listens here; `home --browser` binds this port.
 pub const BROWSER_HOME_PORT: u16 = 8090;
 
+/// Home binds `localhost`, which names both loopback addresses. A program holding
+/// either one would take Home's browser traffic or leave Home half-bound, so Home
+/// refuses to start. A Runtime that still owns this Home's data is left to the host
+/// lock, which names it.
+pub fn refuse_browser_home_port_in_use(data_dir: &Path, port: u16) -> Result<()> {
+    if crate::host_lock::active_host_process(data_dir)?.is_some() {
+        return Ok(());
+    }
+    let in_use = [
+        std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
+        std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST),
+    ]
+    .into_iter()
+    .any(|ip| {
+        // Same address reuse as Home's own bind, so a closed earlier Home never counts.
+        matches!(
+            std::net::TcpListener::bind((ip, port)),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse
+        )
+    });
+    anyhow::ensure!(!in_use, port_in_use_message(port));
+    Ok(())
+}
+
+fn port_in_use_message(port: u16) -> String {
+    format!(
+        "Home cannot start because another program is using port {port}; run `lsof -i :{port}` to see which one."
+    )
+}
+
 fn approved_home_url(value: &str, port: u16) -> Result<url::Url> {
     anyhow::ensure!(
         ["localhost", "127.0.0.1", "[::1]"]
@@ -2375,4 +2441,4 @@ fn valid_hash(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

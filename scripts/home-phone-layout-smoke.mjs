@@ -19,7 +19,9 @@ import { createServer } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
 
 import { LONG_PRESS_MS } from "../capsules/home-gui/browser/shell-touch.js";
 import { EXTERNAL_LINK_OPEN_GUARD_MS } from "../capsules/home/browser/home-external-link.js";
@@ -52,7 +54,7 @@ const principalId = "did:elastos:fixture-phone-layout";
 // measure the shell around them.
 const FIRST_PARTY_APPS = [
   ["library", "Library", "Browse files and folders"],
-  ["documents", "Documents", "Write and publish markdown"],
+  ["documents", "Documents", "Write Markdown and text documents."],
   ["marketplace", "Marketplace", "Find and install apps"],
   ["system", "System", "Runtime, updates and devices"],
   ["people", "People", "Contacts and trusted peers"],
@@ -596,16 +598,6 @@ async function listen() {
   return `http://127.0.0.1:${address.port}`;
 }
 
-function playwrightSpecifier() {
-  const configured = process.env.ELASTOS_PLAYWRIGHT_MODULE || "";
-  if (configured) {
-    return configured.startsWith("file:") ? configured : pathToFileURL(resolve(configured)).href;
-  }
-  return pathToFileURL(
-    join(repoRoot, "elastos/tools/browser-playwright-engine/node_modules/playwright/index.js"),
-  ).href;
-}
-
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -714,7 +706,42 @@ function geometry() {
   };
 }
 
+// A cold font cache lays text out in the fallback face and a warm cache in
+// Inter, and the two have different metrics. Every capsule declares Inter as
+// an optional face and the fixture serves it with no-store, so this wait
+// cannot warm a later document's cache: it only lets this document's own font
+// load settle before its boxes are read. A frame that is still navigating has
+// no document to settle; the capsule measurements record null for it, while
+// the shell measurement has no catch and fails its check.
+async function waitForDocumentFonts(target) {
+  const timeoutMs = browserWaitTimeoutMs();
+  // A font load that never settles fails the check instead of hanging it.
+  const settled = await target.evaluate(async (limitMs) => {
+    // A frame that is still parsing has no body yet; measure the family the
+    // parsed text uses and keep the wait harmless there.
+    const styled = document.body || document.documentElement;
+    const family = getComputedStyle(styled).fontFamily.split(",")[0].trim();
+    const loading = (async () => {
+      // A family the document does not declare has no face to load; the
+      // measurement then uses the same fallback it always did.
+      if (family) {
+        await document.fonts.load(`16px ${family}`).catch(() => null);
+      }
+      await document.fonts.ready;
+    })();
+    let timer;
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(false), limitMs); });
+    const result = await Promise.race([loading.then(() => true), deadline]);
+    clearTimeout(timer);
+    return result;
+  }, timeoutMs).catch(() => null);
+  if (settled === false) {
+    throw new Error(`document fonts must settle within ${timeoutMs} ms`);
+  }
+}
+
 async function measure(frame, label) {
+  await waitForDocumentFonts(frame);
   const metrics = await frame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX });
   const shape = await frame.evaluate(geometry);
   return { surface: label, ...metrics, geometry: shape };
@@ -860,6 +887,9 @@ async function measureCapsuleFrame(page, target) {
   if (!capsuleFrame) {
     return { capsule: null, capsuleLayout: null };
   }
+  // A frame that is still navigating has no document to settle; the capsule
+  // measurements below already record null in that case.
+  await waitForDocumentFonts(capsuleFrame);
   return {
     capsule: await capsuleFrame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX }).catch(() => null),
     capsuleLayout: await capsuleFrame.evaluate(() => ({
@@ -1225,7 +1255,7 @@ function historyBack(frame) {
 // An app window as Back sees it, and the stage around it.
 function stageWindowState(frame, target) {
   return frame.evaluate(async (target) => {
-    const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
+    const stage = await import(new URL("./shell-phone-stage.js?v=home-20261101d", location.href).href);
     const node = document.querySelector(`.window[data-target="${target}"]`);
     return {
       home: location.href.includes("/apps/home-gui/"),
@@ -1247,8 +1277,8 @@ function homeState(page, frame) {
 // Closes every window of an app through the shell, wherever it is.
 function discardWindows(frame, target) {
   return frame.evaluate(async (target) => {
-    const core = await import(new URL("./shell-core.js?v=home-20260813a", location.href).href);
-    const windows = await import(new URL("./shell-windows.js?v=home-20260813a", location.href).href);
+    const core = await import(new URL("./shell-core.js?v=home-20261101d", location.href).href);
+    const windows = await import(new URL("./shell-windows.js?v=home-20261101d", location.href).href);
     for (const entry of [...core.shellState.windows.values()]) {
       if (entry.targetId === target) {
         await windows.closeWindow(entry.id);
@@ -1320,7 +1350,7 @@ async function probeBackRaces(page, frame) {
       await LAYER_OPENERS[spec.id].open(frame);
       await sleep(SHEET_SETTLE_MS);
       const race = await frame.evaluate(async ({ spec, timeoutMs }) => {
-        const owner = await import(new URL(`./${spec.module}?v=home-20260813a`, location.href).href);
+        const owner = await import(new URL(`./${spec.module}?v=home-20261101d`, location.href).href);
         const leaving = document.querySelector(spec.leaving);
         return new Promise((resolve) => {
           // Added after the shell's own popstate listener, so the shell's Back
@@ -1596,8 +1626,8 @@ async function probeResetOwnerReports(page, frame) {
   const homeUrl = page.url();
   const stageHistory = await frame.evaluate(() => document.body.dataset.stageHistory || "");
   const limits = await frame.evaluate(async () => {
-    const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
-    const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
+    const stage = await import(new URL("./shell-phone-stage.js?v=home-20261101d", location.href).href);
+    const popovers = await import(new URL("./shell-popovers.js?v=home-20261101d", location.href).href);
     return {
       timeoutMs: stage.RESET_HISTORY_TIMEOUT_MS,
       attempts: stage.RESET_HISTORY_ATTEMPTS,
@@ -2163,11 +2193,12 @@ async function runProfile(browser, engineId, profile, origin) {
   } finally {
     await context.close();
   }
-  return { engine: engineId, profile: profile.id, viewport: profile.viewport, viewportMeta, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, inboxOpen: inboxOpenProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, welcomeReach: welcomeReachProbe, externalLink: await runExternalLinkProbe(browser, profile, origin, dir), bootRetries };
+  return { engine: engineId, profile: profile.id, viewport: profile.viewport, viewportMeta, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, inboxOpen: inboxOpenProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, welcomeReach: welcomeReachProbe, externalLink: await runExternalLinkProbe(browser, profile, origin, dir), browserLink: await runBrowserLinkProbe(browser, profile, origin), bootRetries };
 }
 
 // The link probe opens a real new tab, so it runs on its own Home: the layout
-// run above never sees a tab switch.
+// run above never sees a tab switch. That Home has no Browser app, as on
+// Linux, Jetson and Intel Macs, so Open link opens a tab.
 async function runExternalLinkProbe(browser, profile, origin, dir) {
   const context = await browser.newContext({
     viewport: profile.viewport,
@@ -2177,12 +2208,99 @@ async function runExternalLinkProbe(browser, profile, origin, dir) {
     reducedMotion: "reduce",
   });
   try {
+    await context.route((url) => url.pathname === "/api/apps/home/summary", withoutBrowserApp);
     const { page, frame } = await bootHome(context, origin);
     await openWindow(frame, "library");
     return await probeExternalLink(page, dir, "library");
   } finally {
     await context.close();
   }
+}
+
+async function withoutBrowserApp(route) {
+  const response = await route.fetch();
+  const summary = await response.json();
+  summary.targets = summary.targets.filter((target) => target.target !== "browser");
+  await route.fulfill({ response, json: summary });
+}
+
+// On a Home with the Browser app the same sheet says so, and Open in Browser
+// hands the confirmed address to the Browser window as the Assistant does:
+// no tab, and the Browser launch carries exactly that address.
+async function runBrowserLinkProbe(browser, profile, origin) {
+  const context = await browser.newContext({
+    viewport: profile.viewport,
+    deviceScaleFactor: profile.deviceScaleFactor,
+    isMobile: profile.isMobile,
+    hasTouch: profile.hasTouch,
+    reducedMotion: "reduce",
+  });
+  const destinationRequests = [];
+  const browserLaunches = [];
+  context.on("request", (request) => {
+    if (new URL(request.url()).pathname !== "/api/apps/home/launch" || request.method() !== "POST") return;
+    const body = request.postDataJSON();
+    if (body?.target === "browser") browserLaunches.push(body.query || {});
+  });
+  try {
+    await context.route(`${LINK_DESTINATION_ORIGIN}/**`, (route) => {
+      destinationRequests.push(route.request().url());
+      return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Destination</title>" });
+    });
+    const { page, frame } = await bootHome(context, origin);
+    await openWindow(frame, "library");
+    const appFrame = page.frames().find((candidate) => candidate.url().includes("/apps/library/"));
+    assert(appFrame, "Library frame for the Browser link probe");
+    const token = new URLSearchParams(new URL(appFrame.url()).hash.slice(1)).get("home_token");
+    const address = `${LINK_DESTINATION_ORIGIN}/in-browser?q=elastos`;
+    await appFrame.evaluate(({ url, token }) => {
+      window.top.postMessage({ type: "home:open-external", url, homeToken: token }, "*");
+    }, { url: address, token });
+    await page.locator("#home-link-prompt").waitFor({ state: "visible", timeout: BOOT_TIMEOUT_MS });
+    const shown = await page.evaluate(() => ({
+      address: document.querySelector("#home-link-address").textContent,
+      button: document.querySelector("#home-link-open").textContent,
+      copy: document.querySelector("#home-link-copy").textContent,
+    }));
+    await sleep(EXTERNAL_LINK_OPEN_GUARD_MS + 100);
+    const pagesBefore = context.pages().length;
+    await page.locator("#home-link-open").click();
+    await waitFor(
+      () => frame.locator('.window[data-target="browser"]').count().then((count) => count > 0),
+      BOOT_TIMEOUT_MS,
+      "Browser window for the confirmed link",
+    );
+    await sleep(SURFACE_SETTLE_MS);
+    return {
+      address,
+      shown,
+      sheetHidden: await page.evaluate(() => document.querySelector("#home-link-prompt").hidden),
+      newPages: context.pages().length - pagesBefore,
+      browserLaunchUrls: browserLaunches.map((query) => query.url ?? null),
+      destinationRequests,
+    };
+  } finally {
+    await context.close();
+  }
+}
+
+function browserLinkFailures(run) {
+  const probe = run.browserLink;
+  const label = `${run.engine}/${run.profile}/browser-link`;
+  if (!probe) {
+    return [`${label}: the Browser link probe did not run`];
+  }
+  const failures = [];
+  if (probe.shown.address !== probe.address || probe.shown.button !== "Open in Browser" || !/Browser app/.test(probe.shown.copy)) {
+    failures.push(`${label}: the sheet must show the whole address and say it opens in Browser. Got ${JSON.stringify(probe.shown)}`);
+  }
+  if (!probe.sheetHidden || probe.newPages !== 0 || probe.destinationRequests.length !== 0) {
+    failures.push(`${label}: Open in Browser must close the sheet and open no tab. Got ${JSON.stringify(probe)}`);
+  }
+  if (JSON.stringify(probe.browserLaunchUrls) !== JSON.stringify([probe.address])) {
+    failures.push(`${label}: Browser must open exactly the confirmed address, once. Got ${JSON.stringify(probe.browserLaunchUrls)}`);
+  }
+  return failures;
 }
 
 // Open on an Inbox rail entry reaches Home as the host's open-target command
@@ -2935,7 +3053,7 @@ async function probePhoneBack(frame) {
       return;
     }
     await frame.evaluate(async () => {
-      const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
+      const stage = await import(new URL("./shell-phone-stage.js?v=home-20261101d", location.href).href);
       stage.closeTopStageLayer(document);
     });
   };
@@ -2983,8 +3101,8 @@ async function probePhoneBack(frame) {
   // still here. Every Home host surface must be a registered layer, and every
   // registered layer needs an opener below, so Back cannot silently miss one.
   const registry = await frame.evaluate(async () => {
-    const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
-    const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
+    const popovers = await import(new URL("./shell-popovers.js?v=home-20261101d", location.href).href);
+    const stage = await import(new URL("./shell-phone-stage.js?v=home-20261101d", location.href).href);
     const layers = popovers.registeredStageLayers().map(({ id, selector }) => ({ id, selector }));
     const registered = new Set(layers.map((layer) => document.querySelector(layer.selector)).filter(Boolean));
     const unregistered = stage.LAYER_HOST_SELECTORS
@@ -3042,8 +3160,8 @@ async function probePhoneBack(frame) {
   // A fullscreen Space with the bar's identity menu open: Back closes the
   // menu and nothing else; the Space stays fullscreen.
   const fullscreenSetup = await frame.evaluate(async () => {
-    const core = await import(new URL("./shell-core.js?v=home-20260813a", location.href).href);
-    const stages = await import(new URL("./shell-stages.js?v=home-20260813a", location.href).href);
+    const core = await import(new URL("./shell-core.js?v=home-20261101d", location.href).href);
+    const stages = await import(new URL("./shell-stages.js?v=home-20261101d", location.href).href);
     const id = core.shellState.activeWindowId;
     if (!id) {
       return null;
@@ -3053,7 +3171,7 @@ async function probePhoneBack(frame) {
   });
   await sleep(SHEET_SETTLE_MS);
   const readFullscreen = () => frame.evaluate(async (id) => {
-    const stages = await import(new URL("./shell-stages.js?v=home-20260813a", location.href).href);
+    const stages = await import(new URL("./shell-stages.js?v=home-20261101d", location.href).href);
     const active = stages.getActiveStageId();
     return { activeStage: active, fullscreen: Boolean(id) && !stages.isDesktopSpace(active) };
   }, fullscreenSetup?.id || null);
@@ -3066,7 +3184,7 @@ async function probePhoneBack(frame) {
   const fullscreenAfter = { ...(await readFullscreen()), menu: await readLayer(frame, "identity-menu") };
   if (fullscreenSetup) {
     await frame.evaluate(async (id) => {
-      const stages = await import(new URL("./shell-stages.js?v=home-20260813a", location.href).href);
+      const stages = await import(new URL("./shell-stages.js?v=home-20261101d", location.href).href);
       stages.exitFullscreenStage(id);
     }, fullscreenSetup.id);
     await sleep(SHEET_SETTLE_MS);
@@ -3111,8 +3229,8 @@ async function probePhoneBack(frame) {
 // is on screen at all, leaving included), and the layers Back would count.
 function readLayer(frame, id) {
   return frame.evaluate(async (id) => {
-    const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
-    const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
+    const popovers = await import(new URL("./shell-popovers.js?v=home-20261101d", location.href).href);
+    const stage = await import(new URL("./shell-phone-stage.js?v=home-20261101d", location.href).href);
     const layer = popovers.registeredStageLayers().find((entry) => entry.id === id);
     const state = layer ? stage.stageLayerState(layer, document) : "closed";
     return {
@@ -3150,7 +3268,7 @@ function setWelcome(frame, { open, yielded = false }) {
 
 async function callShellModule(frame, file, call) {
   await frame.evaluate(async ({ file, call }) => {
-    const module = await import(new URL(`./${file}?v=home-20260813a`, location.href).href);
+    const module = await import(new URL(`./${file}?v=home-20261101d`, location.href).href);
     module[call]();
   }, { file, call });
 }
@@ -3550,10 +3668,10 @@ function summarize(run) {
 
 async function launchEngine(playwright, engineId) {
   const engine = playwright[engineId];
-  const executable = engineId === "chromium" && process.env.ELASTOS_BROWSER_EXECUTABLE
-    ? process.env.ELASTOS_BROWSER_EXECUTABLE
+  const executable = engineId === "chromium"
+    ? (process.env.ELASTOS_BROWSER_EXECUTABLE || productSmokeLaunchOptions().executablePath)
     : engine.executablePath();
-  if (!existsSync(executable)) {
+  if (!executable || !existsSync(executable)) {
     return null;
   }
   const args = engineId === "chromium"
@@ -3588,8 +3706,7 @@ const report = { generatedAt: new Date().toISOString(), origin, source: sourceTr
 const failures = sourceFailures(report.source);
 const skippedEngines = [];
 try {
-  const imported = await import(playwrightSpecifier());
-  const playwright = imported.default || imported;
+  const playwright = await importProductSmokePlaywright();
   for (const engineId of requestedEngines) {
     assert(engineId === "chromium" || engineId === "webkit", `unsupported engine ${engineId}`);
     const browser = await launchEngine(playwright, engineId);
@@ -3604,7 +3721,7 @@ try {
         }
         const run = await runProfile(browser, engineId, profile, origin);
         report.runs.push(run);
-        failures.push(...shellFailures(run), ...viewportMetaFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run), ...welcomeReachFailures(run), ...backRaceFailures(run), ...externalLinkFailures(run));
+        failures.push(...shellFailures(run), ...viewportMetaFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run), ...welcomeReachFailures(run), ...backRaceFailures(run), ...externalLinkFailures(run), ...browserLinkFailures(run));
         console.log(`[home-phone-layout] ${engineId}/${profile.id} ${summarize(run)}`);
       }
       const closedStream = await runClosedStream(browser, engineId, origin);
@@ -3621,11 +3738,11 @@ try {
   }
   assert(
     report.runs.length > 0,
-    `home-phone-layout-smoke ran no engine; requested ${requestedEngines.join(",")} but none is installed under elastos/tools/browser-playwright-engine`,
+    `home-phone-layout-smoke ran no engine; requested ${requestedEngines.join(",")} but Playwright Chromium is not installed`,
   );
   assert(
     !requestedEngines.includes("chromium") || report.runs.some((run) => run.engine === "chromium"),
-    "home-phone-layout-smoke needs the chromium engine from elastos/tools/browser-playwright-engine",
+    "home-phone-layout-smoke needs Playwright Chromium",
   );
   report.capsuleErrors = capsuleErrors;
   report.consoleErrors = consoleErrors;

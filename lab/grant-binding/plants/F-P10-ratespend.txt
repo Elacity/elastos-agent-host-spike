@@ -2,10 +2,10 @@ id: F-P10-ratespend
 file: src/ops.rs
 test: ops::model_journal_refusal_spends_no_rate
 --- old
-                            return Err(OperateRefuse::JournalHeld);
+                    return Err(OperateRefuse::JournalHeld);
 --- new
-                            if let Some(stored) = self.grants.get_mut(&request.handle) {
-                                stored.record.window_effects += 1;
-                            }
-                            return Err(OperateRefuse::JournalHeld);
+                    if let Some(stored) = self.grants.get_mut(&request.handle) {
+                        stored.record.window_effects += 1;
+                    }
+                    return Err(OperateRefuse::JournalHeld);
 --- end

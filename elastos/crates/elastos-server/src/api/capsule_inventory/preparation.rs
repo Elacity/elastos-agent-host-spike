@@ -4587,6 +4587,45 @@ mod tests {
         )
     }
 
+    fn context_for(principal_id: &str) -> HomeLaunchTokenContext {
+        HomeLaunchTokenContext::for_test(
+            principal_id,
+            "session-1",
+            Some("proof-1".into()),
+            "grant-1",
+        )
+    }
+
+    /// A stored Human principal, as a real launch stores one, with the context
+    /// built from its resolved root.
+    fn stored_context(data_dir: &Path) -> HomeLaunchTokenContext {
+        stored_context_for(
+            data_dir,
+            "person:reservation-fixture",
+            "session-1",
+            Some("proof-1"),
+            "grant-1",
+        )
+    }
+
+    fn stored_context_for(
+        data_dir: &Path,
+        principal_id: &str,
+        session_id: &str,
+        proof_binding_id: Option<&str>,
+        grant_id: &str,
+    ) -> HomeLaunchTokenContext {
+        crate::auth::store_test_human_principal(data_dir, principal_id);
+        let root =
+            crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).unwrap();
+        HomeLaunchTokenContext::resolved(
+            root,
+            session_id.to_string(),
+            proof_binding_id.map(str::to_string),
+            grant_id.to_string(),
+        )
+    }
+
     fn fixture() -> (tempfile::TempDir, String) {
         let root = tempfile::tempdir().unwrap();
         let payload = super::super::tests::model_catalog_fixture();
@@ -5375,7 +5414,7 @@ mod tests {
                 .unwrap();
             retention_intent(root.path(), &context(), &record.package_cid, true).unwrap();
 
-            let context = context();
+            let context = stored_context(root.path());
             let timestamp = now().unwrap();
             crate::auth::store_session_grant(
                 root.path(),
@@ -5383,7 +5422,7 @@ mod tests {
                     schema: AuthSessionGrantV1::SCHEMA.into(),
                     grant_id: context.grant_id.clone(),
                     session_id: context.session_id.clone(),
-                    principal_id: context.principal_id.clone(),
+                    principal_id: context.principal_id().to_string(),
                     proof_binding_id: context.proof_binding_id.clone().unwrap(),
                     issued_at: timestamp,
                     expires_at: timestamp + 3600,
@@ -5403,6 +5442,7 @@ mod tests {
                 collaboration_chat_product_port: None,
                 collaboration_presence_product_port: None,
                 collaboration_discovery_service: None,
+                browser_internet: Default::default(),
                 identity_manager: Arc::new(std::sync::OnceLock::new()),
                 cache_dir: root.path().to_path_buf(),
                 data_dir: root.path().to_path_buf(),
@@ -5472,7 +5512,7 @@ mod tests {
                 let public = serde_json::to_string(readiness).unwrap();
                 for private in [
                     root.path().to_str().unwrap(),
-                    &context.principal_id,
+                    context.principal_id(),
                     "adapter",
                     "inference_ready",
                     "engine_warm",
@@ -5583,7 +5623,7 @@ mod tests {
                     schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
                     grant_id: context.grant_id.clone(),
                     session_id: context.session_id.clone(),
-                    principal_id: context.principal_id.clone(),
+                    principal_id: context.principal_id().to_string(),
                     proof_binding_id: context.proof_binding_id.clone().unwrap(),
                     issued_at: timestamp,
                     expires_at: timestamp + 3600,
@@ -5604,6 +5644,7 @@ mod tests {
                     collaboration_chat_product_port: None,
                     collaboration_presence_product_port: None,
                     collaboration_discovery_service: None,
+                    browser_internet: Default::default(),
                     identity_manager: Arc::new(std::sync::OnceLock::new()),
                     cache_dir: root.to_path_buf(),
                     data_dir: root.to_path_buf(),
@@ -5636,15 +5677,17 @@ mod tests {
             .unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
             let status = response.status();
-            (
-                status,
-                serde_json::from_slice(
-                    &axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                        .await
-                        .unwrap(),
-                )
-                .unwrap(),
-            )
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            // A refusal body is text, not JSON. Return that text so a caller's
+            // status assertion names the refusal instead of a parse panic.
+            let value = if status.is_success() {
+                serde_json::from_slice(&body).unwrap()
+            } else {
+                serde_json::json!({ "unparsed_body": String::from_utf8_lossy(&body) })
+            };
+            (status, value)
         }
 
         async fn drain_readiness_worker(root: &Path) {
@@ -5680,7 +5723,8 @@ mod tests {
             admit(root.path(), &record);
             let _engine = install_engine(root.path());
             let (valid, provider) = readiness_provider(root.path(), &registry).await;
-            let (app, token) = readiness_catalog_app(root.path(), registry, &context());
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry, &stored_context(root.path()));
             let ordinary = readiness_catalog_request(&app, &token, None).await.1["capsules"]
                 .as_array()
                 .unwrap()
@@ -5779,7 +5823,8 @@ mod tests {
             let _engine = install_engine(root.path());
             let (_, provider) = readiness_provider(root.path(), &registry).await;
             retention_intent(root.path(), &context(), &record.package_cid, true).unwrap();
-            let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &context());
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
             for (method, input) in [
                 ("catalog.list", serde_json::json!({})),
                 (
@@ -5808,10 +5853,13 @@ mod tests {
                 assert!(!value.to_string().contains("inference_ready"));
             }
             assert_eq!(provider.calls.lock().unwrap().len(), 2);
-            let mut other = context();
-            other.principal_id = "person:other-reader".into();
-            other.session_id = "session-other".into();
-            other.grant_id = "grant-other".into();
+            let other = stored_context_for(
+                root.path(),
+                "person:other-reader",
+                "session-other",
+                Some("proof-other"),
+                "grant-other",
+            );
             let (other_app, other_token) =
                 readiness_catalog_app(root.path(), registry.clone(), &other);
             let local = root.path().join("capsules/model-fixture");
@@ -5834,7 +5882,7 @@ mod tests {
                 unavailable_model_runtime_projection()
             );
             assert!(!catalog.to_string().contains(&record.operation_id));
-            assert!(!catalog.to_string().contains(&context().principal_id));
+            assert!(!catalog.to_string().contains(context().principal_id()));
             assert_eq!(
                 provider.calls.lock().unwrap().len(),
                 2,
@@ -5923,7 +5971,8 @@ mod tests {
                 })
                 .collect();
             let calls = backend.calls.lock().unwrap().clone();
-            let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &context());
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
             for (strategy, expected) in [
                 ("source-build", serde_json::json!("source_engine_required")),
                 ("local-copy", serde_json::json!("source_engine_required")),
@@ -5994,8 +6043,7 @@ mod tests {
             assert_eq!(invalid["admitted"], true);
             assert_eq!(invalid["dispatch_ready"], false);
             assert!(invalid["dispatch_unavailable_reason"].is_null());
-            let mut other = context();
-            other.principal_id = "person:other-reader".into();
+            let other = context_for("person:other-reader");
             assert_eq!(
                 model_runtime_projection(
                     root.path(),
@@ -6061,7 +6109,8 @@ mod tests {
             admit(root.path(), &record);
             let _engine = install_engine(root.path());
             let (_, provider) = readiness_provider(root.path(), &registry).await;
-            let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &context());
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
             provider.hold.store(true, Ordering::Release);
             let request_app = app.clone();
             let request_token = token.clone();
@@ -6136,7 +6185,8 @@ mod tests {
             payload["entries"][0]["cid"] =
                 serde_json::json!(cid::Cid::new_v1(0x70, hash).to_string());
             write_preparation_catalog(root.path(), &payload);
-            let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &context());
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry.clone(), &stored_context(root.path()));
             let (_, catalog) = readiness_catalog_request(&app, &token, None).await;
             let model = catalog["capsules"]
                 .as_array()
@@ -6152,7 +6202,8 @@ mod tests {
             let second = payload["entries"][0].clone();
             payload["entries"].as_array_mut().unwrap().push(second);
             write_preparation_catalog(root.path(), &payload);
-            let (app, token) = readiness_catalog_app(root.path(), registry, &context());
+            let (app, token) =
+                readiness_catalog_app(root.path(), registry, &stored_context(root.path()));
             let (_, catalog) = readiness_catalog_request(&app, &token, None).await;
             assert_eq!(catalog["model_catalog_state"], "unavailable");
             assert!(catalog["capsules"]
@@ -6533,7 +6584,7 @@ mod tests {
                 .unwrap()
                 .load()
                 .unwrap()
-                .kept(&context().principal_id, &old.package_cid));
+                .kept(context().principal_id(), &old.package_cid));
             let released =
                 retention_intent(root.path(), &context(), &old.package_cid, false).unwrap();
             assert_eq!(released["kept"], false);
@@ -6639,7 +6690,7 @@ mod tests {
                 .load()
                 .unwrap();
             assert_eq!(state.retirement, None);
-            assert!(state.kept(&context().principal_id, &f.old.package_cid));
+            assert!(state.kept(context().principal_id(), &f.old.package_cid));
             assert_eq!(
                 load_operation(f.root.path(), &f.old.operation_id)
                     .unwrap()
@@ -6660,7 +6711,7 @@ mod tests {
                 operation_id: f.old.operation_id.clone(),
                 admission_id: f.old.operation_id.clone(),
                 phase: RetirementPhase::WithdrawalPending,
-                reclaim_principal: Some(context().principal_id),
+                reclaim_principal: Some(context().principal_id().to_string()),
             });
             inventory.save(&state).unwrap();
             drop(inventory);
@@ -6686,7 +6737,7 @@ mod tests {
                 .load()
                 .unwrap();
             assert_eq!(state.retirement, None);
-            assert!(state.kept(&context().principal_id, &f.old.package_cid));
+            assert!(state.kept(context().principal_id(), &f.old.package_cid));
             assert_eq!(
                 load_operation(f.root.path(), &f.old.operation_id)
                     .unwrap()
@@ -6753,8 +6804,8 @@ mod tests {
                 .load()
                 .unwrap();
             assert_eq!(state.retirement, None);
-            assert!(!state.kept(&context().principal_id, &f.old.package_cid));
-            assert!(state.kept(&context().principal_id, &f.pending.package_cid));
+            assert!(!state.kept(context().principal_id(), &f.old.package_cid));
+            assert!(state.kept(context().principal_id(), &f.pending.package_cid));
             assert_eq!(
                 load_operation(f.root.path(), &f.old.operation_id)
                     .unwrap()
@@ -6768,8 +6819,7 @@ mod tests {
         async fn model_owner_reclaim_foreign_keep_refuses_before_withdrawal() {
             let f = retirement_fixture().await;
             retention_intent(f.root.path(), &context(), &f.old.package_cid, true).unwrap();
-            let mut foreign = context();
-            foreign.principal_id = "person:foreign-keeper".into();
+            let foreign = context_for("person:foreign-keeper");
             let inventory = Inventory::open(f.root.path(), false).unwrap();
             let mut state = inventory.load().unwrap();
             let alias = state
@@ -6781,7 +6831,7 @@ mod tests {
                         && record.state == PreparationState::Admitted
                 })
                 .unwrap();
-            alias.request_binding.principal = foreign.principal_id.clone();
+            alias.request_binding.principal = foreign.principal_id().to_string();
             alias.operation_id = operation_id(alias).unwrap();
             inventory.save(&state).unwrap();
             drop(inventory);
@@ -6837,14 +6887,13 @@ mod tests {
             assert_eq!(retirement.phase, RetirementPhase::WithdrawalPending);
             assert_eq!(
                 retirement.reclaim_principal.as_deref(),
-                Some(context().principal_id.as_str())
+                Some(context().principal_id())
             );
-            assert!(state.kept(&context().principal_id, &f.old.package_cid));
+            assert!(state.kept(context().principal_id(), &f.old.package_cid));
             drop(inventory);
             let path = f.root.path().join("model-preparation/state.json");
             let before = std::fs::read(&path).unwrap();
-            let mut foreign = context();
-            foreign.principal_id = "person:new-user-during-removal".into();
+            let foreign = context_for("person:new-user-during-removal");
             let error = reserve(
                 f.root.path(),
                 &caller(&foreign, &method("use")),
@@ -6875,8 +6924,7 @@ mod tests {
         async fn model_owner_reclaim_confirmed_recovery_uses_actual_caller() {
             for startup in [false, true] {
                 let f = retirement_fixture().await;
-                let mut requester = context();
-                requester.principal_id = "person:shared-removal-caller".into();
+                let requester = context_for("person:shared-removal-caller");
                 let inventory = Inventory::open(f.root.path(), false).unwrap();
                 let mut state = inventory.load().unwrap();
                 let alias = state
@@ -6888,7 +6936,7 @@ mod tests {
                             && record.state == PreparationState::Admitted
                     })
                     .unwrap();
-                alias.request_binding.principal = requester.principal_id.clone();
+                alias.request_binding.principal = requester.principal_id().to_string();
                 alias.operation_id = operation_id(alias).unwrap();
                 inventory.save(&state).unwrap();
                 drop(inventory);
@@ -6913,10 +6961,10 @@ mod tests {
                 assert_eq!(retirement.phase, RetirementPhase::Withdrawn);
                 assert_eq!(
                     retirement.reclaim_principal.as_deref(),
-                    Some(requester.principal_id.as_str())
+                    Some(requester.principal_id())
                 );
-                assert_ne!(requester.principal_id, f.old.request_binding.principal);
-                assert!(state.kept(&requester.principal_id, &f.old.package_cid));
+                assert_ne!(requester.principal_id(), f.old.request_binding.principal);
+                assert!(state.kept(requester.principal_id(), &f.old.package_cid));
                 assert!(weights.is_file());
                 std::fs::set_permissions(&weights, std::fs::Permissions::from_mode(0o600)).unwrap();
                 let calls = f.model.calls.lock().unwrap().len();
@@ -6959,8 +7007,8 @@ mod tests {
                     .load()
                     .unwrap();
                 assert!(state.retirement.is_none());
-                assert!(!state.kept(&requester.principal_id, &f.old.package_cid));
-                assert!(state.kept(&context().principal_id, &f.pending.package_cid));
+                assert!(!state.kept(requester.principal_id(), &f.old.package_cid));
+                assert!(state.kept(context().principal_id(), &f.pending.package_cid));
                 assert!(!weights.exists());
                 assert_eq!(
                     f.model.calls.lock().unwrap().len(),
@@ -8494,7 +8542,7 @@ mod tests {
             assert_eq!(actual.extra, expected.extra);
             let current = Inventory::open(root.path(), false).unwrap().load().unwrap();
             assert_eq!(current.records, records);
-            assert!(current.kept(&context().principal_id, &record.package_cid));
+            assert!(current.kept(context().principal_id(), &record.package_cid));
             assert_eq!(
                 backend.calls.lock().unwrap().as_slice(),
                 [
@@ -9179,7 +9227,7 @@ server.serve_forever()
                         serde_json::json!({"schema":"elastos.model.input.text/v1","prompt":prompt});
                     let binding = RuntimeCreateBinding {
                         schema: RUNTIME_CREATE_BINDING_SCHEMA.into(),
-                        principal_id: ctx.principal_id.clone(),
+                        principal_id: ctx.principal_id().to_string(),
                         session_id: ctx.session_id.clone(),
                         capsule_id: "assistant".into(),
                         grant_id: ctx.grant_id.clone(),
@@ -9725,8 +9773,7 @@ server.serve_forever()
             next_cid,
         )
         .is_err());
-        let mut other = context();
-        other.principal_id = "person:another-owner".into();
+        let other = context_for("person:another-owner");
         assert!(status(
             root.path(),
             &caller(&other, &method("status")),
@@ -9844,10 +9891,10 @@ server.serve_forever()
                 .unwrap();
             register_content(&registry, root.path()).await;
 
-            let context = context();
+            let context = stored_context(root.path());
             let grant = AuthSessionGrantV1 {
                 schema: AuthSessionGrantV1::SCHEMA.into(),
-                principal_id: context.principal_id.clone(),
+                principal_id: context.principal_id().to_string(),
                 session_id: context.session_id.clone(),
                 proof_binding_id: context.proof_binding_id.clone().unwrap(),
                 grant_id: context.grant_id.clone(),
@@ -9869,6 +9916,14 @@ server.serve_forever()
             )
             .unwrap();
             assert_eq!(admitted, context);
+            // Independent of the fixture's builder: the stored Human's root is
+            // the one Users path for this id.
+            admitted
+                .root()
+                .owns_object_uri(
+                    "localhost://Users/b7372fffe50885c1dfcd9aaf/Documents/preparation.txt",
+                )
+                .unwrap();
             let path = root.path().to_path_buf();
             let revalidate: Revalidate = Arc::new(move || {
                 if fault == "authority_revoked"
@@ -10000,7 +10055,7 @@ server.serve_forever()
                     .unwrap()
                     .load()
                     .unwrap()
-                    .kept(&context.principal_id, &cid));
+                    .kept(context.principal_id(), &cid));
             }
         }
     }
@@ -10329,39 +10384,73 @@ server.serve_forever()
             )
         }
 
-        fn loopback_listener(address: &str) {
-            let port = address
-                .strip_prefix("/ip4/127.0.0.1/tcp/")
-                .and_then(|port| port.parse::<u16>().ok())
-                .unwrap();
-            assert_ne!(port, 0, "fixture listener must have a bound loopback port");
+        /// The publisher's Home as a Carrier holder answers a model read:
+        /// every bounded read comes from its own offline repo. The Carrier hop
+        /// itself is covered by the `SlowHolderPreparation` tests.
+        struct OfflineRepoHolder {
+            api_port: u16,
+            client: reqwest::Client,
+            reads: std::sync::atomic::AtomicUsize,
         }
 
-        async fn require_peer(
-            kubo: &Path,
-            root: &Path,
-            repo: &Path,
-            expected: &str,
-            deadline: Instant,
-        ) {
-            loop {
-                let peers = run(
-                    command(kubo, root, repo, root, &["swarm", "peers"]),
-                    root,
-                    deadline,
-                )
-                .await;
-                let peers: Vec<_> = peers.lines().collect();
-                if peers.is_empty() {
-                    assert!(Instant::now() < deadline, "fixture peer readiness deadline");
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    continue;
+        #[async_trait::async_trait]
+        impl elastos_runtime::provider::Provider for OfflineRepoHolder {
+            fn name(&self) -> &'static str {
+                "offline-repo-holder-fixture"
+            }
+            fn schemes(&self) -> Vec<&'static str> {
+                vec!["availability"]
+            }
+            async fn handle(
+                &self,
+                _: elastos_runtime::provider::ResourceRequest,
+            ) -> Result<
+                elastos_runtime::provider::ResourceResponse,
+                elastos_runtime::provider::ProviderError,
+            > {
+                panic!("preparation reads availability through send_raw")
+            }
+            async fn send_raw(
+                &self,
+                request: &serde_json::Value,
+            ) -> Result<serde_json::Value, elastos_runtime::provider::ProviderError> {
+                use base64::Engine as _;
+                let failed =
+                    |error: String| elastos_runtime::provider::ProviderError::Provider(error);
+                assert_eq!(request["bounded_read"], true);
+                let arg = format!(
+                    "{}/{}",
+                    request["cid"].as_str().unwrap(),
+                    request["path"].as_str().unwrap()
+                );
+                let range = &request["range"];
+                let (offset, length) = match (range["start"].as_u64(), range["end"].as_u64()) {
+                    (Some(start), Some(end)) => (start, end - start + 1),
+                    _ => (0, request["max_bytes"].as_u64().unwrap()),
+                };
+                let response = self
+                    .client
+                    .post(format!("http://127.0.0.1:{}/api/v0/cat", self.api_port))
+                    .query(&[
+                        ("arg", arg),
+                        ("offline", "true".into()),
+                        ("offset", offset.to_string()),
+                        ("length", length.to_string()),
+                    ])
+                    .send()
+                    .await
+                    .map_err(|error| failed(error.to_string()))?;
+                if !response.status().is_success() {
+                    return Ok(serde_json::json!({"status":"error",
+                        "code":"carrier_fetch_failed", "message":"holder repo miss"}));
                 }
-                assert_eq!(peers.len(), 1, "fixture must have only its exact peer");
-                let (address, peer) = peers[0].rsplit_once("/p2p/").unwrap();
-                loopback_listener(address);
-                assert_eq!(peer, expected);
-                return;
+                let bytes = response
+                    .bytes()
+                    .await
+                    .map_err(|error| failed(error.to_string()))?;
+                self.reads.fetch_add(1, Ordering::AcqRel);
+                Ok(serde_json::json!({"status":"ok",
+                    "data":{"data":base64::engine::general_purpose::STANDARD.encode(bytes)}}))
             }
         }
 
@@ -10369,13 +10458,10 @@ server.serve_forever()
             kubo: &Path,
             root: &Path,
             repo: &Path,
-            cold: bool,
             deadline: Instant,
         ) -> (OwnedChild, File, File, u16) {
-            let mut args = vec!["daemon", "--routing=none", "--enable-gc=false"];
-            if !cold {
-                args.push("--offline");
-            }
+            // As ipfs-provider runs Kubo: offline, a local content store only.
+            let args = ["daemon", "--offline", "--routing=none", "--enable-gc=false"];
             let stdout = tempfile::tempfile_in(root).unwrap();
             let stderr = tempfile::tempfile_in(root).unwrap();
             let mut daemon = OwnedChild(
@@ -10439,7 +10525,7 @@ server.serve_forever()
         }
 
         #[tokio::test]
-        #[ignore = "requires explicit pinned binaries and isolated loopback peers; parent runs cold process proof"]
+        #[ignore = "requires explicit pinned binaries and an isolated offline holder repo; parent runs cold process proof"]
         async fn model_preparation_real_content_native_process_cold_64mib() {
             preparation_process(true).await;
         }
@@ -10561,25 +10647,10 @@ server.serve_forever()
                 config["Bootstrap"] = serde_json::json!([]);
                 config["Addresses"]["API"] = serde_json::json!("/ip4/127.0.0.1/tcp/0");
                 config["Addresses"]["Gateway"] = serde_json::json!("");
-                config["Addresses"]["Swarm"] = if cold {
-                    serde_json::json!(["/ip4/127.0.0.1/tcp/0"])
-                } else {
-                    serde_json::json!([])
-                };
+                config["Addresses"]["Swarm"] = serde_json::json!([]);
                 config["Routing"]["Type"] = serde_json::json!("none");
                 config["Discovery"]["MDNS"]["Enabled"] = serde_json::json!(false);
                 config["AutoConf"]["Enabled"] = serde_json::json!(false);
-                if cold {
-                    config["Swarm"]["DisableNatPortMap"] = serde_json::json!(true);
-                    config["Swarm"]["RelayClient"]["Enabled"] = serde_json::json!(false);
-                    config["Swarm"]["RelayService"]["Enabled"] = serde_json::json!(false);
-                    config["Swarm"]["EnableHolePunching"] = serde_json::json!(false);
-                    config["AutoNAT"]["ServiceMode"] = serde_json::json!("disabled");
-                    config["Swarm"]["Transports"]["Network"] = serde_json::json!({
-                        "TCP":true,"Relay":false,"QUIC":false,"Websocket":false,
-                        "WebTransport":false,"WebRTCDirect":false
-                    });
-                }
                 config["Import"] = proof_import_profile();
                 fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
             }
@@ -10682,7 +10753,7 @@ server.serve_forever()
                     )
                     .await,
                     baseline,
-                    "consumer block set changed before peer connection"
+                    "consumer block set changed before Use"
                 );
             }
             assert!(
@@ -10692,64 +10763,26 @@ server.serve_forever()
             let backend_before = disk_bytes(&repo);
             let seed_disk = disk_bytes(&seed);
             let (mut daemon, stdout, stderr, port) =
-                start_daemon(&kubo, &root_path, &repo, cold, deadline).await;
+                start_daemon(&kubo, &root_path, &repo, deadline).await;
             let mut publisher = if cold {
-                Some(start_daemon(&kubo, &root_path, &publisher_repo, true, deadline).await)
+                Some(start_daemon(&kubo, &root_path, &publisher_repo, deadline).await)
             } else {
                 None
             };
-            let mut peer_ids = Vec::new();
-            if cold {
-                let mut listeners = Vec::new();
-                for fixture_repo in [&repo, &publisher_repo] {
-                    let config: serde_json::Value =
-                        serde_json::from_slice(&fs::read(fixture_repo.join("config")).unwrap())
-                            .unwrap();
-                    peer_ids.push(config["Identity"]["PeerID"].as_str().unwrap().to_owned());
-                    let listener = run(
-                        command(
-                            &kubo,
-                            &root_path,
-                            fixture_repo,
-                            &root_path,
-                            &["swarm", "addrs", "listen"],
-                        ),
-                        &root_path,
-                        deadline,
-                    )
-                    .await;
-                    loopback_listener(&listener);
-                    listeners.push(listener);
-                    assert!(run(
-                        command(
-                            &kubo,
-                            &root_path,
-                            fixture_repo,
-                            &root_path,
-                            &["swarm", "peers"]
-                        ),
-                        &root_path,
-                        deadline
-                    )
-                    .await
-                    .is_empty());
-                }
-                let address = format!("{}/p2p/{}", listeners[1], peer_ids[1]);
-                run(
-                    command(
-                        &kubo,
-                        &root_path,
-                        &repo,
-                        &root_path,
-                        &["swarm", "connect", &address],
-                    ),
-                    &root_path,
-                    deadline,
-                )
-                .await;
-                require_peer(&kubo, &root_path, &repo, &peer_ids[1], deadline).await;
-                require_peer(&kubo, &root_path, &publisher_repo, &peer_ids[0], deadline).await;
-            }
+            // Kubo runs offline, so the consumer's repo never reaches the
+            // publisher's; a cold Get reads every part from the holder.
+            let holder = publisher.as_ref().map(|(_, _, _, api_port)| {
+                Arc::new(OfflineRepoHolder {
+                    api_port: *api_port,
+                    client: reqwest::Client::builder()
+                        .no_proxy()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .timeout(Duration::from_secs(10))
+                        .build()
+                        .unwrap(),
+                    reads: Default::default(),
+                })
+            });
             let setup_ms = setup_started.elapsed().as_millis();
             let publisher_before = if cold && pinned.is_none() {
                 disk_bytes(&publisher_repo)
@@ -10757,7 +10790,8 @@ server.serve_forever()
                 (0, 0)
             };
             fs::write(data.join("ipfs-coords.json"), serde_json::to_vec(&serde_json::json!({
-                "kubo_pid":daemon.0.id(),"api_port":port,"gateway_port":0,"started_at":now().unwrap(),"last_used":now().unwrap()
+                "kubo_pid":daemon.0.id(),"api_port":port,"gateway_port":0,"started_at":now().unwrap(),
+                "last_used":now().unwrap(),"offline":true
             })).unwrap()).unwrap();
             let bridge = Arc::new(
                 ProviderBridge::spawn(
@@ -10782,6 +10816,13 @@ server.serve_forever()
                 .await
                 .unwrap();
             register_content(&registry, &data).await;
+            if let Some(holder) = &holder {
+                registry
+                    .register_sub_provider("availability", holder.clone())
+                    .await
+                    .unwrap();
+            }
+            let test_holder = holder.clone();
             let owner = Arc::new(test_owner());
             let running_owner = owner.clone();
             let test_data = data.clone();
@@ -10914,16 +10955,8 @@ server.serve_forever()
                     publisher_peak.0.max(publisher_after.0),
                     publisher_peak.1.max(publisher_after.1),
                 );
-                if cold && !real_model {
-                    assert!(
-                        backend_after.0 >= backend_before.0 + weights_size as u64,
-                        "cold transfer must grow consumer backend logical bytes"
-                    );
-                    assert!(
-                        backend_after.1 > backend_before.1,
-                        "cold transfer must allocate consumer backend blocks"
-                    );
-                }
+                // A Get stages the package outside Kubo and only hashes it
+                // there, so the consumer's repo need not grow.
                 combined_allocated_peak = combined_allocated_peak
                     .max(admitted_disk.1 + backend_after.1 + publisher_after.1 + seed_disk.1);
                 minimum_free = minimum_free.min(volume_bytes(&test_volume).1);
@@ -10940,7 +10973,14 @@ server.serve_forever()
                         .filter(|(path, _)| *path != "_elastos_object.json")
                         .map(|(_, bytes)| bytes.len().div_ceil(65536))
                         .sum::<usize>();
-                assert_eq!(reads, expected_reads);
+                if let Some(holder) = &test_holder {
+                    // One local miss (repeated once after backend preparation),
+                    // then every part comes from the holder's offline repo.
+                    assert!((1..=2).contains(&reads), "local reads: {reads}");
+                    assert_eq!(holder.reads.load(Ordering::Acquire), expected_reads);
+                } else {
+                    assert_eq!(reads, expected_reads);
+                }
                 // The real engine enables activation composition after admission;
                 // both independently verify the exact stored package CID.
                 let admission_and_activation_hashes = if real_model { 2 } else { 1 };
@@ -11046,6 +11086,7 @@ server.serve_forever()
                 );
                 serde_json::json!({"cold":cold,"setup_ms":setup_ms,"elapsed_preparation_ms":elapsed_ms,
                     "reuse_ms":reuse_ms,"content_reads":reads,
+                    "holder_reads":test_holder.as_ref().map(|holder| holder.reads.load(Ordering::Acquire)),
                     "layout_preflight_bytes":layout_charge,"minimum_sampled_free_bytes":minimum_free,
                     "sample_interval_ms":if real_model {1000} else {10},"samples":samples,"max_sample_gap_ms":max_sample_gap_ms,
                     "test_process_sampled_rss_peak_kib":rss_peak_kib,"inference":inference,
@@ -11089,23 +11130,6 @@ server.serve_forever()
             drop(registry);
             drop(backend);
             drop(bridge);
-            // Perform peer assertions in a task so an assertion still reaches
-            // the exact-child cleanup below.
-            let peer_check = if cold {
-                let kubo = kubo.clone();
-                let root = root_path.clone();
-                let repo = repo.clone();
-                let publisher_repo = publisher_repo.clone();
-                Some(
-                    tokio::spawn(async move {
-                        require_peer(&kubo, &root, &repo, &peer_ids[1], deadline).await;
-                        require_peer(&kubo, &root, &publisher_repo, &peer_ids[0], deadline).await;
-                    })
-                    .await,
-                )
-            } else {
-                None
-            };
             for result in [daemon.0.kill(), daemon.0.wait().map(|_| ())] {
                 if let Err(error) = result {
                     cleanup_errors.push(format!("consumer cleanup: {error}"));
@@ -11133,9 +11157,6 @@ server.serve_forever()
             }
             assert!(cleanup_errors.is_empty(), "{cleanup_errors:?}");
             assert!(!root_path.exists());
-            if let Some(peer_check) = peer_check {
-                peer_check.unwrap();
-            }
             let mut receipt = outcome
                 .expect("production preparation deadline")
                 .expect("production preparation task");
@@ -11143,7 +11164,7 @@ server.serve_forever()
             receipt["native_shutdown_reap"] = serde_json::json!(true);
             receipt["kubo_reaped"] = serde_json::json!(true);
             receipt["kubo_children_reaped"] = serde_json::json!(if cold { 2 } else { 1 });
-            receipt["consumer_package_absent_before_connect"] = serde_json::json!(cold);
+            receipt["consumer_package_absent_before_use"] = serde_json::json!(cold);
             receipt["consumer_init_block"] = serde_json::json!(consumer_baseline);
             if let Some(pinned) = &pinned {
                 // Volume samples replace recursive large-backend scans. Do not
@@ -11171,9 +11192,9 @@ server.serve_forever()
                 );
             }
             receipt["proof_limit"] = serde_json::json!(if pinned.is_some() {
-                "Exact pinned model, isolated publisher-attested catalog, cold loopback Content admission and native model reply/restart. Volume/RSS are samples, not continuous peaks; GUI, installed acceptance and eviction remain open."
+                "Exact pinned model, isolated publisher-attested catalog, cold Get from a holder's offline Kubo through the availability plane, Content admission and native model reply/restart. The Carrier hop is covered by the holder tests. Volume/RSS are samples, not continuous peaks; GUI, installed acceptance and eviction remain open."
             } else if cold {
-                "64 MiB-capped signed synthetic cold loopback delivery through Content/native Use/admission/reuse. Allocations are sampled peaks; whole-buffer fixture memory is harness-only. Public-network, exact pinned models and inference remain open."
+                "64 MiB-capped signed synthetic cold Get: one local miss on the consumer's offline Kubo, then every part from the holder's offline Kubo through the availability plane, Content/native Use/admission/reuse. The Carrier hop is covered by the holder tests. Allocations are sampled peaks; whole-buffer fixture memory is harness-only. Exact pinned models and inference remain open."
             } else {
                 "8 MiB signed synthetic seeded offline Kubo proof through Content/native Use/admission/reuse. Allocations are sampled peaks; whole-buffer fixture memory is harness-only. Cold-network, exact pinned models and inference remain open."
             });
@@ -11862,11 +11883,10 @@ server.serve_forever()
             .unwrap()
             .load()
             .unwrap()
-            .kept(&context().principal_id, &record.package_cid));
+            .kept(context().principal_id(), &record.package_cid));
         let calls = backend.calls.lock().unwrap().clone();
         let path = root.path().join("model-preparation/state.json");
-        let mut foreign = context();
-        foreign.principal_id = "person:other-pending-retention".into();
+        let foreign = context_for("person:other-pending-retention");
         for keep in [true, false] {
             let before = std::fs::read(&path).unwrap();
             assert!(retention_intent(root.path(), &foreign, &record.package_cid, keep).is_err());
@@ -12131,6 +12151,7 @@ server.serve_forever()
             None,
         )
         .await;
+        silent.publish(&cid);
         let holder_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
         let holder = carrier_fixture::start_content_holder_runtime(
             92,
@@ -12138,6 +12159,7 @@ server.serve_forever()
             holder_requests.clone(),
         )
         .await;
+        holder.publish(&cid);
         consumer
             .memory_lookup
             .add_endpoint_info(holder.addr.clone());
@@ -12313,6 +12335,7 @@ server.serve_forever()
         let served = Arc::new(std::sync::Mutex::new(Vec::new()));
         let holder =
             carrier_fixture::start_content_holder_runtime(94, files.clone(), served.clone()).await;
+        holder.publish(&cid);
         consumer
             .memory_lookup
             .add_endpoint_info(holder.addr.clone());
@@ -12511,6 +12534,7 @@ server.serve_forever()
                 behavior,
             )
             .await;
+            holder.publish(&cid);
             consumer
                 .memory_lookup
                 .add_endpoint_info(holder.addr.clone());
@@ -13513,7 +13537,7 @@ server.serve_forever()
         let path = root.path().join("model-preparation/state.json");
         let saved = std::fs::read(&path).unwrap();
         let state: PreparationInventory = serde_json::from_slice(&saved).unwrap();
-        assert!(state.kept(&principal.principal_id, &cid));
+        assert!(state.kept(principal.principal_id(), &cid));
         assert_eq!(state.retention_claims.len(), 1);
         assert_eq!(state.records, vec![record.clone()]);
         assert_eq!(
@@ -13532,7 +13556,7 @@ server.serve_forever()
             .unwrap()
             .load()
             .unwrap()
-            .kept(&principal.principal_id, &cid));
+            .kept(principal.principal_id(), &cid));
     }
 
     #[test]
@@ -13560,7 +13584,7 @@ server.serve_forever()
                 .unwrap()
                 .load()
                 .unwrap()
-                .kept(&context().principal_id, cid));
+                .kept(context().principal_id(), cid));
             let cancelling = terminal.ends_with("cancel");
             let result = manage(
                 root.path(),
@@ -13587,7 +13611,10 @@ server.serve_forever()
             );
             assert_eq!(result.reserved_bytes, 0);
             let inventory = Inventory::open(root.path(), false).unwrap();
-            assert!(!inventory.load().unwrap().kept(&context().principal_id, cid));
+            assert!(!inventory
+                .load()
+                .unwrap()
+                .kept(context().principal_id(), cid));
             drop(inventory);
             let next = reserve(
                 root.path(),
@@ -13598,7 +13625,10 @@ server.serve_forever()
             .unwrap();
             assert_ne!(next.operation_id, record.operation_id);
             let inventory = Inventory::open(root.path(), false).unwrap();
-            assert!(inventory.load().unwrap().kept(&context().principal_id, cid));
+            assert!(inventory
+                .load()
+                .unwrap()
+                .kept(context().principal_id(), cid));
         }
     }
 
@@ -13623,7 +13653,7 @@ server.serve_forever()
                 assert!(inventory
                     .load()
                     .unwrap()
-                    .kept(&context().principal_id, &record.package_cid));
+                    .kept(context().principal_id(), &record.package_cid));
             }
             settle_failure(root.path(), &record.operation_id, true, false).unwrap();
             let settled = load_operation(root.path(), &record.operation_id).unwrap();
@@ -13640,7 +13670,7 @@ server.serve_forever()
             assert!(!inventory
                 .load()
                 .unwrap()
-                .kept(&context().principal_id, &record.package_cid));
+                .kept(context().principal_id(), &record.package_cid));
             assert_eq!(*backend.calls.lock().unwrap(), calls);
         }
     }
@@ -13651,8 +13681,7 @@ server.serve_forever()
         finish_retention_fixture(root.path(), &record, registry).await;
         retention_intent(root.path(), &context(), &record.package_cid, true).unwrap();
         let calls = backend.calls.lock().unwrap().clone();
-        let mut foreign = context();
-        foreign.principal_id = "person:shared-pending-retention".into();
+        let foreign = context_for("person:shared-pending-retention");
         for principal in [context(), foreign] {
             let shared = reserve(
                 root.path(),
@@ -13666,7 +13695,7 @@ server.serve_forever()
                 retention_intent(root.path(), &principal, &record.package_cid, true).unwrap();
             assert_eq!(
                 reply["admitted"],
-                principal.principal_id == context().principal_id
+                principal.principal_id() == context().principal_id()
             );
             cancel(
                 root.path(),
@@ -13676,10 +13705,10 @@ server.serve_forever()
             .unwrap();
             let inventory = Inventory::open(root.path(), false).unwrap();
             let state = inventory.load().unwrap();
-            assert!(state.kept(&context().principal_id, &record.package_cid));
+            assert!(state.kept(context().principal_id(), &record.package_cid));
             assert_eq!(
-                state.kept(&principal.principal_id, &record.package_cid),
-                principal.principal_id == context().principal_id
+                state.kept(principal.principal_id(), &record.package_cid),
+                principal.principal_id() == context().principal_id()
             );
             assert_eq!(state.retention_claims.len(), 1);
             assert!(inventory.admitted(&record.operation_id).is_ok());
@@ -13764,8 +13793,7 @@ server.serve_forever()
         let (root, record, backend, registry) = staged_fixture(now().unwrap(), true).await;
         finish_retention_fixture(root.path(), &record, registry.clone()).await;
         let first = context();
-        let mut second = context();
-        second.principal_id = "person:second-retention".into();
+        let second = context_for("person:second-retention");
         assert!(retention_intent(root.path(), &second, &record.package_cid, true).is_err());
         assert!(retention_intent(root.path(), &second, &record.package_cid, false).is_err());
         retention_intent(root.path(), &first, &record.package_cid, true).unwrap();
@@ -13831,7 +13859,7 @@ server.serve_forever()
         .unwrap();
         assert_eq!(
             saved["retention_claims"],
-            serde_json::json!([{"principal":second.principal_id,"cid":record.package_cid}])
+            serde_json::json!([{"principal":second.principal_id(),"cid":record.package_cid}])
         );
         assert_eq!(
             Inventory::open(root.path(), false)
@@ -13897,8 +13925,7 @@ server.serve_forever()
                 )
                 .is_err());
         }
-        let mut invalid = context();
-        invalid.principal_id.clear();
+        let invalid = context_for("");
         assert!(retention_intent(root.path(), &invalid, &record.package_cid, false).is_err());
         assert!(test_owner()
             .invoke_fixture(
@@ -13950,8 +13977,8 @@ server.serve_forever()
             serde_json::json!([claim, claim]),
             serde_json::json!(vec![claim.clone(); MAX_RECORDS + 1]),
             serde_json::json!([{"principal":"person:foreign","cid":record.package_cid}]),
-            serde_json::json!([{"principal":context().principal_id,"cid":foreign_cid}]),
-            serde_json::json!([{"principal":context().principal_id,"cid":record.package_cid,"keep":true}]),
+            serde_json::json!([{"principal":context().principal_id(),"cid":foreign_cid}]),
+            serde_json::json!([{"principal":context().principal_id(),"cid":record.package_cid,"keep":true}]),
             serde_json::Value::Null,
         ];
         let calls = backend.calls.lock().unwrap().clone();
@@ -14014,8 +14041,7 @@ server.serve_forever()
             )
             .unwrap();
         join_worker(&owner).await;
-        let mut other = context();
-        other.principal_id = "person:other-fixture".into();
+        let other = context_for("person:other-fixture");
         for op in ["status", "cancel"] {
             assert!(owner
                 .invoke_fixture(
@@ -14046,7 +14072,7 @@ server.serve_forever()
         assert_eq!(reused.state, PreparationState::Admitted);
         assert_eq!(reused.admission_id, record.operation_id);
         assert_eq!(reused.reserved_bytes, 0);
-        assert_eq!(reused.request_binding.principal, other.principal_id);
+        assert_eq!(reused.request_binding.principal, other.principal_id());
         assert_eq!(
             reused.request_binding.request_id,
             fixture_request_id(root.path(), "fresh", now().unwrap())
@@ -15471,13 +15497,13 @@ server.serve_forever()
             config["model_catalog"]["head_cid"].as_str().unwrap()
         );
         assert_eq!(reserved.request_binding.request_id, request_id);
-        assert_eq!(reserved.request_binding.principal, context.principal_id);
+        assert_eq!(reserved.request_binding.principal, context.principal_id());
         assert_eq!(reserved.request_binding.capsule, capsule);
         assert_eq!(
             reserved.request_binding,
             esp_request_binding(
                 request_id,
-                &context.principal_id,
+                context.principal_id(),
                 capsule,
                 Some(caller.interface),
                 &use_method.id,

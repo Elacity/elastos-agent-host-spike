@@ -252,6 +252,18 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<String>,
     ) -> Result<CapsuleHandle> {
+        self.run_local_with_signer(path, args, principal_id)
+            .await
+            .map(|(handle, _signer)| handle)
+    }
+
+    /// Load and run a capsule, also returning the signer admission verified.
+    pub(crate) async fn run_local_with_signer(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        principal_id: Option<String>,
+    ) -> Result<(CapsuleHandle, Signer)> {
         // Read manifest
         let manifest_path = path.join("capsule.json");
         let manifest_data = tokio::fs::read_to_string(&manifest_path)
@@ -291,7 +303,7 @@ impl Runtime {
         self.check_provider_dependencies(&manifest).await?;
 
         // Verify signature if verifier is configured
-        let _signer = self.verify_capsule_signature(&manifest, path).await?;
+        let signer = self.verify_capsule_signature(&manifest, path).await?;
         crate::component::validate_component_capsule(path, &manifest).await?;
 
         // Find a compute provider that supports this capsule type
@@ -337,7 +349,7 @@ impl Runtime {
         }
         start?;
 
-        Ok(handle)
+        Ok((handle, signer))
     }
 
     /// Check that all providers required by a capsule are registered
@@ -530,7 +542,7 @@ impl Runtime {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use elastos_common::{
@@ -539,7 +551,9 @@ mod tests {
     };
     use elastos_compute::{CapsuleInfo, ComputeProvider};
     use elastos_runtime::capability::pending::GrantDuration;
-    use elastos_runtime::capability::{CapabilityManager, CapabilityStore, TokenConstraints};
+    use elastos_runtime::capability::{
+        CapabilityManager, CapabilityStore, Settler, TokenConstraints,
+    };
     use elastos_runtime::primitives::audit::{AuditEvent, AuditLog};
     use elastos_runtime::primitives::metrics::MetricsManager;
     use elastos_runtime::provider::{
@@ -553,7 +567,7 @@ mod tests {
         ComponentTypeSection, InstanceType,
     };
 
-    struct NoopComputeProvider;
+    pub(crate) struct NoopComputeProvider;
 
     #[async_trait]
     impl ComputeProvider for NoopComputeProvider {
@@ -665,7 +679,157 @@ mod tests {
         }
     }
 
-    async fn test_runtime() -> (Runtime, tempfile::TempDir) {
+    /// The map the launch entry fills: capsule id to ceiling.
+    type Ceilings = Arc<StdRwLock<HashMap<String, Vec<String>>>>;
+
+    /// Records, when a capsule starts, the ceiling the launch entry filled for it.
+    #[derive(Default)]
+    struct CeilingReadingProvider {
+        ceilings: std::sync::OnceLock<Ceilings>,
+        seen: std::sync::Mutex<Vec<Option<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl ComputeProvider for CeilingReadingProvider {
+        async fn load(&self, _path: &Path, manifest: CapsuleManifest) -> Result<CapsuleHandle> {
+            Ok(CapsuleHandle {
+                id: CapsuleId::new("ceiling-capsule"),
+                manifest,
+                args: Vec::new(),
+            })
+        }
+
+        async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
+            let ceilings = self.ceilings.get().unwrap().read().unwrap();
+            let ceiling = ceilings.get(&handle.id.0).cloned();
+            self.seen.lock().unwrap().push(ceiling);
+            Ok(())
+        }
+
+        async fn stop(&self, _handle: &CapsuleHandle) -> Result<()> {
+            Ok(())
+        }
+
+        async fn status(&self, _handle: &CapsuleHandle) -> Result<CapsuleStatus> {
+            Ok(CapsuleStatus::Running)
+        }
+
+        async fn info(&self, handle: &CapsuleHandle) -> Result<CapsuleInfo> {
+            Ok(CapsuleInfo {
+                id: handle.id.clone(),
+                name: handle.manifest.name.clone(),
+                status: CapsuleStatus::Running,
+                memory_used_mb: 0,
+            })
+        }
+
+        fn supports(&self, _capsule_type: &CapsuleType) -> bool {
+            true
+        }
+    }
+
+    /// The launch entry fills a capsule's ceiling from the bounds function: a
+    /// capability is its ceiling (the control), and a manifest whose only
+    /// authority field is asks is started with an empty one.
+    #[tokio::test]
+    async fn the_launch_entry_starts_a_manifest_with_only_asks_under_an_empty_ceiling() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let provider = Arc::new(CeilingReadingProvider::default());
+        let runtime = Runtime::new(storage, provider.clone());
+        assert!(provider
+            .ceilings
+            .set(runtime.bridge_manifest_capabilities.clone())
+            .is_ok());
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        let dir = temp_dir.path().join("asks-launch");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"vm image bytes").unwrap();
+        let mut with_capability = unsigned_manifest();
+        with_capability.capsule_type = CapsuleType::MicroVM;
+        with_capability.entrypoint = "rootfs.ext4".to_string();
+        let mut with_asks = with_capability.clone();
+        with_capability.capabilities = vec!["elastos://did/*".to_string()];
+        with_asks.asks = vec![elastos_common::ManifestAsk {
+            resource: "elastos://did/*".to_string(),
+            actions: vec![elastos_common::AskAction::Read],
+        }];
+        for manifest in [with_capability, with_asks] {
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            runtime.run_local(&dir, Vec::new()).await.unwrap();
+        }
+        assert_eq!(
+            *provider.seen.lock().unwrap(),
+            vec![Some(vec!["elastos://did/*".to_string()]), Some(Vec::new())]
+        );
+    }
+
+    /// A manifest whose requirement carries a `cid`: a pin. Only
+    /// `PinnedManifest` reads one; every start path parses the ordinary
+    /// manifest type, which refuses the key.
+    pub(crate) const PINNED_MANIFEST: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"microvm","entrypoint":"rootfs.ext4","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    /// The same manifest with the pin taken out: the control of each row.
+    pub(crate) fn unpinned_manifest() -> String {
+        let pin = r#","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy""#;
+        assert_eq!(PINNED_MANIFEST.matches(pin).count(), 1);
+        PINNED_MANIFEST.replace(pin, "")
+    }
+
+    /// Writes a capsule folder holding `manifest` and its entrypoint file.
+    pub(crate) fn write_fixture_capsule(parent: &Path, manifest: &str) -> PathBuf {
+        let dir = parent.join("pinned-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"vm image bytes").unwrap();
+        std::fs::write(dir.join("capsule.json"), manifest).unwrap();
+        dir
+    }
+
+    /// The launch entry stops at its own manifest parse for a pinned
+    /// manifest, before a compute provider loads anything. The same manifest
+    /// without the pin is loaded, so the pin is what stops it.
+    #[tokio::test]
+    async fn the_launch_entry_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let loads = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(
+            storage,
+            Arc::new(CountingComputeProvider {
+                loads: loads.clone(),
+            }),
+        );
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        let dir = write_fixture_capsule(temp_dir.path(), PINNED_MANIFEST);
+        let error = runtime.run_local(&dir, Vec::new()).await.unwrap_err();
+        let expected = "Invalid manifest: Failed to parse capsule.json: unknown field `cid`";
+        assert!(error.to_string().starts_with(expected), "{error}");
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        write_fixture_capsule(temp_dir.path(), &unpinned_manifest());
+        runtime.run_local(&dir, Vec::new()).await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    pub(crate) async fn test_runtime() -> (Runtime, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
             LocalFSProvider::new(temp_dir.path().to_path_buf())
@@ -705,6 +869,7 @@ mod tests {
             window_policy: None,
             model_content: None,
             agent: None,
+            asks: Vec::new(),
             signature: None,
         }
     }
@@ -1364,7 +1529,7 @@ mod tests {
             let pending = next_pending(&fx.pending_store).await;
             assert_eq!(pending.resource.as_str(), journal);
             fx.pending_store
-                .deny_request(pending.id.as_str(), "not now")
+                .deny_request_by(pending.id.as_str(), "not now", Settler::Shell)
                 .await
                 .unwrap();
         }

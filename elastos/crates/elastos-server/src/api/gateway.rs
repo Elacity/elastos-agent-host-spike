@@ -47,11 +47,17 @@ mod gateway_assistant;
 mod gateway_assistant_workspace_v2;
 #[path = "gateway_browser.rs"]
 mod gateway_browser;
+#[path = "gateway_browser_internet.rs"]
+mod gateway_browser_internet;
+#[cfg(test)]
+#[path = "gateway_r3_stored_root_tests.rs"]
+pub(in crate::api) mod r3_stored_root_tests;
 pub(crate) use gateway_browser::gateway_browser_operator::{
     register_browser_operator_sessions, BrowserOperatorService,
 };
 pub(crate) use gateway_browser::gateway_browser_remote::invoke as invoke_remote_browser_engine;
 pub(crate) use gateway_browser::gateway_browser_remote::provider_transport_ready as browser_remote_provider_transport_ready;
+pub(crate) use gateway_browser_internet::BrowserInternetService;
 #[path = "gateway_capsule_catalog.rs"]
 mod gateway_capsule_catalog;
 #[path = "gateway_collaboration_presence.rs"]
@@ -66,6 +72,8 @@ mod gateway_home_agent;
 mod gateway_home_external_link;
 #[path = "gateway_home_runtime.rs"]
 mod gateway_home_runtime;
+#[path = "gateway_home_shared_content.rs"]
+mod gateway_home_shared_content;
 #[path = "gateway_home_system.rs"]
 mod gateway_home_system;
 #[path = "gateway_home_system_ai_provider.rs"]
@@ -90,9 +98,9 @@ mod gateway_model_remote;
 mod gateway_model_service;
 pub(in crate::api) use gateway_model_service::deny_grant_and_settle as deny_model_grant_and_settle;
 pub(crate) use gateway_model_service::{
-    invoke as invoke_remote_model, model_grant_id, ModelServiceGrant, MODEL_GRANT_SCHEMA,
-    MODEL_GRANT_SCOPE, MODEL_GRANT_TTL_SECS, MODEL_LOCAL_OFFER, MODEL_OPERATIONS,
-    MODEL_SERVICE_KIND, MODEL_SERVICE_URI,
+    invoke as invoke_remote_model, model_grant_id, ModelServiceGrant, MODEL_AUTHORITY_TIMEOUT_CODE,
+    MODEL_GRANT_SCHEMA, MODEL_GRANT_SCOPE, MODEL_GRANT_TTL_SECS, MODEL_LOCAL_OFFER,
+    MODEL_OPERATIONS, MODEL_SERVICE_KIND, MODEL_SERVICE_URI,
 };
 #[path = "gateway_origin.rs"]
 mod gateway_origin;
@@ -120,6 +128,7 @@ use gateway_esp::*;
 use gateway_home_external_link::*;
 pub(crate) use gateway_home_runtime::is_wallet_connector_capsule_id;
 use gateway_home_runtime::*;
+use gateway_home_shared_content::*;
 
 pub(crate) fn principal_root_protected_object_inventory(
     localhost_root: &str,
@@ -141,23 +150,26 @@ pub(in crate::api) use gateway_home_system::profile_readiness_for_principal;
 use gateway_home_system::*;
 pub(crate) use gateway_home_system::{
     authorize_home_engine_preparation_cancellation, authorize_home_service_engine,
-    authorize_home_service_exit, sync_runtime_services_mailboxes,
+    authorize_home_service_exit, carrier_source_is_contact_of, sync_runtime_services_mailboxes,
 };
 use gateway_home_terminal::*;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
+#[cfg(test)]
+pub(super) use gateway_home_token::launch_principal_root;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
 pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(super) use gateway_home_token::{
     home_browser_origin, home_launch_token_header, home_session_clear_cookie_header,
     home_session_cookie_header_for_token, issue_home_launch_token_for_auth_grant,
-    issue_home_projection_launch_token_with_context, require_carried_home_launch_token,
-    require_home_launch_token, require_home_launch_token_binding,
-    require_home_launch_token_context, require_home_launch_token_for_any_app_context,
-    require_home_launch_token_for_any_context, require_home_projection_launch_token_context,
-    require_home_runtime_wallet_authority, require_home_token, require_home_token_context,
-    require_home_viewer_launch_token_context, require_internal_shell_launch_grant_for_any_context,
+    issue_home_launch_token_for_verified_grant, issue_home_projection_launch_token_with_context,
+    require_carried_home_launch_token, require_home_launch_token,
+    require_home_launch_token_binding, require_home_launch_token_context,
+    require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
+    require_home_projection_launch_token_context, require_home_runtime_wallet_authority,
+    require_home_token, require_home_token_context, require_home_viewer_launch_token_context,
+    require_internal_shell_launch_grant_for_any_context,
     require_internal_shell_runtime_wallet_authority, require_runtime_wallet_authority,
     runtime_wallet_authority, HomeLaunchContext, RequiredHomeLaunchToken,
 };
@@ -213,6 +225,13 @@ pub(super) use gateway_site::{content_type, validate_file_path};
 use gateway_transaction_effects::*;
 pub(crate) use gateway_wallet::ensure_wallet_connector_configured;
 use gateway_wallet::*;
+
+/// A capsule this Home does not offer is absent everywhere: not served, not
+/// launchable and not in the catalog. Services is hidden until sharing moves
+/// into People; WalletConnect waits for an operator-pinned config.
+pub(crate) fn capsule_is_offered(data_dir: &std::path::Path, name: &str) -> bool {
+    name != SERVICES_CAPSULE_ID && ensure_wallet_connector_configured(data_dir, name).is_ok()
+}
 pub(super) use gateway_wallet_adapter::RuntimeWalletAdapter;
 
 /// Largest single file the gateway serves or Library accepts (100 MiB). Gateway
@@ -260,7 +279,7 @@ const WALLET_PRICE_IDS: &[(&str, &str)] = &[
 pub(crate) const ROOM_SESSION_COOKIE: &str = "room-session";
 pub(crate) const BROWSER_SESSION_COOKIE: &str = "browser-session";
 pub(crate) const HOME_SESSION_COOKIE: &str = "home-session";
-const HOME_LAUNCH_TOKEN_DOMAIN: &str = "elastos.home.launch.v4";
+use crate::auth::HOME_LAUNCH_TOKEN_DOMAIN;
 const HOME_LAUNCH_TOKEN_TTL_SECS: u64 = 12 * 60 * 60;
 const HOME_BROWSER_STATE_SCHEMA: &str = "elastos.home.browser-state/v1";
 const HOME_BROWSER_STATE_MAX_BYTES: usize = 64 * 1024;
@@ -414,7 +433,6 @@ fn home_launch_token_context_from_parts(
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, &auth_data_dir, principal_id)?;
     Ok(HomeLaunchTokenContext::resolved(
         root,
-        principal_id.to_string(),
         session_id.to_string(),
         proof_binding_id,
         grant_id.to_string(),
@@ -493,6 +511,7 @@ struct WalletPricePolicy {
 
 #[derive(Clone)]
 pub struct GatewayState {
+    pub(crate) browser_internet: Arc<BrowserInternetService>,
     pub(crate) carrier_endpoint: Option<iroh::Endpoint>,
     pub provider_registry: Option<Arc<ProviderRegistry>>,
     pub(crate) collaboration_chat_product_port:
@@ -571,6 +590,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
 
     Router::new()
         .merge(user_content)
+        .route(
+            "/api/apps/browser/internet",
+            get(gateway_browser_internet::summary).post(gateway_browser_internet::action),
+        )
         .route("/healthz", get(healthz))
         .route(
             "/api/auth/evm/challenge",
@@ -731,6 +754,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             post(chat_room_contact_request),
         )
         .route(
+            "/api/apps/chat-room/contacts/profile-id",
+            post(chat_room_contact_profile_id),
+        )
+        .route(
             "/api/apps/chat-room/community-presence/request",
             post(chat_room_community_presence_request),
         )
@@ -764,6 +791,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             get(system_summary)
                 .post(system_update_apply)
                 .layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/apps/system/update-channel",
+            post(system_source_switch_channel).layer(DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
             "/api/apps/system/appearance/preferences",
@@ -806,10 +837,6 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/apps/system/ai-provider/staged",
             delete(gateway_home_system_ai_provider::system_ai_provider_discard_staged),
-        )
-        .route(
-            "/api/apps/system/approval-lens",
-            post(gateway_home_system_ai_provider::system_approval_lens_select),
         )
         .route(
             "/api/apps/system/approval-lens/revoke",
@@ -1047,8 +1074,21 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             get(home_background_image),
         )
         .route("/api/apps/home/runtime/ensure", post(home_runtime_ensure))
-        .route("/api/apps/home/launch", post(home_launch))
+        .route(
+            "/api/apps/home/launch",
+            post(|state, headers, input| async move {
+                home_launch(state, headers, input, &crate::setup::detect_platform()).await
+            }),
+        )
         .route("/api/apps/home/external-link", post(home_external_link))
+        .route(
+            "/api/apps/home/shared-content/check",
+            post(home_shared_content_check),
+        )
+        .route(
+            "/api/apps/home/shared-content/get",
+            post(home_shared_content_get),
+        )
         .route(
             "/api/apps/home-cli/terminal/contract",
             get(home_cli_terminal_contract),
@@ -1092,6 +1132,11 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             )),
         )
         .route("/api/apps/marketplace/catalog", get(marketplace_catalog))
+        // Reachable only with a Services token, which Home stops issuing while
+        // Services is hidden (0.8.0; see capsule_is_offered). The share and
+        // request backend stays: Inbox approval, grant use and revocation run on
+        // it, its tests set up grants through these routes, and the 0.8.1 People
+        // rework reuses it.
         .route("/api/apps/services/summary", get(services_summary))
         .route("/api/apps/services/offers", post(services_offer_update))
         .route("/api/apps/inbox/summary", get(inbox_summary))
@@ -1118,6 +1163,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/apps/people/contacts/remove",
             post(people_contact_remove),
+        )
+        .route(
+            "/api/apps/people/contacts/request",
+            post(people_contact_request_create),
         )
         .route("/api/apps/chat-room/summary", get(chat_room_summary))
         .route(
@@ -1188,6 +1237,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/apps/chat-room/objects/send",
             post(room_service_objects_send),
+        )
+        .route(
+            "/api/apps/chat-room/attach-library",
+            post(chat_room_attach_library),
         )
         .route(
             "/api/apps/chat-room/upload/start",
@@ -1274,143 +1327,36 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn landing_page() -> Html<String> {
-    Html(format!(
-        r#"<!DOCTYPE html>
+const LANDING_PAGE_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ElastOS Gateway</title>
+  <meta name="color-scheme" content="light dark" />
+  <title>ElastOS Home</title>
   <style>
-    :root {{
-      --bg: #0c1217;
-      --panel: #111a21;
-      --text: #e9f0f4;
-      --muted: #9bb1bf;
-      --accent: #29b6f6;
-      --ok: #54d66d;
-      --border: #203241;
-    }}
-    body {{
-      margin: 0;
-      font-family: "Segoe UI", "SF Pro Text", system-ui, sans-serif;
-      background: radial-gradient(circle at 20% 0%, #122130 0%, var(--bg) 45%);
-      color: var(--text);
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 1.25rem;
-    }}
-    main {{
-      width: min(820px, 100%);
-      background: linear-gradient(180deg, #111a21 0%, #0f171f 100%);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 1.25rem;
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
-    }}
-    h1 {{
-      margin: 0 0 0.25rem;
-      font-size: 1.5rem;
-    }}
-    .muted {{
-      color: var(--muted);
-      margin: 0.125rem 0 0.75rem;
-    }}
-    .version {{
-      font-size: 0.875rem;
-      color: var(--ok);
-      margin-bottom: 1rem;
-    }}
-    form {{
-      display: flex;
-      gap: 0.5rem;
-      margin: 1rem 0 0.75rem;
-      flex-wrap: wrap;
-    }}
-    input[type="text"] {{
-      flex: 1 1 420px;
-      min-width: 220px;
-      background: #0d141b;
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 0.7rem 0.8rem;
-      font-size: 0.95rem;
-    }}
-    button {{
-      background: var(--accent);
-      color: #05131d;
-      border: 0;
-      border-radius: 10px;
-      padding: 0.7rem 1rem;
-      font-weight: 700;
-      cursor: pointer;
-    }}
-    code {{
-      background: #0c141b;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 0.1rem 0.35rem;
-    }}
-    ul {{
-      margin-top: 0.5rem;
-      color: var(--muted);
-    }}
-    a {{
-      color: var(--accent);
-    }}
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1.5rem; box-sizing: border-box; font-family: system-ui, sans-serif; line-height: 1.5; background: #ffffff; color: #1a1a1a; }
+    main { max-width: 32rem; }
+    h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
+    a { color: #0b57d0; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #121212; color: #ececec; }
+      a { color: #8ab4f8; }
+    }
   </style>
 </head>
 <body>
   <main>
-    <h1>ElastOS Gateway</h1>
-    <p class="muted">Public ElastOS edge for MyWebSite, publisher objects, and read-only CID content.</p>
-    <p class="version">Version {}</p>
-
-    <form id="cid-form">
-      <input id="cid-input" type="text" placeholder="Paste CID, elastos://CID, or gateway URL" autocomplete="off" />
-      <button type="submit">Open</button>
-    </form>
-
-    <p class="muted">URL format: <code>/s/&lt;cid&gt;/</code></p>
-    <ul>
-      <li>Health check: <a href="/healthz">/healthz</a></li>
-      <li>Site root: <code>/</code> from <code>localhost://MyWebSite</code> or a bound Edge target.</li>
-      <li>Publisher objects: <code>/release-head.json</code>, <code>/release.json</code>, <code>/install.sh</code>, <code>/artifacts/...</code></li>
-      <li>Content example: <code>/s/bafy.../</code></li>
-    </ul>
+    <h1>ElastOS Home</h1>
+    <p>This is an ElastOS Home. No public website is available here.</p>
+    <p><a href="https://elastos.elacitylabs.com/">About ElastOS</a></p>
   </main>
-
-  <script>
-    (function () {{
-      function extractCid(input) {{
-        var s = (input || "").trim().replace(/\/+$/, "");
-        if (!s) return "";
-        if (s.startsWith("elastos://")) return s.slice("elastos://".length).split("/")[0];
-        var m1 = s.match(/\/ipfs\/([^\/?#]+)/);
-        if (m1 && m1[1]) return m1[1];
-        var m2 = s.match(/^https?:\/\/([^./]+)\.ipfs\./i);
-        if (m2 && m2[1]) return m2[1];
-        return s;
-      }}
-
-      var form = document.getElementById("cid-form");
-      var input = document.getElementById("cid-input");
-      if (!form || !input) return;
-      form.addEventListener("submit", function (e) {{
-        e.preventDefault();
-        var cid = extractCid(input.value);
-        if (!cid) return;
-        window.location.href = "/s/" + encodeURIComponent(cid) + "/";
-      }});
-    }})();
-  </script>
 </body>
-</html>"#,
-        GATEWAY_VERSION
-    ))
+</html>
+"#;
+
+async fn landing_page() -> Html<String> {
+    Html(LANDING_PAGE_HTML.to_string())
 }
 
 include!("gateway_models.rs");
@@ -1462,6 +1408,10 @@ fn gateway_provider_error_response(scheme: &str, err: anyhow::Error) -> Response
 }
 
 fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode, String) {
+    (gateway_provider_error_status(scheme, &err), err.to_string())
+}
+
+fn gateway_provider_error_status(scheme: &str, err: &anyhow::Error) -> StatusCode {
     let text = err.to_string();
     let unavailable = format!("{scheme} provider unavailable");
     let forbidden = text.contains("home launch token")
@@ -1471,7 +1421,7 @@ fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode
         || text.contains("private host blocked")
         || text.contains("private IP blocked")
         || text.contains("private network");
-    let status = if forbidden {
+    if forbidden {
         StatusCode::FORBIDDEN
     } else if text.contains(&unavailable) {
         StatusCode::SERVICE_UNAVAILABLE
@@ -1486,8 +1436,7 @@ fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
-    };
-    (status, text)
+    }
 }
 
 fn inbox_error_response(err: anyhow::Error) -> Response {
@@ -1614,4 +1563,4 @@ fn home_error_response(err: anyhow::Error) -> Response {
 mod gateway_browser_tests;
 #[cfg(test)]
 #[path = "gateway_tests/mod.rs"]
-mod gateway_tests;
+pub(in crate::api) mod gateway_tests;

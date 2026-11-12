@@ -20,7 +20,7 @@ struct PinnedModel {
     quantized_repository: &'static str,
     quantized_revision: &'static str,
     provenance: &'static str,
-    /// Whole-proof budget: import, loopback transfer, admission, reply/restart.
+    /// Whole-proof budget: import, holder transfer, admission, reply/restart.
     deadline_secs: u64,
     /// Accepts the completed text of the first reply.
     reply_accepts: fn(&str) -> bool,
@@ -745,7 +745,7 @@ async fn pinned_first_reply(
     let input = serde_json::json!({"schema":"elastos.model.input.text/v1","prompt":"Reply with exactly one word: ready."});
     let binding = RuntimeCreateBinding {
         schema: RUNTIME_CREATE_BINDING_SCHEMA.into(),
-        principal_id: ctx.principal_id.clone(),
+        principal_id: ctx.principal_id().to_string(),
         session_id: ctx.session_id.clone(),
         capsule_id: "assistant".into(),
         grant_id: ctx.grant_id.clone(),
@@ -847,7 +847,7 @@ async fn pinned_runs_and_active_cancel(
         "prompt":model.long_prompt});
     let binding = RuntimeCreateBinding {
         schema: RUNTIME_CREATE_BINDING_SCHEMA.into(),
-        principal_id: ctx.principal_id.clone(),
+        principal_id: ctx.principal_id().to_string(),
         session_id: ctx.session_id.clone(),
         capsule_id: "assistant".into(),
         grant_id: ctx.grant_id.clone(),
@@ -1056,7 +1056,7 @@ async fn pinned_reply_and_restart(
         .unwrap()
         .load()
         .unwrap()
-        .kept(&context().principal_id, cid));
+        .kept(context().principal_id(), cid));
     serde_json::json!({"offer_id":offer,"cid":cid,"reply_completed":true,"restart_replay_exact":true,
         "keep_persisted":true,"provider_shutdown_reap":true,"engine_process_group_absence":null,
         "active_text_delta_bytes":proof.active_delta_bytes,"active_cancel_unknown_replay":true,

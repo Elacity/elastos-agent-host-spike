@@ -457,6 +457,15 @@ pub(super) struct RoomSendBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct ChatRoomAttachLibraryBody {
+    uri: String,
+    #[serde(default)]
+    if_revision: Option<String>,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ChatRoomAccessPolicyBody {
     allow_guest_invites: bool,
     allow_member_invites: bool,
@@ -755,11 +764,15 @@ pub(super) async fn chat_room_session_start(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
-    let context =
-        match require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID) {
-            Ok(context) => context,
-            Err(err) => return room_service_error_response(err),
-        };
+    let launch = match gateway_home_token::require_home_launch_grant(
+        &state.data_dir,
+        &headers,
+        CHAT_ROOM_CAPSULE_ID,
+    ) {
+        Ok(context) => context,
+        Err(err) => return room_service_error_response(err),
+    };
+    let context = launch.context.clone();
     // Chat asks once, on Community open; a refusal or an open card is kept.
     let _ = gateway_collaboration_presence::request_community_presence(&state, &context, false);
     let community_presence =
@@ -775,9 +788,9 @@ pub(super) async fn chat_room_session_start(
     };
     match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let output = if port.is_some() {
-            start_configured_chat_room_session(&data_dir, &context)?
+            start_configured_chat_room_session(&data_dir, &launch)?
         } else {
-            start_chat_room_session(&data_dir, &context)?
+            start_chat_room_session(&data_dir, &launch)?
         };
         let configured = port.is_some();
         let mut poll = match port {
@@ -813,9 +826,7 @@ pub(super) async fn chat_room_session_start(
             );
             apply_profile_attribution_to_room_poll(&mut poll, &names);
             cards = Some(participant_card_directory(
-                authority.as_ref(),
                 read_snapshot.as_ref(),
-                discovery_service.as_ref(),
                 presence_snapshot.as_ref(),
                 local_identity.as_ref().map(|(did, _)| did.as_str()),
             ));
@@ -1280,8 +1291,9 @@ struct ChatRoomSessionGrant {
 
 fn start_chat_room_session(
     data_dir: &std::path::Path,
-    context: &HomeLaunchTokenContext,
+    launch: &RequiredHomeLaunchToken,
 ) -> anyhow::Result<ChatRoomSessionGrant> {
+    let context = &launch.context;
     let (did, handle) = trusted_local_chat_room_principal(data_dir, context)?;
     let session = crate::room_service::start_local_principal_runtime_session(
         data_dir,
@@ -1289,14 +1301,16 @@ fn start_chat_room_session(
         context.principal_id(),
         &handle,
         "ElastOS shell",
+        &room_session_authorization(launch),
     )?;
     Ok(chat_room_session_grant(session))
 }
 
 fn start_configured_chat_room_session(
     data_dir: &std::path::Path,
-    context: &HomeLaunchTokenContext,
+    launch: &RequiredHomeLaunchToken,
 ) -> anyhow::Result<ChatRoomSessionGrant> {
+    let context = &launch.context;
     let (did, handle) = trusted_configured_chat_profile(data_dir, context)?;
     let session = crate::room_service::start_configured_collaboration_principal_session(
         data_dir,
@@ -1304,8 +1318,22 @@ fn start_configured_chat_room_session(
         context.principal_id(),
         &handle,
         "ElastOS shell",
+        &room_session_authorization(launch),
     )?;
     Ok(chat_room_session_grant(session))
+}
+
+fn room_session_authorization(
+    launch: &RequiredHomeLaunchToken,
+) -> crate::room_service::RoomSessionAuthorization {
+    crate::room_service::RoomSessionAuthorization {
+        principal_id: launch.context.principal_id().to_string(),
+        session_id: launch.context.session_id.clone(),
+        proof_binding_id: launch.context.proof_binding_id.clone(),
+        grant_id: launch.context.grant_id.clone(),
+        authority_actor: launch.launch_context.authority_actor.clone(),
+        expires_at: launch.expires_at,
+    }
 }
 
 fn trusted_local_chat_room_principal(
@@ -1334,11 +1362,11 @@ pub(super) fn trusted_chat_room_profile_authority(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument> {
-    let localhost_root = crate::auth::principal_localhost_root(context.principal_id());
+    let localhost_root = context.root().localhost_root();
     crate::collaboration_profile_authority::load_profile_authority(
         data_dir,
         context.principal_id(),
-        &localhost_root,
+        localhost_root,
     )?
     .ok_or_else(|| anyhow::anyhow!("signed Profile is unavailable"))
 }
@@ -1553,14 +1581,10 @@ fn room_local_profile_identity(
 }
 
 /// Collects the relationship facts behind Community profile cards from this
-/// principal's signed contact store and current Discovery view.
+/// principal's signed contact store.
 fn participant_card_directory(
-    authority: Option<&gateway_home_system::ConfiguredContactAuthority>,
     read_snapshot: Option<
         &crate::collaboration_contact_store::CollaborationContactReadSnapshot<'_>,
-    >,
-    discovery_service: Option<
-        &crate::collaboration_discovery_runtime::CollaborationDiscoveryService,
     >,
     presence_snapshot: Option<&crate::collaboration_presence::CollaborationPresenceSnapshot>,
     local_profile_did: Option<&str>,
@@ -1593,24 +1617,67 @@ fn participant_card_directory(
                 });
         }
     }
-    let Some(authority) = authority else {
-        return directory;
-    };
-    let Some(store) = read_snapshot else {
-        return directory;
-    };
-    directory.relationships = gateway_home_system::contact_relationships(store, now);
-    if let Some(service) = discovery_service {
-        if let Ok(status) = service.read_only_status_from_snapshot(store, &authority.profile, now) {
-            directory.discoverable = status
-                .visible_people()
-                .iter()
-                .map(|person| person.profile_did().to_string())
-                .collect();
-        }
+    if let Some(store) = read_snapshot {
+        directory.relationships = gateway_home_system::contact_relationships(store, now);
     }
     directory
 }
+
+/// The signed Profile display names this Home holds for Community members,
+/// by Profile DID: unexpired presence first (the newest name), then verified
+/// Community posts. These are the people and names Chat profile cards show.
+pub(super) async fn community_member_names(
+    state: &GatewayState,
+    now: u64,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut names = std::collections::HashMap::new();
+    if let Some(port) = state.collaboration_chat_product_port.as_ref() {
+        let (network_id, conversation_id) = port.history_scope();
+        let (network_id, conversation_id) = (network_id.to_string(), conversation_id.to_string());
+        let data_dir = state.data_dir.clone();
+        names.extend(
+            tokio::task::spawn_blocking(move || {
+                crate::room_service::collaboration_verified_members(
+                    &data_dir,
+                    &network_id,
+                    &conversation_id,
+                )
+            })
+            .await??,
+        );
+    }
+    if let Some(port) = state.collaboration_presence_product_port.as_ref() {
+        if let Ok(snapshot) = port.authorized_snapshot(now).await {
+            for record in snapshot
+                .records()
+                .iter()
+                .filter(|record| record.expires_at() > now)
+            {
+                names.insert(
+                    record.sender_profile_did().to_string(),
+                    record.display_name().to_string(),
+                );
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// The Profile DID behind a card's opaque reference, among the people the
+/// card directory lists: verified posters in this Community and members
+/// whose Home announced presence. Any other reference resolves to nothing,
+/// so Chat acts only on people it shows.
+async fn resolve_participant_ref(
+    state: &GatewayState,
+    participant_ref: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(community_member_names(state, now_ts())
+        .await?
+        .into_keys()
+        .find(|member_did| home_people_contact_id(member_did) == participant_ref))
+}
+
+const PARTICIPANT_NOT_LISTED: &str = "This person is no longer listed in Community.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1619,15 +1686,17 @@ pub(super) struct ChatRoomContactRequestBody {
 }
 
 /// Sends a contact request to a Community participant chosen on their
-/// profile card. The request binds to that person's signed Discovery
-/// advertisement, and they accept or decline it in Inbox.
+/// profile card, with or without Discovery, and answers like People's
+/// request by DID: `{status, message}`. They accept or decline it in
+/// Inbox. A person visible in Discovery gets the request bound to their
+/// listing, which an alpha.25 Home can still receive.
 pub(super) async fn chat_room_contact_request(
     State(state): State<GatewayState>,
     headers: HeaderMap,
     Json(body): Json<ChatRoomContactRequestBody>,
 ) -> Response {
     // The Chat session comes first, so a refused caller learns nothing about
-    // this Home's Discovery setup.
+    // this Home's contacts.
     let context =
         match require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID) {
             Ok(context) => context,
@@ -1665,28 +1734,77 @@ pub(super) async fn chat_room_contact_request(
             crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL
         ));
     }
-    let Some(advertisement_id) = status
+    let community_names = match community_member_names(&state, now).await {
+        Ok(names) => names,
+        Err(err) => return room_service_error_response(err),
+    };
+    let Some(member_did) = community_names
+        .keys()
+        .find(|member_did| home_people_contact_id(member_did) == body.participant_ref)
+        .cloned()
+    else {
+        return (StatusCode::CONFLICT, PARTICIPANT_NOT_LISTED).into_response();
+    };
+    let addable =
+        matches!(
+        authority
+            .store
+            .read_only_snapshot()
+            .and_then(|read| read.relationship_with(&member_did, now)),
+        Ok(crate::collaboration_contact_store::CollaborationContactRelationship::None
+            | crate::collaboration_contact_store::CollaborationContactRelationship::Removed { .. }
+            | crate::collaboration_contact_store::CollaborationContactRelationship::Declined)
+    );
+    let listed = status
         .visible_people()
         .iter()
-        .find(|person| home_people_contact_id(person.profile_did()) == body.participant_ref)
-        .map(|person| person.advertisement_id().to_string())
-    else {
-        return (
-            StatusCode::CONFLICT,
-            "Ask them to turn on Discovery, then try again. Both of you need Discovery on to add a contact.",
-        )
-            .into_response();
-    };
-    match service
-        .send_contact_request(
-            authority.store.as_ref(),
-            &advertisement_id,
-            &authority.profile,
-            now,
-        )
-        .await
+        .find(|person| person.profile_did() == member_did);
+    if let (true, Some(person)) = (addable, listed) {
+        return match service
+            .send_contact_request(
+                authority.store.as_ref(),
+                person.advertisement_id(),
+                &authority.profile,
+                now,
+            )
+            .await
+        {
+            Ok(()) => gateway_home_system::contact_request_answer(
+                &crate::collaboration_discovery_runtime::ProfileContactRequestOutcome::Requested,
+                Some(person.display_name()),
+            ),
+            Err(err) => room_service_error_response(err),
+        };
+    }
+    gateway_home_system::send_profile_contact_request_response(
+        &service,
+        &state,
+        &community_names,
+        &context,
+        &authority,
+        &member_did,
+    )
+    .await
+}
+
+/// `POST /api/apps/chat-room/contacts/profile-id {participant_ref}` →
+/// `{profile_id}`: the DID of a person Chat lists, released only when
+/// someone asks to copy it from that person's card.
+pub(super) async fn chat_room_contact_profile_id(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(body): Json<ChatRoomContactRequestBody>,
+) -> Response {
+    if let Err(err) =
+        require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID)
     {
-        Ok(()) => Json(serde_json::json!({ "status": "requested" })).into_response(),
+        return room_service_error_response(err);
+    }
+    match resolve_participant_ref(&state, &body.participant_ref).await {
+        Ok(Some(profile_id)) => {
+            Json(serde_json::json!({ "profile_id": profile_id })).into_response()
+        }
+        Ok(None) => (StatusCode::CONFLICT, PARTICIPANT_NOT_LISTED).into_response(),
         Err(err) => room_service_error_response(err),
     }
 }
@@ -1777,11 +1895,16 @@ pub(super) async fn room_service_session_leave(
     let secure = request_uses_tls(&headers);
     let data_dir = state.data_dir.clone();
     if state.collaboration_chat_product_port.is_some() {
-        let context =
-            match require_home_launch_token_context(&data_dir, &headers, CHAT_ROOM_CAPSULE_ID) {
-                Ok(context) => context,
-                Err(err) => return room_service_error_response(err),
-            };
+        let launch = match gateway_home_token::require_home_launch_grant(
+            &data_dir,
+            &headers,
+            CHAT_ROOM_CAPSULE_ID,
+        ) {
+            Ok(context) => context,
+            Err(err) => return room_service_error_response(err),
+        };
+        let context = launch.context.clone();
+        let authorization = room_session_authorization(&launch);
         let (did, _) = match trusted_configured_chat_profile(&data_dir, &context) {
             Ok(principal) => principal,
             Err(err) => return room_service_error_response(err),
@@ -1792,6 +1915,7 @@ pub(super) async fn room_service_session_leave(
                 &data_dir,
                 &did,
                 &principal_id,
+                &authorization,
             )
         })
         .await;
@@ -1862,7 +1986,7 @@ pub(super) async fn room_service_poll(
     let mut reader_profile = None;
     let token = match port.as_ref() {
         Some(_) => {
-            let context = match require_home_launch_token_context(
+            let launch = match gateway_home_token::require_home_launch_grant(
                 &data_dir,
                 &headers,
                 CHAT_ROOM_CAPSULE_ID,
@@ -1870,6 +1994,7 @@ pub(super) async fn room_service_poll(
                 Ok(context) => context,
                 Err(err) => return room_service_error_response(err),
             };
+            let context = launch.context.clone();
             launch_context = Some(context.clone());
             let profile = match trusted_chat_room_profile_authority(&data_dir, &context) {
                 Ok(profile) => profile,
@@ -1882,6 +2007,7 @@ pub(super) async fn room_service_poll(
                     &data_dir,
                     &did,
                     context.principal_id(),
+                    &room_session_authorization(&launch),
                 ) {
                     Ok(session) => session,
                     Err(err) => return room_service_error_response(err),
@@ -1958,9 +2084,7 @@ pub(super) async fn room_service_poll(
             );
             apply_profile_attribution_to_room_poll(&mut poll, &names);
             cards = Some(participant_card_directory(
-                authority.as_ref(),
                 read_snapshot.as_ref(),
-                discovery_service.as_ref(),
                 presence_snapshot.as_ref(),
                 local_identity.as_ref().map(|(did, _)| did.as_str()),
             ));
@@ -1993,15 +2117,20 @@ pub(super) async fn room_service_objects_send(
     }
     let data_dir = state.data_dir.clone();
     let port = state.collaboration_chat_product_port.clone();
-    let context = match port.as_ref() {
+    let launch = match port.as_ref() {
         Some(_) => {
-            match require_home_launch_token_context(&data_dir, &headers, CHAT_ROOM_CAPSULE_ID) {
+            match gateway_home_token::require_home_launch_grant(
+                &data_dir,
+                &headers,
+                CHAT_ROOM_CAPSULE_ID,
+            ) {
                 Ok(context) => Some(context),
                 Err(err) => return room_service_error_response(err),
             }
         }
         None => None,
     };
+    let context = launch.as_ref().map(|launch| launch.context.clone());
     let profile = match context.as_ref() {
         Some(context) => {
             match gateway_home_system::load_profile_authority_for_context(&data_dir, context) {
@@ -2016,8 +2145,8 @@ pub(super) async fn room_service_objects_send(
         }
         None => None,
     };
-    let token = match context.as_ref() {
-        Some(context) => match start_configured_chat_room_session(&data_dir, context) {
+    let token = match launch.as_ref() {
+        Some(launch) => match start_configured_chat_room_session(&data_dir, launch) {
             Ok(session) => session.token,
             Err(err) => return room_service_error_response(err),
         },
@@ -2133,6 +2262,235 @@ pub(super) async fn room_service_upload_finish(
         Ok(Err(err)) => room_service_error_response(err),
         Err(err) => room_service_join_error_response(err),
     }
+}
+
+#[cfg(test)]
+mod community_file_post_tests {
+    #[test]
+    fn a_file_post_is_one_exact_line_within_the_body_limit() {
+        let cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+        let (body, name) = super::community_file_post("a\nb\tc.txt", 30, cid);
+        assert_eq!(body, format!("a b c.txt · 30 bytes · elastos://{cid}"));
+        assert_eq!(name, "a b c.txt");
+        let long = "x".repeat(2_100);
+        let (body, name) = super::community_file_post(&long, 3_565_158, cid);
+        assert_eq!(
+            body.chars().count(),
+            crate::room_service::MAX_OBJECT_BODY_LEN
+        );
+        assert!(name.ends_with('…'));
+        assert!(body.ends_with(&format!(" · 3.4 MB · elastos://{cid}")));
+        let (body, _) = super::community_file_post(&"y".repeat(300), 1024, cid);
+        assert_eq!(
+            body,
+            format!("{} · 1.0 KB · elastos://{cid}", "y".repeat(300))
+        );
+    }
+}
+
+/// The Community post for one attached file: `<name> · <size> · elastos://<cid>`,
+/// one line, within the Chat body limit (the name gives way).
+fn community_file_post(name: &str, size_bytes: u64, cid: &str) -> (String, String) {
+    let name: String = name
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let name = if name.is_empty() {
+        "file".to_string()
+    } else {
+        name
+    };
+    let tail = format!(
+        " · {} · elastos://{cid}",
+        format_shared_file_size(size_bytes)
+    );
+    let room = crate::room_service::MAX_OBJECT_BODY_LEN.saturating_sub(tail.chars().count());
+    let name = if name.chars().count() > room {
+        let mut short: String = name.chars().take(room.saturating_sub(1)).collect();
+        short.push('…');
+        short
+    } else {
+        name
+    };
+    (format!("{name}{tail}"), name)
+}
+
+/// Community attach: the sender's own Library file goes through the one
+/// Library publish (pinned on this Home only, Published in Library, withdrawn
+/// with Unpublish), then its link is posted through the normal signed Chat
+/// send. A post that fails keeps the publication: the same `request_id` posts
+/// it again without publishing anything new.
+pub(super) async fn chat_room_attach_library(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(body): Json<ChatRoomAttachLibraryBody>,
+) -> Response {
+    if let Err(err) = validate_room_send_request_id(&body.request_id) {
+        return attach_library_response(
+            StatusCode::BAD_REQUEST,
+            None,
+            attach_library_error_body("invalid_request", &err.to_string()),
+        );
+    }
+    let data_dir = state.data_dir.clone();
+    let (Some(port), Some(registry)) = (
+        state.collaboration_chat_product_port.clone(),
+        state.provider_registry.clone(),
+    ) else {
+        return attach_library_response(
+            StatusCode::CONFLICT,
+            None,
+            attach_library_error_body("unsupported", "Files can be posted only in Community."),
+        );
+    };
+    let launch = match gateway_home_token::require_home_launch_grant(
+        &data_dir,
+        &headers,
+        CHAT_ROOM_CAPSULE_ID,
+    ) {
+        Ok(context) => context,
+        Err(err) => return attach_library_chat_error(err),
+    };
+    let context = launch.context.clone();
+    let profile = match gateway_home_system::load_profile_authority_for_context(&data_dir, &context)
+    {
+        Ok(Some(profile)) => profile,
+        Ok(None) => {
+            return attach_library_chat_error(anyhow::anyhow!("Chat requires a signed Profile"))
+        }
+        Err(err) => return attach_library_chat_error(err),
+    };
+    let token = match start_configured_chat_room_session(&data_dir, &launch) {
+        Ok(session) => session.token,
+        Err(err) => return attach_library_chat_error(err),
+    };
+    let ChatRoomAttachLibraryBody {
+        uri,
+        if_revision,
+        request_id,
+    } = body;
+    // The request_id is checked against its saved binding before anything
+    // happens: another file under the same id, or a publication withdrawn
+    // since, is refused; a saved publication is posted as it was published;
+    // a new one passes the send rate limit before it is published.
+    let publication = match crate::library::chat_attach_publication(
+        &data_dir,
+        &registry,
+        context.principal_id(),
+        &request_id,
+        &uri,
+        if_revision.as_deref(),
+        || port.check_message_allowed(&profile, now_ts()),
+    )
+    .await
+    {
+        Ok(publication) => publication,
+        Err(err)
+            if err
+                .downcast_ref::<crate::collaboration_rate_limit::CommunitySendRateLimited>()
+                .is_some() =>
+        {
+            return attach_library_chat_error(err)
+        }
+        Err(err) => return attach_library_publish_error(err),
+    };
+    let (post, name) =
+        community_file_post(&publication.name, publication.size_bytes, &publication.cid);
+    let size_bytes = publication.size_bytes;
+    let principal_id = context.principal_id().to_string();
+    let now = now_ts();
+    let posted = tokio::task::spawn_blocking(move || {
+        let operation = crate::collaboration_product::chat_message_request_binding(
+            &request_id,
+            &principal_id,
+            &post,
+            &profile,
+        )?;
+        let prepared = port.prepare_message(operation, &post, &profile, now)?;
+        port.project_prepared_message(&data_dir, &prepared, Some(&token))
+    })
+    .await;
+    let failure = match posted {
+        Ok(Ok(_)) => {
+            return Json(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "publication": publication.data,
+                    "posted": true,
+                    "name": name,
+                    "size_bytes": size_bytes,
+                },
+            }))
+            .into_response()
+        }
+        Ok(Err(err)) => err,
+        Err(err) => anyhow::anyhow!("group chat task failed: {err}"),
+    };
+    let (status, retry_after, _) = room_service_error_parts(&failure);
+    let mut body = attach_library_error_body(
+        "post_failed",
+        "Your file is published, but the post did not go through. Try again.",
+    );
+    body["data"] = serde_json::json!({
+        "publication": publication.data,
+        "posted": false,
+    });
+    attach_library_response(status, retry_after, body)
+}
+
+fn attach_library_error_body(code: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({ "status": "error", "code": code, "message": message })
+}
+
+fn attach_library_response(
+    status: StatusCode,
+    retry_after: Option<u64>,
+    body: serde_json::Value,
+) -> Response {
+    let mut response = (status, Json(body)).into_response();
+    if let Some(secs) = retry_after {
+        response
+            .headers_mut()
+            .insert("retry-after", axum::http::HeaderValue::from(secs));
+    }
+    response
+}
+
+/// A Chat authority or send refusal before anything is published.
+fn attach_library_chat_error(err: anyhow::Error) -> Response {
+    let (status, retry_after, message) = room_service_error_parts(&err);
+    let code = if retry_after.is_some() {
+        "rate_limited"
+    } else {
+        "chat_error"
+    };
+    attach_library_response(
+        status,
+        retry_after,
+        attach_library_error_body(code, &message),
+    )
+}
+
+fn attach_library_publish_error(err: anyhow::Error) -> Response {
+    let refusal = crate::library::find_library_refusal(&err);
+    let code = refusal.map_or("library_error", |refusal| refusal.code);
+    let status = match code {
+        "too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+        "stale_revision" | "changed_since_publish" | "request_id_reused" | "withdrawn" => {
+            StatusCode::CONFLICT
+        }
+        "not_found" => StatusCode::NOT_FOUND,
+        "unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    let mut body = attach_library_error_body(code, &err.to_string());
+    if let Some(reason) = refusal.and_then(|refusal| refusal.reason) {
+        body["reason"] = serde_json::Value::String(reason.to_string());
+    }
+    attach_library_response(status, None, body)
 }
 
 pub(super) async fn room_service_attachment_get(
@@ -2264,8 +2622,9 @@ fn chat_room_access_token_from_headers(
     headers: &HeaderMap,
 ) -> anyhow::Result<String> {
     if headers.contains_key("x-elastos-home-token") {
-        let context = require_home_launch_token_context(data_dir, headers, CHAT_ROOM_CAPSULE_ID)?;
-        return Ok(start_chat_room_session(data_dir, &context)?.token);
+        let launch =
+            gateway_home_token::require_home_launch_grant(data_dir, headers, CHAT_ROOM_CAPSULE_ID)?;
+        return Ok(start_chat_room_session(data_dir, &launch)?.token);
     }
     room_session_token_from_headers(headers)
 }
@@ -2307,17 +2666,41 @@ fn upload_offset_from_headers(headers: &HeaderMap) -> anyhow::Result<u64> {
 }
 
 pub(super) fn room_service_error_response(err: anyhow::Error) -> Response {
+    match room_service_error_parts(&err) {
+        (status, Some(retry_after), text) => {
+            (status, [("retry-after", retry_after.to_string())], text).into_response()
+        }
+        (status, None, text) => (status, text).into_response(),
+    }
+}
+
+/// The HTTP status, any retry-after seconds, and the plain words for a Chat
+/// room failure.
+fn room_service_error_parts(err: &anyhow::Error) -> (StatusCode, Option<u64>, String) {
     if let Some(limited) =
         err.downcast_ref::<crate::collaboration_rate_limit::CommunitySendRateLimited>()
     {
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            [("retry-after", limited.retry_after_secs.to_string())],
+            Some(limited.retry_after_secs),
             limited.to_string(),
-        )
-            .into_response();
+        );
     }
-    let profile_required = gateway_home_system::profile_required_message(&err);
+    if let Some(refusal) =
+        err.downcast_ref::<crate::collaboration_discovery_runtime::ProfileContactRequestRefusal>()
+    {
+        use crate::collaboration_discovery_runtime::ProfileContactRequestRefusal;
+        let status = match refusal {
+            ProfileContactRequestRefusal::InvalidProfileId
+            | ProfileContactRequestRefusal::OwnDeviceId
+            | ProfileContactRequestRefusal::OtherHomeDeviceId => StatusCode::BAD_REQUEST,
+            ProfileContactRequestRefusal::TooManyWaiting
+            | ProfileContactRequestRefusal::CommunityLeft
+            | ProfileContactRequestRefusal::Undeliverable => StatusCode::CONFLICT,
+        };
+        return (status, None, refusal.to_string());
+    }
+    let profile_required = gateway_home_system::profile_required_message(err);
     let text = profile_required
         .map(str::to_string)
         .unwrap_or_else(|| err.to_string());
@@ -2338,6 +2721,7 @@ pub(super) fn room_service_error_response(err: anyhow::Error) -> Response {
     {
         StatusCode::FORBIDDEN
     } else if text.contains("must not be empty")
+        || text == crate::room_service::EMPTY_FILE_REFUSAL
         || text.contains("characters or fewer")
         || text.contains("exceeds")
         || text.contains("request_id")
@@ -2347,7 +2731,7 @@ pub(super) fn room_service_error_response(err: anyhow::Error) -> Response {
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
-    (status, text).into_response()
+    (status, None, text)
 }
 
 pub(super) fn room_service_join_error_response(err: tokio::task::JoinError) -> Response {
@@ -2356,4 +2740,57 @@ pub(super) fn room_service_join_error_response(err: tokio::task::JoinError) -> R
         format!("group chat task failed: {}", err),
     )
         .into_response()
+}
+
+/// R2 rows: the chat-room profile authority reads the root the launch context
+/// resolved, so a principal with no stored record is refused instead of served
+/// from the principal-id rule.
+#[cfg(test)]
+mod stored_root_tests {
+    use super::*;
+
+    fn stored_context(data_dir: &std::path::Path, principal_id: &str) -> HomeLaunchTokenContext {
+        let root =
+            crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).unwrap();
+        HomeLaunchTokenContext::resolved(root, "session".to_string(), None, "grant".to_string())
+    }
+
+    #[test]
+    fn an_unstored_room_principal_is_refused_instead_of_served_from_the_id_rule_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:room-no-stored-record";
+        let context = HomeLaunchTokenContext::for_test(principal_id, "session", None, "grant");
+        assert!(
+            crate::auth::principal_stored_localhost_root(Some(temp.path()), principal_id).is_err(),
+            "the fixture principal has no stored record"
+        );
+        let id_rule_root = crate::auth::principal_localhost_root(principal_id);
+        assert!(
+            crate::collaboration_profile_authority::profile_authority_path(
+                temp.path(),
+                &id_rule_root
+            )
+            .is_ok(),
+            "the id rule names a root this Home accepts"
+        );
+        let err = trusted_chat_room_profile_authority(temp.path(), &context).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid profile authority root"),
+            "the fixture root has no stored record: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_stored_room_principal_keeps_todays_profile_decision() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:room-stored-record";
+        let record = crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let context = stored_context(temp.path(), &record.principal_id);
+        assert_eq!(
+            trusted_chat_room_profile_authority(temp.path(), &context)
+                .unwrap_err()
+                .to_string(),
+            "signed Profile is unavailable"
+        );
+    }
 }

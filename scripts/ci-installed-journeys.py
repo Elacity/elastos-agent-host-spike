@@ -385,6 +385,13 @@ def runtime_unit_helper(control):
         os.close(owner_fd)
 
 
+class ExitStatusUnknown:
+    """The child has stopped, but this outside observer cannot read a status."""
+
+
+EXIT_STATUS_UNKNOWN = ExitStatusUnknown()
+
+
 class FiniteRuntime:
     """Outside observer for one identity-bound transient CI service."""
     def __init__(self, home, data, address, environment, gib, platform=sys.platform):
@@ -401,6 +408,7 @@ class FiniteRuntime:
         self.stop = threading.Event()
         self.error = None
         self.failure = None
+        self.census_gap = None
         self.thread = None
         self.outside = [os.getpid()]
         self.engine = None
@@ -491,7 +499,90 @@ class FiniteRuntime:
         return result
 
     def poll(self):
-        return 1 if self.error or self.pid in self.fds and pidfd_exited(self.fds[self.pid]) else None
+        # The helper owns the Runtime's wait, so no exit status reaches this
+        # outside observer. Report the stop without inventing a code.
+        return EXIT_STATUS_UNKNOWN if self.error or self.pid in self.fds and pidfd_exited(self.fds[self.pid]) else None
+
+    def record_census_gap(self, pid, fd):
+        """Capture the failed sample before cleanup, without changing its verdict."""
+        if self.census_gap is not None:
+            return
+        observed = {"pid": pid, "sampled_at": time.monotonic()}
+        directory = Path("/proc") / str(pid)
+        for name, limit in (("stat", 4096), ("cmdline", 8192), ("cgroup", 4096)):
+            try:
+                if name == "stat":
+                    text = bounded_text(directory / name, limit)
+                    fields = text[text.rfind(")") + 2:].split()
+                    observed.update(ppid=int(fields[1]), start_ticks=int(fields[19]), state=fields[0])
+                elif name == "cmdline":
+                    text = bounded_text(directory / name, limit).rstrip("\0")
+                    observed[name] = text.split("\0") if text else []
+                else:
+                    observed[name] = cgroup_membership(pid)
+            except (OSError, RuntimeError, ValueError, IndexError) as error:
+                observed[name + "_error"] = PUBLIC_ERROR_TYPES.get(type(error), "redacted")
+        retained = self.known.get(pid, {})
+        detail = {"retained": retained.get("census_sample", {}), "observed": observed,
+                  "role": retained.get("role"), "exe_sha256": retained.get("exe_sha256"),
+                  "expected_cgroup": self.binding["ControlGroup"]}
+        try:
+            pids = [int(value) for value in bounded_text(self.group / "cgroup.procs", 8192).split()]
+            if len(pids) > 512:
+                raise RuntimeError("finite journey process census exceeds its bound")
+            detail["expected_cgroup_procs"] = pids
+        except (OSError, RuntimeError, ValueError) as error:
+            detail["expected_cgroup_procs_error"] = PUBLIC_ERROR_TYPES.get(type(error), "redacted")
+        parent_pid = observed.get("ppid", detail["retained"].get("ppid", retained.get("parent")))
+        parent = {"pid": parent_pid}
+        if parent_pid is not None and parent_pid > 0:
+            try:
+                if parent_pid in self.fds:
+                    parent["pidfd_exited"] = pidfd_exited(self.fds[parent_pid])
+                else:
+                    parent_fd = os.pidfd_open(parent_pid, 0)
+                    try:
+                        parent["pidfd_exited"] = pidfd_exited(parent_fd)
+                    finally:
+                        os.close(parent_fd)
+            except (OSError, RuntimeError) as error:
+                parent["pidfd_error"] = PUBLIC_ERROR_TYPES.get(type(error), "redacted")
+            try:
+                parent["cgroup"] = cgroup_membership(parent_pid)
+            except (OSError, RuntimeError, ValueError) as error:
+                parent["cgroup_error"] = PUBLIC_ERROR_TYPES.get(type(error), "redacted")
+        detail["parent"] = parent
+        try:
+            detail["pidfd_exited"] = pidfd_exited(fd)
+        except (OSError, RuntimeError) as error:
+            detail["pidfd_error"] = PUBLIC_ERROR_TYPES.get(type(error), "redacted")
+        detail["same_start_ticks"] = (observed["start_ticks"] == retained["start_ticks"]
+                                      if "start_ticks" in observed and "start_ticks" in retained else None)
+        # Raw argv and non-unit cgroup names stay with the private Runtime log.
+        # CI uploads JSON and PNG only; this file deliberately uses .private.log.
+        try:
+            private_json(self.control / "census-gap.private.log", detail)
+            detail["private_capture"] = "saved"
+        except (OSError, RuntimeError) as error:
+            detail["private_capture"] = PUBLIC_ERROR_TYPES.get(type(error), "redacted")
+        for key in ("retained", "observed", "parent"):
+            sample = dict(detail[key])
+            if "cmdline" in sample:
+                # Only the bound executable's name and fixed harness verbs leave
+                # the runner. Arbitrary positional values can contain credentials.
+                executable = Path(retained.get("executable", "")).name
+                sample["cmdline"] = [executable if index == 0 and Path(arg).name == executable else
+                                     arg if arg in ("gateway", "init", "daemon", "--internal-local-llama-guard")
+                                     else "<redacted>" for index, arg in enumerate(sample["cmdline"])]
+            if "cgroup" in sample and sample["cgroup"] != self.binding["ControlGroup"]:
+                sample["cgroup_sha256"] = hashlib.sha256(sample["cgroup"].encode()).hexdigest()
+                sample["cgroup"] = "/" + "/".join(
+                    part if re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}\.(slice|scope|service|mount|socket)", part)
+                    else "<name>" for part in sample["cgroup"].split("/")[1:])
+            if key == "retained":
+                sample.update(role=retained.get("role"), exe_sha256=retained.get("exe_sha256"))
+            detail[key] = sample
+        self.census_gap = detail
 
     def observe_once(self, require_runtime=True):
         if (self.metric("memory.max") != str(self.budget) or self.metric("memory.swap.max") != "0"
@@ -591,9 +682,26 @@ class FiniteRuntime:
                                     "model_provider" if executable == (self.data / "bin/model-provider").resolve() else
                                     "llama_server" if executable.name == "llama-server" else "other")
                 self.known[pid] = identity
+            self.known[pid]["census_sample"] = {
+                "pid": pid, "ppid": identity["parent"], "start_ticks": identity["start_ticks"],
+                "state": identity["state"], "cmdline": command, "cgroup": membership,
+                "sampled_at": time.monotonic(),
+            }
             current[pid] = self.known[pid]
-        if any(pid not in current and not pidfd_exited(fd) for pid, fd in self.fds.items()):
-            raise RuntimeError("finite journey live child left its unit census")
+        for pid, fd in self.fds.items():
+            if pid not in current and not pidfd_exited(fd):
+                try:
+                    stat = bounded_text(Path("/proc") / str(pid) / "stat", 4096)
+                    fields = stat[stat.rfind(")") + 2:].split()
+                    # Exited children leave cgroup.procs before their parent
+                    # reaps them. Bind state and birth to this one stat sample;
+                    # keep the pidfd for the whole-unit exit check in finish().
+                    if fields[0] == "Z" and int(fields[19]) == self.known.get(pid, {}).get("start_ticks"):
+                        continue
+                except (OSError, RuntimeError, ValueError, IndexError):
+                    pass
+                self.record_census_gap(pid, fd)
+                raise RuntimeError("finite journey live child left its unit census")
         if require_runtime and self.pid not in current:
             raise RuntimeError("finite journey Runtime left its unit")
         memory = [self.metric(name) for name in ("memory.current", "memory.peak")]
@@ -714,6 +822,8 @@ class FiniteRuntime:
                   "actions": self.actions, "outside_runtime_unit": True}
         if self.failure:
             record["observer_failure"] = self.failure
+        if self.census_gap:
+            record["census_gap"] = self.census_gap
         if runtime_exited:
             record["runtime_exited_before_cleanup"] = True
         phase = "unit_binding"
@@ -1065,10 +1175,21 @@ def free_port(kind=socket.SOCK_STREAM):
         return probe.getsockname()[1]
 
 
-def wait_healthy(child, address, label, stop=None):
+def wait_healthy(child, address, label, stop=None, evidence=None):
+    """Refuse a Runtime that stops before health or leaves observation.
+
+    The message names the observed status or signal and the evidence file the
+    harness already writes. Runtime output stays in its private log; it never
+    reaches a CI log line, redacted or not.
+    """
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline and not (stop and stop.is_set()):
-        assert child.poll() is None, f"installed {label} exited before health" + failure_suffix(getattr(child, "failure", None))
+        code = child.poll()
+        if code is not None:
+            status = (f" (exit {code})" if code >= 0 else f" (signal {-code})") if type(code) is int else ""
+            raise AssertionError(f"installed {label} did not become healthy{status}"
+                                 + failure_suffix(getattr(child, "failure", None))
+                                 + (f"; evidence: {evidence}" if evidence else ""))
         try:
             with urllib.request.urlopen(f"http://{address}/healthz", timeout=1) as response:
                 if response.status == 200:
@@ -1087,18 +1208,29 @@ def post_json(url, body, token=None):
         return json.loads(response.read(1024 * 1024))
 
 
-def start_holder(home, data, consumer_data, consumer_environment):
+def serve_as_seed(data):
+    """Make this data dir a seed: a node that serves publisher content (Runtime's Publisher artifacts root)."""
+    path = data
+    for part in ("ElastOS", "SystemServices", "Publisher", "artifacts"):
+        path = path / part
+        path.mkdir(mode=0o700, exist_ok=True)
+
+
+def start_holder(home, data, consumer_data, consumer_environment, evidence=None):
     """Start the separate holder Home and name it as the consumer's one Carrier peer.
 
     The holder gateway starts its own Kubo with the pinned package before health.
+    Production serves model packages from a seed, so the holder is one: an
+    ordinary Home serves peers only files its people publish to their contacts.
     """
     environment = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(data.parent))
+    serve_as_seed(data)
     installed, number = str(data / "bin/elastos"), free_port()
     with (home / "holder-runtime.private.log").open("wb") as log:
         child = subprocess.Popen([installed, "gateway", "--addr", f"127.0.0.1:{number}"], env=environment,
                                  stdout=log, stderr=log, start_new_session=True)
     try:
-        wait_healthy(child, f"localhost:{number}", "holder Runtime")
+        wait_healthy(child, f"localhost:{number}", "holder Runtime", evidence=evidence)
         deadline = time.monotonic() + 30
         while not (data / "gateway-runtime-coords.json").is_file() and time.monotonic() < deadline:
             time.sleep(0.25)
@@ -1137,8 +1269,9 @@ def consumer_root_block(data, cid):
 
 class RepairRuntime:
     """Own the installed Home and its one deliberate interrupted-Get restart."""
-    def __init__(self, home, data, address, environment):
+    def __init__(self, home, data, address, environment, evidence=None):
         self.home, self.data, self.address, self.environment = home, data, address, environment
+        self.evidence = evidence
         self.control = home / "repair-control"
         self.control.mkdir(mode=0o700)
         self.log = (home / "journey-runtime.private.log").open("wb")
@@ -1263,7 +1396,7 @@ class RepairRuntime:
                 remaining -= len(part)
         self.kept = {"weights_bytes": whole, "weights_prefix_sha256": value.hexdigest(), "interrupted_process_cleanup": cleanup}
         self.launch()
-        wait_healthy(self.child, self.address, "restarted Runtime", self.stop)
+        wait_healthy(self.child, self.address, "restarted Runtime", self.stop, evidence=self.evidence)
         self.record["runtime_episodes"].append(self.identity())
         if weights.lstat().st_size < whole:
             raise RuntimeError("repair journey restart lost its kept prefix")
@@ -1417,18 +1550,21 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0, repair=Fa
         raise RuntimeError("installed journey fixture already owns running processes")
     if carrier:
         assert not (data / "ipfs-repo").exists() and not (data / "ipfs-repo").is_symlink(), "consumer Home starts without the package"
-        holder, record["package_holder"] = start_holder(holder_home, holder_data, data, environment)
+        holder, record["package_holder"] = start_holder(holder_home, holder_data, data, environment,
+                                                       evidence=evidence / "installed-journeys.json")
     number = free_port()
     address = f"localhost:{number}"
     started = time.monotonic()
     record["fixture_preparation_seconds"] = round(started - preparation_started, 2)
-    # Runtime logs stay private in the isolated Home; upload receipts/screenshots only.
+    # Runtime logs stay private in the isolated Home; upload receipts/screenshots
+    # only. A wait_healthy failure names its status and that evidence file.
     finite = None
     repair_runtime = None
     log = None
     try:
         if repair:
-            repair_runtime = RepairRuntime(home, data, f"127.0.0.1:{number}", environment)
+            repair_runtime = RepairRuntime(home, data, f"127.0.0.1:{number}", environment,
+                                              evidence=evidence / "installed-journeys.json")
             child = repair_runtime
         elif memory_gib:
             finite = FiniteRuntime(home, data, f"127.0.0.1:{number}", environment, memory_gib)
@@ -1448,7 +1584,7 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0, repair=Fa
             cleanup_runtime(holder, holder_data)
         raise
     try:
-        wait_healthy(child, address, "Runtime")
+        wait_healthy(child, address, "Runtime", evidence=evidence / "installed-journeys.json")
         command = ["node", "scripts/ci-installed-home-journey.mjs", f"http://{address}", str(evidence), str(data)]
         if finite:
             command += ["--memory-refusal" if memory_gib == 1 else "--resource-lifecycle", str(finite.control)]

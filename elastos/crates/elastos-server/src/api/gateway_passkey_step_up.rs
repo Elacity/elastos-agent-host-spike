@@ -165,6 +165,7 @@ pub(in crate::api) struct PasskeyStepUpEffectIdentity {
 struct IssuedPasskeyStepUp {
     token: String,
     step_up_id: String,
+    expires_at: u64,
 }
 
 pub(super) async fn passkey_step_up_begin(
@@ -216,7 +217,20 @@ async fn passkey_step_up_begin_inner(
     )?;
     require_hosted_step_up_launch(&host_context, &launch)?;
     let operation = validate_step_up_operation(&input.operation)?;
-    let request_sha256 = canonical_request_sha256(&input.request)?;
+    let request = if matches!(
+        operation.as_str(),
+        gateway_browser_internet::GRANT_OPERATION | gateway_browser_internet::REVOKE_OPERATION
+    ) {
+        let stored = gateway_browser_internet::step_up_request(state, &launch, &operation).await?;
+        anyhow::ensure!(
+            input.request == stored,
+            "Browser internet request has changed; review the current request"
+        );
+        stored
+    } else {
+        input.request
+    };
+    let request_sha256 = canonical_request_sha256(&request)?;
     let passkey = passkey_for_launch(&state.data_dir, &launch)?;
     let rp = super::super::handlers::identity::derive_rp(headers)?;
     if passkey.rp_id != rp.id {
@@ -626,7 +640,7 @@ pub(crate) fn issue_passkey_step_up_token_at_for_test(
             ceremony_id: format!("passkey:step-up:{}", gateway_home_token::uuid_like_token()),
             original_launch_id: launch.launch_id,
             launch_context: launch.launch_context,
-            principal_id: launch.context.principal_id,
+            principal_id: launch.context.principal_id().to_string(),
             session_id: launch.context.session_id,
             proof_binding_id: passkey_proof_binding_id(&passkey),
             grant_id: launch.context.grant_id,
@@ -712,7 +726,15 @@ fn issue_step_up_token(
         operation: pending.operation.clone(),
         request_sha256: pending.request_sha256.clone(),
         iat: issued_at,
-        exp: issued_at.saturating_add(PASSKEY_STEP_UP_TTL_SECS),
+        exp: gateway_home_token::grant_bound_expiry(
+            data_dir,
+            &pending.principal_id,
+            &pending.session_id,
+            Some(&pending.proof_binding_id),
+            &pending.grant_id,
+            issued_at,
+            PASSKEY_STEP_UP_TTL_SECS,
+        )?,
         non_delegatable: true,
     };
     payload.validate(issued_at, PASSKEY_STEP_UP_TTL_SECS)?;
@@ -729,6 +751,7 @@ fn issue_step_up_token(
         signer_did,
     };
     Ok(IssuedPasskeyStepUp {
+        expires_at: envelope.payload.exp,
         token: URL_SAFE_NO_PAD.encode(serde_json::to_vec(&envelope)?),
         step_up_id,
     })
@@ -744,7 +767,7 @@ fn complete_step_up(
     Ok(PasskeyStepUpCompleteResponse {
         schema: PASSKEY_STEP_UP_COMPLETE_RESULT_SCHEMA.to_string(),
         step_up_token: issued.token,
-        expires_at: completed_at.saturating_add(PASSKEY_STEP_UP_TTL_SECS),
+        expires_at: issued.expires_at,
     })
 }
 
@@ -1492,6 +1515,7 @@ mod tests {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(OnceLock::new()),
             cache_dir: data_dir.path().join("cache"),
             data_dir: data_dir.path().to_path_buf(),
@@ -1526,7 +1550,7 @@ mod tests {
             ceremony_id,
             original_launch_id: fixture.launch.launch_id.clone(),
             launch_context: fixture.launch.launch_context.clone(),
-            principal_id: fixture.context.principal_id.clone(),
+            principal_id: fixture.context.principal_id().to_string(),
             session_id: fixture.context.session_id.clone(),
             proof_binding_id: fixture.context.proof_binding_id.clone().unwrap(),
             grant_id: fixture.context.grant_id.clone(),
@@ -1545,6 +1569,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn proof_bound_step_up_ends_with_the_grant() {
+        let fixture = fixture();
+        let now = now_ts();
+        let mut grant = crate::auth::load_active_session_grant(
+            fixture.data_dir.path(),
+            &fixture.context.session_id,
+            now,
+        )
+        .unwrap();
+        grant.expires_at = now + 30;
+        crate::auth::store_session_grant(fixture.data_dir.path(), grant.clone()).unwrap();
+        let pending = pending_for(&fixture, "ceremony:expiry".into(), now);
+        let completed = complete_step_up(fixture.data_dir.path(), &pending, now).unwrap();
+        let envelope: PasskeyStepUpEnvelope =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(completed.step_up_token).unwrap())
+                .unwrap();
+        assert_eq!(envelope.payload.exp, grant.expires_at);
+        assert_eq!(completed.expires_at, grant.expires_at);
+    }
+
     fn consumed_for(
         fixture: &StepUpFixture,
         step_up_id: String,
@@ -1555,7 +1600,7 @@ mod tests {
             token_sha256: "a".repeat(64),
             step_up_id,
             original_launch_id: fixture.launch.launch_id.clone(),
-            principal_id: fixture.context.principal_id.clone(),
+            principal_id: fixture.context.principal_id().to_string(),
             session_id: fixture.context.session_id.clone(),
             operation: "inspect.approve".to_string(),
             request_sha256: canonical_request_sha256(
@@ -1712,7 +1757,7 @@ mod tests {
                 last_used_at: now,
                 revoked_at: None,
             }),
-            fixture.context.principal_id.clone(),
+            fixture.context.principal_id().to_string(),
             crate::auth::RuntimePrincipalRole::Admin,
             Some("Step-up tester"),
             now,
@@ -2334,14 +2379,25 @@ mod tests {
             format!("passkey:step-up:{}", gateway_home_token::uuid_like_token()),
             now,
         );
+        let issued = issue_step_up_token(fixture.data_dir.path(), &pending, now).unwrap();
         let auth_state = crate::auth::auth_state_path(fixture.data_dir.path()).unwrap();
         std::fs::remove_file(&auth_state).unwrap();
         std::fs::create_dir(&auth_state).unwrap();
 
-        let error = complete_step_up(fixture.data_dir.path(), &pending, now).unwrap_err();
+        let error = append_step_up_completion_audit(
+            fixture.data_dir.path(),
+            &pending,
+            &issued.step_up_id,
+            now,
+        )
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("failed to persist passkey step-up completion audit"));
+        assert!(complete_step_up(fixture.data_dir.path(), &pending, now)
+            .unwrap_err()
+            .to_string()
+            .contains("auth session is not active"));
     }
 
     #[test]
@@ -2385,7 +2441,7 @@ mod tests {
                 token_sha256: token_sha256.clone(),
                 step_up_id: format!("step-up:{index:032x}"),
                 original_launch_id: consumed_capacity.launch.launch_id.clone(),
-                principal_id: consumed_capacity.context.principal_id.clone(),
+                principal_id: consumed_capacity.context.principal_id().to_string(),
                 session_id: consumed_capacity.context.session_id.clone(),
                 operation: "inspect.approve".to_string(),
                 request_sha256: canonical_request_sha256(

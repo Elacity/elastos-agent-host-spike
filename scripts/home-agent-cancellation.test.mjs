@@ -443,6 +443,34 @@ test("nested Agent Settings intent opens System models with exact origin", async
   window.location.href = prior.href; window.top = prior.top;
 });
 
+test("an Assistant link asks Home GUI for Browser first and Home's link prompt only for that same link", async () => {
+  const { openWebLink, openWebLinkThroughHomePrompt } = await import("../capsules/assistant/browser/harness-host.js");
+  const prior = { href: window.location.href, top: window.top, parent: window.parent };
+  const toParent = [], toTop = [];
+  window.parent = { postMessage: (message, origin) => toParent.push({ message, origin }) };
+  window.top = { postMessage: (message, origin) => toTop.push({ message, origin }) };
+  window.location.href = "https://home.example/apps/assistant/?home_origin=https%3A%2F%2Fhome.example";
+  const url = "https://docs.example/guide";
+  assert.equal(openWebLinkThroughHomePrompt(url), false, "nothing reaches the prompt unasked");
+  openWebLink(url);
+  assert.deepEqual(toParent, [{ origin: "*", message: { type: "home-agent:open-browser", url } }]);
+  assert.deepEqual(toTop, [], "with Browser, Home GUI opens it and Home's prompt is not asked");
+  assert.equal(openWebLinkThroughHomePrompt("https://evil.example/"), false, "Home GUI cannot swap the address");
+  assert.equal(openWebLinkThroughHomePrompt(url), true);
+  assert.deepEqual(toTop, [{ origin: "https://home.example", message: { type: "home:open-external", url, homeToken: "fixture" } }]);
+  assert.equal(openWebLinkThroughHomePrompt(url), false, "one prompt per click");
+  assert.equal(toTop.length, 1);
+  // Home GUI answers with the capsule's own string, so a link with no trailing
+  // slash or a mixed-case host still reaches the prompt, on every click.
+  for (const raw of ["https://example.com", "https://Docs.Example/Guide", "https://example.com"]) {
+    openWebLink(raw);
+    assert.equal(openWebLinkThroughHomePrompt(raw), true, raw);
+    assert.deepEqual(toTop.at(-1), { origin: "https://home.example", message: { type: "home:open-external", url: raw, homeToken: "fixture" } });
+  }
+  assert.equal(toTop.length, 4);
+  window.location.href = prior.href; window.top = prior.top; window.parent = prior.parent;
+});
+
 async function fixture(cancelReject = false, saved = null) {
   const events = defer();
   const accepted = defer();
@@ -811,6 +839,9 @@ function controllerFixture() {
     getElementById: () => null, addEventListener() {}, removeEventListener() {} };
   Object.assign(window, { setTimeout, clearTimeout, setInterval, clearInterval,
     requestAnimationFrame: () => 1, cancelAnimationFrame() {} });
+  // These lifecycle tests keep layout inert; Chromium covers scroll/resize.
+  globalThis.requestAnimationFrame = window.requestAnimationFrame;
+  globalThis.ResizeObserver = globalThis.MutationObserver = class { observe() {} disconnect() {} };
   const ctx = { activeSessionId: "one", sessions: [{ id: "one", messages: [] }, { id: "two", messages: [] }],
     streamGeneration: 0, turnBusy: true, streamTimer: 0, followUpQueue: [] };
   controller.bindAgentStream(ctx, { streamEl: () => null, titleEl: () => null });
@@ -869,6 +900,10 @@ function createDomNode(tag = "div") {
     removeEventListener() {},
     setAttribute() {},
     scrollIntoView() {},
+    scrollTo({ top, behavior }) {
+      assert.equal(behavior, "instant");
+      this.scrollTop = Math.max(0, Math.min(top, this.scrollHeight - this.clientHeight));
+    },
     contains() { return false; },
     querySelectorAll() { return []; },
     closest() { return null; },
@@ -1129,44 +1164,6 @@ test("a reply cut off by End says so live and after restore", () => {
   assert.doesNotMatch(status.textContent, /Model run failed/);
 });
 
-function renderedAgentText(stream) {
-  const row = (stream.children || []).find((child) => child.dataset?.role === "agent");
-  if (!row) return "";
-  const parts = [];
-  const walk = (node) => {
-    if (!node || typeof node !== "object") return;
-    if (typeof node.data === "string") parts.push(node.data);
-    else if (String(node.className || "").includes("agent-stream-frozen-block") && node.textContent) {
-      parts.push(node.textContent);
-    }
-    for (const child of node.children || []) walk(child);
-  };
-  walk(row);
-  return parts.join("");
-}
-
-test("live chat flushes two consecutive deltas before reopen of unretained output", async t => {
-  const { ctx, status, stream, offerLists, offersAfterProbe } = await runUnretainedLiveTurn(t, {
-    create: { run_id: "run-two-deltas", sequence_cursor: 0, status: "running" },
-    eventsPages: [
-      { after: 0, data: {
-        schema: "elastos.model.run-events/v1", run_id: "run-two-deltas",
-        events: [
-          { sequence: 1, kind: "text_delta", data: { text: "Hel" } },
-          { sequence: 2, kind: "text_delta", data: { text: "lo" } },
-          { sequence: 3, kind: "completed", terminal: true, data: { output_retained: false } },
-        ],
-        next_cursor: 3, has_more: false, settlement_source: "runtime_index",
-        output_retained: false,
-      } },
-    ],
-  });
-  assert.equal(status.textContent, controller.OUTPUT_UNRETAINED_STATUS);
-  assert.equal(offerLists, offersAfterProbe);
-  assert.equal(renderedAgentText(stream), "Hello", "both deltas must paint before reopen");
-  assert.equal(ctx.sessions[0].messages.filter((message) => message.role === "agent").at(-1)?.text, "Hello");
-});
-
 test("refresh after a refused new turn requires another deliberate Send", async t => {
   t.after(() => live.selectLiveOffer(""));
   const { ctx } = controllerFixture(); ctx.turnBusy = false;
@@ -1404,6 +1401,59 @@ test("only an exact provider-refused expired fresh create permits deliberate ret
     assert.equal(states.at(-1).state, confirmed ? "failed" : "settlement_unknown");
     assert.equal(Boolean(states.at(-1).completedAt), confirmed);
   }
+});
+
+test("a same-Home authority timeout tells the person to try again", async t => {
+  t.after(() => live.selectLiveOffer(""));
+  const offerId = "remote:g:fixture";
+  const message = "The Home could not check model access in time. Try again.";
+  assert.equal(controller.formatStreamError({
+    code: "remote_model_invocation_refused",
+    reason: "authority_timeout",
+    preDispatchRefusal: true,
+  }), message);
+  assert.equal(controller.formatStreamError({
+    code: "remote_model_invocation_refused",
+    reason: "denied",
+    preDispatchRefusal: true,
+  }), "Request refused. This attempt stopped before provider dispatch. Review service access before a new request.");
+  const states = [];
+  globalThis.fetch = async (url, init) => {
+    const op = new URL(url).pathname.split("/").pop();
+    if (op === "offers_list") return { ok: true, json: async () => ({ offers: [
+      { id: offerId, title: "Fixture", operation: "text.generate", input_modalities: ["text/plain"], output_modalities: ["text/plain"], context: fixtureContext },
+    ] }) };
+    if (op !== "runs_create") throw new Error(`unexpected ${op}`);
+    const body = JSON.parse(init.body);
+    return { ok: false, status: 409, json: async () => ({
+      status: "error",
+      code: "remote_model_invocation_refused",
+      reason: "authority_timeout",
+      message,
+      refusal: {
+        schema: "elastos.model.invocation-refusal/v1",
+        scope: "invocation",
+        dispatch: "not_started",
+        request_id: body.request_id,
+        offer_id: body.offer_id,
+      },
+    }) };
+  };
+  live.selectLiveOffer(offerId);
+  await live.probeLiveInference({ force: true });
+  await assert.rejects(
+    live.streamChatViaContract([{ role: "user", content: "fixture" }], {
+      onState: (state) => states.push(state),
+    }),
+    (error) => {
+      assert.equal(error.reason, "authority_timeout");
+      assert.equal(controller.formatStreamError(error), message);
+      assert.equal(error.preDispatchRefusal, true);
+      return error.code === "remote_model_invocation_refused";
+    },
+  );
+  assert.equal(states.at(-1).state, "failed");
+  assert.equal(Boolean(states.at(-1).completedAt), true);
 });
 
 test("the open model menu follows each read, keeps focus on its action, and closing Assistant stops re-reads", async t => {

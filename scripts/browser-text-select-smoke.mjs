@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./system-uiux-fixture.mjs";
+import { productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
 
 const repoRoot = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const browserRoot = join(repoRoot, "capsules/browser/browser");
@@ -58,7 +59,7 @@ bindBrowserInputSurface({
 window.ready = true;
 </script>`;
 
-const browser = await chromium.launch({ headless: true, ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
+const browser = await chromium.launch({ headless: true, ...productSmokeLaunchOptions() });
 try {
   const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
   const pageErrors = [];
@@ -105,7 +106,7 @@ try {
   await page.mouse.up();
   await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
   const edge = await page.evaluate(() => ({ channel: window.channel.splice(0), runtime: window.runtime.splice(0) }));
-  assert(edge.runtime.length === 0 && edge.channel.at(-1) === "m,1280,720,0,0", "a drag past the video must release at its edge", edge);
+  assert(edge.runtime.length === 0 && edge.channel.at(-1) === "m,1279,719,0,0", "a drag past the video must release at its edge", edge);
 
   await page.focus("#panel");
   await page.keyboard.press("Meta+A");

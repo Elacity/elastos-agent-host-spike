@@ -12,7 +12,7 @@ async fn test_system_can_select_default_wallet_without_exposing_connector_author
         bitcoin_challenges: TokioMutex::default(),
         accounts: TokioMutex::new(vec![json!({
             "account_id": account_id,
-            "principal_id": context.principal_id,
+            "principal_id": context.principal_id(),
             "proof_binding_id": "proof:wallet:siwe:eip155:8453:0xa4c02db8653dd0ca18a8736d693b0db85c5b246c",
             "chain_namespace": "eip155:8453",
             "address": "0xA4C02dB8653DD0cA18A8736D693B0dB85C5b246C",

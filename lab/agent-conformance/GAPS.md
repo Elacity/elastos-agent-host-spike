@@ -401,18 +401,17 @@ after this operator recipe is accepted. Open blockers retain their BLOCKED grade
 Task 019 uses the production shell-authenticated approval routes through the
 one controller in `tests/common/grants.rs`. The root is
 `localhost://Public/agent-conformance-grants`. The manifest declares
-`localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`.
-The ungranted read stays outside the Public pattern. The fixture denies the
-pending `elastos://net/stream` request, and provider execution stays outside
-that row. The Public pattern permits a request; the operator supplies the grant.
+`localhost://Public/agent-conformance-grants/*`. The ungranted read stays
+outside the Public pattern. A manifest that declares `elastos://net/stream` is
+refused at validation, so provider execution stays outside every row. The
+Public pattern permits a request; the operator supplies the grant.
 
 The controller reads only the fixture's `attach_secret` field into memory and
 attaches once with scope `shell` at the port owned by `Operator`. The secret,
 session token and returned grant tokens stay in memory. The controller uses
 `GET /api/capability/pending`, matches resource/action/reason exactly against
 `fixtures/grants.json`, and posts one `once` grant for the listed read. Every
-other pending request receives the fixture denial reason; a pending
-`elastos://net/stream` request receives `fixture denies unlisted elastos://net/stream`.
+other pending request receives the fixture denial reason.
 Ambiguous matches are denied before any grant is selected. The Runtime mints the
 grant for the requesting session (`api/handlers/capability.rs:339-346`); the
 observed guest invocation checks that the requesting client can use it.
@@ -519,16 +518,27 @@ remain refused.
 The deny-only probe requests `read` on the synthetic resource in
 `fixtures/ungranted-read.txt`, or `execute` on `elastos://net/stream` from
 `fixtures/ungranted-network.txt`. The ungranted read stays outside the Public
-pattern. The manifest declares `elastos://net/stream`. The fixture denies that
-pending request, and provider execution stays outside that row. The Runtime
+pattern. The manifest declares only
+`localhost://Public/agent-conformance-grants/*`. An app capsule cannot declare
+`elastos://net/stream`, so this lab no longer shows a live pending network
+request that the fixture then denies. `declared_network_manifest_is_refused`
+proves instead that putting that capability back is refused at validation with
+`app capsules cannot request system-only backend capability "elastos://net/stream"; use the product/provider contract instead`.
+That row calls the Runtime's manifest validation through the lab library; it
+attempts no launch. Whether an app-legal declared `elastos://` resource would
+restore the retired pending-then-denied journey is not investigated. Validation
+admits any `elastos://` resource outside the system-only list
+(`localhost.rs:36-56`, `manifest.rs:647-666`), and whether the Bus then holds
+such a request for the fixture to deny is a run question that no row measures.
+Provider execution stays outside every row. The Runtime
 owns resource authority. The read's manifest refusal returns through the guest's Bus
 call and lifecycle to `elastos run`. The live wrapper uses
 `Component capsule denied: BusError::Internal("capsule manifest does not declare authority for <resource>")`
-for that read. The network row uses
-`Component capsule denied: BusError::Denied("fixture denies unlisted elastos://net/stream")`.
-`undeclared_network_manifest_is_refused` stages the same probe manifest without
-`elastos://net/stream` and requires the manifest refusal
-`Internal("capsule manifest does not declare authority for elastos://net/stream")`.
+for that read. `undeclared_network_manifest_is_refused` stages the shipped probe
+manifest, which does not declare `elastos://net/stream`, and requires the
+manifest refusal
+`Internal("capsule manifest does not declare authority for elastos://net/stream")`
+when the probe requests it anyway.
 The default build uses `BusError::Unavailable` with the AC-002-ARGS reason.
 The probe returns immediately after the
 request, including unexpected success, so this check performs no provider
@@ -657,6 +667,7 @@ a separate Home supplies zero principal evidence.
 | `real_agent_host_gets_no_ungranted_authority` | UsersAI binding | A principal-scoped CLI launch lets the two journal requests reach the shell. |
 | `agent_cannot_read_other_agent_memory` | UsersAI binding; AC-002-ARGS | Launch agent-b with its verified context, request agent-a's exact memory path, and require a reason with zero returned bytes. F-ac2a then explicitly grants that read. |
 | `agent_can_read_human_space_with_grant` | UsersAI binding; AC-002-ARGS | Reuse `Controller` to seed the human object and grant the verified agent its exact read; compare the complete bytes inside the existing probe read path. |
+| `ungranted_memory_write_is_refused` | UsersAI binding; AC-002-ARGS | Run the same memory-write probe under a verified Agent principal. First declare its exact `UsersAI/self` resource and prove a granted write succeeds. Then omit that manifest authority and require the existing exact manifest-refusal assertion. `resource_bridge.rs:851` currently refuses both manifests before their authority is checked. |
 
 The two real agent-host rows remain BLOCKED until the verified launch binding
 lands. F-agent-host-grant is retired under `UsersAI binding` with its exact
@@ -680,10 +691,16 @@ while retired.
 requires the Runtime's principal-context refusal for `Users/self` through the
 003 read feature. This proves refusal for today's unbound CLI launch; the
 verified agent's refusal/positive-grant pair remains under both blockers above.
-`ungranted_memory_write_is_refused` requires a manifest-authority refusal from
-the memory-write Bus request. It proves the request cannot write without
-allowance, rather than proving principal-scoped storage. The new variants also
-undergo the existing two-build hash, import and feature-exclusivity checks.
+`ungranted_memory_write_is_refused` retains its manifest-authority expectation
+while ignored. The unbound CLI launch now gets
+`Internal("localhost://UsersAI/self requires a principal-scoped launch context")`
+from `resource_bridge.rs:851`, before the manifest check at `:1412`. This
+refusal also applies when the same resource is declared. The positive write
+and its missing-authority counterpart need a verified Agent principal. The new
+variants also undergo the existing two-build hash, import and
+feature-exclusivity checks. F-ac2-write is retired under `UsersAI binding;
+AC-002-ARGS` with its exact mutation in `falsifiers.json`. Restore it and run
+the plant after the granted-write control and this refusal row are live.
 
 `no_policy_file_does_not_mean_allow` attempts one in-manifest read using the
 existing granted-read probe. `fixtures/no-policy.json` is absent in the
@@ -789,9 +806,12 @@ scope and the same invocation's VERSIONS.json keep these limits visible.
 | `run_leaves_no_live_grant` | AC-021-GRANTS | Shell-authorized view of every session's live grants, filtered by Runtime for exhausted, revoked and expired grants. |
 
 `run_leaves_no_live_grant` is ignored with `blocked: AC-021-GRANTS`. When
-explicitly selected, it reuses the granted-read journey and requires a global
-live-grant result before the Home can pass. The normal journeys report this
-check as BLOCKED, including when the shell's own list is empty.
+explicitly selected, it reuses the granted-read journey and requires an empty
+global live-grant result before the Home can pass. The normal journeys print
+`BLOCKED(AC-021-GRANTS:leftover)` while the scoped view holds live grants this
+run's fixture minted, and `pending:0 grants:0` only when that view is empty. A
+live grant this run did not mint fails the journey as foreign or stale; it is
+never folded into the known gap.
 
 Runtime owns the grant lifetime. A `once` approval sets `max_uses = 1`
 (`elastos/crates/elastos-server/src/api/handlers/capability.rs:335`). The first
@@ -804,20 +824,25 @@ The `run` client attaches shell and client sessions
 (`elastos/crates/elastos-server/src/runtime_control.rs:917`), then returns from
 `run_local` without a detach or grant-revoke call (`run_cmd.rs:264`). Thus client
 exit alone does not end its grants or prove their absence. The shell can see
-all pending requests (`api/handlers/capability.rs:244`), but the current list
-selects grants by the caller's session (`api/handlers/capability.rs:433`). Its
-rows describe granted requests; they are not a global inventory of remaining
-allowances. Audit events provide supporting history only.
+all pending requests (`api/handlers/capability.rs:244`). The plain list selects
+grants by the caller's session and keeps every record whose status is
+`Granted`, including a spent allowance or a past lifetime until revocation
+(`capability.rs:537-543`); the scoped view lists every session's live
+grants. A plain response is not a global inventory of remaining allowances.
+Audit events provide supporting history only.
 
-The Runtime change that flips this check is a shell-authorized view of every
-session's live grants, with exhausted, revoked and expired grants filtered by
-Runtime. The fixture expects the existing list response to identify that view
-with `scope: "all_sessions_live"` and `capabilities: []`. A session-local or
-unmarked response stays BLOCKED. A global nonempty list fails with `live grant
-leftover`. This is a future response contract, not a claim that Runtime exposes
-it today. Client callers retain their own-session view. This lane changes zero
-Runtime routes and performs zero revocations. F-cleanup-grant is deferred until
-this blocker closes; the synthetic scope falsifier tests honest grading only.
+The check uses the shell-authorized view of every session's live grants, with
+exhausted, revoked and expired grants filtered by Runtime. The fixture asks
+that view by `?scope=all_sessions_live` and requires the marker
+`scope: "all_sessions_live"`. An unmarked response stays
+`BLOCKED(AC-021-GRANTS)`; a scoped list whose live ids were all minted by this
+run reports `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)`. A live id the
+run did not mint fails the census as foreign or stale. Only an empty
+scoped list reports `pending:0 grants:0`, and only `run_leaves_no_live_grant`
+requires it. Client callers retain their own-session view. This lane changes
+zero Runtime routes and performs zero revocations. F-cleanup-grant is deferred
+until this blocker closes; the fixture's own grants are not evidence that
+Runtime ends a run's grants.
 
 Before tests, `run.sh` uses the existing report executable to check earlier
 `target/home-*` roots. It selects only those direct children (two-second limit)

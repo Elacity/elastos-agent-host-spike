@@ -80,8 +80,10 @@ pub(crate) fn read_model_catalog_file(
     {
         use std::os::unix::fs::MetadataExt;
         let uid = unsafe { libc::geteuid() };
+        // The data root keeps its owner's group permissions (Ubuntu umask
+        // 002), as the installation writer admits it; the input stays strict.
         if root.uid() != uid
-            || root.mode() & 0o022 != 0
+            || root.mode() & 0o002 != 0
             || metadata.uid() != uid
             || metadata.mode() & 0o022 != 0
             || metadata.nlink() != 1
@@ -346,6 +348,31 @@ pub(crate) fn list_development_capsule_manifests() -> Vec<CapsuleManifest> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn model_catalog_read_accepts_group_writable_data_root_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let file = data.join("components.json");
+        std::fs::write(&file, b"{}").unwrap();
+        let set = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set(&file, 0o600);
+        set(&data, 0o770);
+        assert_eq!(
+            read_model_catalog_file(&data, "components.json", 16).unwrap(),
+            b"{}"
+        );
+        set(&data, 0o777);
+        assert!(read_model_catalog_file(&data, "components.json", 16).is_err());
+        set(&data, 0o700);
+        set(&file, 0o660);
+        assert!(read_model_catalog_file(&data, "components.json", 16).is_err());
+    }
 
     pub(crate) fn model_catalog_fixture() -> Value {
         // Synthetic signed metadata; no model bytes or production publisher.
@@ -845,6 +872,43 @@ pub(crate) mod tests {
             .collect::<BTreeSet<_>>();
         assert!(development_names.contains("gba-emulator"));
         assert!(development_names.contains("gba-ucity"));
+    }
+
+    /// A pinned manifest in the capsules folder is absent to Home's reader,
+    /// and its name is absent from the catalog's list. The same capsule
+    /// without the pin is read and listed (the control).
+    #[test]
+    fn a_pinned_manifest_is_absent_from_the_inventory_and_the_catalog_list() {
+        use crate::runtime::tests::{unpinned_manifest, write_fixture_capsule, PINNED_MANIFEST};
+        let data_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            data_dir.path().join("components.json"),
+            serde_json::json!({
+                "external": {"pinned-fixture": {
+                    "install_path": "capsules/pinned-fixture", "platforms": {}
+                }},
+                "capsules": {}, "profiles": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let capsules = data_dir.path().join("capsules");
+        let listed = |manifest: &str| {
+            let dir = write_fixture_capsule(&capsules, manifest);
+            let names: Vec<String> = list_active_capsule_manifests(data_dir.path())
+                .into_iter()
+                .map(|manifest| manifest.name)
+                .collect();
+            (
+                load_capsule_manifest(&dir, "pinned-fixture").is_some(),
+                names,
+            )
+        };
+        assert_eq!(
+            listed(&unpinned_manifest()),
+            (true, vec!["pinned-fixture".to_string()])
+        );
+        assert_eq!(listed(PINNED_MANIFEST), (false, Vec::new()));
     }
 
     #[test]

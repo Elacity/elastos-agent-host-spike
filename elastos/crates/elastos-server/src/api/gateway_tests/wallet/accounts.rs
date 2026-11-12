@@ -177,7 +177,7 @@ async fn test_system_token_can_review_and_reject_wallet_approvals() {
             "reason": "Publish document revision",
             "account_id": "wallet:eip155:20:0xabc",
             "address": "0xabc",
-            "principal_id": context.principal_id.clone(),
+            "principal_id": context.principal_id(),
             "created_at": 10,
             "expires_at": 20
         })]),

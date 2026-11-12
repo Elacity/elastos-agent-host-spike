@@ -89,6 +89,11 @@ BINARY_DOWNLOAD_CONNECT_TIMEOUT="${ELASTOS_BINARY_DOWNLOAD_CONNECT_TIMEOUT:-15}"
 # 1 KiB/s for 60 s (the closest rule); there is no total cap.
 BINARY_DOWNLOAD_SPEED_LIMIT="${ELASTOS_BINARY_DOWNLOAD_SPEED_LIMIT:-1024}"
 BINARY_DOWNLOAD_SPEED_TIME="${ELASTOS_BINARY_DOWNLOAD_SPEED_TIME:-60}"
+# A Mac without Command Line Tools waits this long for Apple's installer.
+COMMAND_LINE_TOOLS_WAIT_SECONDS="${ELASTOS_COMMAND_LINE_TOOLS_WAIT_SECONDS:-1200}"
+COMMAND_LINE_TOOLS_POLL_SECONDS="${ELASTOS_COMMAND_LINE_TOOLS_POLL_SECONDS:-5}"
+# Ends the one PATH line the installer adds to a login profile; uninstall removes it.
+PATH_PROFILE_MARKER="# Added by the ElastOS installer"
 
 # ── Colors ────────────────────────────────────────────────────────────
 
@@ -374,6 +379,134 @@ sha256_file() {
     fi
 }
 
+installer_physical_root() {
+    local root="$1" suffix=""
+    # A fresh install can have missing directories below a relocated ancestor.
+    while [[ ! -e "$root" && ! -L "$root" && "$root" != "/" ]]; do
+        suffix="/$(basename -- "$root")${suffix}"
+        root="$(dirname -- "$root")"
+    done
+    root="$(cd -P -- "$root" && pwd -P)" || return 1
+    printf '%s\n' "${root%/}${suffix:-/}"
+}
+
+installer_repair_existing_permissions() {
+    local home_root data_root bin_root
+    home_root="$(installer_physical_root "$HOME")" || return 1
+    data_root="$(installer_physical_root "$(dirname -- "$DATA_DIR")")" || return 1
+    bin_root="$(installer_physical_root "$INSTALL_DIR")" || return 1
+    # Resolve storage roots only. The managed elastos entries remain literal,
+    # so descriptor traversal still refuses links inside the installation.
+    installer_repair_permissions "$home_root" "${data_root%/}/elastos" "${bin_root%/}/elastos"
+}
+
+installer_repair_permissions() {
+    python3 - "$@" <<'PY_INSTALL_PERMISSIONS'
+import os
+import pwd
+import shlex
+import stat
+import sys
+
+
+def repair_permissions(home, data, binary):
+    home, data, binary = map(os.path.abspath, (home, data, binary))
+    targets = [(os.path.dirname(binary), True, 0), (data, True, 0),
+               (binary, False, 0o022),
+               (os.path.join(os.path.dirname(binary), ".elastos.install.lock"), False, 0o077),
+               (os.path.join(os.path.dirname(binary), ".elastos.update-journal.json"), False, 0o077)]
+    for name in ("components.json", "sources.json", "runtime-coords.json",
+                 "home-runtime-coords.json", "gateway-runtime-coords.json"):
+        targets.append((os.path.join(data, name), False, 0o077 if "coords" in name else 0o022))
+    for directory in ("bin", "installation", "ElastOS", "ElastOS/SystemServices", "ElastOS/SystemServices/Publisher"):
+        targets.append((os.path.join(data, directory), True, 0o077 if directory == "installation" else 0o022))
+    for directory in ("installation", "ElastOS/SystemServices/Publisher"):
+        for name in ("release-head.json", "release.json"):
+            targets.append((os.path.join(data, directory, name), False,
+                            0o077 if directory == "installation" else 0o022))
+    target_paths = {path for path, _, _ in targets}
+    descriptors, bindings, repairs, root_owned = {}, [], [], set()
+
+    def identity(metadata):
+        return (metadata.st_dev, metadata.st_ino, metadata.st_uid, metadata.st_mode, metadata.st_nlink)
+
+    def open_path(path, directory):
+        if path in descriptors:
+            return descriptors[path]
+        parent, name = os.path.split(path)
+        parent_fd = open_path(parent, True)
+        if parent_fd is None:
+            return None
+        try:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        expected = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected(before.st_mode):
+            raise ValueError("Unsafe installation path: " + shlex.quote(path) + "; use a regular file or directory without symlinks")
+        if before.st_uid == 0 and os.geteuid() != 0 and os.path.commonpath((home, path)) == home:
+            root_owned.add(data if os.path.commonpath((data, path)) == data else path)
+            return None
+        if path in target_paths and before.st_uid != os.geteuid():
+            raise ValueError("Unsafe installation path: " + shlex.quote(path) + " is not owned by you. Choose a location you own")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_DIRECTORY if directory else 0)
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        descriptors[path] = descriptor
+        if identity(before) != identity(os.fstat(descriptor)):
+            raise ValueError("Installation path changed: " + shlex.quote(path))
+        bindings.append((parent_fd, name, before, path))
+        return descriptor
+
+    try:
+        descriptors["/"] = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        component_root = os.path.join(data, "bin")
+        component_fd = open_path(component_root, True)
+        if component_fd is not None:
+            for name in sorted(os.listdir(component_fd)):
+                path = os.path.join(component_root, name)
+                targets.append((path, False, 0o022))
+                target_paths.add(path)
+        for path, directory, refused in targets:
+            if not os.path.lexists(path):
+                continue
+            descriptor = open_path(path, directory)
+            if descriptor is None:
+                continue
+            metadata = os.fstat(descriptor)
+            if metadata.st_uid != os.geteuid():
+                raise ValueError("Unsafe installation path: " + shlex.quote(path) + " is not owned by you. Choose a location you own")
+            if metadata.st_mode & 0o002:
+                raise ValueError("Unsafe installation path: " + shlex.quote(path) + " is world-writable; fix with: chmod o-w " + shlex.quote(path))
+            if not directory and (metadata.st_nlink != 1 or metadata.st_mode & 0o6000):
+                raise ValueError("Unsafe installation file: " + shlex.quote(path))
+            if metadata.st_mode & 0o020 and refused:
+                repairs.append((descriptor, stat.S_IMODE(metadata.st_mode) & ~refused, path))
+        if root_owned:
+            command = "sudo chown -R " + shlex.quote(pwd.getpwuid(os.geteuid()).pw_name + ":")
+            command += " " + " ".join(shlex.quote(path) for path in sorted(root_owned))
+            raise ValueError("Restore ownership of this Home, then run the installer again: " + command)
+        # Validate the complete set before the first change. Keep every parent
+        # open, compare device and inode, and apply modes through descriptors.
+        for parent, name, before, path in bindings:
+            if identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity(before):
+                raise ValueError("Installation path changed: " + shlex.quote(path))
+        for descriptor, mode, path in repairs:
+            os.fchmod(descriptor, mode)
+            print("Repaired permissions: " + shlex.quote(path) + " (" + format(mode, "04o") + ")")
+    finally:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+
+
+if __name__ == "__main__":
+    try:
+        repair_permissions(*sys.argv[1:])
+    except (ValueError, OSError) as error:
+        print("Error: " + str(error), file=sys.stderr)
+        sys.exit(1)
+PY_INSTALL_PERMISSIONS
+}
+
 installer_runtime_control() {
     # All callers stop verified processes before changing the selected install.
     # Smoke cleanup can disable the binary scan when using a shared branch binary.
@@ -381,6 +514,7 @@ installer_runtime_control() {
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import stat
 import subprocess
@@ -390,7 +524,7 @@ import time
 PREFIXES = ("serve", "gateway", "room open", "home")
 
 
-def process_snapshot(pid):
+def process_snapshot(pid, recorded_at=None):
     if type(pid) is not int or not 1 < pid < 2**31:
         raise ValueError("Runtime PID must be a positive process ID greater than one")
     try:
@@ -399,8 +533,9 @@ def process_snapshot(pid):
         return None
     except PermissionError:
         raise ValueError("Runtime process belongs to another owner")
+    observed_at = time.time()
     result = subprocess.run(
-        ["ps", "-ww", "-p", str(pid), "-o", "uid=", "-o", "lstart=", "-o", "stat=", "-o", "command="],
+        ["ps", "-ww", "-p", str(pid), "-o", "uid=", "-o", "lstart=", "-o", "etime=", "-o", "stat=", "-o", "command="],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         env=dict(os.environ, LC_ALL="C"), text=True, check=False,
     )
@@ -410,14 +545,28 @@ def process_snapshot(pid):
         except ProcessLookupError:
             return None
         raise ValueError("Runtime process identity is unavailable")
-    parts = result.stdout.strip().split(None, 7)
-    if len(parts) != 8 or not parts[0].isdigit():
+    parts = result.stdout.strip().split(None, 8)
+    if len(parts) != 9 or not parts[0].isdigit():
         raise ValueError("Runtime process identity is ambiguous")
     if int(parts[0]) != os.geteuid():
         raise ValueError("Runtime process belongs to another owner")
-    if parts[6].startswith("Z"):
+    if parts[7].startswith("Z"):
         return None
-    return (" ".join(parts[1:6]), parts[7])
+    if recorded_at is not None:
+        # etime is numeric on Linux and macOS: [[days-]hours:]minutes:seconds.
+        # Sample the clock before ps; elapsed seconds are rounded down, so
+        # this lower bound rejects definite PID reuse without parsing dates.
+        elapsed = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", parts[6])
+        if elapsed is None:
+            raise ValueError("Runtime process elapsed time is ambiguous")
+        days, hours, minutes, seconds = (int(field or 0) for field in elapsed.groups())
+        if minutes >= 60 or seconds >= 60 or (days and hours >= 24):
+            raise ValueError("Runtime process elapsed time is ambiguous")
+        age = ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+        if observed_at - age - 1 >= recorded_at:
+            raise ValueError("Runtime process started after its ownership record; preserved its process and state")
+    # Keep the raw birth string for identity checks, independent of elapsed age.
+    return (" ".join(parts[1:6]), parts[8])
 
 
 def matches_command(snapshot, binary, prefixes=PREFIXES):
@@ -586,16 +735,10 @@ def stop_installation(data_dir, binary, scan_binary):
             continue
         records.append((path, recorded))
         pid = recorded[0]
-        snapshot = process_snapshot(pid)
+        snapshot = process_snapshot(pid, recorded_at=recorded[4])
         if snapshot is not None:
             if not matches_command(snapshot, binary):
                 raise ValueError("Recorded Runtime is foreign or ambiguous; preserved its process and state")
-            # ps lstart and this Python process use the same local timezone.
-            # Its second precision rejects definite PID reuse; coordinates do
-            # not yet carry a process birth identity for finer comparisons.
-            started = time.mktime(time.strptime(snapshot[0], "%a %b %d %H:%M:%S %Y"))
-            if started > int(recorded[4]):
-                raise ValueError("Runtime process started after its ownership record; preserved its process and state")
             selected[pid] = snapshot
     if scan_binary:
         for pid, snapshot in selected_processes(binary).items():
@@ -882,6 +1025,182 @@ runtime_command() {
     fi
 }
 
+# The command that runs this installer again with the same options.
+rerun_command() {
+    printf 'curl -fsSL %q | bash' "${PG}/install.sh"
+    if (( ${#INSTALLER_ARGS[@]} > 0 )); then
+        printf ' -s --'
+        printf ' %q' "${INSTALLER_ARGS[@]}"
+    fi
+}
+
+# Apple's python3 is a stub until the Command Line Tools are installed. Start
+# Apple's installer and wait for a python3 that runs. `xcode-select -p` is the
+# probe because running the stub can open Apple's window again.
+wait_for_command_line_tools() {
+    xcode-select --install >/dev/null 2>&1 || true
+    info "This Mac needs Apple's Command Line Tools once, for python3."
+    info "Click Install in Apple's window. This installer continues by itself when they are installed. Press Ctrl+C to stop."
+    local waited=0 next_note=60
+    while (( waited < COMMAND_LINE_TOOLS_WAIT_SECONDS )); do
+        sleep "$COMMAND_LINE_TOOLS_POLL_SECONDS"
+        waited=$((waited + COMMAND_LINE_TOOLS_POLL_SECONDS))
+        if xcode-select -p >/dev/null 2>&1 && python3 -c '' </dev/null >/dev/null 2>&1; then
+            ok "Apple's Command Line Tools are installed"
+            return 0
+        fi
+        if (( waited >= next_note )); then
+            info "Still waiting for Apple's Command Line Tools ($(format_elapsed "$waited"))..."
+            next_note=$((next_note + 60))
+        fi
+    done
+    return 1
+}
+
+# An install directory (default INSTALL_DIR) as a PATH line for a shell profile:
+# "$HOME/..." under HOME, quoted elsewhere.
+path_export_line() {
+    local dir="${1:-$INSTALL_DIR}" quoted
+    quoted="$(printf '%q' "$dir")"
+    if [[ "$quoted" == "$dir" && -n "${HOME:-}" && "$dir" == "${HOME%/}"/* ]]; then
+        printf 'export PATH="$HOME/%s:$PATH"' "${dir#"${HOME%/}"/}"
+    else
+        printf 'export PATH=%s:"$PATH"' "$quoted"
+    fi
+}
+
+# The file the login shell reads at sign-in: zsh reads ~/.zprofile; bash reads the
+# first of ~/.bash_profile, ~/.bash_login and ~/.profile, so a new file must not
+# hide an existing one. Other shells: ~/.zprofile on macOS, ~/.profile on Linux.
+login_profile() {
+    local name
+    case "${SHELL##*/}" in
+        zsh) printf '%s/.zprofile' "$HOME" ;;
+        bash)
+            for name in .bash_profile .bash_login .profile; do
+                if [[ -f "$HOME/$name" ]]; then
+                    printf '%s/%s' "$HOME" "$name"
+                    return 0
+                fi
+            done
+            printf '%s/.profile' "$HOME" ;;
+        *)
+            if [[ "${PLATFORM:-}" == *-darwin ]]; then
+                printf '%s/.zprofile' "$HOME"
+            else
+                printf '%s/.profile' "$HOME"
+            fi ;;
+    esac
+}
+
+# `append_login_profile_line PROFILE LINE` appends LINE to a login profile
+# through one opened file. The profile is opened without following a link (a
+# missing one is created exclusively) and must be this user's regular file with
+# a single name, so the line cannot land in another file such as Runtime data.
+# Only new bytes are written, at the end, in one write; its inode, mode, owner,
+# ACL and existing content stay. Returns 0 when the line was added, 1 when the
+# profile is unchanged (a failed or short write is cut back to the original
+# size), and 2 when the result is uncertain (the cut back or the close after a
+# write failed), so the profile may end in all or part of the line.
+append_login_profile_line() {
+    python3 -I - "$@" <<'PY_LOGIN_PROFILE'
+import os
+import stat
+import sys
+
+path, line = sys.argv[1], os.fsencode(sys.argv[2])
+flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+outcome = 1
+wrote = False
+try:
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        found = os.fstat(fd)
+        if stat.S_ISREG(found.st_mode) and found.st_uid == os.geteuid() and found.st_nlink == 1:
+            size = os.lseek(fd, 0, os.SEEK_END)
+            # A last line without a newline would otherwise join this one.
+            new = (b"\n" if size and os.pread(fd, 1, size - 1) != b"\n" else b"") + line + b"\n"
+            wrote = True
+            try:
+                written = os.write(fd, new)
+            except OSError:
+                written = -1
+            if written == len(new):
+                outcome = 0
+            else:
+                try:
+                    os.ftruncate(fd, size)
+                except OSError:
+                    outcome = 2
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            if wrote:
+                outcome = 2
+except OSError:
+    if wrote:
+        outcome = 2
+sys.exit(outcome)
+PY_LOGIN_PROFILE
+}
+
+# One marked line in the login profile, so `elastos` is found after a restart
+# (as rustup, uv and bun do). Skipped when INSTALL_DIR is already on PATH, when
+# the line is present, and with ELASTOS_NO_MODIFY_PATH=1.
+PATH_PROFILE_UPDATED=false
+add_install_dir_to_login_profile() {
+    [[ "${ELASTOS_NO_MODIFY_PATH:-}" != 1 ]] || return 0
+    case ":${PATH}:" in *":${INSTALL_DIR}:"*) return 0 ;; esac
+    local profile line
+    profile="$(login_profile)"
+    line="$(path_export_line) ${PATH_PROFILE_MARKER}"
+    if [[ -f "$profile" ]] && grep -qxF -- "$line" "$profile"; then
+        return 0
+    fi
+    local status=0
+    append_login_profile_line "$profile" "$line" || status=$?
+    if [[ "$status" -eq 2 ]]; then
+        warn "Could not confirm the change to $(display_path "$profile"); open it and make sure its last line is exactly: $(path_export_line)"
+        return 0
+    elif [[ "$status" -ne 0 ]]; then
+        warn "Left $(display_path "$profile") unchanged because it is linked to another file, is not your own plain file or could not be changed; so new terminals find elastos, add this line to it yourself: $(path_export_line)"
+        return 0
+    fi
+    PATH_PROFILE_UPDATED=true
+    ok "Added $(display_path "$INSTALL_DIR") to PATH in $(display_path "$profile"), so new terminals find elastos"
+    info "To undo, delete the line ending in '${PATH_PROFILE_MARKER}' from that file."
+}
+
+# Uninstall never edits a profile: it names each profile that still holds the
+# exact line the installer added for this install directory.
+show_login_profile_lines() {
+    local line profile
+    line="$(path_export_line "$1") ${PATH_PROFILE_MARKER}"
+    for profile in "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+        [[ -f "$profile" ]] && grep -qxF -- "$line" "$profile" || continue
+        warn "To finish, delete this line from $(display_path "$profile"): $line"
+    done
+}
+
+# Browser's one-time setup grants a per-user device ACL. Other open failures
+# (for example a host/container restriction) need host support, not that ACL.
+browser_kvm_access_available() {
+    [[ -c /dev/kvm ]] || return 1
+    python3 - <<'PY_BROWSER_KVM'
+import errno, os
+try:
+    device = os.open('/dev/kvm', os.O_RDWR | os.O_CLOEXEC)
+except OSError as error:
+    raise SystemExit(0 if error.errno == errno.EACCES else 1)
+else:
+    os.close(device)
+PY_BROWSER_KVM
+}
+
 show_ready() {
     local runtime_bin="$1" command elapsed
     command="$(runtime_command "$runtime_bin")"
@@ -890,50 +1209,30 @@ show_ready() {
     echo -e "  ${GREEN}${BOLD}ElastOS ${RELEASE_VERSION:-} is ready${NC} ${DIM}(took ${elapsed})${NC}"
     printf '    %b%-12s%b %s\n' "$DIM" "Open Home" "$NC" "${command} home --browser"
     printf '    %b%-12s%b %s\n' "$DIM" "Update" "$NC" "${command} update"
+    if [[ "${EXISTING_INSTALL:-false}" == false && "$(uname -s)" == Linux && "$(uname -m)" =~ ^(aarch64|arm64)$ ]] && browser_kvm_access_available; then
+        printf '    Browser is available on this computer. To turn it on, run: %s setup --browser\n' "$command"
+    fi
     if [[ "$command" != elastos ]]; then
-        local quoted path_entry
-        quoted="$(printf '%q' "$INSTALL_DIR")"
-        if [[ "$quoted" == "$INSTALL_DIR" && -n "${HOME:-}" && "$INSTALL_DIR" == "${HOME%/}"/* ]]; then
-            path_entry="\"\$HOME/${INSTALL_DIR#"${HOME%/}"/}:\$PATH\""
-        else
-            path_entry="${quoted}:\"\$PATH\""
-        fi
-        printf '    %b%-12s%b %s\n' "$DIM" "Add to PATH" "$NC" "export PATH=${path_entry}"
+        local label="Add to PATH"
+        # New terminals already read the profile line; only this one needs it.
+        [[ "$PATH_PROFILE_UPDATED" != true ]] || label="This terminal"
+        printf '    %b%-12s%b %s\n' "$DIM" "$label" "$NC" "$(path_export_line)"
     fi
     echo ""
 }
 
-# Setup leaves the curl pipe unread. Browser Home runs in the controlling
-# terminal; non-interactive provisioning prints the command for a later launch.
-prepare_browser_linux_host() {
-    BROWSER_LINUX_HOST_READY=false
-    [[ "$(uname -s)" == Linux ]] || return 0
-    local helper="${DATA_DIR}/scripts/browser-vm-linux-network.py" user
-    # sudo runs only a root-owned copy, never the user-writable helper.
-    local root_helper=/usr/local/lib/elastos/browser-vm-linux-network.py
-    [[ -f "$helper" ]] || return 0
-    if [[ ! -e /dev/kvm ]]; then
-        info "Browser virtualization is unavailable: this host has no /dev/kvm device."
-        return 0
-    fi
-    user="$(id -un)"
-    if /usr/bin/python3 -I "$helper" check >/dev/null 2>&1; then
-        info "Browser KVM and network access are ready."
-    elif ( : </dev/tty ) 2>/dev/null && command -v sudo >/dev/null 2>&1; then
-        info "Browser needs one-time administrator setup for KVM access and its private network devices."
-        info "The setup shows its changes and asks for confirmation. Runtime then runs as your user."
-        sudo install -D -o root -g root -m 755 "$helper" "$root_helper" </dev/tty || return $?
-        sudo /usr/bin/python3 -I "$root_helper" setup --user "$user" </dev/tty || return $?
-        /usr/bin/python3 -I "$helper" check >/dev/null 2>&1 || return $?
-    else
-        info "Browser needs one-time administrator setup. Run from a terminal:"
-        printf '  sudo install -D -o root -g root -m 755 %q %q\n' "$helper" "$root_helper"
-        printf '  sudo /usr/bin/python3 -I %q setup --user %q\n' "$root_helper" "$user"
-        return 0
-    fi
-    BROWSER_LINUX_HOST_READY=true
-    info "To remove Browser host access after closing Browser:"
-    printf '  sudo /usr/bin/python3 -I %q remove --user %q\n' "$root_helper" "$user"
+# Home listens only on this computer (the Runtime's BROWSER_HOME_PORT, 8090). A
+# Linux computer with no desktop session, such as a Jetson used over SSH, has
+# no browser to open, so say how to reach Home from another computer.
+show_remote_open_hint() {
+    [[ "$(uname -s)" == Linux && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]] || return 0
+    local host
+    # SSH_CONNECTION is "client port server port": the address this session reached.
+    host="$(printf '%s\n' "${SSH_CONNECTION:-}" | awk '{ print $3 }')"
+    [[ -n "$host" ]] || host="$(uname -n)"
+    info "No desktop is running on this computer, so no browser opens here."
+    info "To use Home from another computer, run this there, then open http://localhost:8090/home/ in its browser:"
+    printf '  ssh -L 8090:localhost:8090 %s@%s\n' "$(id -un)" "$host"
 }
 
 finish_install() {
@@ -944,19 +1243,21 @@ finish_install() {
     fi
     step 5 "Set up Home"
     info "Setting up Home..."
-    local setup_args=(setup)
+    local setup_args=(setup) status=0
     if [[ "${ISOLATED:-false}" == true ]]; then
         setup_args+=(--isolated)
     fi
-    "$runtime_bin" "${setup_args[@]}" </dev/null || return $?
-    if ! prepare_browser_linux_host; then
-        warn "Browser host preparation is incomplete. Home is ready. Run the installer from a terminal to complete Browser host access, then run elastos setup."
-    elif [[ "${BROWSER_LINUX_HOST_READY:-false}" == true ]]; then
-        # Resume image preparation with the same Community choice.
-        "$runtime_bin" "${setup_args[@]}" </dev/null || warn "Home is ready. Browser preparation needs repair with elastos setup."
+    "$runtime_bin" "${setup_args[@]}" </dev/null || status=$?
+    if (( status != 0 )); then
+        # The Runtime is installed; only setup needs to run again.
+        warn "Home setup did not finish. ElastOS is installed, so you do not need to run the whole install again."
+        warn "If the reason above is a network that blocks UDP port 4433 (some office, school and hotel networks do), connect to another network, such as a phone hotspot."
+        warn "Then run: $(runtime_command "$runtime_bin") ${setup_args[*]}"
+        return "$status"
     fi
     show_ready "$runtime_bin"
     if ( : </dev/tty ) 2>/dev/null && [[ -t 1 ]]; then
+        show_remote_open_hint
         info "Opening Home..."
         "$runtime_bin" home --browser </dev/tty || return $?
     else
@@ -1083,9 +1384,14 @@ uninstall_installation() {
     binary="${install_dir}/elastos"
     if [[ ! -e "$binary" && ! -L "$binary" && ! -e "$data_dir" && ! -L "$data_dir" ]]; then
         ok "No ElastOS installation found"
+        show_login_profile_lines "$install_dir"
         return 0
     fi
     command -v python3 &>/dev/null || die "Required tool not found: python3"
+    if [[ "$(uname -s)" == Linux ]]; then
+        info "If you turned Browser on, close Browser and remove its host access before uninstalling:"
+        printf '  sudo /usr/bin/python3 -I /usr/local/lib/elastos/browser-vm-linux-network.py remove --user %q\n' "$(id -un)"
+    fi
     uninstall_files check "$install_dir" "$data_dir" "$remove_data" \
         || die "Nothing was stopped or removed"
     info "Stopping this installation's verified Runtime processes..."
@@ -1098,6 +1404,7 @@ uninstall_installation() {
     uninstall_files remove "$install_dir" "$data_dir" "$remove_data" \
         || die "Uninstall did not finish; run it again after fixing the reason above"
     ok "Removed the Runtime and its components"
+    show_login_profile_lines "$install_dir"
     if [[ "$remove_data" == true ]]; then
         ok "Deleted the data directory"
     else
@@ -1118,6 +1425,7 @@ INSTALL_ONLY="${ELASTOS_INSTALL_ONLY:-false}"
 UNINSTALL=false
 REMOVE_DATA=false
 INSTALL_STARTED_AT=$SECONDS
+INSTALLER_ARGS=("$@")
 installer_select_output
 
 while [[ $# -gt 0 ]]; do
@@ -1179,10 +1487,15 @@ for cmd in curl python3; do
 done
 # A Mac without Command Line Tools has only a python3 stub that cannot run.
 if ! python3 -c '' </dev/null &>/dev/null; then
-    if [[ "$PLATFORM" == *-darwin ]]; then
-        die "This Mac needs Apple's Command Line Tools for python3. Run: xcode-select --install, then run the installer again."
+    if [[ "$PLATFORM" != *-darwin ]]; then
+        die "python3 is installed but does not run. Repair python3, then run the installer again."
     fi
-    die "python3 is installed but does not run. Repair python3, then run the installer again."
+    # Only a person at a terminal can click Install in Apple's window.
+    if [[ ! -t 1 ]]; then
+        die_exact "This Mac needs Apple's Command Line Tools for python3. Run: xcode-select --install, and when it finishes run: $(rerun_command)"
+    fi
+    wait_for_command_line_tools \
+        || die_exact "Apple's Command Line Tools are not installed yet. When Apple's installer finishes, run: $(rerun_command)"
 fi
 
 if ! command -v sha256sum &>/dev/null && ! command -v shasum &>/dev/null; then
@@ -1216,23 +1529,25 @@ fi
 
 [[ "$INSTALL_DIR" == /* ]] || INSTALL_DIR="${PWD}/${INSTALL_DIR}"
 
-# The installation writer refuses directories others can write. Check the real
-# directory, as the writer does after resolving symlinks; say how to fix it and
-# leave it unchanged.
+# Existing DATA/BIN roots keep their owner's group permissions. Check the real
+# user-owned directory for world-write permission and leave its mode unchanged.
+# File, lock and private staging checks retain their separate policies.
 require_safe_existing_dir() {
     local dir="$1" real
     [[ -e "$dir" || -L "$dir" ]] || return 0
     [[ -d "$dir" ]] || die_exact "Unsafe installation directory: $(printf '%q' "$dir") is not a directory"
+    if [[ ! -O "$dir" ]]; then
+        installer_repair_existing_permissions || exit 1
+        die_exact "Unsafe installation directory: $(printf '%q' "$dir") is not owned by you. Choose a location you own"
+    fi
     real="$(cd -P -- "$dir" && pwd -P)" || die_exact "Cannot resolve installation directory: $(printf '%q' "$dir")"
-    [[ -O "$real" ]] || die_exact "Unsafe installation directory: $(printf '%q' "$real") is not owned by you; fix with: sudo chown \"\$(id -u)\" $(printf '%q' "$real")"
-    if [[ -n "$(find "$real" -maxdepth 0 \( -perm -g+w -o -perm -o+w \))" ]]; then
-        die_exact "Unsafe installation directory: $(printf '%q' "$real") is group- or world-writable; fix with: chmod go-w $(printf '%q' "$real")"
+    if [[ -n "$(find "$real" -maxdepth 0 -perm -o+w)" ]]; then
+        die_exact "Unsafe installation directory: $(printf '%q' "$real") is world-writable; fix with: chmod o-w $(printf '%q' "$real")"
     fi
 }
-# The runtime also refuses media tools under a parent others can write, such
-# as a group-writable ~/.local. Apply that rule to every existing ancestor of
-# the data directory now, before any download: owned by you or root, and not
-# group- or world-writable.
+# Existing ancestors keep their group permissions. Require ownership by you
+# or root and reject world-write permission before any download. Shared parents
+# keep their modes; an unsafe parent requires a safe installation location.
 dir_owner_mode() {
     # GNU stat -f reports the filesystem, so pick the syntax by what works.
     if stat -c '%u %a' / >/dev/null 2>&1; then
@@ -1249,13 +1564,10 @@ require_safe_parent_chain() {
         read -r owner mode < <(dir_owner_mode "$real") || die_exact "Cannot inspect directory: $(printf '%q' "$real")"
         quoted="$(printf '%q' "$real")"
         if [[ "$owner" != 0 && "$owner" != "$(id -u)" ]]; then
-            die_exact "Unsafe parent directory: $quoted is not owned by you; fix with: sudo chown \"\$(id -u)\" $quoted"
+            die_exact "Unsafe parent directory: $quoted is not owned by you or root. Choose a user-owned location with safe parents"
         fi
-        if (( 8#$mode & 8#022 )); then
-            if [[ "$owner" == 0 && "$(id -u)" != 0 ]]; then
-                die_exact "Unsafe parent directory: $quoted is group- or world-writable; fix with: sudo chmod go-w $quoted"
-            fi
-            die_exact "Unsafe parent directory: $quoted is group- or world-writable; fix with: chmod go-w $quoted"
+        if (( 8#$mode & 8#002 )); then
+            die_exact "Unsafe parent directory: $quoted is world-writable. Choose a user-owned location with safe parents"
         fi
         [[ "$real" != "/" ]] || break
         real="$(dirname -- "$real")"
@@ -1264,6 +1576,7 @@ require_safe_parent_chain() {
 require_safe_existing_dir "$INSTALL_DIR"
 require_safe_existing_dir "$DATA_DIR"
 require_safe_parent_chain "$DATA_DIR"
+installer_repair_existing_permissions || exit 1
 
 # ── Fetch + verify release head ──────────────────────────────────────
 
@@ -1440,8 +1753,9 @@ with open(os.environ["SOURCES_PATH"], "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
-# The writer refuses an older release, another channel, a pending Home
-# update and a concurrent writer before this installer stops Runtime.
+# The writer refuses an older release, a channel a stable or canary Home does
+# not follow, a pending Home update and a concurrent writer before this
+# installer stops Runtime.
 INSTALL_RELEASE=("${TMP_INSTALL_BIN}" install-release --data-dir "$DATA_DIR"
     --binary "${INSTALL_DIR}/elastos" --candidate "${TMP_INSTALL_BIN}" "$SOURCES_PATH"
     "${INSTALL_SCRATCH}/release-head.json" "${INSTALL_SCRATCH}/release.json")
@@ -1470,6 +1784,7 @@ info "Verifying and upgrading configured protected roots while Runtime is stoppe
 ok "Protected roots are ready"
 ok "Saved trusted source config to $(display_path "${DATA_DIR}/sources.json")"
 ok "Saved verified release inputs for Runtime setup and updates"
+add_install_dir_to_login_profile
 
 # ── Complete installation ─────────────────────────────────────────────
 

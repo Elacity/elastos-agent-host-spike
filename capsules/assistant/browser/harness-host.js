@@ -10,10 +10,17 @@ import { migrateLegacyWorkspaces, mergeWorkspaceDocuments } from "./workspace-tr
    that needs Home is asked for by message; anything that needs Runtime goes
    through the launch token like every other capsule. */
 
-const homeToken = (() => {
+let homeToken = (() => {
   const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
   return params.get("home_token") || "";
 })();
+
+const homeTokenListeners = new Set();
+export function onHomeTokenChanged(callback) { homeTokenListeners.add(callback); }
+export function setHomeGuiLaunchToken(token) {
+  homeToken = token;
+  for (const callback of homeTokenListeners) callback(token);
+}
 
 /* ---- shell-core ------------------------------------------------------------ */
 
@@ -276,6 +283,25 @@ export function postToHome(message) {
   if (window.parent && window.parent !== window) {
     window.parent.postMessage(message, "*");
   }
+}
+
+/* A web link goes to Home GUI, which opens it in the Browser app. A Home
+   without that app answers home-agent:open-link for the same address; only
+   then does the link go to Home's own link prompt (#430), as this app's
+   request, where the person sees the address and chooses Open link. */
+let pendingWebLink = "";
+export function openWebLink(url) {
+  pendingWebLink = url;
+  postToHome({ type: "home-agent:open-browser", url });
+}
+
+export function openWebLinkThroughHomePrompt(url) {
+  if (!url || url !== pendingWebLink) return false;
+  pendingWebLink = "";
+  const origin = homeOrigin();
+  if (!origin || !homeToken || window.top === window) return false;
+  window.top.postMessage({ type: "home:open-external", url, homeToken }, origin);
+  return true;
 }
 
 /* ---- copy ------------------------------------------------------------------ */

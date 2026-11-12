@@ -95,10 +95,10 @@ pub(super) async fn put(
 
 fn object_location(
     data_dir: &Path,
-    principal_id: &str,
+    context: &HomeLaunchTokenContext,
     relative: &str,
 ) -> anyhow::Result<(String, PathBuf)> {
-    let root = crate::auth::principal_localhost_root(principal_id);
+    let root = context.root().localhost_root();
     let uri = format!("{root}/{relative}");
     let path = rooted_localhost_fs_path(data_dir, &uri)
         .ok_or_else(|| anyhow::anyhow!("invalid Assistant workspace object root"))?;
@@ -111,20 +111,14 @@ fn optional_object(
     relative: &str,
     max_bytes: usize,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    let (uri, path) = object_location(data_dir, context.principal_id(), relative)?;
+    let (uri, path) = object_location(data_dir, context, relative)?;
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
-    let root = crate::auth::principal_localhost_root(context.principal_id());
-    let bytes = crate::auth::read_principal_root_object(
-        data_dir,
-        context.principal_id(),
-        &root,
-        &uri,
-        &path,
-    )?;
+    let bytes =
+        crate::auth::read_principal_root_object_resolved(data_dir, context.root(), &uri, &path)?;
     anyhow::ensure!(
         bytes.len() <= max_bytes,
         "Assistant workspace source exceeds its byte limit"
@@ -184,8 +178,7 @@ pub(super) fn legacy_home_agent(
     anyhow::ensure!(
         state.schema == HOME_BROWSER_STATE_SCHEMA
             && state.principal_id == context.principal_id()
-            && state.localhost_root
-                == crate::auth::principal_localhost_root(context.principal_id()),
+            && state.localhost_root == context.root().localhost_root(),
         "invalid legacy Home workspace identity"
     );
     if let Some(session) = raw.get("session").filter(|value| !value.is_null()) {
@@ -301,12 +294,10 @@ fn save(
         "Assistant workspace including retained sources exceeds {} bytes",
         MAX_BYTES
     );
-    let (uri, path) = object_location(data_dir, context.principal_id(), RELATIVE_PATH)?;
-    let root = crate::auth::principal_localhost_root(context.principal_id());
-    crate::auth::write_protected_principal_root_object(
+    let (uri, path) = object_location(data_dir, context, RELATIVE_PATH)?;
+    crate::auth::write_protected_principal_root_object_resolved(
         data_dir,
-        context.principal_id(),
-        &root,
+        context.root(),
         &uri,
         &path,
         &bytes,
@@ -368,4 +359,198 @@ pub(super) fn preserve_legacy_home_agent(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod r3_tests {
+    use super::super::r3_stored_root_tests::{
+        fixture, seed, verified_parent_device_context, AGENT_ID, AGENT_ROOT, NEEDS_PROTECTION,
+    };
+    use super::*;
+
+    #[test]
+    fn agent_location_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        let (uri, path) = object_location(dir.path(), &context, RELATIVE_PATH).unwrap();
+        assert_eq!(
+            uri,
+            format!("{AGENT_ROOT}/.AppData/ElastOS/Assistant/workspace-v2.json"),
+            "R3 v2 location uses UsersAI"
+        );
+        assert_eq!(
+            path,
+            dir.path().join(format!(
+                "{}/.AppData/ElastOS/Assistant/workspace-v2.json",
+                AGENT_ROOT.strip_prefix("localhost://").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn agent_optional_read_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        seed(
+            dir.path(),
+            ".AppData/ElastOS/Assistant/workspace-v2.json",
+            b"agent bytes",
+        );
+        let result = optional_object(dir.path(), &context, RELATIVE_PATH, MAX_BYTES)
+            .map_err(|err| err.to_string());
+        assert_eq!(
+            result,
+            Ok(Some(b"agent bytes".to_vec())),
+            "R3 v2 read uses UsersAI"
+        );
+    }
+
+    #[test]
+    fn agent_legacy_identity_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        let browser_state = format!(
+            r#"{{
+            "schema":"elastos.home.browser-state/v1", "principal_id":"{AGENT_ID}",
+            "localhost_root":"{AGENT_ROOT}",
+            "session":{{"windows":[],"agent":{{"draft":"legacy agent"}}}},
+            "layout":null,"recent_targets":[]
+        }}"#
+        );
+        seed(
+            dir.path(),
+            ".AppData/ElastOS/Home/browser-state.json",
+            browser_state.as_bytes(),
+        );
+        let result = legacy_home_agent(dir.path(), &context).map_err(|err| err.to_string());
+        assert_eq!(
+            result,
+            Ok(Some(serde_json::json!({"draft":"legacy agent"}))),
+            "R3 v2 legacy identity uses UsersAI"
+        );
+    }
+
+    #[test]
+    fn agent_write_uses_stored_root() {
+        let (dir, context) = fixture(true);
+        let initial = read(dir.path(), &context).unwrap();
+        let request = PutRequest {
+            schema: "elastos.assistant.workspace/v2".into(),
+            if_revision: 0,
+            document: serde_json::json!({"draft":"agent draft"}),
+            migration_revision: Some(initial["migration_revision"].as_str().unwrap().into()),
+        };
+        let result = save(dir.path(), &context, request);
+        let writes = crate::auth::principal_object_io::writes(dir.path());
+        assert!(
+            writes.iter().any(|path| path.ends_with(
+                "UsersAI/ba287e12925d9408db0f24e3/.AppData/ElastOS/Assistant/workspace-v2.json"
+            )),
+            "R3 v2 write records the stored-root object: {writes:?}"
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            NEEDS_PROTECTION,
+            "R3 v2 write reaches UsersAI protection gate"
+        );
+    }
+
+    #[test]
+    fn human_keeps_workspace_round_trip() {
+        let (dir, context) = fixture(false);
+        let initial = read(dir.path(), &context).unwrap();
+        assert_eq!(initial["revision"], 0);
+        let request = PutRequest {
+            schema: "elastos.assistant.workspace/v2".into(),
+            if_revision: 0,
+            document: serde_json::json!({"draft":"human draft"}),
+            migration_revision: Some(initial["migration_revision"].as_str().unwrap().into()),
+        };
+        let saved = save(dir.path(), &context, request).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({"schema":"elastos.assistant.workspace/v2",
+            "revision":1, "document":{"draft":"human draft"}})
+        );
+        assert_eq!(read(dir.path(), &context).unwrap(), saved);
+    }
+
+    #[test]
+    fn parent_signed_workspace_reads_parent_root_and_keeps_protection_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (context, parent_root, child_root, token) =
+            verified_parent_device_context(dir.path(), "assistant");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        let route_error =
+            require_home_launch_token_context(dir.path(), &headers, "assistant").unwrap_err();
+        assert!(
+            route_error.to_string().contains("Signer DID mismatch"),
+            "{route_error}"
+        );
+        let (uri, path) = object_location(dir.path(), &context, RELATIVE_PATH).unwrap();
+        assert_eq!(uri, format!("{parent_root}/{RELATIVE_PATH}"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = serde_json::json!({
+            "assistant": null, "homeAgent": null, "homeSessionAgent": null
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": SCHEMA, "revision": 7, "document": {"draft": "parent"},
+                "migration_revision": migration_revision(&legacy).unwrap(), "legacy": legacy
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let child_uri = format!("{child_root}/{RELATIVE_PATH}");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &child_uri).unwrap();
+        std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        let decoy_legacy = serde_json::json!({
+            "assistant": null, "homeAgent": null, "homeSessionAgent": null
+        });
+        std::fs::write(&child_path, serde_json::to_vec(&serde_json::json!({
+            "schema": SCHEMA, "revision": 99, "document": {"draft": "child decoy"},
+            "migration_revision": migration_revision(&decoy_legacy).unwrap(), "legacy": decoy_legacy
+        })).unwrap()).unwrap();
+        assert_eq!(
+            read(dir.path(), &context)
+                .map(|value| value["revision"].clone())
+                .map_err(|error| error.to_string()),
+            Ok(serde_json::json!(7))
+        );
+        let request = PutRequest {
+            schema: SCHEMA.into(),
+            if_revision: 7,
+            document: serde_json::json!({"draft":"replacement"}),
+            migration_revision: None,
+        };
+        assert_eq!(
+            save(dir.path(), &context, request).unwrap_err().to_string(),
+            NEEDS_PROTECTION
+        );
+        assert!(!crate::auth::principal_object_io::reads(dir.path()).contains(&child_path));
+        std::fs::remove_file(&child_path).unwrap();
+        assert!(std::fs::read(&path)
+            .unwrap()
+            .windows(6)
+            .any(|bytes| bytes == b"parent"));
+        std::fs::remove_file(&path).unwrap();
+        crate::auth::create_owner_only_dir_all(dir.path(), path.parent().unwrap()).unwrap();
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            context.principal_id(),
+            &parent_root,
+        );
+        let initial = read(dir.path(), &context).unwrap();
+        let request = PutRequest {
+            schema: SCHEMA.into(),
+            if_revision: 0,
+            document: serde_json::json!({"draft":"protected parent"}),
+            migration_revision: Some(initial["migration_revision"].as_str().unwrap().into()),
+        };
+        let saved = save(dir.path(), &context, request);
+        assert!(saved.is_ok(), "parent workspace save: {saved:?}");
+        assert_eq!(read(dir.path(), &context).unwrap()["revision"], 1);
+        assert!(!child_path.exists());
+        assert!(!crate::auth::principal_object_io::writes(dir.path()).contains(&child_path));
+    }
 }

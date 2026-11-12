@@ -435,7 +435,7 @@ fn a_hosted_effect_above_the_budget_cap_is_refused_on_the_granted_pair() {
     );
 
     // A second resident on its own identity admits the cap on its own grant,
-    // because each identity's ceiling is its own.
+    // because each grant's ceiling is its own.
     let other = SignedBundle::distinct("agent-budget-b");
     admit(&mut standin, &other);
     let other_session = launch(&mut standin, &other);
@@ -635,7 +635,7 @@ fn a_session_grants_allowance_is_held_across_its_uses() {
     );
 }
 
-/// F-1253-2, at the routes: a stopped grant's open hold still counts.
+/// F-1253-2, at the routes: an ended grant's open hold keeps its own ceiling.
 ///
 /// Agent A holds the cap (4096) through the use route. B is a second route
 /// grant on A's own identity, minted before the stop through
@@ -643,17 +643,21 @@ fn a_session_grants_allowance_is_held_across_its_uses() {
 /// revoke B too, so A alone is ended through `end_one_live_grant`, the seam
 /// whose body is the `end_live_grant` step `revoke_live` runs: the grant
 /// becomes `Revoked` and its ledger binding ends through `end_grant`, which
-/// keeps A's open hold. B is a `session` grant, so nothing revokes it, and its
-/// ask of 1 is refused only because A's held 4096 still counts against the
-/// identity ceiling. B stays live and unspent.
+/// keeps A's open hold on A's own key. B is a `session` grant with its own
+/// ceiling, so A's hold fills only A's key: B's ask of 1 is admitted before
+/// the stop and again after it.
 ///
-/// F1 in Rong's table: asking 1, not 4096, proves the shared ceiling. F6
-/// (Rong's table): this journey pins that ending a grant keeps its hold
-/// (`end_grant`), rather than removing the binding. Dropping the `end_grant`
-/// call from `end_live_grant` keeps this test green because the grant stays
-/// live; a `held_for_identity` that skips ended grants turns it red.
+/// This journey pins the route behaviour that a sibling grant keeps its own
+/// ceiling across an end. It does not show the end reached the ledger: B's
+/// ceiling is its own, so dropping the `end_grant` call from `end_live_grant`
+/// keeps it green. F6 (Rong's table) on this same stand-in step is pinned by
+/// `standin_runtime::tests::standin_ended_grant_keeps_its_open_hold`, which
+/// ends A through `end_one_live_grant` and reads A's handle on the ledger:
+/// a new hold is refused `unknown handle` and the open hold still releases.
+/// `model_ended_grant_hold_keeps_its_own_key` in `grant-binding/src/ledger.rs`
+/// pins the kept hold on the ledger alone.
 #[test]
-fn an_ended_grants_open_hold_still_blocks_a_sibling_grant() {
+fn an_ended_grants_open_hold_keeps_its_own_ceiling() {
     let mut standin = StandIn::new();
     let bundle = SignedBundle::distinct("agent-ceiling-a");
     admit(&mut standin, &bundle);
@@ -664,7 +668,7 @@ fn an_ended_grants_open_hold_still_blocks_a_sibling_grant() {
     assert_eq!(
         present(&mut standin, &agent, &a.run_id, &a.request_id),
         Ok(json!({ "valid": true })),
-        "A's default use holds the whole ceiling"
+        "A's default use holds the whole cap on its own ceiling"
     );
     assert_eq!(
         present_ask(
@@ -674,8 +678,8 @@ fn an_ended_grants_open_hold_still_blocks_a_sibling_grant() {
             &b.request_id,
             &json!({ "amount": 1 })
         ),
-        Err((403u16, "reservation exceeds the ceiling".to_owned())),
-        "A's open hold refuses B's ask of 1 before the stop"
+        Ok(json!({ "valid": true })),
+        "A's open hold leaves B's ask of 1 admitted before the stop"
     );
     standin.end_one_live_grant(&a.request_id);
     assert!(
@@ -691,23 +695,23 @@ fn an_ended_grants_open_hold_still_blocks_a_sibling_grant() {
             Caller::Client { session_id: &agent },
             &json!({ "request_id": b.request_id, "amount": 1 }),
         ),
-        Err((403u16, "reservation exceeds the ceiling".to_owned())),
-        "the ended grant's open hold still counts at the routes"
+        Ok(json!({ "valid": true })),
+        "the ended grant's open hold stays on its own ceiling at the routes"
     );
     assert!(
         listed_live(&standin, &b.request_id),
-        "the refused ask leaves B live and unspent"
+        "B stays live after its second ask"
     );
 }
 
-/// F1: a second grant is refused while the first grant's hold is open.
+/// F1: two grants of one identity keep separate ceilings.
 ///
 /// Session S asks twice and the shell grants both through `post_capability_grant`,
 /// so A and B are both route-minted `session` grants. A's use asks 4096 and is
-/// admitted; B's use asks 1 and is refused at `Verifier::reserve`, because
-/// the ledger sums the open holds of S's identity, not of one handle.
+/// admitted; B's use asks 1 and is admitted at `Verifier::reserve`, because
+/// the ledger sums the open holds of one grant key, not of one identity.
 #[test]
-fn a_second_grant_is_refused_while_the_first_grants_hold_is_open() {
+fn two_grants_of_one_identity_keep_separate_ceilings() {
     let mut standin = StandIn::new();
     let bundle = SignedBundle::distinct("agent-two-grants");
     admit(&mut standin, &bundle);
@@ -728,19 +732,20 @@ fn a_second_grant_is_refused_while_the_first_grants_hold_is_open() {
             &b.request_id,
             &json!({ "amount": 1 })
         ),
-        Err((403u16, "reservation exceeds the ceiling".to_owned())),
-        "B's ask of 1 is refused by A's open hold, so the ceiling is shared"
+        Ok(json!({ "valid": true })),
+        "B's ask of 1 is admitted on its own ceiling"
     );
     assert!(
         listed_live(&standin, &a.request_id) && listed_live(&standin, &b.request_id),
-        "both grants stay live after the refusal"
+        "both grants stay live after their uses"
     );
 }
 
 /// F2: a different identity admits the same ask.
 ///
 /// After the same setup as F1, a session T with a grant C asks 4096 and is
-/// admitted: the ceiling is per identity, so S's hold covers T's grant.
+/// admitted: each grant keeps its own ceiling, so S's hold stays on S's
+/// grant and C admits the cap on its own.
 #[test]
 fn a_second_identities_grant_admits_the_cap_while_the_first_identity_holds_it() {
     let mut standin = StandIn::new();
@@ -766,11 +771,10 @@ fn a_second_identities_grant_admits_the_cap_while_the_first_identity_holds_it() 
 
 /// F4: a refused use holds nothing.
 ///
-/// On session S, A's 1000 is admitted, then B's 4096 is refused at
-/// `Verifier::reserve`, then B's 1 is admitted. A and B are two route-minted
-/// grants of S. The 1 fits under the ceiling only when the refused 4096
-/// recorded no hold, so the refused ask left the identity's held sum at
-/// exactly A's 1000.
+/// On session S, A's 1000 is admitted, then A's 4096 is refused at
+/// `Verifier::reserve`, then A's 1 is admitted. A is one route-minted grant,
+/// so its ceiling is 4096: the 1 fits only when the refused 4096 recorded no
+/// hold, so the refused ask left the grant's held sum at exactly 1000.
 #[test]
 fn a_refused_use_holds_nothing() {
     let mut standin = StandIn::new();
@@ -778,8 +782,6 @@ fn a_refused_use_holds_nothing() {
     admit(&mut standin, &bundle);
     let session = launch(&mut standin, &bundle);
     let a = own_grant_of(&mut standin, &session, "session");
-    let b = own_grant_of(&mut standin, &session, "session");
-    assert_ne!(a.request_id, b.request_id, "the two grants are distinct");
     assert_eq!(
         present_ask(
             &mut standin,
@@ -795,27 +797,27 @@ fn a_refused_use_holds_nothing() {
         present_ask(
             &mut standin,
             &session,
-            &b.run_id,
-            &b.request_id,
+            &a.run_id,
+            &a.request_id,
             &json!({ "amount": 4096 })
         ),
         Err((403u16, "reservation exceeds the ceiling".to_owned())),
-        "B's 4096 is refused by A's hold"
+        "A's 4096 is refused by A's own hold of 1000"
     );
     assert!(
-        listed_live(&standin, &b.request_id),
-        "the refused ask leaves B live and unspent"
+        listed_live(&standin, &a.request_id),
+        "the refused ask leaves A live and unspent"
     );
     assert_eq!(
         present_ask(
             &mut standin,
             &session,
-            &b.run_id,
-            &b.request_id,
+            &a.run_id,
+            &a.request_id,
             &json!({ "amount": 1 })
         ),
         Ok(json!({ "valid": true })),
-        "B's 1 fits, so the refused 4096 held nothing"
+        "A's 1 fits, so the refused 4096 held nothing"
     );
 }
 

@@ -512,6 +512,40 @@ impl TwoRuntimes {
         crate::auth::principal_localhost_root(&self.authority.principal_id)
     }
 
+    /// The context launch verification builds: the stored principal root
+    /// resolved the way `require_home_launch_token_value_from_expected_did`
+    /// resolves it, never the fixture's `for_test` root.
+    fn resolved_context(
+        &self,
+        principal_id: &str,
+        session_id: &str,
+        proof_binding_id: Option<String>,
+        grant_id: &str,
+    ) -> HomeLaunchTokenContext {
+        let data_dir = self.owner.path();
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(
+            data_dir,
+            &crate::api::gateway::gateway_home_token::home_launch_auth_data_dir(data_dir),
+            principal_id,
+        )
+        .expect("fixture principal has a stored root");
+        HomeLaunchTokenContext::resolved(
+            root,
+            session_id.to_string(),
+            proof_binding_id,
+            grant_id.to_string(),
+        )
+    }
+
+    fn owner_context(&self) -> HomeLaunchTokenContext {
+        self.resolved_context(
+            &self.authority.principal_id,
+            &self.authority.session_id,
+            Some(self.authority.proof_binding_id.clone()),
+            &self.authority.grant_id,
+        )
+    }
+
     fn write_request_record(&self, status: &str) {
         self.write_request_record_with_expiry(status, now_ts() + 3600);
     }
@@ -1636,15 +1670,6 @@ mod denial_authority {
     use crate::api::gateway::gateway_model_service::deny_grant_and_settle;
 
     impl TwoRuntimes {
-        fn owner_context(&self) -> HomeLaunchTokenContext {
-            HomeLaunchTokenContext::for_test(
-                self.authority.principal_id.clone(),
-                self.authority.session_id.clone(),
-                Some(self.authority.proof_binding_id.clone()),
-                self.authority.grant_id.clone(),
-            )
-        }
-
         async fn deny_as(&self, context: &HomeLaunchTokenContext) -> anyhow::Result<String> {
             deny_grant_and_settle(
                 Some(self.registry.clone()),
@@ -1666,6 +1691,82 @@ mod denial_authority {
             .parent()
             .unwrap()
             .to_path_buf()
+        }
+
+        /// Records an approved model request under the root the context
+        /// carries, the way the Runtime records one for that principal.
+        fn write_requests_state_for(&self, context: &HomeLaunchTokenContext) {
+            let data_dir = self.owner.path();
+            let principal_id = context.principal_id();
+            let root = context.root().localhost_root();
+            let uri = format!("{root}/.AppData/ElastOS/Home/services-requests.json");
+            let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let now = now_ts();
+            let state = json!({
+                "schema": "elastos.services.requests/v1",
+                "principal_id": principal_id,
+                "localhost_root": root,
+                "updated_at": now,
+                "requests": { REQUEST_ID: {
+                    "request_id": REQUEST_ID,
+                    "offer_id": "local:provider:model",
+                    "service_uri": "elastos://peer/model",
+                    "service_kind": "remote_model",
+                    "service_display_name": "Mac model",
+                    "requester_peer_id": self.seed_node.endpoint.id().to_string(),
+                    "requester_did": self.seed_did,
+                    "requester_display_name": "Seed",
+                    "created_at": now,
+                    "updated_at": now,
+                    "status": "approved",
+                    "authenticated_request": true,
+                    "grant_expires_at": now + 3600,
+                } },
+            });
+            crate::auth::write_principal_root_object_resolved(
+                data_dir,
+                context.root(),
+                &uri,
+                &path,
+                &serde_json::to_vec_pretty(&state).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn recorded_requests_state(&self, context: &HomeLaunchTokenContext) -> Value {
+            let uri = format!(
+                "{}/.AppData/ElastOS/Home/services-requests.json",
+                context.root().localhost_root()
+            );
+            let path = elastos_common::localhost::rooted_localhost_fs_path(self.owner.path(), &uri)
+                .unwrap();
+            let raw = crate::auth::read_principal_root_object_resolved(
+                self.owner.path(),
+                context.root(),
+                &uri,
+                &path,
+            )
+            .unwrap();
+            serde_json::from_slice(&raw).unwrap()
+        }
+
+        /// Writes raw state bytes at the context's root through the same
+        /// principal-root object writer the Runtime uses.
+        fn write_requests_state_bytes_for(&self, context: &HomeLaunchTokenContext, bytes: &[u8]) {
+            let data_dir = self.owner.path();
+            let root = context.root().localhost_root();
+            let uri = format!("{root}/.AppData/ElastOS/Home/services-requests.json");
+            let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            crate::auth::write_principal_root_object_resolved(
+                data_dir,
+                context.root(),
+                &uri,
+                &path,
+                bytes,
+            )
+            .unwrap();
         }
 
         fn owner_inbox_app(&self) -> axum::Router {
@@ -1706,14 +1807,27 @@ mod denial_authority {
         let open = fx.create_run("seed-req-open", "qwen-local").await;
         assert_eq!(open["ok"], true, "{open}");
         let ops_before = fx.provider_ops().await;
-        let intruder = HomeLaunchTokenContext::for_test(
-            "person:local:intruder",
-            "auth:intruder",
-            Some("proof:passkey:intruder".to_string()),
-            "grant:intruder",
+        let intruder = passkey_authority_with_name_role_credential(
+            fx.owner.path(),
+            Some("Intruder"),
+            crate::auth::RuntimePrincipalRole::Admin,
+            "gateway-test-intruder-passkey",
         );
-        let result = fx.deny_as(&intruder).await;
-        assert!(result.is_err(), "{result:?}");
+        let context = fx.resolved_context(
+            &intruder.principal_id,
+            &intruder.session_id,
+            Some(intruder.proof_binding_id.clone()),
+            &intruder.grant_id,
+        );
+        // The intruder's stored root carries a plaintext copy of the owner's
+        // state, so the principal-scoped lookup must refuse it by name.
+        let owner_state = fx.recorded_requests_state(&fx.owner_context());
+        fx.write_requests_state_bytes_for(
+            &context,
+            &serde_json::to_vec_pretty(&owner_state).unwrap(),
+        );
+        let result = fx.deny_as(&context).await;
+        assert_eq!(result.unwrap_err().to_string(), "service request not found");
         assert_eq!(fx.provider_ops().await, ops_before, "no cancel may follow");
         assert_eq!(
             fx.create_run("seed-req-still-open", "qwen-local").await["ok"],
@@ -1756,6 +1870,66 @@ mod denial_authority {
         assert_eq!(cancel["runtime_binding"]["grant_id"], fx.grant_id);
         let refused = fx.create_run("seed-req-after", "qwen-local").await;
         assert_eq!(refused["code"], "denied", "{refused}");
+        fx.shutdown().await;
+    }
+
+    /// A subordinate gateway trusts its parent's DID. Launch verification
+    /// builds that parent-signed token's root with `verified_device_signer`,
+    /// which MUST NOT resolve, and a device principal has no stored record.
+    /// The decision must use the verified root: save the denial there and
+    /// cancel the open run.
+    #[tokio::test]
+    async fn a_parent_signed_device_owner_records_its_denial_and_cancels_the_open_run() {
+        let fx = TwoRuntimes::start().await;
+        let open = fx.create_run("seed-req-open", "qwen-local").await;
+        assert_eq!(open["ok"], true, "{open}");
+        let open_run_id = run_id_for(&fx.remote_principal(), "seed-req-open");
+        // The parent mints the token with its own device key. A subordinate
+        // gateway receives it and trusts that DID, which is not the host's key.
+        let parent = tempfile::tempdir().unwrap();
+        let (_parent_key, parent_did) =
+            elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let parent_context = local_home_launch_token_context(parent.path()).unwrap();
+        let token = issue_home_launch_token_with_context(
+            parent.path(),
+            SERVICES_CAPSULE_ID,
+            &parent_context,
+        )
+        .unwrap();
+        let verified =
+            crate::api::gateway::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+                fx.owner.path(),
+                &token,
+                &[SERVICES_CAPSULE_ID],
+                parent_did.clone(),
+                fx.owner.path(),
+            )
+            .expect("a parent-signed device token verifies for the subordinate gateway");
+        let context = verified.context;
+        let principal = format!("device:{parent_did}");
+        // The device root for that principal, written independently of the
+        // resolver the verifier uses.
+        let expected_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(principal.as_bytes())[..12])
+        );
+        assert_eq!(
+            verified.launch_context.executable_actor,
+            SERVICES_CAPSULE_ID
+        );
+        assert_eq!(context.principal_id(), principal);
+        assert_eq!(context.proof_binding_id(), None);
+        assert_eq!(context.root().localhost_root(), expected_root);
+        fx.write_requests_state_for(&context);
+        let result = fx.deny_as(&context).await;
+        assert!(result.is_err(), "delivery failure surfaces: {result:?}");
+        assert_eq!(
+            fx.recorded_requests_state(&context)["requests"][REQUEST_ID]["status"],
+            "denied"
+        );
+        let cancel = fx.last_provider_call().await;
+        assert_eq!(cancel["op"], "runs_cancel");
+        assert_eq!(cancel["run_id"], open_run_id);
         fx.shutdown().await;
     }
 
@@ -2143,12 +2317,7 @@ async fn assistant_and_home_agent_keeps_separate_runs_for_the_same_request_id() 
     let result = crate::api::gateway::gateway_model_service::deny_grant_and_settle(
         Some(fx.registry.clone()),
         fx.owner.path(),
-        &HomeLaunchTokenContext::for_test(
-            fx.authority.principal_id.clone(),
-            fx.authority.session_id.clone(),
-            Some(fx.authority.proof_binding_id.clone()),
-            fx.authority.grant_id.clone(),
-        ),
+        &fx.owner_context(),
         None,
         REQUEST_ID,
     )
@@ -2358,6 +2527,215 @@ async fn shared_hosted_offer_denies_fresh_creates_and_recovers_without_losing_ol
 }
 
 #[tokio::test]
+async fn an_active_grant_stays_active_while_another_home_holds_the_audit_lock() {
+    let fx = TwoRuntimes::start().await;
+    let other = tempfile::tempdir().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let other_path = other.path().to_path_buf();
+    let holder = std::thread::spawn(move || {
+        crate::auth::hold_audit_activation_lock_for_test(&other_path, ready_tx, release_rx);
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("other home acquired the audit lock");
+    let created = fx
+        .create_run("during-other-home-audit-lock", "qwen-local")
+        .await;
+    let _ = release_tx.send(());
+    holder.join().expect("audit lock holder");
+    assert_eq!(created["ok"], true, "{created}");
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_active_grant_stays_active_while_another_home_holds_the_principal_root_lock() {
+    let fx = TwoRuntimes::start().await;
+    let other = tempfile::tempdir().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let other_path = other.path().to_path_buf();
+    let holder = std::thread::spawn(move || {
+        crate::auth::hold_principal_root_lock_for_test(&other_path, ready_tx, release_rx);
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("other home acquired the principal-root lock");
+    let created = fx
+        .create_run("during-other-home-principal-root-lock", "qwen-local")
+        .await;
+    let _ = release_tx.send(());
+    holder.join().expect("principal-root lock holder");
+    assert_eq!(created["ok"], true, "{created}");
+    fx.shutdown().await;
+}
+
+const AUTHORITY_TIMEOUT_MESSAGE: &str = "The Home could not check model access in time. Try again.";
+
+fn scoped_create_request(fx: &TwoRuntimes, request_id: &str) -> Value {
+    let mut remote = fx.remote(SEED_PRINCIPAL, "assistant");
+    remote["refusal_scope"] = json!("invocation");
+    json!({
+        "op": "runs_create",
+        "offer_id": "qwen-local",
+        "operation": "text.generate",
+        "input": {"prompt": "hello"},
+        "request_id": request_id,
+        "remote_model": remote,
+    })
+}
+
+fn hold_home_audit_lock(
+    path: &std::path::Path,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let path = path.to_path_buf();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        crate::auth::hold_audit_activation_lock_for_test(&path, ready_tx, release_rx);
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("same Home acquired the audit lock");
+    (release_tx, holder)
+}
+
+fn assert_authority_timeout_refusal(response: &Value, request: &Value) {
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(
+        response["result"]["code"], "remote_model_invocation_refused",
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["reason"], "authority_timeout",
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["message"], AUTHORITY_TIMEOUT_MESSAGE,
+        "{response}"
+    );
+    assert_eq!(response["result"]["refusal"]["dispatch"], "not_started");
+    let mut expected =
+        crate::api::gateway::gateway_model_service::invocation_refusal_binding(request).unwrap();
+    expected["dispatch"] = json!("not_started");
+    assert_eq!(response["result"]["refusal"], expected);
+}
+
+#[tokio::test]
+async fn a_same_home_authority_timeout_is_not_an_inactive_grant() {
+    let fx = TwoRuntimes::start().await;
+    let (release_tx, holder) = hold_home_audit_lock(fx.owner.path());
+    let listed = fx
+        .call(
+            "offers_list",
+            json!({
+                "op": "offers_list",
+                "remote_model": fx.remote(SEED_PRINCIPAL, "assistant"),
+            }),
+        )
+        .await;
+    assert_eq!(listed["ok"], false, "{listed}");
+    assert_eq!(listed["code"], "authority_timeout", "{listed}");
+    assert_eq!(listed["error"], AUTHORITY_TIMEOUT_MESSAGE, "{listed}");
+    let request = scoped_create_request(&fx, "during-same-home-audit-lock");
+    let created = fx.call("runs_create", request.clone()).await;
+    assert_authority_timeout_refusal(&created, &request);
+    assert_eq!(fx.create_count().await, 0, "timeout dispatched a create");
+    assert!(
+        fx.provider_ops().await.is_empty(),
+        "timeout called the provider"
+    );
+    release_tx
+        .send(())
+        .expect("release the same-home audit lock");
+    holder.join().expect("audit lock holder");
+    let resumed = fx
+        .create_run("after-same-home-audit-lock", "qwen-local")
+        .await;
+    assert_eq!(resumed["ok"], true, "{resumed}");
+    assert_eq!(fx.create_count().await, 1);
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_same_home_authority_timeout_before_dispatch_releases_the_reservation() {
+    let fx = TwoRuntimes::start().await;
+    let owner = fx.owner.path().to_path_buf();
+    let barrier = install_create_race_barrier(&owner, CreateRacePoint::BeforeDispatch);
+    let request = scoped_create_request(&fx, "before-dispatch-same-home-timeout");
+    let (created, _) = tokio::join!(fx.call("runs_create", request.clone()), async {
+        barrier.wait_prepared().await;
+        let (release_tx, holder) = hold_home_audit_lock(&owner);
+        barrier.release();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        release_tx
+            .send(())
+            .expect("release the same-home audit lock");
+        holder.join().expect("audit lock holder");
+    });
+    // The next create uses this Home. The barrier would wait for a partner that is gone.
+    drop(barrier);
+    assert_authority_timeout_refusal(&created, &request);
+    assert_eq!(
+        fx.provider_ops()
+            .await
+            .iter()
+            .filter(|op| *op == "runs_create")
+            .count(),
+        0,
+        "pre-dispatch timeout dispatched a create"
+    );
+    assert!(fx
+        .run_record(&run_id_for(
+            &fx.remote_principal(),
+            "before-dispatch-same-home-timeout"
+        ))
+        .is_null());
+    let index_path = fx.owner.path().join("services-model-runs.json");
+    let index: Value = serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+    assert!(
+        index["pending"].as_object().unwrap().is_empty(),
+        "reservation remained: {index}"
+    );
+    let resumed = fx
+        .create_run("after-pre-dispatch-timeout", "qwen-local")
+        .await;
+    assert_eq!(resumed["ok"], true, "{resumed}");
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_same_home_authority_timeout_after_dispatch_cancels_the_run() {
+    let fx = TwoRuntimes::start().await;
+    let owner = fx.owner.path().to_path_buf();
+    let barrier = install_create_race_barrier(&owner, CreateRacePoint::BeforeCommit);
+    let (created, _) = tokio::join!(
+        fx.create_run("after-dispatch-same-home-timeout", "qwen-local"),
+        async {
+            barrier.wait_prepared().await;
+            let (release_tx, holder) = hold_home_audit_lock(&owner);
+            barrier.release();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            release_tx
+                .send(())
+                .expect("release the same-home audit lock");
+            holder.join().expect("audit lock holder");
+        }
+    );
+    assert_eq!(created["ok"], true, "{created}");
+    let run_id = run_id_for(&fx.remote_principal(), "after-dispatch-same-home-timeout");
+    assert_eq!(fx.run_record(&run_id)["terminal_status"], "cancelled");
+    let ops = fx.provider_ops().await;
+    assert_eq!(
+        ops.iter().filter(|op| *op == "runs_create").count(),
+        1,
+        "{ops:?}"
+    );
+    assert!(ops.iter().any(|op| *op == "runs_cancel"), "{ops:?}");
+    fx.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_hosted_grant_serves_only_while_its_provider_is_an_admin() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
     let fx = TwoRuntimes::start().await;
@@ -2498,7 +2876,7 @@ async fn an_admin_with_two_passkeys_serves_local_and_hosted_model_grants() {
         })
         .unwrap()
         .role = crate::auth::RuntimePrincipalRole::Guest;
-    crate::auth::save_auth_state(fx.owner.path(), &auth).unwrap();
+    crate::auth::save_auth_state(fx.owner.path(), &auth, None).unwrap();
     fx.write_request_record_with_expiry_and_offers("approved", now_ts() + 3600, &[hosted]);
     let refused = fx.create_run("hosted-mixed-roles", hosted).await;
     assert_eq!(refused["ok"], false, "{refused}");

@@ -40,15 +40,24 @@ pub(in crate::api::gateway) fn capsule_catalog_summary_for(
             protected_content
                 || manifest.name != crate::protected_content_runtime::ELACITY_PLAYER_CAPSULE_ID
         })
-        // Browser is absent, not merely unlaunchable, where it is unavailable.
+        // Supported Linux owners can find Browser before granting host access.
         .filter(|manifest| manifest.name != "browser" || crate::setup::browser_available(platform))
+        // Hidden Services and an unconfigured WalletConnect are absent here as
+        // in the launcher and Wallet.
+        .filter(|manifest| capsule_is_offered(data_dir, &manifest.name))
         .map(|manifest| {
-            catalog_capsule_summary(
+            let mut summary = catalog_capsule_summary(
                 manifest,
                 &launch_targets,
                 &components,
                 &accepted_content_by_viewer,
-            )
+            );
+            if summary.name == "browser" {
+                if let Some(message) = crate::setup::linux_host_setup_message(data_dir, platform) {
+                    summary.description = message.to_string();
+                }
+            }
+            summary
         })
         .collect::<Vec<_>>();
     // The browser terminal only starts in developer mode, so the Terminal
@@ -60,6 +69,13 @@ pub(in crate::api::gateway) fn capsule_catalog_summary_for(
         {
             capsule.launchable = false;
         }
+    }
+    // Archive opens archives from Library only, so Marketplace offers no Open.
+    for capsule in capsules
+        .iter_mut()
+        .filter(|capsule| capsule.name == "archive-manager")
+    {
+        capsule.launchable = false;
     }
     let model_catalog_state = match crate::api::capsule_inventory::model_catalog_entries(data_dir) {
         Ok(None) => "unconfigured",
@@ -330,7 +346,6 @@ fn catalog_capsule_summary(
             .map(|target| target.description.clone())
             .or_else(|| manifest.description.clone())
             .unwrap_or_else(|| "Capsule metadata available through Runtime.".to_string()),
-        author: manifest.author,
         window_policy,
         role,
         capsule_type,
@@ -371,6 +386,23 @@ fn catalog_capsule_summary(
         install_path: component.and_then(|entry| entry.install_path.clone()),
         release_path: component.and_then(|entry| entry.release_path.clone()),
         repository: component.and_then(|entry| entry.repository.clone()),
+    }
+}
+
+/// Names the publisher of each installed item whose package row matches a
+/// capsule record signed by a release key this Home trusts (`signers`, from
+/// `setup::installed_release_signers`). Every other installed item has no
+/// publisher; signed model rows keep their catalogue publisher.
+pub(in crate::api::gateway) fn project_release_publishers(
+    catalog: &mut CapsuleCatalogResponse,
+    signers: &BTreeMap<String, String>,
+) {
+    for capsule in catalog
+        .capsules
+        .iter_mut()
+        .filter(|capsule| capsule.source == "installed")
+    {
+        capsule.publisher_did = signers.get(&capsule.name).cloned();
     }
 }
 
@@ -711,6 +743,30 @@ fn load_capsule_components(data_dir: &std::path::Path) -> BTreeMap<String, Capsu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linux_marketplace_lists_browser_with_its_opt_in_command() {
+        let root = tempfile::tempdir().unwrap();
+        let capsule = root.path().join("capsules/browser");
+        std::fs::create_dir_all(&capsule).unwrap();
+        std::fs::write(
+            capsule.join("capsule.json"),
+            include_str!("../../../../../../capsules/browser/capsule.json"),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("components.json"),
+            r#"{"profiles":{},"external":{"browser":{"install_path":"capsules/browser","platforms":{}}}}"#).unwrap();
+        let catalog = super::capsule_catalog_summary_for(root.path(), "linux-arm64");
+        let browser = catalog
+            .capsules
+            .iter()
+            .find(|row| row.name == "browser")
+            .unwrap();
+        assert!(!browser.launchable);
+        assert!(browser.description.contains("elastos setup --browser"));
+        let unsupported = super::capsule_catalog_summary_for(root.path(), "linux-amd64");
+        assert!(unsupported.capsules.iter().all(|row| row.name != "browser"));
+    }
+
     use super::*;
 
     #[test]
@@ -847,6 +903,64 @@ mod tests {
     }
 
     #[test]
+    fn only_installed_items_with_a_matching_signed_record_name_a_publisher() {
+        let root = tempfile::tempdir().unwrap();
+        let mut external = serde_json::Map::new();
+        for name in ["system", "people"] {
+            let dir = root.path().join("capsules").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                std::fs::read(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join(format!("../../../capsules/{name}/capsule.json")),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            external.insert(
+                name.to_owned(),
+                serde_json::json!({"install_path": format!("capsules/{name}"), "platforms": {}}),
+            );
+        }
+        std::fs::write(
+            root.path().join("components.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "external": external, "capsules": {}, "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut catalog = capsule_catalog_summary(root.path());
+        assert!(catalog
+            .capsules
+            .iter()
+            .all(|row| row.publisher_did.is_none()));
+        let signers = BTreeMap::from([
+            ("system".to_owned(), "did:key:zRelease".to_owned()),
+            ("absent".to_owned(), "did:key:zRelease".to_owned()),
+        ]);
+        project_release_publishers(&mut catalog, &signers);
+        let publisher = |name: &str| {
+            catalog
+                .capsules
+                .iter()
+                .find(|row| row.name == name)
+                .unwrap_or_else(|| panic!("{name} listed"))
+                .publisher_did
+                .clone()
+        };
+        assert_eq!(publisher("system").as_deref(), Some("did:key:zRelease"));
+        assert_eq!(publisher("people"), None);
+        // A Home without a signed release names no publisher.
+        project_release_publishers(&mut catalog, &BTreeMap::new());
+        assert!(catalog
+            .capsules
+            .iter()
+            .all(|row| row.publisher_did.is_none()));
+    }
+
+    #[test]
     fn capsule_title_preserves_product_names() {
         assert_eq!(capsule_title("wallet-metamask"), "MetaMask");
         assert_eq!(capsule_title("wallet-unisat"), "UniSat");
@@ -947,8 +1061,6 @@ pub(in crate::api::gateway) struct CapsuleSummary {
     pub(in crate::api::gateway) version: String,
     pub(in crate::api::gateway) title: String,
     pub(in crate::api::gateway) description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(in crate::api::gateway) author: Option<String>,
     pub(in crate::api::gateway) role: CapsuleRole,
     #[serde(rename = "type")]
     pub(in crate::api::gateway) capsule_type: CapsuleType,

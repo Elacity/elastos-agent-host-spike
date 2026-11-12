@@ -17,8 +17,9 @@ import {
   clearHomeAuthorityToken,
   shellState,
   fetchJson,
+  createHomeBackgroundImageReader,
   targetById,
-} from "./shell-core.js?v=home-update-20261003a";
+} from "./shell-core.js?v=home-wallpaper-20261030b";
 import {
   addAccountPasskey,
   bindHomeUnlock,
@@ -29,11 +30,11 @@ import {
   profileReadinessActionTarget,
   showHomeUnlock,
   signOutHome,
-} from "./shell-auth.js?v=home-update-20261003a";
+} from "./shell-auth.js?v=home-wallpaper-20261030b";
 import {
   handleHomeWalletConnectorEffect,
   WALLET_CONNECTOR_EFFECT_TYPE,
-} from "./home-wallet-connector-host.js?v=home-update-20261003a";
+} from "./home-wallet-connector-host.js?v=home-wallpaper-20261030b";
 import {
   createHomeClipboardFrameState,
   createHomeClipboardHost,
@@ -49,10 +50,12 @@ import {
 import { createHomeLinkStatus } from "./home-link-status.js?v=home-20260924a";
 import {
   createHomeExternalLinkPrompt,
+  requestHomeSharedContent,
+  openHomeSharedFile,
   EXTERNAL_LINK_REQUEST_SCHEMA,
   HOME_OPEN_EXTERNAL_TYPE,
   MAX_EXTERNAL_LINK_LENGTH,
-} from "./home-external-link.js?v=home-20261017c";
+} from "./home-external-link.js?v=home-links-20261101a";
 
 const SUMMARY_REFRESH_DEBOUNCE_MS = 150;
 const SUMMARY_REFRESH_RETRY_MS = 700;
@@ -88,7 +91,7 @@ const SHELL_MESSAGE_OPEN_TARGET_SOURCES = Object.freeze({
   assistant: new Set(["marketplace", "system", "inbox"]),
   "home-agent": new Set(["marketplace", "system", "inbox"]),
   "archive-manager": new Set(["library"]),
-  browser: new Set(["library"]),
+  browser: new Set(["library", "inbox"]),
   "chat-room": new Set(["library", "people", "inbox"]),
   "gba-emulator": new Set(["library"]),
   "home-cli": "visible-target",
@@ -97,11 +100,9 @@ const SHELL_MESSAGE_OPEN_TARGET_SOURCES = Object.freeze({
   library: new Set(["archive-manager", "documents", "gba-emulator", "library"]),
   marketplace: "runtime-target",
   people: new Set(["chat-room", "inbox", "system"]),
-  services: new Set(["browser", "chat-room"]),
   system: "visible-target",
   "wallet": new Set(["wallet-metamask", "wallet-unisat"]),
 });
-const SHELL_MESSAGE_OPEN_URI_SOURCES = new Set(["documents", "chat-room"]);
 const SHELL_MESSAGE_DELIVER_TARGET_SOURCES = Object.freeze({
   "chat-room": new Set(["documents"]),
   documents: new Set(["chat-room"]),
@@ -109,6 +110,11 @@ const SHELL_MESSAGE_DELIVER_TARGET_SOURCES = Object.freeze({
 });
 const PASSKEY_STEP_UP_TARGETS = new Set(["inbox", SYSTEM_APP_ID, "wallet"]);
 const launchedAppContexts = new Map();
+// Archive is launchable but not in the Home summary, so the GUI may launch it
+// only for the exact open its owner app (Library) just asked for.
+const ownerLaunchGrants = [];
+const OWNER_LAUNCH_GRANT_MS = 15000;
+const OWNER_LAUNCH_GRANT_LIMIT = 8;
 const pendingBrowserAuthorityRenewals = new Map();
 let homeEventsReconnectAttempts = 0;
 let homeEventsReconnectInFlight = null;
@@ -147,6 +153,21 @@ const homeExternalLinkPrompt = createHomeExternalLinkPrompt({
   address: document.querySelector("#home-link-address"),
   openButton: document.querySelector("#home-link-open"),
   cancelButton: document.querySelector("#home-link-cancel"),
+  eyebrow: document.querySelector("#home-link-kind"),
+  title: document.querySelector("#home-link-title"),
+  asker: document.querySelector("#home-link-copy"),
+  size: document.querySelector("#home-link-size"),
+  status: document.querySelector("#home-link-status"),
+  openSharedFile: (file, signal) => openHomeSharedFile(file, { openTarget: openTargetFromHomeGui, signal }),
+  // The same source the Assistant face uses: the Browser target is in this
+  // Home's summary. Home GUI opens it as the Assistant does, reusing the one
+  // Browser window; the command carries only the confirmed address.
+  browserAvailable: homeGuiCanOpenBrowser,
+  openInBrowser: (url) => {
+    openTargetFromHomeGui("browser", { query: { url } }).catch((error) => {
+      console.error("home could not open the link in Browser", error);
+    });
+  },
   isLive: externalLinkSenderIsLive,
   otherSheetShown: () => !homeClipboardPromptRoot.hidden,
 });
@@ -209,7 +230,7 @@ function retireLaunchedAppContext(homeToken) {
     return false;
   }
   cancelBrowserAuthorityRenewalsForToken(homeToken);
-  cancelChatReconnect(context);
+  cancelFrameRenewal(context);
   cancelLibraryPicker(context);
   homeClipboardHost.retireFrame(context.clipboardState);
   homeExternalLinkPrompt.retire(homeToken);
@@ -220,7 +241,7 @@ function retireLaunchedAppContext(homeToken) {
 function clearLaunchedAppContexts() {
   clearPendingBrowserAuthorityRenewals();
   for (const context of launchedAppContexts.values()) {
-    cancelChatReconnect(context);
+    cancelFrameRenewal(context);
     cancelLibraryPicker(context);
     homeClipboardHost.retireFrame(context.clipboardState);
   }
@@ -228,36 +249,69 @@ function clearLaunchedAppContexts() {
   homeExternalLinkPrompt.clear();
 }
 
-function cancelChatReconnect(context) {
-  const record = context.chatReconnectPending;
+function cancelFrameRenewal(context) {
+  const record = context.frameRenewalPending;
   if (!record) return;
-  context.chatReconnectPending = null;
+  context.frameRenewalPending = null;
   window.clearTimeout(record.timeout);
   if (record.freshToken) retireLaunchedAppContext(record.freshToken);
 }
 
-function settleChatReconnect(old, record, error = null) {
-  if (old.chatReconnectPending !== record) return false;
-  old.chatReconnectPending = null;
+function transferFrameAssociations(old, fresh, freshToken) {
+  const oldToken = [...launchedAppContexts].find(([, context]) => context === old)?.[0];
+  if (old.pickerRequest) {
+    const record = old.pickerRequest;
+    record.opener = fresh;
+    record.openerToken = freshToken;
+    fresh.pickerRequest = record;
+    old.pickerRequest = null;
+  }
+  if (old.pickerOwner) {
+    fresh.pickerOwner = old.pickerOwner;
+    fresh.pickerOwner.pickerToken = freshToken;
+    old.pickerOwner = null;
+  }
+  if (old.clipboardState) {
+    fresh.clipboardState = old.clipboardState;
+    fresh.clipboardState.homeToken = freshToken;
+    if (fresh.clipboardState.inFlight) fresh.clipboardState.inFlight.homeToken = freshToken;
+    old.clipboardState = null;
+  }
+  for (const record of pendingBrowserAuthorityRenewals.values()) {
+    // Keep the original wire token to correlate the GUI's outstanding reply.
+    if (record.frameToken === oldToken) record.frameToken = freshToken;
+  }
+  homeExternalLinkPrompt.transfer(oldToken, freshToken);
+  fresh.walletEffectState = old.walletEffectState;
+  old.walletEffectState = null;
+}
+
+function settleFrameRenewal(old, record, error = null) {
+  if (old.frameRenewalPending !== record) return false;
+  old.frameRenewalPending = null;
   window.clearTimeout(record.timeout);
   if (error) {
     if (record.freshToken) retireLaunchedAppContext(record.freshToken);
   } else {
     const fresh = launchedAppContexts.get(record.freshToken);
-    if (launchedAppContexts.get(record.oldToken) !== old || old.source !== record.event.source
-      || fresh?.targetId !== "chat-room" || fresh.source || record.expiresAt <= Date.now()) {
+    if (!homeSummarySignedIn(shellState.currentSummary)
+      || record.principal !== shellState.currentSummary?.authority?.principal_id
+      || record.proofBinding !== shellState.currentSummary?.authority?.proof_binding_id
+      || launchedAppContexts.get(record.oldToken) !== old || old.source !== record.event.source
+      || fresh?.targetId !== old.targetId || fresh.source || record.expiresAt <= Date.now()) {
       if (record.freshToken) retireLaunchedAppContext(record.freshToken);
-      error = new Error("Home could not reopen this Chat window");
+      error = new Error("Home could not reopen this app window");
     } else {
       try {
-        requireHomeGuiActive("reconnect Chat");
-        fresh.chatReconnectCommit = { requestId: record.requestId, oldToken: record.oldToken };
-        if (!postToActiveShell({ type: "home:gui-command", command: "renew-chat-authority",
+        requireHomeGuiActive("reconnect this app");
+        fresh.frameRenewalCommit = { requestId: record.requestId, oldToken: record.oldToken };
+        if (!postToActiveShell({ type: "home:gui-command", command: "renew-frame-authority",
           phase: "commit", requestId: record.requestId, homeToken: record.oldToken,
           launched: record.launched, expiresAt: record.expiresAt })) {
-          throw new Error("Home GUI could not reopen Chat");
+          throw new Error("Home GUI could not reopen this app");
         }
         fresh.source = record.event.source;
+        transferFrameAssociations(old, fresh, record.freshToken);
         retireLaunchedAppContext(record.oldToken);
       } catch (failure) {
         retireLaunchedAppContext(record.freshToken);
@@ -514,12 +568,14 @@ async function launchHomeTarget(target, query = {}) {
       home_origin: window.location.origin,
     },
   };
+  const readBackgroundImage = [HOME_GUI_SHELL_ID, SYSTEM_APP_ID].includes(target)
+    ? createHomeBackgroundImageReader() : null;
   const launched = await fetchJson("/api/apps/home/launch", {
     method: "POST",
     body: JSON.stringify(body),
   });
   if (launched?.attach_kind === "iframe") {
-    rememberLaunchedAppContext(launched);
+    rememberLaunchedAppContext(launched, readBackgroundImage);
     if (pickerOwner) {
       const token = homeLaunchTokenFromRoute(launched.route);
       if (!currentLibraryPicker(pickerOwner) || pickerOwner.pickerToken) {
@@ -533,14 +589,20 @@ async function launchHomeTarget(target, query = {}) {
   return launched;
 }
 
+function homeGuiActive() {
+  return activeShellTarget(shellState.currentSummary) === HOME_GUI_SHELL_ID &&
+    shellState.activeShellRootTarget === HOME_GUI_SHELL_ID &&
+    !!activeShellFrame?.contentWindow;
+}
+
 function requireHomeGuiActive(action) {
-  if (
-    activeShellTarget(shellState.currentSummary) !== HOME_GUI_SHELL_ID ||
-    shellState.activeShellRootTarget !== HOME_GUI_SHELL_ID ||
-    !activeShellFrame?.contentWindow
-  ) {
+  if (!homeGuiActive()) {
     throw new Error(`${action} requires active ${HOME_GUI_SHELL_ID}`);
   }
+}
+
+function homeGuiCanOpenBrowser() {
+  return homeGuiActive() && !!targetById(shellState.currentSummary, "browser");
 }
 
 async function openTargetFromHomeGui(target, options = {}) {
@@ -580,7 +642,7 @@ function postBrowserAuthorityRenewalResult(record, result) {
 
 function cancelBrowserAuthorityRenewalsForToken(homeToken) {
   for (const [requestId, record] of pendingBrowserAuthorityRenewals) {
-    if (record.oldHomeToken !== homeToken) {
+    if (record.frameToken !== homeToken) {
       continue;
     }
     window.clearTimeout(record.timeout);
@@ -602,7 +664,7 @@ function settleBrowserAuthorityRenewal(record, result) {
   window.clearTimeout(record.timeout);
   pendingBrowserAuthorityRenewals.delete(record.requestId);
   if (result.ok) {
-    retireLaunchedAppContext(record.oldHomeToken);
+    retireLaunchedAppContext(record.frameToken);
   }
   postBrowserAuthorityRenewalResult(record, result);
   return true;
@@ -638,7 +700,7 @@ function startBrowserAuthorityRenewal(event, context, message) {
   }
   const pendingForFrame = [...pendingBrowserAuthorityRenewals.values()].find(
     (record) =>
-      record.oldHomeToken === context.homeToken &&
+      record.frameToken === context.homeToken &&
       record.browserInstance === browserInstance &&
       record.source === event.source,
   );
@@ -665,6 +727,7 @@ function startBrowserAuthorityRenewal(event, context, message) {
   }
   const record = {
     requestId,
+    frameToken: context.homeToken,
     oldHomeToken: context.homeToken,
     browserInstance,
     source: event.source,
@@ -741,7 +804,7 @@ function handleBrowserAuthorityRenewalResult(context, message) {
       reason: message.reason,
     });
   }
-  const oldContext = launchedAppContexts.get(record.oldHomeToken);
+  const oldContext = launchedAppContexts.get(record.frameToken);
   const freshContext = launchedAppContexts.get(message.freshHomeToken);
   if (
     message.reason !== "" ||
@@ -907,7 +970,7 @@ function replyToShellRequest(event, requestId, result, error = null) {
   }, OPAQUE_FRAME_TARGET);
 }
 
-function rememberLaunchedAppContext(launched) {
+function rememberLaunchedAppContext(launched, readBackgroundImage) {
   const token = homeLaunchTokenFromRoute(launched?.route || "");
   if (!token || !launched?.target) {
     throw new Error("Runtime returned an incomplete isolated launch");
@@ -917,6 +980,8 @@ function rememberLaunchedAppContext(launched) {
   }
   launchedAppContexts.set(token, {
     targetId: launched.target,
+    expiresAt: Number(launched.expires_at) * 1000,
+    readBackgroundImage,
     browserInstance:
       launched.target === "browser"
         ? browserInstanceFromRoute(launched.route || "")
@@ -1636,6 +1701,24 @@ window.addEventListener("message", (event) => {
   if (!context) {
     return;
   }
+  if (data.type === "home:background-image") {
+    if (!hasExactMessageKeys(data, ["type", "requestId", "homeToken"])
+      || typeof data.requestId !== "string" || !data.requestId || data.requestId.length > 128
+      || !((context.kind === "shell-frame" && context.targetId === HOME_GUI_SHELL_ID)
+        || (context.kind === "app-frame" && context.targetId === SYSTEM_APP_ID))) return;
+    const launched = launchedAppContexts.get(context.homeToken);
+    if (!launched?.readBackgroundImage) return;
+    const reply = (blob) => {
+      const current = homeMessageContext(event, data);
+      if (current?.kind !== context.kind || current?.targetId !== context.targetId
+        || current?.homeToken !== context.homeToken
+        || launchedAppContexts.get(context.homeToken) !== launched) return;
+      event.source.postMessage({ type: "home:background-image-result",
+        requestId: data.requestId, blob }, OPAQUE_FRAME_TARGET);
+    };
+    launched.readBackgroundImage().then(reply, () => reply(null));
+    return;
+  }
   if (data.type === "home:navigation-hint") {
     relayHomeNavigation(context, data);
     return;
@@ -1671,6 +1754,13 @@ window.addEventListener("message", (event) => {
       if (shellState.currentSummary) {
         postToActiveShell({ type: "home:shell-summary", summary: shellState.currentSummary });
       }
+    }
+    return;
+  }
+  if (data.type === "home:frame-authority-ready") {
+    if (context.kind === "app-frame" && context.clipboardState &&
+        hasExactMessageKeys(data, ["type", "homeToken"])) {
+      homeClipboardHost.resetFrame(context.clipboardState, context);
     }
     return;
   }
@@ -1720,78 +1810,93 @@ window.addEventListener("message", (event) => {
     }
     return;
   }
-  if (data.type === "home:chat-authority-renewed") {
+  if (data.type === "home:frame-authority-renewed") {
     if (context.kind !== "shell-frame" || context.targetId !== HOME_GUI_SHELL_ID
       || !hasExactMessageKeys(data, ["type", "requestId", "oldHomeToken", "freshHomeToken", "ok", "homeToken"])) return;
     const old = launchedAppContexts.get(data.oldHomeToken);
-    const record = old?.chatReconnectPending;
+    const record = old?.frameRenewalPending;
     if (!record || record.requestId !== data.requestId || record.freshToken !== data.freshHomeToken
       || !record.launched || typeof data.ok !== "boolean") return;
-    settleChatReconnect(old, record, data.ok ? null : new Error("Home could not reopen this Chat window"));
+    settleFrameRenewal(old, record, data.ok ? null : new Error("Home could not reopen this app window"));
     return;
   }
-  if (data.type === "home:chat-authority-committed") {
+  if (data.type === "home:frame-authority-committed") {
     if (context.kind !== "shell-frame" || context.targetId !== HOME_GUI_SHELL_ID
       || !hasExactMessageKeys(data, ["type", "requestId", "oldHomeToken", "freshHomeToken", "ok", "homeToken"])) return;
     const fresh = launchedAppContexts.get(data.freshHomeToken);
-    const commit = fresh?.chatReconnectCommit;
-    if (fresh?.targetId !== "chat-room" || !commit || commit.requestId !== data.requestId
+    const commit = fresh?.frameRenewalCommit;
+    if (!fresh || !commit || commit.requestId !== data.requestId
       || commit.oldToken !== data.oldHomeToken || typeof data.ok !== "boolean") return;
-    delete fresh.chatReconnectCommit;
+    delete fresh.frameRenewalCommit;
     if (!data.ok) retireLaunchedAppContext(data.freshHomeToken);
     return;
   }
   if (data.type === "home:launch-target") {
     const requestId = typeof data.requestId === "string" ? data.requestId.trim() : "";
     const target = typeof data.target === "string" ? data.target.trim() : "";
-    if (context.kind === "app-frame" && context.targetId === "chat-room") {
+    if (context.kind === "app-frame" && ["chat-room", "people", "documents", "assistant", "library"].includes(context.targetId)) {
       const query = data.query;
       const keys = query && typeof query === "object" && !Array.isArray(query) ? Object.keys(query) : null;
-      const validQuery = keys && (keys.length === 0 || (keys.length === 1 && keys[0] === "conversation_id"
-        && typeof query.conversation_id === "string" && /^[A-Za-z0-9:._-]{1,512}$/.test(query.conversation_id)));
+      const allowedKeys = {
+        "chat-room": ["conversation_id"], people: [], assistant: [],
+        documents: ["doc", "objectUri"], library: ["uri", "pickerRequestId"],
+      }[context.targetId];
+      const picker = launchedAppContexts.get(context.homeToken)?.pickerOwner;
+      const validQuery = keys && keys.length <= (context.targetId === "library" ? 2 : 1)
+        && keys.every(key => allowedKeys.includes(key) && typeof query[key] === "string"
+          && query[key].length > 0 && query[key].length <= 2048)
+        && (context.targetId !== "chat-room" || !keys.length || /^[A-Za-z0-9:._-]{1,512}$/.test(query.conversation_id))
+        && (!keys.includes("pickerRequestId") || (currentLibraryPicker(picker)
+          && picker.id === query.pickerRequestId && picker.pickerToken === context.homeToken
+          && ["ready", "delivering"].includes(picker.phase)));
       if (!hasExactMessageKeys(data, ["type", "requestId", "target", "query", "homeToken"])
         || !/^[A-Za-z0-9-]{1,64}$/.test(requestId) || requestId !== data.requestId
-        || target !== "chat-room" || target !== data.target || data.homeToken !== context.homeToken || !validQuery) {
-        replyToShellRequest(event, requestId, null, new Error("Home denied the Chat reconnect"));
+        || target !== context.targetId || target !== data.target || data.homeToken !== context.homeToken || !validQuery) {
+        replyToShellRequest(event, requestId, null, new Error("Home denied the app reconnect"));
         return;
       }
       const old = launchedAppContexts.get(context.homeToken);
-      if (old.chatReconnectPending) {
-        if (old.chatReconnectPending.requestId !== requestId) {
-          replyToShellRequest(event, requestId, null, new Error("Chat is already reconnecting"));
+      if (old.frameRenewalPending) {
+        if (old.frameRenewalPending.requestId !== requestId) {
+          replyToShellRequest(event, requestId, null, new Error("This app is already reconnecting"));
         }
         return;
       }
       const record = { requestId, oldToken: context.homeToken, event, freshToken: "", launched: null,
+        principal: shellState.currentSummary?.authority?.principal_id,
+        proofBinding: shellState.currentSummary?.authority?.proof_binding_id,
         expiresAt: Date.now() + 20000, timeout: 0 };
-      old.chatReconnectPending = record;
+      old.frameRenewalPending = record;
       record.timeout = window.setTimeout(() => {
-        if (old.chatReconnectPending !== record) return;
-        settleChatReconnect(old, record, new Error("Home could not reopen Chat in time"));
+        if (old.frameRenewalPending !== record) return;
+        settleFrameRenewal(old, record, new Error("Home could not reopen this app in time"));
       }, 25000);
       let createdToken = "";
-      launchHomeTarget("chat-room", query).then((launched) => {
+      // Transfer the existing picker with the frame; a renewal does not open a picker.
+      const launchQuery = { ...query };
+      delete launchQuery.pickerRequestId;
+      launchHomeTarget(target, launchQuery).then((launched) => {
         const freshToken = homeLaunchTokenFromRoute(launched?.route || "");
         createdToken = freshToken;
         const fresh = launchedAppContexts.get(freshToken);
-        if (launched?.target !== "chat-room" || launched.attach_kind !== "iframe"
+        if (launched?.target !== target || launched.attach_kind !== "iframe"
           || (launched.launch_status && launched.launch_status !== "launched")
           || !fresh || freshToken === context.homeToken || fresh.source
           || launchedAppContexts.get(context.homeToken) !== old || old.source !== event.source
-          || old.chatReconnectPending !== record) {
+          || old.frameRenewalPending !== record) {
           if (freshToken && freshToken !== context.homeToken) retireLaunchedAppContext(freshToken);
-          throw new Error("Home could not reopen this Chat window");
+          throw new Error("Home could not reopen this app window");
         }
-        requireHomeGuiActive("reconnect Chat");
+        requireHomeGuiActive("reconnect this app");
         record.freshToken = freshToken;
         record.launched = launched;
-        if (!postToActiveShell({ type: "home:gui-command", command: "renew-chat-authority",
+        if (!postToActiveShell({ type: "home:gui-command", command: "renew-frame-authority",
           phase: "prepare", requestId, homeToken: context.homeToken, launched, expiresAt: record.expiresAt })) {
-          throw new Error("Home GUI could not reopen Chat");
+          throw new Error("Home GUI could not reopen this app");
         }
       }).catch((error) => {
         if (createdToken && createdToken !== context.homeToken) retireLaunchedAppContext(createdToken);
-        settleChatReconnect(old, record, error);
+        settleFrameRenewal(old, record, error);
       });
       return;
     }
@@ -1800,7 +1905,8 @@ window.addEventListener("message", (event) => {
       ![HOME_GUI_SHELL_ID, HOME_CLI_SHELL_ID].includes(context.targetId) ||
       !requestId ||
       !target ||
-      !canOpenTargetFromHomeMessage(context, target)
+      !(canOpenTargetFromHomeMessage(context, target) ||
+        (context.targetId === HOME_GUI_SHELL_ID && consumeOwnerLaunchGrant(target, data.query)))
     ) {
       replyToShellRequest(event, requestId, null, new Error("Home denied the shell launch"));
       return;
@@ -1975,22 +2081,7 @@ window.addEventListener("message", (event) => {
     return;
   }
   if (data.type === "home:open-uri") {
-    if (!canOpenUriFromHomeMessage(context)) {
-      console.warn("home ignored unauthorized open-uri message", context.targetId);
-      return;
-    }
-    const resolved = resolveOpenUri(data);
-    if (!resolved) {
-      console.warn("home could not resolve URI", data.uri);
-      return;
-    }
-    if (!targetById(shellState.currentSummary, resolved.target)) {
-      console.warn("home could not open URI because its viewer is not installed", data.uri);
-      return;
-    }
-    openTargetFromHomeGui(resolved.target, { query: resolved.query }).catch((error) => {
-      console.error("home open-uri failed", error);
-    });
+    requestHomeSharedContent({ context, data, prompt: homeExternalLinkPrompt, fetchJson });
     return;
   }
   if (data.type === "home:deliver-to-target") {
@@ -2055,6 +2146,13 @@ window.addEventListener("message", (event) => {
     });
     return;
   }
+  if (data.type === "home:focus-browser") {
+    if (context.kind === "app-frame" && context.targetId === "inbox"
+      && hasExactMessageKeys(data, ["type", "homeToken"])) {
+      postToActiveShell({type:"home:gui-command", command:"focus-browser"});
+    }
+    return;
+  }
   if (data.type !== "home:open-target") {
     return;
   }
@@ -2066,10 +2164,31 @@ window.addEventListener("message", (event) => {
     console.warn("home ignored unauthorized open-target message", context.targetId, target);
     return;
   }
-  if (context.targetId === "chat-room" && ["people", "inbox"].includes(target)
-    && (!hasExactMessageKeys(data, ["type", "target", "query", "homeToken"])
+  // An app opens Browser only empty. A web address from an app goes through
+  // Home's link sheet (home:open-external, #430), never straight into Browser.
+  if (context.kind === "app-frame" && target === "browser" && data.query !== undefined && (
+    !data.query || typeof data.query !== "object" || Array.isArray(data.query) ||
+    Object.keys(data.query).length !== 0
+  )) {
+    console.warn("home ignored an app's Browser open with a query", context.targetId);
+    return;
+  }
+  if (context.targetId === "browser" && target === "inbox") {
+    if (!hasExactMessageKeys(data, ["type", "target", "query", "homeToken"])
       || !data.query || typeof data.query !== "object" || Array.isArray(data.query)
-      || Object.keys(data.query).length !== 0)) return;
+      || Object.keys(data.query).length !== 1
+      || data.query.notification_id !== "browser-internet:permission") return;
+  }
+  if (context.targetId === "chat-room" && ["people", "inbox"].includes(target)) {
+    if (!hasExactMessageKeys(data, ["type", "target", "query", "homeToken"])
+      || !data.query || typeof data.query !== "object" || Array.isArray(data.query)) return;
+    const keys = Object.keys(data.query);
+    const peopleDid = target === "people" && keys.length === 1 && keys[0] === "did"
+      && typeof data.query.did === "string" && data.query.did.length <= 512
+      && data.query.did === data.query.did.trim()
+      && /^did:key:z[1-9A-HJ-NP-Za-km-z]+$/.test(data.query.did);
+    if (keys.length !== 0 && !peopleDid) return;
+  }
   if (["assistant", "home-agent"].includes(context.targetId)) {
     if (!hasExactMessageKeys(data, ["type", "target", "query", "homeToken"])) return;
     const marketplace = data.target === "marketplace" && assistantModelsMarketplaceQuery(data.query);
@@ -2081,12 +2200,6 @@ window.addEventListener("message", (event) => {
   if (context.targetId === "marketplace" && target === "assistant" &&
       (!hasExactMessageKeys(data, ["type", "target", "query", "homeToken"]) ||
        !marketplaceAssistantHandoffQuery(data.query))) return;
-  if (context.targetId === "marketplace" && target === "services" &&
-      (!hasExactMessageKeys(data, ["type", "target", "query", "homeToken"])
-       || !data.query || typeof data.query !== "object" || Array.isArray(data.query)
-       || Object.keys(data.query).join(",") !== "service_offer_id"
-       || typeof data.query.service_offer_id !== "string"
-       || !/^[A-Za-z0-9_.:-]{1,256}$/.test(data.query.service_offer_id))) return;
   if (
     context.kind === "app-frame" &&
     context.targetId === "wallet" &&
@@ -2117,6 +2230,10 @@ window.addEventListener("message", (event) => {
       console.warn("home ignored non-graphical shell open-target message", context.targetId, target);
     }
     return;
+  }
+  if (context.kind === "app-frame" && SHELL_MESSAGE_OPEN_TARGET_SOURCES[context.targetId] instanceof Set &&
+      !targetById(shellState.currentSummary, target)) {
+    grantOwnerLaunch(target, query);
   }
   openTargetFromHomeGui(target, { query }).catch((error) => {
     console.error("home open-target failed", error);
@@ -2282,10 +2399,6 @@ function isBoundedStepUpRequest(request) {
   }
 }
 
-function canOpenUriFromHomeMessage(context) {
-  return context.kind === "home" || SHELL_MESSAGE_OPEN_URI_SOURCES.has(context.targetId);
-}
-
 // An app frame or Home CLI asks Home to open a web link. The Runtime names the
 // app from its signed launch and returns the one validated address; Home then
 // shows its own sheet (home-external-link.js). The app never gets a reply.
@@ -2353,56 +2466,35 @@ function canOpenTargetFromHomeMessage(context, target) {
   return policy.has(target);
 }
 
+function ownerLaunchGrantKey(target, query) {
+  const entries = Object.entries(query && typeof query === "object" ? query : {})
+    .filter(([key]) => key.trim())
+    .map(([key, value]) => [key, typeof value === "string" ? value : String(value ?? "")])
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return JSON.stringify([target, entries]);
+}
+
+function grantOwnerLaunch(target, query) {
+  const now = Date.now();
+  const live = ownerLaunchGrants.filter((grant) => grant.expiresAt > now).slice(1 - OWNER_LAUNCH_GRANT_LIMIT);
+  ownerLaunchGrants.splice(0, ownerLaunchGrants.length, ...live,
+    { key: ownerLaunchGrantKey(target, query), expiresAt: now + OWNER_LAUNCH_GRANT_MS });
+}
+
+function consumeOwnerLaunchGrant(target, query) {
+  const key = ownerLaunchGrantKey(target, query);
+  const index = ownerLaunchGrants.findIndex((grant) => grant.key === key && grant.expiresAt > Date.now());
+  if (index < 0) return false;
+  ownerLaunchGrants.splice(index, 1);
+  return true;
+}
+
 function canDeliverTargetFromHomeMessage(context, target) {
   if (context.kind !== "app-frame" && context.kind !== "shell-frame") {
     return false;
   }
   const policy = SHELL_MESSAGE_DELIVER_TARGET_SOURCES[context.targetId];
   return !!policy && policy.has(target);
-}
-
-function resolveOpenUri(data) {
-  const uri = typeof data.uri === "string" ? data.uri.trim() : "";
-  if (!uri.startsWith("elastos://")) {
-    return null;
-  }
-  const peerInvite = resolvePeerInviteUri(uri);
-  if (peerInvite) {
-    return peerInvite;
-  }
-  const cid = uri.slice("elastos://".length).split(/[/?#]/)[0].trim();
-  if (!cid) {
-    return null;
-  }
-  const preferredViewer = typeof data.preferredViewer === "string" ? data.preferredViewer.trim() : "";
-  if (preferredViewer === "documents" || preferredViewer === "") {
-    return {
-      target: "documents",
-      query: {
-        cid,
-        uri,
-        view: "read",
-      },
-    };
-  }
-  return null;
-}
-
-function resolvePeerInviteUri(uri) {
-  try {
-    const parsed = new URL(uri);
-    const path = parsed.pathname.replace(/^\/+/, "");
-    const isPeerInvite = parsed.hostname === "peer" && path === "invite";
-    if (parsed.protocol === "elastos:" && isPeerInvite && parsed.searchParams.get("token")) {
-      return {
-        target: "chat-room",
-        query: { invite: uri },
-      };
-    }
-  } catch (_error) {
-    return null;
-  }
-  return null;
 }
 
 async function boot() {
@@ -2458,6 +2550,10 @@ async function boot() {
 }
 
 function startShellTimers() {
+  if (!shellState.frameRenewalTimer) {
+    shellState.frameRenewalTimer = window.setInterval(renewExpiringFrames, 30_000);
+    window.addEventListener("online", () => refreshSignedHomeSession());
+  }
   if (!shellState.sessionRefreshTimer) {
     shellState.sessionRefreshTimer = window.setInterval(() => {
       refreshSignedHomeSession();
@@ -2469,6 +2565,7 @@ function startShellTimers() {
       if (document.hidden) {
         return;
       }
+      refreshSignedHomeSession();
       homeEventsReconnectAttempts = 0;
       requestShellSummaryRefresh({ reason: "visibilitychange", delay: 0 });
       ensureHomeEventChannel();
@@ -2520,12 +2617,22 @@ function homeSummaryHasProofBoundSession(summary) {
   );
 }
 
+function renewExpiringFrames() {
+  if (!homeSummarySignedIn(shellState.currentSummary)) return;
+  for (const [homeToken, context] of launchedAppContexts) {
+    if (!context.source || context.frameRenewalPending || !Number.isFinite(context.expiresAt)
+      || context.expiresAt > Date.now() + 60_000) continue;
+    context.source.postMessage({ type: "elastos.home.authority.request/v1", homeToken }, OPAQUE_FRAME_TARGET);
+  }
+}
+
 function refreshSignedHomeSession() {
   if (!homeSummaryHasProofBoundSession(shellState.currentSummary)) {
     return Promise.resolve(null);
   }
   return refreshHomeSession()
     .then(() => refreshShellSummary())
+    .then(() => renewExpiringFrames())
     .catch((error) => {
       if (isHomeAuthError(error)) {
         showHostAuthGate({ presentation: "prompt" }).catch((unlockError) => {
@@ -2647,6 +2754,7 @@ function refreshHomeAfterEventReconnect() {
         signal => refreshShellSummary({ signal })) : null)
       .then((summary) => {
         if (current() && homeSummarySignedIn(summary)) {
+          renewExpiringFrames();
           broadcastHomeRuntimeEvents([{
             kind: "home.summary.changed",
             scope: "home",

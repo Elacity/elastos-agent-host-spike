@@ -37,16 +37,44 @@ struct ServedPage {
     gateway: GatewayState,
     network: crate::collaboration_network::VerifiedCollaborationNetworkProfile,
     slots: tokio::sync::Semaphore,
-    prepared: OnceLock<std::result::Result<Prepared, String>>,
+    prepared: Arc<OnceLock<std::result::Result<Prepared, String>>>,
     reservation: OnceLock<BrowserLaunchReservation>,
     dispatched: AtomicBool,
     expires_at: u64,
     launched: AtomicBool,
     closing: Arc<AtomicBool>,
-    result: OnceLock<Value>,
+    result: Arc<OnceLock<Value>>,
     terminal: Mutex<Option<Value>>,
-    changed: Notify,
+    changed: Arc<Notify>,
     last_seen: Mutex<tokio::time::Instant>,
+}
+
+// Capture this guard before spawning: even cancellation before the first poll
+// publishes a terminal result and wakes every waiter. Native effects retain
+// their durable owner for cleanup when a worker stops unexpectedly.
+struct EngineTaskCompletion<T> {
+    result: Arc<OnceLock<T>>,
+    fallback: Option<T>,
+    closing: Arc<AtomicBool>,
+    changed: Arc<Notify>,
+}
+
+impl<T> EngineTaskCompletion<T> {
+    fn publish(mut self, result: T) {
+        let _ = self.result.set(result);
+        self.fallback = None;
+    }
+}
+
+impl<T> Drop for EngineTaskCompletion<T> {
+    fn drop(&mut self) {
+        if let Some(fallback) = self.fallback.take() {
+            if self.result.set(fallback).is_ok() {
+                self.closing.store(true, Ordering::Release);
+            }
+        }
+        self.changed.notify_waiters();
+    }
 }
 
 type ServedPages = BTreeMap<(PathBuf, String), Arc<ServedPage>>;
@@ -219,6 +247,7 @@ fn runtime_state(
         cache_dir: data_dir.join("cache"),
         provider_registry: Some(registry),
         carrier_endpoint: Some(endpoint),
+        browser_internet: Default::default(),
         identity_manager: Arc::new(OnceLock::new()),
         collaboration_chat_product_port: None,
         collaboration_presence_product_port: None,
@@ -410,23 +439,30 @@ pub(crate) async fn invoke(
                 gateway: runtime_state(data_dir, registry, endpoint),
                 network,
                 slots: tokio::sync::Semaphore::new(32),
-                prepared: OnceLock::new(),
+                prepared: Arc::new(OnceLock::new()),
                 reservation: OnceLock::new(),
                 dispatched: AtomicBool::new(false),
                 expires_at: grant.expires_at,
                 launched: AtomicBool::new(false),
                 closing: Arc::new(AtomicBool::new(false)),
-                result: OnceLock::new(),
+                result: Arc::new(OnceLock::new()),
                 terminal: Mutex::new(None),
-                changed: Notify::new(),
+                changed: Arc::new(Notify::new()),
                 last_seen: Mutex::new(tokio::time::Instant::now()),
             });
             pages.insert(key, page.clone());
             let task = page.clone();
+            let completion = EngineTaskCompletion {
+                result: task.prepared.clone(),
+                fallback: Some(Err(
+                    "Engine preparation did not complete; retry cleanup".into()
+                )),
+                closing: task.closing.clone(),
+                changed: task.changed.clone(),
+            };
             tokio::spawn(async move {
                 let result = prepare(&task).await.map_err(|e| e.to_string());
-                task.prepared.set(result).ok();
-                task.changed.notify_waiters();
+                completion.publish(result);
                 supervise(task).await;
             });
             page
@@ -516,6 +552,13 @@ pub(crate) async fn invoke(
             );
             if !page.launched.swap(true, Ordering::AcqRel) {
                 let task = page.clone();
+                let completion = EngineTaskCompletion {
+                    result: task.result.clone(),
+                    fallback: Some(json!({"status":"error","code":"browser_engine_unavailable",
+                        "message":"Remote Engine launch did not complete; retry cleanup"})),
+                    closing: task.closing.clone(),
+                    changed: task.changed.clone(),
+                };
                 tokio::spawn(async move {
                     let result = launch(&task).await.unwrap_or_else(|error| {
                         task.closing.store(true, Ordering::Release);
@@ -526,8 +569,7 @@ pub(crate) async fn invoke(
                     if result["status"] != "ok" {
                         task.closing.store(true, Ordering::Release);
                     }
-                    task.result.set(result).ok();
-                    task.changed.notify_waiters();
+                    completion.publish(result);
                     if task.closing.load(Ordering::Acquire) {
                         let _ = close(&task).await;
                     }
@@ -536,7 +578,7 @@ pub(crate) async fn invoke(
             drop(admission);
             let result = page.wait_result().await?;
             ensure!(
-                !page.closing.load(Ordering::Acquire),
+                result["status"] == "error" || !page.closing.load(Ordering::Acquire),
                 "Engine owner retired before launch publication"
             );
             Ok(result)
@@ -637,6 +679,28 @@ fn remote_wallet_consumer_mediation(
         "bus": "private",
         "authority": "consumer_runtime",
     })
+}
+
+// The serving Engine's profile is owned by its authenticated remote owner,
+// which is not a principal in this Runtime's auth store.
+fn remote_engine_profile(data_dir: &FsPath, owner: &RemoteEngineOwner) -> Result<Value> {
+    let storage = owner.storage_principal();
+    let uri = format!("localhost://Users/{storage}/BrowserProfiles/default/profile.ext4");
+    let disk_path = rooted_localhost_fs_path(data_dir, &uri)
+        .context("Remote Engine profile path invalid")?
+        .to_str()
+        .context("Remote Engine profile path must be UTF-8")?
+        .to_owned();
+    Ok(json!({
+        "schema":"elastos.browser.profile/v1", "scope":"active_principal",
+        "storage":BROWSER_PROFILE_STORAGE,
+        "storage_posture":BROWSER_PROFILE_STORAGE_POSTURE,
+        "protected_storage":false, "encrypted":false, "recoverable":false,
+        "recovery":BROWSER_PROFILE_RECOVERY, "uri":uri,
+        "public_uri":"localhost://Users/self/BrowserProfiles/default/profile.ext4",
+        "profile_key":owner.profile_key, "disk_path":disk_path,
+        "reset":"whole_profile"
+    }))
 }
 
 fn remote_wallet_consumer_request(
@@ -758,7 +822,7 @@ async fn prepare(page: &ServedPage) -> Result<Prepared> {
         serde_json::from_value(intent["guarantee_level"].clone())?;
     validate_browser_launch_contract(mode, guarantee)?;
     let principal = owner.storage_principal();
-    let adapter = resolve_browser_engine_adapter(
+    let (adapter, verified_rootfs) = resolve_browser_engine_adapter(
         registry,
         &gateway.data_dir,
         &principal,
@@ -808,8 +872,7 @@ async fn prepare(page: &ServedPage) -> Result<Prepared> {
             egress_runtime_socket_path:stream["adapter_ipc"]["runtime_stream_path"].as_str().unwrap_or_default(),
         }).map_err(anyhow::Error::msg)?.context("Remote Engine transport preparation unsupported")?;
         bind_browser_vz_transport_authority(&gateway.data_dir, &reservation, stream_id, None, transport.authority.clone()).await.map_err(anyhow::Error::msg)?;
-        let (_, mut profile) = browser_profile_launch_descriptor(&gateway.data_dir, &principal)?;
-        profile["profile_key"] = json!(owner.profile_key);
+        let profile = remote_engine_profile(&gateway.data_dir, owner)?;
         let viewer = browser_vz_viewer_turn_capability(&transport.authority, &transport.secret).map_err(anyhow::Error::msg)?;
         crate::carrier::browser_engine_media::bind_target(&gateway.data_dir, owner.requester_endpoint.parse()?, &transport.authority, page.closing.clone()).await?;
         let wallet = remote_wallet_consumer_mediation(&owner.requester_endpoint, &owner.page_id, &owner.generation);
@@ -829,12 +892,15 @@ async fn prepare(page: &ServedPage) -> Result<Prepared> {
                 == owner.page_id,
             "Engine Wallet launch request escaped its page"
         );
-        let request = json!({"op":"launch","url":url,"stream_session":browser_engine_stream_session(&stream),
+        let mut request = json!({"op":"launch","url":url,"stream_session":browser_engine_stream_session(&stream),
             "lifecycle_generation":owner.generation,"principal_id":principal,"profile":profile,
             "wallet":wallet,
             "viewport":intent["viewport"],"display_mode":mode,"guarantee_level":guarantee,
             "adapter_id":owner.adapter_id,"page_id":owner.page_id,"vm_id":owner.vm_id,
             "transport_authority":transport.authority,"transport_secret":transport.secret});
+        if let Some(seed) = verified_rootfs {
+            request["verified_rootfs"] = json!(seed);
+        }
         Ok::<_, anyhow::Error>(Prepared {reservation:reservation.clone(),owner_launch_id,
             principal_id:principal,request,stream,authority:transport.authority,viewer})
     }.await;
@@ -1557,6 +1623,27 @@ pub(super) fn unresolved_preparation(
     }))
 }
 
+#[derive(Debug)]
+pub(super) enum ProfileTransferRequired {
+    OwningRuntime,
+    BeforeRemotePlacement,
+}
+
+impl std::fmt::Display for ProfileTransferRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OwningRuntime => {
+                "This Browser profile requires an approved transfer from its owning Runtime"
+            }
+            Self::BeforeRemotePlacement => {
+                "This Browser profile requires an approved transfer before remote placement"
+            }
+        })
+    }
+}
+
+impl std::error::Error for ProfileTransferRequired {}
+
 pub(super) fn require_profile_placement(
     data_dir: &FsPath,
     principal: &str,
@@ -1574,7 +1661,7 @@ pub(super) fn require_profile_placement(
         !placements
             .iter()
             .any(|p| p.principal_id == principal && peer != Some(p.peer.as_str())),
-        "This Browser profile requires an approved transfer from its owning Runtime"
+        ProfileTransferRequired::OwningRuntime
     );
     ensure!(
         !records
@@ -1582,7 +1669,7 @@ pub(super) fn require_profile_placement(
             .any(|binding| binding.principal_id == principal
                 && binding.dispatch_started
                 && peer != binding.grant["peer_did"].as_str()),
-        "This Browser profile requires an approved transfer from its owning Runtime"
+        ProfileTransferRequired::OwningRuntime
     );
     Ok(())
 }
@@ -1617,7 +1704,10 @@ pub(super) async fn select(
         context.principal_id(),
         grant["peer_did"].as_str(),
     )?;
-    inventory.select(Some(&adapter_id), mode, guarantee)?;
+    ensure!(
+        inventory.select(Some(&adapter_id), mode, guarantee)?.engine == "chromium_microvm",
+        "Browser internet requires a VM engine"
+    );
     let readiness = tokio::time::timeout_at(
         deadline,
         crate::carrier::probe_browser_engine(registry, &grant, "readiness", Some(&adapter_id)),
@@ -1638,11 +1728,14 @@ pub(super) async fn select(
     );
     // An existing local profile requires an approved transfer. Selecting
     // execution cannot silently fork its cookies onto another Runtime.
-    let (local_profile, _) =
-        browser_profile_launch_descriptor(&gateway.data_dir, context.principal_id())?;
+    let (local_profile, _) = browser_profile_launch_descriptor(
+        &gateway.data_dir,
+        context.principal_id(),
+        context.root(),
+    )?;
     ensure!(
         !local_profile.exists(),
-        "This Browser profile requires an approved transfer before remote placement"
+        ProfileTransferRequired::BeforeRemotePlacement
     );
     Ok(Some((grant, adapter_id, id)))
 }
@@ -2085,6 +2178,45 @@ pub(in crate::api::gateway) async fn retry_consumer_preparations(gateway: &Gatew
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_engine_worker_abort_and_panic_publish_failure_and_wake_waiters() {
+        for stage in ["prepare", "launch"] {
+            for stop in ["before_poll", "during_wait", "panic"] {
+                let result = Arc::new(OnceLock::new());
+                let closing = Arc::new(AtomicBool::new(false));
+                let changed = Arc::new(Notify::new());
+                let wake = changed.notified();
+                let fallback = format!("{stage} did not complete; retry cleanup");
+                let completion = EngineTaskCompletion {
+                    result: result.clone(),
+                    fallback: Some(fallback.clone()),
+                    closing: closing.clone(),
+                    changed: changed.clone(),
+                };
+                let (entered, started) = tokio::sync::oneshot::channel();
+                let worker = tokio::spawn(async move {
+                    let _completion = completion;
+                    entered.send(()).unwrap();
+                    assert_ne!(stop, "panic", "fixture Engine worker panic");
+                    std::future::pending::<()>().await;
+                });
+                if stop != "before_poll" {
+                    started.await.unwrap();
+                }
+                if stop != "panic" {
+                    worker.abort();
+                }
+                assert!(worker.await.is_err());
+                tokio::time::timeout(Duration::from_secs(1), wake)
+                    .await
+                    .unwrap();
+                assert_eq!(result.get(), Some(&fallback));
+                assert!(closing.load(Ordering::Acquire));
+            }
+        }
+    }
+
     fn pending_binding(serial: usize, principal: &str) -> ConsumerBinding {
         ConsumerBinding {
             grant: json!({"peer_did":"runtime-b"}),
@@ -2339,6 +2471,7 @@ mod tests {
             cache_dir: root.path().join("cache"),
             provider_registry: Some(registry),
             carrier_endpoint: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(OnceLock::new()),
             collaboration_chat_product_port: None,
             collaboration_presence_product_port: None,
@@ -2479,6 +2612,31 @@ mod tests {
                 "selection has no launch or transport effects"
             );
         }
+    }
+
+    #[test]
+    fn remote_engine_profile_uri_names_authenticated_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = RemoteEngineOwner {
+            requester_endpoint: "a87b8a99bd88a69686c994a80b629d8154871aa295540834c01d79f4f916502f"
+                .into(),
+            requester_principal_id: "consumer".into(),
+            grant_id: "grant:remote-engine".into(),
+            grant_revision: 1,
+            generation: "generation".into(),
+            page_id: "page".into(),
+            vm_id: "vm".into(),
+            profile_key: "profile".into(),
+            adapter_id: "adapter".into(),
+        };
+        let profile = remote_engine_profile(root.path(), &owner).unwrap();
+        assert_eq!(
+            profile["uri"],
+            "localhost://Users/remote-engine-594321e52caebd3b7afc9f03bf002e82d1006a3dfa8e8e96a8619224ad233861/BrowserProfiles/default/profile.ext4"
+        );
+        assert_eq!(profile["storage"], BROWSER_PROFILE_STORAGE);
+        assert_eq!(profile["storage_posture"], BROWSER_PROFILE_STORAGE_POSTURE);
+        assert_eq!(profile["recovery"], BROWSER_PROFILE_RECOVERY);
     }
 
     #[test]

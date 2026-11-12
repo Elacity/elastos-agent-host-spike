@@ -41,6 +41,159 @@ import { renderToString as renderMathToString } from "./vendor/katex/katex.mjs";
 let ctx = null;
 /** @type {null | Record<string, Function>} */
 let host = null;
+/* A turn owns its visibility listener and streaming marker. */
+let streamFollowCleanup = null;
+
+/* A reader within this distance of the end is at the end. */
+export const READER_AT_END_PX = 8;
+let transcriptFollow = null;
+export function pinTranscriptToEnd(scroller) {
+  if (!scroller) return 0;
+  scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+  transcriptFollow?.didPin(scroller);
+  return scroller.scrollTop;
+}
+
+export function followTranscriptToEnd(scroller) {
+  if (transcriptFollow?.atEnd) return pinTranscriptToEnd(scroller);
+  return scroller?.scrollTop || 0;
+}
+
+export function jumpTranscriptToEnd(scroller) {
+  transcriptFollow?.reset();
+  return pinTranscriptToEnd(scroller);
+}
+
+function observeTranscript(scroller, content) {
+  if (!scroller || !content || transcriptFollow) return;
+  let atEnd = true;
+  let readerPending = false;
+  let lastScrollTop = scroller.scrollTop;
+  let lastScrollMax = scroller.scrollHeight - scroller.clientHeight;
+  let readerStartTop = 0;
+  let readerMoved = false;
+  let readerWasFollowing = false;
+  let dragging = false;
+  let touching = false;
+  const heldKeys = new Set();
+  let settleTimer = 0;
+  let touchY = 0;
+  const showFollow = () => {
+    scroller.classList.toggle("is-follow-bottom", atEnd && scroller.classList.contains("is-live-streaming"));
+    updateJumpToLatestVisibility();
+  };
+  const nearEnd = () => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= READER_AT_END_PX;
+  // Reader input owns follow until release and 150 ms without movement.
+  // Key animations can emit scrollend while they are still near the end.
+  const waitForReader = () => {
+    window.clearTimeout(settleTimer);
+    if (!readerPending) return;
+    const top = scroller.scrollTop;
+    settleTimer = window.setTimeout(() => {
+      if (dragging || touching || heldKeys.size || !readerPending) return;
+      readerMoved ||= scroller.scrollTop !== readerStartTop;
+      if (scroller.scrollTop !== top) { waitForReader(); return; }
+      readerPending = false;
+      lastScrollMax = scroller.scrollHeight - scroller.clientHeight;
+      // A stationary press can span reply growth. Restore its follow and pin;
+      // a reader who was already away keeps that position.
+      atEnd = readerMoved ? nearEnd() : readerWasFollowing || nearEnd();
+      if (!readerMoved && atEnd) pinTranscriptToEnd(scroller);
+      showFollow();
+    }, 150);
+  };
+  const readerInput = () => {
+    if (!readerPending) {
+      readerStartTop = scroller.scrollTop;
+      // Compositor scrolling can precede delivery of the wheel event.
+      readerMoved = readerStartTop !== lastScrollTop;
+      readerWasFollowing = atEnd;
+    }
+    readerPending = true;
+    atEnd = false;
+    waitForReader();
+    showFollow();
+  };
+  const pinFollowing = () => {
+    if (atEnd) pinTranscriptToEnd(scroller);
+    showFollow();
+  };
+  transcriptFollow = {
+    get atEnd() { return atEnd; },
+    didPin(target) {
+      if (target !== scroller) return;
+      lastScrollTop = scroller.scrollTop;
+      lastScrollMax = scroller.scrollHeight - scroller.clientHeight;
+    },
+    reset() { atEnd = true; readerPending = false; window.clearTimeout(settleTimer); pinFollowing(); },
+  };
+  scroller.addEventListener("wheel", event => {
+    if (event.deltaY && !event.ctrlKey) readerInput();
+  }, { passive: true });
+  scroller.addEventListener("touchstart", event => {
+    touchY = event.touches[0].clientY;
+    touching = true;
+    readerInput();
+  }, { passive: true });
+  scroller.addEventListener("touchmove", event => {
+    const y = event.touches[0].clientY;
+    if (y !== touchY) readerInput();
+    touchY = y;
+  }, { passive: true });
+  scroller.addEventListener("pointerdown", () => {
+    dragging = true;
+    readerInput();
+  });
+  const releasePointer = () => {
+    if (!dragging) return;
+    dragging = false;
+    waitForReader();
+  };
+  document.addEventListener("pointerup", releasePointer);
+  document.addEventListener("pointercancel", releasePointer);
+  const releaseTouch = event => {
+    if (event.touches.length) return;
+    touching = false;
+    waitForReader();
+  };
+  document.addEventListener("touchend", releaseTouch, { passive: true });
+  document.addEventListener("touchcancel", releaseTouch, { passive: true });
+  document.addEventListener("keydown", event => {
+    if (event.defaultPrevented || event.target.closest?.("input, textarea, select, [contenteditable]")) return;
+    if (event.target !== document.body && !scroller.contains(event.target)) return;
+    if (["PageUp", "Home", "ArrowUp", "PageDown", "End", "ArrowDown", " "].includes(event.key)) {
+      heldKeys.add(event.key);
+      readerInput();
+    }
+  });
+  document.addEventListener("keyup", event => {
+    if (heldKeys.delete(event.key)) waitForReader();
+  });
+  document.addEventListener("keydown", event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") readerInput();
+  });
+  scroller.addEventListener("scroll", () => {
+    // Momentum can continue after a quiet gap closed the input gesture.
+    // A smaller range can clamp the scroll before ResizeObserver pins it.
+    // A queued pin event can also arrive after content grows or the viewport
+    // shrinks. Only upward movement belongs to the reader in that case.
+    const max = scroller.scrollHeight - scroller.clientHeight;
+    if (!readerPending && atEnd && !nearEnd() && max >= lastScrollMax && scroller.scrollTop < lastScrollTop) {
+      readerInput();
+      readerMoved = true;
+    }
+    if (readerPending) readerMoved ||= scroller.scrollTop !== readerStartTop;
+    lastScrollTop = scroller.scrollTop;
+    lastScrollMax = max;
+    waitForReader();
+    showFollow();
+  }, { passive: true });
+  scroller.addEventListener("scrollend", waitForReader);
+  const resize = new ResizeObserver(pinFollowing);
+  resize.observe(scroller);
+  resize.observe(content);
+  pinFollowing();
+}
 
 /** Canonical live-turn buffers. The DOM is never the source of truth. */
 const liveTurnCanonical = {
@@ -54,8 +207,6 @@ const liveTurnCanonical = {
 
 const STREAM_BUDGET_MS = 8;
 const STREAM_TRACE_LIMIT = 48;
-const FOLLOW_RESUME_PX = 96;
-const RICH_FINALIZE_BUDGET_MS = 48;
 /** One-shot markdown+KaTeX above this freezes Brave. Stream freeze slices stay ~800. */
 const RICH_MARKDOWN_MAX_CHARS = 8_000;
 const LONG_TASK_TRACE_LIMIT = 24;
@@ -233,7 +384,7 @@ export function renderMarkdown(text, { streaming = false, stream, kind } = {}) {
 }
 
 /** Keep raw markdown on the node so Stop/Copy don't lose markers after HTML paint. */
-function paintAgentMessageBody(body, text, { streaming = false, allowDegrade = false } = {}) {
+function paintAgentMessageBody(body, text, { streaming = false } = {}) {
   if (!body) {
     return;
   }
@@ -247,18 +398,8 @@ function paintAgentMessageBody(body, text, { streaming = false, allowDegrade = f
     delete body.dataset.mdPainted;
     return;
   }
-  const started = performance.now();
-  const html = renderMarkdown(raw, { streaming: false });
-  if (allowDegrade && performance.now() - started > RICH_FINALIZE_BUDGET_MS) {
-    delete body.dataset.mdPainted;
-    return;
-  }
   const tmpl = document.createElement("template");
-  tmpl.innerHTML = html;
-  if (allowDegrade && performance.now() - started > RICH_FINALIZE_BUDGET_MS) {
-    delete body.dataset.mdPainted;
-    return;
-  }
+  tmpl.innerHTML = renderMarkdown(raw, { streaming: false });
   body.replaceChildren(tmpl.content);
   body.dataset.mdPainted = "1";
 }
@@ -365,6 +506,103 @@ function formatInlineMarkdown(escaped) {
     .replaceAll(/`([^`]+)`/g, '<code class="agent-md-inline">$1</code>');
 }
 
+const MD_LIST_ITEM = /^(\s*)([-*+]|\d+\.)\s+(.*)$/;
+
+function startsMarkdownBlock(line) {
+  const trimmed = line.trim();
+  return (
+    line.includes("|") ||
+    /^(#{1,3})\s+/.test(trimmed) ||
+    /^>\s?/.test(trimmed) ||
+    /^\s*(\\\[|\$\$)/.test(line)
+  );
+}
+
+/* One list starting at lines[start]. Items continue across blank lines while
+   the next marker has the same kind and indent; non-list text directly under
+   an item (or indented after a blank) joins that item; deeper markers form a
+   nested list inside the current item. An ordered list says how many digits
+   its widest number has, so its gutter fits "10." as well as "9.". Returns
+   the html and the next line. */
+function renderMarkdownList(lines, start) {
+  const first = MD_LIST_ITEM.exec(lines[start]);
+  const indent = first[1].length;
+  const ordered = /\d/.test(first[2]);
+  const tag = ordered ? "ol" : "ul";
+  const number = ordered ? Number.parseInt(first[2], 10) : 1;
+  let html = "";
+  let items = 0;
+  let j = start;
+  for (;;) {
+    const marker = MD_LIST_ITEM.exec(lines[j]);
+    let parts = [marker[3]];
+    let body = "";
+    const flushText = () => {
+      const text = parts.join("\n").trim();
+      if (text) {
+        body += formatInlineMarkdown(escapeHtml(text)).replaceAll("\n", "<br>");
+      }
+      parts = [];
+    };
+    let nextItem = false;
+    j += 1;
+    while (j < lines.length) {
+      const line = lines[j];
+      if (!line.trim()) {
+        let k = j + 1;
+        while (k < lines.length && !lines[k].trim()) {
+          k += 1;
+        }
+        if (k >= lines.length) {
+          break;
+        }
+        const after = MD_LIST_ITEM.exec(lines[k]);
+        const afterIndent = /^\s*/.exec(lines[k])[0].length;
+        if (after && afterIndent === indent && /\d/.test(after[2]) === ordered) {
+          j = k;
+          nextItem = true;
+          break;
+        }
+        if (after ? afterIndent > indent : afterIndent > indent && !startsMarkdownBlock(lines[k])) {
+          if (!after) {
+            parts.push("");
+          }
+          j = k;
+          continue;
+        }
+        break;
+      }
+      const item = MD_LIST_ITEM.exec(line);
+      if (item) {
+        const itemIndent = item[1].length;
+        if (itemIndent > indent) {
+          flushText();
+          const sub = renderMarkdownList(lines, j);
+          body += sub.html;
+          j = sub.next;
+          continue;
+        }
+        nextItem = itemIndent === indent && /\d/.test(item[2]) === ordered;
+        break;
+      }
+      if (startsMarkdownBlock(line)) {
+        break;
+      }
+      parts.push(line.trim());
+      j += 1;
+    }
+    flushText();
+    html += `<li>${body}</li>`;
+    items += 1;
+    if (!nextItem) {
+      break;
+    }
+  }
+  const digits = ordered ? Math.min(String(number + items - 1).length, 4) : 1;
+  const attrs = `${number !== 1 ? ` start="${number}"` : ""}${digits > 1 ? ` data-marker-digits="${digits}"` : ""}`;
+  return { html: `<${tag} class="agent-md-list"${attrs}>${html}</${tag}>`, next: j };
+}
+
 function renderMarkdownBlocks(raw) {
   const lines = String(raw).replace(/\r\n/g, "\n").split("\n");
   let html = "";
@@ -386,13 +624,13 @@ function renderMarkdownBlocks(raw) {
     if (
       line.includes("|") &&
       i + 1 < lines.length &&
-      /^\s*\|?[\s:-|]+\|?\s*$/.test(lines[i + 1])
+      /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1])
     ) {
       const rows = [];
       while (i < lines.length && lines[i].includes("|")) {
         rows.push(lines[i]);
         i += 1;
-        if (rows.length === 1 && i < lines.length && /^\s*\|?[\s:-|]+\|?\s*$/.test(lines[i])) {
+        if (rows.length === 1 && i < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i])) {
           i += 1; /* skip separator */
         } else if (rows.length > 1 && (!lines[i] || !lines[i].includes("|"))) {
           break;
@@ -468,16 +706,10 @@ function renderMarkdownBlocks(raw) {
       i += 1;
       continue;
     }
-    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
-      const ordered = /^\s*\d+\.\s+/.test(line);
-      const tag = ordered ? "ol" : "ul";
-      html += `<${tag} class="agent-md-list">`;
-      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
-        const item = lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, "");
-        html += `<li>${formatInlineMarkdown(escapeHtml(item))}</li>`;
-        i += 1;
-      }
-      html += `</${tag}>`;
+    if (MD_LIST_ITEM.test(line)) {
+      const list = renderMarkdownList(lines, i);
+      html += list.html;
+      i = list.next;
       continue;
     }
     if (/^>\s?/.test(line.trim())) {
@@ -491,7 +723,11 @@ function renderMarkdownBlocks(raw) {
       ).replaceAll("\n", "<br>")}</blockquote>`;
       continue;
     }
-    const para = [];
+    /* The current line matched no other block, so it opens the paragraph;
+       taking it unconditionally guarantees progress (a stray "|" or an
+       unclosed "$$" line would otherwise stall this loop forever). */
+    const para = [line];
+    i += 1;
     while (
       i < lines.length &&
       lines[i].trim() &&
@@ -532,6 +768,10 @@ export function formatStreamError(err) {
   if (["model_invocation_refused", "remote_model_invocation_refused"].includes(code)
       && err?.reason === "request_expired" && err?.preDispatchRefusal === true) {
     return "This request is no longer valid. Check your device's clock, then try again.";
+  }
+  if (["model_invocation_refused", "remote_model_invocation_refused"].includes(code)
+      && err?.reason === "authority_timeout" && err?.preDispatchRefusal === true) {
+    return "The Home could not check model access in time. Try again.";
   }
   if (code === "remote_model_invocation_refused" && err?.preDispatchRefusal === true) {
     return "Request refused. This attempt stopped before provider dispatch. Review service access before a new request.";
@@ -684,6 +924,7 @@ export function ensureJumpToLatest() {
   btn.hidden = true;
   btn.textContent = "Jump to latest";
   viewport.append(btn);
+  observeTranscript(host.streamScrollEl?.(), host.streamEl?.());
   return btn;
 }
 
@@ -694,9 +935,7 @@ export function updateJumpToLatestVisibility() {
     return;
   }
   const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-  btn.hidden = distance < 96 || !ctx?.turnBusy && distance < 160;
-  /* Show whenever user is meaningfully above bottom during/after turns. */
-  btn.hidden = distance < 120;
+  btn.hidden = transcriptFollow?.atEnd || distance <= READER_AT_END_PX;
 }
 
 function commitAgentReply(session, answer, thinking = "", { partial = false, quiet = false, progress = null, run = null, turn = null } = {}) {
@@ -924,6 +1163,8 @@ export function showEmptyState() {
 }
 
 function clearVisibleTranscript() {
+  streamFollowCleanup?.();
+  transcriptFollow?.reset();
   host.clearEmptyState?.();
   const column = host.streamEl?.();
   const scroll = host.streamScrollEl?.();
@@ -1308,6 +1549,19 @@ export function messageCopyText(row) {
   return body.querySelector(".agent-msg-user-text")?.textContent || "";
 }
 
+function discardAgentRow(row) {
+  if (!row) {
+    return;
+  }
+  const parent = row.parentElement;
+  const wasNewest = row.classList.contains("is-newest-reply");
+  row.remove();
+  if (!wasNewest || !parent) {
+    return;
+  }
+  [...parent.querySelectorAll(".agent-msg-agent")].at(-1)?.classList.add("is-newest-reply");
+}
+
 export function appendMessage(
   role,
   text,
@@ -1322,6 +1576,12 @@ export function appendMessage(
   const row = document.createElement("div");
   row.className = `agent-msg agent-msg-${role}${streaming ? " is-streaming" : ""}`;
   row.dataset.role = role;
+  if (role === "agent") {
+    for (const prior of stream.querySelectorAll(".agent-msg-agent.is-newest-reply")) {
+      if (transcriptFollow?.atEnd) prior.classList.remove("is-newest-reply");
+    }
+    row.classList.add("is-newest-reply");
+  }
   if (msgIndex != null) {
     row.dataset.msgIndex = String(msgIndex);
   }
@@ -1588,6 +1848,7 @@ export function regenerateLastAgentTurn() {
 
 /** Request cancellation; keep the stream attached until Runtime settles it. */
 export function abortAgentStreamNow() {
+  if (!ctx?.turnBusy) streamFollowCleanup?.();
   return abortLiveChatStream();
 }
 
@@ -1595,8 +1856,10 @@ export function stopAgentStream({ keepPartial = true, drainQueue = false, cancel
   /* cancelRun=false = navigation detach: leave the server-side run alive, just stop
      consuming its events. Explicit Stop (default) still fires runs_cancel. */
   if (cancelRun) {
+    if (!ctx.turnBusy) streamFollowCleanup?.();
     return abortLiveChatStream();
   }
+  streamFollowCleanup?.();
   const detachedSession = ctx.sessions.find((s) => s.id === ctx.activeSessionId);
   const canon = getLiveTurnCanonical();
   detachLiveChatStream();
@@ -1641,7 +1904,7 @@ export function stopAgentStream({ keepPartial = true, drainQueue = false, cancel
     streaming.classList.remove("is-streaming");
     streaming.dataset.streamPhase = "presentation_done";
     if (!keepPartial) {
-      streaming.remove();
+      discardAgentRow(streaming);
       thinking?.remove();
       return;
     }
@@ -1878,17 +2141,11 @@ function streamBucketP95(traces) {
 }
 
 function scheduleIdleWork(fn) {
-  const startedAt = performance.now();
-  const invoke = (abandonRich) => {
-    fn({ abandonRich: Boolean(abandonRich) || performance.now() - startedAt > 4000 });
-  };
   if (typeof requestIdleCallback === "function") {
-    requestIdleCallback((deadline) => {
-      invoke(Boolean(deadline?.didTimeout));
-    }, { timeout: 4000 });
+    requestIdleCallback(() => fn(), { timeout: 4000 });
     return;
   }
-  window.setTimeout(() => invoke(false), 32);
+  window.setTimeout(fn, 32);
 }
 
 /** Live turn: contract runs_events → scheduled DOM. Stop requests cancellation. */
@@ -1897,6 +2154,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     showRunSettlement(resumeTurn);
     return;
   }
+  streamFollowCleanup?.();
   detachLiveChatStream();
   clearStreamTimer();
   const generation = (ctx.streamGeneration += 1);
@@ -1981,30 +2239,10 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   let renderAbort = null;
   let lastFlushAt = 0;
   let sawFirstToken = false;
-  let stickToBottom = true;
-  /* scrollTop the stream left a following reader at; null if not following. */
-  let endScrollTop = null;
-  /* Land on the end now and once more after layout settles, unless the reader
-     moved up in between or another turn took the transcript. */
-  const pinToEnd = () => {
-    scroller.scrollTop = scroller.scrollHeight;
-    const top = scroller.scrollTop;
-    window.requestAnimationFrame(() => {
-      if (generation === ctx.streamGeneration && scroller.scrollTop >= top - 1) {
-        scroller.scrollTop = scroller.scrollHeight;
-        if (endScrollTop === top) {
-          endScrollTop = scroller.scrollTop;
-        }
-      }
-    });
-    return top;
-  };
   let answerNotifiedAt = 0;
   let hiddenBuffered = false;
   let progressEl = null;
   let revealTimer = 0;
-  let followRaf = 0;
-  let followScrollQuiet = false;
   let longTaskObserver = null;
   let frameWatch = 0;
   let streamingFlush = false;
@@ -2051,12 +2289,14 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       }
       if (!progressEl && next.revealed) {
         progressEl = appendProgressBlock();
-        progressEl?.addEventListener("toggle", () => pauseFollow());
       }
       paintProgressView(progressEl, next, {
         reasoning: ctx.reasoningVisible ? getReasoning() : "",
         reasoningVisible: ctx.reasoningVisible,
       });
+      /* The status line appears and grows below the newest message: a
+         following reader keeps it in view above the composer. */
+      followAfterFlush();
     },
   });
   revealTimer = window.setTimeout(() => {
@@ -2120,95 +2360,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     return Boolean(node && (answerRow?.contains(node) || progressEl?.contains(node)));
   };
 
-  const followAfterFlush = () => {
-    if (!stickToBottom || followRaf || selectionInStream()) {
-      return;
-    }
-    followRaf = window.requestAnimationFrame(() => {
-      followRaf = 0;
-      if (!stickToBottom || selectionInStream() || !scroller) {
-        return;
-      }
-      followScrollQuiet = true;
-      const t0 = performance.now();
-      /* True bottom: the stream's bottom padding keeps the end above the
-         floating composer; scrollIntoView on an anchor left it underneath. */
-      scroller.scrollTop = scroller.scrollHeight;
-      const took = performance.now() - t0;
-      perf.followMs += took;
-      const last = perf.traces[perf.traces.length - 1];
-      if (last) {
-        last.followMs = Number(took.toFixed(2));
-      }
-      window.requestAnimationFrame(() => {
-        followScrollQuiet = false;
-      });
-    });
-  };
-
-  const setFollowBottom = (on) => {
-    stickToBottom = on;
-    scroller?.classList.toggle("is-follow-bottom", on);
-    const btn = document.querySelector("[data-agent-jump-latest]");
-    if (btn) {
-      btn.hidden = on;
-    }
-    if (on) {
-      followAfterFlush();
-    }
-  };
-
-  const pauseFollow = () => {
-    setFollowBottom(false);
-  };
-
+  const followAfterFlush = () => followTranscriptToEnd(host.streamScrollEl?.());
   const scroller = host.streamScrollEl?.();
-  const streamRoot = host.streamEl?.();
-  const onUserScroll = () => {
-    if (followScrollQuiet || !scroller) {
-      return;
-    }
-    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    if (distance > FOLLOW_RESUME_PX) {
-      if (stickToBottom) {
-        pauseFollow();
-      }
-      return;
-    }
-    if (!stickToBottom) {
-      setFollowBottom(true);
-    }
-  };
-  const onUserScrollUp = (event) => {
-    if (event.deltaY < 0) {
-      pauseFollow();
-    }
-  };
-  const onKeyNav = (event) => {
-    if (event.target?.closest?.("textarea, input, [contenteditable]")) {
-      return;
-    }
-    if (event.key === "PageUp" || event.key === "Home" || event.key === "ArrowUp") {
-      pauseFollow();
-    }
-  };
-  const onSelectStart = (event) => {
-    if (answerRow?.contains(event.target) || progressEl?.contains(event.target)) {
-      pauseFollow();
-    }
-  };
-  const onStreamPointer = (event) => {
-    if (
-      event.target.closest?.("pre, code, .agent-md-code, .agent-thinking, .agent-progress, a, button")
-    ) {
-      pauseFollow();
-    }
-  };
-  const onContextMenu = (event) => {
-    if (answerRow?.contains(event.target) || progressEl?.contains(event.target)) {
-      pauseFollow();
-    }
-  };
   const onVisibility = () => {
     if (!streamTabHidden() && hiddenBuffered && generation === ctx.streamGeneration) {
       hiddenBuffered = false;
@@ -2216,23 +2369,17 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     }
   };
   scroller?.classList.add("is-live-streaming");
-  setFollowBottom(true);
-  scroller?.addEventListener("scroll", onUserScroll, { passive: true });
-  scroller?.addEventListener("wheel", onUserScrollUp, { passive: true });
-  streamRoot?.addEventListener("selectstart", onSelectStart);
-  streamRoot?.addEventListener("pointerdown", onStreamPointer);
-  streamRoot?.addEventListener("contextmenu", onContextMenu);
-  document.addEventListener("keydown", onKeyNav);
+  transcriptFollow?.reset();
   document.addEventListener("visibilitychange", onVisibility);
-  const jumpBtn = document.querySelector("[data-agent-jump-latest]");
-  const onJumpLatest = () => setFollowBottom(true);
-  jumpBtn?.addEventListener("click", onJumpLatest);
-  const onResizeFollow = () => {
-    if (stickToBottom) {
+  const releaseFollow = () => {
+    document.removeEventListener("visibilitychange", onVisibility);
+    if (streamFollowCleanup === releaseFollow) streamFollowCleanup = null;
+    if (generation === ctx.streamGeneration) {
+      scroller?.classList.remove("is-live-streaming", "is-follow-bottom");
       followAfterFlush();
     }
   };
-  window.addEventListener("resize", onResizeFollow, { passive: true });
+  streamFollowCleanup = releaseFollow;
 
   const ensureAnswerShell = () => {
     if (answerRow) {
@@ -2444,7 +2591,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       tailLen: tail.length,
       frozenBlocks: state.frozenBlocks,
       hidden: streamTabHidden(),
-      follow: stickToBottom,
+      follow: transcriptFollow?.atEnd ?? true,
     });
     adaptQuality();
     } finally {
@@ -2667,9 +2814,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       const partial = materializeCanonical();
       commitAgentReply(session, partial.answer, partial.reasoning, { partial: true, turn: result.turnManifest });
       answerRow?.classList.remove("is-streaming");
-      if (answerBody) {
-        answerBody.dataset.mdSource = partial.answer;
-      }
+      paintAgentMessageBody(answerBody, String(partial.answer || "").trim());
       settleStreamedReply(answerRow, session);
       if (result.stopRequested && result.settlementUnknown) {
         /* Local engines cannot confirm a stop; the turn keeps its unknown state. */
@@ -2698,12 +2843,10 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       const reasoning = String(partial.reasoning || "").trim();
       commitAgentReply(session, answer, reasoning, { turn: result.turnManifest });
       answerRow?.classList.remove("is-streaming");
-      if (answerBody) {
-        answerBody.dataset.mdSource = answer;
-      }
+      paintAgentMessageBody(answerBody, answer);
       if (!answer) {
         progressEl?.remove();
-        answerRow?.remove();
+        discardAgentRow(answerRow);
       }
       settleStreamedReply(answerRow, session);
       if (session && result.turnManifest) {
@@ -2742,10 +2885,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     let thinking = String(joined.reasoning || "").trim();
     if (!answer && thinking) {
       /* Reasoning models often spend the budget thinking — surface it honestly.
-         Do not one-shot markdown a Think dump; that is what crashed Brave. */
+         It is rendered like any reply, the same way a reopened chat shows it. */
       answer = thinking;
       thinking = "";
-      state.quality = "plain";
     }
     const split = splitThinkTaggedContent(answer);
     if (split.thinking && !thinking) {
@@ -2774,7 +2916,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
 
     if (!answer) {
       progressEl?.remove();
-      answerRow?.remove();
+      discardAgentRow(answerRow);
       if (!stoppedEarly) {
         setStreamStatus("Model returned an empty reply", { tone: "error" });
         void probeLiveInference({ force: true });
@@ -2792,46 +2934,31 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     }
     const answerBodyRef = answerBody;
     const answerTextRef = answer;
-    const finalize = ({ abandonRich = false } = {}) => {
+    const finalize = () => {
       if (generation !== ctx.streamGeneration || !answerBodyRef?.isConnected) {
+        releaseFollow();
         return;
       }
-      const unhealthy =
-        abandonRich ||
-        perf.slowFrames > 12 ||
-        perf.longTasks.some((row) => row.duration >= 50);
-      /* The last flush and the rich render below make the reply taller; keep
-         a reader who was following at the end. One who scrolled up since the
-         stream ended (its listeners are gone) stays where they are. */
-      const pinned = endScrollTop !== null && !!scroller && scroller.scrollTop >= endScrollTop - 1;
-      answerBodyRef.dataset.mdSource = answerTextRef;
-      const skipRich = unhealthy || stoppedEarly || state.quality === "plain";
-      if (!skipRich) {
-        try {
-          if (frozenEl?.isConnected) {
-            const remaining = String(tailNode?.data || tail || "");
-            if (remaining) {
-              freezeSlice(remaining, { markdown: true });
-            }
-            tailEl?.remove();
-            tailEl = null;
-            tailNode = null;
-          } else {
-            paintAgentMessageBody(answerBodyRef, answerTextRef, {
-              streaming: false,
-              allowDegrade: true,
-            });
-          }
-        } catch {
-          /* keep streamed prefix — canonical survives presentation failure */
-        }
+      /* Streaming painted plain text (live tokens never run Markdown, see
+         adaptQuality). The finished reply, stopped early or not, now gets the
+         render a reopened chat gives it: the whole text through the history
+         painter, which keeps the same size cap. */
+      try {
+        paintAgentMessageBody(answerBodyRef, answerTextRef, { streaming: false });
+        frozenEl = null;
+        tailEl = null;
+        tailNode = null;
+      } catch {
+        /* keep streamed prefix — canonical survives presentation failure */
       }
-      if (pinned) {
-        pinToEnd();
-      }
+      followAfterFlush();
+      updateJumpToLatestVisibility();
       timings.t6 = Date.now();
       setPhase("presentation_done");
-      window.requestAnimationFrame(() => drainFollowUpQueue());
+      window.requestAnimationFrame(() => {
+        releaseFollow();
+        if (generation === ctx.streamGeneration) drainFollowUpQueue();
+      });
       if (host.debug === true && perf.renders) {
         const ms = (a, b) => (a && b ? a - b : 0);
         const durs = perf.traces.map((row) => row.dur);
@@ -2967,7 +3094,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         }
       }
       progressEl?.remove();
-      answerRow?.remove();
+      discardAgentRow(answerRow);
       showApprovalReview(session?.lastTurn || liveTurn);
       return;
     }
@@ -2975,9 +3102,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       persistPartialAgentReply(partialAnswer, partialThinking);
       settleStreamedReply(answerRow, session);
       answerRow?.classList.remove("is-streaming");
-      if (answerBody) {
-        answerBody.dataset.mdSource = partialAnswer;
-      }
+      paintAgentMessageBody(answerBody, partialAnswer, { streaming: false });
       if (answerRow && !answerRow.querySelector(".agent-msg-stopped")) {
         const note = document.createElement("div");
         note.className = "agent-msg-stopped";
@@ -2994,7 +3119,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     if (unresolvedModelTurn(liveTurn)) showRunSettlement(liveTurn, honest);
     else setStreamStatus(honest, { tone: "error" });
     progressEl?.remove();
-    answerRow?.remove();
+    discardAgentRow(answerRow);
     if (!liveTurn?.providerRunId && !unresolvedModelTurn(liveTurn)) void probeLiveInference({ force: true });
     return;
   } finally {
@@ -3023,25 +3148,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       window.cancelAnimationFrame(frameWatch);
       frameWatch = 0;
     }
-    if (followRaf) {
-      window.cancelAnimationFrame(followRaf);
-      followRaf = 0;
-    }
-    /* The cancelled frame carried the final flush (and the Stopped note sits
-       below it): land on the true end before the listeners go. */
-    if (stickToBottom && scroller && generation === ctx.streamGeneration) {
-      endScrollTop = pinToEnd();
-    }
-    window.removeEventListener("resize", onResizeFollow);
-    document.removeEventListener("keydown", onKeyNav);
-    scroller?.classList.remove("is-live-streaming", "is-follow-bottom");
-    scroller?.removeEventListener("scroll", onUserScroll);
-    scroller?.removeEventListener("wheel", onUserScrollUp);
-    jumpBtn?.removeEventListener("click", onJumpLatest);
-    streamRoot?.removeEventListener("selectstart", onSelectStart);
-    streamRoot?.removeEventListener("pointerdown", onStreamPointer);
-    streamRoot?.removeEventListener("contextmenu", onContextMenu);
-    document.removeEventListener("visibilitychange", onVisibility);
+    releaseFollow();
     if (revealTimer) {
       window.clearTimeout(revealTimer);
     }

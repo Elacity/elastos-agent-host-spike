@@ -144,8 +144,8 @@ the retained-root marker. Their exact edits and named tests are in
 Task 003 adds these rows to the same table:
 
 - `ungranted_effect_is_refused`: runs the read build against the ready fixture operator. Requires a nonzero exit and the lifecycle error `Internal("capsule manifest does not declare authority for localhost://Public/agent-conformance-ungranted/outside-fixture.txt")` inside the Runtime's component-failure wrapper.
-- `ungranted_network_is_refused`: the manifest declares `elastos://net/stream`. The request is pending, and the fixture denies it with `fixture denies unlisted elastos://net/stream`. Provider execution stays outside this row.
-- `undeclared_network_manifest_is_refused`: stages the same probe bundle with a manifest whose capabilities omit `elastos://net/stream`. The manifest refuses the request, and its reason names that resource: `Internal("capsule manifest does not declare authority for elastos://net/stream")`. No fixture denial and no grant are involved.
+- `declared_network_manifest_is_refused`: a probe manifest that declares `elastos://net/stream` is refused at validation with `app capsules cannot request system-only backend capability "elastos://net/stream"; use the product/provider contract instead`. The row calls that validation through the lab library and attempts no launch. The shipped probe manifest, with its one Public capability, is accepted.
+- `undeclared_network_manifest_is_refused`: stages the shipped probe bundle, whose manifest does not declare `elastos://net/stream`. The manifest refuses the request, and its reason names that resource: `Internal("capsule manifest does not declare authority for elastos://net/stream")`. No fixture denial and no grant are involved.
 - `default_activation_refuses_without_selector`: runs the default build and requires the AC-002-ARGS unavailable reason through the guest lifecycle.
 - `ungranted_model_call_is_refused`: BLOCKED (RT3), with the Runtime change in GAPS.md.
 - `operator_storage_is_under_throwaway_home`: BLOCKED (AC-006-STORAGE), with the Runtime change in GAPS.md. The lane performs no reads through that Runtime-owned path.
@@ -163,9 +163,10 @@ the bytes. Bundle-CID admission stays separate.
 
 The earlier no-operator rows stop before the storage constructor. The new live
 rows reach the existing AC-006-STORAGE exception, recorded in GAPS.md. The
-ungranted read stays outside the Public pattern. The manifest declares
-`elastos://net/stream`, the fixture denies that pending request, and provider
-execution stays outside that row. The guest returns the Bus error,
+ungranted read stays outside the Public pattern. The manifest declares only
+`localhost://Public/agent-conformance-grants/*`; a manifest that declares
+`elastos://net/stream` is refused at validation, so this lab no longer shows a
+pending network request for the fixture to deny. The guest returns the Bus error,
 and the harness requires both the nonzero exit and the exact reason. An
 unexpected grant returns success without any provider invoke, causing the
 refusal test to fail while keeping the probe free of real effects. Every live
@@ -304,8 +305,7 @@ once with scope `shell` at the operator's loopback port, then services pending
 requests during the existing process collection loop. Resource, action and
 reason must match an entry in `fixtures/grants.json` exactly. The entry supplies
 `once` or `session`; this fixture selects `once`. Every other request receives
-`fixture denies unlisted read`; a pending `elastos://net/stream` request
-receives `fixture denies unlisted elastos://net/stream`. An ambiguous match
+`fixture denies unlisted read`. An ambiguous match
 denies the whole pending snapshot with a reason. A consumed entry also refuses
 a later matching request.
 
@@ -344,9 +344,9 @@ Runtime contract gap.
 
 The new selectors share the existing probe source, manifest, build staging,
 import checks and two-build SHA-256 checks. The manifest declares
-`localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`.
-The ungranted read stays outside the Public pattern. The fixture denies the
-pending network request, and provider execution stays outside that row.
+`localhost://Public/agent-conformance-grants/*`. The ungranted read stays
+outside the Public pattern. A declared `elastos://net/stream` is refused at
+validation, so provider execution stays outside every row.
 `Public` is the file-backed fixture root. The controller writes the seed
 through Runtime before the guest runs; Runtime owns the stored representation. The guest expects its bytes independently of the
 seed fixture and keeps them inside the capsule.
@@ -414,7 +414,7 @@ before claiming their M1 results.
 Task 004 adds the agent-memory rows to the same Cargo-derived table:
 
 - `agent_cannot_read_human_space_without_grant`: the existing read feature asks for `Users/self` and requires the Runtime's principal-context refusal. This is the current unbound CLI's refusal half.
-- `ungranted_memory_write_is_refused`: the new memory-write feature requests authority through the Bus and requires the Runtime's manifest refusal.
+- `ungranted_memory_write_is_refused`: BLOCKED (UsersAI binding; AC-002-ARGS). The memory-write probe retains its exact manifest-refusal assertion. Today's unbound CLI launch receives a principal-context refusal before the manifest check. A verified Agent launch must first prove a granted write, then prove the missing-authority refusal.
 - `no_policy_file_does_not_mean_allow`: one in-manifest read receives zero controller decisions when `fixtures/no-policy.json` is absent. The natural pending-request refusal must arrive within 40 seconds. A harness timeout fails.
 - `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
 - `real_agent_host_journal_under_usersai_principal`: BLOCKED (UsersAI binding), the P7 gap in the default table. Forced with `--ignored`, it reads the real manifest and requires every capability under `UsersAI/self`; agent-host moves its journal when the Runtime binding lands.
@@ -436,13 +436,15 @@ that exists only in `tests/agent_host.rs`, still reads `NOT RUN` from it.
 `fixtures/no-policy.json` stays absent. A build failure, unrelated error,
 SKIPPED or BLOCKED result cannot catch a falsifier.
 
-F-ac2-human and F-ac2-write change the respective probe activation to succeed
-without its Bus refusal. Each named refusal test must fail, then pass when the
-original probe bytes are restored. All mutations remain inside fixtures or the
-one probe. This list uses the `agent-conformance` command. An ignored test,
-or a test that exists only in `tests/agent_host.rs`, still reads `NOT RUN`
-from it. The existing report records every launched variant's
-component SHA-256 and complete bundle lab CID.
+F-ac2-human changes the human-read probe activation to succeed without its
+Bus refusal. Its named refusal test must fail, then pass when the original
+probe bytes are restored. F-ac2-write is retired under `UsersAI binding;
+AC-002-ARGS` until `ungranted_memory_write_is_refused` is live with a passing
+granted-write control. Its exact mutation is kept in `falsifiers.json`.
+Both mutations stay in the probe. The active list uses the
+`agent-conformance` command. An ignored test, or a test that exists only in
+`tests/agent_host.rs`, reads `NOT RUN` from it. The existing report records
+every launched variant's component SHA-256 and complete bundle lab CID.
 
 ## Fake host-file refusal (M1 A8)
 
@@ -518,10 +520,15 @@ the line names the retained `target/home-*`. Passing journeys remove their own
 Homes after capture, source and report checks. The census tool's scratch Home
 is removed after its captures join the existing credential-check inventory.
 
-The grant result is currently `BLOCKED(AC-021-GRANTS)`: the fixture shell sees
-its own grants. `run_leaves_no_live_grant` stays an ignored table row until
-Runtime supplies the global live-grant contract in GAPS.md. F-cleanup-grant
-waits for that contract. F-cleanup-temp and F-cleanup-process run the existing
+The grant result is `pending:0 grants:0` when the scoped view holds no live
+grant, and `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)` while live grants
+that this run's fixture minted stay after client exit. The census asks the
+shell-only live view (`?scope=all_sessions_live`) and compares each live id with
+the fixture's own minted set; a live id the run did not mint fails as a foreign
+or stale grant. This lane performs zero revocations, so the blocked line
+reports the real AC-021 gap rather than a cleaned fixture.
+`run_leaves_no_live_grant` stays an ignored table row. F-cleanup-grant waits
+for that row. F-cleanup-temp and F-cleanup-process run the existing
 `granted_read_succeeds` test; both must fail for their planted reason, then
 pass after restoration. Other cleanup falsifiers exercise the port check,
 pending and scope grading, capture inventory, earlier-run detection and table
@@ -611,9 +618,11 @@ After collection, the controller checks pending requests while the operator
 is alive. Its shell-owned pending control proves the live census call can
 refuse a leftover and is then denied. The final empty-pending check precedes
 operator group stop, root census, API-port closure and the empty `tmp/` check.
-Cross-session live grants remain `BLOCKED(AC-021-GRANTS)` and give zero passing
-credit. Resident cancellation stays RT4; this row covers the pending-request
-point only. GAPS.md defines the cleanup visibility limits.
+The census asks the shell-only live view. The controller performs no
+revocation, so a run's grants stay live and the line reports
+`BLOCKED(AC-021-GRANTS:leftover)`; an unmarked view reports
+`BLOCKED(AC-021-GRANTS)`. Resident cancellation stays RT4; this row covers the
+pending-request point only. GAPS.md defines the cleanup visibility limits.
 
 F-cancel-sibling cancels both first requests and must fail the sibling check.
 F-cancel-reason changes the delivered reason. F-cancel-retry bypasses later
@@ -645,7 +654,9 @@ empty. A further two-second quiet window polls the same list; five seconds is
 the maximum permitted window. The existing cleanup path then checks the
 operator and both client roots through its lsof implementation, checks the
 closed API port and empty `tmp/` directories, and checks captures for fixture
-credentials. Live grants remain `BLOCKED(AC-021-GRANTS)`.
+credentials. The cleanup path performs no revocation and keeps the run's
+grants, so its live-grant census reports
+`BLOCKED(AC-021-GRANTS:leftover)`.
 
 Read the single checked `kill settlement:` line for both child statuses,
 signal, kill time, first barrier time, overlap, elapsed times, quiet duration,

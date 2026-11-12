@@ -389,10 +389,12 @@ fn seed_completed_runtime_custody_mint(
     let content_id =
         crate::protected_content_runtime::runtime_protected_content_id(draft.encrypted_content())
             .unwrap();
+    let publisher_root =
+        crate::auth::principal_stored_localhost_root(Some(data_dir), &input.principal_id).unwrap();
     let publisher_profile_did = crate::collaboration_profile_authority::load_profile_authority(
         data_dir,
         &input.principal_id,
-        &crate::auth::principal_localhost_root(&input.principal_id),
+        &publisher_root,
     )
     .unwrap()
     .unwrap()
@@ -1336,6 +1338,70 @@ async fn test_documents_viewer_route_can_read_and_save_library_file_only() {
     assert_eq!(save["status"], "ok");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_documents_viewer_route_refuses_a_file_reached_through_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let documents_token = app_token_for_authority(dir.path(), DOCUMENTS_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    write_test_static_capsule(
+        dir.path(),
+        DOCUMENTS_CAPSULE_ID,
+        "viewer",
+        "Test Documents viewer",
+        "<!doctype html><title>Documents Viewer</title>",
+    );
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("Secret.txt"), b"outside secret").unwrap();
+    let documents_path = library_object_path(dir.path(), &format!("{root}/Documents"));
+    std::fs::create_dir_all(&documents_path).unwrap();
+    std::os::unix::fs::symlink(outside.path(), documents_path.join("Linked")).unwrap();
+    let uri = format!("{root}/Documents/Linked/Secret.txt");
+    let encoded_uri = uri.replace(':', "%3A").replace('/', "%2F");
+
+    for (method, body) in [
+        ("GET", Body::empty()),
+        (
+            "PUT",
+            Body::from(
+                serde_json::to_vec(&json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(b"overwritten"),
+                }))
+                .unwrap(),
+            ),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", "null")
+                    .method(method)
+                    .uri(format!(
+                        "/api/viewers/documents/library-object?uri={encoded_uri}"
+                    ))
+                    .header("x-elastos-home-token", documents_token.clone())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let text = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&text);
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method}: {text}");
+        assert!(text.contains("linked folder"), "{method}: {text}");
+    }
+    assert_eq!(
+        std::fs::read(outside.path().join("Secret.txt")).unwrap(),
+        b"outside secret"
+    );
+}
+
 #[tokio::test]
 async fn test_library_provider_rejects_unknown_operation() {
     let dir = tempfile::tempdir().unwrap();
@@ -1416,6 +1482,95 @@ async fn test_object_provider_replaces_a_client_sent_principal_id() {
         .iter()
         .find(|r| r["id"] == "home");
     assert_eq!(home.unwrap()["uri"], own, "{roots}");
+}
+
+#[tokio::test]
+async fn test_library_public_root_reports_whether_it_holds_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let public_root = |roots: &serde_json::Value| {
+        roots["data"]["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "public")
+            .cloned()
+            .expect("public Library root")
+    };
+
+    let (status, roots) = post_library(app.clone(), &token, "roots", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let public = public_root(&roots);
+    assert_eq!(public["uri"], format!("{root}/Public"));
+    assert_eq!(public["metadata"]["empty"], true, "{public}");
+    assert_eq!(public["metadata"]["item_count"], 0, "{public}");
+
+    let (mkdir_status, _) = post_library(
+        app.clone(),
+        &token,
+        "mkdir",
+        json!({ "parent_uri": root, "name": "Public" }),
+    )
+    .await;
+    assert_eq!(mkdir_status, StatusCode::OK);
+    let (write_status, _) = post_library(
+        app.clone(),
+        &token,
+        "write",
+        json!({
+            "uri": format!("{root}/Public/draft.txt"),
+            "mime": "text/plain",
+            "data": base64::engine::general_purpose::STANDARD.encode(b"draft"),
+        }),
+    )
+    .await;
+    assert_eq!(write_status, StatusCode::OK);
+    let (_, roots) = post_library(app.clone(), &token, "roots", json!({})).await;
+    let public = public_root(&roots);
+    assert_eq!(public["metadata"]["empty"], false, "{public}");
+    assert_eq!(public["metadata"]["item_count"], 1, "{public}");
+}
+
+#[tokio::test]
+async fn test_library_stat_of_an_untouched_place_is_the_empty_folder_list_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let pictures_uri = format!("{root}/Pictures");
+
+    let (list_status, list) =
+        post_library(app.clone(), &token, "list", json!({ "uri": pictures_uri })).await;
+    assert_eq!(list_status, StatusCode::OK, "{list}");
+    assert_eq!(list["data"]["objects"], json!([]), "{list}");
+
+    let (stat_status, stat) =
+        post_library(app.clone(), &token, "stat", json!({ "uri": pictures_uri })).await;
+    assert_eq!(stat_status, StatusCode::OK, "{stat}");
+    let object = &stat["data"]["object"];
+    assert_eq!(object["uri"], pictures_uri, "{stat}");
+    assert_eq!(object["name"], "Pictures", "{stat}");
+    assert_eq!(object["kind"], "directory", "{stat}");
+    assert_eq!(object["modified_at"], 0, "{stat}");
+    assert_eq!(object["created_at"], 0, "{stat}");
+
+    // Only a place stands in for a missing directory; any other missing path
+    // still fails.
+    let (missing_status, missing) = post_library(
+        app.clone(),
+        &token,
+        "stat",
+        json!({ "uri": format!("{root}/Pictures/Missing") }),
+    )
+    .await;
+    assert!(
+        missing_status != StatusCode::OK || missing["status"] != "ok",
+        "{missing}"
+    );
 }
 
 #[tokio::test]
@@ -5668,6 +5823,36 @@ async fn test_library_gateway_webspace_sync_fails_closed_without_write_adapter()
 }
 
 #[tokio::test]
+async fn test_library_gateway_unmounted_operator_webspace_is_not_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_unmounted_operator_webspace_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+
+    let (status, stat) = post_library(
+        app,
+        &token,
+        "stat",
+        json!({
+            "uri": "localhost://WebSpaces/Operator",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stat["status"], "error");
+    assert_eq!(stat["code"], "library_error");
+    let message = stat["message"].as_str().unwrap();
+    assert!(
+        message.contains("unknown WebSpace moniker: Operator"),
+        "{stat}"
+    );
+    assert!(message.contains("stat_failed"), "{stat}");
+    assert!(!serde_json::to_string(&stat)
+        .unwrap()
+        .contains("operator://"));
+}
+
+#[tokio::test]
 async fn test_library_gateway_webspace_sync_reports_resolver_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(library_webspace_test_state(dir.path()).await);
@@ -6874,6 +7059,7 @@ async fn archive_content_bound_never_undercounts() {
     let bound = |uri: &str, data_key_id: Option<&str>| {
         let path = rooted_localhost_fs_path(dir.path(), uri).unwrap();
         crate::auth::principal_root_object_content_bound(
+            dir.path(),
             &authority.principal_id,
             &root,
             uri,
@@ -6926,10 +7112,11 @@ async fn test_library_provider_publish_fails_closed_without_content_provider() {
     .await;
     assert_eq!(publish_status, StatusCode::OK);
     assert_eq!(publish["status"], "error");
-    assert!(publish["message"]
-        .as_str()
-        .unwrap()
-        .contains("content provider unavailable"));
+    assert_eq!(publish["code"], "unavailable");
+    assert_eq!(
+        publish["message"],
+        "Publishing isn't available right now. Try again."
+    );
 }
 
 #[tokio::test]
@@ -8432,6 +8619,191 @@ async fn test_runtime_custody_buy_fails_before_effects_when_fresh_availability_i
         )
         .unwrap()
         .is_none()
+    );
+}
+
+#[tokio::test]
+async fn r4_runtime_custody_buy_loads_agent_profile() {
+    let root = crate::auth::valid_agent::ROOT;
+    let _guard = protected_content_gateway_mock_test_guard().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    crate::protected_content_runtime::tests::write_device_key(dir.path(), 0x5a);
+    let (state, wallet_provider) = wallet_chain_test_state_with_observer(dir.path()).await;
+    state
+        .provider_registry
+        .as_ref()
+        .unwrap()
+        .register_sub_provider("content", Arc::new(MockContentProvider))
+        .await
+        .unwrap();
+    reset_mock_protected_content_chain_mode();
+    reset_mock_protected_content_purchase_fixture();
+    set_mock_protected_content_purchase_native();
+    reset_mock_chain_raw_requests();
+
+    let agent = crate::auth::valid_agent::plant(dir.path());
+    let principal_id = agent.principal_id.clone();
+    crate::auth::store_test_principal_root_protection_for(dir.path(), &principal_id, root);
+    let agent_profile = crate::collaboration_profile_authority::test_plant_profile_authority(
+        dir.path(),
+        &principal_id,
+        root,
+        "buyer",
+        None,
+        crate::auth::now_ts(),
+    )
+    .unwrap();
+    assert!(
+        crate::collaboration_profile_authority::load_profile_authority(
+            dir.path(),
+            &principal_id,
+            root,
+        )
+        .unwrap()
+        .is_some()
+    );
+    let account_id = wallet_provider
+        .provider
+        .seed_managed_evm_account_for_principal(&principal_id)
+        .await;
+    set_mock_wallet_transaction_default(
+        &wallet_provider.provider,
+        &principal_id,
+        "eip155:8453",
+        &account_id,
+        10,
+    )
+    .await;
+    let uri = format!("{root}/Documents/r4-buy");
+    let input = runtime_custody_creator_test_input(&principal_id, &uri, 0x97, &account_id);
+    let facts = seed_completed_runtime_custody_mint(dir.path(), &input);
+    seed_runtime_custody_creator_listing_for_buy(
+        dir.path(),
+        &principal_id,
+        &facts,
+        MOCK_MANAGED_EVM_ADDRESS,
+        true,
+    );
+    let now = crate::auth::now_ts();
+    let grant = elastos_runtime::auth::AuthSessionGrantV1 {
+        schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: format!("grant:{}", uuid_like_token()),
+        session_id: format!("auth:{}", uuid_like_token()),
+        principal_id: principal_id.clone(),
+        proof_binding_id: agent.proof_binding_id.clone(),
+        issued_at: now,
+        expires_at: now + 12 * 60 * 60,
+        apps: vec![LIBRARY_CAPSULE_ID.to_string()],
+    };
+    crate::auth::plant_session_grant(dir.path(), grant.clone());
+    let token =
+        issue_home_launch_token_for_auth_grant(dir.path(), LIBRARY_CAPSULE_ID, &grant).unwrap();
+    let runtime_authority =
+        runtime_wallet_authority_for_app_token(dir.path(), LIBRARY_CAPSULE_ID, &token);
+    let registry = state.provider_registry.as_ref().unwrap().clone();
+    let error = crate::api::gateway::runtime_custody_buy_via_gateway(
+        &state,
+        &runtime_authority,
+        registry,
+        crate::protected_content_runtime::RuntimeCustodyBuyInput {
+            principal_id,
+            mint_id: hex::encode(facts.mint_id.as_bytes()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(agent_profile.document().display_name, "buyer");
+    assert_eq!(
+        error.to_string(),
+        crate::protected_content_runtime::RUNTIME_CUSTODY_PURCHASE_PENDING_MESSAGE,
+        "R4 buyer loaded the Agent profile under {root}"
+    );
+}
+
+#[tokio::test]
+async fn r4_runtime_custody_buy_refuses_remote_context_at_root_lookup() {
+    const REMOTE: &str = "remote:6b1f0c9a2d4e7f3851a0b2c3d4e5f607";
+    let _guard = protected_content_gateway_mock_test_guard().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, wallet_provider) = wallet_chain_test_state_with_observer(dir.path()).await;
+    reset_mock_protected_content_chain_mode();
+    reset_mock_protected_content_purchase_fixture();
+    reset_mock_chain_raw_requests();
+    let seller = passkey_authority_with_profile(dir.path(), "seller");
+    let account_id = wallet_provider
+        .provider
+        .seed_managed_evm_account_for_principal(&seller.principal_id)
+        .await;
+    let uri = format!(
+        "{}/Documents/r4-remote-buy",
+        crate::auth::principal_localhost_root(&seller.principal_id)
+    );
+    let input = runtime_custody_creator_test_input(&seller.principal_id, &uri, 0x98, &account_id);
+    let facts = seed_completed_runtime_custody_mint(dir.path(), &input);
+    seed_runtime_custody_creator_listing_for_buy(
+        dir.path(),
+        &seller.principal_id,
+        &facts,
+        MOCK_MANAGED_EVM_ADDRESS,
+        false,
+    );
+    // The remote context as gateway_model_service builds it: empty-root sentinel.
+    let required = RequiredHomeLaunchToken {
+        expires_at: crate::auth::now_ts() + 60,
+        launch_id: "r4-remote-launch".into(),
+        launch_context: HomeLaunchContext {
+            schema: "elastos.runtime.browser-launch/v1".into(),
+            selected_resource: LIBRARY_CAPSULE_ID.into(),
+            executable_actor: LIBRARY_CAPSULE_ID.into(),
+            authority_actor: LIBRARY_CAPSULE_ID.into(),
+        },
+        context: HomeLaunchTokenContext::resolved(
+            crate::auth::ResolvedPrincipalRoot::remote(REMOTE).unwrap(),
+            "r4-remote-grant".into(),
+            None,
+            "r4-remote-grant".into(),
+        ),
+    };
+    let authority = runtime_wallet_authority(dir.path(), &required).unwrap();
+    assert_eq!(authority.root().localhost_root(), "");
+    let error = crate::api::gateway::runtime_custody_buy_via_gateway(
+        &state,
+        &authority,
+        state.provider_registry.as_ref().unwrap().clone(),
+        crate::protected_content_runtime::RuntimeCustodyBuyInput {
+            principal_id: REMOTE.into(),
+            mint_id: hex::encode(facts.mint_id.as_bytes()),
+        },
+    )
+    .await
+    .unwrap_err();
+    let chain: Vec<String> = error.chain().map(ToString::to_string).collect();
+    assert_eq!(chain[0], "Runtime custody purchase is denied before buy");
+    assert_eq!(
+        chain.last().and_then(|cause| cause.lines().next()),
+        Some("Wallet authority principal root unresolved"),
+        "R4 buyer refuses the unstored remote principal at its root lookup: {chain:?}"
+    );
+    assert!(
+        crate::protected_content_runtime::load_runtime_custody_purchase(
+            dir.path(),
+            REMOTE,
+            facts.mint_id,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        wallet_provider
+            .provider
+            .latest_transaction_approval_request_id()
+            .await,
+        None
     );
 }
 
@@ -11546,10 +11918,7 @@ async fn test_library_provider_unpublish_and_repair_update_status() {
         .unwrap()
         .starts_with("bafkrei"));
     assert_eq!(unpublish["data"]["object"].get("published_cid"), None);
-    assert_eq!(
-        unpublish["data"]["object"]["availability"],
-        "local_unpinned"
-    );
+    assert_eq!(unpublish["data"]["object"]["availability"], "withdrawn");
 
     let (repair_status, repair) = post_library(
         app.clone(),
@@ -11580,4 +11949,97 @@ async fn test_library_provider_unpublish_and_repair_update_status() {
         status["data"]["published"]["availability"]["status"],
         "local_pinned"
     );
+}
+
+#[tokio::test]
+async fn unpublishing_one_persons_publication_keeps_another_persons_identical_bytes_shared() {
+    // Publishes here count in the shared mock Content the protected tests check.
+    let _guard = protected_content_gateway_mock_test_guard().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let alma = passkey_authority_with_name(dir.path(), Some("alma"));
+    let bruno = passkey_authority_with_name_role(
+        dir.path(),
+        Some("bruno"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    assert_ne!(alma.principal_id, bruno.principal_id);
+    let mut people = Vec::new();
+    for authority in [&alma, &bruno] {
+        let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, authority);
+        let root = crate::auth::principal_localhost_root(&authority.principal_id);
+        let uri = format!("{root}/Documents/same.txt");
+        let (_, write) = post_library(
+            app.clone(),
+            &token,
+            "write",
+            json!({
+                "uri": uri,
+                "data": base64::engine::general_purpose::STANDARD.encode(b"same bytes"),
+            }),
+        )
+        .await;
+        assert_eq!(write["status"], "ok", "{write}");
+        let (_, publish) =
+            post_library(app.clone(), &token, "publish", json!({ "uri": uri })).await;
+        assert_eq!(publish["data"]["cid"], TEST_CIDV1, "{publish}");
+        people.push((token, uri));
+    }
+
+    // Alma withdraws: Bruno's publication of the same CID stays served.
+    let (token, uri) = &people[0];
+    let (_, unpublish) = post_library(app.clone(), token, "unpublish", json!({ "uri": uri })).await;
+    assert_eq!(unpublish["status"], "ok", "{unpublish}");
+    assert_eq!(unpublish["data"]["availability"]["status"], "withdrawn");
+    assert!(crate::library::cid_is_published_here(
+        dir.path(),
+        TEST_CIDV1
+    ));
+    let (token, uri) = &people[1];
+    let (_, status) = post_library(app.clone(), token, "status", json!({ "uri": uri })).await;
+    assert_eq!(status["data"]["object"]["published"], true, "{status}");
+
+    // Bruno withdraws last: nothing on this Home shares the CID any more.
+    let (_, unpublish) = post_library(app.clone(), token, "unpublish", json!({ "uri": uri })).await;
+    assert_eq!(unpublish["status"], "ok", "{unpublish}");
+    assert!(!crate::library::cid_is_published_here(
+        dir.path(),
+        TEST_CIDV1
+    ));
+}
+
+#[tokio::test]
+async fn a_publication_withdrawn_by_an_older_release_is_not_served_after_the_update() {
+    let _guard = protected_content_gateway_mock_test_guard().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("alma"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let uri = format!("{root}/Documents/undo.txt");
+    let (_, write) = post_library(
+        app.clone(),
+        &token,
+        "write",
+        json!({
+            "uri": uri,
+            "data": base64::engine::general_purpose::STANDARD.encode(b"undo bytes"),
+        }),
+    )
+    .await;
+    assert_eq!(write["status"], "ok", "{write}");
+    let (_, publish) = post_library(app.clone(), &token, "publish", json!({ "uri": uri })).await;
+    let cid = publish["data"]["cid"].as_str().unwrap().to_string();
+    assert!(crate::library::cid_is_published_here(dir.path(), &cid));
+
+    // Undo to alpha.25, which stops sharing and rewrites the record without
+    // the publication id; the index it never knew keeps the old entry.
+    crate::library::withdraw_as_alpha25_for_test(dir.path(), &authority.principal_id, &uri);
+    assert!(crate::library::cid_is_published_here(dir.path(), &cid));
+
+    // Update back: the start rebuild serves only what an active record backs.
+    crate::library::reconcile_published_cids(dir.path());
+    assert!(!crate::library::cid_is_published_here(dir.path(), &cid));
+    let (_, status) = post_library(app, &token, "status", json!({ "uri": uri })).await;
+    assert_eq!(status["data"]["object"]["published"], false, "{status}");
 }

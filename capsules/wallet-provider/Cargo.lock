@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "elastos-auth"
-version = "0.8.0"
+version = "2.0.1"
 dependencies = [
  "chrono",
  "hex",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "elastos-identity"
-version = "0.8.0"
+version = "2.0.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "elastos-protected-content-contracts"
-version = "0.8.0"
+version = "2.0.1"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
@@ -1470,6 +1470,7 @@ dependencies = [
  "elastos-wallet-contract",
  "hex",
  "k256",
+ "libc",
  "rand",
  "serde",
  "serde_json",

@@ -133,6 +133,10 @@ fn sign_in_route(path: &str, method: &Method) -> bool {
     )
 }
 
+fn browser_api_path(path: &str) -> bool {
+    path == "/api/apps/browser" || path.starts_with("/api/apps/browser/")
+}
+
 fn runtime_operator_route(path: &str, method: &Method) -> bool {
     let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
     match (method.as_str(), parts.as_slice()) {
@@ -198,26 +202,35 @@ pub(super) async fn gateway_admission(
     }
     // A browser preflight carries header names, never the launch-token value.
     // Its response advertises the protocol; admission of the request still
-    // requires the signed launch before any request body can be read.
+    // requires the signed launch before any request body can be read. An
+    // app reads this Home's local content store (`/content/<cid>`) with its
+    // launch token too, so that read may be preflighted as well.
     if method == Method::OPTIONS {
         let requested_method = single_header(headers, "access-control-request-method");
         let requested_headers =
             single_header(headers, "access-control-request-headers").unwrap_or("");
+        let api = path.starts_with("/api/")
+            && matches!(
+                requested_method,
+                Some("GET" | "POST" | "PUT" | "DELETE" | "HEAD")
+            );
+        let content_read =
+            path.starts_with("/content/") && matches!(requested_method, Some("GET" | "HEAD"));
         if origin == Some("null")
             && requested_headers
                 .split(',')
                 .any(|h| h.trim().eq_ignore_ascii_case("x-elastos-home-token"))
-            && matches!(
-                requested_method,
-                Some("GET" | "POST" | "PUT" | "DELETE" | "HEAD")
-            )
-            && path.starts_with("/api/")
+            && (api || content_read)
         {
             let mut response = StatusCode::NO_CONTENT.into_response();
             apply_capsule_cors_headers(response.headers_mut(), &HeaderValue::from_static("null"));
             response.headers_mut().insert(
                 "access-control-allow-methods",
-                HeaderValue::from_static("GET, POST, PUT, DELETE, HEAD"),
+                HeaderValue::from_static(if api {
+                    "GET, POST, PUT, DELETE, HEAD"
+                } else {
+                    "GET, HEAD"
+                }),
             );
             response.headers_mut().insert(
                 "access-control-allow-headers",
@@ -255,13 +268,24 @@ pub(super) async fn gateway_admission(
             return response;
         }
     }
-    if !public
-        && !sign_in
-        && !ticket
-        && !runtime_session
-        && gateway_home_token::require_gateway_launch(&state.data_dir, headers).is_err()
-    {
-        return refused();
+    // Home reopens Browser only for a signed Browser launch token that expired
+    // or lost its session. Another app's token stays the generic refusal, and
+    // so does every other route.
+    let mut browser_launch_renewal = None;
+    if !public && !sign_in && !ticket && !runtime_session {
+        match gateway_home_token::require_gateway_launch(&state.data_dir, headers) {
+            Ok(()) => {}
+            Err(_) if browser_api_path(path) => {
+                if let Some(err) =
+                    gateway_home_token::browser_launch_reopen_error(&state.data_dir, headers)
+                {
+                    browser_launch_renewal = Some(gateway_provider_error_response("browser", err));
+                } else {
+                    return refused();
+                }
+            }
+            Err(_) => return refused(),
+        }
     }
     if sign_in && method == Method::POST {
         let peer = request
@@ -275,7 +299,11 @@ pub(super) async fn gateway_admission(
         }
     }
     let opaque = origin == Some("null");
-    let mut response = next.run(request).await;
+    let mut response = if let Some(response) = browser_launch_renewal {
+        response
+    } else {
+        next.run(request).await
+    };
     if opaque && (public || !sign_in) {
         apply_capsule_cors_headers(response.headers_mut(), &HeaderValue::from_static("null"));
         response.headers_mut().insert(

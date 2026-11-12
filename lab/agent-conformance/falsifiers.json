@@ -3,6 +3,7 @@
   "retired": {
     "F-ac2a": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_cannot_read_other_agent_memory is live. Mutation remains described in GAPS.md and RUNBOOK.md.",
     "F-ac2b": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_memory_under_own_principal is live. Mutation remains described in GAPS.md and RUNBOOK.md.",
+    "F-ac2-write": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once ungranted_memory_write_is_refused is live with a passing granted-write control. Exact mutation: {\"file\":\"../../lab/agent-conformance/probe/src/lib.rs\",\"old\":\"fn write_memory() -> Result<(), elastos::bus::types::BusError> {\\n    use\",\"new\":\"fn write_memory() -> Result<(), elastos::bus::types::BusError> {\\n    if std::hint::black_box(true) { return Ok(()); }\\n    use\"}",
     "F-agent-host-grant": "Retired: UsersAI binding. Returns to the falsifiers list once real_agent_host_gets_no_ungranted_authority has a passing live baseline. Exact mutation: {\"file\": \"fixtures/grants.json\", \"old\": \"  \\\"grants\\\": [\\n\", \"new\": \"  \\\"grants\\\": [\\n    {\\n      \\\"resource\\\": \\\"localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal\\\",\\n      \\\"action\\\": \\\"write\\\",\\n      \\\"reason\\\": \\\"Agent Host task journal\\\",\\n      \\\"duration\\\": \\\"once\\\"\\n    },\\n\"}"
   },
   "falsifiers": [
@@ -254,9 +255,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/agent-conformance/tests/common/operator.rs",
-          "old": "    if count == 0 || !api_seen {",
-          "new": "    if false && (count == 0 || !api_seen) {"
+          "file": "../../lab/agent-conformance/src/census.rs",
+          "old": "    if files.is_empty() || !api_seen {",
+          "new": "    if false && (files.is_empty() || !api_seen) {"
         }
       ],
       "tests": [
@@ -324,7 +325,7 @@
         }
       ],
       "tests": [
-        "ungranted_network_is_refused"
+        "undeclared_network_manifest_is_refused"
       ]
     },
     {
@@ -496,8 +497,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/src/report.rs",
-          "old": "probe\n            .bundle_lab_cid\n            .parse::<capsule_identity::LabCid>()\n            .is_ok()",
-          "new": "(!probe.bundle_lab_cid.is_empty())"
+          "old": "probe\n            .bundle_lab_cid\n            .parse::<capsule_identity::LabCid>()\n            .is_err()",
+          "new": "probe.bundle_lab_cid.is_empty()"
         }
       ],
       "tests": [
@@ -658,8 +659,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/common/grants.rs",
-          "old": "    if !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))",
-          "new": "    if false && !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))"
+          "old": "    if status != 200 && status != 403 {",
+          "new": "    if false && status != 200 && status != 403 {"
         }
       ],
       "tests": [
@@ -780,22 +781,6 @@
       ]
     },
     {
-      "id": "F-ac2-write",
-      "title": "make the memory-write activation succeed before its Bus request",
-      "command": "agent-conformance",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/agent-conformance/probe/src/lib.rs",
-          "old": "fn write_memory() -> Result<(), elastos::bus::types::BusError> {\n    use",
-          "new": "fn write_memory() -> Result<(), elastos::bus::types::BusError> {\n    if std::hint::black_box(true) { return Ok(()); }\n    use"
-        }
-      ],
-      "tests": [
-        "ungranted_memory_write_is_refused"
-      ]
-    },
-    {
       "id": "F-ac8a",
       "title": "grant the exact fake host-file request and its manifest bound",
       "command": "agent-conformance",
@@ -808,8 +793,8 @@
         },
         {
           "file": "../../lab/agent-conformance/probe/capsule.json",
-          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\"]",
-          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
         }
       ],
       "tests": [
@@ -857,8 +842,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
-          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         }
       ],
       "tests": [
@@ -873,13 +858,18 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
-          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    let mut _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"120\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         },
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    if require_live_grants {",
-          "new": "    drop(_leftover);\n    if require_live_grants {"
+          "new": "    _leftover.stop().unwrap();\n    drop(_leftover);\n    if require_live_grants {"
+        },
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "        home.finish().unwrap();\n        return;",
+          "new": "        _leftover.stop().unwrap();\n        drop(_leftover);\n        home.finish().unwrap();\n        return;"
         }
       ],
       "tests": [
@@ -1158,12 +1148,28 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "controller.check_cleanup_wiring(|controller| controller.cleanup_state())",
-          "new": "controller.check_cleanup_wiring(|_controller| Ok(\"pending:0 grants:BLOCKED(AC-021-GRANTS)\"))"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    let cleanup_state = controller.check_cleanup_wiring(|_controller| Ok(\"pending:0 grants:BLOCKED(AC-021-GRANTS)\"));\n    let mut finished = operator.finish_check(sampled);"
         }
       ],
       "tests": [
         "granted_read_succeeds"
+      ]
+    },
+    {
+      "id": "F-cleanup-minted",
+      "title": "treat every live grant as the run's known AC-021 gap",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
+          "old": "    let foreign = ids.iter().any(|id| !minted.contains(id));",
+          "new": "    let foreign = false;"
+        }
+      ],
+      "tests": [
+        "grants::tests::live_grants_are_the_known_gap_only_when_this_run_minted_them"
       ]
     },
     {
@@ -1514,6 +1520,38 @@
       ]
     },
     {
+      "id": "F-standin-a12-foreign",
+      "title": "treat every stored grant id as one this run minted",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "        self.minted.clone()",
+          "new": "        self.grants\n            .iter()\n            .map(|grant| grant.request_id.clone())\n            .collect()"
+        }
+      ],
+      "tests": [
+        "standin_a12_census_refuses_a_foreign_seeded_grant"
+      ]
+    },
+    {
+      "id": "F-standin-shell-granted",
+      "title": "widen the plain view to every session's granted records",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "            Caller::Shell => self.granted_kept(own),",
+          "new": "            Caller::Shell => self.granted_kept(Caller::Shell),"
+        }
+      ],
+      "tests": [
+        "standin_runtime::tests::standin_shell_plain_matches_the_real_session_granted_filter"
+      ]
+    },
+    {
       "id": "F-standin-m2-content",
       "title": "admit a content-role bundle instead of refusing it",
       "command": "agent-conformance",
@@ -1546,35 +1584,35 @@
       ]
     },
     {
-      "id": "F-net-undeclared",
-      "title": "stage the declared manifest for the undeclared network refusal",
+      "id": "F-net-declared",
+      "title": "declare the system-only network capability in the probe manifest",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/probe/capsule.json",
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\"]"
+        }
+      ],
+      "tests": [
+        "declared_network_manifest_is_refused"
+      ]
+    },
+    {
+      "id": "F-net-declared-stage",
+      "title": "stage the shipped manifest where the declaring manifest belongs",
       "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "agent_conformance::identity::stage_probe(&home, &bytes, manifest, label)",
-          "new": "agent_conformance::identity::stage_probe(&home, &bytes, MANIFEST, label)"
+          "old": "    capabilities.retain(|capability| capability.as_str() != Some(\"elastos://net/stream\"));\n    capabilities.push(json!(\"elastos://net/stream\"));",
+          "new": "    capabilities.retain(|capability| capability.as_str() != Some(\"elastos://net/stream\"));"
         }
       ],
       "tests": [
-        "undeclared_network_manifest_is_refused"
-      ]
-    },
-    {
-      "id": "F-net-reason",
-      "title": "give the declared network request the read denial reason",
-      "command": "agent-conformance",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/agent-conformance/tests/common/grants.rs",
-          "old": "                let reason = if field(request, \"resource\")? == \"elastos://net/stream\" {\n                    \"fixture denies unlisted elastos://net/stream\".to_owned()\n                } else {\n                    self.fixture.deny_reason.clone()\n                };",
-          "new": "                let reason = self.fixture.deny_reason.clone();"
-        }
-      ],
-      "tests": [
-        "ungranted_network_is_refused"
+        "declared_network_manifest_is_refused"
       ]
     }
   ]

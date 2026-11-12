@@ -64,8 +64,10 @@ browser_host = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(browser_host)
 
 
-def run(*args):
-    return subprocess.check_output(args, cwd=SOURCE_ROOT, text=True).strip()
+def run(*args, env=None):
+    """One command's output. ``env`` lets a test isolate the git reads; ``None``
+    keeps the production default of inheriting this process's environment."""
+    return subprocess.check_output(args, cwd=SOURCE_ROOT, text=True, env=env).strip()
 
 
 def digest(path):
@@ -251,6 +253,27 @@ def check_binary(path, platform):
     with path.open("rb") as source:
         header = source.read(64)
     check_native_header(header, path.stat().st_mode, platform, path.name)
+
+
+def macos_minos(otool_load_commands):
+    """Minimum macOS from `otool -l` text: LC_BUILD_VERSION minos or LC_VERSION_MIN_MACOSX version."""
+    found, command = [], None
+    for line in otool_load_commands.splitlines():
+        words = line.split()
+        if words[:1] == ["cmd"] and len(words) == 2:
+            command = words[1]
+        elif ((command == "LC_BUILD_VERSION" and words[:1] == ["minos"])
+              or (command == "LC_VERSION_MIN_MACOSX" and words[:1] == ["version"])) and len(words) == 2:
+            found.append(tuple(int(part) for part in words[1].split(".")))
+    if not found:
+        raise ValueError("Mach-O has no macOS minimum version")
+    return max(found)
+
+
+def check_macos_floor(otool_load_commands, floor, label):
+    minos = macos_minos(otool_load_commands)
+    if minos > tuple(int(part) for part in floor.split(".")):
+        raise ValueError(f"{label}: requires macOS {'.'.join(map(str, minos))}, above its {floor} floor")
 
 
 def check_native_header(header, mode, platform, label):
@@ -721,25 +744,25 @@ def check_contents(root, platform, omissions):
     return manifest, template
 
 
-def source_identity(commit, tree):
+def source_identity(commit, tree, env=None):
     if not re.fullmatch(r"[0-9a-f]{40}", commit) or not re.fullmatch(r"[0-9a-f]{40}", tree):
         raise ValueError("source commit and tree must be full Git object names")
-    if run("git", "rev-parse", "HEAD") != commit or run("git", "rev-parse", "HEAD^{tree}") != tree:
+    if run("git", "rev-parse", "HEAD", env=env) != commit or run("git", "rev-parse", "HEAD^{tree}", env=env) != tree:
         raise ValueError("source identity changed during preparation")
-    if run("git", "status", "--porcelain", "--untracked-files=normal"):
+    if run("git", "status", "--porcelain", "--untracked-files=normal", env=env):
         raise ValueError("source checkout must be clean")
-    locks = [p for p in run("git", "ls-files").splitlines() if p.endswith("Cargo.lock")]
+    locks = [p for p in run("git", "ls-files", env=env).splitlines() if p.endswith("Cargo.lock")]
     return {"commit": commit, "tree": tree, "clean": True,
             "lockfiles": {p: digest(SOURCE_ROOT / p) for p in locks}}
 
 
-def record(args):
+def record(args, env=None):
     root = args.root.resolve()
     if (args.root.is_symlink() or not root.is_dir()
             or (root / "platform-input.json").exists()
             or (root / "platform-input.json").is_symlink()):
         raise ValueError("record requires a new, regular staging directory")
-    source = source_identity(args.source_commit, args.source_tree)
+    source = source_identity(args.source_commit, args.source_tree, env=env)
     if args.target != PLATFORMS[args.platform][1]:
         raise ValueError("native target does not match platform")
     check_version(args.version)
@@ -770,7 +793,7 @@ def record(args):
         paths.append(origin)
     files = {str(p.relative_to(root)): file_record(regular_file(root, str(p.relative_to(root))))
              for p in paths if not p.is_dir() or p.is_symlink()}
-    if source_identity(args.source_commit, args.source_tree) != source:
+    if source_identity(args.source_commit, args.source_tree, env=env) != source:
         raise ValueError("source inputs changed during preparation")
     receipt = {"schema": SCHEMA, "created_at": datetime.now(timezone.utc).isoformat(),
                "source": source, "version": args.version, "platform": args.platform,
@@ -1397,6 +1420,9 @@ def main():
     create.add_argument("--platform", choices=PLATFORMS, required=True)
     check = commands.add_parser("verify")
     check.add_argument("root", type=Path)
+    floor = commands.add_parser("macos-floor", help="refuse Mach-O files whose minimum macOS exceeds the floor")
+    floor.add_argument("--floor", required=True)
+    floor.add_argument("files", nargs="+", type=Path)
     reuse = commands.add_parser("copy-support", help="copy verified native support without the original Runtime")
     for name in ("input", "root"):
         reuse.add_argument("--" + name, type=Path, required=True)
@@ -1435,6 +1461,9 @@ def main():
             copy_support(args)
         elif args.command == "verify":
             print(json.dumps(verify(args.root), sort_keys=True))
+        elif args.command == "macos-floor":
+            for path in args.files:
+                check_macos_floor(run("otool", "-l", str(path)), args.floor, path.name)
         elif args.command == "stage-inputs":
             stage_inputs(args.input, args.version, args.output, args.preview_platform)
         elif args.command == "verify-staged":

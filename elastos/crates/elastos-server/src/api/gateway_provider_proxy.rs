@@ -1728,6 +1728,12 @@ pub(super) async fn gateway_provider_proxy(
     /* The verified capsule behind the launch token: model runs are bound and
     audited to it, never to a fixed name. */
     let launch_capsule_id = required.launch_context.executable_actor.clone();
+    if scheme == "net" && matches!(op.as_str(), "http" | "connect" | "resolve" | "stream") {
+        return (
+            StatusCode::GONE,
+            format!("legacy /api/provider/net/{op} is disabled; Browser streams must be opened through /api/apps/browser/open"),
+        ).into_response();
+    }
     let registry = match state.provider_registry.as_ref().cloned() {
         Some(registry) => registry,
         None => {
@@ -1812,9 +1818,7 @@ pub(super) async fn gateway_provider_proxy(
                         StatusCode::CONFLICT,
                         Json(serde_json::json!({
                             "status": "error", "code": "remote_model_invocation_refused",
-                            "message": if reason == elastos_model_contract::MODEL_REQUEST_EXPIRED_CODE {
-                                elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE
-                            } else { "This invocation was refused before provider dispatch." },
+                            "message": super::gateway_model_service::invocation_refusal_message(&reason),
                             "reason": reason, "refusal": binding,
                         })),
                     )
@@ -1903,16 +1907,6 @@ pub(super) async fn gateway_provider_proxy(
         }
     }
 
-    if scheme == "net" && op == "http" {
-        return gateway_browser::gateway_browser_net_http(registry.as_ref(), &request).await;
-    }
-    if scheme == "net" && op == "stream" {
-        return (
-            StatusCode::GONE,
-            "legacy /api/provider/net/stream is disabled; Browser streams must be opened through /api/apps/browser/open",
-        )
-            .into_response();
-    }
     if scheme == "inspect" && op == "request_act" {
         return gateway_inspect_action_request(&state, &context, &request).await;
     }
@@ -1982,9 +1976,10 @@ pub(super) async fn gateway_provider_proxy(
         if launch_capsule_id == "assistant" && op == "runs_create" {
             if let Some(offer_id) = request.get("offer_id").and_then(serde_json::Value::as_str) {
                 if let Some(hint) = crate::api::hosted_model_offer_hint(&state.data_dir, offer_id) {
-                    let gate = crate::jev_approval_lens::prepare_assistant_hosted_http(
+                    // No evaluator acts while Approval Lens is hidden: log the
+                    // hosted request and let it through to its own Inbox approval.
+                    let _ = crate::jev_approval_lens::record_assistant_hosted_http_shadow(
                         &state.data_dir,
-                        registry.as_ref(),
                         &crate::jev_approval_lens::AssistantHostedHttpContext {
                             request_id: audit.request_id,
                             principal_id: &principal_id,
@@ -1994,27 +1989,7 @@ pub(super) async fn gateway_provider_proxy(
                             offer_id,
                             hint,
                         },
-                    )
-                    .await;
-                    match gate {
-                        crate::jev_approval_lens::HostedHttpGate::Proceed => {}
-                        crate::jev_approval_lens::HostedHttpGate::NeedsReview => {
-                            return Json(serde_json::json!({
-                                "status": "error",
-                                "code": "approval_required",
-                                "message": crate::jev_approval_lens::HOSTED_HTTP_REVIEW_MESSAGE,
-                            }))
-                            .into_response();
-                        }
-                        crate::jev_approval_lens::HostedHttpGate::Denied => {
-                            return Json(serde_json::json!({
-                                "status": "error",
-                                "code": "approval_denied",
-                                "message": crate::jev_approval_lens::HOSTED_HTTP_DENIED_MESSAGE,
-                            }))
-                            .into_response();
-                        }
-                    }
+                    );
                 }
             }
         }
@@ -3467,7 +3442,8 @@ pub(crate) async fn runtime_custody_buy_via_gateway(
     if listing.mint_id != input.mint_id {
         return Err(purchase_denied_missing!()());
     }
-    let localhost_root = crate::auth::principal_localhost_root(&input.principal_id);
+    let localhost_root = runtime_custody_buyer_root(&state.data_dir, &input.principal_id)
+        .map_err(purchase_denied!())?;
     let profile = crate::collaboration_profile_authority::load_profile_authority(
         &state.data_dir,
         &input.principal_id,
@@ -3748,6 +3724,17 @@ pub(crate) async fn runtime_custody_buy_via_gateway(
     purchase.updated_at = crate::auth::now_ts();
     crate::protected_content_runtime::persist_runtime_custody_purchase(&state.data_dir, &purchase)?;
     Ok(runtime_custody_buy_terminal_response(&purchase))
+}
+
+fn runtime_custody_buyer_root(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+) -> anyhow::Result<String> {
+    Ok(
+        super::gateway_home_token::wallet_principal_root(data_dir, principal_id)?
+            .localhost_root()
+            .to_string(),
+    )
 }
 
 async fn runtime_custody_publish_creator_tail_from_facts(
@@ -4389,6 +4376,35 @@ fn library_events_sse_event(payload: serde_json::Value) -> SseEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn r4_buyer_profile_uses_stored_root() {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        use crate::auth::PrincipalKind;
+        let missing = tempfile::tempdir().unwrap();
+        assert_eq!(
+            super::runtime_custody_buyer_root(missing.path(), ID)
+                .unwrap_err()
+                .to_string(),
+            "Wallet authority principal root unresolved"
+        );
+        for (kind, expected) in [
+            (PrincipalKind::Agent, AGENT_ROOT),
+            (PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            store(dir.path(), kind);
+            assert_eq!(
+                super::runtime_custody_buyer_root(
+                    dir.path(),
+                    crate::auth::r4_fixture::principal_id(kind)
+                )
+                .unwrap(),
+                expected,
+                "R4 buyer profile root"
+            );
+        }
+    }
+
     #[test]
     fn fail_closed_macros_keep_the_stable_message_and_carry_the_cause() {
         let error = (creator_mint_unavailable!())("boom");

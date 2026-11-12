@@ -12,8 +12,8 @@ use super::capsule_inventory::{
     load_capsule_manifest,
 };
 use super::gateway::{
-    capsule_icon_variants, content_type, ensure_wallet_connector_configured, request_uses_tls,
-    validate_file_path, GatewayState, HOME_CAPSULE_ID, HOME_ROUTE,
+    capsule_icon_variants, capsule_is_offered, content_type, request_uses_tls, validate_file_path,
+    GatewayState, HOME_CAPSULE_ID, HOME_ROUTE,
 };
 
 const BROWSER_CAPSULE_CACHE_CONTROL: &str = "no-store";
@@ -212,7 +212,7 @@ async fn serve_browser_capsule_asset(
     requested_path: Option<&str>,
     raw_query: Option<&str>,
 ) -> Response {
-    if ensure_wallet_connector_configured(data_dir, app).is_err() {
+    if !capsule_is_offered(data_dir, app) {
         return (StatusCode::NOT_FOUND, "Browser capsule not found").into_response();
     }
 
@@ -418,7 +418,7 @@ pub(crate) fn list_launchable_browser_capsules(data_dir: &Path) -> Vec<Launchabl
     list_launchable_browser_capsules_for(data_dir, &crate::setup::detect_platform())
 }
 
-fn list_launchable_browser_capsules_for(
+pub(super) fn list_launchable_browser_capsules_for(
     data_dir: &Path,
     platform: &str,
 ) -> Vec<LaunchableBrowserCapsule> {
@@ -427,7 +427,7 @@ fn list_launchable_browser_capsules_for(
         if !manifest.role.is_shell_launchable() {
             continue;
         }
-        if ensure_wallet_connector_configured(data_dir, &manifest.name).is_err() {
+        if !capsule_is_offered(data_dir, &manifest.name) {
             continue;
         }
         if manifest.name == "browser" && !crate::setup::browser_available(platform) {
@@ -1083,6 +1083,42 @@ mod tests {
         assert!(list_launchable_browser_capsules(data_dir.path()).is_empty());
     }
 
+    /// `GET /apps/{name}/` for a capsule whose manifest pins a requirement:
+    /// no route and no bytes, for a data capsule and for a wasm capsule's
+    /// browser files. Each is served before the pin is added (the control).
+    #[tokio::test]
+    async fn a_pinned_manifest_gets_no_browser_route_and_no_bytes() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_test_browser_capsule(data_dir.path(), "pinned-data", "Pinned data", "app");
+        write_test_wasm_browser_capsule(data_dir.path(), "pinned-wasm", "Pinned wasm", "app");
+        for name in ["pinned-data", "pinned-wasm"] {
+            let served = || async {
+                serve_browser_capsule_path(data_dir.path(), &test_request_headers(), name, None)
+                    .await
+            };
+            assert_eq!(served().await.status(), StatusCode::OK, "{name}");
+
+            let manifest_path = data_dir
+                .path()
+                .join("capsules")
+                .join(name)
+                .join("capsule.json");
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            manifest["requires"] = serde_json::json!([{
+                "name": "viewer", "kind": "capsule",
+                "cid": "bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"
+            }]);
+            fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let response = served().await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], b"Browser capsule not found", "{name}");
+        }
+    }
+
     #[tokio::test]
     async fn browser_capsule_documents_allow_isolated_home_embedding() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -1494,12 +1530,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_is_launchable_only_on_hosts_with_a_local_engine() {
+    fn browser_is_launchable_on_supported_hosts_before_setup() {
         let data_dir = tempfile::tempdir().unwrap();
         write_test_browser_capsule(data_dir.path(), "browser", "Browser", "app");
         for (platform, listed) in [
             ("linux-amd64", false),
-            ("linux-arm64", false),
+            ("linux-arm64", true),
             ("darwin-arm64", true),
         ] {
             let names: Vec<_> = list_launchable_browser_capsules_for(data_dir.path(), platform)

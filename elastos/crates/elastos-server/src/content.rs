@@ -18,9 +18,9 @@ use elastos_common::protected_content::{
     validate_protected_content_key_envelope_algorithms, SealedObjectV1, SEALED_OBJECT_SCHEMA,
 };
 use elastos_runtime::provider::{
-    Provider, ProviderByteRange, ProviderError, ProviderInvocation, ProviderInvocationTransport,
-    ProviderProgress, ProviderRegistry, ProviderStreamOptions, ProviderTransfer, ResourceRequest,
-    ResourceResponse,
+    Provider, ProviderByteRange, ProviderCarrierRoute, ProviderError, ProviderInvocation,
+    ProviderInvocationTransport, ProviderProgress, ProviderRegistry, ProviderStreamOptions,
+    ProviderTransfer, ResourceRequest, ResourceResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -93,7 +93,8 @@ const REPAIR_WORKER_MAX_ATTEMPTS_LIMIT: u32 = 25;
 const REPAIR_WORKER_DEFAULT_FAILURE_BUDGET: u32 = 10;
 const REPAIR_WORKER_MAX_FAILURE_BUDGET: u32 = 100;
 const IMPORT_EXACT_MAX_BYTES: usize = 64 * 1024 * 1024;
-const IMPORT_OBJECT_MAX_FILES: usize = 512;
+/// Publish policy that pins on this node only and never asks availability to replicate.
+pub(crate) const LOCAL_PIN_AVAILABILITY_POLICY: &str = "local_pin";
 const AVAILABILITY_DASHBOARD_REMOTE_ROW_LIMIT: usize = 10;
 const OBJECT_MANIFEST_SCHEMA: &str = "elastos.content.object.manifest/v1";
 const OBJECT_MANIFEST_PATH: &str = "_elastos_object.json";
@@ -2862,9 +2863,9 @@ pub async fn fetch_bytes_via_provider(
     fetch_bytes_via_content(registry, cid, path, None).await
 }
 
-/// Read through the local backend only (Kubo, which checks every block it
-/// fetches against its CID), refused once the file passes `max_bytes`; a local
-/// miss never reaches availability holders.
+/// Read from this node's IPFS repo only, refused once the file passes
+/// `max_bytes`; a local miss never searches the network or reaches
+/// availability holders.
 pub(crate) async fn fetch_verified_local_bytes_via_provider(
     registry: &ProviderRegistry,
     cid: &str,
@@ -2920,6 +2921,149 @@ async fn fetch_bytes_via_content(
     session
         .drain_to_vec()
         .map_err(|err| anyhow::anyhow!("content provider stream read failed: {err}"))
+}
+
+/// Runtime provider source for Home getting a file a contact shared in Chat.
+pub(crate) const HOME_SHARED_CONTENT_SOURCE: &str = "home-shared-content";
+/// Largest file Home gets from a contact: `import_exact`'s own bound.
+pub(crate) const HOME_SHARED_CONTENT_MAX_BYTES: usize = IMPORT_EXACT_MAX_BYTES;
+/// How long Home connects to the sender's Home before calling it offline.
+const HOME_SHARED_CONTENT_CONNECT_MS: u64 = 5_000;
+
+/// The outcome of getting a shared file from its sender's Home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SharedContentGet {
+    /// The exact bytes are pinned here now.
+    Local,
+    SenderOffline,
+    /// The sender's Home refused or no longer pins the CID.
+    NotShared,
+    TooLarge,
+    /// The bytes did not hash to the link's CID; nothing was pinned.
+    Mismatch,
+    Timeout,
+}
+
+impl SharedContentGet {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::SenderOffline => "sender_offline",
+            Self::NotShared => "not_shared",
+            Self::TooLarge => "too_large",
+            Self::Mismatch => "mismatch",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+/// Whether `cid` is pinned on this Home's backend now. A receipt alone is not
+/// enough: a failed pin can leave a `repair_needed` receipt with no bytes here.
+pub(crate) async fn content_pinned_here(registry: &ProviderRegistry, cid: &str) -> bool {
+    crate::carrier::local_cid_pinned(registry, cid).await == Some(true)
+}
+
+/// Gets `cid` from the Home at `peer_did` with its existing local-only
+/// `content/fetch`, waiting at most `reply_wait` for the answer, then imports
+/// it with `import_exact`: added unpinned, compared with `cid`, pinned only on
+/// a match. The holder reads at most [`HOME_SHARED_CONTENT_MAX_BYTES`], and the
+/// answer this Home accepts is bounded to match.
+pub(crate) async fn get_shared_content_from_peer(
+    registry: &ProviderRegistry,
+    peer_did: &str,
+    cid: &str,
+    filename: &str,
+    reply_wait: Duration,
+) -> anyhow::Result<SharedContentGet> {
+    anyhow::ensure!(is_valid_cid(cid), "shared content requires a valid CID");
+    let reply_wait_ms = u64::try_from(reply_wait.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let fetched = registry
+        .invoke_provider(ProviderInvocation {
+            source: HOME_SHARED_CONTENT_SOURCE.to_string(),
+            target: "content".to_string(),
+            op: "fetch".to_string(),
+            request: json!({
+                "op": "fetch",
+                "cid": cid,
+                "local_only": true,
+                "transfer": "stream",
+                "whole_max_bytes": HOME_SHARED_CONTENT_MAX_BYTES,
+            }),
+            transfer: ProviderTransfer::Stream,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did: peer_did.to_string(),
+                timeout_ms: Some(HOME_SHARED_CONTENT_CONNECT_MS),
+                reply_wait_ms: Some(reply_wait_ms),
+            }),
+        })
+        .await;
+    let mut response = match fetched {
+        Ok(response) => response,
+        Err(ProviderError::Unavailable(_)) => return Ok(SharedContentGet::SenderOffline),
+        Err(ProviderError::Io(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
+            return Ok(SharedContentGet::Timeout)
+        }
+        Err(err) => {
+            let text = err.to_string();
+            return Ok(
+                if text.ends_with(crate::carrier::CARRIER_CONTENT_TOO_LARGE) {
+                    SharedContentGet::TooLarge
+                } else if text.ends_with(crate::carrier::PEER_ROUTE_IN_TRANSIT) {
+                    SharedContentGet::SenderOffline
+                } else {
+                    SharedContentGet::NotShared
+                },
+            );
+        }
+    };
+    if response.get("status").and_then(Value::as_str) != Some("ok") {
+        return Ok(SharedContentGet::NotShared);
+    }
+    // Move the payload out so only one copy of the bytes is held at a time.
+    let mut import = json!({ "op": "import_exact", "cid": cid, "filename": filename });
+    match response.get_mut("data") {
+        Some(data) if data.get("stream").is_some() => import["stream"] = data["stream"].take(),
+        Some(data) if data.get("data").is_some_and(Value::is_string) => {
+            import["data"] = data["data"].take()
+        }
+        _ => return Ok(SharedContentGet::NotShared),
+    }
+    drop(response);
+    let imported = registry
+        .invoke_provider(ProviderInvocation {
+            source: HOME_SHARED_CONTENT_SOURCE.to_string(),
+            target: "content".to_string(),
+            op: "import_exact".to_string(),
+            request: import,
+            transfer: ProviderTransfer::Json,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Local,
+        })
+        .await;
+    match imported {
+        Ok(response) if response.get("status").and_then(Value::as_str) == Some("ok") => {
+            Ok(SharedContentGet::Local)
+        }
+        Ok(response) if response.get("code").and_then(Value::as_str) == Some("cid_mismatch") => {
+            Ok(SharedContentGet::Mismatch)
+        }
+        Err(err) if err.to_string().contains("import_exact payload exceeds") => {
+            Ok(SharedContentGet::TooLarge)
+        }
+        Ok(response) => anyhow::bail!(
+            "shared content import failed: {}",
+            response
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+        ),
+        Err(err) => anyhow::bail!("shared content import failed: {err}"),
+    }
 }
 
 /// Validate signed catalog metadata using the existing content closure list.
@@ -3065,6 +3209,11 @@ pub fn parse_content_object_manifest(
     Ok(manifest)
 }
 
+/// What `elastos run/serve --cid` say for a CID this Home's store lacks. The
+/// CLI has no Carrier node and Kubo is offline, so only Home can fetch it.
+pub const CID_NOT_ON_THIS_HOME: &str =
+    "This content isn't on this Home. Open it from Home, which can fetch it from a contact.";
+
 /// Materialize a published capsule through the content availability contract.
 ///
 /// Data capsules must carry `_elastos_object.json`; that manifest is the file
@@ -3076,13 +3225,16 @@ pub async fn prepare_capsule_from_content_provider(
     let manifest_bytes = match fetch_bytes_via_provider(registry, cid, Some("capsule.json")).await {
         Ok(bytes) => bytes,
         Err(capsule_err) => {
-            if let Ok(object_manifest) = fetch_content_object_manifest(registry, cid).await {
-                anyhow::bail!(
+            match fetch_content_object_manifest(registry, cid).await {
+                Ok(object_manifest) => anyhow::bail!(
                     "content object {cid} has kind '{}' and is not a launchable capsule; use `elastos open elastos://{cid}` to inspect release objects or open it with a matching viewer once one is installed",
                     object_manifest.kind
-                );
+                ),
+                Err(_) => {
+                    tracing::debug!(%cid, error = %capsule_err, "capsule CID not in this Home's store");
+                    anyhow::bail!(CID_NOT_ON_THIS_HOME);
+                }
             }
-            return Err(capsule_err);
         }
     };
     let manifest_data = String::from_utf8(manifest_bytes.clone())
@@ -3145,7 +3297,6 @@ impl Provider for ContentProvider {
             Some("publish") => self.publish(request).await,
             Some("fetch") => self.fetch(request).await,
             Some("import_exact") => self.import_exact(request).await,
-            Some("import_object") => self.import_object(request).await,
             Some("admission") => self.admission(request).await,
             Some("ensure") => self.ensure(request).await,
             Some("repair") => self.repair(request).await,
@@ -3557,7 +3708,12 @@ impl ContentProvider {
             .await?;
         let cid = provider_response_cid(&ipfs_response)?;
         let local_outcome = AvailabilityOutcome::local_publish(pin);
-        let outcome = if pin {
+        // `local_pin` keeps the object on this node only; no network replication is attempted.
+        let local_only_policy = request
+            .get("availability_policy")
+            .and_then(|value| value.as_str())
+            == Some(LOCAL_PIN_AVAILABILITY_POLICY);
+        let outcome = if pin && !local_only_policy {
             self.ensure_network_availability(
                 &registry,
                 &cid,
@@ -3905,162 +4061,6 @@ impl ContentProvider {
         })))
     }
 
-    async fn import_object(&self, request: &Value) -> Result<Value, ProviderError> {
-        validate_import_object_invocation(request)?;
-        let cid = request
-            .get("cid")
-            .and_then(|cid| cid.as_str())
-            .filter(|cid| !cid.trim().is_empty())
-            .ok_or_else(|| ProviderError::Provider("content import_object requires cid".into()))?;
-        if !is_valid_cid(cid) {
-            return Ok(provider_error(
-                "invalid_cid",
-                "content import_object requires a valid CID",
-            ));
-        }
-        let files = request
-            .get("files")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new()));
-        let (file_count, total_bytes) = validate_import_object_payload_bounds(&files)?;
-        let requirements = AvailabilityRequirements::from_request(request);
-        let publisher_did = request
-            .get("publisher_did")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        let publisher_did = Some(self.effective_publisher_did(publisher_did.as_deref())?);
-        let object_kind = request
-            .get("object_kind")
-            .or_else(|| request.get("kind"))
-            .and_then(|value| value.as_str())
-            .unwrap_or("directory");
-        let files = with_directory_object_manifest(
-            files,
-            object_kind,
-            request.get("object_did").and_then(|value| value.as_str()),
-            request
-                .get("publisher_did")
-                .and_then(|value| value.as_str()),
-            request.get("links"),
-        )?;
-        // The quota counts what this node keeps: the files and the generated
-        // manifest.
-        let retained_bytes = directory_files_decoded_bytes(&files);
-        let storage_quota = self.principal_storage_quota_for_request(
-            publisher_did.as_deref().unwrap_or_default(),
-            &requirements,
-            Some(retained_bytes),
-            Some(cid),
-        )?;
-        if storage_quota.get("status").and_then(|value| value.as_str()) == Some("quota_exceeded") {
-            return Ok(provider_error(
-                "storage_quota_exceeded",
-                "content import_object exceeds the principal storage quota",
-            ));
-        }
-        let registry = self.registry()?;
-        let ipfs_response = self
-            .invoke_provider(
-                &registry,
-                "ipfs",
-                "add_directory",
-                json!({
-                    "op": "add_directory",
-                    "files": files,
-                    "pin": false,
-                }),
-                ProviderTransfer::Json,
-            )
-            .await?;
-        provider_response_ok(&ipfs_response, "content import_object")?;
-        let imported_cid = provider_response_cid(&ipfs_response).map_err(|err| {
-            ProviderError::Provider(format!("content import_object missing imported CID: {err}"))
-        })?;
-        if imported_cid != cid {
-            return Ok(provider_error(
-                "cid_mismatch",
-                "content import_object produced a different CID; exact object import requires matching manifest and bytes",
-            ));
-        }
-        self.pin_imported_cid(&registry, cid, "content import_object")
-            .await?;
-
-        let local_outcome = AvailabilityOutcome {
-            provider: "ipfs-provider".to_string(),
-            policy: "carrier_object_import".to_string(),
-            status: "local_pinned".to_string(),
-            replicas: 1,
-            reason: None,
-            peer_selection: local_peer_selection_json(),
-            quota: local_quota_json(),
-            repair_worker: repair_worker_json(false),
-            storage_market: local_storage_market_json(),
-            repair_graph: local_repair_graph_json(),
-            abuse_controls: local_abuse_controls_json(),
-        };
-        let outcome = self
-            .ensure_network_availability(
-                &registry,
-                cid,
-                request,
-                &local_outcome,
-                AvailabilityRequestContext {
-                    object_did: request.get("object_did").and_then(|value| value.as_str()),
-                    publisher_did: publisher_did.as_deref(),
-                    accounting_observation: ContentAccountingObservation {
-                        files: Some(file_count as u64),
-                        bytes: Some(retained_bytes),
-                    },
-                },
-            )
-            .await?
-            .unwrap_or(local_outcome);
-        let object_did = request
-            .get("object_did")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        let receipt = self.write_receipt(ReceiptInput {
-            cid: cid.to_string(),
-            object_did,
-            publisher_did,
-            provider: outcome.provider.clone(),
-            policy: outcome.policy.clone(),
-            status: outcome.status.clone(),
-            replicas: outcome.replicas,
-            peer_selection: outcome.peer_selection.clone(),
-            quota: outcome.quota.clone(),
-            repair_worker: outcome.repair_worker.clone(),
-            storage_market: outcome.storage_market.clone(),
-            repair_graph: outcome.repair_graph.clone(),
-            abuse_controls: outcome.abuse_controls.clone(),
-            accounting: content_accounting_json_with_storage_quota(
-                "carrier_object_import",
-                ContentAccountingObservation {
-                    files: Some(file_count as u64),
-                    bytes: Some(retained_bytes),
-                },
-                outcome.replicas,
-                storage_quota,
-            ),
-        })?;
-        let repair_task = self.record_repair_task(&receipt, &outcome, requirements, false)?;
-
-        Ok(provider_ok(json!({
-            "cid": cid,
-            "uri": format!("elastos://{cid}"),
-            "availability": outcome.to_json(),
-            "repair_task": repair_task,
-            "receipt": receipt,
-            "import": {
-                "schema": "elastos.content.import-object/v1",
-                "method": "carrier_provider_object_manifest",
-                "files": file_count,
-                "bytes": total_bytes,
-                "verified_cid": true,
-            }
-        })))
-    }
-
     /// Pins `cid` once an import has added its blocks unpinned and produced
     /// exactly that CID.
     async fn pin_imported_cid(
@@ -4107,7 +4107,25 @@ impl ContentProvider {
                 ProviderTransfer::Json,
             )
             .await?;
-        provider_response_ok(&ipfs_response, "content unpublish")?;
+        if ipfs_response.get("status").and_then(Value::as_str) == Some("error") {
+            // An unpin that fails because the CID is no longer pinned (an
+            // earlier unpublish got this far before it was interrupted)
+            // completes the unpublish: verified absence, not a guess.
+            let status = self
+                .invoke_provider(
+                    &registry,
+                    "ipfs",
+                    "pin_status",
+                    json!({ "op": "pin_status", "cid": cid }),
+                    ProviderTransfer::Json,
+                )
+                .await?;
+            if !(status.get("status").and_then(Value::as_str) == Some("ok")
+                && status["data"]["pinned"] == false)
+            {
+                provider_response_ok(&ipfs_response, "content unpublish")?;
+            }
+        }
         let previous_receipt = self.latest_receipt_for_cid(cid).transpose()?;
         let outcome = AvailabilityOutcome {
             provider: "ipfs-provider".to_string(),
@@ -4269,7 +4287,12 @@ impl ContentProvider {
             .transpose()?
             .map(|receipt| content_accounting_observation_from_value(&receipt.payload.accounting))
             .unwrap_or_default();
-        let outcome = if local_outcome.status == "local_pinned" {
+        // `local_pin` keeps the object on this node only, for repair as for publish.
+        let local_only_policy = request
+            .get("availability_policy")
+            .and_then(|value| value.as_str())
+            == Some(LOCAL_PIN_AVAILABILITY_POLICY);
+        let outcome = if local_outcome.status == "local_pinned" && !local_only_policy {
             self.ensure_network_availability(
                 &registry,
                 cid,
@@ -6149,7 +6172,7 @@ impl AvailabilityOutcome {
         if pin {
             Self {
                 provider: "ipfs-provider".to_string(),
-                policy: "local_pin".to_string(),
+                policy: LOCAL_PIN_AVAILABILITY_POLICY.to_string(),
                 status: "local_pinned".to_string(),
                 replicas: 1,
                 reason: None,
@@ -8222,15 +8245,23 @@ fn validate_import_exact_invocation(request: &Value) -> Result<(), ProviderError
         request,
         "content import_exact requires Runtime provider invocation metadata",
     )?;
+    // A peer's replica push arrives over Carrier; Home's own `get` of a file a
+    // contact shared imports locally. No other caller may import.
+    let (source, transport) = match runtime.get("source").and_then(|value| value.as_str()) {
+        Some(HOME_SHARED_CONTENT_SOURCE) => {
+            (HOME_SHARED_CONTENT_SOURCE, "runtime-local-provider-plane")
+        }
+        _ => ("carrier-availability", "carrier-provider-plane"),
+    };
     validate_runtime_invocation_fields(
         runtime,
         "content import_exact",
         &[
             ("schema", "elastos.provider.invocation/v1"),
-            ("source", "carrier-availability"),
+            ("source", source),
             ("target", "content"),
             ("op", "import_exact"),
-            ("transport", "carrier-provider-plane"),
+            ("transport", transport),
         ],
     )?;
     if !matches!(
@@ -8242,25 +8273,6 @@ fn validate_import_exact_invocation(request: &Value) -> Result<(), ProviderError
         ));
     }
     Ok(())
-}
-
-fn validate_import_object_invocation(request: &Value) -> Result<(), ProviderError> {
-    let runtime = runtime_invocation_object(
-        request,
-        "content import_object requires Runtime provider invocation metadata",
-    )?;
-    validate_runtime_invocation_fields(
-        runtime,
-        "content import_object",
-        &[
-            ("schema", "elastos.provider.invocation/v1"),
-            ("source", "carrier-availability"),
-            ("target", "content"),
-            ("op", "import_object"),
-            ("transport", "carrier-provider-plane"),
-            ("transfer", "json"),
-        ],
-    )
 }
 
 fn validate_repair_worker_invocation(request: &Value) -> Result<(), ProviderError> {
@@ -8334,146 +8346,17 @@ fn import_exact_payload_bytes(request: &Value) -> Result<Vec<u8>, ProviderError>
     Ok(bytes)
 }
 
-fn validate_import_object_payload_bounds(files: &Value) -> Result<(usize, usize), ProviderError> {
-    let files = files.as_array().ok_or_else(|| {
-        ProviderError::Provider("content import_object files must be an array".into())
-    })?;
-    if files.is_empty() {
-        return Err(ProviderError::Provider(
-            "content import_object requires at least one file".into(),
-        ));
-    }
-    if files.len() > IMPORT_OBJECT_MAX_FILES {
-        return Err(ProviderError::Provider(format!(
-            "content import_object file count exceeds {IMPORT_OBJECT_MAX_FILES}"
-        )));
-    }
-    let mut total_bytes = 0_usize;
-    for file in files {
-        let path = file
-            .get("path")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        let data = file
-            .get("data")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                ProviderError::Provider(format!(
-                    "content import_object file {path} is missing base64 data"
-                ))
-            })?;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .map_err(|err| {
-                ProviderError::Provider(format!(
-                    "content import_object file {path} has invalid base64 data: {err}"
-                ))
-            })?;
-        total_bytes = total_bytes.saturating_add(decoded.len());
-        if total_bytes > IMPORT_EXACT_MAX_BYTES {
-            return Err(ProviderError::Provider(format!(
-                "content import_object payload exceeds {} bytes",
-                IMPORT_EXACT_MAX_BYTES
-            )));
-        }
-    }
-    Ok((files.len(), total_bytes))
-}
-
 fn provider_stream_payload_bytes(stream: &Value) -> Result<Vec<u8>, ProviderError> {
-    let object = stream.as_object().ok_or_else(|| {
-        ProviderError::Provider("content import_exact stream must be an object".into())
-    })?;
-    let schema = object
-        .get("schema")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    if schema != "elastos.provider.stream/v1" {
-        return Err(ProviderError::Provider(format!(
-            "content import_exact stream schema mismatch: expected elastos.provider.stream/v1, got {schema}"
-        )));
-    }
-    let encoding = object
-        .get("encoding")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    if encoding != "base64-chunks" {
-        return Err(ProviderError::Provider(format!(
-            "content import_exact stream encoding mismatch: expected base64-chunks, got {encoding}"
-        )));
-    }
-    let chunks = object
-        .get("chunks")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| {
-            ProviderError::Provider("content import_exact stream missing chunks".into())
-        })?;
-    let mut bytes = Vec::new();
-    for (expected_index, chunk) in chunks.iter().enumerate() {
-        let chunk = chunk.as_object().ok_or_else(|| {
-            ProviderError::Provider("content import_exact stream chunk must be an object".into())
-        })?;
-        let index = chunk
-            .get("index")
-            .and_then(|value| value.as_u64())
-            .ok_or_else(|| {
-                ProviderError::Provider("content import_exact stream chunk missing index".into())
-            })?;
-        if index != expected_index as u64 {
-            return Err(ProviderError::Provider(format!(
-                "content import_exact stream chunk index mismatch: expected {expected_index}, got {index}"
-            )));
-        }
-        let offset = chunk
-            .get("offset")
-            .and_then(|value| value.as_u64())
-            .ok_or_else(|| {
-                ProviderError::Provider("content import_exact stream chunk missing offset".into())
-            })?;
-        if offset != bytes.len() as u64 {
-            return Err(ProviderError::Provider(format!(
-                "content import_exact stream chunk {index} offset mismatch: expected {}, got {offset}",
-                bytes.len()
-            )));
-        }
-        let encoded = chunk
-            .get("data")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                ProviderError::Provider("content import_exact stream chunk missing data".into())
-            })?;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(|err| {
+    elastos_runtime::provider::decode_provider_stream_payload(stream, IMPORT_EXACT_MAX_BYTES)
+        .map_err(|err| {
+            if err.to_string().contains("payload exceeds") {
                 ProviderError::Provider(format!(
-                    "content import_exact stream chunk has invalid base64: {err}"
+                    "content import_exact payload exceeds {IMPORT_EXACT_MAX_BYTES} bytes"
                 ))
-            })?;
-        if bytes.len().saturating_add(decoded.len()) > IMPORT_EXACT_MAX_BYTES {
-            return Err(ProviderError::Provider(format!(
-                "content import_exact payload exceeds {} bytes",
-                IMPORT_EXACT_MAX_BYTES
-            )));
-        }
-        if let Some(length) = chunk.get("length").and_then(|value| value.as_u64()) {
-            if length != decoded.len() as u64 {
-                return Err(ProviderError::Provider(format!(
-                    "content import_exact stream chunk {index} length {length} does not match decoded length {}",
-                    decoded.len()
-                )));
+            } else {
+                ProviderError::Provider(format!("content import_exact stream: {err}"))
             }
-        }
-        bytes.extend_from_slice(&decoded);
-    }
-    if let Some(total_bytes) = object.get("total_bytes").and_then(|value| value.as_u64()) {
-        if total_bytes != bytes.len() as u64 {
-            return Err(ProviderError::Provider(format!(
-                "content import_exact stream total_bytes {total_bytes} does not match decoded length {}",
-                bytes.len()
-            )));
-        }
-    }
-    Ok(bytes)
+        })
 }
 
 fn parse_availability_provider_response(
@@ -9356,20 +9239,6 @@ fn append_jsonl<T: Serialize>(path: &Path, entry: &T) -> Result<(), ProviderErro
     Ok(())
 }
 
-/// Decoded bytes of a directory's files: what the node stores for them.
-fn directory_files_decoded_bytes(files: &Value) -> u64 {
-    files
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|file| file.get("data")?.as_str())
-        .map(|data| {
-            let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
-            (data.len() / 4 * 3).saturating_sub(padding) as u64
-        })
-        .sum()
-}
-
 fn verify_signed_receipt(receipt: &SignedAvailabilityReceipt) -> Result<(), ProviderError> {
     let envelope = serde_json::to_vec(receipt)
         .map_err(|err| ProviderError::Provider(format!("content receipt encode failed: {err}")))?;
@@ -9494,6 +9363,8 @@ mod tests {
         pinned: Mutex<Vec<String>>,
         pin_error: Mutex<Option<String>>,
         unpinned: Mutex<Vec<String>>,
+        unpin_error: Mutex<Option<String>>,
+        pin_status: Mutex<Option<bool>>,
         bounded_read_not_ready: Mutex<bool>,
     }
 
@@ -9598,6 +9469,9 @@ mod tests {
                     Ok(provider_ok(json!({})))
                 }
                 Some("unpin") => {
+                    if let Some(message) = self.unpin_error.lock().await.clone() {
+                        return Ok(provider_error("unpin_failed", &message));
+                    }
                     let cid = request
                         .get("cid")
                         .and_then(|cid| cid.as_str())
@@ -9606,6 +9480,13 @@ mod tests {
                     self.unpinned.lock().await.push(cid);
                     Ok(provider_ok(json!({})))
                 }
+                Some("pin_status") => match *self.pin_status.lock().await {
+                    Some(pinned) => Ok(provider_ok(json!({ "pinned": pinned }))),
+                    None => Ok(provider_error(
+                        "pin_status_failed",
+                        "mock pin set unreadable",
+                    )),
+                },
                 _ => Ok(provider_error("unsupported", "unsupported mock ipfs op")),
             }
         }
@@ -9682,25 +9563,6 @@ mod tests {
                 "encoding": "base64-chunks",
                 "chunk_size": 65536
             },
-            "range": null,
-            "progress": null
-        })
-    }
-
-    fn carrier_import_object_invocation() -> Value {
-        json!({
-            "schema": "elastos.provider.invocation/v1",
-            "source": "carrier-availability",
-            "target": "content",
-            "op": "import_object",
-            "capability": "provider:carrier-availability->content:import_object",
-            "transport": "carrier-provider-plane",
-            "carrier": {
-                "route": "connect_ticket",
-                "peer_did": "did:key:zRemote",
-                "timeout_ms": 5000
-            },
-            "transfer": "json",
             "range": null,
             "progress": null
         })
@@ -9829,6 +9691,8 @@ mod tests {
             pinned: Mutex::new(Vec::new()),
             pin_error: Mutex::new(None),
             unpinned: Mutex::new(Vec::new()),
+            unpin_error: Mutex::new(None),
+            pin_status: Mutex::new(None),
             bounded_read_not_ready: Mutex::new(false),
         });
         registry
@@ -10288,24 +10152,17 @@ mod tests {
         // The bytes hash to TEST_CID, which this node already pins; the peer
         // names a different CID.
         let other_cid = "QmRSEtAyq7Xgr5YCFVWuYsBdqbR5X9fJDsdpNQuvm9yaic";
-        for request in [
-            json!({
+        let response = content
+            .send_raw(&json!({
                 "op": "import_exact",
                 "cid": other_cid,
                 "stream": test_stream_payload(b"hello content"),
                 "_runtime_invocation": carrier_import_exact_invocation(),
-            }),
-            json!({
-                "op": "import_object",
-                "cid": other_cid,
-                "files": [{ "path": "index.md", "data": "IyBUZXN0Cg==" }],
-                "_runtime_invocation": carrier_import_object_invocation(),
-            }),
-        ] {
-            let response = content.send_raw(&request).await.unwrap();
-            assert_eq!(response["status"], "error", "{response}");
-            assert_eq!(response["code"], "cid_mismatch");
-        }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], "cid_mismatch");
         assert!(ipfs.unpinned.lock().await.is_empty(), "no pin is removed");
         assert!(ipfs.pinned.lock().await.is_empty(), "nothing is pinned");
         for request in ipfs.requests.lock().await.iter() {
@@ -10358,83 +10215,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_import_object_requires_runtime_provider_invocation() {
-        let (_data_dir, _registry, _ipfs, content) = registry_with_content_and_ipfs().await;
-        let err = content
-            .send_raw(&json!({
-                "op": "import_object",
-                "cid": TEST_CID,
-                "files": [{"path": "index.md", "data": "IyBUZXN0Cg=="}],
-            }))
-            .await
-            .unwrap_err();
-
-        assert!(err
-            .to_string()
-            .contains("requires Runtime provider invocation metadata"));
-    }
-
-    #[tokio::test]
-    async fn content_import_object_reconstructs_manifest_directory() {
+    async fn content_refuses_an_older_peers_replica_object_import() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
-        let response = content
+        let refused = content
             .send_raw(&json!({
                 "op": "import_object",
                 "cid": TEST_CID,
-                "object_kind": "document",
-                "object_did": "did:key:zObject",
-                "publisher_did": "did:key:zPublisher",
-                "links": [{"rel": "provenance", "cid": TEST_CID}],
                 "files": [{"path": "index.md", "data": "IyBUZXN0Cg=="}],
-                "_runtime_invocation": carrier_import_object_invocation(),
+                "_runtime_invocation": {
+                    "schema": "elastos.provider.invocation/v1",
+                    "source": "carrier-availability",
+                    "target": "content",
+                    "op": "import_object",
+                    "transport": "carrier-provider-plane",
+                    "transfer": "json",
+                },
             }))
-            .await
-            .unwrap();
-
-        assert_eq!(response["status"], "ok");
-        assert_eq!(response["data"]["cid"], TEST_CID);
-        assert_eq!(
-            response["data"]["availability"]["policy"],
-            "carrier_object_import"
+            .await;
+        assert!(
+            !matches!(&refused, Ok(response) if response["status"] == "ok"),
+            "{refused:?}"
         );
-        assert_eq!(
-            response["data"]["import"]["schema"],
-            "elastos.content.import-object/v1"
-        );
-        assert_eq!(response["data"]["import"]["files"], 1);
-        assert_eq!(response["data"]["import"]["verified_cid"], true);
-        assert_eq!(
-            response["data"]["receipt"]["payload"]["accounting"]["source"],
-            "carrier_object_import"
-        );
-        assert_eq!(
-            response["data"]["receipt"]["payload"]["accounting"]["files"],
-            1
-        );
-
-        let directories = ipfs.added_directories.lock().await;
-        assert_eq!(directories.len(), 1);
-        let manifest_entry = directories[0]
-            .iter()
-            .find(|entry| entry["path"].as_str() == Some(OBJECT_MANIFEST_PATH))
-            .expect("object manifest should be injected");
-        let manifest_bytes = base64::engine::general_purpose::STANDARD
-            .decode(manifest_entry["data"].as_str().unwrap())
-            .unwrap();
-        let manifest: ContentObjectManifest = serde_json::from_slice(&manifest_bytes).unwrap();
-        // The ledger counts the files and the generated manifest.
-        assert_eq!(
-            response["data"]["receipt"]["payload"]["accounting"]["content_bytes"],
-            7 + manifest_bytes.len() as u64
-        );
-        assert_eq!(manifest.kind, "document");
-        assert_eq!(manifest.object_did.as_deref(), Some("did:key:zObject"));
-        assert_eq!(
-            manifest.publisher_did.as_deref(),
-            Some("did:key:zPublisher")
-        );
-        assert_eq!(manifest.files.len(), 1);
-        assert_eq!(manifest.links[0].rel, "provenance");
+        assert!(ipfs.added_directories.lock().await.is_empty());
+        assert!(ipfs.pinned.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -10666,6 +10469,94 @@ mod tests {
             1
         );
         assert!(!dashboard.to_string().contains("connect_ticket"));
+    }
+
+    #[tokio::test]
+    async fn content_publish_local_pin_policy_never_calls_availability() {
+        let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(provider_ok(json!({}))),
+        });
+        registry.register(availability.clone()).await;
+
+        let response = content
+            .send_raw(&json!({
+                "op": "publish",
+                "kind": "file",
+                "filename": "notes.txt",
+                "data": "aGVsbG8K",
+                "pin": true,
+                "availability_policy": LOCAL_PIN_AVAILABILITY_POLICY,
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "ok", "{response}");
+        assert_eq!(response["data"]["availability"]["status"], "local_pinned");
+        assert_eq!(
+            response["data"]["receipt"]["payload"]["policy"],
+            LOCAL_PIN_AVAILABILITY_POLICY
+        );
+        assert_eq!(response["data"]["repair_task"]["status"], "local_only");
+        assert!(availability.requests.lock().await.is_empty());
+        assert_eq!(
+            *ipfs.added_files.lock().await,
+            vec!["notes.txt".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn content_repair_and_ensure_with_local_pin_policy_never_call_availability() {
+        let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(provider_ok(json!({}))),
+        });
+        registry.register(availability.clone()).await;
+
+        for op in ["repair", "ensure"] {
+            let response = content
+                .send_raw(&json!({
+                    "op": op,
+                    "cid": TEST_CID,
+                    "availability_policy": LOCAL_PIN_AVAILABILITY_POLICY,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(response["status"], "ok", "{response}");
+            assert_eq!(response["data"]["availability"]["status"], "local_pinned");
+        }
+        assert!(availability.requests.lock().await.is_empty());
+        assert_eq!(ipfs.pinned.lock().await.len(), 2);
+
+        // Without the policy, repair still asks availability as before.
+        content
+            .send_raw(&json!({ "op": "repair", "cid": TEST_CID }))
+            .await
+            .unwrap();
+        assert_eq!(availability.requests.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn content_unpublish_completes_when_the_cid_is_verified_no_longer_pinned() {
+        let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let unpublish = json!({ "op": "unpublish", "cid": TEST_CID });
+        *ipfs.unpin_error.lock().await = Some("not pinned or pinned indirectly".to_string());
+
+        // The pin set can't be read: the failure stands, so Unpublish is retried.
+        assert!(content.send_raw(&unpublish).await.is_err());
+        // Still pinned: the failure stands.
+        *ipfs.pin_status.lock().await = Some(true);
+        assert!(content.send_raw(&unpublish).await.is_err());
+        // Verified not pinned (an earlier unpin got through): done.
+        *ipfs.pin_status.lock().await = Some(false);
+        let response = content.send_raw(&unpublish).await.unwrap();
+        assert_eq!(response["status"], "ok", "{response}");
+        assert_eq!(
+            response["data"]["receipt"]["payload"]["status"],
+            "local_unpinned"
+        );
     }
 
     #[tokio::test]
@@ -13130,6 +13021,37 @@ mod tests {
         );
     }
 
+    /// The prepare step behind `run --cid`, `serve --cid` and `share` stops
+    /// at its own manifest parse for a pinned manifest: the error is that
+    /// parse's own text, and the parse comes before any folder is made. The
+    /// same manifest without the pin gets past the parse, to the later
+    /// refusal of its type (the control).
+    #[tokio::test]
+    async fn content_prepare_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        use crate::runtime::tests::{unpinned_manifest, PINNED_MANIFEST};
+        let (_data_dir, registry, ipfs, _content) = registry_with_content_and_ipfs().await;
+        let mut errors = Vec::new();
+        for manifest in [PINNED_MANIFEST.to_string(), unpinned_manifest()] {
+            let mut cat_files = ipfs.cat_files.lock().await;
+            cat_files.insert("capsule.json".to_string(), manifest.into_bytes());
+            drop(cat_files);
+            let error = prepare_capsule_from_content_provider(&registry, TEST_CID)
+                .await
+                .unwrap_err();
+            errors.push(error.to_string());
+        }
+        assert!(
+            errors[0].starts_with("unknown field `cid`"),
+            "{}",
+            errors[0]
+        );
+        assert!(
+            errors[1].starts_with("MicroVM capsule opens"),
+            "{}",
+            errors[1]
+        );
+    }
+
     #[tokio::test]
     async fn content_prepare_data_capsule_materializes_verified_manifest_files() {
         let (_data_dir, registry, ipfs, _content) = registry_with_content_and_ipfs().await;
@@ -13254,6 +13176,20 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("kind 'release'"));
         assert!(err.to_string().contains("not a launchable capsule"));
+    }
+
+    #[tokio::test]
+    async fn content_prepare_capsule_says_a_missing_cid_is_not_on_this_home() {
+        let (_data_dir, registry, ipfs, _content) = registry_with_content_and_ipfs().await;
+        {
+            let mut missing = ipfs.missing_paths.lock().await;
+            missing.push("capsule.json".to_string());
+            missing.push(OBJECT_MANIFEST_PATH.to_string());
+        }
+        let err = prepare_capsule_from_content_provider(&registry, TEST_CID)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), CID_NOT_ON_THIS_HOME);
     }
 
     #[tokio::test]
