@@ -549,8 +549,8 @@ mod r8d_passkey_rows {
     }
 
     /// The child holds no protection for this person's root, so the save is
-    /// refused and creates nothing. The route gives the same text
-    /// with the status it answers.
+    /// refused and creates nothing. The route answers the same refusal with
+    /// 403 and the bare text.
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_assistant_workspace_save_for_the_passkey_person() {
         let person: PasskeyPerson = passkey_person(ASSISTANT_CAPSULE_ID);
@@ -567,7 +567,7 @@ mod r8d_passkey_rows {
             Json(put_request()),
         )
         .await;
-        assert_eq!(answer.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
         let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
             .await
             .unwrap();

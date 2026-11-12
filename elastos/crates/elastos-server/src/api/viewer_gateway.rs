@@ -919,7 +919,10 @@ fn clean_storage_file_name(name: &str) -> anyhow::Result<String> {
     Ok(file_name.to_string())
 }
 
-fn viewer_error_response(err: anyhow::Error) -> Response {
+pub(super) fn viewer_error_response(err: anyhow::Error) -> Response {
+    if let Some(response) = super::gateway::protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
     let text = err.to_string();
     let status = if text.contains("not found") {
         StatusCode::NOT_FOUND
