@@ -70,6 +70,7 @@ pub mod runtime_control;
 pub mod setup;
 pub mod shares;
 pub mod sources;
+pub mod stage_cmd;
 pub mod supervisor;
 #[cfg(all(test, unix))]
 mod test_support;

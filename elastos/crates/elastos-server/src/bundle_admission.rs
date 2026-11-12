@@ -7,6 +7,8 @@
 //! a refusal is reported by. It admits nothing by itself and starts nothing.
 
 use std::fmt;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use elastos_bundle_identity::{Budget, LabCid, Refusal};
 use elastos_runtime::signature::SignatureVerifier;
@@ -64,6 +66,10 @@ pub enum BundleRefusal {
     SignatureNotAccepted,
     /// The walk of the bundle's folder refused it.
     Walk { code: &'static str, detail: String },
+    /// The store's slot for this CID holds something that is not this bundle.
+    SlotDiffers { cid: String, found: String },
+    /// The store could not be read or written.
+    Store(String),
 }
 
 impl BundleRefusal {
@@ -76,6 +82,8 @@ impl BundleRefusal {
             BundleRefusal::SignatureNamesAnotherCid { .. } => "bundle_signature_names_another_cid",
             BundleRefusal::SignatureNotAccepted => "bundle_signature_not_accepted",
             BundleRefusal::Walk { code, .. } => code,
+            BundleRefusal::SlotDiffers { .. } => "bundle_slot_differs",
+            BundleRefusal::Store(_) => "bundle_store_io",
         }
     }
 }
@@ -95,11 +103,57 @@ impl fmt::Display for BundleRefusal {
                 write!(f, "{code}: the bundle's signature is not accepted")
             }
             BundleRefusal::Walk { detail, .. } => write!(f, "{code}: {detail}"),
+            BundleRefusal::SlotDiffers { cid, found } => write!(
+                f,
+                "{code}: the store's slot for {cid} does not hold that bundle: {found}"
+            ),
+            BundleRefusal::Store(why) => write!(f, "{code}: {why}"),
         }
     }
 }
 
 impl std::error::Error for BundleRefusal {}
+
+/// The most that is read of a signature file. One is about 300 bytes.
+pub const MAX_SIGNATURE_FILE_BYTES: u64 = 4_096;
+
+/// Where the Home at `data_dir` keeps the files of the bundle `cid`.
+pub fn bundle_slot(data_dir: &Path, cid: &LabCid) -> PathBuf {
+    by_cid(data_dir).join(cid.to_string())
+}
+
+/// Where the Home at `data_dir` keeps the signature over `cid`: beside the
+/// bundle's folder, never inside it.
+pub fn bundle_signature_path(data_dir: &Path, cid: &LabCid) -> PathBuf {
+    by_cid(data_dir).join(format!("{cid}.sig.json"))
+}
+
+fn by_cid(data_dir: &Path) -> PathBuf {
+    data_dir.join("capsules").join("by-cid")
+}
+
+/// Read a signature file, at most [`MAX_SIGNATURE_FILE_BYTES`] of it. A file
+/// that is not there is `None`, which the check refuses as unsigned.
+pub fn read_signature_file(path: &Path) -> Result<Option<Vec<u8>>, BundleRefusal> {
+    let unread = |error: std::io::Error| {
+        BundleRefusal::SignatureUnparsed(format!("could not read the signature file: {error}"))
+    };
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(unread(error)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_SIGNATURE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unread)?;
+    if bytes.len() as u64 > MAX_SIGNATURE_FILE_BYTES {
+        return Err(BundleRefusal::SignatureUnparsed(format!(
+            "the signature file is over {MAX_SIGNATURE_FILE_BYTES} bytes"
+        )));
+    }
+    Ok(Some(bytes))
+}
 
 /// The signature file beside a bundle, exactly: no other key is allowed.
 #[derive(Deserialize)]

@@ -440,6 +440,17 @@ enum Commands {
         key: Option<std::path::PathBuf>,
     },
 
+    /// Put a signed bundle into this Home's store of bundles named by CID
+    #[command(name = "stage-bundle", hide = true)]
+    StageBundle {
+        /// The bundle's folder
+        folder: std::path::PathBuf,
+        /// The publisher's signature file for the bundle's CID. Without it
+        /// the command only prints that CID, the text a publisher signs.
+        #[arg(long)]
+        signature: Option<std::path::PathBuf>,
+    },
+
     /// Start the public ElastOS edge for MyWebSite, publisher objects, and CID content
     #[command(hide = true)]
     Gateway {
@@ -1519,6 +1530,35 @@ async fn run() -> anyhow::Result<()> {
 
         Commands::SignPayload { domain, key } => {
             trust_cmd::run_sign_payload(domain, key)?;
+        }
+
+        Commands::StageBundle {
+            folder,
+            signature: None,
+        } => {
+            let cid = elastos_server::stage_cmd::bundle_cid(&folder)?;
+            println!("{}", serde_json::json!({ "cid": cid }));
+        }
+
+        Commands::StageBundle {
+            folder,
+            signature: Some(signature),
+        } => {
+            // The Runtime is made as `run` makes it, so the keys asked here
+            // are the keys a start of this Home would ask.
+            let data_dir = default_data_dir();
+            let runtime = create_runtime(data_dir.join("storage")).await?;
+            let staged =
+                elastos_server::stage_cmd::stage_bundle(&runtime, &data_dir, &folder, &signature)
+                    .await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "cid": staged.cid,
+                    "signer_did": staged.signer_did,
+                    "files_written": staged.files_written,
+                })
+            );
         }
 
         Commands::PublishRelease {
