@@ -9547,14 +9547,18 @@ mod stored_root_tests {
         assert!(!child_path.exists());
     }
 
-    /// The launch context takes this person's root from the parent's store,
-    /// where their record is kept. This Runtime holds no protection for that
-    /// root, so the save is refused and the read answers the default.
-    #[test]
-    fn parent_auth_store_person_services_selection_is_refused_in_child() {
+    /// A person stored only in a parent auth directory, verified into this
+    /// Runtime through a parent-signed launch token. Returns the parent's
+    /// temporary directory, the person's record, and the verified context.
+    fn parent_store_services_person(
+        data_dir: &std::path::Path,
+    ) -> (
+        tempfile::TempDir,
+        crate::auth::PrincipalRecord,
+        HomeLaunchTokenContext,
+    ) {
         use elastos_runtime::auth::AuthSessionGrantV1;
 
-        let (_temp, data_dir) = state_dir();
         let parent = tempfile::tempdir().unwrap();
         let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
         let mut record = crate::auth::store_test_human_principal(
@@ -9586,7 +9590,16 @@ mod stored_root_tests {
         let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
             &data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did, parent.path(),
         ).unwrap();
-        let context = verified.context;
+        (parent, record, verified.context)
+    }
+
+    /// The launch context takes this person's root from the parent's store,
+    /// where their record is kept. This Runtime holds no protection for that
+    /// root, so the save is refused and the read answers the default.
+    #[test]
+    fn parent_auth_store_person_services_selection_is_refused_in_child() {
+        let (_temp, data_dir) = state_dir();
+        let (_parent, record, context) = parent_store_services_person(&data_dir);
         assert_eq!(
             context.root().localhost_root(),
             "localhost://Users/parent-stored-root"
@@ -9623,6 +9636,32 @@ mod stored_root_tests {
         let formula_path =
             elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &formula_uri).unwrap();
         assert!(!formula_path.exists());
+    }
+
+    /// The same parent-stored person with test protection seeded on this
+    /// Runtime: the save seals the object under the stored root, and the read
+    /// returns the selection.
+    #[test]
+    fn parent_auth_store_person_services_selection_writes_sealed_with_protection_here() {
+        let (_temp, data_dir) = state_dir();
+        let (_parent, record, context) = parent_store_services_person(&data_dir);
+        crate::auth::store_test_principal_root_protection_for(
+            &data_dir,
+            &record.principal_id,
+            context.root().localhost_root(),
+        );
+        let selection = home_services_default_selection_state(&context);
+        home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
+        let stored_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(stored_path.is_file(), "the save wrote under the stored root");
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&stored_path).unwrap()).unwrap();
+        assert_eq!(stored["schema"], "elastos.principal-root.object/v1");
+        assert_eq!(
+            serde_json::to_value(home_services_selection_state(&data_dir, &context).unwrap())
+                .unwrap(),
+            serde_json::to_value(&selection).unwrap()
+        );
     }
 
     #[test]

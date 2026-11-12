@@ -554,3 +554,50 @@ mod r3_tests {
         assert!(!crate::auth::principal_object_io::writes(dir.path()).contains(&child_path));
     }
 }
+
+/// R8d evidence row: the v2 Assistant workspace save through a child Runtime.
+#[cfg(test)]
+mod r8d_rows {
+    use super::*;
+    use crate::api::gateway::gateway_tests::r8d_passkey_rows::{
+        passkey_person, KEPT_ELSEWHERE,
+    };
+
+    /// Entry: the v2 workspace PUT route with the current migration identity.
+    /// The person's record is kept on the parent and the child holds no
+    /// protection for their root, so the save answers 403 with the bare
+    /// refusal text and writes nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn r8d_child_assistant_workspace_v2_save_is_refused_for_the_passkey_person() {
+        let person = passkey_person("assistant");
+        let read = get(State(person.child_state()), person.route_headers("assistant")).await;
+        assert_eq!(read.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(read.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let migration_revision = value["migration_revision"]
+            .as_str()
+            .expect("the read names the migration identity")
+            .to_string();
+        let request: PutRequest = serde_json::from_value(serde_json::json!({
+            "schema": "elastos.assistant.workspace/v2",
+            "if_revision": 0,
+            "document": {},
+            "migration_revision": migration_revision,
+        }))
+        .unwrap();
+        let answer = put(
+            State(person.child_state()),
+            person.route_headers("assistant"),
+            Json(request),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), KEPT_ELSEWHERE);
+        person.assert_child_holds_only(&[]);
+    }
+}
