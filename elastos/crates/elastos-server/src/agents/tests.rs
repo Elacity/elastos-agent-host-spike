@@ -1176,3 +1176,143 @@ fn a_create_request_has_three_fields_and_no_other() {
         assert!(parse(body).is_err(), "a missing field: {missing}");
     }
 }
+
+#[test]
+fn retire_happens_once_and_only_for_the_owner() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    let other = second_person(&home, "person:local:other-owner");
+
+    // Another person's agent answers as an unknown id does.
+    for (caller, id) in [
+        (caller_of(&other), agent.agent_id.as_str()),
+        (home.caller(), AGENT_A),
+    ] {
+        let result = retire_in_any_build(home.path(), &caller, id, 11);
+        assert_eq!(refusal_of(result), NO_SUCH_AGENT);
+    }
+    assert!(list_in_any_build(home.path(), &caller_of(&other))
+        .unwrap()
+        .is_empty());
+
+    let retired = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
+    assert_eq!(retired.retired_at, Some(11));
+    let file = loaded(&home);
+    let record = &file.agents[0].record;
+    assert_eq!((record.retired_at, record.updated_at), (Some(11), 11));
+    assert_eq!(record.created_at, 9);
+    let event = home.agent_events().pop().unwrap();
+    assert_eq!(event.event_type, "agent.record.retire");
+    assert_eq!(event.principal_id.as_deref(), Some(agent.agent_id.as_str()));
+    assert_eq!(event.reason[..6], *"seq=3 ");
+
+    let written = home.agent_bytes();
+    let again = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 12);
+    assert_eq!(refusal_of(again), ALREADY_RETIRED);
+    assert_eq!(
+        home.agent_bytes(),
+        written,
+        "a second retire writes nothing"
+    );
+
+    // The tombstone stays listed, and still holds its id and root.
+    assert_eq!(
+        list_in_any_build(home.path(), &home.caller()).unwrap(),
+        [retired]
+    );
+}
+
+#[test]
+fn a_retired_agent_no_longer_counts_toward_the_limit() {
+    let home = Home::new();
+    turn_on(&home);
+    let first = create_one(&home, "request-0");
+    for index in 1..MAX_LIVE_AGENTS_PER_OWNER {
+        create_one(&home, &format!("request-{index}"));
+    }
+    assert_eq!(
+        refusal_of(create_as(&home, &home.caller(), "request-more")),
+        AT_THE_LIMIT
+    );
+    retire_in_any_build(home.path(), &home.caller(), &first.agent_id, 11).unwrap();
+    create_one(&home, "request-more");
+}
+
+#[test]
+fn with_agents_off_every_use_refuses_and_the_records_are_kept() {
+    let home = Home::new();
+    let no_file = list_in_any_build(home.path(), &home.caller());
+    assert_eq!(refusal_of(no_file), NOT_ENABLED, "no file at all");
+
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    set_enabled_in_any_build(home.path(), &home.caller(), false, 11).unwrap();
+    let written = home.agent_bytes();
+    assert_eq!(
+        loaded(&home).agents.len(),
+        1,
+        "turning off keeps the record"
+    );
+
+    assert_eq!(
+        refusal_of(create_as(&home, &home.caller(), "request-2")),
+        NOT_ENABLED
+    );
+    assert_eq!(
+        refusal_of(list_in_any_build(home.path(), &home.caller())),
+        NOT_ENABLED
+    );
+    let retire = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 12);
+    assert_eq!(refusal_of(retire), NOT_ENABLED);
+    assert_eq!(home.agent_bytes(), written);
+
+    turn_on(&home);
+    assert_eq!(
+        list_in_any_build(home.path(), &home.caller()).unwrap(),
+        [agent]
+    );
+}
+
+#[test]
+fn a_refused_file_keeps_its_bytes_and_refuses_every_operation() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    let mut value: Value = serde_json::from_slice(&home.agent_bytes()).unwrap();
+    value["pending"] = json!(null);
+    home.plant(&value);
+    let planted = home.agent_bytes();
+    let events = home.audit().len();
+    let unavailable = format!("agents are unavailable: {NOT_OUR_FORM}");
+    let caller = home.caller();
+
+    let on = set_enabled_in_any_build(home.path(), &caller, true, 12);
+    assert_eq!(refusal_of(on), unavailable);
+    let off = set_enabled_in_any_build(home.path(), &caller, false, 12);
+    assert_eq!(refusal_of(off), unavailable);
+    assert_eq!(
+        refusal_of(create_as(&home, &caller, "request-2")),
+        unavailable
+    );
+    assert_eq!(
+        refusal_of(create_as(&home, &caller, "request-1")),
+        unavailable
+    );
+    let retire = retire_in_any_build(home.path(), &caller, &agent.agent_id, 12);
+    assert_eq!(refusal_of(retire), unavailable);
+    assert_eq!(
+        refusal_of(list_in_any_build(home.path(), &caller)),
+        unavailable
+    );
+
+    assert_eq!(home.agent_bytes(), planted, "the file is never rewritten");
+    assert_eq!(home.audit().len(), events, "no event was appended");
+    // The owner's own load is as before.
+    let state = crate::auth::load_auth_state(home.path()).unwrap();
+    assert!(state
+        .principals
+        .iter()
+        .any(|principal| principal.principal_id == OWNER_ID));
+    assert!(owner_protection(&home).principal_id == OWNER_ID);
+}

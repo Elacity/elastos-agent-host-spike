@@ -814,3 +814,57 @@ fn list_in_any_build(data_dir: &Path, caller: &Caller<'_>) -> anyhow::Result<Vec
         .filter(|agent| owned_by(agent, owner));
     Ok(theirs.map(view).collect())
 }
+
+const NO_SUCH_AGENT: &str = "the caller owns no agent with that id";
+const ALREADY_RETIRED: &str = "agent is already retired";
+
+/// Retires one of the caller's agents, once. The record stays as a
+/// tombstone, so its id and root are never used again, and its storage is
+/// kept. Another person's agent gives the same refusal as an unknown id.
+pub(crate) fn retire(
+    data_dir: &Path,
+    caller: &Caller<'_>,
+    agent_id: &str,
+    now: u64,
+) -> anyhow::Result<AgentView> {
+    require_build()?;
+    retire_in_any_build(data_dir, caller, agent_id, now)
+}
+
+fn retire_in_any_build(
+    data_dir: &Path,
+    caller: &Caller<'_>,
+    agent_id: &str,
+    now: u64,
+) -> anyhow::Result<AgentView> {
+    let opened = open(data_dir, true)?;
+    if opened.file.enabled.is_none() {
+        return refused(NOT_ENABLED);
+    }
+    let owner = caller_person(&opened.owner_file, caller)?;
+    let mut after = opened.file.clone();
+    after.sequence += 1;
+    let Some(agent) = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == agent_id && owned_by(agent, owner))
+    else {
+        return refused(NO_SUCH_AGENT);
+    };
+    if agent.record.retired_at.is_some() {
+        return refused(ALREADY_RETIRED);
+    }
+    agent.record.retired_at = Some(now);
+    agent.record.updated_at = now;
+    let retired = view(agent);
+    write(
+        data_dir,
+        &opened,
+        Operation::Retire,
+        &after,
+        caller,
+        agent_id,
+        now,
+    )?;
+    Ok(retired)
+}
