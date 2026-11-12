@@ -2334,6 +2334,37 @@ fn the_tar_end_marker_ends_the_listing() {
 }
 
 #[test]
+fn one_zero_block_at_the_end_of_the_object_refuses_the_archive() {
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend([0u8; 512]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn one_zero_block_followed_by_a_header_refuses_the_archive() {
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend([0u8; 512]);
+    archive.extend(tar_header(&TarSpec::file("b.txt")));
+    archive.extend([0u8; 1024]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
+fn one_zero_block_followed_by_data_refuses_the_archive() {
+    let mut archive = tar_header(&TarSpec::file("a.txt"));
+    archive.extend([0u8; 512]);
+    archive.extend([0x41u8; 512]);
+    archive.extend([0u8; 1024]);
+    let bus = run_fixture(request(TAR, &[]), TAR, archive);
+    assert_eq!(view(&bus)["refused"]["code"], "end_marker");
+    assert!(entries(&bus).is_empty());
+}
+
+#[test]
 fn the_tar_read_budget_lists_what_fit_and_marks_the_run() {
     let specs: Vec<TarSpec> = (0..200)
         .map(|index| TarSpec::file(&format!("f{index:0>3}.txt")))

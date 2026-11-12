@@ -203,7 +203,6 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
     let size = size_of(reader)?;
     let mut entries = Vec::new();
     let mut offset = 0u64;
-    let mut zeros = 0u8;
     while offset < size {
         let block = match read_block(reader, offset) {
             Ok(block) => block,
@@ -220,17 +219,35 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>, Option<Refused>), 
             )
             .into());
         }
-        // The end marker is a pair of zero blocks; any entry after it is not
-        // part of the archive.
+        // The archive ends only at two consecutive zero blocks. One alone
+        // followed by a header, data or the end of the object is not an end,
+        // and never a reason to carry on as though the pair was there.
         if block.iter().all(|&byte| byte == 0) {
-            zeros += 1;
-            if zeros == 2 {
-                break;
+            let next_offset = offset + BLOCK_BYTES;
+            let lone_end = next_offset >= size;
+            if lone_end {
+                let refused = Refused::new(
+                    "end_marker",
+                    format!("the zero block at {offset} ends the object; the archive needs two"),
+                );
+                return Err(refused.into());
             }
-            offset += BLOCK_BYTES;
-            continue;
+            let second = match read_block(reader, next_offset) {
+                Ok(block) => block,
+                Err(TarError::Stopped(reason)) => return Ok(stop(size, entries, reason)),
+                Err(error) => return Err(error),
+            };
+            let second_zero =
+                second.len() == BLOCK_BYTES as usize && second.iter().all(|&byte| byte == 0);
+            if !second_zero {
+                return Err(Refused::new(
+                    "end_marker",
+                    format!("the zero block at {offset} is not followed by a second zero block"),
+                )
+                .into());
+            }
+            break;
         }
-        zeros = 0;
         if !is_header(&block) {
             return Err(Refused::new(
                 "header_magic",
