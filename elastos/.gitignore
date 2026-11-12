@@ -30,6 +30,7 @@ Thumbs.db
 /storage/
 *.wasm
 !tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm
+!tests/fixtures/components/asks-nothing/bundle/asks-nothing.component.wasm
 .last-published-cid
 
 
