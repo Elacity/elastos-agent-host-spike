@@ -7459,8 +7459,12 @@ struct PrincipalRootObjectWriteOptions<'a> {
     require_protection: bool,
     create_only: bool,
     precondition: Option<PrincipalRootObjectPrecondition<'a>>,
-    /// Set only by the plain held-root write: make its parent after every
-    /// check and the protection decision, so a refusal leaves nothing behind.
+    /// Set only by the plain held-root write. After every check and the
+    /// protection decision, make the file's parent folder owner-only: create
+    /// it, or narrow an existing folder this process owns. Without this
+    /// option the atomic write still creates a missing parent, with default
+    /// permissions. The option sets the folder's permissions; it does not
+    /// decide whether the folder exists.
     create_owner_only_parent: bool,
 }
 
