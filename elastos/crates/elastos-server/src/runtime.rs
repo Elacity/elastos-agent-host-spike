@@ -440,8 +440,10 @@ impl Runtime {
         };
         let mut pending: Vec<_> = below(1, admitted.pins).collect();
         let mut members = 1;
-        // Every bundle admitted so far, by its CID, with the name it carries.
-        let mut names = HashMap::from([(asked.to_string(), admitted.manifest.name.clone())]);
+        // Every bundle admitted so far, by its CID: the name it carries, the
+        // deepest place a pin has reached it at, and its own pins.
+        let root = (admitted.manifest.name.clone(), 1, Vec::new());
+        let mut seen = HashMap::from([(asked.to_string(), root)]);
         while let Some((depth, name, pin)) = pending.pop() {
             let refused = |refusal| BundleRefusal::Requirement {
                 name: name.clone(),
@@ -457,11 +459,17 @@ impl Runtime {
             };
             // A bundle reached a second time, through another pin, was
             // admitted on its first reach. Its name must be this
-            // requirement's too, and that is all: it is not walked or
-            // counted again, and its own pins were followed then.
-            if let Some(known) = names.get(&pinned.to_string()) {
-                if *known != name {
-                    return Err(refused(BundleRefusal::RequirementMismatch(known.clone())));
+            // requirement's too. It is not walked or counted again. Reached
+            // deeper than before, its own pins sit deeper too: they are
+            // measured again from here, out of memory, so that the depth
+            // limit does not turn on which pin the walk met first.
+            if let Some((carried, deepest, pins)) = seen.get_mut(&pinned.to_string()) {
+                if *carried != name {
+                    return Err(refused(BundleRefusal::RequirementMismatch(carried.clone())));
+                }
+                if depth > *deepest {
+                    *deepest = depth;
+                    pending.extend(below(depth, pins.clone()));
                 }
                 continue;
             }
@@ -478,7 +486,8 @@ impl Runtime {
                     member.manifest.name,
                 )));
             }
-            names.insert(pinned.to_string(), member.manifest.name);
+            let known = (member.manifest.name, depth, member.pins.clone());
+            seen.insert(pinned.to_string(), known);
             pending.extend(below(depth, member.pins));
         }
         drop(trust);
