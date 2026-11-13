@@ -52,10 +52,15 @@ impl Home {
         std::fs::read(self.agent_file()).unwrap()
     }
 
+    /// The sign-in file's own records: the loader also hands agents through,
+    /// and that file holds none.
     fn owner_file(&self) -> Vec<PrincipalRecord> {
         crate::auth::load_auth_state(self.path())
             .unwrap()
             .principals
+            .into_iter()
+            .filter(|record| record.kind != PrincipalKind::Agent)
+            .collect()
     }
 
     fn load(&self) -> AgentFile {
@@ -1679,4 +1684,94 @@ fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
     // Each stored event has exactly the frozen event's fields.
     let ours = serde_json::to_value(home.audit()).unwrap();
     assert_eq!(serde_json::to_value(&stored.audit).unwrap(), ours);
+}
+
+/// The launch lookup: one stored agent of the launcher's own, enabled and not
+/// retired, and nothing else. The root reader the bridge calls gives the same
+/// record, and the protection the sign-in loader keeps apart.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    let stored = crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id).unwrap();
+    assert_eq!(stored.record.principal_id, agent.agent_id);
+    assert_eq!(stored.record.owner.as_deref(), Some(OWNER_ID));
+    let root = crate::auth::principal_kind_localhost_root(&agent.agent_id, PrincipalKind::Agent);
+    let by_root = stored_agent_for_root(home.path(), &agent.agent_id, &root)
+        .unwrap()
+        .expect("the root reader finds the same agent");
+    assert_eq!(by_root.record.principal_id, agent.agent_id);
+    let protection = stored_protection(home.path(), &agent.agent_id, &root)
+        .unwrap()
+        .expect("the agent's protection is in the file");
+    assert_eq!(protection.principal_id, agent.agent_id);
+
+    // A stored person who does not own it sees nothing, and so does a
+    // person the Home does not hold.
+    crate::auth::store_test_principal_root_protection(home.path(), "person:local:a5-other");
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), "person:local:a5-other", &agent.agent_id)
+            .unwrap_err()
+            .to_string(),
+        NO_SUCH_AGENT
+    );
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), "person:local:a5-stranger", &agent.agent_id)
+            .unwrap_err()
+            .to_string(),
+        NOT_A_PERSON
+    );
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), OWNER_ID, AGENT_B)
+            .unwrap_err()
+            .to_string(),
+        NO_SUCH_AGENT
+    );
+
+    // Retired and turned off are both no agent.
+    retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id)
+            .unwrap_err()
+            .to_string(),
+        NO_SUCH_AGENT
+    );
+    set_enabled_in_any_build(home.path(), &home.caller(), false, 12).unwrap();
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id)
+            .unwrap_err()
+            .to_string(),
+        NOT_ENABLED
+    );
+}
+
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn with_the_feature_off_the_launch_lookup_refuses_by_name() {
+    let home = Home::new();
+    let caller = home.caller();
+    let agent_id = plant_enabled_home_with_one_agent(
+        home.path(),
+        caller.principal_id,
+        caller.proof_binding_id,
+    );
+    assert_eq!(loaded(&home).agents.len(), 1);
+    assert_eq!(
+        stored_agent(home.path(), OWNER_ID, &agent_id)
+            .unwrap_err()
+            .to_string(),
+        FEATURE_OFF
+    );
+    assert_eq!(
+        stored_agent_for_root(
+            home.path(),
+            &agent_id,
+            &crate::auth::principal_kind_localhost_root(&agent_id, PrincipalKind::Agent),
+        )
+        .unwrap_err()
+        .to_string(),
+        FEATURE_OFF
+    );
 }
