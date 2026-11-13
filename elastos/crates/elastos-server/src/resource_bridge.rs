@@ -1836,8 +1836,10 @@ mod tests {
     /// Every place that fills a capsule's ceiling asks the one function that
     /// decides it, and none of those files reads a manifest's capability list
     /// or storage permissions itself. So a rule placed in that function (such
-    /// as the empty ceiling of a manifest with asks) holds wherever a capsule
-    /// is started. And those four are the only production callers of that
+    /// as: a manifest with asks is bounded by them and by nothing else) holds
+    /// wherever a capsule is started. This test counts callers; what the
+    /// function returns is held by its own tests. And those four are the
+    /// only production callers of that
     /// function under `elastos/crates`: a fifth has to be added here.
     ///
     /// What this cannot show: a workspace member outside `elastos/crates`
@@ -2499,9 +2501,10 @@ mod tests {
     /// request's action is written in upper case, and is judged as the
     /// Runtime will read it. Nothing listens on the address given, so a
     /// ceiling refusal can only have come from this check. The controls are
-    /// not refused by the ceiling and so go on to that dead address: the
-    /// read under the same ask (the request for it again in upper case),
-    /// and the same write under a ceiling that names no action.
+    /// refused by nothing here and fail only where they try to reach that
+    /// dead address: the read under the same ask (the request for it again
+    /// in upper case), and the same write under a ceiling that names no
+    /// action.
     #[tokio::test]
     async fn the_attached_bridge_holds_a_capsule_with_asks_to_their_actions() {
         let folder = "localhost://Local/SharedByLocalUsersAndBots/Home/allowed";
@@ -2541,6 +2544,8 @@ mod tests {
                 "{message}"
             );
         }
+        // Each control passes every check made before anything is sent, and
+        // so fails where it tries to reach the Runtime at the dead address.
         for (line, ceiling) in [
             (invoke("read"), read_only.clone()),
             (request("READ"), read_only.clone()),
@@ -2548,7 +2553,11 @@ mod tests {
             (request("WRITE"), any),
         ] {
             let went_on = answer(line.clone(), ceiling).await;
-            assert!(!by_the_ceiling(&went_on), "{line}: {went_on:?}");
+            let failure = match went_on {
+                Ok(answered) => panic!("{line}: answered without the Runtime: {answered}"),
+                Err(failure) => format!("{failure:#}"),
+            };
+            assert!(failure.contains("127.0.0.1:12345"), "{line}: {failure}");
         }
     }
 
@@ -2911,6 +2920,10 @@ mod tests {
             .await
             .expect("the bridge answers");
         assert_eq!(refused["response"]["code"], "manifest_capability_denied");
+        assert_eq!(
+            refused["response"]["message"],
+            format!("capsule manifest does not declare authority to write {object_uri}")
+        );
         assert!(store.list_pending().await.is_empty(), "no prompt was made");
 
         let (line, asker) = (request("read"), ctx.clone());
