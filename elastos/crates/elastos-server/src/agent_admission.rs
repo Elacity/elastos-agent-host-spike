@@ -89,22 +89,10 @@ pub(crate) fn admit_launch(
     if stored.record.localhost_root != root {
         return Err(Refused("agent record's root is not the root its id owns".to_string()).into());
     }
-    // The owner's key must open the agent's stored wrap before anything starts.
-    let (owner_id, nonce, wrapped) = crate::agents::stored_wrap(data_dir, &stored.protection)?;
-    let owner_root = crate::auth::principal_stored_localhost_root(Some(data_dir), &owner_id)?;
-    let Some(wrap_key) =
-        crate::auth::owner_root_wrap_key(data_dir, &owner_id, &owner_root, &stored.protection)?
-    else {
-        anyhow::bail!("agent's owner holds no storage protection");
-    };
-    let key = zeroize::Zeroizing::new(crate::auth::decrypt_aes256_gcm_bytes(
-        wrap_key.as_slice(),
-        &nonce,
-        &wrapped,
-    ).map_err(|_| anyhow::anyhow!("principal-root decrypt failed"))?);
-    if crate::auth::principal_data_key_id(&key) != stored.protection.data_key_id {
-        anyhow::bail!("agent data key does not match its protection");
-    }
+    let _key = zeroize::Zeroizing::new(crate::auth::open_agent_root_data_key(
+        data_dir,
+        &stored.protection,
+    )?);
     Ok(Some(AdmissionContext {
         actor: agent_id.to_string(),
     }))
@@ -353,5 +341,30 @@ pub(crate) mod tests {
         require_home_runtime(home.path(), home.path()).unwrap();
         let error = require_home_runtime(home.path(), parent.path()).unwrap_err();
         assert_eq!(error.to_string(), NOT_THE_HOME);
+    }
+
+    /// Row 5d at the one refusal every launch entrance shares: an agent's own
+    /// principal is refused by name, and no other principal is touched.
+    #[test]
+    fn an_agents_principal_reaches_only_a_launch_that_admitted_it() {
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let refusal = |id: Option<&str>| {
+            refuse_unadmitted_agent_principal(id)
+                .err()
+                .map(|err| err.to_string())
+        };
+        let expected = "a stored agent's principal reaches only a launch that admitted it: \
+                        agent:v2:0123456789abcdef0123456789abcdef";
+        if crate::agents::build_allows() {
+            assert_eq!(refusal(Some(agent)).unwrap(), expected);
+        } else {
+            assert_eq!(
+                refusal(Some(agent)),
+                None,
+                "a build without the feature refuses no principal"
+            );
+        }
+        assert_eq!(refusal(Some("person:local:a5-owner")), None);
+        assert_eq!(refusal(None), None);
     }
 }

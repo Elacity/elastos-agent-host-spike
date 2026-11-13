@@ -442,7 +442,16 @@ fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
         true => Some(lock_for_write(data_dir)?),
         false => None,
     };
-    let owner_file = crate::auth::load_owner_principals(data_dir)?;
+    // The sign-in loader hands agents through too. The sign-in file itself
+    // holds none, and every rule below compares this file with the records
+    // that file holds, so agent records are left out here.
+    let owner_file: Vec<PrincipalRecord> = crate::auth::load_owner_principals(data_dir)?
+        .into_iter()
+        .filter(|record| {
+            record.kind != PrincipalKind::Agent
+                && record.proof_binding.kind != ProofBindingKind::AgentAdmission
+        })
+        .collect();
     let file = match load(data_dir, &owner_file)? {
         AgentFile::Missing => AgentRecordsFile::unwritten(),
         AgentFile::Loaded(file) => file,
@@ -953,7 +962,10 @@ pub(crate) fn stored_protection(
     principal_id: &str,
     localhost_root: &str,
 ) -> anyhow::Result<Option<PrincipalRootProtectionV1>> {
-    Ok(stored_agent_for_root(data_dir, principal_id, localhost_root)?.map(|agent| agent.protection))
+    Ok(
+        stored_agent_for_root(data_dir, principal_id, localhost_root)?
+            .map(|agent| agent.protection),
+    )
 }
 
 /// The owner and the raw wrap of one stored protection, for `auth` to open.
@@ -964,8 +976,11 @@ pub(crate) fn stored_wrap(
     data_dir: &Path,
     protection: &PrincipalRootProtectionV1,
 ) -> anyhow::Result<(String, [u8; 12], Vec<u8>)> {
-    let Some(agent) =
-        stored_agent_for_root(data_dir, &protection.principal_id, &protection.localhost_root)?
+    let Some(agent) = stored_agent_for_root(
+        data_dir,
+        &protection.principal_id,
+        &protection.localhost_root,
+    )?
     else {
         anyhow::bail!("agent file holds no record for this principal root");
     };
@@ -989,4 +1004,58 @@ pub(crate) fn stored_wrap(
         nonce,
         crate::auth::b64_url_decode(&envelope.wrapped_data_key)?,
     ))
+}
+
+/// Adds the agent file's records to what the sign-in file's loader returns,
+/// while agents are on for this Home. It never fails: an agent fault leaves the
+/// owner's own load exactly as it was. A record already present stays one.
+pub(crate) fn merge_into(data_dir: &Path, state: &mut crate::auth::AuthState) {
+    if !build_allows() {
+        return;
+    }
+    let Ok(AgentFile::Loaded(file)) = load(data_dir, &state.principals) else {
+        return;
+    };
+    if file.enabled.is_none() {
+        return;
+    }
+    for agent in file.agents {
+        if !state
+            .principals
+            .iter()
+            .any(|record| record.principal_id == agent.record.principal_id)
+        {
+            state.principals.push(agent.record);
+        }
+    }
+}
+
+/// The sign-in file's own records: `state` without the agent records the
+/// agent file holds unchanged. A caller that adds or changes an agent record
+/// keeps it here, and the save guard refuses it. `None` when nothing is
+/// dropped, which is every build without the feature.
+pub(crate) fn without_agent_roots(
+    data_dir: &Path,
+    state: &crate::auth::AuthState,
+) -> Option<crate::auth::AuthState> {
+    if !build_allows() {
+        return None;
+    }
+    // The file's records are read here, never through the sign-in loader: a
+    // save holds the sign-in lock while it asks, and the loader needs it.
+    let mut stored = Vec::new();
+    if let Ok(path) = agent_file_path(data_dir) {
+        if let Ok(Some(bytes)) = read_agent_file(data_dir, &path) {
+            if let Ok(file) = parse_strict(&bytes) {
+                stored = file.agents;
+            }
+        }
+    }
+    let is_agent = |record: &PrincipalRecord| stored.iter().any(|agent| agent.record == *record);
+    if !state.principals.iter().any(is_agent) {
+        return None;
+    }
+    let mut stripped = state.clone();
+    stripped.principals.retain(|record| !is_agent(record));
+    Some(stripped)
 }
