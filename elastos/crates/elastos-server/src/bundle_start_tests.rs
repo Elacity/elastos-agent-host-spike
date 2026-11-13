@@ -2860,3 +2860,94 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     );
     assert!(!tokens::person(&data).is_empty());
 }
+
+/// D1a-all. The Runtime keeps at most sixteen launches for everyone together:
+/// two people fill it, a third person's open is refused as the Runtime's,
+/// nothing kept is dropped for it, and when the time is up it opens.
+#[tokio::test]
+async fn the_runtime_keeps_sixteen_launches_for_everyone_together() {
+    use crate::page_launch::{OpenRefusal, KEPT_IN_ALL, KEPT_PER_PRINCIPAL};
+    let publisher = key(95);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let data = home.data();
+    let open = |person: &'static str| home.runtime.open_for_page(&data, &cid, person);
+    assert_eq!(KEPT_IN_ALL, 2 * KEPT_PER_PRINCIPAL);
+    for person in [PERSON, "person:local:second"] {
+        for _ in 0..KEPT_PER_PRINCIPAL {
+            open(person).await.unwrap();
+        }
+    }
+    let third = open("person:local:third").await.unwrap_err();
+    assert!(matches!(third, OpenRefusal::TooManyInAll), "{third:?}");
+    assert_eq!(home.runtime.kept_launch_count(), KEPT_IN_ALL);
+    home.runtime.expire_kept_launches();
+    open("person:local:third").await.unwrap();
+}
+
+/// D1a-place. An open takes its place before its start runs, and the place
+/// counts at once: with eight places taken and no start run, the next open is
+/// refused before its start (a CID the start would refuse is answered as the
+/// ninth). A place no launch fills reads as nothing. A place is given back
+/// when its start is refused or what started is not content, so failed opens
+/// leave nothing behind. Nine opens at once keep exactly eight.
+#[tokio::test]
+async fn a_place_is_taken_before_the_start_and_given_back_when_no_launch_fills_it() {
+    use crate::page_launch::{take_place, KeptRead, OpenRefusal, KEPT_PER_PRINCIPAL};
+    let publisher = key(96);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let program = home
+        .staged("core", &manifest("core"), &quiet_component(), &publisher)
+        .await;
+    let data = home.data();
+    let runtime = &home.runtime;
+
+    let places: Vec<_> = (0..KEPT_PER_PRINCIPAL)
+        .map(|_| take_place(&runtime.page_launches, PERSON).unwrap())
+        .collect();
+    let refused = runtime
+        .open_for_page(&data, "not-a-cid", PERSON)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, OpenRefusal::TooManyOpen), "{refused:?}");
+    let (id, page) = (places[0].id().to_string(), "");
+    assert_eq!(
+        runtime.kept_launch_page(&id),
+        None,
+        "a place no launch fills"
+    );
+    assert_eq!(
+        runtime.read_kept_launch(&id, PERSON, page, KeptRead::Content(ENTRYPOINT)),
+        None
+    );
+    drop(places);
+    assert_eq!(runtime.kept_launch_count(), 0, "the places went back");
+
+    for _ in 0..3 * KEPT_PER_PRINCIPAL {
+        let refused = runtime
+            .open_for_page(&data, "not-a-cid", PERSON)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, OpenRefusal::Start(_)), "{refused:?}");
+        let refused = runtime
+            .open_for_page(&data, &program, PERSON)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, OpenRefusal::NotContent), "{refused:?}");
+    }
+    assert_eq!(runtime.kept_launch_count(), 0, "failed opens left nothing");
+
+    let mut opens = tokio::task::JoinSet::new();
+    for _ in 0..=KEPT_PER_PRINCIPAL {
+        let (runtime, data, cid) = (runtime.clone(), data.clone(), cid.clone());
+        opens.spawn(async move { runtime.open_for_page(&data, &cid, PERSON).await });
+    }
+    let opened: Vec<_> = opens.join_all().await;
+    let kept = opened.iter().filter(|open| open.is_ok()).count();
+    assert_eq!(kept, KEPT_PER_PRINCIPAL);
+    assert!(opened
+        .iter()
+        .any(|open| matches!(open, Err(OpenRefusal::TooManyOpen))));
+    assert_eq!(runtime.kept_launch_count(), KEPT_PER_PRINCIPAL);
+}

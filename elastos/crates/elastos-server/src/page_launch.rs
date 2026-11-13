@@ -23,6 +23,9 @@ use crate::runtime::Runtime;
 /// How many launches one person may have kept at once. The next open is
 /// refused; none is dropped to make room.
 pub const KEPT_PER_PRINCIPAL: usize = 8;
+/// How many launches the Runtime keeps at once, for everyone together. Each
+/// holds at most one walk's files (64 MiB), so this bounds their memory too.
+pub const KEPT_IN_ALL: usize = 16;
 /// How long a launch is kept after it is opened.
 pub const KEPT_FOR: Duration = Duration::from_secs(15 * 60);
 
@@ -36,11 +39,13 @@ pub(crate) struct Started {
     pub page: Option<String>,
 }
 
-/// One kept launch.
+/// One place in the table: taken by an open before its start runs, and
+/// holding the launch once the start is over.
 pub(crate) struct Kept {
     principal: String,
     page: String,
-    launch: Arc<LaunchContent>,
+    /// `None` while the open's start runs.
+    launch: Option<Arc<LaunchContent>>,
     until: Instant,
 }
 
@@ -63,6 +68,8 @@ pub enum OpenRefusal {
     NotContent,
     /// This person has [`KEPT_PER_PRINCIPAL`] launches kept already.
     TooManyOpen,
+    /// The Runtime keeps [`KEPT_IN_ALL`] launches already.
+    TooManyInAll,
     /// No person to keep it for.
     NoPrincipal,
 }
@@ -93,6 +100,56 @@ fn kept_ones(table: &PageLaunches) -> std::sync::MutexGuard<'_, HashMap<String, 
     kept
 }
 
+/// A place an open has taken. Dropped before the open keeps its launch (the
+/// start refused, the content was not content, the open was cancelled), it
+/// gives the place back.
+pub(crate) struct Place {
+    table: PageLaunches,
+    id: String,
+    filled: bool,
+}
+
+impl Place {
+    #[cfg(test)]
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        if !self.filled {
+            let mut kept = self.table.lock().unwrap_or_else(|it| it.into_inner());
+            kept.remove(&self.id);
+        }
+    }
+}
+
+/// Take a place for `principal`, under the one lock every place is taken and
+/// filled under: refused when the person or the Runtime is full.
+pub(crate) fn take_place(table: &PageLaunches, principal: &str) -> Result<Place, OpenRefusal> {
+    let mut kept = kept_ones(table);
+    if kept.len() >= KEPT_IN_ALL {
+        return Err(OpenRefusal::TooManyInAll);
+    }
+    if held_by(&kept, principal) >= KEPT_PER_PRINCIPAL {
+        return Err(OpenRefusal::TooManyOpen);
+    }
+    let id = hex::encode(rand::random::<[u8; 16]>());
+    let one = Kept {
+        principal: principal.to_string(),
+        page: String::new(),
+        launch: None,
+        until: Instant::now() + KEPT_FOR,
+    };
+    kept.insert(id.clone(), one);
+    Ok(Place {
+        table: table.clone(),
+        id,
+        filled: false,
+    })
+}
+
 fn held_by(kept: &HashMap<String, Kept>, principal: &str) -> usize {
     kept.values()
         .filter(|one| one.principal == principal)
@@ -113,10 +170,10 @@ impl Runtime {
         if principal.trim().is_empty() {
             return Err(OpenRefusal::NoPrincipal);
         }
-        // Refused before anything is walked or run when the person is full.
-        if held_by(&kept_ones(&self.page_launches), principal) >= KEPT_PER_PRINCIPAL {
-            return Err(OpenRefusal::TooManyOpen);
-        }
+        // The place is taken before anything is walked or run: a full person
+        // or a full Runtime is refused here, and two opens at once cannot
+        // both take the last place. The place goes back if no launch fills it.
+        let mut place = take_place(&self.page_launches, principal)?;
         let person = Some(principal.to_string());
         // The one walk budget of every start by CID, as `run_by_bundle` hands it over.
         let budget = crate::bundle_admission::BUNDLE_WALK_BUDGET;
@@ -127,22 +184,18 @@ impl Runtime {
         let (Some(launch), Some(page)) = (started.launch, started.page) else {
             return Err(OpenRefusal::NotContent);
         };
-        let id = hex::encode(rand::random::<[u8; 16]>());
         let mut kept = kept_ones(&self.page_launches);
-        // Checked again under the one lock that inserts: two opens at once
-        // cannot both take the last place.
-        if held_by(&kept, principal) >= KEPT_PER_PRINCIPAL {
-            return Err(OpenRefusal::TooManyOpen);
-        }
-        let until = Instant::now() + KEPT_FOR;
-        let one = Kept {
-            principal: principal.to_string(),
-            page: page.clone(),
-            launch,
-            until,
-        };
-        kept.insert(id.clone(), one);
-        Ok(Opened { id, page })
+        // The place this open took is filled and its time starts now. (It
+        // cannot have expired: a place lasts as long as a kept launch.)
+        let one = kept.get_mut(&place.id).ok_or(OpenRefusal::TooManyOpen)?;
+        one.page = page.clone();
+        one.launch = Some(launch);
+        one.until = Instant::now() + KEPT_FOR;
+        place.filled = true;
+        Ok(Opened {
+            id: place.id.clone(),
+            page,
+        })
     }
 
     /// Read a kept launch: for `principal`, for its `page`, one name of what
@@ -162,7 +215,7 @@ impl Runtime {
             if one.principal != principal || one.page != page {
                 return None;
             }
-            one.launch.clone()
+            one.launch.clone()?
         };
         match what {
             // An output name with a `/` names nothing: the output's write rule
@@ -177,9 +230,9 @@ impl Runtime {
 
     /// The page a kept launch was opened for, while it is kept.
     pub(crate) fn kept_launch_page(&self, id: &str) -> Option<String> {
-        kept_ones(&self.page_launches)
-            .get(id)
-            .map(|one| one.page.clone())
+        let kept = kept_ones(&self.page_launches);
+        let one = kept.get(id)?;
+        one.launch.as_ref().map(|_| one.page.clone())
     }
 
     #[cfg(test)]
@@ -191,10 +244,8 @@ impl Runtime {
     pub(crate) fn write_kept_output(&self, id: &str, name: &str, bytes: &[u8]) {
         let kept = kept_ones(&self.page_launches);
         let name = format!("{LAUNCH_OUTPUT}{name}");
-        kept[id]
-            .launch
-            .write_for_test(&name, bytes.to_vec())
-            .unwrap();
+        let launch = kept[id].launch.as_ref().expect("a filled place");
+        launch.write_for_test(&name, bytes.to_vec()).unwrap();
     }
 
     #[cfg(test)]
