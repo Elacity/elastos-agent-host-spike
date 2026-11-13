@@ -883,6 +883,13 @@ fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
     // it read is the ceiling the request is judged under.
     assert_eq!(handler.matches("host_manifest_capabilities").count(), 1);
     assert_eq!(handler.matches("manifest_capabilities,\n").count(), 1);
+    // The content of a launch is looked up the same way: by the caller's own
+    // id, there and nowhere else, and a caller with no entry gets none.
+    let held = "let launch = host_launch_contents.read().ok();\n                \
+                let launch = launch.and_then(|guard| guard.get(capsule_id).cloned());";
+    assert_eq!(handler.matches(held).count(), 1);
+    assert_eq!(handler.matches("host_launch_contents").count(), 1);
+    assert_eq!(handler.matches("launch,\n").count(), 1);
 }
 
 /// A-asks. A capsule whose manifest has asks is started unsealed, under
@@ -1858,15 +1865,24 @@ async fn a_bundle_two_pins_reach_is_checked_and_counted_once() {
             let name = format!("{order}-{levels}");
             let root = manifest_pinning(&name, &pins);
             let root = home.staged(&name, &root, &quiet, &publisher).await;
-            let result = home.run(&root, None).await;
+            let (result, walked) = home.run_watched(&root, None, BUNDLE_WALK_BUDGET).await;
             match refused {
                 true => assert_eq!(
                     result.unwrap_err(),
                     under(&named("below"), BundleRefusal::ClosureTooDeep),
                     "{order}"
                 ),
-                false => assert_eq!(result.unwrap().0, name, "{order}"),
+                false => assert_eq!(result.unwrap(), name, "{order}"),
             }
+            // Measuring again reads nothing: every bundle is walked once at
+            // most, the shared one and what is below it included, and the
+            // bundle refused for its depth the long way round is not read.
+            let mut once = walked.clone();
+            once.sort();
+            once.dedup();
+            assert_eq!(once.len(), walked.len(), "{order}: {walked:?}");
+            let unread = usize::from(refused && order == "long-first");
+            assert_eq!(walked.len(), levels + 3 - unread, "{order}: {walked:?}");
         }
     }
 }
@@ -2290,4 +2306,168 @@ async fn each_kind_of_bundle_has_its_places_and_no_other() {
             format!("bundle_member_kind_refused: {found} is pinned where a program must be (requirement {name})")
         );
     }
+}
+
+/// L-held. While the program of a content launch runs, the Runtime holds
+/// that launch's content for the program's own capsule id: every file the
+/// walk read from the content bundle, by its path, and nothing of the page
+/// or of the program. It is held for no one else and not kept afterwards. A
+/// program started by its own CID has none.
+#[tokio::test]
+async fn the_content_of_a_launch_is_held_for_its_program_while_it_runs() {
+    let publisher = key(84);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let core = manifest_with("core", "asks", asks);
+    let core = home
+        .staged("core", &core, &calling_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let content = home
+        .staged("pictures", &content, b"a picture", &publisher)
+        .await;
+
+    // Asked from inside the bridge handler, which the core reaches because
+    // it has asks: what is held for the caller, and for another id.
+    type Seen = (String, Option<Vec<String>>, Option<Vec<String>>);
+    let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
+    let (record, runtime) = (seen.clone(), Arc::downgrade(&home.runtime));
+    home.runtime
+        .set_bridge_hostcall(Arc::new(move |_line, capsule, _principal| {
+            let runtime = runtime.upgrade().expect("the Home");
+            let (own, other) = (
+                runtime.launch_paths_of(capsule),
+                runtime.launch_paths_of("another"),
+            );
+            record
+                .lock()
+                .unwrap()
+                .push((capsule.to_string(), own, other));
+            Err("the test's bridge handler was reached".to_string())
+        }));
+
+    let refusal = home.run(&content, Some(PERSON)).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_start_failed", "{refusal}");
+    let held = seen.lock().unwrap().clone();
+    assert_eq!(held.len(), 1);
+    let (capsule, own, other) = &held[0];
+    let files = vec![ENTRYPOINT.to_string(), "capsule.json".to_string()];
+    assert_eq!(own.as_ref(), Some(&files));
+    assert_eq!(other, &None);
+    assert_eq!(home.runtime.launch_paths_of(capsule), None, "not kept");
+
+    // The same program started by its own CID: no content is held for it.
+    let refusal = home.run(&core, Some(PERSON)).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_start_failed", "{refusal}");
+    let held = seen.lock().unwrap().clone();
+    assert_eq!(held.len(), 2);
+    assert_eq!(held[1].1, None);
+}
+
+/// L-long. A content whose listing would be longer than a launch serves is
+/// refused at the start, by name, before anything it pins is read. Here: 700
+/// empty files, each under a path about four hundred bytes long (a whole
+/// path must stay under what the file system allows).
+#[tokio::test]
+async fn content_whose_listing_is_too_long_is_refused_at_the_start() {
+    let publisher = key(85);
+    let home = Home::trusting(&[&publisher]).await;
+    let core = home
+        .staged("core", &manifest("core"), &quiet_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let manifest = content_manifest("long", &[("page", &page)]).to_string();
+    let folder = home.bundle("long", &manifest, b"a picture");
+    let deep = (0..2).fold(folder.clone(), |at, _| at.join("d".repeat(200)));
+    fs::create_dir_all(&deep).unwrap();
+    for file in 0..700 {
+        fs::write(deep.join(format!("{file:03}")), b"").unwrap();
+    }
+    let content = home.stage(&folder, &publisher).await;
+    let (result, walked) = home.run_watched(&content, None, BUNDLE_WALK_BUDGET).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(
+        refusal.code(),
+        "bundle_content_listing_too_long",
+        "{refusal}"
+    );
+    assert!(
+        matches!(refusal, BundleRefusal::ContentListingTooLong(bytes) if bytes > 256 * 1024),
+        "{refusal}"
+    );
+    assert_eq!(walked, [content.as_str()]);
+}
+
+/// L-cancel. A start that is cancelled while its program runs takes the
+/// launch's content away at once. The program here is held inside its one
+/// call to the bridge; the start is cancelled there; the content is gone
+/// before the call returns, so the program, still running, finds none when
+/// it looks again, and none is kept.
+#[tokio::test]
+async fn a_cancelled_start_takes_the_launchs_content_away() {
+    let publisher = key(86);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let core = manifest_with("core", "asks", asks);
+    let core = home
+        .staged("core", &core, &calling_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let content = home
+        .staged("pictures", &content, b"a picture", &publisher)
+        .await;
+
+    let (called, on_call) = std::sync::mpsc::channel::<String>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let looked: Arc<Mutex<Vec<Option<Vec<String>>>>> = Arc::default();
+    let (record, runtime) = (looked.clone(), Arc::downgrade(&home.runtime));
+    home.runtime
+        .set_bridge_hostcall(Arc::new(move |_line, capsule, _principal| {
+            let runtime = runtime.upgrade().expect("the Home");
+            record
+                .lock()
+                .unwrap()
+                .push(runtime.launch_paths_of(capsule));
+            called.send(capsule.to_string()).unwrap();
+            // Held here, inside the program's call, until the test says.
+            released.lock().unwrap().recv().unwrap();
+            record
+                .lock()
+                .unwrap()
+                .push(runtime.launch_paths_of(capsule));
+            Err("the test's bridge handler was reached".to_string())
+        }));
+
+    let (runtime, data) = (home.runtime.clone(), home.data());
+    let start = tokio::spawn(async move {
+        let person = Some(PERSON.to_string());
+        let started = runtime.run_by_bundle(&data, &content, Vec::new(), person);
+        started.await.map(|_| ())
+    });
+    let capsule = tokio::task::spawn_blocking(move || on_call.recv().unwrap())
+        .await
+        .unwrap();
+    let files = vec![ENTRYPOINT.to_string(), "capsule.json".to_string()];
+    assert_eq!(home.runtime.launch_paths_of(&capsule), Some(files.clone()));
+
+    start.abort();
+    assert!(start.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        home.runtime.launch_paths_of(&capsule),
+        None,
+        "taken away at the cancel"
+    );
+
+    release.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while looked.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(*looked.lock().unwrap(), [Some(files), None]);
 }

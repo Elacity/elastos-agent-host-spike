@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal};
+use crate::resource_bridge::LaunchContent;
 use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider};
@@ -70,6 +71,45 @@ pub struct Runtime {
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
     bridge_manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    /// For each program a content launch is running, by its capsule id: the
+    /// content it was launched with. Kept like the ceilings, beside them.
+    launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+}
+
+/// One launch's content in the Runtime's table, for as long as this value
+/// lives. It is put there when the value is made and taken away when the
+/// value is dropped, however that happens: at the end of the start, or when
+/// the start is cancelled and its future dropped.
+struct LaunchHeld {
+    table: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+    id: String,
+}
+
+impl LaunchHeld {
+    fn new(
+        table: &Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+        id: &str,
+        launch: Arc<LaunchContent>,
+    ) -> Self {
+        if let Ok(mut launches) = table.write() {
+            launches.insert(id.to_string(), launch);
+        }
+        Self {
+            table: table.clone(),
+            id: id.to_string(),
+        }
+    }
+}
+
+impl Drop for LaunchHeld {
+    fn drop(&mut self) {
+        // A poisoned lock still holds the map: the entry goes all the same.
+        let mut launches = match self.table.write() {
+            Ok(launches) => launches,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        launches.remove(&self.id);
+    }
 }
 
 impl Runtime {
@@ -84,6 +124,7 @@ impl Runtime {
             running_capsules: RwLock::new(HashMap::new()),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            launch_contents: Arc::default(),
         }
     }
 
@@ -101,6 +142,7 @@ impl Runtime {
             running_capsules: RwLock::new(HashMap::new()),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            launch_contents: Arc::default(),
         }
     }
 
@@ -122,6 +164,7 @@ impl Runtime {
             let host_pending = pending_store.clone();
             let host_data_dir = data_dir.clone();
             let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
+            let host_launch_contents = self.launch_contents.clone();
             let host_handle = tokio::runtime::Handle::current();
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
                 let manifest_capabilities = host_manifest_capabilities
@@ -129,6 +172,11 @@ impl Runtime {
                     .ok()
                     .and_then(|guard| guard.get(capsule_id).cloned())
                     .unwrap_or_default();
+                // The content this caller was launched with, if it is the
+                // program of a content launch: looked up by its own id, as
+                // its ceiling is, and nobody else's.
+                let launch = host_launch_contents.read().ok();
+                let launch = launch.and_then(|guard| guard.get(capsule_id).cloned());
                 let ctx = crate::resource_bridge::BridgeContext {
                     provider_registry: host_reg.clone(),
                     capability_manager: host_cap_mgr.clone(),
@@ -137,6 +185,7 @@ impl Runtime {
                     principal_id: principal_id.map(ToOwned::to_owned),
                     manifest_capabilities,
                     data_dir: Some(host_data_dir.clone()),
+                    launch,
                 };
                 let response = host_handle
                     .block_on(crate::resource_bridge::handle_component_resource_request(
@@ -369,7 +418,11 @@ impl Runtime {
     /// The bundle is a program, and it is what starts; or it is content, and
     /// then what starts is the one program of the page that content pins:
     /// content pins exactly its viewer, a page, and a page pins exactly its
-    /// program, the core. The content and the page get no instance, and the
+    /// program, the core. While the core runs, the content's files, as this
+    /// start's walk read them, are its to read under the launch name
+    /// (`elastos://launch/content/`), if its manifest asks for that name;
+    /// the bridge answers those reads itself and the store is not read
+    /// again. The content and the page get no instance, and the
     /// handle returned is the core's. A page is not started by its own CID.
     /// Under a program only programs may be pinned.
     ///
@@ -396,7 +449,7 @@ impl Runtime {
     /// walk budget they all share, before anything starts. A pinned bundle
     /// is checked and nothing more, the core under content aside: it is not
     /// started, and the capsule that starts gets no way to reach it or its
-    /// bytes, the content's included. A bundle that two pins
+    /// bytes. A bundle that two pins
     /// reach is checked and counted once. Who is trusted is read once for
     /// the whole start.
     pub async fn run_by_bundle(
@@ -458,6 +511,19 @@ impl Runtime {
         let below = |depth: usize, kind: BundleKind, core: bool, pins: Vec<(String, String)>| {
             let pins = pins.into_iter().rev();
             pins.map(move |(name, pin)| (depth + 1, kind, core, name, pin))
+        };
+        // For content, what its program may read while it runs: the files
+        // this walk has just read, held for the launch. A content whose
+        // listing would be too long to serve is refused here, before
+        // anything it pins is read.
+        let launch = match admitted.kind {
+            BundleKind::Content => {
+                let content = LaunchContent::new(std::mem::take(&mut admitted.files));
+                Some(Arc::new(
+                    content.map_err(BundleRefusal::ContentListingTooLong)?,
+                ))
+            }
+            BundleKind::Program | BundleKind::Page => None,
         };
         let pins = std::mem::take(&mut admitted.pins);
         // Every bundle admitted so far, by its CID: the name it carries, the
@@ -571,9 +637,17 @@ impl Runtime {
             false => component.load_admitted(bytes, manifest).await,
         };
         let mut handle = loaded.map_err(failed)?;
-        self.start_loaded(component, &mut handle, args, principal_id)
-            .await
-            .map_err(failed)?;
+        // The launch's content is the program's to read from before it
+        // starts until the start is over, kept under the program's own
+        // capsule id. "Over" is when the start returns, and also when it is
+        // cancelled: the program may run on in its own thread after that,
+        // and from then on it reads nothing of the content.
+        let held =
+            launch.map(|launch| LaunchHeld::new(&self.launch_contents, &handle.id.0, launch));
+        let started = self.start_loaded(component, &mut handle, args, principal_id);
+        let started = started.await;
+        drop(held);
+        started.map_err(failed)?;
         Ok((handle, accepted))
     }
 
@@ -640,6 +714,14 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn trust_can_change_now(&self) -> bool {
         self.signature_verifier.try_write().is_ok()
+    }
+
+    /// Test only: the paths of the content the capsule `id` may read right
+    /// now as the program of a content launch.
+    #[cfg(test)]
+    pub(crate) fn launch_paths_of(&self, id: &str) -> Option<Vec<String>> {
+        let launches = self.launch_contents.read().unwrap();
+        launches.get(id).map(|launch| launch.paths())
     }
 
     /// Test only: the ceiling the bridge holds the capsule `id` to right now,

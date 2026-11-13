@@ -6,6 +6,7 @@
 //! Wire format: newline-delimited JSON matching `RequestEnvelope` / `ResponseEnvelope`
 //! from `elastos-guest::runtime`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +33,75 @@ const CAPABILITY_APPROVAL_POLL_MS: u64 = 100;
 const CAPABILITY_APPROVAL_MAX_POLLS: usize = 300;
 const MAX_RESOURCE_FRAME_BYTES: usize = 1_048_576;
 
+/// The name a content launch binds for its program, and the pattern that
+/// program asks for and is granted: a read of the bare name is the listing,
+/// a read of a name under it is that file of the content.
+pub const LAUNCH_CONTENT: &str = "elastos://launch/content/";
+/// Every name of a launch starts so. The bridge answers each itself, at
+/// once: none is put to the shell and none reaches a provider.
+pub const LAUNCH_NAMES: &str = "elastos://launch/";
+/// The bridge's one answer where no launch binds the name for the caller.
+const NO_LAUNCH: &str = "no content launch binds this name for this capsule";
+pub const LAUNCH_CONTENT_PATTERN: &str = "elastos://launch/content/*";
+/// The listing of a launch's content may be this long as text, no longer.
+pub const LAUNCH_LISTING_MAX_BYTES: usize = 256 * 1024;
+
+/// What one content launch lets its program read: the content bundle's
+/// files exactly as the start's walk read them, and their listing, made
+/// once. The store is not read again for either. The listing is the one
+/// format the Runtime owns here: a schema name and, for each file in the
+/// order of its path, `path` and `size`.
+pub struct LaunchContent {
+    files: BTreeMap<String, Vec<u8>>,
+    listing: Vec<u8>,
+}
+
+impl LaunchContent {
+    /// `Err` holds the listing's length when it would pass the cap.
+    pub fn new(files: BTreeMap<String, Vec<u8>>) -> std::result::Result<Self, usize> {
+        let entry = |(path, bytes): (&String, &Vec<u8>)| serde_json::json!({"path": path, "size": bytes.len()});
+        let listed: Vec<_> = files.iter().map(entry).collect();
+        let listing =
+            serde_json::json!({"schema": "elastos.launch.content-listing/v1", "files": listed});
+        let listing = listing.to_string().into_bytes();
+        match listing.len() > LAUNCH_LISTING_MAX_BYTES {
+            true => Err(listing.len()),
+            false => Ok(Self { files, listing }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn paths(&self) -> Vec<String> {
+        self.files.keys().cloned().collect()
+    }
+
+    /// What a read of `name` gets: the listing for the bare name, and for a
+    /// name under it the file with exactly that path. The path is looked up
+    /// as text among the files the walk read; it is joined onto no folder.
+    fn read(&self, name: &str) -> Option<&[u8]> {
+        match name.strip_prefix(LAUNCH_CONTENT)? {
+            "" => Some(&self.listing),
+            path => self.files.get(path).map(Vec::as_slice),
+        }
+    }
+}
+
+/// The bridge's own answer to a read of a launch name, for the caller whose
+/// launch this is: the bytes, in the window asked for, or `not_found`. Its
+/// caller has already held the request to the ceiling and to the token.
+fn launch_read_response(
+    launch: Option<&LaunchContent>,
+    request: &serde_json::Value,
+) -> serde_json::Value {
+    let name = request["path"].as_str().unwrap_or_default();
+    let Some(bytes) = launch.and_then(|launch| launch.read(name)) else {
+        return resource_error_response("not_found", NO_LAUNCH);
+    };
+    let window = |key: &str| request.get(key).and_then(|value| value.as_u64());
+    let bytes = apply_read_window(bytes.to_vec(), window("offset"), window("length"));
+    provider_ok_result(serde_json::json!({"content": bytes, "size": bytes.len()}))
+}
+
 /// Resources needed by the bridge to handle requests.
 #[derive(Clone)]
 pub struct BridgeContext {
@@ -47,6 +117,9 @@ pub struct BridgeContext {
     pub manifest_capabilities: Vec<AuthorityBound>,
     /// Runtime data directory used by protected principal-root storage helpers.
     pub data_dir: Option<PathBuf>,
+    /// The content this capsule was launched with, when it is the program of
+    /// a content launch that is still running. Nothing else has one.
+    pub launch: Option<Arc<LaunchContent>>,
 }
 
 /// Spawn a resource bridge handler for a microVM capsule.
@@ -223,6 +296,9 @@ fn resource_invoke_dispatch(
     }
     if !body.is_object() {
         return Err("resource_invoke body must be a JSON object".to_string());
+    }
+    if scheme == "launch" {
+        body["path"] = serde_json::Value::String(uri.to_string());
     }
     if scheme == "localhost" {
         if let Some(object) = body.as_object_mut() {
@@ -451,6 +527,17 @@ async fn authorize_and_dispatch_resource_invoke(
 
     if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+    }
+
+    // A launch name is answered here, from the caller's own launch, and
+    // never by a provider.
+    if dispatch.scheme == "launch" {
+        let response = launch_read_response(bridge_ctx.launch.as_deref(), &dispatch.request);
+        let outcome = match response.get("type").and_then(|value| value.as_str()) {
+            Some("resource_result") => invoke_outcome(&response["result"]),
+            _ => "denied",
+        };
+        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
     }
 
     if let Some(response) = protected_principal_root_resource_response(
@@ -1040,6 +1127,31 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 }
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
+                // A launch name is never put to the shell. The bridge answers
+                // at once from what it holds for this caller: the launch's
+                // one grant, for the pattern its content is bound under, or
+                // `not_found`.
+                if resource.starts_with(LAUNCH_NAMES) {
+                    let bound = ctx.launch.is_some()
+                        && resource == LAUNCH_CONTENT_PATTERN
+                        && action == elastos_runtime::capability::Action::Read;
+                    let response = match bound {
+                        true => {
+                            let token = ctx.capability_manager.grant(
+                                &ctx.capsule_id,
+                                resource_id,
+                                action,
+                                elastos_runtime::capability::TokenConstraints::default(),
+                                None,
+                            );
+                            let token = encode_bridge_capability_token(&token);
+                            serde_json::json!({"type": "capability_token", "token": token})
+                        }
+                        false => resource_error_response("not_found", NO_LAUNCH),
+                    };
+                    return Ok(serde_json::json!({"id": id, "response": response}));
+                }
+
                 // Create a pending request — the shell decides whether to grant.
                 let pending = crate::api::handlers::capability::create_request_retiring(
                     &ctx.pending_store,
@@ -1265,6 +1377,13 @@ pub async fn handle_remote_request_with_audit_dir(
                     }));
                 }
             };
+            // A capsule attached to a running Runtime is never the program
+            // of a content launch: a launch name is refused here, at once,
+            // and goes to no provider.
+            if dispatch.scheme == "launch" {
+                let response = resource_error_response("not_found", NO_LAUNCH);
+                return Ok(serde_json::json!({"id": id, "response": response}));
+            }
             let cap_token = request["token"].as_str().unwrap_or("");
             // Audit as local dispatch does: "requested" once the request
             // parses, then one "completed" record for every way out, refusals
@@ -1410,6 +1529,11 @@ pub async fn handle_remote_request_with_audit_dir(
             let resource = request["resource"].as_str().unwrap_or("");
             let action_str = request["action"].as_str().unwrap_or("execute");
             let reason = request["reason"].as_str().unwrap_or("");
+            // Nor is a launch name ever sent on to be put to the shell.
+            if resource.starts_with(LAUNCH_NAMES) {
+                let response = resource_error_response("not_found", NO_LAUNCH);
+                return Ok(serde_json::json!({"id": id, "response": response}));
+            }
 
             let data_dir = audit_data_dir;
             let scoped_resource = match scope_current_user_alias(resource, principal_id, data_dir) {
@@ -1731,6 +1855,7 @@ mod tests {
                 "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
             ]),
             data_dir: None,
+            launch: None,
         }
     }
 
@@ -1756,6 +1881,359 @@ mod tests {
         assert!(!manifest_allows_resource(
             &bounds, &resource, "read", None, None
         ));
+    }
+
+    /// The listing of a launch's content: a schema name and, for each file
+    /// in the order of its path, the path and the size, and nothing else.
+    /// It is made once, from the files handed over. Past the cap there is
+    /// no launch content at all, and the length is given back.
+    #[test]
+    fn the_listing_of_a_launchs_content_is_its_files_by_path_and_is_capped() {
+        let file = |path: &str, size: usize| (path.to_string(), vec![7u8; size]);
+        let files = BTreeMap::from([
+            file("images/02.png", 5),
+            file("capsule.json", 3),
+            file("images/01.png", 0),
+        ]);
+        let content = LaunchContent::new(files).map_err(|_| ()).unwrap();
+        let listing: serde_json::Value = serde_json::from_slice(&content.listing).unwrap();
+        assert_eq!(
+            listing,
+            serde_json::json!({
+                "schema": "elastos.launch.content-listing/v1",
+                "files": [
+                    {"path": "capsule.json", "size": 3},
+                    {"path": "images/01.png", "size": 0},
+                    {"path": "images/02.png", "size": 5}
+                ]
+            })
+        );
+        assert_eq!(content.paths().len(), 3);
+
+        // 256 paths of about a thousand bytes each: over the cap by a little.
+        let long = |n: usize| format!("{}/{n:04}", "d".repeat(1_015));
+        let many = |count: usize| -> BTreeMap<String, Vec<u8>> {
+            (0..count).map(|n| (long(n), Vec::new())).collect()
+        };
+        let over = LaunchContent::new(many(256)).map(|_| ()).unwrap_err();
+        assert!(over > LAUNCH_LISTING_MAX_BYTES, "{over}");
+        assert!(LaunchContent::new(many(240)).is_ok());
+    }
+
+    /// A context for the program of a content launch: its own capsule id,
+    /// the asks a photo core would sign, and the launch's content. Each
+    /// shares `base`'s capability manager, pending store and audit log.
+    fn launched(base: &BridgeContext, capsule: &str, files: &[(&str, &[u8])]) -> BridgeContext {
+        let files = files
+            .iter()
+            .map(|(path, bytes)| (path.to_string(), bytes.to_vec()));
+        let mut ctx = base.clone();
+        ctx.capsule_id = capsule.to_string();
+        ctx.manifest_capabilities = vec![AuthorityBound {
+            resource: LAUNCH_CONTENT_PATTERN.to_string(),
+            actions: Some(vec![elastos_common::AskAction::Read]),
+        }];
+        ctx.launch = Some(Arc::new(
+            LaunchContent::new(files.collect()).map_err(|_| ()).unwrap(),
+        ));
+        ctx
+    }
+
+    fn launch_request(resource: &str, action: &str) -> String {
+        format!(
+            r#"{{"id":41,"request":{{"type":"request_capability","resource":"{resource}","action":"{action}"}}}}"#
+        )
+    }
+
+    fn launch_read(name: &str, token: &str, body: serde_json::Value) -> String {
+        let request = serde_json::json!({
+            "type": "resource_invoke", "uri": name, "operation": "read", "token": token, "body": body
+        });
+        serde_json::json!({"id": 42, "request": request}).to_string()
+    }
+
+    /// The token of a granted request, or the refusal's code.
+    async fn launch_grant(
+        ctx: &BridgeContext,
+        resource: &str,
+        action: &str,
+    ) -> std::result::Result<String, String> {
+        let answer = handle_request(&launch_request(resource, action), &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        match answer["response"]["type"].as_str() {
+            Some("capability_token") => {
+                Ok(answer["response"]["token"].as_str().unwrap().to_string())
+            }
+            _ => Err(answer["response"]["code"]
+                .as_str()
+                .unwrap_or("?")
+                .to_string()),
+        }
+    }
+
+    /// The bytes a read returns, or the refusal's code.
+    async fn launch_bytes(ctx: &BridgeContext, line: &str) -> std::result::Result<Vec<u8>, String> {
+        let answer = handle_request(line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        let response = &answer["response"];
+        match response["result"]["status"].as_str() {
+            Some("ok") => {
+                let data = &response["result"]["data"];
+                let bytes: Vec<u8> = serde_json::from_value(data["content"].clone()).unwrap();
+                assert_eq!(data["size"], bytes.len());
+                Ok(bytes)
+            }
+            _ => Err(response["code"].as_str().unwrap_or("?").to_string()),
+        }
+    }
+
+    /// The bridge answers every launch name itself. Two programs of two
+    /// content launches are alive at once: each asks for the launch name and
+    /// is granted it at once, with nothing put to the shell, and each reads
+    /// its own content under the same names, never the other's; a token is
+    /// its holder's alone. The bare name is the listing; a name under it is
+    /// that file, by its exact path, in the window asked for. A path with
+    /// `..`, a path the content does not hold, another launch name, a write,
+    /// and any other action are refused, and nothing is read for them. When
+    /// the launch is over the same token opens nothing.
+    #[tokio::test]
+    async fn the_bridge_answers_a_launch_name_itself_for_the_caller_it_binds() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[
+                ("capsule.json", b"{}"),
+                ("images/01.png", b"first set"),
+                ("images/02.png", b"0123456789"),
+            ],
+        );
+        let two = launched(&base, "core-two", &[("images/01.png", b"second set")]);
+        let token_one = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let token_two = launch_grant(&two, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        assert!(
+            base.pending_store.list_pending().await.is_empty(),
+            "nothing was put to the shell"
+        );
+
+        let picture = "elastos://launch/content/images/01.png";
+        let none = serde_json::json!({});
+        let read = |ctx: &BridgeContext, name: &str, token: &str, body: &serde_json::Value| {
+            let (ctx, line) = (ctx.clone(), launch_read(name, token, body.clone()));
+            async move { launch_bytes(&ctx, &line).await }
+        };
+        assert_eq!(
+            read(&one, picture, &token_one, &none).await.unwrap(),
+            b"first set"
+        );
+        assert_eq!(
+            read(&two, picture, &token_two, &none).await.unwrap(),
+            b"second set"
+        );
+        // A token is its holder's: the other program's token is no use here.
+        assert_eq!(
+            read(&two, picture, &token_one, &none).await.unwrap_err(),
+            "capability_denied"
+        );
+        assert_eq!(
+            read(&one, picture, "", &none).await.unwrap_err(),
+            "missing_token"
+        );
+
+        // The bare name is the listing, and only this caller's.
+        let listing = read(&one, LAUNCH_CONTENT, &token_one, &none).await.unwrap();
+        let listing: serde_json::Value = serde_json::from_slice(&listing).unwrap();
+        let paths: Vec<&str> = listing["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["capsule.json", "images/01.png", "images/02.png"]);
+        assert_eq!(listing["files"][2]["size"], 10);
+
+        // A window, as a storage read has.
+        let window = serde_json::json!({"offset": 2, "length": 3});
+        let second = "elastos://launch/content/images/02.png";
+        assert_eq!(
+            read(&one, second, &token_one, &window).await.unwrap(),
+            b"234"
+        );
+
+        // Not a file of this content: the other content's file names mean
+        // nothing here, and neither does a path from outside.
+        for missing in [
+            "elastos://launch/content/images/03.png",
+            "elastos://launch/content/images",
+            "elastos://launch/content//etc/passwd",
+            "elastos://launch/content/Images/01.png",
+        ] {
+            let refused = read(&one, missing, &token_one, &none).await.unwrap_err();
+            assert_eq!(refused, "not_found", "{missing}");
+        }
+        // A path with `..` does not pass the ceiling at all.
+        let climbing = "elastos://launch/content/images/../capsule.json";
+        let refused = read(&one, climbing, &token_one, &none).await.unwrap_err();
+        assert_eq!(refused, "manifest_capability_denied");
+        // No other text is a launch name, and the one operation is a read.
+        let refused = read(&one, "elastos://launch/store", &token_one, &none)
+            .await
+            .unwrap_err();
+        assert_eq!(refused, "invalid_resource_invoke");
+        let write = serde_json::json!({
+            "id": 43,
+            "request": {"type": "resource_invoke", "uri": picture, "operation": "write",
+                        "token": token_one, "body": {"content": "x"}}
+        });
+        let refused = launch_bytes(&one, &write.to_string()).await.unwrap_err();
+        assert_eq!(refused, "invalid_resource_invoke");
+
+        // A request for any other action, or any other launch name, is
+        // refused at once too: by the ceiling when the manifest does not ask
+        // for it, and with `not_found` when it does.
+        assert_eq!(
+            launch_grant(&one, LAUNCH_CONTENT_PATTERN, "write")
+                .await
+                .unwrap_err(),
+            "manifest_capability_denied"
+        );
+        let mut wide = one.clone();
+        wide.manifest_capabilities = any_action(vec!["elastos://launch/*".to_string()]);
+        for (resource, action) in [
+            (LAUNCH_CONTENT_PATTERN, "write"),
+            ("elastos://launch/output/playlist.json", "write"),
+            ("elastos://launch/content/images/01.png", "read"),
+            ("elastos://launch/*", "read"),
+        ] {
+            let refused = launch_grant(&wide, resource, action).await.unwrap_err();
+            assert_eq!(refused, "not_found", "{action} {resource}");
+        }
+        assert!(
+            base.pending_store.list_pending().await.is_empty(),
+            "still nothing for the shell"
+        );
+
+        // The launch is over: the entry is gone, and the token it left opens
+        // nothing.
+        let mut over = one.clone();
+        over.launch = None;
+        assert_eq!(
+            read(&over, picture, &token_one, &none).await.unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            read(&over, LAUNCH_CONTENT, &token_one, &none)
+                .await
+                .unwrap_err(),
+            "not_found"
+        );
+    }
+
+    /// Where no content launch binds the name, the answer comes at once and
+    /// is `not_found`: that one code is how a program learns it was not
+    /// launched with content. Nothing is put to the shell. A program whose
+    /// manifest asks for other names but not this one is refused before
+    /// that, by its own ceiling, by name: under content too, so such a
+    /// program starts and cannot read. (A program that asks for nothing at
+    /// all never gets this far: a start by CID loads it sealed, and its call
+    /// is refused before any bridge sees it.)
+    #[tokio::test]
+    async fn a_launch_name_without_a_launch_is_not_found_at_once() {
+        let base = bridge_context();
+        let mut asking = launched(&base, "from-a-folder", &[]);
+        asking.launch = None;
+        let started = std::time::Instant::now();
+        let refused = launch_grant(&asking, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap_err();
+        assert_eq!(refused, "not_found");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "at once"
+        );
+        assert!(
+            base.pending_store.list_pending().await.is_empty(),
+            "nothing was put to the shell"
+        );
+
+        let mut not_asking = launched(&base, "under-content", &[("images/01.png", b"x")]);
+        not_asking.manifest_capabilities = any_action(vec!["elastos://did/*".to_string()]);
+        let answer = handle_request(
+            &launch_request(LAUNCH_CONTENT_PATTERN, "read"),
+            &Some(not_asking.clone()),
+        )
+        .await
+        .expect("the bridge answers");
+        assert_eq!(answer["response"]["code"], "manifest_capability_denied");
+        assert_eq!(
+            answer["response"]["message"],
+            "capsule manifest does not declare authority for elastos://launch/content/*"
+        );
+        let line = launch_read(LAUNCH_CONTENT, "", serde_json::json!({}));
+        assert_eq!(
+            launch_bytes(&not_asking, &line).await.unwrap_err(),
+            "manifest_capability_denied"
+        );
+    }
+
+    /// A capsule attached to a running Runtime is never the program of a
+    /// content launch. The attached bridge refuses a launch name at once,
+    /// request and read alike, and sends nothing on: the address it is given
+    /// here has nothing behind it, and no answer speaks of a failed send.
+    #[tokio::test]
+    async fn the_attached_bridge_refuses_a_launch_name_and_sends_nothing() {
+        let asks = vec![AuthorityBound {
+            resource: LAUNCH_CONTENT_PATTERN.to_string(),
+            actions: Some(vec![elastos_common::AskAction::Read]),
+        }];
+        let lines = [
+            launch_request(LAUNCH_CONTENT_PATTERN, "read"),
+            launch_request("elastos://launch/output/playlist.json", "write"),
+            launch_read(
+                "elastos://launch/content/images/01.png",
+                "any-token",
+                serde_json::json!({}),
+            ),
+            launch_read(LAUNCH_CONTENT, "any-token", serde_json::json!({})),
+        ];
+        for line in lines {
+            let answer = handle_remote_request(
+                &line,
+                "http://127.0.0.1:9",
+                "client-token",
+                "attached-capsule",
+                &any_action(vec!["elastos://launch/*".to_string()]),
+                None,
+            )
+            .await
+            .expect("the bridge answers");
+            assert_eq!(answer["response"]["code"], "not_found", "{line}: {answer}");
+            assert_eq!(answer["response"]["message"], NO_LAUNCH, "{line}");
+        }
+        // The same, under the asks a photo core signs: the read of a file is
+        // inside them and is refused by the launch rule, not by the ceiling.
+        let line = launch_read(
+            "elastos://launch/content/images/01.png",
+            "any-token",
+            serde_json::json!({}),
+        );
+        let answer = handle_remote_request(
+            &line,
+            "http://127.0.0.1:9",
+            "client-token",
+            "attached-capsule",
+            &asks,
+            None,
+        )
+        .await
+        .expect("the bridge answers");
+        assert_eq!(answer["response"]["code"], "not_found", "{answer}");
     }
 
     /// A manifest's asks are its ceiling. A request passes the ceiling when
