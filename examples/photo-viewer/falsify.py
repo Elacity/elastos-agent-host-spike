@@ -161,6 +161,13 @@ GUEST = [
         "if images.len() > MAX_ALBUM_ITEMS {",
         ["a_launched_set_with_no_pictures_or_too_many_is_refused"],
     ),
+    (
+        "a launch's listing read up to the Runtime's cap, past the fuel the album's cap bounds",
+        "src/lib.rs",
+        "pub const MAX_LISTING_BYTES: u64 = MAX_ALBUM_BYTES;",
+        "pub const MAX_LISTING_BYTES: u64 = 256 * 1024;",
+        ["a_launched_set_whose_listing_passes_the_cap_is_refused"],
+    ),
 ]
 
 # The kit's straight writer and the `json!` serializer it replaced. The JSON

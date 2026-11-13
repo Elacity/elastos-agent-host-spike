@@ -50,8 +50,11 @@ pub const LAUNCH_OUTPUT_PATTERN: &str = "elastos://launch/output/*";
 pub const LAUNCH_PLAYLIST_URI: &str = "elastos://launch/output/playlist.json";
 /// The Runtime's listing of the launched content: each file's path and size.
 pub const LISTING_SCHEMA: &str = "elastos.launch.content-listing/v1";
-/// The Runtime refuses a content whose listing is longer than this.
-pub const MAX_LISTING_BYTES: u64 = 256 * 1024;
+/// The core reads at most this much of the set's listing. The listing plays
+/// the album's part, so it has the album's cap, and the worst launched set
+/// costs the fuel the worst album does. (The Runtime's own cap, 256 KiB, is
+/// wider: a set it starts may still be one this core refuses.)
+pub const MAX_LISTING_BYTES: u64 = MAX_ALBUM_BYTES;
 /// On a content launch the album is the set's files under this folder.
 pub const LAUNCH_IMAGES: &str = "images/";
 

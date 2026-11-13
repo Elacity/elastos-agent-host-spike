@@ -897,3 +897,49 @@ fn a_launched_set_with_no_pictures_or_too_many_is_refused() {
         assert!(storage.calls.is_empty());
     }
 }
+
+/// A set whose listing is longer than the core reads (the album's cap) is
+/// refused after the listing, before any picture is read; nothing is written.
+#[test]
+fn a_launched_set_whose_listing_passes_the_cap_is_refused() {
+    let names: Vec<(String, Vec<u8>)> = (0..MAX_ALBUM_ITEMS)
+        .map(|index| {
+            (
+                format!("images/{index:02}{}.png", "x".repeat(300)),
+                Vec::new(),
+            )
+        })
+        .collect();
+    let files: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.clone()))
+        .collect();
+    let size = Launch::listing(
+        &files
+            .iter()
+            .map(|(p, b)| (p.to_string(), b.clone()))
+            .collect(),
+    )
+    .len();
+    assert!(
+        size as u64 > MAX_LISTING_BYTES,
+        "the listing is {size} bytes"
+    );
+    let mut storage = FakeBus::default();
+    let mut launch = Launch::of(&mut storage, Some(&files));
+    let refusal = crate::run(&mut launch).unwrap_err();
+    assert_eq!(
+        refusal,
+        Refusal::Input(format!(
+            "the set's listing is larger than {MAX_LISTING_BYTES} bytes"
+        ))
+    );
+    assert!(
+        launch.read.iter().all(|name| name == LAUNCH_CONTENT),
+        "only the listing was read: {:?}",
+        launch.read
+    );
+    assert!(launch.output.is_empty());
+    drop(launch);
+    assert!(storage.calls.is_empty());
+}

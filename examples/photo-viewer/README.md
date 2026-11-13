@@ -13,17 +13,37 @@ release and deployment lists, like `examples/hello`.
 ## What one run does
 
 The Component ABI has no input argument and no return value
-(`elastos/wit/elastos-bus-v1.wit:84-88`), so for this spike input and output
-are principal-scoped objects at fixed paths. In Phase 2 the input should be
-the object the person opened, bound by Runtime to this launch (P16).
+(`elastos/wit/elastos-bus-v1.wit:84-88`). So the first thing a run does is ask
+one question: was it launched with a photo set? It asks for the launch's
+content, `elastos://launch/content/*`, to read.
 
-| Object | Path | Grant |
-| --- | --- | --- |
-| Album (input) | `localhost://Users/self/.AppData/App/photo-viewer/album.json` | `read` |
-| Images | `localhost://Users/self/Pictures/...` (each item) | `read`, one per image |
-| Playlist (output) | `localhost://Users/self/.AppData/App/photo-viewer/playlist.json` | `write` |
+- **Granted: a content launch.** The Runtime started this core because the
+  person opened a photo set by its CID. The album is the set's files under
+  `images/`, in the order of their paths, and the playlist goes to the
+  launch's own output, which the Runtime keeps in memory for the launch.
+  Nothing of the person's storage is asked for or written.
+- **Answered `not_found`: no content launch.** The album and the playlist are
+  the person's, at fixed paths, as before.
+- **Any other answer ends the run.** Nothing falls back to the person's
+  storage after a refusal or a failure.
 
-`capsule.json` bounds the guest to those two prefixes (`permissions.storage`).
+| Object | On a content launch | Otherwise | Grant |
+| --- | --- | --- | --- |
+| Album (input) | the Runtime's listing, `elastos://launch/content/` | `localhost://Users/self/.AppData/App/photo-viewer/album.json` | `read` |
+| Images | `elastos://launch/content/images/...` (each file), under the one grant | `localhost://Users/self/Pictures/...` (each item) | `read`, one per image when not launched |
+| Playlist (output) | `elastos://launch/output/playlist.json` | `localhost://Users/self/.AppData/App/photo-viewer/playlist.json` | `write` |
+
+`capsule.json` asks for exactly these four (`asks`): the launch's content
+(read), the launch's output (write), `Pictures/` (read) and the core's own
+folder (read and write). The Runtime refuses the core anything outside them.
+
+On a content launch, steps 1 and 3 change: the listing is read whole (at most
+16 KiB, the album's cap; a longer one is refused) and must have the schema
+`elastos.launch.content-listing/v1`; 1 to 64 of its files must be under
+`images/`, and each plays for 5000 ms. The playlist is written to the launch's
+output. Step 2 is the same for each picture.
+
+When not launched:
 
 1. Request `read` on the album, read it whole (at most 16 KiB), and parse it:
    schema `elastos.photo-viewer.album/v1`, 1 to 64 items, each a `uri` under
@@ -61,16 +81,20 @@ Two kinds of failure:
 
 | Limit | Value | Why |
 | --- | --- | --- |
-| Album | 16 KiB | Read whole: Bus v1 bytes are a JSON array of numbers, about 415 fuel a byte. |
+| Album, or a launch's listing | 16 KiB | Read whole: Bus v1 bytes are a JSON array of numbers, about 415 fuel a byte. |
 | Items | 64 | |
 | Object | 64 MiB | One byte past it is read; the body is not. |
 | JPEG segments before the frame | 32 | Bounds the reads per item. |
 
 `ComponentProvider` gives every run a fixed 100,000,000 fuel
 (`elastos-compute/src/providers/component.rs:28`). Fuel no longer depends on
-image size (one 64-byte PNG and one 12 MiB PNG both use 257,772). The worst
-album within these limits uses 59.1% of the budget (64.9% before the kit's
-cheaper write); `host-test` gates it at 80%.
+image size. The worst album within these limits uses 61.3% of the budget
+(59.1% before the run asked the launch question first; 64.9% before the kit's
+cheaper write); `host-test` gates it at 80%. The worst launched set (a listing
+near 16 KiB naming 64 JPEGs, each walked to its last segment) uses 60.5%, and
+is gated at 80% too. That is why the core reads at most 16 KiB of a listing,
+though the Runtime lists up to 256 KiB: a listing that long would cost more
+fuel than the whole budget. (Measured with a Mac build of this commit.)
 
 ## Build
 
@@ -108,7 +132,7 @@ Measure fuel by album shape:
 
 | Path | Owner |
 | --- | --- |
-| `capsule.json` | Identity, role, Component ABI, entrypoint, storage bounds |
+| `capsule.json` | Identity, role, Component ABI, entrypoint, asks |
 | `src/lib.rs` | Run order, limits, stop and skip rules, playlist, the `lifecycle.run` export |
 | `src/album.rs` | Album schema |
 | `src/tests.rs` | Guest tests |
