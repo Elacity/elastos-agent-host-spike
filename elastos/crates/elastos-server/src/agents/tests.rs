@@ -1815,6 +1815,25 @@ fn home_with_agents(count: usize, bundle_cid: &str) -> (crate::agents::tests::Ho
     (home, agents)
 }
 
+/// Admission over one walk of `capsule`: the same value the launch route
+/// carries through the grant check, admission, and the load. The capsules these
+/// tests build are walkable.
+fn admit_walked(
+    data_dir: &Path,
+    sign_in_store: &Path,
+    capsule: &Path,
+    launcher: Option<&str>,
+    agent: Option<&str>,
+) -> anyhow::Result<Option<crate::agent_admission::AdmissionContext>> {
+    crate::agent_admission::admit_launch(
+        data_dir,
+        sign_in_store,
+        launcher,
+        agent,
+        crate::agent_admission::walk_launch(capsule).expect("the test capsule walks"),
+    )
+}
+
 /// One Agent Host capsule folder: a manifest that declares the agent kind and a
 /// component, the entrypoint bytes, and an `.elastos-cid` receipt. Returns the
 /// folder and the CID the Runtime's own walk gives its bytes.
@@ -1858,7 +1877,7 @@ fn an_agent_launch_admits_each_agents_own_actor_and_root() {
     );
     let (home, agents) = home_with_agents(2, &host_cid);
     let caller = home.caller();
-    let first = crate::agent_admission::admit_launch(
+    let first = admit_walked(
         home.path(),
         home.path(),
         host.path(),
@@ -1867,7 +1886,7 @@ fn an_agent_launch_admits_each_agents_own_actor_and_root() {
     )
     .unwrap()
     .unwrap();
-    let second = crate::agent_admission::admit_launch(
+    let second = admit_walked(
         home.path(),
         home.path(),
         host.path(),
@@ -1887,7 +1906,7 @@ fn an_agent_launch_admits_each_agents_own_actor_and_root() {
         assert!(own.starts_with("localhost://UsersAI/"), "{own}");
         assert_eq!(root(&first.actor), root(&agents[0]));
     }
-    assert!(crate::agent_admission::admit_launch(
+    assert!(admit_walked(
         home.path(),
         home.path(),
         host.path(),
@@ -1909,7 +1928,7 @@ fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
     );
     let (home, agents) = home_with_agents(1, &host_cid);
     crate::auth::store_test_principal_root_protection(home.path(), "person:local:a5-other");
-    let error = crate::agent_admission::admit_launch(
+    let error = admit_walked(
         home.path(),
         home.path(),
         host.path(),
@@ -1918,7 +1937,7 @@ fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "the caller owns no agent with that id");
-    let error = crate::agent_admission::admit_launch(
+    let error = admit_walked(
         home.path(),
         home.path(),
         host.path(),
@@ -1940,7 +1959,7 @@ fn an_agent_launch_needs_its_launcher_and_its_own_home() {
     );
     let (home, agents) = home_with_agents(1, &host_cid);
     let caller = home.caller();
-    let error = crate::agent_admission::admit_launch(
+    let error = admit_walked(
         home.path(),
         home.path(),
         host.path(),
@@ -1950,7 +1969,7 @@ fn an_agent_launch_needs_its_launcher_and_its_own_home() {
     .unwrap_err();
     assert_eq!(error.to_string(), crate::agent_admission::NO_LAUNCHER);
     let child = tempfile::tempdir().unwrap();
-    let error = crate::agent_admission::admit_launch(
+    let error = admit_walked(
         home.path(),
         child.path(),
         host.path(),
@@ -1976,7 +1995,7 @@ fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
     let (home, agents) = home_with_agents(1, &stored_cid);
     let caller = home.caller();
     let launch = |capsule: &Path| {
-        crate::agent_admission::admit_launch(
+        admit_walked(
             home.path(),
             home.path(),
             capsule,
@@ -2033,10 +2052,26 @@ fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
 #[test]
 fn with_the_feature_off_an_agent_launch_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let error = crate::agent_admission::admit_launch(
+    let capsule = dir.path().join("capsule");
+    std::fs::create_dir_all(&capsule).unwrap();
+    std::fs::write(
+        capsule.join("capsule.json"),
+        serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": "agent-host",
+            "role": "app",
+            "type": "wasm",
+            "entrypoint": "main.wasm"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(capsule.join("main.wasm"), b"entrypoint").unwrap();
+    let error = admit_walked(
         dir.path(),
         dir.path(),
-        dir.path(),
+        &capsule,
         Some("person:local:a5-owner"),
         Some("agent:v2:cccccccccccccccccccccccccccccccc"),
     )

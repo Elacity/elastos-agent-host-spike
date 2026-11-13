@@ -141,7 +141,7 @@ impl AgentRecordsFile {
     }
 }
 
-fn agent_file_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn agent_file_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(crate::auth::auth_state_path(data_dir)?.with_file_name(AGENT_RECORDS_FILE))
 }
 
@@ -213,7 +213,7 @@ fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, &'st
 /// Parses the file and refuses anything this Runtime would not have written:
 /// the parsed file, written back, must hold the same fields and values as
 /// the bytes read. That one comparison refuses an unknown field at any depth.
-fn parse_strict(bytes: &[u8]) -> Result<AgentRecordsFile, &'static str> {
+pub(crate) fn parse_strict(bytes: &[u8]) -> Result<AgentRecordsFile, &'static str> {
     let file: AgentRecordsFile = serde_json::from_slice(bytes).map_err(|_| DOES_NOT_PARSE)?;
     let found: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| DOES_NOT_PARSE)?;
     let written = serde_json::to_value(&file).map_err(|_| DOES_NOT_PARSE)?;

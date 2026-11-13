@@ -92,20 +92,41 @@ pub async fn launch_capsule(
     Json(req): Json<LaunchRequest>,
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     let path = std::path::Path::new(&req.path);
-    let launcher = principal_from_launch_request(
-        data_dir.as_deref(),
-        path,
-        req.principal_id,
-        req.launch_grant,
-    )?;
-    let admission = match req.agent_id.as_deref() {
-        None => None,
-        Some(agent_id) => Some(admit_agent_launch(
-            data_dir.as_deref(),
-            path,
-            launcher.as_deref(),
-            agent_id,
-        )?),
+    reject_raw_launch_principal_id(req.principal_id.as_deref())?;
+    let (launcher, admission) = match req.agent_id.as_deref() {
+        None => (
+            principal_from_launch_request(
+                data_dir.as_deref(),
+                path,
+                req.principal_id,
+                req.launch_grant,
+            )?,
+            None,
+        ),
+        Some(agent_id) => {
+            let data_dir = data_dir.as_deref().ok_or((
+                StatusCode::BAD_REQUEST,
+                "an agent launch needs this Home's data directory".to_string(),
+            ))?;
+            // The build gate runs before any folder is read, so a build
+            // without agents refuses an agent launch by name.
+            crate::agents::require_build()
+                .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+            // One walk names the capsule the grant must authorize and the
+            // bytes this launch will run. The grant is checked against the
+            // walked manifest's name, and that same value reaches admission
+            // and the loader; nothing reads the folder between them.
+            let walked = crate::agent_admission::walk_launch(path)
+                .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+            let launcher = principal_from_capsule_name(
+                Some(data_dir),
+                &walked.manifest.name,
+                req.launch_grant,
+            )?;
+            let admission =
+                admit_agent_launch(Some(data_dir), walked, launcher.as_deref(), agent_id)?;
+            (launcher, Some(admission))
+        }
     };
     // An admitted agent launch starts through the one entry that may hand the
     // bridge an agent's own id, and from the bytes admission walked. Every
@@ -149,7 +170,7 @@ pub async fn launch_capsule(
 /// is started before all of that holds.
 fn admit_agent_launch(
     data_dir: Option<&std::path::Path>,
-    capsule_dir: &std::path::Path,
+    walked: crate::agent_admission::WalkedLaunch,
     launcher: Option<&str>,
     agent_id: &str,
 ) -> Result<crate::agent_admission::AdmissionContext, (StatusCode, String)> {
@@ -158,25 +179,16 @@ fn admit_agent_launch(
         "an agent launch needs this Home's data directory".to_string(),
     ))?;
     let sign_in_store = super::gateway::home_launch_auth_data_dir(data_dir);
-    crate::agent_admission::admit_launch(
-        data_dir,
-        &sign_in_store,
-        capsule_dir,
-        launcher,
-        Some(agent_id),
-    )
-    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?
-    .ok_or((
-        StatusCode::BAD_REQUEST,
-        "an agent launch needs a stored agent".to_string(),
-    ))
+    crate::agent_admission::admit_launch(data_dir, &sign_in_store, launcher, Some(agent_id), walked)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "an agent launch needs a stored agent".to_string(),
+        ))
 }
 
-fn reject_raw_launch_principal_id(
-    principal_id: Option<String>,
-) -> Result<(), (StatusCode, String)> {
+fn reject_raw_launch_principal_id(principal_id: Option<&str>) -> Result<(), (StatusCode, String)> {
     if principal_id
-        .as_deref()
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .is_some()
@@ -189,41 +201,61 @@ fn reject_raw_launch_principal_id(
     Ok(())
 }
 
+/// A launch grant names the capsule it authorizes. For an agent launch that
+/// name comes from the one walk, never from a second read of the folder.
+fn principal_from_capsule_name(
+    data_dir: Option<&std::path::Path>,
+    capsule_name: &str,
+    launch_grant: Option<String>,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let Some(grant) = launch_grant
+        .map(|grant| grant.trim().to_string())
+        .filter(|grant| !grant.is_empty())
+    else {
+        return Ok(None);
+    };
+    let data_dir = data_dir.ok_or((
+        StatusCode::BAD_REQUEST,
+        "principal launch grant unavailable".to_string(),
+    ))?;
+    let mut headers = HeaderMap::new();
+    let header_value = HeaderValue::from_str(&grant).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid launch_grant header value".to_string(),
+        )
+    })?;
+    headers.insert("x-elastos-home-token", header_value);
+    let context = super::gateway::require_internal_shell_launch_grant_for_any_context(
+        data_dir,
+        &headers,
+        &[capsule_name],
+    )
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    Ok(Some(context.principal_id().to_string()))
+}
+
 fn principal_from_launch_request(
     data_dir: Option<&std::path::Path>,
     capsule_dir: &std::path::Path,
     principal_id: Option<String>,
     launch_grant: Option<String>,
 ) -> Result<Option<String>, (StatusCode, String)> {
-    reject_raw_launch_principal_id(principal_id)?;
+    reject_raw_launch_principal_id(principal_id.as_deref())?;
     let launch_grant = launch_grant
         .map(|grant| grant.trim().to_string())
         .filter(|grant| !grant.is_empty());
-    match launch_grant {
-        None => Ok(None),
-        Some(grant) => {
-            let data_dir = data_dir.ok_or((
-                StatusCode::BAD_REQUEST,
-                "principal launch grant unavailable".to_string(),
-            ))?;
-            let capsule_name = launch_capsule_name(capsule_dir)?;
-            let mut headers = HeaderMap::new();
-            let header_value = HeaderValue::from_str(&grant).map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "invalid launch_grant header value".to_string(),
-                )
-            })?;
-            headers.insert("x-elastos-home-token", header_value);
-            let context = super::gateway::require_internal_shell_launch_grant_for_any_context(
-                data_dir,
-                &headers,
-                &[capsule_name.as_str()],
-            )
-            .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-            Ok(Some(context.principal_id().to_string()))
-        }
+    if launch_grant.is_none() {
+        return Ok(None);
     }
+    if data_dir.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "principal launch grant unavailable".to_string(),
+        ));
+    }
+    let capsule_name = launch_capsule_name(capsule_dir)?;
+    principal_from_capsule_name(data_dir, &capsule_name, launch_grant)
 }
 
 fn launch_capsule_name(capsule_dir: &std::path::Path) -> Result<String, (StatusCode, String)> {
@@ -1065,6 +1097,110 @@ mod tests {
         );
     }
 
+    /// Round 3, point 1: the launch grant is checked against the name of the
+    /// one walked manifest, not against an earlier read of `capsule.json`.
+    /// The stored host's own bytes are unchanged; a grant that names another
+    /// capsule is refused before admission and before any principal binds.
+    #[tokio::test]
+    async fn an_agent_launch_refuses_a_grant_for_another_capsule() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents.first().expect("one agent").clone();
+        let context = gateway::local_home_launch_token_context(&home.data_dir).unwrap();
+        let grant = gateway::issue_home_launch_token_with_context(
+            &home.data_dir,
+            "another-capsule",
+            &context,
+        )
+        .unwrap();
+
+        let response = launch_capsule(
+            Extension(home.runtime.clone()),
+            Extension(home.audit_log.clone()),
+            Extension(Some(home.data_dir.clone())),
+            Json(LaunchRequest {
+                path: home.capsule_dir.to_string_lossy().into_owned(),
+                principal_id: None,
+                launch_grant: Some(grant),
+                agent_id: Some(agent),
+            }),
+        )
+        .await;
+        let (status, message) = match response {
+            Ok(_) => panic!("a grant for another capsule admitted the stored host"),
+            Err(error) => error,
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(message.contains("not authorized"), "{message}");
+        assert!(
+            home.audit_log.recent_events(2).is_empty(),
+            "the runtime started nothing"
+        );
+        assert!(
+            crate::auth::load_auth_state(&home.data_dir)
+                .unwrap()
+                .audit
+                .iter()
+                .all(|event| event.event_type != "component.invoke.completed"),
+            "no principal was bound to a bridge call"
+        );
+    }
+
+    /// Round 3, point 3: a record written before the Runtime stored the Agent
+    /// Host's byte CID still loads through the real strict parser, and every
+    /// launch of it is refused by name. The missing CID is never re-derived
+    /// from `.elastos-cid` or from the release record.
+    #[tokio::test]
+    async fn an_older_agent_record_without_byte_identity_refuses_launch() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents.first().expect("one agent").clone();
+        let path = crate::agents::agent_file_path(&home.data_dir).unwrap();
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for stored in file["agents"].as_array_mut().expect("agents") {
+            stored["record"]["agent_host_package"]
+                .as_object_mut()
+                .expect("the record holds its Agent Host package")
+                .remove("bundle_cid");
+        }
+        let bytes = serde_json::to_vec(&file).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        // The real strict parser accepts the older shape.
+        crate::agents::parse_strict(&bytes)
+            .expect("an older record parses as this Runtime writes it");
+        let owner = gateway::local_home_launch_token_context(&home.data_dir)
+            .unwrap()
+            .principal_id()
+            .to_string();
+        let loaded = crate::agents::stored_agent(&home.data_dir, &owner, &agent)
+            .expect("the older record still loads");
+        assert!(loaded
+            .record
+            .agent_host_package
+            .as_ref()
+            .unwrap()
+            .bundle_cid
+            .is_empty());
+
+        let response = home.launch(&agent).await;
+        let (status, message) = match response {
+            Ok(_) => panic!("an older record without byte identity launched"),
+            Err(error) => error,
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, crate::agent_admission::NO_STORED_BYTES);
+        assert!(
+            home.audit_log.recent_events(2).is_empty(),
+            "the runtime started nothing"
+        );
+    }
+
     /// Row 6a: a launch request that carries a kind is refused by its shape.
     #[test]
     fn a_launch_request_carrying_a_kind_is_refused() {
@@ -1087,10 +1223,11 @@ mod tests {
     async fn a_capsule_that_does_not_declare_an_agent_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "not-an-agent");
+        let walked = crate::agent_admission::walk_launch(&capsule_dir).expect("the capsule walks");
         if !crate::agents::build_allows() {
             let error = admit_agent_launch(
                 Some(dir.path()),
-                &capsule_dir,
+                walked,
                 Some("person:local:a5-owner"),
                 "agent:v2:cccccccccccccccccccccccccccccccc",
             )
@@ -1106,7 +1243,7 @@ mod tests {
         let agent = home.agents.first().expect("one agent").clone();
         let error = admit_agent_launch(
             Some(home.data_dir.as_path()),
-            &capsule_dir,
+            walked,
             Some(context.principal_id()),
             &agent,
         )
@@ -1139,9 +1276,11 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        std::fs::write(capsule_dir.join("main.wasm"), b"entrypoint").unwrap();
+        let walked = crate::agent_admission::walk_launch(&capsule_dir).expect("the capsule walks");
         let error = admit_agent_launch(
             None,
-            &capsule_dir,
+            walked,
             Some("person:local:a5-owner"),
             "agent:v2:cccccccccccccccccccccccccccccccc",
         )

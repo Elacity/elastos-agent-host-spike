@@ -77,19 +77,38 @@ pub(crate) const NO_LAUNCHER: &str = "an agent launch needs its owner's launch g
 pub(crate) const NOT_THE_STORED_HOST: &str =
     "this capsule is not the Agent Host this agent was created for";
 
-/// The refusal a launch gives for a capsule whose manifest declares no agent.
-pub(crate) const NOT_AN_AGENT: &str =
-    "this capsule does not declare an agent, so no stored agent runs it";
+/// The refusal a launch gives when the stored agent has no byte identity. A
+/// record written before the Runtime named the host's bytes carries no CID, and
+/// it is not re-derived from a receipt or from the release record: the launch
+/// fails closed.
+pub(crate) const NO_STORED_BYTES: &str =
+    "this agent's stored Agent Host has no recorded byte identity, so no launch can name it";
 
 /// The refusal a launch gives for a package the Runtime cannot compile from the
 /// bytes it walked.
 pub(crate) const NOT_A_COMPONENT: &str =
     "an agent launch runs only a component capsule the Runtime can name";
 
+/// One walk of a launch directory: its byte CID, the manifest that walk read,
+/// and the entrypoint bytes it read. The route authorizes the launch grant from
+/// this manifest's name, admission compares this CID with the stored host, and
+/// the loader compiles these bytes. Nothing is read from the folder again.
+#[derive(Debug)]
+pub(crate) struct WalkedLaunch {
+    pub(crate) bundle_cid: String,
+    pub(crate) manifest: CapsuleManifest,
+    pub(crate) entrypoint: Vec<u8>,
+}
+
+/// The refusal a launch gives for a capsule whose manifest declares no agent.
+pub(crate) const NOT_AN_AGENT: &str =
+    "this capsule does not declare an agent, so no stored agent runs it";
+
 /// Walk `capsule_dir` once, under the same limits staging uses, and return its
-/// CID, the manifest that walk read, and its entrypoint bytes. Nothing else
-/// reads the folder for the launch: these bytes are what runs.
-fn walked_package(capsule_dir: &Path) -> anyhow::Result<(String, CapsuleManifest, Vec<u8>)> {
+/// CID, the manifest that walk read, and its entrypoint bytes. The caller
+/// carries this one value through the grant check, admission, and the load;
+/// nothing reads the folder again.
+pub(crate) fn walk_launch(capsule_dir: &Path) -> anyhow::Result<WalkedLaunch> {
     let bundle = checked_bundle_within(capsule_dir, BUNDLE_WALK_BUDGET)
         .map_err(|refusal| anyhow::anyhow!("walk the launching capsule: {refusal}"))?;
     let manifest_bytes = bundle
@@ -106,23 +125,30 @@ fn walked_package(capsule_dir: &Path) -> anyhow::Result<(String, CapsuleManifest
             )
         })?
         .to_vec();
-    Ok((bundle.cid().to_string(), manifest, entrypoint))
+    Ok(WalkedLaunch {
+        bundle_cid: bundle.cid().to_string(),
+        manifest,
+        entrypoint,
+    })
 }
 
 /// Admits a launch that names a stored agent, and leaves every other launch
 /// exactly as it was. `None` means no agent was named. Otherwise this Runtime
 /// holds its own sign-in store, the launcher is a stored person, the named id
-/// is that person's stored agent, the capsule about to be loaded walks to the
-/// byte CID the agent's storage records for its Agent Host, and the agent's
-/// stored protection opens with that person's key. A launch that cannot meet
-/// any of that is refused here, before any provider starts and before any
-/// principal is bound.
+/// is that person's stored agent, the walked capsule is the Agent Host bytes
+/// the agent's storage records, and the agent's stored protection opens with
+/// that person's key. A launch that cannot meet any of that is refused here,
+/// before any provider starts and before any principal is bound.
+///
+/// `walked` is the one value `walk_launch` produced; the grant check already
+/// read this manifest's name, and the loader compiles its entrypoint. Admission
+/// opens no file in the launching folder.
 pub(crate) fn admit_launch(
     data_dir: &Path,
     sign_in_store: &Path,
-    capsule_dir: &Path,
     launcher: Option<&str>,
     agent: Option<&str>,
+    walked: WalkedLaunch,
 ) -> anyhow::Result<Option<AdmissionContext>> {
     let Some(agent_id) = agent else {
         return Ok(None);
@@ -137,7 +163,11 @@ pub(crate) fn admit_launch(
     // Agent Host package it was created for, with the CID the walk of its
     // installed files gave; this launch's walk must give the same CID and the
     // same manifest name. No receipt file in the launching folder is read.
-    let (launched_cid, manifest, entrypoint) = walked_package(capsule_dir)?;
+    let WalkedLaunch {
+        bundle_cid,
+        manifest,
+        entrypoint,
+    } = walked;
     if manifest.agent.is_none() {
         return Err(Refused(NOT_AN_AGENT.to_string()).into());
     }
@@ -145,10 +175,15 @@ pub(crate) fn admit_launch(
         return Err(Refused(NOT_A_COMPONENT.to_string()).into());
     }
     let stored_host = stored.record.agent_host_package.as_ref();
-    let same_bytes = stored_host.is_some_and(|host| {
-        !host.bundle_cid.is_empty() && host.name == manifest.name && host.bundle_cid == launched_cid
-    });
-    if !same_bytes {
+    let Some(host) = stored_host else {
+        return Err(Refused(NOT_THE_STORED_HOST.to_string()).into());
+    };
+    // A record from before the Runtime named host bytes carries an empty CID.
+    // It is refused by name rather than re-derived from a file or the release.
+    if host.bundle_cid.is_empty() {
+        return Err(Refused(NO_STORED_BYTES.to_string()).into());
+    }
+    if host.name != manifest.name || host.bundle_cid != bundle_cid {
         return Err(Refused(NOT_THE_STORED_HOST.to_string()).into());
     }
     // The root is derived from the id, never read from a field of the record
