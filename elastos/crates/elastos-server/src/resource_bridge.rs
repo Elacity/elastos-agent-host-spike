@@ -2529,12 +2529,11 @@ mod tests {
     /// sends anything. With one ask, read on a folder: a write there, and a
     /// request to be granted the write, are each refused by the ceiling; the
     /// request's action is written in upper case, and is judged as the
-    /// Runtime will read it. Nothing listens on the address given, so a
-    /// ceiling refusal can only have come from this check. The controls are
-    /// refused by nothing here and fail only where they try to reach that
-    /// dead address: the read under the same ask (the request for it again
-    /// in upper case), and the same write under a ceiling that names no
-    /// action.
+    /// Runtime will read it. A listener the test owns stands in for the
+    /// Runtime: a refusal sends it nothing, and each control is received by
+    /// it, once, at the route it belongs to. The controls are the read
+    /// under the same ask (the request for it again in upper case), and
+    /// the same write under a ceiling that names no action.
     #[tokio::test]
     async fn the_attached_bridge_holds_a_capsule_with_asks_to_their_actions() {
         let folder = "localhost://Local/SharedByLocalUsersAndBots/Home/allowed";
@@ -2553,10 +2552,35 @@ mod tests {
                 r#"{{"id":16,"request":{{"type":"request_capability","resource":"{folder}/a.md","action":"{action}"}}}}"#
             )
         };
-        let answer = |line: String, ceiling: Vec<AuthorityBound>| async move {
-            let dead = "http://127.0.0.1:12345";
-            handle_remote_request(&line, dead, "client-token", "test-capsule", &ceiling, None).await
+        // A listener this test owns stands in for the Runtime. It keeps the
+        // request line of everything it is sent and answers each with an
+        // error, so what reached it is counted and nothing is acted on.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = received.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut first = String::new();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                if reader.read_line(&mut first).is_ok() {
+                    seen.lock().unwrap().push(first.trim().to_string());
+                }
+                let refuse = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                let _ = stream.write_all(refuse.as_bytes());
+            }
+        });
+        let answer = |line: String, ceiling: Vec<AuthorityBound>| {
+            let address = address.clone();
+            async move {
+                let capsule = "test-capsule";
+                handle_remote_request(&line, &address, "client-token", capsule, &ceiling, None)
+                    .await
+            }
         };
+        let reached = || received.lock().unwrap().clone();
         let by_the_ceiling = |answer: &Result<serde_json::Value>| {
             let code = answer
                 .as_ref()
@@ -2574,20 +2598,30 @@ mod tests {
                 "{message}"
             );
         }
-        // Each control passes every check made before anything is sent, and
-        // so fails where it tries to reach the Runtime at the dead address.
-        for (line, ceiling) in [
-            (invoke("read"), read_only.clone()),
-            (request("READ"), read_only.clone()),
-            (invoke("write"), any.clone()),
-            (request("WRITE"), any),
-        ] {
+        assert_eq!(reached(), Vec::<String>::new(), "a refusal sends nothing");
+        // Each control passes every check made before anything is sent: the
+        // listener receives exactly one request for it, an invoke at the
+        // provider route and a request at the capability route.
+        let controls = [
+            (invoke("read"), read_only.clone(), "/api/provider/"),
+            (
+                request("READ"),
+                read_only.clone(),
+                "/api/capability/request",
+            ),
+            (invoke("write"), any.clone(), "/api/provider/"),
+            (request("WRITE"), any, "/api/capability/request"),
+        ];
+        for (sent, (line, ceiling, route)) in controls.into_iter().enumerate() {
             let went_on = answer(line.clone(), ceiling).await;
-            let failure = match went_on {
-                Ok(answered) => panic!("{line}: answered without the Runtime: {answered}"),
-                Err(failure) => format!("{failure:#}"),
-            };
-            assert!(failure.contains("127.0.0.1:12345"), "{line}: {failure}");
+            assert!(!by_the_ceiling(&went_on), "{line}: {went_on:?}");
+            let reached = reached();
+            assert_eq!(reached.len(), sent + 1, "{line}: {reached:?}");
+            let request_line = &reached[sent];
+            assert!(
+                request_line.starts_with("POST ") && request_line.contains(route),
+                "{line}: {request_line}"
+            );
         }
     }
 
@@ -4605,6 +4639,12 @@ mod tests {
         assert_eq!(response["id"], 34);
         assert_eq!(response["response"]["type"], "error");
         assert_eq!(response["response"]["code"], "manifest_capability_denied");
+        // The in-process path, for a manifest without asks: the sentence it
+        // has always been, word for word.
+        assert_eq!(
+            response["response"]["message"],
+            format!("capsule manifest does not declare authority for {uri}")
+        );
         assert!(
             provider.requests().await.is_empty(),
             "manifest-denied component imports must not reach the provider registry"

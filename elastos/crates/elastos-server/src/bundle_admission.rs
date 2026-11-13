@@ -398,13 +398,13 @@ pub fn walk_refusal(refusal: Refusal) -> BundleRefusal {
 /// list: a key that is not on it is refused by name, whatever its value, so
 /// a key the manifest format gains later is refused until this list names it.
 ///
-/// Not on it, on purpose: `agent`, `asks`, `capabilities`, `permissions`,
+/// Not on it, on purpose: `agent`, `capabilities`, `permissions`,
 /// `provides`, `providers`, `authority`, `interfaces`, `microvm`, `viewer`,
 /// `model_content` and `signature`. Each is, or carries, an authority or a
-/// relation to another capsule, and this start mints no grant and reads no
-/// ask: a field would be admitted without the code that gives it meaning.
-/// So what starts has an empty ceiling.
-pub const BUNDLE_MANIFEST_KEYS: [&str; 17] = [
+/// relation to another capsule, and a field would be admitted without the
+/// code that gives it meaning. So the one authority field this start takes
+/// is `asks`, and what starts has its asks as its ceiling, or an empty one.
+pub const BUNDLE_MANIFEST_KEYS: [&str; 18] = [
     // What it is called.
     "schema",
     "name",
@@ -432,9 +432,16 @@ pub const BUNDLE_MANIFEST_KEYS: [&str; 17] = [
     // The bundles this one needs, each named by CID: [`admit_bundle_manifest`]
     // refuses a requirement without a pin, and the start then holds every
     // pinned bundle to the checks it holds this one to. It is a condition on
-    // the start and gives the capsule nothing: its ceiling stays empty, no
-    // grant is made, and it has no way to reach a pinned bundle or its bytes.
+    // the start and gives the capsule nothing: it adds nothing to its
+    // ceiling, no grant is made, and it has no way to reach a pinned bundle
+    // or its bytes.
     "requires",
+    // The most this capsule may ever ask the Runtime for: each a resource
+    // and its actions. They are its whole ceiling, held by the bridge. They
+    // grant nothing: a request inside them is still put to the shell. The
+    // manifest type's own rules for asks hold here as everywhere. A capsule
+    // whose manifest has none is started sealed and can ask for nothing.
+    "asks",
 ];
 
 /// The manifest and the component of a bundle that a start by CID may run.

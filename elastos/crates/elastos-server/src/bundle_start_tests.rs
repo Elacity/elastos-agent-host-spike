@@ -522,7 +522,6 @@ async fn each_key_outside_the_list_is_refused_by_name() {
     let null = serde_json::Value::Null;
     let rows = [
         ("agent", null.clone()),
-        ("asks", serde_json::json!([])),
         ("capabilities", serde_json::json!([])),
         ("permissions", serde_json::json!({})),
         ("provides", null.clone()),
@@ -556,14 +555,17 @@ async fn each_key_outside_the_list_is_refused_by_name() {
     assert_eq!(home.calls(), Vec::new());
 }
 
-/// R-nogrant. The ceiling of a capsule started by CID is filled, as every
-/// capsule's is, from the one bounds function. For every manifest the policy
-/// admits that function gives an empty ceiling: shown for the base manifest
-/// and for one that sets every other key on the list. The control is a
-/// manifest with a capability: its ceiling is not empty, and the policy
-/// refuses it.
+/// R-ceiling. The ceiling of a capsule started by CID is filled, as every
+/// capsule's is, from the one bounds function, and for every manifest this
+/// start admits that is the manifest's asks and nothing else. Without asks
+/// the ceiling is empty: shown for the base manifest and for one that sets
+/// every other key on the list. With asks it is exactly those asks, each
+/// with its actions. So "no asks" and "an empty ceiling" are one thing
+/// here, which is what the start seals by. The control is a manifest with a
+/// capability: its ceiling is not empty, and this start refuses it, also
+/// when asks stand beside it.
 #[test]
-fn a_manifest_the_policy_admits_has_an_empty_ceiling() {
+fn the_ceiling_of_a_manifest_this_start_admits_is_its_asks() {
     use crate::bundle_admission::admit_bundle_manifest;
     use elastos_bundle_identity::checked_bundle_within as walk;
     let dir = tempfile::tempdir().unwrap();
@@ -585,23 +587,46 @@ fn a_manifest_the_policy_admits_has_an_empty_ceiling() {
         "resources".into(),
         serde_json::json!({"memory_mb": 64, "cpu_shares": 2}),
     );
-    // A pinned requirement is no authority: the ceiling stays empty.
+    // A pinned requirement is no authority: it adds nothing to the ceiling.
     keys.insert(
         "requires".into(),
         serde_json::json!([{"name": "needed", "kind": "capsule", "cid": ASKS_NOTHING_CID}]),
     );
     let written: Vec<&str> = keys.keys().map(String::as_str).collect();
-    for key in BUNDLE_MANIFEST_KEYS {
+    for key in BUNDLE_MANIFEST_KEYS
+        .into_iter()
+        .filter(|key| *key != "asks")
+    {
         assert!(written.contains(&key), "{key} is not set in this row");
     }
     for (name, json) in [("base", manifest("base")), ("full", full.to_string())] {
         let admitted = admit_bundle_manifest(&bundle(name, &json)).unwrap();
+        assert!(admitted.manifest.asks.is_empty(), "{name}");
         assert_eq!(
             admitted.manifest.resource_authority_bounds(),
             Vec::<String>::new(),
             "{name}"
         );
     }
+
+    full["asks"] = serde_json::json!([
+        {"resource": "elastos://did/*", "actions": ["read"]},
+        {"resource": "localhost://Users/self/Documents/*", "actions": ["read", "write"]}
+    ]);
+    for key in BUNDLE_MANIFEST_KEYS {
+        assert!(full.get(key).is_some(), "{key} is not set in this row");
+    }
+    let admitted = admit_bundle_manifest(&bundle("asking", &full.to_string())).unwrap();
+    assert!(!admitted.manifest.asks.is_empty());
+    let ceiling = admitted.manifest.resource_authority_bounds();
+    let shown: Vec<String> = ceiling.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        shown,
+        [
+            "elastos://did/* [read]",
+            "localhost://Users/self/Documents/* [read, write]"
+        ]
+    );
 
     let capable = manifest_with(
         "capable",
@@ -615,6 +640,15 @@ fn a_manifest_the_policy_admits_has_an_empty_ceiling() {
         admit_bundle_manifest(&walked).unwrap_err().to_string(),
         "bundle_manifest_field_refused: capabilities"
     );
+    // The manifest type refuses asks beside a capability, so the walk
+    // refuses such a bundle before the key list is asked.
+    full["capabilities"] = serde_json::json!(["elastos://did/*"]);
+    let folder = dir.path().join("both");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("capsule.json"), full.to_string()).unwrap();
+    fs::write(folder.join(ENTRYPOINT), quiet_component()).unwrap();
+    let refusal = walk(&folder, BUNDLE_WALK_BUDGET).unwrap_err();
+    assert!(refusal.to_string().contains("asks_conflict"), "{refusal}");
 }
 
 /// The list holds every key the base manifest uses, and the two lists
@@ -624,7 +658,6 @@ fn a_manifest_the_policy_admits_has_an_empty_ceiling() {
 fn the_list_and_the_refused_keys_cover_the_manifest_type() {
     let refused = [
         "agent",
-        "asks",
         "capabilities",
         "permissions",
         "provides",
@@ -829,6 +862,92 @@ async fn a_runtime_without_a_component_provider_cannot_start_a_bundle() {
     );
 }
 
+/// A-asks. A capsule whose manifest has asks is started unsealed, under
+/// those asks. The calling component, run for its person, reaches the Home's
+/// bridge handler with its one call; at that moment its ceiling is its asks,
+/// each with its actions; afterwards no ceiling is left. The control is the
+/// same component with no asks: it is sealed, and the handler sees nothing.
+#[tokio::test]
+async fn a_capsule_with_asks_is_started_unsealed_under_its_asks() {
+    let publisher = key(69);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([
+        {"resource": "elastos://test/bus/probe", "actions": ["read"]},
+        {"resource": "localhost://Users/self/Documents/*", "actions": ["read", "write"]}
+    ]);
+    let asking = manifest_with("asking", "asks", asks);
+    let asking = home
+        .staged("asking", &asking, &calling_component(), &publisher)
+        .await;
+    let silent = home
+        .staged(
+            "silent",
+            &manifest("silent"),
+            &calling_component(),
+            &publisher,
+        )
+        .await;
+
+    let refusal = home.run(&asking, Some(PERSON)).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_start_failed");
+    assert!(
+        refusal
+            .to_string()
+            .contains("the test's bridge handler was reached"),
+        "{refusal}"
+    );
+    let calls = home.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let (capsule_id, person, ceiling) = &calls[0];
+    assert_eq!(person.as_deref(), Some(PERSON));
+    assert_eq!(
+        ceiling.clone().expect("a ceiling while it runs"),
+        [
+            "elastos://test/bus/probe [read]",
+            "localhost://Users/self/Documents/* [read, write]"
+        ]
+    );
+    assert_eq!(home.runtime.ceiling_of(capsule_id), None, "none left after");
+
+    let refusal = home.run(&silent, Some(PERSON)).await.unwrap_err();
+    assert!(refusal
+        .to_string()
+        .ends_with(&format!("BusError::Denied({SEALED_BRIDGE:?})")));
+    assert_eq!(
+        home.calls().len(),
+        1,
+        "the sealed capsule reached no handler"
+    );
+}
+
+/// A-pinned. A pinned bundle that has asks passes its checks and gets
+/// nothing by them: it is not started, and its asks do not reach the capsule
+/// that pins it. That capsule has no asks of its own, so it is sealed and
+/// the handler sees nothing.
+#[tokio::test]
+async fn a_pinned_bundles_asks_do_not_reach_the_capsule_that_starts() {
+    let publisher = key(70);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let member = manifest_with("asking-member", "asks", asks);
+    let member = home
+        .staged("asking-member", &member, &calling_component(), &publisher)
+        .await;
+    let root = manifest_pinning("plain-root", &[("asking-member", &member)]);
+    let root = home
+        .staged("plain-root", &root, &calling_component(), &publisher)
+        .await;
+
+    let refusal = home.run(&root, Some(PERSON)).await.unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .ends_with(&format!("BusError::Denied({SEALED_BRIDGE:?})")),
+        "{refusal}"
+    );
+    assert_eq!(home.calls(), Vec::new());
+}
+
 /// Every Rust file under `dir`.
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
     for item in fs::read_dir(dir).expect("list") {
@@ -949,14 +1068,21 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
             .count(),
         1
     );
-    assert_eq!(start.matches(".load_admitted_sealed(").count(), 1);
+    // One capsule is loaded, from the walked bytes and the judged manifest:
+    // sealed when that manifest has no asks, unsealed when it has. Nothing
+    // else decides the seal.
     assert_eq!(
         start
-            .matches(".load_admitted_sealed(admitted.component, admitted.manifest)")
+            .matches("let (bytes, manifest) = (admitted.component, admitted.manifest);")
             .count(),
         1
     );
-    assert_eq!(start.matches(".load_admitted(").count(), 0);
+    let seal = "let loaded = match manifest.asks.is_empty() {\n            \
+                true => component.load_admitted_sealed(bytes, manifest).await,\n            \
+                false => component.load_admitted(bytes, manifest).await,\n        };";
+    assert_eq!(start.matches(seal).count(), 1);
+    assert_eq!(start.matches(".load_admitted_sealed(").count(), 1);
+    assert_eq!(start.matches(".load_admitted(").count(), 1);
     for never in ["start_loaded", "load_admitted", "provider"] {
         assert!(!member.contains(never), "{never}");
     }
@@ -969,8 +1095,8 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
 /// was). What comes out is the manifest as the ordinary type reads the same
 /// text with every `cid` left out, beside the pins: shown for one pin on the
 /// base manifest and for two pins on a manifest that sets every key the
-/// start takes. The bundle's own bytes are not changed. (The needle is
-/// split so that this file is not counted.)
+/// start takes, its asks among them. The bundle's own bytes are not
+/// changed. (The needle is split so that this file is not counted.)
 #[test]
 fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
     use crate::bundle_admission::admit_bundle_manifest;
@@ -1046,6 +1172,10 @@ fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
             {"name": "second", "kind": "capsule", "cid": other}
         ]),
     );
+    keys.insert(
+        "asks".into(),
+        serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]),
+    );
     for key in BUNDLE_MANIFEST_KEYS {
         assert!(keys.contains_key(key), "{key} is not set in this row");
     }
@@ -1065,16 +1195,12 @@ fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
     );
     same(&admitted.manifest, &text);
 
-    // Two things the conversion never sees. A manifest that pins and also
-    // has `asks` is refused by name before it; one with a key the manifest
+    // The asks came through as they were written, beside the pins.
+    assert_eq!(admitted.manifest.asks.len(), 1);
+    assert_eq!(admitted.manifest.asks[0].resource, "elastos://did/*");
+
+    // What the conversion never sees: a manifest with a key the manifest
     // type does not know is refused by the walk.
-    full["asks"] = serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]);
-    let with_asks = walk_of("with-asks", &full.to_string()).unwrap();
-    assert_eq!(
-        admit_bundle_manifest(&with_asks).unwrap_err().to_string(),
-        "bundle_manifest_field_refused: asks"
-    );
-    full.as_object_mut().unwrap().remove("asks");
     full["no_such_key"] = serde_json::json!(true);
     let refusal = walk_of("unknown-key", &full.to_string()).unwrap_err();
     assert!(refusal.to_string().contains("no_such_key"), "{refusal}");
