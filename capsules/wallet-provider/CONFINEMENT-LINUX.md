@@ -100,11 +100,11 @@ rules (`clone`, `socketpair`, `fcntl`, `prlimit64`, `futex`). Each needs a run o
 GitHub's x86-64 runner that refuses it alone and runs the three `linux_model_*`
 tests (and the did and wallet journeys for a launch entry). `munmap` is a stated
 exception, not a measured need, so a green drop-one would not remove it. The
-x86-64-only rows (`epoll_wait`, `arch_prctl`, `poll`, `mkdir`, `rename`,
-`unlink`) and the x86-64 loader entries already have that run (42454795461).
-`rename` and `renameat` were named by the failing `runs_create` answer on
-aarch64, not by a drop-one: the next Linux receipt must show the nine model
-answers with them and fail at `runs_create` without them.
+x86-64-only rows (`epoll_wait`, `arch_prctl`, `poll`, `mkdir`, `unlink`)
+and the x86-64 loader entries already have that run (42454795461). `rename`
+postdates that run. The failing `runs_create` answer named it and, on aarch64,
+`renameat`; no drop-one covers either yet. The next Linux receipt must show
+the nine model answers with them and fail at `runs_create` without them.
 
 The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
 nothing, so they take no row and add no syscall. An allow form with no row is a

@@ -3839,7 +3839,7 @@
     },
     {
       "id": "WP257",
-      "title": "the model runtime table loses rename and renameat, so the record replace at runs_create has no admitted call and the allow-list equality sees the missing rows on both architectures",
+      "title": "the model runtime table loses rename and renameat, so the record replace at runs_create has no admitted call on either architecture and the allow-list equality sees the missing row on each",
       "command": "wallet",
       "expect": "caught",
       "edits": [

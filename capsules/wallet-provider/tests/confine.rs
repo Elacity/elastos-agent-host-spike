@@ -7083,7 +7083,9 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     // x86-64 only: aarch64 has no rename call, so glibc's rename calls
     // renameat there.
     ("rename", Some(82), None),
-    ("renameat", Some(264), Some(38)),
+    // aarch64 only: glibc's rename is this call there, and x86-64 reaches the
+    // same replace through `rename`, so no x86-64 journey needs this row.
+    ("renameat", None, Some(38)),
     ("renameat2", Some(316), Some(276)),
     ("rseq", Some(334), Some(293)),
     ("rt_sigaction", Some(13), Some(134)),
@@ -7125,6 +7127,11 @@ const X86_64_ONLY_SYSCALLS: &[&str] = &[
     "rename",
     "unlink",
 ];
+
+/// The calls the table carries for aarch64 alone. `renameat` is the form
+/// glibc's `rename` calls on aarch64, and x86-64 admits `rename` itself, so its
+/// x86-64 cell is empty and no x86-64 program renders the row.
+const AARCH64_ONLY_SYSCALLS: &[&str] = &["renameat"];
 
 /// The first number of the x32 call space on x86-64.
 const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
@@ -9766,7 +9773,7 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
     // would make the builders skip the call on that architecture, and the
     // one-ALLOW-per-syscall check above would agree with the shortened list.
     for (name, x86_64, aarch64) in SECCOMP_SYSCALL_NUMBERS {
-        if !X86_64_ONLY_SYSCALLS.contains(name) {
+        if !X86_64_ONLY_SYSCALLS.contains(name) && !AARCH64_ONLY_SYSCALLS.contains(name) {
             assert!(
                 x86_64.is_some() && aarch64.is_some(),
                 "{name} is a shared row, so both its cells must hold a number"
@@ -9782,6 +9789,17 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
             seccomp_syscall_number(name, 0xc000_00b7),
             None,
             "{name} exists only on x86-64, so its aarch64 cell must be empty"
+        );
+    }
+    for name in AARCH64_ONLY_SYSCALLS {
+        assert_eq!(
+            seccomp_syscall_number(name, 0xc000_003e),
+            None,
+            "{name} exists only on aarch64, so its x86-64 cell must be empty"
+        );
+        assert!(
+            seccomp_syscall_number(name, 0xc000_00b7).is_some(),
+            "{name}'s aarch64 cell must hold its number"
         );
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -11269,7 +11287,7 @@ macro_rules! model_allowed_x86_64 {
             SYS_rename = 82, SYS_mkdir = 83, SYS_unlink = 87, SYS_fchmod = 91, SYS_sysinfo = 99, SYS_geteuid = 107,
             SYS_arch_prctl = 158, SYS_futex = 202, SYS_getdents64 = 217, SYS_exit_group = 231,
             SYS_epoll_wait = 232, SYS_epoll_ctl = 233, SYS_openat = 257, SYS_mkdirat = 258,
-            SYS_newfstatat = 262, SYS_unlinkat = 263, SYS_renameat = 264, SYS_linkat = 265, SYS_readlinkat = 267,
+            SYS_newfstatat = 262, SYS_unlinkat = 263, SYS_linkat = 265, SYS_readlinkat = 267,
             SYS_faccessat = 269, SYS_ppoll = 271, SYS_epoll_pwait = 281, SYS_eventfd2 = 290,
             SYS_epoll_create1 = 291, SYS_prlimit64 = 302, SYS_renameat2 = 316, SYS_getrandom = 318,
             SYS_execveat = 322, SYS_statx = 332, SYS_rseq = 334, SYS_openat2 = 437,
