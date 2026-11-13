@@ -1,7 +1,7 @@
 //! Tests of the start by CID. Each row goes through `Runtime::run_by_bundle`
-//! (or its observed form, which only adds the moment after the walk) on a
-//! bundle put into the store by `stage_bundle`, and asserts the exact code of
-//! a refusal. The bundles are built here; their CIDs come from the crate,
+//! (or its observed form, which only adds the moment after each walk and a
+//! budget a test can reach) on a bundle put into the store by `stage_bundle`,
+//! and asserts the exact code of a refusal. The bundles are built here; their CIDs come from the crate,
 //! whose own vectors the lab's suite and the staging tests hold to recorded
 //! values. Signatures are made by hand (`bundle_admission::tests::signed`).
 
@@ -16,13 +16,14 @@ use elastos_storage::providers::LocalFSProvider;
 use crate::bundle_admission::tests::{did, file_for, key, sign_by_hand, signed};
 use crate::bundle_admission::{
     bundle_signature_path, bundle_slot, BundleRefusal, BUNDLE_MANIFEST_KEYS,
-    BUNDLE_SIGNATURE_DOMAIN,
+    BUNDLE_SIGNATURE_DOMAIN, BUNDLE_WALK_BUDGET,
 };
 use crate::runtime::tests::{
     component_manifest_json, component_with_extra_import, quiet_component,
 };
 use crate::runtime::Runtime;
 use crate::stage_cmd::{bundle_cid, stage_bundle};
+use elastos_bundle_identity::Budget;
 
 /// One call a component made to the bridge: the capsule's id, the principal
 /// it ran for, and the ceiling recorded for it at that moment.
@@ -148,6 +149,53 @@ impl Home {
 
     fn calls(&self) -> Vec<Call> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// `bundle` and then `stage`: the CID of a staged bundle signed by `key`.
+    async fn staged(
+        &self,
+        folder: &str,
+        manifest: &str,
+        component: &[u8],
+        key: &SigningKey,
+    ) -> String {
+        let folder = self.bundle(folder, manifest, component);
+        self.stage(&folder, key).await
+    }
+
+    /// Start by CID under `budget`: the name that ran or the refusal, and
+    /// the CID of each bundle the start walked, in the order it walked them.
+    async fn run_watched(
+        &self,
+        cid: &str,
+        person: Option<&str>,
+        budget: Budget,
+    ) -> (Result<String, BundleRefusal>, Vec<String>) {
+        let mut walked = Vec::new();
+        let person = person.map(ToOwned::to_owned);
+        let result = self
+            .runtime
+            .run_by_bundle_observed(&self.data(), cid, Vec::new(), person, budget, |cid| {
+                walked.push(cid.to_string())
+            })
+            .await
+            .map(|(handle, _)| handle.manifest.name);
+        (result, walked)
+    }
+}
+
+/// `manifest(name)` whose requirements pin `pins`: requirement name and CID.
+fn manifest_pinning(name: &str, pins: &[(&str, &str)]) -> String {
+    let pin = |(name, cid): &(&str, &str)| serde_json::json!({"name": name, "kind": "capsule", "cid": cid});
+    let requires: Vec<serde_json::Value> = pins.iter().map(pin).collect();
+    manifest_with(name, "requires", requires.into())
+}
+
+/// The refusal of a pinned bundle: its requirement's name around its own.
+fn under(name: &str, refusal: BundleRefusal) -> BundleRefusal {
+    BundleRefusal::Requirement {
+        name: name.to_string(),
+        refusal: Box::new(refusal),
     }
 }
 
@@ -356,7 +404,8 @@ async fn a_component_replaced_after_the_walk_does_not_run() {
             &cid,
             Vec::new(),
             Some(PERSON.to_string()),
-            || home.overwrite(&cid, ENTRYPOINT, &replacement),
+            BUNDLE_WALK_BUDGET,
+            |_| home.overwrite(&cid, ENTRYPOINT, &replacement),
         )
         .await;
 
@@ -476,7 +525,6 @@ async fn each_key_outside_the_list_is_refused_by_name() {
         ("asks", serde_json::json!([])),
         ("capabilities", serde_json::json!([])),
         ("permissions", serde_json::json!({})),
-        ("requires", serde_json::json!([])),
         ("provides", null.clone()),
         ("providers", null.clone()),
         ("authority", null.clone()),
@@ -516,7 +564,7 @@ async fn each_key_outside_the_list_is_refused_by_name() {
 /// refuses it.
 #[test]
 fn a_manifest_the_policy_admits_has_an_empty_ceiling() {
-    use crate::bundle_admission::{admit_bundle_manifest, BUNDLE_WALK_BUDGET};
+    use crate::bundle_admission::admit_bundle_manifest;
     use elastos_bundle_identity::checked_bundle_within as walk;
     let dir = tempfile::tempdir().unwrap();
     let bundle = |name: &str, manifest: &str| {
@@ -536,6 +584,11 @@ fn a_manifest_the_policy_admits_has_an_empty_ceiling() {
     keys.insert(
         "resources".into(),
         serde_json::json!({"memory_mb": 64, "cpu_shares": 2}),
+    );
+    // A pinned requirement is no authority: the ceiling stays empty.
+    keys.insert(
+        "requires".into(),
+        serde_json::json!([{"name": "needed", "kind": "capsule", "cid": ASKS_NOTHING_CID}]),
     );
     let written: Vec<&str> = keys.keys().map(String::as_str).collect();
     for key in BUNDLE_MANIFEST_KEYS {
@@ -574,7 +627,6 @@ fn the_list_and_the_refused_keys_cover_the_manifest_type() {
         "asks",
         "capabilities",
         "permissions",
-        "requires",
         "provides",
         "providers",
         "authority",
@@ -777,51 +829,630 @@ async fn a_runtime_without_a_component_provider_cannot_start_a_bundle() {
     );
 }
 
-/// The start by CID reads the slot through the one bounded walk and nothing
-/// else: its body has one call of the bounded walk and none of the calls
-/// that read a file again or fetch. A text pin of `run_by_bundle_observed`.
+/// Every Rust file under `dir`.
+fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
+    for item in fs::read_dir(dir).expect("list") {
+        let path = item.expect("entry").path();
+        if path.is_dir() {
+            rust_files(&path, found);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+/// The start by CID reads each bundle's slot through the one bounded walk
+/// and nothing else, and holds every bundle to one order of checks. A text
+/// pin of `run_by_bundle_observed` and of `admit_closure_member`, the one
+/// function through which the bundle asked for and each pinned bundle pass.
 /// (The walk's name is split below so that the pin on the server's walks,
 /// in `stage_cmd`, does not count this file.)
 #[test]
-fn the_start_by_cid_reads_the_slot_once_and_fetches_nothing() {
+fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     let source = include_str!("runtime.rs");
-    let start = source
-        .find("pub(crate) async fn run_by_bundle_observed(")
-        .unwrap();
-    let body = &source[start..];
-    let body = &body[..body.find("\n    }\n").unwrap()];
+    let body_of = |signature: &str| {
+        let body = &source[source.find(signature).unwrap()..];
+        &body[..body.find("\n    }\n").unwrap()]
+    };
+    let start = body_of("pub(crate) async fn run_by_bundle_observed(");
+    let member = body_of("async fn admit_closure_member(");
     let walk = ["checked_bundle", "_within("].concat();
-    assert_eq!(body.matches(&walk).count(), 1);
-    assert_eq!(body.matches("after_walk()").count(), 1);
-    assert!(body.find(&walk).unwrap() < body.find("after_walk()").unwrap());
-    for never in [
-        "fs::read",
-        "read_to_string",
-        "read_admitted_entrypoint",
-        "provider.load(",
-        "fetch",
-        "resolve_capsule_dir",
-        "resource_authority_bounds",
-        // It fills no ceiling itself: the shared end does, from the one
-        // bounds function.
-        "bridge_manifest_capabilities",
-        "dev_mode",
-        // Nothing is registered as running, and nothing reads the
-        // presentation keys: no window, no projection.
-        "register_capsule",
-        "projections",
-        "window_policy",
-        "icon",
+    assert_eq!(start.matches(&walk).count(), 0);
+    // One bundle's checks, in their order: the walk; the CID; the signature;
+    // and only then the manifest, where a pinned manifest is turned into one
+    // that can start, and the component's imports.
+    let order = [
+        walk.as_str(),
+        "after_walk(asked)",
+        "bundle.cid() != *asked",
+        "self.check_bundle_signature(",
+        "bundle_admission::admit_bundle_manifest(",
+        "validate_component_imports(",
+    ];
+    let places: Vec<usize> = order
+        .iter()
+        .map(|text| {
+            assert_eq!(member.matches(text).count(), 1, "{text}");
+            member.find(text).unwrap()
+        })
+        .collect();
+    assert!(
+        places.windows(2).all(|pair| pair[0] < pair[1]),
+        "{places:?}"
+    );
+    // The bundle asked for and each pinned one go through that function, and
+    // nothing else in the server's code judges a bundle's manifest.
+    assert_eq!(start.matches(".admit_closure_member(").count(), 2);
+    let production = &source[..source.find("\npub(crate) mod tests {").unwrap()];
+    assert_eq!(production.matches(".admit_closure_member(").count(), 2);
+    assert_eq!(production.matches("admit_bundle_manifest(").count(), 1);
+    // The budget of a start is the server's one walk budget and nothing
+    // else: the constant is named once, where the one caller of the observed
+    // form hands it over; what is left starts as that budget; and it is
+    // changed at two places, each of which only takes away from it.
+    assert_eq!(production.matches("BUNDLE_WALK_BUDGET").count(), 1);
+    let handed_over = "let budget = bundle_admission::BUNDLE_WALK_BUDGET;\n        \
+                       self.run_by_bundle_observed(data_dir, cid, args, principal_id, budget, |_| {})";
+    assert_eq!(production.matches(handed_over).count(), 1);
+    assert_eq!(production.matches("run_by_bundle_observed(").count(), 2);
+    assert_eq!(start.matches("let mut left = budget;").count(), 1);
+    assert_eq!(production.matches("&mut left").count(), 2);
+    assert_eq!(production.matches("left.max_").count(), 4);
+    for shrinks in [
+        "left.max_entries = left.max_entries.saturating_sub(files.len());",
+        "left.max_total_bytes = left.max_total_bytes.saturating_sub(bytes);",
     ] {
-        assert!(!body.contains(never), "{never}");
+        assert_eq!(member.matches(shrinks).count(), 1, "{shrinks}");
     }
-    // It passes no ceiling of its own: the shared end fills it.
+    // No other file of the server calls the observed form but this one.
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let observed = ["run_by_bundle", "_observed("].concat();
+    let mut callers: Vec<String> = files
+        .iter()
+        .filter(|path| fs::read_to_string(path).expect("read").contains(&observed))
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    callers.sort();
+    assert_eq!(callers, ["bundle_start_tests.rs", "runtime.rs"]);
+    for body in [start, member] {
+        for never in [
+            "fs::read",
+            "read_to_string",
+            "read_admitted_entrypoint",
+            "provider.load(",
+            "fetch",
+            "resolve_capsule_dir",
+            "resource_authority_bounds",
+            // It fills no ceiling itself: the shared end does, from the one
+            // bounds function.
+            "bridge_manifest_capabilities",
+            "dev_mode",
+            // Nothing is registered as running, and nothing reads the
+            // presentation keys: no window, no projection.
+            "register_capsule",
+            "projections",
+            "window_policy",
+            "icon",
+        ] {
+            assert!(!body.contains(never), "{never}");
+        }
+    }
+    // It passes no ceiling of its own: the shared end fills it. One capsule
+    // is loaded and started, the one asked for, sealed, and only that way.
     assert_eq!(
-        body.matches("self.start_loaded(component, &mut handle, args, principal_id)")
+        start
+            .matches("self.start_loaded(component, &mut handle, args, principal_id)")
             .count(),
         1
     );
-    // The component is loaded sealed, and only that way.
-    assert_eq!(body.matches(".load_admitted_sealed(").count(), 1);
-    assert_eq!(body.matches(".load_admitted(").count(), 0);
+    assert_eq!(start.matches(".load_admitted_sealed(").count(), 1);
+    assert_eq!(
+        start
+            .matches(".load_admitted_sealed(admitted.component, admitted.manifest)")
+            .count(),
+        1
+    );
+    assert_eq!(start.matches(".load_admitted(").count(), 0);
+    for never in ["start_loaded", "load_admitted", "provider"] {
+        assert!(!member.contains(never), "{never}");
+    }
+}
+
+/// The pins come off a manifest at one place in the server: where the start
+/// by CID judges a bundle's manifest, which the pin above holds to after
+/// that bundle's CID and signature checks. The Runtime's reader of pins
+/// still hands out no manifest (its own test, in the common crate, is as it
+/// was). What comes out is the manifest exactly as the ordinary type reads
+/// the same text without the pin, beside the pins; the bundle's own bytes
+/// are not changed. (The needle is split so that this file is not counted.)
+#[test]
+fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
+    use crate::bundle_admission::admit_bundle_manifest;
+    use elastos_bundle_identity::checked_bundle_within as walk;
+    let sources = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&sources, &mut files);
+    let taken_off = [".remove(", "\"cid\")"].concat();
+    let mut places: Vec<(String, usize)> = files
+        .iter()
+        .map(|path| {
+            let text = fs::read_to_string(path).expect("read");
+            let name = path.strip_prefix(&sources).unwrap().to_string_lossy();
+            (name.into_owned(), text.matches(&taken_off).count())
+        })
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    places.sort();
+    // The second is a test of the update controller, which takes the `cid`
+    // off a release's descriptor of an external provider: not a manifest,
+    // and not a pin.
+    assert_eq!(
+        places,
+        [
+            ("bundle_admission.rs".to_string(), 1),
+            ("update_controller/tests.rs".to_string(), 1)
+        ]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let pinning = manifest_pinning("pinning", &[("needed", ASKS_NOTHING_CID)]);
+    fs::write(dir.path().join("capsule.json"), &pinning).unwrap();
+    fs::write(dir.path().join(ENTRYPOINT), quiet_component()).unwrap();
+    let walked = walk(dir.path(), BUNDLE_WALK_BUDGET).unwrap();
+    let admitted = admit_bundle_manifest(&walked).unwrap();
+    assert_eq!(
+        admitted.pins,
+        [("needed".to_string(), ASKS_NOTHING_CID.to_string())]
+    );
+    let without_the_pin = manifest_with(
+        "pinning",
+        "requires",
+        serde_json::json!([{"name": "needed", "kind": "capsule"}]),
+    );
+    let ordinary: elastos_common::CapsuleManifest = serde_json::from_str(&without_the_pin).unwrap();
+    assert_eq!(
+        serde_json::to_value(&admitted.manifest).unwrap(),
+        serde_json::to_value(&ordinary).unwrap()
+    );
+    assert_eq!(walked.entry("capsule.json").unwrap(), pinning.as_bytes());
+}
+
+/// C-walk, the control. A bundle that pins staged bundles starts, and it is
+/// the only thing that runs: every pinned bundle here holds the calling
+/// component, which, started for its person, calls the bridge and ends in an
+/// error. Each pinned bundle is walked once per pin that reaches it, depth
+/// first in the manifests' order (`shared` is pinned twice and checked
+/// twice), each under its own publisher's signature. The capsule that
+/// starts is still sealed: a requirement gives it no bridge.
+#[tokio::test]
+async fn a_bundle_that_pins_staged_bundles_starts_and_only_it_runs() {
+    let (publisher, other) = (key(60), key(61));
+    let home = Home::trusting(&[&publisher, &other]).await;
+    let (quiet, calling) = (quiet_component(), calling_component());
+    let shared = home
+        .staged("shared", &manifest("shared"), &calling, &other)
+        .await;
+    let pins_shared = |name: &str| manifest_pinning(name, &[("shared", &shared)]);
+    let left = home
+        .staged("left", &pins_shared("left"), &calling, &publisher)
+        .await;
+    let right = home
+        .staged("right", &pins_shared("right"), &calling, &other)
+        .await;
+    let pins_both = |name: &str| manifest_pinning(name, &[("left", &left), ("right", &right)]);
+    let root = home
+        .staged("root", &pins_both("root"), &quiet, &publisher)
+        .await;
+
+    let (ran, walked) = home
+        .run_watched(&root, Some(PERSON), BUNDLE_WALK_BUDGET)
+        .await;
+    assert_eq!(ran.unwrap(), "root");
+    assert_eq!(
+        walked,
+        [
+            root.as_str(),
+            left.as_str(),
+            shared.as_str(),
+            right.as_str(),
+            shared.as_str()
+        ]
+    );
+    assert_eq!(
+        home.run(&root, Some(PERSON)).await.unwrap().1,
+        did(&publisher.verifying_key()),
+        "the signer reported is the one of the bundle asked for"
+    );
+    assert_eq!(home.calls(), Vec::new());
+    assert!(home.runtime.list_capsules().await.is_empty());
+
+    let calling_root = home
+        .staged(
+            "calling-root",
+            &pins_both("calling-root"),
+            &calling,
+            &publisher,
+        )
+        .await;
+    let refusal = home.run(&calling_root, Some(PERSON)).await.unwrap_err();
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "bundle_start_failed: Compute error: Component capsule denied: BusError::Denied({SEALED_BRIDGE:?})"
+        )
+    );
+    assert_eq!(home.calls(), Vec::new());
+}
+
+/// C-missing. A pin whose bundle the store does not hold refuses the start,
+/// under the requirement's name and with the code of a missing bundle.
+/// Nothing is fetched and nothing is made in the store.
+#[tokio::test]
+async fn a_pinned_bundle_that_is_not_in_the_store_refuses_the_start() {
+    let publisher = key(62);
+    let home = Home::trusting(&[&publisher]).await;
+    let absent = "bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q";
+    let needs = manifest_pinning("needs", &[("needed", absent)]);
+    let root = home
+        .staged("needs", &needs, &quiet_component(), &publisher)
+        .await;
+
+    let (result, walked) = home.run_watched(&root, None, BUNDLE_WALK_BUDGET).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(
+        refusal,
+        under("needed", BundleRefusal::Missing(absent.to_string()))
+    );
+    assert_eq!(refusal.code(), "bundle_missing");
+    assert_eq!(
+        refusal.to_string(),
+        format!("bundle_missing: this Home's store holds no bundle {absent} (requirement needed)")
+    );
+    assert_eq!(walked, [root.as_str()]);
+    assert!(!bundle_slot(&home.data(), &absent.parse().unwrap()).exists());
+}
+
+/// C-member. A pinned bundle is held to every check the bundle asked for is
+/// held to, at this start, in the same order. Each row starts from a root
+/// that pins one staged bundle signed by another publisher and starts (the
+/// control), then changes one thing about the pinned bundle.
+#[tokio::test]
+async fn a_pinned_bundle_is_held_to_every_check_the_asked_one_is() {
+    let (publisher, other) = (key(63), key(64));
+    let home = Home::trusting(&[&publisher, &other]).await;
+    let quiet = quiet_component();
+    // A root named `label` that pins `member` as `needed`.
+    let root_pinning = |label: &str, member: &str| {
+        let pinning = manifest_pinning(label, &[("needed", member)]);
+        (label.to_string(), pinning)
+    };
+    let needed = manifest("needed");
+
+    // A file of the pinned bundle changed after staging.
+    let member = home.staged("changed-needed", &needed, &quiet, &other).await;
+    let (label, pinning) = root_pinning("changed", &member);
+    let root = home.staged(&label, &pinning, &quiet, &publisher).await;
+    assert_eq!(home.run(&root, None).await.unwrap().0, "changed");
+    let mut changed = quiet.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    home.overwrite(&member, ENTRYPOINT, &changed);
+    let elsewhere = home.bundle("changed-copy", &needed, &changed);
+    let mismatch = BundleRefusal::CidMismatch {
+        asked: member.clone(),
+        computed: bundle_cid(&elsewhere).unwrap(),
+    };
+    assert_eq!(
+        home.run(&root, None).await.unwrap_err(),
+        under("needed", mismatch.clone())
+    );
+    // The CID is judged before the signature: with the signature gone too,
+    // the refusal is still the mismatch.
+    let signature = bundle_signature_path(&home.data(), &member.parse().unwrap());
+    fs::remove_file(signature).unwrap();
+    assert_eq!(
+        home.run(&root, None).await.unwrap_err(),
+        under("needed", mismatch)
+    );
+
+    // Its signature file gone; then its signer no longer trusted, though
+    // the root's signer still is.
+    let trusted = manifest("trusted");
+    let member = home.staged("signed-needed", &trusted, &quiet, &other).await;
+    let pinning = manifest_pinning("signed", &[("trusted", &member)]);
+    let root = home.staged("signed", &pinning, &quiet, &publisher).await;
+    assert_eq!(home.run(&root, None).await.unwrap().0, "signed");
+    home.trust(&[&publisher]).await;
+    assert_eq!(
+        home.run(&root, None).await.unwrap_err(),
+        under("trusted", BundleRefusal::SignatureNotAccepted)
+    );
+    home.trust(&[&publisher, &other]).await;
+    assert_eq!(home.run(&root, None).await.unwrap().0, "signed");
+    let signature = bundle_signature_path(&home.data(), &member.parse().unwrap());
+    fs::remove_file(signature).unwrap();
+    assert_eq!(
+        home.run(&root, None).await.unwrap_err(),
+        under("trusted", BundleRefusal::Unsigned)
+    );
+
+    // Its manifest has a key this start does not take: a pinned bundle that
+    // declares an authority refuses the start. With its signature gone as
+    // well, the refusal is the signature's: a manifest is not judged, and a
+    // pinned one not converted, before the signature is accepted.
+    let capable = manifest_with(
+        "capable",
+        "capabilities",
+        serde_json::json!(["elastos://did/*"]),
+    );
+    let member = home.staged("capable", &capable, &quiet, &other).await;
+    let pinning = manifest_pinning("wants", &[("capable", &member)]);
+    let root = home.staged("wants", &pinning, &quiet, &publisher).await;
+    let refusal = home.run(&root, None).await.unwrap_err();
+    assert_eq!(
+        refusal,
+        under(
+            "capable",
+            BundleRefusal::ManifestFieldRefused("capabilities".to_string())
+        )
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "bundle_manifest_field_refused: capabilities (requirement capable)"
+    );
+    let signature = bundle_signature_path(&home.data(), &member.parse().unwrap());
+    fs::remove_file(signature).unwrap();
+    assert_eq!(
+        home.run(&root, None).await.unwrap_err(),
+        under("capable", BundleRefusal::Unsigned)
+    );
+
+    // It is not an app component of the contract: by its role, and by what
+    // its component imports.
+    let viewer = manifest_with("a-viewer", "role", serde_json::json!("viewer"));
+    let member = home.staged("a-viewer", &viewer, &quiet, &other).await;
+    let pinning = manifest_pinning("shows", &[("a-viewer", &member)]);
+    let root = home.staged("shows", &pinning, &quiet, &publisher).await;
+    let refusal = home.run(&root, None).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_not_a_component");
+    assert!(matches!(&refusal, BundleRefusal::Requirement { name, .. } if name == "a-viewer"));
+    let member = home
+        .staged(
+            "imports",
+            &manifest("imports"),
+            &component_with_extra_import(),
+            &other,
+        )
+        .await;
+    let pinning = manifest_pinning("links", &[("imports", &member)]);
+    let root = home.staged("links", &pinning, &quiet, &publisher).await;
+    let refusal = home.run(&root, None).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_not_a_component");
+    assert!(refusal.to_string().contains("wasi:filesystem"), "{refusal}");
+    assert!(refusal.to_string().ends_with("(requirement imports)"));
+    assert_eq!(home.calls(), Vec::new());
+}
+
+/// C-name. The bundle staged under a pin must be called what the
+/// requirement that pins it is called. The control pins the same bundle
+/// under its own name.
+#[tokio::test]
+async fn the_bundle_under_a_pin_carries_the_requirements_name() {
+    let publisher = key(65);
+    let home = Home::trusting(&[&publisher]).await;
+    let quiet = quiet_component();
+    let member = home
+        .staged("other", &manifest("other"), &quiet, &publisher)
+        .await;
+    let wrong = manifest_pinning("wrong", &[("needed", &member)]);
+    let wrong = home.staged("wrong", &wrong, &quiet, &publisher).await;
+    let refusal = home.run(&wrong, None).await.unwrap_err();
+    assert_eq!(
+        refusal,
+        under(
+            "needed",
+            BundleRefusal::RequirementMismatch("other".to_string())
+        )
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "bundle_requirement_mismatch: the bundle staged under the pin is called \"other\" (requirement needed)"
+    );
+
+    let right = manifest_pinning("right", &[("other", &member)]);
+    let right = home.staged("right", &right, &quiet, &publisher).await;
+    assert_eq!(home.run(&right, None).await.unwrap().0, "right");
+}
+
+/// C-unpinned, C-names. A requirement without a pin refuses the start, also
+/// beside one that has a pin, and so does a requirement whose name is not
+/// plain; in both cases before any pinned bundle is looked at. The same
+/// holds for the manifest of a pinned bundle. The control has a pin and a
+/// name that uses every kind of plain character.
+#[tokio::test]
+async fn a_requirement_without_a_pin_or_with_an_odd_name_refuses_the_start() {
+    let publisher = key(66);
+    let home = Home::trusting(&[&publisher]).await;
+    let quiet = quiet_component();
+    let plain = "a.B_c-1";
+    let member = home
+        .staged("plain", &manifest(plain), &quiet, &publisher)
+        .await;
+    let control = manifest_pinning("control", &[(plain, &member)]);
+    let control = home.staged("control", &control, &quiet, &publisher).await;
+    assert_eq!(home.run(&control, None).await.unwrap().0, "control");
+
+    let loose = serde_json::json!({"name": "loose", "kind": "capsule"});
+    let pinned = serde_json::json!({"name": plain, "kind": "capsule", "cid": member});
+    let rows = [
+        ("alone", serde_json::json!([loose])),
+        ("after", serde_json::json!([pinned, loose])),
+        ("before", serde_json::json!([loose, pinned])),
+    ];
+    for (name, requires) in rows {
+        let unpinned = manifest_with(name, "requires", requires);
+        let root = home.staged(name, &unpinned, &quiet, &publisher).await;
+        let (result, walked) = home.run_watched(&root, None, BUNDLE_WALK_BUDGET).await;
+        let refusal = result.unwrap_err();
+        assert_eq!(
+            refusal,
+            BundleRefusal::RequirementUnpinned("loose".to_string()),
+            "{name}"
+        );
+        assert_eq!(refusal.to_string(), "bundle_requirement_unpinned: loose");
+        assert_eq!(walked, [root.as_str()], "{name}");
+    }
+
+    for (row, odd) in ["a/b", "a*", "..", ".", "a b", "a\\b"]
+        .into_iter()
+        .enumerate()
+    {
+        let name = format!("odd-{row}");
+        let root = manifest_pinning(&name, &[(odd, &member)]);
+        let root = home.staged(&name, &root, &quiet, &publisher).await;
+        let (result, walked) = home.run_watched(&root, None, BUNDLE_WALK_BUDGET).await;
+        let refusal = result.unwrap_err();
+        assert_eq!(
+            refusal,
+            BundleRefusal::RequirementNameInvalid(odd.to_string()),
+            "{odd}"
+        );
+        assert_eq!(refusal.code(), "bundle_requirement_name_invalid");
+        assert_eq!(walked, [root.as_str()], "{odd}");
+    }
+
+    // A pinned bundle's own manifest is held to the same rule.
+    let inner = manifest_with("inner", "requires", serde_json::json!([loose]));
+    let inner = home.staged("inner", &inner, &quiet, &publisher).await;
+    let outer = manifest_pinning("outer", &[("inner", &inner)]);
+    let outer = home.staged("outer", &outer, &quiet, &publisher).await;
+    assert_eq!(
+        home.run(&outer, None).await.unwrap_err(),
+        under(
+            "inner",
+            BundleRefusal::RequirementUnpinned("loose".to_string())
+        )
+    );
+}
+
+/// C-budget. The bundles of one start share one budget of bytes and of
+/// files: the bundle asked for counts, and so does each pinned bundle. With
+/// exactly what the three bundles here hold, the start goes ahead; with one
+/// byte less, or one file less, the walk of the last bundle is refused, and
+/// that bundle alone starts under the same budget.
+#[tokio::test]
+async fn the_bundles_of_one_start_share_one_budget() {
+    let publisher = key(67);
+    let home = Home::trusting(&[&publisher]).await;
+    let quiet = quiet_component();
+    let bytes = |manifest: &str| (manifest.len() + quiet.len()) as u64;
+    let (first, second) = (manifest("first"), manifest("second"));
+    let first_cid = home.staged("first", &first, &quiet, &publisher).await;
+    let second_cid = home.staged("second", &second, &quiet, &publisher).await;
+    let root = manifest_pinning("root", &[("first", &first_cid), ("second", &second_cid)]);
+    let root_cid = home.staged("root", &root, &quiet, &publisher).await;
+
+    // Three bundles of two files each.
+    let exact = Budget {
+        max_entries: 6,
+        max_total_bytes: bytes(&root) + bytes(&first) + bytes(&second),
+        ..BUNDLE_WALK_BUDGET
+    };
+    let (ran, walked) = home.run_watched(&root_cid, None, exact).await;
+    assert_eq!(ran.unwrap(), "root");
+    assert_eq!(
+        walked,
+        [root_cid.as_str(), first_cid.as_str(), second_cid.as_str()]
+    );
+
+    let a_byte_less = Budget {
+        max_total_bytes: exact.max_total_bytes - 1,
+        ..exact
+    };
+    let a_file_less = Budget {
+        max_entries: 5,
+        ..exact
+    };
+    for (short, limit) in [(a_byte_less, "total bytes"), (a_file_less, "entries")] {
+        let (result, walked) = home.run_watched(&root_cid, None, short).await;
+        let refusal = result.unwrap_err();
+        assert_eq!(refusal.code(), "bundle_walk_over_budget", "{refusal}");
+        assert!(
+            matches!(&refusal, BundleRefusal::Requirement { name, .. } if name == "second"),
+            "{refusal}"
+        );
+        assert!(
+            refusal
+                .to_string()
+                .contains(&format!("the walk's limit on {limit}")),
+            "{refusal}"
+        );
+        assert_eq!(walked, [root_cid.as_str(), first_cid.as_str()], "{limit}");
+        let (alone, _) = home.run_watched(&second_cid, None, short).await;
+        assert_eq!(alone.unwrap(), "second");
+    }
+}
+
+/// C-limits. A pin may sit at depth 4 and not at depth 5, the bundle asked
+/// for being depth 1; and one start takes in 16 bundles and not 17. The
+/// bundle past either limit is not read.
+#[tokio::test]
+async fn a_closure_is_limited_in_depth_and_in_number() {
+    let publisher = key(68);
+    let home = Home::trusting(&[&publisher]).await;
+    let quiet = quiet_component();
+
+    // n1 pins n2, which pins n3, and so on down to n5.
+    let mut chain = vec![home.staged("n5", &manifest("n5"), &quiet, &publisher).await];
+    for level in (1..5).rev() {
+        let (name, below) = (format!("n{level}"), format!("n{}", level + 1));
+        let pinning = manifest_pinning(&name, &[(&below, chain.last().unwrap())]);
+        chain.push(home.staged(&name, &pinning, &quiet, &publisher).await);
+    }
+    chain.reverse();
+    let (ran, walked) = home.run_watched(&chain[1], None, BUNDLE_WALK_BUDGET).await;
+    assert_eq!(ran.unwrap(), "n2");
+    assert_eq!(walked, chain[1..]);
+    let (result, walked) = home.run_watched(&chain[0], None, BUNDLE_WALK_BUDGET).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(refusal, under("n5", BundleRefusal::ClosureTooDeep));
+    assert_eq!(
+        refusal.to_string(),
+        "bundle_closure_too_deep: a pin sits below depth 4 (requirement n5)"
+    );
+    assert_eq!(walked, chain[..4]);
+
+    let mut leaves = Vec::new();
+    for leaf in 1..=16 {
+        let name = format!("m{leaf}");
+        let cid = home
+            .staged(&name, &manifest(&name), &quiet, &publisher)
+            .await;
+        leaves.push((name, cid));
+    }
+    let pins: Vec<(&str, &str)> = leaves
+        .iter()
+        .map(|(name, cid)| (name.as_str(), cid.as_str()))
+        .collect();
+    let sixteen = manifest_pinning("sixteen", &pins[..15]);
+    let sixteen = home.staged("sixteen", &sixteen, &quiet, &publisher).await;
+    let (ran, walked) = home.run_watched(&sixteen, None, BUNDLE_WALK_BUDGET).await;
+    assert_eq!(ran.unwrap(), "sixteen");
+    assert_eq!(walked.len(), 16);
+    let seventeen = manifest_pinning("seventeen", &pins);
+    let seventeen = home
+        .staged("seventeen", &seventeen, &quiet, &publisher)
+        .await;
+    let (result, walked) = home.run_watched(&seventeen, None, BUNDLE_WALK_BUDGET).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(refusal, under("m16", BundleRefusal::ClosureTooMany));
+    assert_eq!(
+        refusal.to_string(),
+        "bundle_closure_too_many: more than 16 bundles (requirement m16)"
+    );
+    assert_eq!(walked.len(), 16);
+    assert!(!walked.contains(&leaves[15].1));
 }

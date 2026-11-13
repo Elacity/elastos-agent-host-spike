@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
-use crate::bundle_admission::{self, AcceptedSignature, BundleRefusal};
-use elastos_bundle_identity::{checked_bundle_within, LabCid};
+use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleRefusal};
+use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
 use elastos_common::{CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
@@ -376,6 +376,13 @@ impl Runtime {
     /// component provider refuses its every call to the bridge before any
     /// handler sees it; and its ceiling, filled like every capsule's from
     /// the one bounds function, is empty for any manifest this start admits.
+    ///
+    /// A manifest's requirements must each pin a bundle by CID, and every
+    /// pinned bundle, and every bundle those pin, must be in the store and
+    /// pass the same checks, under its own signature and inside the one
+    /// walk budget they all share, before anything starts. A pinned bundle
+    /// is checked and nothing more: it is not started, and the capsule that
+    /// starts gets no way to reach it or its bytes.
     pub async fn run_by_bundle(
         &self,
         data_dir: &Path,
@@ -383,52 +390,69 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<String>,
     ) -> std::result::Result<(CapsuleHandle, AcceptedSignature), BundleRefusal> {
-        self.run_by_bundle_observed(data_dir, cid, args, principal_id, || {})
+        let budget = bundle_admission::BUNDLE_WALK_BUDGET;
+        self.run_by_bundle_observed(data_dir, cid, args, principal_id, budget, |_| {})
             .await
     }
 
-    /// [`Runtime::run_by_bundle`], telling `after_walk` when the one walk of
-    /// the slot is done. Tests change the slot at that moment, as another
-    /// process could.
+    /// [`Runtime::run_by_bundle`] under `budget`, telling `after_walk` each
+    /// time the one walk of a bundle's slot is done, with that bundle's CID.
+    /// Tests change the slot at that moment, as another process could, and
+    /// give a budget small enough to reach.
     pub(crate) async fn run_by_bundle_observed(
         &self,
         data_dir: &Path,
         cid: &str,
         args: Vec<String>,
         principal_id: Option<String>,
-        after_walk: impl FnOnce(),
+        budget: Budget,
+        mut after_walk: impl FnMut(&LabCid),
     ) -> std::result::Result<(CapsuleHandle, AcceptedSignature), BundleRefusal> {
         let asked: LabCid = cid
             .parse()
             .map_err(|_| BundleRefusal::CidFormInvalid(cid.to_string()))?;
-        let slot = bundle_admission::bundle_slot(data_dir, &asked);
-        match std::fs::symlink_metadata(&slot) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(BundleRefusal::Missing(asked.to_string()));
+        // One budget for the bundle asked for and every bundle pinned below
+        // it: the files and bytes each walk takes in come off what the next
+        // may take.
+        let mut left = budget;
+        let (admitted, accepted) = self
+            .admit_closure_member(data_dir, &asked, &mut left, &mut after_walk)
+            .await?;
+        // The bundles it pins, and the ones those pin, in the manifests'
+        // order and depth first: each is held to the checks just made, then
+        // to its requirement's name. None is started.
+        let below = |depth: usize, pins: Vec<(String, String)>| {
+            let pins = pins.into_iter().rev();
+            pins.map(move |(name, pin)| (depth + 1, name, pin))
+        };
+        let mut pending: Vec<_> = below(1, admitted.pins).collect();
+        let mut members = 1;
+        while let Some((depth, name, pin)) = pending.pop() {
+            let refused = |refusal| BundleRefusal::Requirement {
+                name: name.clone(),
+                refusal: Box::new(refusal),
+            };
+            members += 1;
+            if depth > bundle_admission::CLOSURE_MAX_DEPTH {
+                return Err(refused(BundleRefusal::ClosureTooDeep));
             }
-            Err(error) => {
-                return Err(BundleRefusal::Store(format!(
-                    "could not look at the slot for {asked}: {error}"
+            if members > bundle_admission::CLOSURE_MAX_MEMBERS {
+                return Err(refused(BundleRefusal::ClosureTooMany));
+            }
+            let Ok(pinned) = pin.parse::<LabCid>() else {
+                return Err(refused(BundleRefusal::CidFormInvalid(pin)));
+            };
+            let (member, _) = self
+                .admit_closure_member(data_dir, &pinned, &mut left, &mut after_walk)
+                .await
+                .map_err(refused)?;
+            if member.manifest.name != name {
+                return Err(refused(BundleRefusal::RequirementMismatch(
+                    member.manifest.name,
                 )));
             }
+            pending.extend(below(depth, member.pins));
         }
-        // The one walk of the slot. The manifest and the component below
-        // come from this value; the slot is not read again.
-        let bundle = checked_bundle_within(&slot, bundle_admission::BUNDLE_WALK_BUDGET)
-            .map_err(bundle_admission::walk_refusal)?;
-        after_walk();
-        if bundle.cid() != asked {
-            return Err(BundleRefusal::CidMismatch {
-                asked: asked.to_string(),
-                computed: bundle.cid().to_string(),
-            });
-        }
-        let signature = bundle_admission::bundle_signature_path(data_dir, &asked);
-        let accepted = self.check_bundle_signature(&signature, &asked).await?;
-        let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
-        crate::component::validate_component_imports(&admitted.component)
-            .map_err(BundleRefusal::NotAComponent)?;
 
         let failed = |error: ElastosError| BundleRefusal::StartFailed(error.to_string());
         let Some(component) = self.component_provider.clone() else {
@@ -450,6 +474,60 @@ impl Runtime {
             .await
             .map_err(failed)?;
         Ok((handle, accepted))
+    }
+
+    /// The checks every bundle of a start by CID passes, the one asked for
+    /// and each pinned one alike, in this order: the store has a slot for
+    /// `cid`; one walk of it, inside what is `left` of the closure's budget;
+    /// the files recompute to `cid`; the signature beside it is accepted;
+    /// and only then this start judges its manifest and its component's
+    /// imports. What the walk took in comes off `left`.
+    ///
+    /// The walk is not blind to the manifest: to name a bundle it parses
+    /// and validates `capsule.json` with the Runtime's reader, before the
+    /// CID and the signature are known to be right, and refuses what that
+    /// reader refuses. It keeps the name, the role and the type from it and
+    /// decides nothing else by it. The manifest that can start, and the
+    /// pins that are followed, come from the judgement after the signature.
+    async fn admit_closure_member(
+        &self,
+        data_dir: &Path,
+        asked: &LabCid,
+        left: &mut Budget,
+        after_walk: &mut impl FnMut(&LabCid),
+    ) -> std::result::Result<(AdmittedBundle, AcceptedSignature), BundleRefusal> {
+        let slot = bundle_admission::bundle_slot(data_dir, asked);
+        match std::fs::symlink_metadata(&slot) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BundleRefusal::Missing(asked.to_string()));
+            }
+            Err(error) => {
+                return Err(BundleRefusal::Store(format!(
+                    "could not look at the slot for {asked}: {error}"
+                )));
+            }
+        }
+        // The one walk of the slot. The manifest and the component below
+        // come from this value; the slot is not read again.
+        let bundle = checked_bundle_within(&slot, *left).map_err(bundle_admission::walk_refusal)?;
+        after_walk(asked);
+        let files = bundle.entries();
+        let bytes: u64 = files.iter().map(|file| file.content.len() as u64).sum();
+        left.max_entries = left.max_entries.saturating_sub(files.len());
+        left.max_total_bytes = left.max_total_bytes.saturating_sub(bytes);
+        if bundle.cid() != *asked {
+            return Err(BundleRefusal::CidMismatch {
+                asked: asked.to_string(),
+                computed: bundle.cid().to_string(),
+            });
+        }
+        let signature = bundle_admission::bundle_signature_path(data_dir, asked);
+        let accepted = self.check_bundle_signature(&signature, asked).await?;
+        let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
+        crate::component::validate_component_imports(&admitted.component)
+            .map_err(BundleRefusal::NotAComponent)?;
+        Ok((admitted, accepted))
     }
 
     /// Test only: the ceiling the bridge holds the capsule `id` to right now.
@@ -935,8 +1013,8 @@ pub(crate) mod tests {
     }
 
     /// A manifest whose requirement carries a `cid`: a pin. Only
-    /// `PinnedManifest` reads one; every start path parses the ordinary
-    /// manifest type, which refuses the key.
+    /// `PinnedManifest` reads one; every start from a folder parses the
+    /// ordinary manifest type, which refuses the key.
     pub(crate) const PINNED_MANIFEST: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"microvm","entrypoint":"rootfs.ext4","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
 
     /// The same manifest with the pin taken out: the control of each row.
