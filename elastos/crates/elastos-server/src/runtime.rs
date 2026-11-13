@@ -460,12 +460,15 @@ impl Runtime {
             pins.map(move |(name, pin)| (depth + 1, kind, core, name, pin))
         };
         let pins = std::mem::take(&mut admitted.pins);
+        // Every bundle admitted so far, by its CID: the name it carries, the
+        // deepest place a pin has reached it at, and its own pins. The
+        // bundle asked for is kept with its pins like any other: a cycle of
+        // pins back to it cannot be built, and if one were, the measuring
+        // would go round until the depth limit refused it.
+        let root = (admitted.manifest.name.clone(), 1, pins.clone());
+        let mut seen = HashMap::from([(asked.to_string(), root)]);
         let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
-        // Every bundle admitted so far, by its CID: the name it carries, the
-        // deepest place a pin has reached it at, and its own pins.
-        let root = (admitted.manifest.name.clone(), 1, Vec::new());
-        let mut seen = HashMap::from([(asked.to_string(), root)]);
         // What starts: the program asked for or, under content, the core.
         let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
         while let Some((depth, expected, core, name, pin)) = pending.pop() {
