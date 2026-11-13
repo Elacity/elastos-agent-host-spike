@@ -98,6 +98,25 @@ pub(crate) fn admit_launch(
     }))
 }
 
+/// The refusal a launch gives when an agent's principal reaches it without an
+/// admission context.
+pub(crate) const UNADMITTED_AGENT_PRINCIPAL: &str =
+    "a stored agent's principal reaches only a launch that admitted it";
+
+/// Refuses an agent's own principal on any entrance that did not admit it. An
+/// agent's id reaches a bridge principal only through `admit_launch`, so every
+/// other entrance closes rather than guesses. A build without the feature
+/// changes nothing, and a launch with no principal passes.
+pub(crate) fn refuse_unadmitted_agent_principal(principal_id: Option<&str>) -> anyhow::Result<()> {
+    if !crate::agents::build_allows() {
+        return Ok(());
+    }
+    let Some(id) = principal_id.filter(|id| crate::auth::validate_agent_id(id).is_ok()) else {
+        return Ok(());
+    };
+    anyhow::bail!("{UNADMITTED_AGENT_PRINCIPAL}: {id}")
+}
+
 /// Checks the Agent Host named by a create request. See the module rules.
 pub(crate) fn verify_agent_host(
     data_dir: &Path,

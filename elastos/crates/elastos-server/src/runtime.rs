@@ -271,12 +271,41 @@ impl Runtime {
     }
 
     /// Load and run a capsule, also returning the signer admission verified.
+    /// An agent's own principal reaches no launch here: only an admitted
+    /// launch may hand the bridge a stored agent's id.
     pub(crate) async fn run_local_with_signer(
         &self,
         path: &Path,
         args: Vec<String>,
         principal_id: Option<String>,
     ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_local_signer(path, args, principal_id, false).await
+    }
+
+    /// The same start for a launch that admitted its principal. `actor` is
+    /// the admission context's stored agent id, and it is the only way an
+    /// agent's id reaches a bridge principal.
+    pub(crate) async fn run_local_admitted(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        actor: &str,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_local_signer(path, args, Some(actor.to_string()), true)
+            .await
+    }
+
+    async fn run_local_signer(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        principal_id: Option<String>,
+        admitted: bool,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        if !admitted {
+            crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())
+                .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
+        }
         // Read manifest
         let manifest_path = path.join("capsule.json");
         let manifest_data = tokio::fs::read_to_string(&manifest_path)
@@ -424,6 +453,10 @@ impl Runtime {
         budget: Budget,
         mut after_walk: impl FnMut(&LabCid),
     ) -> std::result::Result<(CapsuleHandle, AcceptedSignature), BundleRefusal> {
+        // A start by CID names no stored agent, so an agent's own principal
+        // is refused here before the walk begins.
+        crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())
+            .map_err(|err| BundleRefusal::StartFailed(err.to_string()))?;
         let asked: LabCid = cid
             .parse()
             .map_err(|_| BundleRefusal::CidFormInvalid(cid.to_string()))?;
@@ -1404,6 +1437,64 @@ pub(crate) mod tests {
         );
         let compute = Arc::new(NoopComputeProvider);
         (Runtime::new(storage, compute), temp_dir)
+    }
+
+    /// Row 5d at the folder entrance: an agent's own principal is refused by
+    /// name before any manifest is read, and the same call with a person's
+    /// principal or none still reaches the manifest.
+    #[tokio::test]
+    async fn an_agents_principal_reaches_no_folder_launch_that_did_not_admit_it() {
+        if !crate::agents::build_allows() {
+            return;
+        }
+        let (runtime, temp) = test_runtime().await;
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let error = runtime
+            .run_local_with_signer(temp.path(), Vec::new(), Some(agent.to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Invalid manifest: a stored agent's principal reaches only a launch that admitted \
+             it: agent:v2:0123456789abcdef0123456789abcdef"
+        );
+        let absent = runtime
+            .run_local_with_signer(&temp.path().join("none"), Vec::new(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            absent
+                .to_string()
+                .starts_with("Invalid manifest: capsule.json not found in "),
+            "{absent}"
+        );
+    }
+
+    /// Row 5d at the start by CID: the same refusal, before the CID is read.
+    #[tokio::test]
+    async fn an_agents_principal_reaches_no_start_by_cid() {
+        if !crate::agents::build_allows() {
+            return;
+        }
+        let (runtime, temp) = test_runtime().await;
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let refusal = runtime
+            .run_by_bundle(
+                temp.path(),
+                "not-a-cid",
+                Vec::new(),
+                Some(agent.to_string()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refusal,
+            BundleRefusal::StartFailed(
+                "a stored agent's principal reaches only a launch that admitted it: \
+                 agent:v2:0123456789abcdef0123456789abcdef"
+                    .to_string()
+            )
+        );
     }
 
     fn unsigned_manifest() -> CapsuleManifest {

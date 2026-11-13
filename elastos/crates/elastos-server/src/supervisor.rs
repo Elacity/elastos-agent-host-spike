@@ -965,6 +965,9 @@ impl Supervisor {
         config: serde_json::Value,
         principal_id: Option<String>,
     ) -> Result<(String, u32)> {
+        // An agent's own principal reaches no VM: a stored agent launches
+        // through the component admission, never here.
+        crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())?;
         let (capsule_dir, manifest) = self.load_capsule_manifest(name).await?;
         if principal_id.is_some() && !manifest.role.is_shell_launchable() {
             bail!("principal launch grants are only valid for shell-launchable capsules");
@@ -1666,6 +1669,46 @@ mod tests {
             SupervisorRequest::LaunchCapsule { name, .. } => assert_eq!(name, "chat"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    /// Amendment row S(b): a stored agent's principal sent straight to the
+    /// supervisor is refused by name, before any manifest is read, so no
+    /// bridge and no VM is made.
+    #[tokio::test]
+    async fn a_stored_agents_principal_launches_no_vm() {
+        if !crate::agents::build_allows() {
+            return;
+        }
+        let data_dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            data_dir.path().to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules: std::collections::HashMap::new(),
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let error = supervisor
+            .launch_capsule(
+                "not-installed",
+                serde_json::json!({}),
+                Some(agent.to_string()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "a stored agent's principal reaches only a launch that admitted it: \
+             agent:v2:0123456789abcdef0123456789abcdef"
+        );
+        assert!(
+            supervisor.running.read().await.is_empty(),
+            "no VM was recorded"
+        );
     }
 
     #[tokio::test]
