@@ -462,10 +462,8 @@ impl Runtime {
         let pins = std::mem::take(&mut admitted.pins);
         let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
-        // Every bundle admitted so far, by its CID, with the name it carries
-        // and what it is.
-        let root = (admitted.manifest.name.clone(), admitted.kind);
-        let mut known = HashMap::from([(asked.to_string(), root)]);
+        // Every bundle admitted so far, by its CID, with the name it carries.
+        let mut names = HashMap::from([(asked.to_string(), admitted.manifest.name.clone())]);
         // What starts: the program asked for or, under content, the core.
         let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
         while let Some((depth, expected, core, name, pin)) = pending.pop() {
@@ -481,24 +479,17 @@ impl Runtime {
             let Ok(pinned) = pin.parse::<LabCid>() else {
                 return Err(refused(BundleRefusal::CidFormInvalid(pin)));
             };
-            let placed = |found: BundleKind| match found == expected {
-                true => Ok(()),
-                false if core => Err(BundleRefusal::ViewerCoreInvalid(format!(
-                    "the viewer pins {}, not a program",
-                    bundle_admission::kind_word(found)
-                ))),
-                false => Err(bundle_admission::misplaced(found, Some(expected))),
-            };
             // A bundle reached a second time, through another pin, was
             // admitted on its first reach. Its name must be this
-            // requirement's too and its kind what this place allows, and
-            // that is all: it is not walked or counted again, and its own
-            // pins were followed then.
-            if let Some((carried, kind)) = known.get(&pinned.to_string()) {
+            // requirement's too, and that is all: it is not walked or
+            // counted again, and its own pins were followed then. Its kind
+            // needs no second look: content and its page could be reached
+            // again only by a cycle of pins, which then starts nothing, so
+            // what is reached twice is a program under a program.
+            if let Some(carried) = names.get(&pinned.to_string()) {
                 if *carried != name {
                     return Err(refused(BundleRefusal::RequirementMismatch(carried.clone())));
                 }
-                placed(*kind).map_err(refused)?;
                 continue;
             }
             members += 1;
@@ -514,11 +505,17 @@ impl Runtime {
                     member.manifest.name,
                 )));
             }
-            placed(member.kind).map_err(refused)?;
-            known.insert(
-                pinned.to_string(),
-                (member.manifest.name.clone(), member.kind),
-            );
+            if member.kind != expected {
+                let found = member.kind;
+                return Err(refused(match core {
+                    true => BundleRefusal::ViewerCoreInvalid(format!(
+                        "the viewer pins {}, not a program",
+                        bundle_admission::kind_word(found)
+                    )),
+                    false => bundle_admission::misplaced(found, Some(expected)),
+                }));
+            }
+            names.insert(pinned.to_string(), member.manifest.name.clone());
             // A page pins exactly one bundle, its program. Whatever a
             // program pins is a program.
             let pins = std::mem::take(&mut member.pins);
