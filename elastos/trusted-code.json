@@ -1,6 +1,6 @@
 {
   "schema": "elastos.trusted-code/v1",
-  "source": "upstream issue #461 candidate lists expanded by this fork on 13 Nov 2026 to every ElastOS-written file where a capsule-rights decision lives, plus the in-process libraries from elastos/Cargo.lock and the host programs of the signed component set",
+  "source": "upstream issue #461 candidate lists expanded by this fork on 13 Nov 2026 to the ElastOS-written files found by that sweep where a capsule-rights decision lives, plus the in-process libraries from elastos/Cargo.lock and the host programs of the signed component set; two files hold such decisions but stay unlisted because the counter refuses their include!: api/capsule_inventory/preparation.rs (authorize, line 380; include! at line 10277) and api/gateway.rs (launch-token context mismatch at line 433; include! at line 1370)",
   "count_rule": "docs/TRUSTED-CODE.md",
   "files": [
     "elastos/crates/elastos-server/src/runtime.rs",
@@ -61,7 +61,28 @@
     "elastos/crates/elastos-server/src/api/handlers/storage.rs",
     "elastos/crates/elastos-server/src/collaboration_presence_grant.rs",
     "elastos/crates/elastos-server/src/room_service.rs",
-    "elastos/crates/elastos-server/src/protected_content_runtime.rs"
+    "elastos/crates/elastos-server/src/protected_content_runtime.rs",
+    "elastos/crates/elastos-server/src/api/routes.rs",
+    "elastos/crates/elastos-server/src/api/browser_capsules.rs",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs",
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs",
+    "elastos/crates/elastos-server/src/api/model_provider_egress_decision.rs",
+    "elastos/crates/elastos-server/src/api/gateway_transaction_effects.rs",
+    "elastos/crates/elastos-server/src/api/gateway_inspect_actions.rs",
+    "elastos/crates/elastos-server/src/api/gateway_inspect_actions/store.rs",
+    "elastos/crates/elastos-server/src/api/gateway_home_system.rs",
+    "elastos/crates/elastos-server/src/api/gateway_home_terminal.rs",
+    "elastos/crates/elastos-server/src/api/gateway_inbox.rs",
+    "elastos/crates/elastos-server/src/api/gateway_home_update.rs",
+    "elastos/crates/elastos-server/src/api/gateway_home_system_ai_provider.rs",
+    "elastos/crates/elastos-server/src/api/gateway_wallet_prices.rs",
+    "elastos/crates/elastos-server/src/api/gateway_wallet_approvals.rs",
+    "elastos/crates/elastos-server/src/api/gateway_collaboration_presence.rs",
+    "elastos/crates/elastos-server/src/api/auth_gateway.rs",
+    "elastos/crates/elastos-server/src/api/auth_passkey_limits.rs",
+    "elastos/crates/elastos-server/src/api/gateway_browser_remote.rs",
+    "elastos/crates/elastos-server/src/api/gateway_browser_stream.rs",
+    "elastos/crates/elastos-server/src/api/gateway_browser_transport.rs"
   ],
   "absent_candidates": [],
   "libraries": [
