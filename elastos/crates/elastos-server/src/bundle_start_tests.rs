@@ -862,6 +862,28 @@ async fn a_runtime_without_a_component_provider_cannot_start_a_bundle() {
     );
 }
 
+/// The bridge looks a ceiling up by the calling capsule's own id, and an id
+/// it holds no entry for gets the empty ceiling, never another capsule's. A
+/// text pin of the one lookup in the Home's bridge handler; that an empty
+/// ceiling lets no word through is the bridge's own test
+/// (`a_manifest_with_asks_is_held_to_their_resources_and_their_actions`).
+#[test]
+fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
+    let source = include_str!("runtime.rs");
+    let handler = &source[source.find("component.set_bus_hostcall(Arc::new(").unwrap()..];
+    let handler = &handler[..handler.find("\n            }));\n").unwrap()];
+    let lookup = "let manifest_capabilities = host_manifest_capabilities\n                    \
+                  .read()\n                    \
+                  .ok()\n                    \
+                  .and_then(|guard| guard.get(capsule_id).cloned())\n                    \
+                  .unwrap_or_default();";
+    assert_eq!(handler.matches(lookup).count(), 1);
+    // The handler reads the map of ceilings there and nowhere else, and what
+    // it read is the ceiling the request is judged under.
+    assert_eq!(handler.matches("host_manifest_capabilities").count(), 1);
+    assert_eq!(handler.matches("manifest_capabilities,\n").count(), 1);
+}
+
 /// A-asks. A capsule whose manifest has asks is started unsealed, under
 /// those asks. The calling component, run for its person, reaches the Home's
 /// bridge handler with its one call; at that moment its ceiling is its asks,
@@ -1061,7 +1083,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         }
     }
     // It passes no ceiling of its own: the shared end fills it. One capsule
-    // is loaded and started, the one asked for, sealed, and only that way.
+    // is started, the one asked for.
     assert_eq!(
         start
             .matches("self.start_loaded(component, &mut handle, args, principal_id)")

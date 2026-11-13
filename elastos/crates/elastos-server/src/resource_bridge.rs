@@ -1822,6 +1822,18 @@ mod tests {
                 );
             }
         }
+
+        // The empty ceiling: what a capsule without asks has at a start by
+        // CID, and what the bridge gives a capsule id it holds no entry for.
+        // No word passes, on any resource.
+        for (resource, _) in rows {
+            for word in words.into_iter().chain(["no-such-action", "READ"]) {
+                assert!(
+                    !manifest_allows_resource(&[], resource, word, None, None),
+                    "{word} on {resource}"
+                );
+            }
+        }
     }
 
     /// The production text of a source file: comment lines dropped, and
