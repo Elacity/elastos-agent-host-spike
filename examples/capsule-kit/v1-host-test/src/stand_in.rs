@@ -78,6 +78,12 @@ pub fn dispatch_principal(
         _ => return bridge.answer(line),
     };
     let refuse = |code: &str, message: &str| json!({ "id": envelope["id"], "response": error(code, message) });
+    // The stand-in plays a launch through the person's storage names. The
+    // Runtime's own launch names are answered as the bridge answers them when
+    // there is no content launch.
+    if resource.starts_with("elastos://launch/") {
+        return bridge.answer(line);
+    }
     let Some(principal) = principal else {
         return refuse("denied", NO_PRINCIPAL);
     };

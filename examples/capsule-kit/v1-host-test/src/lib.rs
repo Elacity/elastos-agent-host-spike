@@ -45,6 +45,10 @@ pub struct Bridge {
     pub bytes_served: BTreeMap<String, usize>,
     pub provider_errors: BTreeMap<String, String>,
     pub stand_in: Option<StandInBinding>,
+    /// A content launch: launch names are answered from `objects` and
+    /// `allowed` like any other, a grant on a pattern ending in `*` covering
+    /// the names under it. Off, every launch name answers `not_found`.
+    pub launch: bool,
 }
 
 impl Bridge {
@@ -113,6 +117,14 @@ impl Bridge {
     pub fn capability(&mut self, request: &Value) -> Value {
         let resource = request["resource"].as_str().unwrap_or_default().to_string();
         let action = request["action"].as_str().unwrap_or_default().to_string();
+        // The Runtime answers a launch name itself, at once. Unless the bridge
+        // plays a content launch, the answer is the one it gives with none.
+        if resource.starts_with("elastos://launch/") && !self.launch {
+            return error(
+                "not_found",
+                "no content launch binds this name for this capsule",
+            );
+        }
         if !self.allowed.contains(&(resource.clone(), action.clone())) {
             return error("denied", &format!("no {action} grant for {resource}"));
         }
@@ -138,7 +150,7 @@ impl Bridge {
             _ => return error("invalid_resource_invoke", "unsupported operation"),
         };
         match self.issued.get(token) {
-            Some((resource, granted)) if *resource == uri && granted == action => {}
+            Some((resource, granted)) if covers(resource, &uri) && granted == action => {}
             _ => return error("capability_denied", "Capability validation failed"),
         }
         if body["path"].as_str() != Some(uri.as_str()) {
@@ -174,6 +186,16 @@ impl Bridge {
         };
         json!({ "type": "resource_result", "result": result, "audit": "component-invoke:test" })
     }
+}
+
+/// A grant covers its own name and, on a content launch, a launch pattern
+/// ending in `*` covers the names under it.
+fn covers(granted: &str, uri: &str) -> bool {
+    granted == uri
+        || granted.starts_with("elastos://launch/")
+            && granted
+                .strip_suffix('*')
+                .is_some_and(|prefix| uri.starts_with(prefix))
 }
 
 /// What the localhost provider would refuse in this body
@@ -386,6 +408,8 @@ pub mod measure {
             "denied" | "capability_denied" | "missing_token" | "invalid_token" => {
                 BusError::Denied(message)
             }
+            // As the Runtime's component provider maps it.
+            "not_found" => BusError::NotFound(message),
             _ => BusError::Invalid(message),
         }
     }

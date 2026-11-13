@@ -5,6 +5,12 @@
 # (run 42799209177) and c012a96d (runs 42855754576, 42859550117 and
 # 42861188954), on 10 and 11 Nov 2026. The examples/ tree of c012a96d is the
 # tree the one-commit landing carries. No build on an aarch64 machine.
-photo-viewer c11bb294d15e6914f4322ea3d16f09a0fff4e81c617f66aa09d7a892a6c97248
+# The photo-viewer line is from 30f2619c (the photo core opens a launched
+# photo set), built without Docker on a native x86_64 Linux machine with the
+# container's four fixed by hand (examples/photo-viewer/repro/README.md,
+# "Without Docker"): twice, each in a new empty build folder, the same bytes
+# both times, on 13 Nov 2026. That route gave the photo and documents lines
+# above byte for byte at c012a96d first.
+photo-viewer 10812fc9e3794003b8d6bca381a5575696c15539a87d4d2eae88e0aafd97a87a
 docs-viewer 2219d49d379852ae4058b3c8d076842ce981da433147d175615fb0a04df10f59
 archive-viewer 770fad5ecc6f0502c81e3c7ea3bb7dca35465205a721ae413bce56831d004a60

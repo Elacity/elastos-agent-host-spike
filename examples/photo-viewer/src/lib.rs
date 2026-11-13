@@ -39,6 +39,25 @@ pub const PLAYLIST_URI: &str = "localhost://Users/self/.AppData/App/photo-viewer
 pub const PICTURES_PREFIX: &str = "localhost://Users/self/Pictures/";
 pub const PLAYLIST_SCHEMA: &str = "elastos.photo-viewer.playlist/v1";
 
+/// A photo set the run was launched with by its CID. The Runtime answers
+/// these names itself, for this run only: `not_found` on the first means the
+/// run was not launched with content.
+pub const LAUNCH_CONTENT: &str = "elastos://launch/content/";
+pub const LAUNCH_CONTENT_PATTERN: &str = "elastos://launch/content/*";
+/// Where the playlist goes on a content launch: the launch's own output,
+/// kept by the Runtime for the launch, not the person's storage.
+pub const LAUNCH_OUTPUT_PATTERN: &str = "elastos://launch/output/*";
+pub const LAUNCH_PLAYLIST_URI: &str = "elastos://launch/output/playlist.json";
+/// The Runtime's listing of the launched content: each file's path and size.
+pub const LISTING_SCHEMA: &str = "elastos.launch.content-listing/v1";
+/// The core reads at most this much of the set's listing. The listing plays
+/// the album's part, so it has the album's cap, and the worst launched set
+/// costs the fuel the worst album does. (The Runtime's own cap, 256 KiB, is
+/// wider: a set it starts may still be one this core refuses.)
+pub const MAX_LISTING_BYTES: u64 = MAX_ALBUM_BYTES;
+/// On a content launch the album is the set's files under this folder.
+pub const LAUNCH_IMAGES: &str = "images/";
+
 /// The album is read whole, so it keeps a small cap.
 pub const MAX_ALBUM_BYTES: u64 = 16 * 1024;
 pub const MAX_ALBUM_ITEMS: usize = 64;
@@ -120,16 +139,46 @@ pub struct Skipped {
 
 /// Reads the album and its image headers, and writes the playlist.
 /// Returns the playlist text that was written.
+///
+/// One question decides where everything is: was this run launched with a
+/// photo set? It asks for the launch's content first. Granted: the album is
+/// the set's pictures and the playlist goes to the launch's output. Answered
+/// `not_found`: the album and the playlist are the person's, as they always
+/// were. Any other answer ends the run: nothing falls back to the person's
+/// storage after a refusal or a failure.
 pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
-    let album_grant = grant(bus, ALBUM_URI, "read", "read the album to play")?;
-    let album_bytes = read_bounded(bus, ALBUM_URI, &album_grant, Vec::new(), MAX_ALBUM_BYTES)?
-        .ok_or(Refusal::InputTooLarge)?;
-    let items = album::parse(&album_bytes).map_err(Refusal::Input)?;
+    let launch = match bus.request(
+        LAUNCH_CONTENT_PATTERN,
+        "read",
+        "read the photo set this run opens",
+    ) {
+        Ok(grant) => Some(grant),
+        Err(BusFailure::NotFound(_)) => None,
+        Err(failure) => {
+            return Err(Refusal::NoGrant {
+                resource: LAUNCH_CONTENT_PATTERN.to_string(),
+                failure,
+            })
+        }
+    };
+    let (items, album) = match &launch {
+        Some(content) => (launch_album(bus, content)?, LAUNCH_CONTENT),
+        None => {
+            let album_grant = grant(bus, ALBUM_URI, "read", "read the album to play")?;
+            let album_bytes =
+                read_bounded(bus, ALBUM_URI, &album_grant, Vec::new(), MAX_ALBUM_BYTES)?
+                    .ok_or(Refusal::InputTooLarge)?;
+            (
+                album::parse(&album_bytes).map_err(Refusal::Input)?,
+                ALBUM_URI,
+            )
+        }
+    };
 
     let mut playlist = Vec::with_capacity(items.len());
     let mut skipped = Vec::new();
     for (order, item) in items.iter().enumerate() {
-        match check_item(bus, order, item)? {
+        match check_item(bus, order, item, launch.as_deref())? {
             Ok(checked) => playlist.push(checked),
             Err(reason) => skipped.push(Skipped {
                 order,
@@ -139,15 +188,59 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         }
     }
 
-    let text = playlist_json(&playlist, &skipped);
-    let write_grant = grant(bus, PLAYLIST_URI, "write", "write the checked playlist")?;
-    bus::write_bytes(bus, PLAYLIST_URI, &write_grant, text.as_bytes()).map_err(|error| {
+    let text = playlist_json(album, &playlist, &skipped);
+    let (granted, target) = match launch {
+        Some(_) => (LAUNCH_OUTPUT_PATTERN, LAUNCH_PLAYLIST_URI),
+        None => (PLAYLIST_URI, PLAYLIST_URI),
+    };
+    let write_grant = grant(bus, granted, "write", "write the checked playlist")?;
+    bus::write_bytes(bus, target, &write_grant, text.as_bytes()).map_err(|error| {
         Refusal::Call {
-            resource: PLAYLIST_URI.to_string(),
+            resource: target.to_string(),
             error,
         }
     })?;
     Ok(text)
+}
+
+/// The album of a content launch: the files of the launched set under
+/// `images/`, in the order of their paths, as the Runtime lists them, each
+/// read under the one grant the launch gave. A set with none is refused, as
+/// an album with none is.
+fn launch_album(bus: &mut dyn Bus, content: &str) -> Result<Vec<AlbumItem>, Refusal> {
+    let listing = read_bounded(bus, LAUNCH_CONTENT, content, Vec::new(), MAX_LISTING_BYTES)?
+        .ok_or_else(|| {
+            Refusal::Input(format!(
+                "the set's listing is larger than {MAX_LISTING_BYTES} bytes"
+            ))
+        })?;
+    let listing: Value = serde_json::from_slice(&listing)
+        .map_err(|err| Refusal::Input(format!("the set's listing does not parse: {err}")))?;
+    if listing["schema"] != LISTING_SCHEMA {
+        return Err(Refusal::Input(format!(
+            "the set's listing is not {LISTING_SCHEMA}"
+        )));
+    }
+    let files = listing["files"]
+        .as_array()
+        .ok_or_else(|| Refusal::Input("the set's listing has no files".to_string()))?;
+    let path = |file: &Value| file["path"].as_str().map(str::to_string);
+    let images: Vec<String> = files
+        .iter()
+        .filter_map(path)
+        .filter(|path| path.starts_with(LAUNCH_IMAGES))
+        .collect();
+    if images.is_empty() || images.len() > MAX_ALBUM_ITEMS {
+        return Err(Refusal::Input(format!(
+            "the set holds {} files under {LAUNCH_IMAGES}; 1 to {MAX_ALBUM_ITEMS} are played",
+            images.len()
+        )));
+    }
+    let item = |path: String| AlbumItem {
+        uri: format!("{LAUNCH_CONTENT}{path}"),
+        duration_ms: DEFAULT_DURATION_MS,
+    };
+    Ok(images.into_iter().map(item).collect())
 }
 
 /// The outer error stops the run; the inner one skips the item.
@@ -155,9 +248,15 @@ fn check_item(
     bus: &mut dyn Bus,
     order: usize,
     item: &AlbumItem,
+    launch: Option<&str>,
 ) -> Result<Result<PlaylistItem, Skip>, Refusal> {
     let uri = item.uri.as_str();
-    let item_grant = grant(bus, uri, "read", "read the header of an image in the album")?;
+    // On a content launch every picture is read under the launch's one grant;
+    // otherwise each is asked for on its own.
+    let item_grant = match launch {
+        Some(content) => content.to_string(),
+        None => grant(bus, uri, "read", "read the header of an image in the album")?,
+    };
 
     // Type first, from the header alone.
     let header = read_at(bus, uri, &item_grant, 0, HEADER_BYTES)?;
@@ -196,7 +295,8 @@ fn check_item(
 }
 
 /// Keys are sorted (`serde_json` default map), so the text is deterministic.
-pub fn playlist_json(items: &[PlaylistItem], skipped: &[Skipped]) -> String {
+/// `album` names where the album came from.
+pub fn playlist_json(album: &str, items: &[PlaylistItem], skipped: &[Skipped]) -> String {
     let items: Vec<Value> = items
         .iter()
         .map(|item| {
@@ -223,7 +323,7 @@ pub fn playlist_json(items: &[PlaylistItem], skipped: &[Skipped]) -> String {
         .collect();
     json!({
         "schema": PLAYLIST_SCHEMA,
-        "album": ALBUM_URI,
+        "album": album,
         "items": items,
         "skipped": skipped,
     })

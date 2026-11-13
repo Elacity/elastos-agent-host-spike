@@ -22,9 +22,10 @@ const MAX_ALBUM_BYTES: usize = 16 * 1024;
 const MAX_ALBUM_ITEMS: usize = 64;
 const MAX_JPEG_SEGMENTS: usize = 32;
 const HEADER_BYTES: usize = 32;
-/// Between the old `json!` write (64.9% of the Runtime budget) and the
-/// straight writer (59.1%) for the worst album.
-const CHEAPER_WRITE_GATE: u64 = 62_000_000;
+/// Between the old `json!` write and the straight writer (61.3% of the
+/// Runtime budget) for the worst album. They were 64.9% and 59.1% before the
+/// run asked the launch question first, which costs both the same.
+const CHEAPER_WRITE_GATE: u64 = 64_000_000;
 
 fn capsule_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -128,18 +129,29 @@ fn the_copied_admission_check_refuses_a_core_module() {
 }
 
 #[test]
-fn manifest_is_a_valid_component_capsule_with_narrow_storage_bounds() {
+fn manifest_is_a_valid_component_capsule_with_narrow_asks() {
     let manifest = manifest();
     manifest.validate().expect("manifest validates");
     assert!(manifest.is_component_capsule());
     assert_eq!(manifest.entrypoint, "photo-viewer.component.wasm");
+    // The ceiling is the asks and nothing else: each resource with its
+    // actions. No storage permission and no capability stands beside them.
+    let bounds: Vec<String> = manifest
+        .resource_authority_bounds()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(
-        manifest.resource_authority_bounds(),
-        vec![
-            "localhost://Users/self/.AppData/App/photo-viewer/*".to_string(),
-            "localhost://Users/self/Pictures/*".to_string(),
+        bounds,
+        [
+            "elastos://launch/content/* [read]",
+            "elastos://launch/output/* [write]",
+            "localhost://Users/self/Pictures/* [read]",
+            "localhost://Users/self/.AppData/App/photo-viewer/* [read, write]",
         ]
     );
+    assert!(manifest.permissions.storage.is_empty());
+    assert!(manifest.capabilities.is_empty());
 }
 
 // --- runs in the Runtime's ComponentProvider ------------------------------------------
@@ -355,10 +367,11 @@ fn worst_case_albums_stay_under_80_percent_of_the_runtime_fuel() {
 }
 
 /// The write is cheaper, and that is what the rule is for: `json!` builds a
-/// `serde_json::Value` per byte and costs 64.9% of the Runtime budget for the
-/// worst album; the straight writer costs 59.1%. The limit sits between the
-/// two, so a return to the old serializer fails here even while the 80% gate
-/// still passes.
+/// `serde_json::Value` per byte and cost 64.9% of the Runtime budget for the
+/// worst album when the straight writer cost 59.1%; the launch question added
+/// the same to both (now 61.3% for the straight writer). The limit sits
+/// between the two, so a return to the old serializer fails here even while
+/// the 80% gate still passes.
 #[test]
 fn the_worst_case_album_is_written_without_a_value_per_byte() {
     for (name, bridge) in worst_case_albums() {
@@ -370,6 +383,120 @@ fn the_worst_case_album_is_written_without_a_value_per_byte() {
             "{name} uses {used} fuel; the json! writer used 64.9% of {}",
             measure::RUNTIME_FUEL
         );
+    }
+}
+
+// --- a content launch ---------------------------------------------------------------
+
+const LAUNCH_CONTENT: &str = "elastos://launch/content/";
+const LAUNCH_PLAYLIST: &str = "elastos://launch/output/playlist.json";
+
+/// A bridge that plays a content launch of these files (path, bytes): the
+/// Runtime's listing at the bare content name, each file under it, and the
+/// two launch grants the core asks for. Nothing of the person's.
+fn launch_with(files: &[(String, Vec<u8>)]) -> Bridge {
+    let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let listing: Vec<Value> = sorted
+        .iter()
+        .map(|(path, bytes)| json!({ "path": path, "size": bytes.len() }))
+        .collect();
+    let mut bridge = Bridge {
+        launch: true,
+        ..Bridge::default()
+    };
+    bridge.put(
+        LAUNCH_CONTENT,
+        serde_json::to_vec(&json!({
+            "schema": "elastos.launch.content-listing/v1",
+            "files": listing,
+        }))
+        .unwrap(),
+    );
+    for (path, bytes) in files {
+        bridge.put(&format!("{LAUNCH_CONTENT}{path}"), bytes.clone());
+    }
+    bridge.allow("elastos://launch/content/*", "read");
+    bridge.allow("elastos://launch/output/*", "write");
+    bridge
+}
+
+/// The built component, launched with a photo set, plays it from the launch:
+/// the playlist goes to the launch's output and nothing to the person's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launched_photo_set_plays_through_the_runtime() {
+    let files = vec![
+        ("images/01.png".to_string(), png(640, 480, 2048)),
+        ("images/02.jpg".to_string(), jpeg(1920, 1080)),
+        ("notes.txt".to_string(), b"not in the album".to_vec()),
+    ];
+    let (result, bridge) = run(launch_with(&files)).await;
+    result.unwrap();
+    assert_eq!(bridge.written.keys().collect::<Vec<_>>(), [LAUNCH_PLAYLIST]);
+    let playlist: Value = serde_json::from_str(&bridge.written[LAUNCH_PLAYLIST]).unwrap();
+    assert_eq!(playlist["album"], LAUNCH_CONTENT);
+    let uris: Vec<&str> = playlist["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uris,
+        [
+            "elastos://launch/content/images/01.png",
+            "elastos://launch/content/images/02.jpg"
+        ]
+    );
+    assert_eq!(bridge.invokes_on("elastos://launch/content/notes.txt"), 0);
+}
+
+/// The launched sets that cost the most fuel within the core's limits: the
+/// listing near its cap (the album's, 16 KiB) with 64 files under `images/`,
+/// each a JPEG whose frame header sits after the most segments the core walks.
+fn worst_case_launched_sets() -> Vec<(&'static str, Bridge)> {
+    let name_len = MAX_ALBUM_BYTES / MAX_ALBUM_ITEMS - 48;
+    let set = |segments: usize| -> Vec<(String, Vec<u8>)> {
+        (0..MAX_ALBUM_ITEMS)
+            .map(|index| {
+                (
+                    format!("images/{index:02}{}.jpg", "x".repeat(name_len)),
+                    jpeg_after(&vec![0; segments], 10, 10),
+                )
+            })
+            .collect()
+    };
+    vec![
+        (
+            "a launched set of 64 JPEGs, 31 segments each",
+            launch_with(&set(MAX_JPEG_SEGMENTS - 2)),
+        ),
+        (
+            "a launched set of 64 JPEGs past the segment limit",
+            launch_with(&set(MAX_JPEG_SEGMENTS)),
+        ),
+    ]
+}
+
+#[test]
+fn the_worst_case_listing_is_near_its_cap() {
+    for (name, bridge) in worst_case_launched_sets() {
+        let size = bridge.objects[LAUNCH_CONTENT].len();
+        assert!(
+            size <= MAX_ALBUM_BYTES && size > MAX_ALBUM_BYTES * 3 / 4,
+            "{name}: listing is {size} bytes"
+        );
+    }
+}
+
+#[test]
+fn worst_case_launched_sets_stay_under_80_percent_of_the_runtime_fuel() {
+    for (name, bridge) in worst_case_launched_sets() {
+        let (outcome, used) = measure::run(bridge, measure::RUNTIME_FUEL);
+        outcome.unwrap_or_else(|err| panic!("{name}: {err}"));
+        let percent = used as f64 * 100.0 / measure::RUNTIME_FUEL as f64;
+        println!("{name}: {used} fuel ({percent:.1}% of the Runtime budget)");
+        assert!(percent <= 80.0, "{name} uses {percent:.1}% of the fuel");
     }
 }
 

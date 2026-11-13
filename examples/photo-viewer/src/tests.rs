@@ -1,7 +1,133 @@
 use serde_json::{json, Value};
 
+use std::collections::BTreeMap;
+
 use crate::*;
 use capsule_kit_guest::fake::{Call, FakeBus};
+
+/// The Runtime's answers to launch names, around the kit's fake bus, which
+/// answers every other name as the person's storage. `content` is the photo
+/// set the run was launched with, by path, or none; `refuse` replaces the
+/// answer to every launch request with that failure.
+struct Launch<'a> {
+    storage: &'a mut FakeBus,
+    content: Option<BTreeMap<String, Vec<u8>>>,
+    refuse: Option<BusFailure>,
+    output: BTreeMap<String, Vec<u8>>,
+    asked: Vec<(String, String)>,
+    read: Vec<String>,
+}
+
+impl<'a> Launch<'a> {
+    fn of(storage: &'a mut FakeBus, content: Option<&[(&str, Vec<u8>)]>) -> Self {
+        let content = content.map(|files| {
+            let file = |(path, bytes): &(&str, Vec<u8>)| (path.to_string(), bytes.clone());
+            files.iter().map(file).collect()
+        });
+        Launch {
+            storage,
+            content,
+            refuse: None,
+            output: BTreeMap::new(),
+            asked: Vec::new(),
+            read: Vec::new(),
+        }
+    }
+
+    fn listing(content: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+        let file = |(path, bytes): (&String, &Vec<u8>)| json!({"path": path, "size": bytes.len()});
+        let files: Vec<Value> = content.iter().map(file).collect();
+        json!({"schema": LISTING_SCHEMA, "files": files})
+            .to_string()
+            .into_bytes()
+    }
+}
+
+fn launch_reply(result: Value) -> InvokeReply {
+    InvokeReply {
+        status: result["status"].as_str().unwrap_or("ok").to_string(),
+        body: serde_json::to_vec(&result).unwrap(),
+    }
+}
+
+impl Bus for Launch<'_> {
+    fn request(
+        &mut self,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<String, BusFailure> {
+        if !resource.starts_with("elastos://launch/") {
+            return self.storage.request(resource, action, reason);
+        }
+        self.asked.push((resource.to_string(), action.to_string()));
+        if let Some(failure) = &self.refuse {
+            return Err(failure.clone());
+        }
+        match (self.content.is_some(), resource, action) {
+            (true, LAUNCH_CONTENT_PATTERN, "read") => Ok("launch-content".to_string()),
+            (true, LAUNCH_OUTPUT_PATTERN, "write") => Ok("launch-output".to_string()),
+            _ => Err(BusFailure::NotFound(
+                "no content launch binds this name".to_string(),
+            )),
+        }
+    }
+
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        grant: &str,
+    ) -> Result<InvokeReply, BusFailure> {
+        if !resource.starts_with("elastos://launch/") {
+            return self.storage.invoke(resource, operation, body, grant);
+        }
+        let body: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(
+            body["path"], resource,
+            "a launch name travels as its own path"
+        );
+        let not_found = || BusFailure::NotFound("no content launch binds this name".to_string());
+        let content = self.content.as_ref().ok_or_else(not_found)?;
+        match (operation, grant) {
+            ("read", "launch-content") if resource.starts_with(LAUNCH_CONTENT) => {
+                self.read.push(resource.to_string());
+                let bytes = match &resource[LAUNCH_CONTENT.len()..] {
+                    "" => Self::listing(content),
+                    path => content.get(path).cloned().ok_or_else(not_found)?,
+                };
+                let start = body["offset"].as_u64().unwrap_or(0) as usize;
+                let length = body["length"].as_u64().unwrap() as usize;
+                let window = bytes.get(start..).unwrap_or_default();
+                let window = &window[..length.min(window.len())];
+                Ok(launch_reply(
+                    json!({"status": "ok", "data": {"content": window, "size": window.len()}}),
+                ))
+            }
+            ("write", "launch-output") if resource.starts_with("elastos://launch/output/") => {
+                let bytes: Vec<u8> = serde_json::from_value(body["content"].clone()).unwrap();
+                self.output.insert(resource.to_string(), bytes);
+                Ok(launch_reply(json!({"status": "ok", "data": {"size": 0}})))
+            }
+            _ => Err(BusFailure::Denied(
+                "Capability validation failed".to_string(),
+            )),
+        }
+    }
+}
+
+/// A run that was not launched with content: the launch name answers
+/// `not_found`, as the Runtime answers it, and the rest is the person's.
+fn run(bus: &mut FakeBus) -> Result<String, Refusal> {
+    let mut launch = Launch::of(bus, None);
+    let ran = crate::run(&mut launch);
+    assert_eq!(
+        launch.asked,
+        [(LAUNCH_CONTENT_PATTERN.to_string(), "read".to_string())]
+    );
+    ran
+}
 
 const A: &str = "localhost://Users/self/Pictures/a.png";
 const B: &str = "localhost://Users/self/Pictures/trip/b.jpg";
@@ -627,4 +753,193 @@ fn malformed_albums_stop_before_any_image_is_read() {
         assert!(bus.invokes_on(A).is_empty(), "{name}: no image may be read");
         assert_nothing_written(&bus);
     }
+}
+
+/// A photo set launched by its CID plays from the launch. The core asks for
+/// the launch's content, reads the Runtime's listing, takes the files under
+/// `images/` in path order as its album, reads each under the one grant the
+/// launch gave, and writes the playlist to the launch's output. It asks the
+/// person's storage for nothing and writes nothing there.
+#[test]
+fn a_launched_photo_set_plays_from_the_launch_and_its_output() {
+    let mut storage = FakeBus::default();
+    let files = [
+        ("capsule.json", b"{}".to_vec()),
+        ("images/01.png", png(640, 480, 100)),
+        ("images/02.jpg", jpeg(1920, 1080)),
+        ("images/03.txt", b"not a picture".to_vec()),
+        ("notes.txt", b"not in the album".to_vec()),
+    ];
+    let mut launch = Launch::of(&mut storage, Some(&files));
+    let text = crate::run(&mut launch).expect("the set plays");
+
+    let launch_name = |path: &str| format!("{LAUNCH_CONTENT}{path}");
+    assert_eq!(
+        launch.asked,
+        [
+            (LAUNCH_CONTENT_PATTERN.to_string(), "read".to_string()),
+            (LAUNCH_OUTPUT_PATTERN.to_string(), "write".to_string()),
+        ]
+    );
+    assert_eq!(
+        launch.read.first().map(String::as_str),
+        Some(LAUNCH_CONTENT),
+        "the listing first"
+    );
+    assert!(!launch.read.contains(&launch_name("notes.txt")));
+    assert_eq!(launch.output.len(), 1);
+    assert_eq!(launch.output[LAUNCH_PLAYLIST_URI], text.as_bytes());
+    let playlist: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(playlist["album"], LAUNCH_CONTENT);
+    let uris: Vec<&str> = playlist["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uris,
+        [launch_name("images/01.png"), launch_name("images/02.jpg")]
+    );
+    assert_eq!(playlist["skipped"][0]["uri"], launch_name("images/03.txt"));
+    assert_eq!(playlist["skipped"][0]["reason"], "wrong_type");
+    drop(launch);
+    assert!(
+        storage.calls.is_empty(),
+        "nothing of the person's: {:?}",
+        storage.calls
+    );
+    assert!(storage.written.is_empty());
+}
+
+/// Not launched with content: the launch name answers `not_found`, and the
+/// album and the playlist are the person's, as before.
+#[test]
+fn a_run_not_launched_with_content_plays_the_persons_album() {
+    let mut storage = FakeBus::default()
+        .object(ALBUM_URI, album(json!([{ "uri": A }])))
+        .allow(ALBUM_URI, "read")
+        .object(A, png(10, 10, 64))
+        .allow(A, "read")
+        .allow(PLAYLIST_URI, "write");
+    let mut launch = Launch::of(&mut storage, None);
+    crate::run(&mut launch).expect("the album plays");
+    assert_eq!(
+        launch.asked,
+        [(LAUNCH_CONTENT_PATTERN.to_string(), "read".to_string())]
+    );
+    assert!(launch.output.is_empty());
+    drop(launch);
+    assert!(storage.written.contains_key(PLAYLIST_URI));
+}
+
+/// Only `not_found` means "not launched with content". Any other answer to
+/// the launch request ends the run at once, naming the launch name; the
+/// person's album is not asked for and nothing is written anywhere.
+#[test]
+fn any_other_answer_to_the_launch_question_ends_the_run() {
+    for failure in [
+        BusFailure::Denied("denied".into()),
+        BusFailure::Timeout("timed out".into()),
+        BusFailure::Unavailable("unavailable".into()),
+        BusFailure::Internal("internal".into()),
+        BusFailure::Invalid("invalid".into()),
+    ] {
+        let mut storage = FakeBus::default()
+            .object(ALBUM_URI, album(json!([{ "uri": A }])))
+            .allow(ALBUM_URI, "read")
+            .allow(PLAYLIST_URI, "write");
+        let mut launch = Launch::of(&mut storage, None);
+        launch.refuse = Some(failure.clone());
+        let refusal = crate::run(&mut launch).unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::NoGrant {
+                resource: LAUNCH_CONTENT_PATTERN.to_string(),
+                failure: failure.clone()
+            }
+        );
+        assert!(launch.output.is_empty());
+        drop(launch);
+        assert!(storage.calls.is_empty(), "{failure:?}: {:?}", storage.calls);
+        assert!(storage.written.is_empty());
+    }
+}
+
+/// A launched set with no file under `images/`, and one with more than an
+/// album holds, are refused before any picture is read; nothing is written.
+#[test]
+fn a_launched_set_with_no_pictures_or_too_many_is_refused() {
+    let many: Vec<(String, Vec<u8>)> = (0..=MAX_ALBUM_ITEMS)
+        .map(|index| (format!("images/{index:03}.png"), png(10, 10, 64)))
+        .collect();
+    let many: Vec<(&str, Vec<u8>)> = many
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.clone()))
+        .collect();
+    let none = vec![
+        ("capsule.json", b"{}".to_vec()),
+        ("photo.png", png(10, 10, 64)),
+    ];
+    for (files, count) in [(none, 0), (many, MAX_ALBUM_ITEMS + 1)] {
+        let mut storage = FakeBus::default();
+        let mut launch = Launch::of(&mut storage, Some(&files));
+        let refusal = crate::run(&mut launch).unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::Input(format!(
+                "the set holds {count} files under images/; 1 to {MAX_ALBUM_ITEMS} are played"
+            ))
+        );
+        assert_eq!(launch.read, [LAUNCH_CONTENT], "only the listing was read");
+        assert!(launch.output.is_empty());
+        drop(launch);
+        assert!(storage.calls.is_empty());
+    }
+}
+
+/// A set whose listing is longer than the core reads (the album's cap) is
+/// refused after the listing, before any picture is read; nothing is written.
+#[test]
+fn a_launched_set_whose_listing_passes_the_cap_is_refused() {
+    let names: Vec<(String, Vec<u8>)> = (0..MAX_ALBUM_ITEMS)
+        .map(|index| {
+            (
+                format!("images/{index:02}{}.png", "x".repeat(300)),
+                Vec::new(),
+            )
+        })
+        .collect();
+    let files: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.clone()))
+        .collect();
+    let size = Launch::listing(
+        &files
+            .iter()
+            .map(|(p, b)| (p.to_string(), b.clone()))
+            .collect(),
+    )
+    .len();
+    assert!(
+        size as u64 > MAX_LISTING_BYTES,
+        "the listing is {size} bytes"
+    );
+    let mut storage = FakeBus::default();
+    let mut launch = Launch::of(&mut storage, Some(&files));
+    let refusal = crate::run(&mut launch).unwrap_err();
+    assert_eq!(
+        refusal,
+        Refusal::Input(format!(
+            "the set's listing is larger than {MAX_LISTING_BYTES} bytes"
+        ))
+    );
+    assert!(
+        launch.read.iter().all(|name| name == LAUNCH_CONTENT),
+        "only the listing was read: {:?}",
+        launch.read
+    );
+    assert!(launch.output.is_empty());
+    drop(launch);
+    assert!(storage.calls.is_empty());
 }

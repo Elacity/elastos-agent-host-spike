@@ -20,7 +20,7 @@ and the artifact, written to `examples/photo-viewer/photo-viewer.component.wasm`
 | Platform | `linux/amd64`, also on Apple Silicon (Docker runs it emulated) |
 | Toolchain | Rust 1.91.0, the image's compiler, held by `RUSTUP_TOOLCHAIN` in the recipe (the repository's `rust-toolchain.toml` pins a newer compiler and is not used in the container); target `wasm32-unknown-unknown` |
 | Crates | `Cargo.lock` of the guest and of `elastos/tools/componentize`, built `--locked` |
-| Paths | Repository mounted at `/src/elastos-runtime`, the path the builder remaps to; `HOME=/home/builder` |
+| Paths | Repository mounted at `/build/elastos-runtime` (Cargo hashes the kit's path dependency by this path); the builder remaps it to `/src/elastos-runtime` in the artifact; `HOME=/home/builder` |
 | `python3` | The package version and Debian snapshot date in `examples/capsule-kit/repro/build-in-container.sh` (bookworm main only) |
 | Builder | The repository's own `scripts/build-component-capsule.sh`: `SOURCE_DATE_EPOCH=0`, no incremental, path remapping, componentize |
 
@@ -53,15 +53,39 @@ the host triple has to be the same, so the platform is pinned.
 | `ca5560aa` | P1 | `9cf6874985454b5be310a68ea28493d8b3cac6a7a914d5831c4500bb3d17bade` |
 | `8fc30615` | P1b (guest unchanged to `3ecb8ae9`) | `add93842bb7253bdab18d27067d0976558913fda6bd354f772f04c5e9fc9dd22` |
 | `claude/photo-kit-crate` | the kit's shared crate (the one planned hash change), in the container | [recorded-hashes.txt](../../capsule-kit/repro/recorded-hashes.txt) |
+| `30f2619c` | C3c-c, the photo core opens a launched set; built without Docker (below) | [recorded-hashes.txt](../../capsule-kit/repro/recorded-hashes.txt) |
 
 All were built in this container in cloud. The guest code moved into the kit's crate
 (`examples/capsule-kit/guest`) and now writes its playlist through the kit's cheaper write, so its bytes
 and its hash change once; see `examples/capsule-kit/CRATE-REPORT.md`. From that commit on, only the
-container build is the reference: the kit's crate is a path dependency outside this workspace, and Cargo
+container build, or the route without Docker that fixes the same four things, is the reference: the kit's crate is a path dependency outside this workspace, and Cargo
 hashes it by its absolute path, so a native build gives a hash of its own checkout path (here, natively,
 `5a284f2f…`). The container mounts the repository at one fixed path. The P1 build also ran with
 `CARGO_BUILD_JOBS=1` and gave the same hash. Both equal the cloud-native
 builds, as expected: cloud is already `x86_64-unknown-linux-gnu`.
+
+## Without Docker
+
+The container fixes four things, and a native x86_64 Linux machine can fix
+the same four by hand: the checkout at `/build/elastos-runtime`,
+`HOME=/home/builder`, a new empty build folder, and the compiler 1.91.0 with
+its own `wasm32-unknown-unknown` library (over the repository's newer pin),
+with no `RUSTFLAGS`:
+
+```bash
+cd /build/elastos-runtime
+env -u RUSTFLAGS HOME=/home/builder RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" \
+  RUSTUP_TOOLCHAIN=1.91.0 CARGO_BUILD_BUILD_DIR=/tmp/elastos-build-dir-new SOURCE_DATE_EPOCH=0 \
+  scripts/build-component-capsule.sh examples/photo-viewer
+```
+
+(`RUSTUP_HOME` and `CARGO_HOME` stay the builder's own: they are read before
+`HOME` changes, and the builder remaps both.) At `c012a96d`, the commit the
+container's hashes were recorded at, this gave both recorded hashes byte for
+byte, the photo core's and the documents core's. From `30f2619c` on (the photo
+core opens a launched photo set), the photo core's recorded hash was made
+this way: built twice, each time in a new empty build folder, the same bytes
+both times (`10812fc9…`; the full value is in the record).
 
 ## Behind a proxy
 
