@@ -2964,3 +2964,54 @@ async fn a_place_is_taken_before_the_start_and_given_back_when_no_launch_fills_i
         .any(|open| matches!(open, Err(OpenRefusal::TooManyOpen))));
     assert_eq!(runtime.kept_launch_count(), KEPT_PER_PRINCIPAL);
 }
+
+/// D1a-deadline. A start that does not come back holds no place for ever. Its
+/// core calls the Runtime, and the call never returns (fuel does not count
+/// that time); past the open's deadline (shortened here) the open is refused
+/// as timed out and its place given back. The call is let go afterwards.
+#[tokio::test]
+async fn an_open_whose_start_does_not_come_back_is_refused_at_its_deadline() {
+    use crate::page_launch::OpenRefusal;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let publisher = key(97);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let core = manifest_with("core", "asks", asks);
+    let core = home
+        .staged("core", &core, &calling_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let cid = home
+        .staged("pictures", &content, b"a picture", &publisher)
+        .await;
+
+    // The bridge's answer to the core's one call: held until the test lets it
+    // go, and at most ten seconds, so a test that fails does not hang.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    let reached = Arc::new(AtomicBool::new(false));
+    let seen = reached.clone();
+    home.runtime
+        .set_bridge_hostcall(Arc::new(move |_line, _capsule, _principal| {
+            seen.store(true, Ordering::SeqCst);
+            let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            Err("the test's bridge handler let go".to_string())
+        }));
+    home.runtime.set_page_start_deadline(Duration::from_secs(1));
+
+    let refused = home
+        .runtime
+        .open_for_page(&home.data(), &cid, PERSON)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, OpenRefusal::StartTimedOut), "{refused:?}");
+    assert!(
+        reached.load(Ordering::SeqCst),
+        "the core's call was reached"
+    );
+    assert_eq!(home.runtime.kept_launch_count(), 0, "the place went back");
+    release.send(()).unwrap();
+}
