@@ -31,6 +31,8 @@ use elastos_wallet_contract::{
     WalletProviderResponseV2, WalletResultV2, PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT,
     VALIDATED_CHAIN_OUTCOME_SCHEMA,
 };
+#[cfg(target_os = "linux")]
+use elastos_wallet_contract::{WALLET_PROTOCOL_VERSION, WALLET_RESPONSE_SCHEMA};
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -5398,6 +5400,192 @@ fn wallet_standin_suite(
         SuiteClass::Permitted,
         &status,
     ));
+
+    record
+}
+
+/// The answer every effectful wallet call gives under the wallet allow list.
+///
+/// `save_store` in `src/storage.rs` replaces `wallet-state.json` atomically: it
+/// writes `.<store>.<pid>.<rand>.tmp` beside the store, then calls
+/// `std::fs::rename`. Rust's `rename` is the Linux `renameat` call, and the
+/// storage row's one allow form maps to its syscalls through
+/// `SECCOMP_RULE_SYSCALLS`, where that form names `renameat2` alone. The kernel
+/// therefore refuses the replace with `EACCES`, Rust reports
+/// `PermissionDenied`, and the provider answers `storage_error` with the
+/// operating system's sentence. The recorded Linux run read the refused call:
+/// `renameat(AT_FDCWD, ".../.wallet-state.json.<pid>.<rand>.tmp", AT_FDCWD,
+/// ".../wallet-state.json") = -1 EACCES`.
+///
+/// So no effectful wallet call can write its store under this filter, and its
+/// operations-table cell stays `designed, not enforced`. Admitting the replace
+/// changes the filter and is the CTO's decision; this caller makes none.
+#[cfg(target_os = "linux")]
+const WALLET_STORE_REPLACE_REFUSAL: &str = "Permission denied (os error 13)";
+
+/// The five wallet operations the Linux journey drives after `init` and
+/// `status`, in the order it drives them.
+///
+/// `list_accounts`, `list_approvals` and `shutdown` answer `ok` and write no
+/// file, so their class is `Permitted`. `default_account` answers the provider's
+/// own typed refusal, `not_found` with `default linked account not set`, because
+/// no default can be stored under this filter, so its class is `Denied`.
+/// `create_managed_account` answers `storage_error` with
+/// `WALLET_STORE_REPLACE_REFUSAL`, so its class is `Denied` too; the helper
+/// asserts that exact sentence and the absent store, so "answered under the
+/// filter" is this refusal and not any other answer.
+///
+/// The other twenty wallet operations need a stored effect, and no effect can
+/// be stored while the replace is refused, so this journey drives none of them.
+#[cfg(target_os = "linux")]
+const WALLET_LINUX_ONLY_CASES: [(&str, SuiteClass); 5] = [
+    ("list_accounts", SuiteClass::Permitted),
+    ("default_account", SuiteClass::Denied),
+    ("list_approvals", SuiteClass::Permitted),
+    ("create_managed_account", SuiteClass::Denied),
+    ("shutdown", SuiteClass::Permitted),
+];
+
+/// The five wallet operations of `WALLET_LINUX_ONLY_CASES` on one started
+/// provider and one root, using the record type and judgement of
+/// `wallet_standin_suite`.
+///
+/// It starts no provider. The three `none:` calls read the store `init` loaded
+/// and assert what they answer for a wallet with no account: the empty listing,
+/// the empty approval listing, and the `not_found` lookup refusal, each beside
+/// its envelope's schema, protocol version and operation name. The one
+/// effectful call then asserts the filter's own answer: `storage_error` with
+/// `WALLET_STORE_REPLACE_REFUSAL`, and afterwards the wallet directory holds
+/// only `wallet-key.hex`, so the refused replace created no store and left no
+/// staging file. `shutdown` is last: it answers `ok` and the child exits with
+/// status 0, which `ConfinedProvider::shutdown` asserts.
+#[cfg(target_os = "linux")]
+fn wallet_standin_linux_only_operations(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+) -> Vec<SuiteEntry> {
+    let mut record = Vec::new();
+
+    let (request, answer) =
+        provider.wallet_request_and_answer(WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        });
+    assert_eq!(
+        answer["data"]["schema"], WALLET_RESPONSE_SCHEMA,
+        "{label}: list_accounts must answer its response schema: {answer}"
+    );
+    assert_eq!(
+        answer["data"]["protocol_version"], WALLET_PROTOCOL_VERSION,
+        "{label}: list_accounts must answer the contract's protocol version: {answer}"
+    );
+    assert_eq!(
+        answer["data"]["operation"], "list_accounts",
+        "{label}: list_accounts must name its own operation: {answer}"
+    );
+    assert_eq!(
+        answer["data"]["result"],
+        json!({ "status": "ok", "data": { "accounts": [], "default_accounts": [] } }),
+        "{label}: a wallet with no account must list none: {answer}"
+    );
+    record.push(wallet_suite_entry(
+        label,
+        "list_accounts",
+        SuiteClass::Permitted,
+        &request,
+        &answer,
+    ));
+
+    let (request, answer) =
+        provider.wallet_request_and_answer(WalletProviderOperationV2::DefaultAccount {
+            chain_namespace: "eip155:20".to_string(),
+            intent: "publish_envelope".to_string(),
+        });
+    assert_eq!(
+        answer["data"]["operation"], "default_account",
+        "{label}: default_account must name its own operation: {answer}"
+    );
+    assert_eq!(
+        answer["data"]["result"],
+        json!({
+            "status": "error",
+            "code": "not_found",
+            "message": "default linked account not set",
+        }),
+        "{label}: a wallet with no default must answer its typed refusal: {answer}"
+    );
+    record.push(wallet_suite_entry(
+        label,
+        "default_account",
+        SuiteClass::Denied,
+        &request,
+        &answer,
+    ));
+
+    let (request, answer) =
+        provider.wallet_request_and_answer(WalletProviderOperationV2::ListApprovals {
+            include_resolved: false,
+        });
+    assert_eq!(
+        answer["data"]["operation"], "list_approvals",
+        "{label}: list_approvals must name its own operation: {answer}"
+    );
+    assert_eq!(
+        answer["data"]["result"],
+        json!({ "status": "ok", "data": { "approval_requests": [] } }),
+        "{label}: a wallet with no approval must list none: {answer}"
+    );
+    record.push(wallet_suite_entry(
+        label,
+        "list_approvals",
+        SuiteClass::Permitted,
+        &request,
+        &answer,
+    ));
+
+    let (request, answer) =
+        provider.wallet_request_and_answer(WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Confined".to_string()),
+            create_new: false,
+        });
+    assert_eq!(
+        answer["data"]["result"],
+        json!({
+            "status": "error",
+            "code": "storage_error",
+            "message": WALLET_STORE_REPLACE_REFUSAL,
+        }),
+        "{label}: the refused store replace must answer its exact sentence: {answer}"
+    );
+    record.push(wallet_suite_entry(
+        label,
+        "create_managed_account",
+        SuiteClass::Denied,
+        &request,
+        &answer,
+    ));
+    let wallet = wallet_dir(root);
+    let mut entries: Vec<String> = fs::read_dir(&wallet)
+        .unwrap_or_else(|err| panic!("{label}: the wallet directory must be readable: {err}"))
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    // The journey's own fixed-byte sentinel is written here before the suite
+    // runs, so the two names are that sentinel and `init`'s key. A refused
+    // replace leaves neither a store nor its staging file.
+    assert_eq!(
+        entries,
+        vec![
+            SECCOMP_INSIDE_FIXTURE_NAME.to_string(),
+            WALLET_KEY_FILE.to_string(),
+        ],
+        "{label}: the refused replace must leave no store and no staging file under {}",
+        wallet.display()
+    );
+    let shutdown = provider.shutdown();
+    record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
 
     record
 }
@@ -13921,6 +14109,10 @@ struct SeccompJourneyFiles {
     expected_fixture: &'static [u8],
 }
 
+/// The one fixed-byte sentinel every journey writes under its `STORAGE_ROOT`,
+/// so an operation that corrupts it leaves the evidence for the comparison.
+const SECCOMP_INSIDE_FIXTURE_NAME: &str = "seccomp-inside-write";
+
 /// The named journey fixtures of `name` under `base`, or a panic naming the
 /// provider whose layout this function does not know. The lab serves three
 /// providers and a guessed layout would be a fallback (P11).
@@ -13934,7 +14126,7 @@ fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
     };
     SeccompJourneyFiles {
         inside: inside_name.map(|name| root.join(name)),
-        inside_fixture: root.join("seccomp-inside-write"),
+        inside_fixture: root.join(SECCOMP_INSIDE_FIXTURE_NAME),
         outside: storage_parent(name, base).join("seccomp-outside-write"),
         expected_fixture,
     }
@@ -14260,14 +14452,28 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
             let expected_key = fs::read(key_file).expect("init must create the storage key");
             let status = provider.send(&json!({ "op": "status" }));
             assert_eq!(status["status"], "ok", "status must answer: {status}");
-            let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
-                include_revoked: false,
-            });
             assert_eq!(
-                ok_data(accounts)["accounts"],
-                json!([]),
-                "a fresh wallet lists no account"
+                status["data"]["provider"], WALLET_PROVIDER,
+                "status must name the provider it serves: {status}"
             );
+            assert_eq!(
+                status["data"]["storage_configured"], true,
+                "the launch's init must have configured storage: {status}"
+            );
+            assert_eq!(
+                status["data"]["managed_wallets_configured"], true,
+                "the launch's init must have configured managed wallets: {status}"
+            );
+            assert_eq!(
+                status["data"]["active_account_count"], 0,
+                "a fresh wallet counts no active account: {status}"
+            );
+            // The five remaining wallet operations, `shutdown` last. Every other
+            // wallet operation needs a stored effect, and the filter refuses the
+            // store's replace, so this journey drives the calls that answer and
+            // the one refusal that names why the rest cannot.
+            let linux_only = wallet_standin_linux_only_operations(&mut provider, &base, &label);
+            assert_suite_outcomes(&label, &linux_only, &WALLET_LINUX_ONLY_CASES);
             Some(expected_key)
         }
         DID_PROVIDER => {
@@ -14305,14 +14511,13 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         }
         other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
     };
-    // did's and model's `shutdown` is their last operation inside their own
-    // Linux-only helper; wallet sends its one here. Either way it is the last
-    // request: the mode read above already observed the live child, and
-    // `ConfinedProvider::shutdown` waits for the child's exit and asserts its
-    // status is 0, so the answer and its effect are both shown.
-    if name == WALLET_PROVIDER {
-        provider.shutdown();
-    }
+    // Every provider's `shutdown` is its last operation inside its own Linux-only
+    // helper, which `assert_suite_outcomes` judges: did's is the tenth entry of
+    // `DID_LINUX_ONLY_CASES`, the model's the seventh of
+    // `MODEL_LINUX_ONLY_CASES`, and wallet's the fifth of
+    // `WALLET_LINUX_ONLY_CASES`. The mode read above already observed the live
+    // child, and `ConfinedProvider::shutdown` waits for the child's exit and
+    // asserts its status is 0, so the answer and its effect are both shown.
 
     let written = assert_seccomp_journey_files(name, &files, expected_inside.as_deref());
     if name == WALLET_PROVIDER {
@@ -14389,6 +14594,16 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
 /// The wallet half of the Linux journey, and the body is
 /// `seccomp_confined_journey`: this caller passes wallet's own binary, file and
 /// test name.
+///
+/// The operations are `init` with wallet's fixture config, which the launch
+/// sends; `status`, asserted field by field for a fresh wallet; then
+/// `wallet_standin_linux_only_operations`, whose five cases `WALLET_LINUX_ONLY_CASES`
+/// judges: `list_accounts` and `list_approvals` answer `ok` with an empty
+/// listing, `default_account` answers `not_found`, `create_managed_account`
+/// answers `storage_error` with the refused store replace's own sentence, and
+/// `shutdown` is last. Every other wallet operation needs a stored effect, and
+/// the filter refuses the store's replace, so none of them is driven here and
+/// their operations-table cells stay `designed, not enforced`.
 ///
 /// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
 /// self-filtering probe intact. The journey inherits an allow-all fixture filter,
@@ -16998,6 +17213,11 @@ const LINUX_CITATION_BINDINGS: &[(&str, &str, &str)] = &[
         "model-provider",
         "linux_model_journey_runs_under_the_seccomp_allow_list",
         "linux_model_file_row_is_refused_outside_storage_root",
+    ),
+    (
+        "wallet-provider",
+        "linux_wallet_journey_runs_under_the_seccomp_allow_list",
+        "linux_wallet_file_row_is_refused_outside_storage_root",
     ),
 ];
 
@@ -23632,6 +23852,72 @@ fn every_operations_table_row_matches_its_provider_and_the_contract() {
     problems.extend(model_operations_linux_cell_problems(capsules));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     model_linux_cell_refusal_cases();
+    wallet_linux_cell_refusal_cases();
+}
+
+/// The refusals the wallet Linux-cell rule makes, built from the row type so
+/// they do not depend on a mutated document.
+///
+/// A wallet cell that cites the model journey is refused by exact name, even
+/// though that journey is a Linux-gated test of the cited file and a test of
+/// this crate. A wallet `storage` row that cites only the journey is refused,
+/// because the journey shows the call answering and the file row shows the same
+/// file refused outside `STORAGE_ROOT`. Both citations pass in the complete form,
+/// so the refusals come from the binding and not from the cell's form.
+fn wallet_linux_cell_refusal_cases() {
+    let journey =
+        format!("{LINUX_CITATION_FILE}::linux_wallet_journey_runs_under_the_seccomp_allow_list");
+    let file_row =
+        format!("{LINUX_CITATION_FILE}::linux_wallet_file_row_is_refused_outside_storage_root");
+    let model_journey =
+        format!("{LINUX_CITATION_FILE}::linux_model_journey_runs_under_the_seccomp_allow_list");
+    let wrong = OperationsRow {
+        operation: "status".to_string(),
+        inputs: String::new(),
+        outputs: String::new(),
+        right: NO_DECLARED_RIGHT.to_string(),
+        effect: String::new(),
+        macos: String::new(),
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}` and `{model_journey}`"),
+    };
+    assert_eq!(
+        linux_status_problems(WALLET_PROVIDER, &wrong),
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {model_journey}, and this provider's Linux cells cite exactly \
+             linux_wallet_journey_runs_under_the_seccomp_allow_list for the journey and \
+             linux_wallet_file_row_is_refused_outside_storage_root for the file row"
+        )],
+        "a wallet cell citing the model journey must be refused by its exact name"
+    );
+
+    let right_only = OperationsRow {
+        operation: "init".to_string(),
+        inputs: String::new(),
+        outputs: String::new(),
+        right: "`storage`".to_string(),
+        effect: String::new(),
+        macos: String::new(),
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}`"),
+    };
+    assert_eq!(
+        linux_status_problems(WALLET_PROVIDER, &right_only),
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+             `storage` and its Linux cell cites no file-row test of {LINUX_CITATION_FILE}"
+        )],
+        "a wallet storage row citing only the journey must be refused"
+    );
+
+    let complete = OperationsRow {
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}` and `{file_row}`"),
+        ..right_only
+    };
+    assert_eq!(
+        linux_status_problems(WALLET_PROVIDER, &complete),
+        Vec::<String>::new(),
+        "a storage row citing the journey and the file row must pass"
+    );
 }
 
 /// Every problem with the model provider's nine Linux cells, in row order.

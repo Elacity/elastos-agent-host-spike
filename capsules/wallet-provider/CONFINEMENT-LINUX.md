@@ -214,12 +214,39 @@ caller alone, because the journey runs the probe only when the provider is
 wallet. In that 31 Oct run the did caller also stopped earlier, at the
 `fchmodat` block recorded below, which is since resolved.
 
-The wallet run requires `init` `ok`, one read-only wallet call `ok`, a
+The wallet run requires `init` `ok` with the launch's own config; `status` `ok`
+naming `wallet-provider`, with storage and managed wallets configured and every
+count zero; then the five cases of `WALLET_LINUX_ONLY_CASES` through
+`wallet_standin_linux_only_operations` and `assert_suite_outcomes`:
+`list_accounts` and `list_approvals` `ok` with an empty listing and their
+envelope's schema, protocol version and operation name, `default_account`
+answering `not_found` with `default linked account not set`,
+`create_managed_account` answering `storage_error` with
+`Permission denied (os error 13)`, and `shutdown` last. It also requires a
 `wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no profile
 written, and the named sibling `seccomp-outside-write` outside `STORAGE_ROOT`
 absent after the run. The file evidence is those named fixture paths; a seccomp
 filter carries syscall policy, not path policy, so no run claims a general file
 boundary.
+
+The effectful call's refusal is the filter's, not the provider's. `save_store`
+replaces `wallet-state.json` by writing a staging file beside it and calling
+`std::fs::rename`, which is the Linux `renameat` call; the storage row maps to
+`renameat2` alone, so the kernel refuses the replace. A recorded run read it:
+`renameat(AT_FDCWD, ".../.wallet-state.json.<pid>.<rand>.tmp", AT_FDCWD,
+".../wallet-state.json") = -1 EACCES`, and afterwards the wallet directory held
+`wallet-key.hex` and the journey's own `seccomp-inside-write` sentinel, and no
+store and no staging file. No effectful wallet operation can write its store under
+this filter, so the twenty others are driven nowhere and their
+operations-table cells stay `designed, not enforced`. The six cells the journey
+does cite record the answers above. Admitting the replace is a filter change and
+the CTO's decision.
+
+On 2026-11-13 the same wallet journey ran on `elastos-bvm`: `aarch64`, Debian,
+kernel `6.1.0-49-cloud-arm64`, 8 cores, unprivileged. The run passed all five
+cases, the `init` key file, the absent outside sibling and the mode read, and it
+printed `launcher marker: before -22, after -13`. The earlier runs in this
+section used `spark1.local`; this one adds no host status and no grant.
 
 The did run requires all ten did operations under the filter. The six file-state
 calls go through `did_standin_permitted_operations` and `assert_suite_outcomes`
