@@ -2893,7 +2893,9 @@ async fn the_runtime_keeps_sixteen_launches_for_everyone_together() {
 /// leave nothing behind. Nine opens at once keep exactly eight.
 #[tokio::test]
 async fn a_place_is_taken_before_the_start_and_given_back_when_no_launch_fills_it() {
-    use crate::page_launch::{take_place, KeptRead, OpenRefusal, KEPT_PER_PRINCIPAL};
+    use crate::page_launch::{
+        take_place, KeptRead, OpenRefusal, KEPT_PER_PRINCIPAL, OPENS_IN_FLIGHT,
+    };
     let publisher = key(96);
     let home = Home::trusting(&[&publisher]).await;
     let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
@@ -2903,7 +2905,12 @@ async fn a_place_is_taken_before_the_start_and_given_back_when_no_launch_fills_i
     let data = home.data();
     let runtime = &home.runtime;
 
-    let places: Vec<_> = (0..KEPT_PER_PRINCIPAL)
+    // Four launches kept, and four places taken by hand with no start run:
+    // the person is full, and so are the opens in flight.
+    for _ in 0..KEPT_PER_PRINCIPAL - OPENS_IN_FLIGHT {
+        runtime.open_for_page(&data, &cid, PERSON).await.unwrap();
+    }
+    let places: Vec<_> = (0..OPENS_IN_FLIGHT)
         .map(|_| take_place(&runtime.page_launches, PERSON).unwrap())
         .collect();
     let refused = runtime
@@ -2912,18 +2919,22 @@ async fn a_place_is_taken_before_the_start_and_given_back_when_no_launch_fills_i
         .unwrap_err();
     assert!(matches!(refused, OpenRefusal::TooManyOpen), "{refused:?}");
     // A place whose start is still running does not expire: only a filled
-    // place does, 15 minutes after it was filled.
+    // place does, 15 minutes after it was filled. The four kept launches go;
+    // the four places stay, and the next open meets the opens in flight.
     runtime.expire_kept_launches();
     assert_eq!(
         runtime.kept_launch_count(),
-        KEPT_PER_PRINCIPAL,
+        OPENS_IN_FLIGHT,
         "unfilled places do not expire"
     );
     let refused = runtime
         .open_for_page(&data, "not-a-cid", PERSON)
         .await
         .unwrap_err();
-    assert!(matches!(refused, OpenRefusal::TooManyOpen), "{refused:?}");
+    assert!(
+        matches!(refused, OpenRefusal::TooManyInFlight),
+        "{refused:?}"
+    );
     let (id, page) = (places[0].id().to_string(), "");
     assert_eq!(
         runtime.kept_launch_page(&id),
@@ -2957,10 +2968,59 @@ async fn a_place_is_taken_before_the_start_and_given_back_when_no_launch_fills_i
         opens.spawn(async move { runtime.open_for_page(&data, &cid, PERSON).await });
     }
     let opened: Vec<_> = opens.join_all().await;
+    // However the nine interleave: at most eight are kept, each refusal is
+    // the person's cap or the opens in flight, and what was answered as
+    // kept is exactly what the table holds.
     let kept = opened.iter().filter(|open| open.is_ok()).count();
-    assert_eq!(kept, KEPT_PER_PRINCIPAL);
-    assert!(opened
+    assert!((1..=KEPT_PER_PRINCIPAL).contains(&kept), "{kept} kept");
+    assert!(opened.iter().all(|open| matches!(
+        open,
+        Ok(_) | Err(OpenRefusal::TooManyOpen | OpenRefusal::TooManyInFlight)
+    )));
+    assert_eq!(runtime.kept_launch_count(), kept);
+}
+
+/// D1a-in-flight. At most four opens run their starts at once, for everyone
+/// together: with four places taken by four people and no start back, a
+/// fifth person's open is refused before its start, while a launch already
+/// kept is still read; one place given back, the fifth person opens. (A start
+/// that never comes back would hold its place like these: the cap bounds how
+/// many places that can take.)
+#[tokio::test]
+async fn at_most_four_opens_run_their_starts_at_once() {
+    use crate::page_launch::{take_place, KeptRead, OpenRefusal, OPENS_IN_FLIGHT};
+    let publisher = key(97);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let data = home.data();
+    let runtime = &home.runtime;
+    let fifth = "person:local:fifth";
+    let kept = runtime.open_for_page(&data, &cid, fifth).await.unwrap();
+
+    let people = [
+        "person:local:a",
+        "person:local:b",
+        "person:local:c",
+        "person:local:d",
+    ];
+    assert_eq!(people.len(), OPENS_IN_FLIGHT);
+    let mut places: Vec<_> = people
         .iter()
-        .any(|open| matches!(open, Err(OpenRefusal::TooManyOpen))));
-    assert_eq!(runtime.kept_launch_count(), KEPT_PER_PRINCIPAL);
+        .map(|person| take_place(&runtime.page_launches, person).unwrap())
+        .collect();
+    let refused = runtime.open_for_page(&data, &cid, fifth).await.unwrap_err();
+    assert!(
+        matches!(refused, OpenRefusal::TooManyInFlight),
+        "{refused:?}"
+    );
+    let read = runtime.read_kept_launch(&kept.id, fifth, "page", KeptRead::Content(ENTRYPOINT));
+    assert_eq!(
+        read,
+        Some(b"a picture".to_vec()),
+        "a kept launch is still read"
+    );
+
+    places.pop();
+    runtime.open_for_page(&data, &cid, fifth).await.unwrap();
+    assert_eq!(runtime.kept_launch_count(), 2 + OPENS_IN_FLIGHT - 1);
 }

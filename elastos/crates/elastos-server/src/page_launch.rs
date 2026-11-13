@@ -26,6 +26,11 @@ pub const KEPT_PER_PRINCIPAL: usize = 8;
 /// How many launches the Runtime keeps at once, for everyone together. Each
 /// holds at most one walk's files (64 MiB), so this bounds their memory too.
 pub const KEPT_IN_ALL: usize = 16;
+/// How many opens may be running their starts at once, for everyone together.
+/// A start that never comes back (a call to the Runtime that never returns)
+/// holds its place and its thread until the process ends: nothing cancels it.
+/// This bounds that harm to these few places; the rest of the table goes on.
+pub const OPENS_IN_FLIGHT: usize = 4;
 /// How long a launch is kept after it is opened.
 pub const KEPT_FOR: Duration = Duration::from_secs(15 * 60);
 
@@ -70,6 +75,8 @@ pub enum OpenRefusal {
     TooManyOpen,
     /// The Runtime keeps [`KEPT_IN_ALL`] launches already.
     TooManyInAll,
+    /// [`OPENS_IN_FLIGHT`] opens are running their starts already.
+    TooManyInFlight,
     /// The place the open took was gone when its start was over.
     PlaceLost,
     /// No person to keep it for.
@@ -139,6 +146,9 @@ pub(crate) fn take_place(table: &PageLaunches, principal: &str) -> Result<Place,
     }
     if held_by(&kept, principal) >= KEPT_PER_PRINCIPAL {
         return Err(OpenRefusal::TooManyOpen);
+    }
+    if kept.values().filter(|one| one.launch.is_none()).count() >= OPENS_IN_FLIGHT {
+        return Err(OpenRefusal::TooManyInFlight);
     }
     // A new id, drawn again in the (128-bit) case it is already in the table.
     let mut id = hex::encode(rand::random::<[u8; 16]>());
