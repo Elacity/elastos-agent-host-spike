@@ -476,6 +476,15 @@ pub async fn start_server_with_sessions(config: ServerConfig) -> anyhow::Result<
         .route("/api/capsules", get(routes::list_capsules))
         .route("/api/capsules", post(routes::launch_capsule))
         .route("/api/capsules/:id", delete(routes::stop_capsule))
+        .route("/api/launch/open", post(routes::open_launch))
+        .route(
+            "/api/launch/:id/output/:name",
+            get(routes::kept_launch_output),
+        )
+        .route(
+            "/api/launch/:id/content/*path",
+            get(routes::kept_launch_content),
+        )
         .layer(axum_middleware::from_fn(shell_only_middleware))
         .layer(axum_middleware::from_fn_with_state(
             api_state.clone(),
