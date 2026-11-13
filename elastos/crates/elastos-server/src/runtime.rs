@@ -462,8 +462,10 @@ impl Runtime {
         let pins = std::mem::take(&mut admitted.pins);
         let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
-        // Every bundle admitted so far, by its CID, with the name it carries.
-        let mut names = HashMap::from([(asked.to_string(), admitted.manifest.name.clone())]);
+        // Every bundle admitted so far, by its CID: the name it carries, the
+        // deepest place a pin has reached it at, and its own pins.
+        let root = (admitted.manifest.name.clone(), 1, Vec::new());
+        let mut seen = HashMap::from([(asked.to_string(), root)]);
         // What starts: the program asked for or, under content, the core.
         let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
         while let Some((depth, expected, core, name, pin)) = pending.pop() {
@@ -481,14 +483,21 @@ impl Runtime {
             };
             // A bundle reached a second time, through another pin, was
             // admitted on its first reach. Its name must be this
-            // requirement's too, and that is all: it is not walked or
-            // counted again, and its own pins were followed then. Its kind
+            // requirement's too. It is not walked or counted again. Reached
+            // deeper than before, its own pins sit deeper too: they are
+            // measured again from here, out of memory, so that the depth
+            // limit does not turn on which pin the walk met first. Its kind
             // needs no second look: content and its page could be reached
             // again only by a cycle of pins, which then starts nothing, so
-            // what is reached twice is a program under a program.
-            if let Some(carried) = names.get(&pinned.to_string()) {
+            // what is reached twice is a program under a program, and what
+            // it pins are programs.
+            if let Some((carried, deepest, pins)) = seen.get_mut(&pinned.to_string()) {
                 if *carried != name {
                     return Err(refused(BundleRefusal::RequirementMismatch(carried.clone())));
+                }
+                if depth > *deepest {
+                    *deepest = depth;
+                    pending.extend(below(depth, BundleKind::Program, false, pins.clone()));
                 }
                 continue;
             }
@@ -515,7 +524,6 @@ impl Runtime {
                     false => bundle_admission::misplaced(found, Some(expected)),
                 }));
             }
-            names.insert(pinned.to_string(), member.manifest.name.clone());
             // A page pins exactly one bundle, its program. Whatever a
             // program pins is a program.
             let pins = std::mem::take(&mut member.pins);
@@ -526,6 +534,8 @@ impl Runtime {
                     pins.len()
                 ))));
             }
+            let known = (member.manifest.name.clone(), depth, pins.clone());
+            seen.insert(pinned.to_string(), known);
             pending.extend(below(depth, BundleKind::Program, page, pins));
             if core {
                 starts = Some(member);

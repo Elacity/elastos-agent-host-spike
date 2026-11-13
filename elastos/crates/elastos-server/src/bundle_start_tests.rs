@@ -1818,6 +1818,57 @@ async fn a_bundle_two_pins_reach_is_checked_and_counted_once() {
         under("shared", BundleRefusal::ClosureTooDeep)
     );
     assert_eq!(walked.iter().collect::<Vec<_>>(), [&long_first, &a, &b, &c]);
+
+    // Nor does it turn on the order when the shared bundle has bundles below
+    // it. `over` pins `under`, which pins `below`. A root pins `over` and
+    // `via`, and `via` pins `over` again, one level down. Reached the short
+    // way first, `over` sits at depth 2 and `below` at depth 4; the second
+    // reach puts `over` at depth 3, and so `below` at depth 5, which is
+    // measured then, out of memory, and refused. Reached the long way first,
+    // `below` is met at depth 5 at once. The same refusal either way; and
+    // with one level less below the shared bundle, a start either way.
+    for (levels, refused) in [(2, true), (1, false)] {
+        let named = |part: &str| format!("{part}-{levels}");
+        let below = manifest(&named("below"));
+        let mut lowest = home
+            .staged(&named("below"), &below, &quiet, &publisher)
+            .await;
+        let mut lowest_name = named("below");
+        if levels == 2 {
+            let under = manifest_pinning(&named("under"), &[(&lowest_name, &lowest)]);
+            lowest = home
+                .staged(&named("under"), &under, &quiet, &publisher)
+                .await;
+            lowest_name = named("under");
+        }
+        let over = manifest_pinning(&named("over"), &[(&lowest_name, &lowest)]);
+        let over = home.staged(&named("over"), &over, &quiet, &publisher).await;
+        let via = manifest_pinning(&named("via"), &[(&named("over"), &over)]);
+        let via = home.staged(&named("via"), &via, &quiet, &publisher).await;
+        let (over_pin, via_pin) = ((named("over"), over), (named("via"), via));
+        let orders = [
+            ("short-first", [&over_pin, &via_pin]),
+            ("long-first", [&via_pin, &over_pin]),
+        ];
+        for (order, pins) in orders {
+            let pins: Vec<(&str, &str)> = pins
+                .iter()
+                .map(|(name, cid)| (name.as_str(), cid.as_str()))
+                .collect();
+            let name = format!("{order}-{levels}");
+            let root = manifest_pinning(&name, &pins);
+            let root = home.staged(&name, &root, &quiet, &publisher).await;
+            let result = home.run(&root, None).await;
+            match refused {
+                true => assert_eq!(
+                    result.unwrap_err(),
+                    under(&named("below"), BundleRefusal::ClosureTooDeep),
+                    "{order}"
+                ),
+                false => assert_eq!(result.unwrap().0, name, "{order}"),
+            }
+        }
+    }
 }
 
 /// C-trust. One reading of who is trusted judges every bundle of a start.
