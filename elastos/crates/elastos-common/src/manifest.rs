@@ -433,6 +433,39 @@ pub fn elastos_bus_v1_wit_sha256() -> String {
 }
 
 impl CapsuleManifest {
+    /// The fields that make this manifest something other than passive
+    /// content: bytes that are described, with no code to run, no authority
+    /// and no tie to another capsule. Empty for passive content. Each entry
+    /// is the manifest's key, in this fixed order. This is the one list of
+    /// that condition: the installed-capsule check and the start by CID both
+    /// ask here.
+    pub fn active_fields(&self) -> Vec<&'static str> {
+        let permissions = &self.permissions;
+        let fields = [
+            ("role", self.role != CapsuleRole::Content),
+            ("type", self.capsule_type != CapsuleType::Data),
+            ("runtime_abi", self.runtime_abi.is_some()),
+            ("execution", self.execution.is_some()),
+            ("bus_contract", self.bus_contract.is_some()),
+            ("wit_world_sha256", self.wit_world_sha256.is_some()),
+            ("viewer", self.viewer.is_some()),
+            ("microvm", self.microvm.is_some()),
+            ("providers", self.providers.is_some()),
+            ("authority", self.authority.is_some()),
+            ("provides", self.provides.is_some()),
+            ("requires", !self.requires.is_empty()),
+            ("capabilities", !self.capabilities.is_empty()),
+            ("asks", !self.asks.is_empty()),
+            ("interfaces", !self.interfaces.is_empty()),
+            ("permissions.host_process", permissions.host_process),
+            ("permissions.guest_network", permissions.guest_network),
+            ("permissions.storage", !permissions.storage.is_empty()),
+            ("permissions.messaging", !permissions.messaging.is_empty()),
+        ];
+        let active = fields.into_iter().filter(|(_, active)| *active);
+        active.map(|(key, _)| key).collect()
+    }
+
     /// Resource ceilings a capsule may ask Runtime to authorize at launch time.
     ///
     /// A manifest with `asks` is bounded by them and by nothing else: each
@@ -3699,6 +3732,106 @@ mod tests {
             manifest.validate().unwrap_err(),
             "ask_invalid: the ask for \"elastos://did/*\" lists no action"
         );
+    }
+
+    /// The one list of what makes a manifest something other than passive
+    /// content. Passive content has none of them; each of the nineteen, set
+    /// alone, is named, by its key; two set together are named in the list's
+    /// order. Each row is parsed from text, without validation: the list
+    /// reads fields, and what a field may hold is not its business.
+    #[test]
+    fn the_fields_that_make_a_manifest_not_passive_content_are_one_list() {
+        let passive = serde_json::json!({
+            "schema": "elastos.capsule/v1", "name": "pictures", "version": "0.1.0",
+            "role": "content", "type": "data", "entrypoint": "images/01.png",
+            "description": "a description is not an active field",
+            "projections": ["content"], "resources": {"memory_mb": 16}
+        });
+        let active = |extra: &[(&str, serde_json::Value)]| {
+            let mut value = passive.clone();
+            for (key, field) in extra {
+                value[*key] = field.clone();
+            }
+            let manifest: CapsuleManifest = serde_json::from_value(value).unwrap();
+            manifest.active_fields()
+        };
+        assert_eq!(active(&[]), Vec::<&str>::new());
+
+        let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        let interface = r#"[{"id": "elastos.photos.viewer", "version": "0.1.0"}]"#;
+        let authority = r#"{"reason": "r", "capabilities": [], "audit_events": []}"#;
+        let rows = [
+            ("role", "role", json(r#""app""#)),
+            ("type", "type", json(r#""wasm""#)),
+            (
+                "runtime_abi",
+                "runtime_abi",
+                json(r#""elastos.component/v1""#),
+            ),
+            ("execution", "execution", json(r#""data""#)),
+            ("bus_contract", "bus_contract", json(r#""elastos:bus@v1""#)),
+            ("wit_world_sha256", "wit_world_sha256", json(r#""00""#)),
+            ("viewer", "viewer", json(r#""image-viewer""#)),
+            ("microvm", "microvm", json("{}")),
+            ("providers", "providers", json(r#"{"did": "did-provider"}"#)),
+            ("authority", "authority", json(authority)),
+            ("provides", "provides", json(r#""elastos://x/*""#)),
+            (
+                "requires",
+                "requires",
+                json(r#"[{"name": "x", "kind": "capsule"}]"#),
+            ),
+            (
+                "capabilities",
+                "capabilities",
+                json(r#"["elastos://did/*"]"#),
+            ),
+            (
+                "asks",
+                "asks",
+                json(r#"[{"resource": "elastos://did/*", "actions": ["read"]}]"#),
+            ),
+            ("interfaces", "interfaces", json(interface)),
+            (
+                "permissions.host_process",
+                "permissions",
+                json(r#"{"host_process": true}"#),
+            ),
+            (
+                "permissions.guest_network",
+                "permissions",
+                json(r#"{"guest_network": true}"#),
+            ),
+            (
+                "permissions.storage",
+                "permissions",
+                json(r#"{"storage": ["shared"]}"#),
+            ),
+            (
+                "permissions.messaging",
+                "permissions",
+                json(r#"{"messaging": ["chat"]}"#),
+            ),
+        ];
+        for (named, key, value) in &rows {
+            assert_eq!(active(&[(key, value.clone())]), [*named], "{named}");
+        }
+        let names: Vec<&str> = rows.iter().map(|(named, _, _)| *named).collect();
+        assert_eq!(names.len(), 19);
+
+        let (asks, role) = (rows[13].2.clone(), rows[0].2.clone());
+        assert_eq!(active(&[("asks", asks), ("role", role)]), ["role", "asks"]);
+        // Every row at once, the permissions as one object: the whole list,
+        // in its order.
+        let all_permissions = json(
+            r#"{"host_process": true, "guest_network": true, "storage": ["shared"], "messaging": ["chat"]}"#,
+        );
+        let mut every: Vec<(&str, serde_json::Value)> = rows[..15]
+            .iter()
+            .map(|(_, key, value)| (*key, value.clone()))
+            .collect();
+        every.push(("permissions", all_permissions));
+        assert_eq!(active(&every), names);
     }
 
     /// The asks of a manifest are its whole ceiling, each with its actions,

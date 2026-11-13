@@ -1114,7 +1114,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     // else decides the seal.
     assert_eq!(
         start
-            .matches("let (bytes, manifest) = (admitted.component, admitted.manifest);")
+            .matches("let (bytes, manifest) = (starts.component, starts.manifest);")
             .count(),
         1
     );
@@ -2028,4 +2028,266 @@ async fn two_starts_of_one_cid_are_two_instances() {
     let (first, _) = start().await.unwrap();
     let (second, _) = start().await.unwrap();
     assert_ne!(first.id.0, second.id.0);
+}
+
+/// A content manifest that pins `pins`, and a page manifest that pins `pins`:
+/// each with the one file `ENTRYPOINT` as its entrypoint, which for them is
+/// bytes to show and never code.
+fn content_manifest(name: &str, pins: &[(&str, &str)]) -> serde_json::Value {
+    let pin = |(name, cid): &(&str, &str)| serde_json::json!({"name": name, "kind": "capsule", "cid": cid});
+    serde_json::json!({
+        "schema": "elastos.capsule/v1", "name": name, "version": "0.1.0",
+        "role": "content", "type": "data", "entrypoint": ENTRYPOINT,
+        "requires": pins.iter().map(pin).collect::<Vec<_>>()
+    })
+}
+
+fn page_manifest(name: &str, pins: &[(&str, &str)]) -> serde_json::Value {
+    let mut page = content_manifest(name, pins);
+    for (key, value) in [
+        ("role", "viewer"),
+        ("type", "wasm"),
+        ("runtime_abi", "elastos.runtime-projection/v1"),
+        ("bus_contract", "elastos.runtime-projection/v1"),
+        ("execution", "web-projection"),
+    ] {
+        page[key] = value.into();
+    }
+    page["projections"] = serde_json::json!(["web"]);
+    page
+}
+
+/// K-launch. Content named by its CID starts its viewer's one program. The
+/// content pins a page, the page pins a program, its core; each is staged
+/// under a publisher of its own and walked once, in that order; the core is
+/// what runs, under its own asks, and the content and the page get no
+/// instance. The signer reported is the content's. A core without asks is
+/// sealed there as anywhere. A program the core pins is checked like any
+/// pinned program.
+#[tokio::test]
+async fn content_named_by_cid_starts_its_viewers_one_program() {
+    let (of_content, of_page, of_core) = (key(80), key(81), key(82));
+    let home = Home::trusting(&[&of_content, &of_page, &of_core]).await;
+    let picture = b"not code: the bytes of a picture".to_vec();
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let helper = home
+        .staged("helper", &manifest("helper"), &quiet_component(), &of_core)
+        .await;
+    let mut core: serde_json::Value =
+        serde_json::from_str(&manifest_pinning("core", &[("helper", &helper)])).unwrap();
+    core["asks"] = asks;
+    let core = home
+        .staged("core", &core.to_string(), &calling_component(), &of_core)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, &picture, &of_page).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let content = home
+        .staged("pictures", &content, &picture, &of_content)
+        .await;
+
+    let (ran, walked) = home
+        .run_watched(&content, Some(PERSON), BUNDLE_WALK_BUDGET)
+        .await;
+    // The core ran and made its one call, which this Home's handler refuses.
+    assert_eq!(ran.unwrap_err().code(), "bundle_start_failed");
+    assert_eq!(
+        walked.iter().collect::<Vec<_>>(),
+        [&content, &page, &core, &helper]
+    );
+    let calls = home.calls();
+    assert_eq!(calls.len(), 1, "one instance ran, and it called once");
+    assert_eq!(calls[0].1.as_deref(), Some(PERSON));
+    assert_eq!(
+        calls[0].2,
+        Some(vec!["elastos://test/bus/probe [read]".to_string()]),
+        "the core runs under its own asks"
+    );
+    assert!(home.runtime.list_capsules().await.is_empty());
+
+    // The same closure with a quiet core that asks for nothing: it starts,
+    // sealed, and ends well; what is reported is the core's name and the
+    // content's signer.
+    let quiet = home
+        .staged("core", &manifest("core"), &quiet_component(), &of_core)
+        .await;
+    let page = page_manifest("page", &[("core", &quiet)]).to_string();
+    let page = home.staged("page", &page, &picture, &of_page).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let content = home
+        .staged("pictures", &content, &picture, &of_content)
+        .await;
+    assert_eq!(
+        home.run(&content, Some(PERSON)).await.unwrap(),
+        ("core".to_string(), did(&of_content.verifying_key()))
+    );
+    assert_eq!(home.calls().len(), 1, "no further call");
+
+    // Each of the three is held to its own publisher: with one of the three
+    // keys no longer trusted, the bundle that key signed is refused, under
+    // its requirement's name when it is a pinned one.
+    for (trusted, refused_under) in [
+        ([&of_page, &of_core], None),
+        ([&of_content, &of_core], Some("page")),
+        ([&of_content, &of_page], Some("core")),
+    ] {
+        home.trust(&trusted).await;
+        let refusal = home.run(&content, None).await.unwrap_err();
+        assert_eq!(refusal.code(), "bundle_signature_not_accepted", "{refusal}");
+        match (&refusal, refused_under) {
+            (BundleRefusal::Requirement { name, .. }, Some(under)) => assert_eq!(name, under),
+            (BundleRefusal::Requirement { .. }, None) => panic!("{refusal}"),
+            (_, under) => assert_eq!(under, None, "{refusal}"),
+        }
+    }
+    home.trust(&[&of_content, &of_page, &of_core]).await;
+
+    // A wrong CID at any of the three: one byte of the staged file changed.
+    for (cid, under_name) in [
+        (&content, None),
+        (&page, Some("page")),
+        (&quiet, Some("core")),
+    ] {
+        let before = fs::read(home.slot_file(cid, ENTRYPOINT)).unwrap();
+        let mut changed = before.clone();
+        changed.push(b'x');
+        home.overwrite(cid, ENTRYPOINT, &changed);
+        let refusal = home.run(&content, None).await.unwrap_err();
+        assert_eq!(refusal.code(), "bundle_cid_mismatch", "{refusal}");
+        let named = matches!(&refusal, BundleRefusal::Requirement { name, .. } if Some(name.as_str()) == under_name);
+        assert_eq!(named, under_name.is_some(), "{refusal}");
+        home.overwrite(cid, ENTRYPOINT, &before);
+    }
+    assert_eq!(home.run(&content, None).await.unwrap().0, "core");
+}
+
+/// K-places. Each kind has its places and no other. Content pins exactly
+/// one bundle and that is a page; a page pins exactly one bundle and that is
+/// a program; a page is not started by its own CID; under a program only
+/// programs sit (content pinned by a program is a shape this start does not
+/// take). Content is passive, an ask included; a page asks for nothing and
+/// holds no key outside the list.
+#[tokio::test]
+async fn each_kind_of_bundle_has_its_places_and_no_other() {
+    let publisher = key(83);
+    let home = Home::trusting(&[&publisher]).await;
+    let (quiet, bytes) = (quiet_component(), b"bytes to show".to_vec());
+    let program = home
+        .staged("core", &manifest("core"), &quiet, &publisher)
+        .await;
+    let other = home
+        .staged("other", &manifest("other"), &quiet, &publisher)
+        .await;
+    let staged = |name: &'static str, manifest: serde_json::Value| {
+        let (home, bytes, publisher) = (&home, &bytes, &publisher);
+        async move {
+            home.staged(name, &manifest.to_string(), bytes, publisher)
+                .await
+        }
+    };
+    let page = staged("page", page_manifest("page", &[("core", &program)])).await;
+    let content = staged("pictures", content_manifest("pictures", &[("page", &page)])).await;
+    assert_eq!(home.run(&content, None).await.unwrap().0, "core");
+
+    // Content: exactly one pin, refused before anything below it is read.
+    for (pins, count) in [
+        (vec![], 0),
+        (vec![("page", page.as_str()), ("core", program.as_str())], 2),
+    ] {
+        let cid = staged("lonely", content_manifest("lonely", &pins)).await;
+        let (result, walked) = home.run_watched(&cid, None, BUNDLE_WALK_BUDGET).await;
+        assert_eq!(
+            result.unwrap_err(),
+            BundleRefusal::ContentRequiresInvalid(count)
+        );
+        assert_eq!(walked, [cid.as_str()]);
+    }
+    // Content: what it pins is a page.
+    for (name, pinned, found) in [
+        ("core", &program, "a program"),
+        ("pictures", &content, "content"),
+    ] {
+        let cid = staged("odd", content_manifest("odd", &[(name, pinned)])).await;
+        assert_eq!(
+            home.run(&cid, None).await.unwrap_err().to_string(),
+            format!("bundle_member_kind_refused: {found} is pinned where a page must be (requirement {name})")
+        );
+    }
+    // Content is passive.
+    let ask = serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]);
+    for (key, value, field) in [
+        ("asks", ask.clone(), "asks"),
+        ("execution", serde_json::json!("data"), "execution"),
+    ] {
+        let mut active = content_manifest("active", &[("page", &page)]);
+        active[key] = value;
+        let cid = staged("active", active).await;
+        assert_eq!(
+            home.run(&cid, None).await.unwrap_err(),
+            BundleRefusal::ContentNotPassive(field.into()),
+            "{key}"
+        );
+    }
+
+    // A page: not by its own CID.
+    assert_eq!(
+        home.run(&page, None).await.unwrap_err().to_string(),
+        "bundle_member_kind_refused: a page is not started by its own CID"
+    );
+    // A page: exactly one pin, and it is a program.
+    let over = |page: String| {
+        let (home, staged) = (&home, &staged);
+        async move {
+            let cid = staged("over", content_manifest("over", &[("page", &page)])).await;
+            home.run(&cid, None).await.unwrap_err().to_string()
+        }
+    };
+    for (pins, count) in [
+        (vec![], 0),
+        (
+            vec![("core", program.as_str()), ("other", other.as_str())],
+            2,
+        ),
+    ] {
+        let page = staged("page", page_manifest("page", &pins)).await;
+        assert_eq!(
+            over(page).await,
+            format!("bundle_viewer_core_invalid: the viewer pins {count} bundles, not its one program (requirement page)")
+        );
+    }
+    for (name, pinned, found) in [("pictures", &content, "content"), ("page", &page, "a page")] {
+        let outer = staged("page", page_manifest("page", &[(name, pinned)])).await;
+        let refusal = over(outer).await;
+        let expected = format!("bundle_viewer_core_invalid: the viewer pins {found}, not a program (requirement {name})");
+        assert!(refusal.starts_with(&expected), "{refusal}");
+    }
+    // A page: no asks, and no key outside the list.
+    let interface = serde_json::json!([{
+        "id": "elastos.photos.viewer", "version": "0.1.0",
+        "methods": [{
+            "id": "playlist.show", "description": "show", "risk": "read",
+            "approval": "runtime_policy", "audit": "event", "operation": "show",
+            "resource": "localhost://Users/self/.AppData/App/photo-viewer/playlist.json"
+        }]
+    }]);
+    for (key, value) in [("asks", ask), ("interfaces", interface)] {
+        let mut asking = page_manifest("page", &[("core", &program)]);
+        asking[key] = value;
+        let refusal = over(staged("page", asking).await).await;
+        assert_eq!(
+            refusal,
+            format!("bundle_manifest_field_refused: {key} (requirement page)")
+        );
+    }
+
+    // Under a program only programs sit. Content pinned by a program is a
+    // shape this start does not take; so is a page.
+    for (name, pinned, found) in [("pictures", &content, "content"), ("page", &page, "a page")] {
+        let root = manifest_pinning("root", &[(name, pinned)]);
+        let cid = home.staged("root", &root, &quiet, &publisher).await;
+        assert_eq!(
+            home.run(&cid, None).await.unwrap_err().to_string(),
+            format!("bundle_member_kind_refused: {found} is pinned where a program must be (requirement {name})")
+        );
+    }
 }
