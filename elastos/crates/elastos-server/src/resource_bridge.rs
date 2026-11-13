@@ -287,11 +287,24 @@ pub(crate) fn manifest_allows_resource(
     })
 }
 
-fn manifest_denied_response(resource: &str, action: &str) -> serde_json::Value {
-    resource_error_response(
-        "manifest_capability_denied",
-        &format!("capsule manifest does not declare authority to {action} {resource}"),
-    )
+/// The refusal of a request beyond the manifest's ceiling. Under a ceiling
+/// that states no action (every manifest without asks) the sentence is the
+/// one it has always been, to the letter: other code matches on it. Under
+/// asks it names the action as well, because the action may be what is
+/// missing.
+fn manifest_denied_response(
+    manifest_capabilities: &[AuthorityBound],
+    resource: &str,
+    action: &str,
+) -> serde_json::Value {
+    let asks = manifest_capabilities
+        .iter()
+        .any(|bound| bound.actions.is_some());
+    let message = match asks {
+        true => format!("capsule manifest does not declare authority to {action} {resource}"),
+        false => format!("capsule manifest does not declare authority for {resource}"),
+    };
+    resource_error_response("manifest_capability_denied", &message)
 }
 
 fn emit_component_invoke_audit(
@@ -381,7 +394,11 @@ async fn authorize_and_dispatch_resource_invoke(
             &audit_id,
             &dispatch,
             "denied",
-            manifest_denied_response(&dispatch.resource, &dispatch.required_action.to_string()),
+            manifest_denied_response(
+                &bridge_ctx.manifest_capabilities,
+                &dispatch.resource,
+                &dispatch.required_action.to_string(),
+            ),
         );
     }
 
@@ -1014,7 +1031,11 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 ) {
                     return Ok(serde_json::json!({
                         "id": id,
-                        "response": manifest_denied_response(resource, &action.to_string()),
+                        "response": manifest_denied_response(
+                            &ctx.manifest_capabilities,
+                            resource,
+                            &action.to_string(),
+                        ),
                     }));
                 }
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
@@ -1285,6 +1306,7 @@ pub async fn handle_remote_request_with_audit_dir(
                 audit_data_dir,
             ) {
                 Some(manifest_denied_response(
+                    manifest_capabilities,
                     &dispatch.resource,
                     &dispatch.required_action.to_string(),
                 ))
@@ -1437,7 +1459,7 @@ pub async fn handle_remote_request_with_audit_dir(
             ) {
                 return Ok(serde_json::json!({
                     "id": id,
-                    "response": manifest_denied_response(resource, &asked),
+                    "response": manifest_denied_response(manifest_capabilities, resource, &asked),
                 }));
             }
 
@@ -2492,6 +2514,14 @@ mod tests {
         assert_eq!(response["id"], 15);
         assert_eq!(response["response"]["type"], "error");
         assert_eq!(response["response"]["code"], "manifest_capability_denied");
+        // A manifest without asks is refused in the words it always was:
+        // the resource, and no action. The lab's conformance tests and any
+        // capsule that matches on the sentence depend on it.
+        assert_eq!(
+            response["response"]["message"],
+            "capsule manifest does not declare authority for \
+             localhost://Local/SharedByLocalUsersAndBots/Home/denied/a.md"
+        );
     }
 
     /// The attached bridge (a component run from the command line against a
