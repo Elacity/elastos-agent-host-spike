@@ -45,15 +45,36 @@ const NO_LAUNCH: &str = "no content launch binds this name for this capsule";
 pub const LAUNCH_CONTENT_PATTERN: &str = "elastos://launch/content/*";
 /// The listing of a launch's content may be this long as text, no longer.
 pub const LAUNCH_LISTING_MAX_BYTES: usize = 256 * 1024;
+/// Where the program of a content launch writes what it makes for the
+/// launch (the photo core, its playlist): names directly under this, kept
+/// in the launch's memory and gone with it. The program asks for the
+/// pattern, to write and to read.
+pub const LAUNCH_OUTPUT: &str = "elastos://launch/output/";
+pub const LAUNCH_OUTPUT_PATTERN: &str = "elastos://launch/output/*";
+/// All of one launch's output together may be this large, no larger.
+pub const LAUNCH_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 
 /// What one content launch lets its program read: the content bundle's
 /// files exactly as the start's walk read them, and their listing, made
 /// once. The store is not read again for either. The listing is the one
 /// format the Runtime owns here: a schema name and, for each file in the
-/// order of its path, `path` and `size`.
+/// order of its path, `path` and `size`. And what the program writes for the
+/// launch, its output, kept here and nowhere else: it goes when the launch
+/// is over, with this value.
 pub struct LaunchContent {
     files: BTreeMap<String, Vec<u8>>,
     listing: Vec<u8>,
+    /// What the program has written for the launch, by name.
+    output: std::sync::Mutex<BTreeMap<String, Vec<u8>>>,
+}
+
+/// Why a write to a launch's output was refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OutputRefusal {
+    /// The name is not one plain name directly under the output.
+    Name,
+    /// The output would be larger than a launch keeps.
+    TooLarge,
 }
 
 impl LaunchContent {
@@ -66,7 +87,11 @@ impl LaunchContent {
         let listing = listing.to_string().into_bytes();
         match listing.len() > LAUNCH_LISTING_MAX_BYTES {
             true => Err(listing.len()),
-            false => Ok(Self { files, listing }),
+            false => Ok(Self {
+                files,
+                listing,
+                output: std::sync::Mutex::default(),
+            }),
         }
     }
 
@@ -78,27 +103,79 @@ impl LaunchContent {
     /// What a read of `name` gets: the listing for the bare name, and for a
     /// name under it the file with exactly that path. The path is looked up
     /// as text among the files the walk read; it is joined onto no folder.
-    fn read(&self, name: &str) -> Option<&[u8]> {
-        match name.strip_prefix(LAUNCH_CONTENT)? {
-            "" => Some(&self.listing),
-            path => self.files.get(path).map(Vec::as_slice),
+    fn read(&self, name: &str) -> Option<Vec<u8>> {
+        if let Some(name) = name.strip_prefix(LAUNCH_OUTPUT) {
+            let output = self.output.lock().unwrap_or_else(|it| it.into_inner());
+            return output.get(name).cloned();
         }
+        match name.strip_prefix(LAUNCH_CONTENT)? {
+            "" => Some(self.listing.clone()),
+            path => self.files.get(path).cloned(),
+        }
+    }
+
+    /// Write `bytes` under `name` in the launch's output, in place of what
+    /// was there. A name is one plain name directly under the output: letters,
+    /// digits, `.`, `_` and `-`, not `.` or `..`, at most 128 bytes. All the
+    /// output together stays within the cap; a write past it changes nothing.
+    fn write(&self, name: &str, bytes: Vec<u8>) -> std::result::Result<usize, OutputRefusal> {
+        let name = name
+            .strip_prefix(LAUNCH_OUTPUT)
+            .ok_or(OutputRefusal::Name)?;
+        let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"._-".contains(&byte);
+        if matches!(name, "" | "." | "..") || name.len() > 128 || !name.bytes().all(plain) {
+            return Err(OutputRefusal::Name);
+        }
+        let mut output = self.output.lock().unwrap_or_else(|it| it.into_inner());
+        let others: usize = output
+            .iter()
+            .filter(|(kept, _)| kept.as_str() != name)
+            .map(|(_, kept)| kept.len())
+            .sum();
+        if others + bytes.len() > LAUNCH_OUTPUT_MAX_BYTES {
+            return Err(OutputRefusal::TooLarge);
+        }
+        let size = bytes.len();
+        output.insert(name.to_string(), bytes);
+        Ok(size)
     }
 }
 
-/// The bridge's own answer to a read of a launch name, for the caller whose
-/// launch this is: the bytes, in the window asked for, or `not_found`. Its
+/// The bridge's own answer to a launch name, for the caller whose launch this
+/// is: a read gets the bytes, in the window asked for; a write to the output
+/// is kept; anything else, or a caller with no launch, gets `not_found`. Its
 /// caller has already held the request to the ceiling and to the token.
-fn launch_read_response(
+fn launch_response(
     launch: Option<&LaunchContent>,
+    operation: &str,
     request: &serde_json::Value,
 ) -> serde_json::Value {
     let name = request["path"].as_str().unwrap_or_default();
-    let Some(bytes) = launch.and_then(|launch| launch.read(name)) else {
+    let Some(launch) = launch else {
+        return resource_error_response("not_found", NO_LAUNCH);
+    };
+    if operation == "write" {
+        let bytes = match request_content_bytes(request) {
+            Ok(bytes) => bytes,
+            Err(message) => return resource_error_response("invalid_content", &message),
+        };
+        return match launch.write(name, bytes) {
+            Ok(size) => provider_ok_result(serde_json::json!({"size": size})),
+            Err(OutputRefusal::Name) => resource_error_response(
+                "invalid_name",
+                "a launch's output is one plain name directly under it",
+            ),
+            Err(OutputRefusal::TooLarge) => resource_error_response(
+                "output_too_large",
+                "a launch's output may hold 64 KiB in all",
+            ),
+        };
+    }
+    let Some(bytes) = launch.read(name) else {
         return resource_error_response("not_found", NO_LAUNCH);
     };
     let window = |key: &str| request.get(key).and_then(|value| value.as_u64());
-    let bytes = apply_read_window(bytes.to_vec(), window("offset"), window("length"));
+    let bytes = apply_read_window(bytes, window("offset"), window("length"));
     provider_ok_result(serde_json::json!({"content": bytes, "size": bytes.len()}))
 }
 
@@ -532,7 +609,8 @@ async fn authorize_and_dispatch_resource_invoke(
     // A launch name is answered here, from the caller's own launch, and
     // never by a provider.
     if dispatch.scheme == "launch" {
-        let response = launch_read_response(bridge_ctx.launch.as_deref(), &dispatch.request);
+        let launch = bridge_ctx.launch.as_deref();
+        let response = launch_response(launch, &dispatch.operation, &dispatch.request);
         let outcome = match response.get("type").and_then(|value| value.as_str()) {
             Some("resource_result") => invoke_outcome(&response["result"]),
             _ => "denied",
@@ -1128,13 +1206,17 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
                 // A launch name is never put to the shell. The bridge answers
-                // at once from what it holds for this caller: the launch's
-                // one grant, for the pattern its content is bound under, or
-                // `not_found`.
+                // at once from what it holds for this caller: a grant for the
+                // content's pattern, to read, or for the output's pattern, to
+                // read or to write; or `not_found`.
                 if resource.starts_with(LAUNCH_NAMES) {
+                    use elastos_runtime::capability::Action::{Read, Write};
                     let bound = ctx.launch.is_some()
-                        && resource == LAUNCH_CONTENT_PATTERN
-                        && action == elastos_runtime::capability::Action::Read;
+                        && match resource {
+                            LAUNCH_CONTENT_PATTERN => action == Read,
+                            LAUNCH_OUTPUT_PATTERN => matches!(action, Read | Write),
+                            _ => false,
+                        };
                     let response = match bound {
                         true => {
                             let token = ctx.capability_manager.grant(
@@ -1377,13 +1459,6 @@ pub async fn handle_remote_request_with_audit_dir(
                     }));
                 }
             };
-            // A capsule attached to a running Runtime is never the program
-            // of a content launch: a launch name is refused here, at once,
-            // and goes to no provider.
-            if dispatch.scheme == "launch" {
-                let response = resource_error_response("not_found", NO_LAUNCH);
-                return Ok(serde_json::json!({"id": id, "response": response}));
-            }
             let cap_token = request["token"].as_str().unwrap_or("");
             // Audit as local dispatch does: "requested" once the request
             // parses, then one "completed" record for every way out, refusals
@@ -1417,7 +1492,12 @@ pub async fn handle_remote_request_with_audit_dir(
                     return Err(err);
                 }
             };
-            let refusal = if !manifest_allows_resource(
+            // A capsule attached to a running Runtime is never the program
+            // of a content launch: a launch name is refused first, goes to
+            // no provider, and is audited as every refusal here is.
+            let refusal = if dispatch.scheme == "launch" {
+                Some(resource_error_response("not_found", NO_LAUNCH))
+            } else if !manifest_allows_resource(
                 manifest_capabilities,
                 &dispatch.resource,
                 &dispatch.required_action.to_string(),
@@ -2081,7 +2161,7 @@ mod tests {
         let climbing = "elastos://launch/content/images/../capsule.json";
         let refused = read(&one, climbing, &token_one, &none).await.unwrap_err();
         assert_eq!(refused, "manifest_capability_denied");
-        // No other text is a launch name, and the one operation is a read.
+        // No other text is a launch name, and the content is read only.
         let refused = read(&one, "elastos://launch/store", &token_one, &none)
             .await
             .unwrap_err();
@@ -2234,6 +2314,217 @@ mod tests {
         .await
         .expect("the bridge answers");
         assert_eq!(answer["response"]["code"], "not_found", "{answer}");
+    }
+
+    /// The bytes a write leaves, or the refusal's code.
+    async fn launch_write(
+        ctx: &BridgeContext,
+        name: &str,
+        token: &str,
+        content: Vec<u8>,
+    ) -> std::result::Result<u64, String> {
+        let request = serde_json::json!({
+            "type": "resource_invoke", "uri": name, "operation": "write", "token": token,
+            "body": {"content": content}
+        });
+        let line = serde_json::json!({"id": 44, "request": request}).to_string();
+        let answer = handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        let response = &answer["response"];
+        match response["result"]["status"].as_str() {
+            Some("ok") => Ok(response["result"]["data"]["size"].as_u64().unwrap()),
+            _ => Err(response["code"].as_str().unwrap_or("?").to_string()),
+        }
+    }
+
+    /// The launch's output. The program of a content launch asks for the
+    /// output pattern, to write and to read, and is granted it at once, with
+    /// nothing put to the shell. It writes a name directly under the output
+    /// and reads it back; a second write replaces the first. All of one
+    /// launch's output together stays within 64 KiB: a write to the cap is
+    /// kept, one past it is refused and changes nothing. A name with a folder
+    /// in it, the bare output name, a climbing path and a write to the
+    /// content are refused. Another launch's program finds none of it under
+    /// the same name, and the token of one is no use to the other. The
+    /// content's listing does not show it. When the launch is over, the name
+    /// answers `not_found`.
+    #[tokio::test]
+    async fn the_program_of_a_content_launch_writes_its_launchs_output() {
+        use elastos_common::AskAction::{Read, Write};
+        let base = bridge_context();
+        let asking = |ctx: &mut BridgeContext| {
+            ctx.manifest_capabilities = vec![
+                AuthorityBound {
+                    resource: LAUNCH_CONTENT_PATTERN.to_string(),
+                    actions: Some(vec![Read]),
+                },
+                AuthorityBound {
+                    resource: LAUNCH_OUTPUT_PATTERN.to_string(),
+                    actions: Some(vec![Read, Write]),
+                },
+            ];
+        };
+        let mut one = launched(&base, "core-one", &[("images/01.png", b"first set")]);
+        asking(&mut one);
+        let mut two = launched(&base, "core-two", &[("images/01.png", b"second set")]);
+        asking(&mut two);
+        let write = launch_grant(&one, LAUNCH_OUTPUT_PATTERN, "write")
+            .await
+            .unwrap();
+        let read = launch_grant(&one, LAUNCH_OUTPUT_PATTERN, "read")
+            .await
+            .unwrap();
+        assert!(
+            base.pending_store.list_pending().await.is_empty(),
+            "nothing was put to the shell"
+        );
+
+        let playlist = "elastos://launch/output/playlist.json";
+        let read_back = |ctx: &BridgeContext, name: &str, token: &str| {
+            let (ctx, line) = (ctx.clone(), launch_read(name, token, serde_json::json!({})));
+            async move { launch_bytes(&ctx, &line).await }
+        };
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"first".to_vec()).await,
+            Ok(5)
+        );
+        assert_eq!(read_back(&one, playlist, &read).await.unwrap(), b"first");
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"second".to_vec()).await,
+            Ok(6)
+        );
+        assert_eq!(read_back(&one, playlist, &read).await.unwrap(), b"second");
+
+        // The cap is on all of the output together.
+        let other = "elastos://launch/output/other.json";
+        let room = LAUNCH_OUTPUT_MAX_BYTES - 6;
+        assert_eq!(
+            launch_write(&one, other, &write, vec![1; room + 1]).await,
+            Err("output_too_large".to_string())
+        );
+        assert_eq!(
+            read_back(&one, other, &read).await.unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            launch_write(&one, other, &write, vec![1; room]).await,
+            Ok(room as u64)
+        );
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"second!".to_vec()).await,
+            Err("output_too_large".to_string())
+        );
+        assert_eq!(read_back(&one, playlist, &read).await.unwrap(), b"second");
+        // A name written again is counted once: at the cap, the same six
+        // bytes over the same name are still taken.
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"third!".to_vec()).await,
+            Ok(6)
+        );
+
+        // Names.
+        let nested = "elastos://launch/output/lists/playlist.json";
+        assert_eq!(
+            launch_write(&one, nested, &write, b"x".to_vec()).await,
+            Err("invalid_name".to_string())
+        );
+        assert_eq!(
+            launch_write(&one, "elastos://launch/output/", &write, b"x".to_vec()).await,
+            Err("invalid_resource_invoke".to_string())
+        );
+        let climbing = "elastos://launch/output/../content/images/01.png";
+        assert_eq!(
+            launch_write(&one, climbing, &write, b"x".to_vec()).await,
+            Err("manifest_capability_denied".to_string())
+        );
+        let picture = "elastos://launch/content/images/01.png";
+        assert_eq!(
+            launch_write(&one, picture, &write, b"x".to_vec()).await,
+            Err("invalid_resource_invoke".to_string())
+        );
+
+        // Another launch: none of it, and one's token is no use there.
+        let two_reads = launch_grant(&two, LAUNCH_OUTPUT_PATTERN, "read")
+            .await
+            .unwrap();
+        assert_eq!(
+            read_back(&two, playlist, &two_reads).await.unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            read_back(&two, playlist, &read).await.unwrap_err(),
+            "capability_denied"
+        );
+
+        // The content's listing is the content's files only.
+        let content = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let listing = read_back(&one, LAUNCH_CONTENT, &content).await.unwrap();
+        let listing: serde_json::Value = serde_json::from_slice(&listing).unwrap();
+        assert_eq!(listing["files"].as_array().unwrap().len(), 1);
+
+        // Any other action on the output is not this launch's to grant.
+        let mut wide = one.clone();
+        wide.manifest_capabilities = any_action(vec!["elastos://launch/*".to_string()]);
+        for action in ["execute", "delete", "admin"] {
+            let refused = launch_grant(&wide, LAUNCH_OUTPUT_PATTERN, action)
+                .await
+                .unwrap_err();
+            assert_eq!(refused, "not_found", "{action}");
+        }
+
+        // The launch is over: the name answers `not_found`.
+        let mut over = one.clone();
+        over.launch = None;
+        assert_eq!(
+            read_back(&over, playlist, &read).await.unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            launch_write(&over, playlist, &write, b"late".to_vec()).await,
+            Err("not_found".to_string())
+        );
+    }
+
+    /// The attached bridge's refusal of a launch name is audited as its other
+    /// refusals are: a "requested" record and a "completed / denied" one,
+    /// under one id that the answer carries. A read and a write alike.
+    #[tokio::test]
+    async fn the_attached_bridge_audits_its_refusal_of_a_launch_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let lines = [
+            remote_invoke_line(51, "read", "elastos://launch/content/images/01.png", "tok"),
+            remote_invoke_line(52, "write", "elastos://launch/output/playlist.json", "tok"),
+        ];
+        for line in lines {
+            let before = remote_invoke_audit(temp.path()).len();
+            let answer = handle_remote_request_with_audit_dir(
+                &line,
+                "http://127.0.0.1:9",
+                "client-token",
+                "attached-capsule",
+                &any_action(vec!["elastos://launch/*".to_string()]),
+                None,
+                Some(temp.path()),
+            )
+            .await
+            .expect("the bridge answers");
+            assert_eq!(answer["response"]["code"], "not_found", "{answer}");
+            let events = remote_invoke_audit(temp.path());
+            let new = &events[before..];
+            assert_eq!(new.len(), 2, "{new:?}");
+            assert_eq!(
+                (new[0].0.as_str(), new[0].1.as_str()),
+                ("component.invoke.requested", "pending")
+            );
+            assert_eq!(
+                (new[1].0.as_str(), new[1].1.as_str()),
+                ("component.invoke.completed", "denied")
+            );
+            assert_eq!(answer["response"]["audit"], new[1].2.as_str());
+        }
     }
 
     /// A manifest's asks are its ceiling. A request passes the ceiling when

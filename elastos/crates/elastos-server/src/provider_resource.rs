@@ -4,7 +4,7 @@
 //! resource from the same provider request. Keeping that logic here prevents
 //! local and capsule-kernel calls from drifting.
 
-use crate::resource_bridge::{LAUNCH_CONTENT, LAUNCH_CONTENT_PATTERN};
+use crate::resource_bridge::{LAUNCH_CONTENT, LAUNCH_CONTENT_PATTERN, LAUNCH_OUTPUT};
 use elastos_common::localhost::rooted_localhost_uri;
 use elastos_runtime::capability::Action;
 use serde_json::Value;
@@ -123,7 +123,11 @@ pub fn provider_operation_action(scheme: &str, op: &str) -> Option<Action> {
 
     match scheme {
         "localhost" | "webspace" => localhost_op_required_action(op),
-        "launch" => (op == "read").then_some(Action::Read),
+        "launch" => match op {
+            "read" => Some(Action::Read),
+            "write" => Some(Action::Write),
+            _ => None,
+        },
         "did" => execute_op_required_action(op),
         "availability" => match op {
             "status" => Some(Action::Read),
@@ -326,21 +330,33 @@ fn validate_chain_network(network: &str) -> Result<(), String> {
 }
 
 /// A launch name is its own resource, as a storage name is: a read of a
-/// file of the launch's content is judged, by the ceiling and by the token,
-/// as exactly that name. The bare name, which asks for the listing, is
-/// judged as the pattern: the bridge's matching folds a trailing slash away,
-/// so the bare text would be covered by nothing, and it is the one request
-/// for all of it. No other text is a launch name, and the one operation is
-/// a read.
+/// file of the launch's content, and a read or a write of a name in the
+/// launch's output, are judged, by the ceiling and by the token, as exactly
+/// that name. The content's bare name, which asks for the listing, is judged
+/// as the pattern: the bridge's matching folds a trailing slash away, so the
+/// bare text would be covered by nothing, and it is the one request for all
+/// of it. The content is read only. No other text is a launch name.
 fn launch_resource(op: &str, request: &Value) -> Result<String, String> {
-    ensure_supported_operation("launch", op, &["read"])?;
-    let name = request.get("path").and_then(|value| value.as_str());
-    match name.and_then(|name| name.strip_prefix(LAUNCH_CONTENT)) {
-        Some("") => Ok(LAUNCH_CONTENT_PATTERN.to_string()),
-        Some(_) => Ok(name.unwrap_or_default().to_string()),
+    ensure_supported_operation("launch", op, &["read", "write"])?;
+    let name = request
+        .get("path")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if let Some(path) = name.strip_prefix(LAUNCH_OUTPUT) {
+        return match path {
+            "" => Err(format!(
+                "a launch's output is named by a name under {LAUNCH_OUTPUT}"
+            )),
+            _ => Ok(name.to_string()),
+        };
+    }
+    match name.strip_prefix(LAUNCH_CONTENT) {
         None => Err(format!(
-            "a launch name is {LAUNCH_CONTENT} or a name under it"
+            "a launch name is {LAUNCH_CONTENT} or {LAUNCH_OUTPUT}, or a name under one of them"
         )),
+        Some(_) if op != "read" => Err("a launch's content is read only".to_string()),
+        Some("") => Ok(LAUNCH_CONTENT_PATTERN.to_string()),
+        Some(_) => Ok(name.to_string()),
     }
 }
 
