@@ -2022,26 +2022,7 @@ fn installed_component_capsule_metadata_stale_reason(
     }
     if component.provider_runtime.is_none() {
         // Content metadata describes bytes, not a provider or an execution grant.
-        if manifest.role != elastos_common::CapsuleRole::Content
-            || manifest.capsule_type != elastos_common::CapsuleType::Data
-            || manifest.runtime_abi.is_some()
-            || manifest.execution.is_some()
-            || manifest.bus_contract.is_some()
-            || manifest.wit_world_sha256.is_some()
-            || manifest.viewer.is_some()
-            || manifest.microvm.is_some()
-            || manifest.providers.is_some()
-            || manifest.authority.is_some()
-            || manifest.provides.is_some()
-            || !manifest.requires.is_empty()
-            || !manifest.capabilities.is_empty()
-            || !manifest.asks.is_empty()
-            || !manifest.interfaces.is_empty()
-            || manifest.permissions.host_process
-            || manifest.permissions.guest_network
-            || !manifest.permissions.storage.is_empty()
-            || !manifest.permissions.messaging.is_empty()
-        {
+        if !manifest.active_fields().is_empty() {
             return Some("capsule metadata must be passive content/data".to_string());
         }
         if let Err(err) = elastos_common::validate_model_content_path(&manifest.entrypoint) {
