@@ -2,8 +2,13 @@
 
 `elastos/trusted-code.json` lists the code the Runtime trusts: the ElastOS-written files that decide
 who may do what, the in-process libraries from `elastos/Cargo.lock`, and the host programs of the
-signed component set in `components.json`. `scripts/trusted-code.py` prints their numbers as text and
-as JSON.
+signed component set in `components.json`. This fork maintains an expanded list: the upstream #461
+candidates plus the ElastOS-written files found by the 13 Nov 2026 sweep where a capsule-rights decision
+lives. The list is that sweep's finding, not a proof that no other file decides. Two files decide and
+stay unlisted because the counter refuses their `include!`: `api/capsule_inventory/preparation.rs`
+(its `authorize` at line 380; `include!` at line 10277) and `api/gateway.rs` (its launch-token context
+check at line 433; `include!` at line 1370).
+`scripts/trusted-code.py` prints their numbers as text and as JSON.
 
 ## The count rule
 
@@ -24,9 +29,13 @@ The unit is one line of a listed Rust file. A line is one of four kinds:
 The count of a file is its code lines. Test, comment and blank lines are excluded. Generated code is
 excluded: a listed file that uses `include!` is refused on every path, and the refusal names the file
 and line, so generated text cannot enter the count unnoticed. Each file is counted on its own; a
-`mod name;` target is not followed, so the list must name every file that makes a decision. The
-counter prints a warning for each non-test `mod name;` in a listed file whose target is not listed;
+`mod name;` target is not followed, so the list must name each file the sweep found to make a
+decision. The counter prints a warning for each non-test `mod name;` in a listed file whose target is not listed;
 `elastos-identity/src/store.rs`'s `mod files` (owner and mode checks on the identity files, no authority decision) is the live example.
+`api/capsule_inventory/preparation.rs` is the known gap in that rule: its `authorize` decides at
+line 380, and the counter cannot follow the file because it uses `include!` at line 10277.
+`api/gateway.rs` is the second: its launch-token context check decides at line 433, and its
+`include!` at line 1370 brings in `gateway_models.rs`.
 
 The number moves without a change in behaviour: splits or joins of lines, moving code under a test
 cfg, and any untracked file in the worktree all change it.
