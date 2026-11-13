@@ -2,7 +2,7 @@
   "schema": "elastos.capsule/v1",
   "version": "0.1.0",
   "name": "a5-launch-probe",
-  "description": "Test-only Component fixture that makes one bridge call and names no principal. The launch binds the principal; this capsule only shows that a call reached the bridge.",
+  "description": "Test-only Component Agent Host fixture. Through the bridge it writes a format-2 journal entry and memory/notes.md under its own UsersAI root, reads them back, and reports a refusal when asked for another agent's root. The launch binds the principal; this capsule names none.",
   "author": "ElastOS",
   "role": "app",
   "type": "wasm",
@@ -15,7 +15,7 @@
     "kind": "agent"
   },
   "capabilities": [
-    "elastos://test/bus/probe"
+    "localhost://UsersAI/self/*"
   ],
   "resources": {
     "memory_mb": 16,
