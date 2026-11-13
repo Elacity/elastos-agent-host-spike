@@ -648,7 +648,7 @@ mod tests {
             &mut files,
         );
         assert!(files.len() > 50, "found {} files", files.len());
-        let mut walks = 0;
+        let (mut walks, mut of_a_start) = (0, 0);
         for file in &files {
             let text = fs::read_to_string(file).unwrap();
             for needle in &unbounded {
@@ -659,17 +659,24 @@ mod tests {
                 );
             }
             for line in text.lines().filter(|line| line.contains(bounded.as_str())) {
+                // The start by CID walks each bundle of a closure under what
+                // is left of one budget. That this budget is the server's,
+                // and that it only shrinks, is held by the start's own pin
+                // (`the_start_by_cid_reads_each_slot_once_and_fetches_nothing`).
+                let what_is_left = file.ends_with("runtime.rs") && line.contains("(&slot, *left)");
                 assert!(
-                    line.contains("BUNDLE_WALK_BUDGET)"),
+                    line.contains("BUNDLE_WALK_BUDGET)") || what_is_left,
                     "{}: a walk without the server's budget: {}",
                     file.display(),
                     line.trim()
                 );
                 walks += 1;
+                of_a_start += usize::from(what_is_left);
             }
         }
         // Staging makes four (the name, the source, a slot that is there,
-        // the slot it wrote); the start by CID makes one, of the slot.
+        // the slot it wrote); the start by CID makes one, of each slot.
         assert_eq!(walks, 5, "the walks the server makes");
+        assert_eq!(of_a_start, 1, "the one walk under what is left");
     }
 }

@@ -190,8 +190,12 @@ impl ComponentProvider {
     /// [`ComponentProvider::load_admitted`] for a capsule that is given no
     /// authority. The activation is sealed: when it runs, every call it makes
     /// to the bridge is refused by this provider, and no handler sees it,
-    /// whichever handler is installed and whenever. The seal is part of the
-    /// activation, so it ends with it, however that run ends.
+    /// whichever handler is installed and whenever. The seal is a mark on
+    /// this one activation's entry and on nothing else, so it can never seal
+    /// another capsule. The entry is taken away when the start returns; a
+    /// start that is cancelled before it returns leaves its entry behind,
+    /// still sealed and still marked running, and `stop` does not take away
+    /// an entry that is marked running.
     pub async fn load_admitted_sealed(
         &self,
         bytes: Vec<u8>,
@@ -400,7 +404,9 @@ impl ComputeProvider for ComponentProvider {
         })
         .await;
 
-        // Drop the activation entry when it finishes, including a failed or panicked host call.
+        // Drop the activation entry when the start returns, also after a
+        // failed or panicked host call. A start whose future is dropped
+        // before this line does not reach it, and its entry stays.
         self.instances.write().await.remove(&handle.id);
 
         result.map_err(|err| ElastosError::Compute(format!("Component task join error: {err}")))?
