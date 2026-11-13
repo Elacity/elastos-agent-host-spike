@@ -2612,4 +2612,54 @@ mod tests {
         let err = require_home_token_context(dir.path(), &headers).unwrap_err();
         assert_eq!(err.to_string(), "Home launch principal root unresolved");
     }
+
+    #[test]
+    fn p2a_ii_0c_wallet_authority_resolves_root_from_trusted_auth_store() {
+        use elastos_runtime::auth::{AuthSessionGrantV1, ProofBinding};
+
+        // Two stores: `runtime_dir` holds only signing/device identity,
+        // `auth_dir` holds the principal record and the session grant.
+        let runtime_dir = tempfile::tempdir().unwrap();
+        let auth_dir = tempfile::tempdir().unwrap();
+        let _auth_guard = set_test_home_launch_auth_data_dir(auth_dir.path());
+
+        let now = now_ts();
+        let stored = crate::auth::upsert_principal_for_binding(
+            auth_dir.path(),
+            ProofBinding::evm_account(20, "0x5555555555555555555555555555555555555555", now),
+            now,
+        )
+        .unwrap();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{}", uuid_like_token()),
+            session_id: format!("auth:{}", uuid_like_token()),
+            principal_id: stored.principal_id.clone(),
+            proof_binding_id: "proof:a5-p2a-ii-0c".to_string(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec!["wallet".to_string()],
+        };
+        crate::auth::store_session_grant(auth_dir.path(), grant.clone()).unwrap();
+        let token =
+            issue_home_launch_token_for_auth_grant(runtime_dir.path(), "wallet", &grant).unwrap();
+
+        let authority = require_runtime_wallet_authority(
+            runtime_dir.path(),
+            &capsule_headers(&token),
+            &["wallet"],
+        )
+        .unwrap();
+        assert_eq!(
+            authority.home_launch_context().principal_id(),
+            stored.principal_id
+        );
+        // Root resolution read `auth_dir`; `runtime_dir` holds no record for
+        // that principal, so success did not come from seeding it there.
+        assert!(crate::auth::principal_stored_localhost_root(
+            Some(runtime_dir.path()),
+            &stored.principal_id
+        )
+        .is_err());
+    }
 }
