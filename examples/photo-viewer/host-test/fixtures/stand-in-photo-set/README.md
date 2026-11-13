@@ -12,11 +12,13 @@ blue WebP from its PNG with `cwebp -lossless`. The stand-in sentence is embedded
 JPEG COM, and WebP XMP metadata. The temporary PNG inputs were removed.
 
 The source manifest pins the surface closure
-`bafkreih2r3y7kst2gylz5miex5wptz2iqzfap2g53xmy27q2y6s6niurhe`, produced by
+`bafkreid5t2o74cs5wzpw4bht6q4zxe7fmma3pyg7tyraswtmv2sztsfbm4`, produced by
 `capsule-bundle pack examples/photo-viewer/surface <physical-output-path>
---require photo-viewer=bafkreihxqbyijmoaykeixnnijvusmobqt2gpktqpu2r5ya2gbswitxvgym`.
-That core CID came from packing the local photo core artifact with the same
-tool. This pin identifies those bytes; a new build needs a newly packed viewer
+--require photo-viewer=bafkreifvez4e7vxwurj25j6g243j6nu25zxnu673fkpbn75qq3ta6qjdhy`.
+That core CID came from packing, with the same tool, the photo core's
+reference artifact of `30f2619c` (sha256 `10812fc9…`, the recorded hash in
+`examples/capsule-kit/repro/recorded-hashes.txt`). The same packing with the
+earlier core CID gives the earlier pin, `bafkreih2r3y7…`. This pin identifies those bytes; a new build needs a newly packed viewer
 and an explicit pin change. Tests create and pin their own temporary dependency
 closures, so the checked-in pin is independent of their build paths.
 

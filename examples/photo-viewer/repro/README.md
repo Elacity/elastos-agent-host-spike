@@ -53,11 +53,12 @@ the host triple has to be the same, so the platform is pinned.
 | `ca5560aa` | P1 | `9cf6874985454b5be310a68ea28493d8b3cac6a7a914d5831c4500bb3d17bade` |
 | `8fc30615` | P1b (guest unchanged to `3ecb8ae9`) | `add93842bb7253bdab18d27067d0976558913fda6bd354f772f04c5e9fc9dd22` |
 | `claude/photo-kit-crate` | the kit's shared crate (the one planned hash change), in the container | [recorded-hashes.txt](../../capsule-kit/repro/recorded-hashes.txt) |
+| `30f2619c` | C3c-c, the photo core opens a launched set; built without Docker (below) | [recorded-hashes.txt](../../capsule-kit/repro/recorded-hashes.txt) |
 
 All were built in this container in cloud. The guest code moved into the kit's crate
 (`examples/capsule-kit/guest`) and now writes its playlist through the kit's cheaper write, so its bytes
 and its hash change once; see `examples/capsule-kit/CRATE-REPORT.md`. From that commit on, only the
-container build is the reference: the kit's crate is a path dependency outside this workspace, and Cargo
+container build, or the route without Docker that fixes the same four things, is the reference: the kit's crate is a path dependency outside this workspace, and Cargo
 hashes it by its absolute path, so a native build gives a hash of its own checkout path (here, natively,
 `5a284f2f…`). The container mounts the repository at one fixed path. The P1 build also ran with
 `CARGO_BUILD_JOBS=1` and gave the same hash. Both equal the cloud-native
@@ -81,7 +82,10 @@ env -u RUSTFLAGS HOME=/home/builder RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOM
 (`RUSTUP_HOME` and `CARGO_HOME` stay the builder's own: they are read before
 `HOME` changes, and the builder remaps both.) At `c012a96d`, the commit the
 container's hashes were recorded at, this gave both recorded hashes byte for
-byte, the photo core's and the documents core's. NATIVE-ROUTE-RECORD
+byte, the photo core's and the documents core's. From `30f2619c` on (the photo
+core opens a launched photo set), the photo core's recorded hash was made
+this way: built twice, each time in a new empty build folder, the same bytes
+both times (`10812fc9…`; the full value is in the record).
 
 ## Behind a proxy
 

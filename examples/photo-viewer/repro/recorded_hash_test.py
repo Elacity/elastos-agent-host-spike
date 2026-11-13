@@ -26,7 +26,7 @@ CASES = [
     (
         "the repro readme repeats the photo hash",
         README, [], [TEST],
-        [(README, "\nc11bb294d15e6914f4322ea3d16f09a0fff4e81c617f66aa09d7a892a6c97248\n")],
+        [(README, "\n10812fc9e3794003b8d6bca381a5575696c15539a87d4d2eae88e0aafd97a87a\n")],
     ),
 ]
 
