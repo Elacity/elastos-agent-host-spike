@@ -51,8 +51,11 @@ pub const LAUNCH_LISTING_MAX_BYTES: usize = 256 * 1024;
 /// pattern, to write and to read.
 pub const LAUNCH_OUTPUT: &str = "elastos://launch/output/";
 pub const LAUNCH_OUTPUT_PATTERN: &str = "elastos://launch/output/*";
-/// All of one launch's output together may be this large, no larger.
+/// All of one launch's output together may be this large, no larger: each
+/// name's bytes and the bytes of its contents count.
 pub const LAUNCH_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+/// And it may hold this many names, no more.
+pub const LAUNCH_OUTPUT_MAX_NAMES: usize = 16;
 
 /// What one content launch lets its program read: the content bundle's
 /// files exactly as the start's walk read them, and their listing, made
@@ -117,7 +120,8 @@ impl LaunchContent {
     /// Write `bytes` under `name` in the launch's output, in place of what
     /// was there. A name is one plain name directly under the output: letters,
     /// digits, `.`, `_` and `-`, not `.` or `..`, at most 128 bytes. All the
-    /// output together stays within the cap; a write past it changes nothing.
+    /// output together, names and contents, stays within the byte cap, and it
+    /// holds at most so many names; a write past either changes nothing.
     fn write(&self, name: &str, bytes: Vec<u8>) -> std::result::Result<usize, OutputRefusal> {
         let name = name
             .strip_prefix(LAUNCH_OUTPUT)
@@ -130,9 +134,11 @@ impl LaunchContent {
         let others: usize = output
             .iter()
             .filter(|(kept, _)| kept.as_str() != name)
-            .map(|(_, kept)| kept.len())
+            .map(|(kept, contents)| kept.len() + contents.len())
             .sum();
-        if others + bytes.len() > LAUNCH_OUTPUT_MAX_BYTES {
+        let names = output.len() + usize::from(!output.contains_key(name));
+        let bytes_after = others + name.len() + bytes.len();
+        if names > LAUNCH_OUTPUT_MAX_NAMES || bytes_after > LAUNCH_OUTPUT_MAX_BYTES {
             return Err(OutputRefusal::TooLarge);
         }
         let size = bytes.len();
@@ -167,7 +173,7 @@ fn launch_response(
             ),
             Err(OutputRefusal::TooLarge) => resource_error_response(
                 "output_too_large",
-                "a launch's output may hold 64 KiB in all",
+                "a launch's output may hold 64 KiB in all, names included, and 16 names",
             ),
         };
     }
@@ -1485,6 +1491,16 @@ pub async fn handle_remote_request_with_audit_dir(
                 }
             };
             audit("requested", "pending")?;
+            // A capsule attached to a running Runtime is never the program
+            // of a content launch: a launch name is refused first, before the
+            // Runtime's address is looked at, goes to no provider, and is
+            // audited as every refusal here is.
+            if dispatch.scheme == "launch" {
+                audit("completed", "denied")?;
+                let mut refusal = resource_error_response("not_found", NO_LAUNCH);
+                refusal["audit"] = serde_json::Value::String(audit_id.clone());
+                return Ok(serde_json::json!({"id": id, "response": refusal}));
+            }
             let api_base = match api_base {
                 Ok(api_base) => api_base,
                 Err(err) => {
@@ -1492,12 +1508,7 @@ pub async fn handle_remote_request_with_audit_dir(
                     return Err(err);
                 }
             };
-            // A capsule attached to a running Runtime is never the program
-            // of a content launch: a launch name is refused first, goes to
-            // no provider, and is audited as every refusal here is.
-            let refusal = if dispatch.scheme == "launch" {
-                Some(resource_error_response("not_found", NO_LAUNCH))
-            } else if !manifest_allows_resource(
+            let refusal = if !manifest_allows_resource(
                 manifest_capabilities,
                 &dispatch.resource,
                 &dispatch.required_action.to_string(),
@@ -2396,9 +2407,10 @@ mod tests {
         );
         assert_eq!(read_back(&one, playlist, &read).await.unwrap(), b"second");
 
-        // The cap is on all of the output together.
+        // The cap is on all of the output together, names and contents: here
+        // `playlist.json` (13 bytes) with 6 bytes, and `other.json` (10).
         let other = "elastos://launch/output/other.json";
-        let room = LAUNCH_OUTPUT_MAX_BYTES - 6;
+        let room = LAUNCH_OUTPUT_MAX_BYTES - (13 + 6) - 10;
         assert_eq!(
             launch_write(&one, other, &write, vec![1; room + 1]).await,
             Err("output_too_large".to_string())
@@ -2423,11 +2435,67 @@ mod tests {
             Ok(6)
         );
 
-        // Names.
+        // Names count too: at the cap, an empty write under a new name is
+        // refused. And at most 16 names, however small.
+        let empty = "elastos://launch/output/e";
+        assert_eq!(
+            launch_write(&one, empty, &write, Vec::new()).await,
+            Err("output_too_large".to_string())
+        );
+        let mut three = launched(&base, "core-three", &[("images/01.png", b"z")]);
+        asking(&mut three);
+        let three_writes = launch_grant(&three, LAUNCH_OUTPUT_PATTERN, "write")
+            .await
+            .unwrap();
+        for index in 0..LAUNCH_OUTPUT_MAX_NAMES {
+            let name = format!("elastos://launch/output/{index:02}");
+            assert_eq!(
+                launch_write(&three, &name, &three_writes, Vec::new()).await,
+                Ok(0),
+                "{index}"
+            );
+        }
+        assert_eq!(
+            launch_write(
+                &three,
+                "elastos://launch/output/16",
+                &three_writes,
+                Vec::new()
+            )
+            .await,
+            Err("output_too_large".to_string())
+        );
+        assert_eq!(
+            launch_write(
+                &three,
+                "elastos://launch/output/00",
+                &three_writes,
+                b"x".to_vec()
+            )
+            .await,
+            Ok(1)
+        );
+
+        // Names, on a launch of its own so that no cap is near: a folder in
+        // the name, and one byte past 128, are refused as names; 128 is taken.
+        let mut four = launched(&base, "core-four", &[("images/01.png", b"w")]);
+        asking(&mut four);
+        let four_writes = launch_grant(&four, LAUNCH_OUTPUT_PATTERN, "write")
+            .await
+            .unwrap();
         let nested = "elastos://launch/output/lists/playlist.json";
         assert_eq!(
-            launch_write(&one, nested, &write, b"x".to_vec()).await,
+            launch_write(&four, nested, &four_writes, b"x".to_vec()).await,
             Err("invalid_name".to_string())
+        );
+        let long = |length: usize| format!("{LAUNCH_OUTPUT}{}", "n".repeat(length));
+        assert_eq!(
+            launch_write(&four, &long(129), &four_writes, b"x".to_vec()).await,
+            Err("invalid_name".to_string())
+        );
+        assert_eq!(
+            launch_write(&four, &long(128), &four_writes, b"x".to_vec()).await,
+            Ok(1)
         );
         assert_eq!(
             launch_write(&one, "elastos://launch/output/", &write, b"x".to_vec()).await,
@@ -2525,6 +2593,22 @@ mod tests {
             );
             assert_eq!(answer["response"]["audit"], new[1].2.as_str());
         }
+        // Before the Runtime's address is looked at: with an address the
+        // attached bridge does not take, a launch name is still refused the
+        // same way, not failed on the address.
+        let line = remote_invoke_line(53, "read", "elastos://launch/content/images/01.png", "tok");
+        let answer = handle_remote_request_with_audit_dir(
+            &line,
+            "https://example.com",
+            "client-token",
+            "attached-capsule",
+            &any_action(vec!["elastos://launch/*".to_string()]),
+            None,
+            Some(temp.path()),
+        )
+        .await
+        .expect("the bridge answers before it looks at the address");
+        assert_eq!(answer["response"]["code"], "not_found", "{answer}");
     }
 
     /// A manifest's asks are its ceiling. A request passes the ceiling when
