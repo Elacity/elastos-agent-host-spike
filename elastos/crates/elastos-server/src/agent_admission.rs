@@ -53,7 +53,8 @@ pub(crate) fn require_home_runtime(data_dir: &Path, sign_in_store: &Path) -> any
 
 /// What one launch was admitted as: the stored agent's principal id. The
 /// bridge runs as `actor`. Its root comes from the one root rule at the bridge,
-/// and its owner is the stored record's owner, so neither is copied here.
+/// and its owner and its storage protection are read again from the stored
+/// record, so neither is copied here.
 #[derive(Debug)]
 pub(crate) struct AdmissionContext {
     pub(crate) actor: String,
@@ -62,15 +63,49 @@ pub(crate) struct AdmissionContext {
 /// The refusal a launch gives when it names an agent and no launcher is.
 pub(crate) const NO_LAUNCHER: &str = "an agent launch needs its owner's launch grant";
 
+/// The refusal a launch gives when the capsule it would load is not the Agent
+/// Host package the agent was created for.
+pub(crate) const NOT_THE_STORED_HOST: &str =
+    "this capsule is not the Agent Host this agent was created for";
+
+/// The package a launch directory names: the name its signed manifest declares
+/// and the package CID the directory records for it. An installed capsule
+/// carries this CID beside its manifest, and creation stored the same two
+/// fields for its Agent Host.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LaunchedPackage {
+    pub(crate) name: String,
+    pub(crate) registry_cid: String,
+}
+
+/// Reads the package identity of the capsule at `capsule_dir`. A directory
+/// with no recorded package CID names no package, so it cannot be a stored
+/// Agent Host.
+fn launched_package(capsule_dir: &Path) -> anyhow::Result<LaunchedPackage> {
+    let manifest = std::fs::read(capsule_dir.join("capsule.json"))
+        .map_err(|err| anyhow::anyhow!("read the launching capsule's manifest: {err}"))?;
+    let manifest: CapsuleManifest = serde_json::from_slice(&manifest)
+        .map_err(|err| anyhow::anyhow!("parse the launching capsule's manifest: {err}"))?;
+    let cid = std::fs::read_to_string(capsule_dir.join(".elastos-cid")).map_err(|err| {
+        anyhow::anyhow!("read the launching capsule's package CID receipt: {err}")
+    })?;
+    Ok(LaunchedPackage {
+        name: manifest.name,
+        registry_cid: cid.trim().to_string(),
+    })
+}
+
 /// Admits a launch that names a stored agent, and leaves every other launch
 /// exactly as it was. `None` means no agent was named. Otherwise this Runtime
 /// holds its own sign-in store, the launcher is a stored person, the named id
-/// is that person's stored agent, and the agent's stored protection opens with
-/// that person's key. A launch that cannot open the agent's key is refused
-/// here, before any provider starts.
+/// is that person's stored agent, the capsule about to be loaded is the Agent
+/// Host package that agent was created for, and the agent's stored protection
+/// opens with that person's key. A launch that cannot meet any of that is
+/// refused here, before any provider starts and before any principal is bound.
 pub(crate) fn admit_launch(
     data_dir: &Path,
     sign_in_store: &Path,
+    capsule_dir: &Path,
     launcher: Option<&str>,
     agent: Option<&str>,
 ) -> anyhow::Result<Option<AdmissionContext>> {
@@ -83,6 +118,18 @@ pub(crate) fn admit_launch(
         return Err(Refused(NO_LAUNCHER.to_string()).into());
     };
     let stored = crate::agents::stored_agent(data_dir, launcher, agent_id)?;
+    // The stored agent carries the Agent Host package it was created for. The
+    // capsule this launch would load must be that same package: its signed
+    // manifest's name and the package CID its directory records. A record with
+    // no stored host, or any different package, is refused before the key is
+    // opened and before the principal is bound.
+    let stored_host = stored.record.agent_host_package.as_ref();
+    let launched = launched_package(capsule_dir)?;
+    if stored_host
+        .is_none_or(|host| host.name != launched.name || host.registry_cid != launched.registry_cid)
+    {
+        return Err(Refused(NOT_THE_STORED_HOST.to_string()).into());
+    }
     // The root is derived from the id, never read from a field of the record
     // on its own, and the record must hold the root its own id owns.
     let root = crate::auth::principal_kind_localhost_root(agent_id, PrincipalKind::Agent);

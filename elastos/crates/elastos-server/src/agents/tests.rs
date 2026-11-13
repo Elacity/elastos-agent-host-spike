@@ -1809,6 +1809,28 @@ fn home_with_agents(count: usize) -> (crate::agents::tests::Home, Vec<String>) {
     (home, agents)
 }
 
+/// The capsule directory of one Agent Host package: a manifest that names it
+/// and the package CID its install records.
+#[cfg(feature = "prototype-agents")]
+fn host_capsule(name: &str, cid: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("capsule.json"),
+        serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": name,
+            "role": "app",
+            "type": "wasm",
+            "entrypoint": "main.wasm"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".elastos-cid"), format!("{cid}\n")).unwrap();
+    dir
+}
+
 /// Two stored agents of one owner admit two actors, and each actor owns
 /// the `UsersAI` root its own id derives. The owner's launch with no agent
 /// stays unbound.
@@ -1817,9 +1839,14 @@ fn home_with_agents(count: usize) -> (crate::agents::tests::Home, Vec<String>) {
 fn an_agent_launch_admits_each_agents_own_actor_and_root() {
     let (home, agents) = home_with_agents(2);
     let caller = home.caller();
+    let host = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        crate::agent_admission::tests::AGENT_HOST_CID,
+    );
     let first = crate::agent_admission::admit_launch(
         home.path(),
         home.path(),
+        host.path(),
         Some(caller.principal_id),
         Some(agents[0].as_str()),
     )
@@ -1828,6 +1855,7 @@ fn an_agent_launch_admits_each_agents_own_actor_and_root() {
     let second = crate::agent_admission::admit_launch(
         home.path(),
         home.path(),
+        host.path(),
         Some(caller.principal_id),
         Some(agents[1].as_str()),
     )
@@ -1847,6 +1875,7 @@ fn an_agent_launch_admits_each_agents_own_actor_and_root() {
     assert!(crate::agent_admission::admit_launch(
         home.path(),
         home.path(),
+        host.path(),
         Some(caller.principal_id),
         None
     )
@@ -1860,10 +1889,15 @@ fn an_agent_launch_admits_each_agents_own_actor_and_root() {
 #[test]
 fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
     let (home, agents) = home_with_agents(1);
+    let host = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        crate::agent_admission::tests::AGENT_HOST_CID,
+    );
     crate::auth::store_test_principal_root_protection(home.path(), "person:local:a5-other");
     let error = crate::agent_admission::admit_launch(
         home.path(),
         home.path(),
+        host.path(),
         Some("person:local:a5-other"),
         Some(agents[0].as_str()),
     )
@@ -1872,6 +1906,7 @@ fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
     let error = crate::agent_admission::admit_launch(
         home.path(),
         home.path(),
+        host.path(),
         Some("person:local:a5-stranger"),
         Some(agents[0].as_str()),
     )
@@ -1886,9 +1921,14 @@ fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
 fn an_agent_launch_needs_its_launcher_and_its_own_home() {
     let (home, agents) = home_with_agents(1);
     let caller = home.caller();
+    let host = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        crate::agent_admission::tests::AGENT_HOST_CID,
+    );
     let error = crate::agent_admission::admit_launch(
         home.path(),
         home.path(),
+        host.path(),
         None,
         Some(agents[0].as_str()),
     )
@@ -1898,11 +1938,57 @@ fn an_agent_launch_needs_its_launcher_and_its_own_home() {
     let error = crate::agent_admission::admit_launch(
         home.path(),
         child.path(),
+        host.path(),
         Some(caller.principal_id),
         Some(agents[0].as_str()),
     )
     .unwrap_err();
     assert_eq!(error.to_string(), crate::agent_admission::NOT_THE_HOME);
+}
+
+/// The capsule a launch would load must be the Agent Host package the agent
+/// was created for. A different name, a different package CID, or no recorded
+/// package CID is refused by name and admits no actor.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
+    let (home, agents) = home_with_agents(1);
+    let caller = home.caller();
+    let launch = |capsule: &Path| {
+        crate::agent_admission::admit_launch(
+            home.path(),
+            home.path(),
+            capsule,
+            Some(caller.principal_id),
+            Some(agents[0].as_str()),
+        )
+    };
+    let other_name = host_capsule(
+        "another-host",
+        crate::agent_admission::tests::AGENT_HOST_CID,
+    );
+    assert_eq!(
+        launch(other_name.path()).unwrap_err().to_string(),
+        crate::agent_admission::NOT_THE_STORED_HOST
+    );
+    let other_cid = host_capsule(crate::agent_admission::tests::AGENT_HOST, "bafkreianother");
+    assert_eq!(
+        launch(other_cid.path()).unwrap_err().to_string(),
+        crate::agent_admission::NOT_THE_STORED_HOST
+    );
+    let no_receipt = host_capsule(crate::agent_admission::tests::AGENT_HOST, "");
+    std::fs::remove_file(no_receipt.path().join(".elastos-cid")).unwrap();
+    let error = launch(no_receipt.path()).unwrap_err().to_string();
+    assert!(
+        error.starts_with("read the launching capsule's package CID receipt:"),
+        "{error}"
+    );
+    // The stored host itself still admits the agent's actor.
+    let stored = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        crate::agent_admission::tests::AGENT_HOST_CID,
+    );
+    assert_eq!(launch(stored.path()).unwrap().unwrap().actor, agents[0]);
 }
 
 /// With the feature off, an agent launch is refused before any lookup.
@@ -1911,6 +1997,7 @@ fn an_agent_launch_needs_its_launcher_and_its_own_home() {
 fn with_the_feature_off_an_agent_launch_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let error = crate::agent_admission::admit_launch(
+        dir.path(),
         dir.path(),
         dir.path(),
         Some("person:local:a5-owner"),

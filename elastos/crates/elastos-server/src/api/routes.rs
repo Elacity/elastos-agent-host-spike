@@ -617,20 +617,24 @@ mod tests {
             session_id: "session:a5-launch",
         };
         agents::set_enabled(&data_dir, &caller, true, 1).unwrap();
+        // The stored Agent Host is the package this launch will load: the
+        // probe's manifest name and the CID its capsule directory records.
+        const PROBE_HOST: &str = "a5-launch-probe";
+        const PROBE_HOST_CID: &str = "bafkreia5probe";
         let create = |name: &str| {
             agents::create(
                 &data_dir,
                 &caller,
                 &agents::CreateRequest {
                     display_name: name.to_string(),
-                    agent_host: "agent-host".to_string(),
+                    agent_host: PROBE_HOST.to_string(),
                     request_id: format!("request-{name}"),
                 },
                 |host| {
                     Ok(
                         crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
                             host,
-                            "bafyagenthost",
+                            PROBE_HOST_CID,
                         ),
                     )
                 },
@@ -650,6 +654,7 @@ mod tests {
         for file in ["capsule.json", "a5-launch-probe.component.wasm"] {
             std::fs::copy(fixture.join(file), capsule_dir.join(file)).unwrap();
         }
+        std::fs::write(capsule_dir.join(".elastos-cid"), format!("{PROBE_HOST_CID}\n")).unwrap();
         let wasm = std::fs::read(capsule_dir.join("a5-launch-probe.component.wasm")).unwrap();
         let mut manifest: elastos_common::CapsuleManifest =
             serde_json::from_slice(&std::fs::read(capsule_dir.join("capsule.json")).unwrap())
@@ -819,6 +824,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Row 1 refusal: an agent stored with host A is refused the launch of
+    /// capsule B. Admission refuses before the runtime starts, so no principal
+    /// is bound and no launch or bridge call is audited.
+    #[tokio::test]
+    async fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
+        use crate::agents;
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        use elastos_compute::providers::ComponentProvider;
+        use elastos_storage::providers::LocalFSProvider;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            Arc::new(
+                LocalFSProvider::new(temp.path().join("storage"))
+                    .await
+                    .unwrap(),
+            ),
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let audit_log = Arc::new(AuditLog::new());
+
+        let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
+        let owner = context.principal_id().to_string();
+        crate::auth::store_test_principal_root_protection(&data_dir, &owner);
+        crate::agents::tests::make_admin(&data_dir, &owner);
+        let record = crate::auth::stored_principal_record(&data_dir, &owner)
+            .unwrap()
+            .unwrap();
+        let caller = agents::Caller {
+            principal_id: &owner,
+            proof_binding_id: &record.proof_binding_id,
+            session_id: "session:a5-host",
+        };
+        agents::set_enabled(&data_dir, &caller, true, 1).unwrap();
+        let agent = agents::create(
+            &data_dir,
+            &caller,
+            &agents::CreateRequest {
+                display_name: "a".to_string(),
+                agent_host: "agent-host".to_string(),
+                request_id: "request-a".to_string(),
+            },
+            |host| {
+                Ok(
+                    crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
+                        host,
+                        "bafyagenthost",
+                    ),
+                )
+            },
+            1,
+        )
+        .unwrap()
+        .agent_id;
+
+        // The capsule that would load is the probe, not the stored host.
+        let capsule_dir = temp.path().join("a5-launch-probe");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/a5-launch-probe");
+        std::fs::copy(
+            fixture.join("capsule.json"),
+            capsule_dir.join("capsule.json"),
+        )
+        .unwrap();
+        std::fs::write(capsule_dir.join(".elastos-cid"), "bafkreia5probe\n").unwrap();
+        let grant =
+            gateway::issue_home_launch_token_with_context(&data_dir, "a5-launch-probe", &context)
+                .unwrap();
+
+        let response = launch_capsule(
+            Extension(runtime),
+            Extension(audit_log.clone()),
+            Extension(Some(data_dir.clone())),
+            Json(LaunchRequest {
+                path: capsule_dir.to_string_lossy().into_owned(),
+                principal_id: None,
+                launch_grant: Some(grant),
+                agent_id: Some(agent),
+            }),
+        )
+        .await;
+        let (status, message) = match response {
+            Ok(_) => panic!("the capsule was admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, crate::agent_admission::NOT_THE_STORED_HOST);
+        assert!(
+            audit_log.recent_events(2).is_empty(),
+            "the runtime started nothing"
+        );
+        assert!(
+            crate::auth::load_auth_state(&data_dir)
+                .unwrap()
+                .audit
+                .iter()
+                .all(|event| event.event_type != "component.invoke.completed"),
+            "no principal was bound to a bridge call"
+        );
     }
 
     /// Row 6a: a launch request that carries a kind is refused by its shape.
