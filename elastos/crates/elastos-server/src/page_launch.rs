@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,12 +26,6 @@ pub const KEPT_PER_PRINCIPAL: usize = 8;
 /// How many launches the Runtime keeps at once, for everyone together. Each
 /// holds at most one walk's files (64 MiB), so this bounds their memory too.
 pub const KEPT_IN_ALL: usize = 16;
-/// How long the start of an open may take, by the clock on the wall. Fuel
-/// counts only the program's own instructions, not a call it makes to the
-/// Runtime that does not come back; past this the open is refused and its
-/// place given back. The program may run on in its own thread, reading
-/// nothing of the launch, as after any cancelled start.
-pub const START_DEADLINE: Duration = Duration::from_secs(60);
 /// How long a launch is kept after it is opened.
 pub const KEPT_FOR: Duration = Duration::from_secs(15 * 60);
 
@@ -79,8 +72,6 @@ pub enum OpenRefusal {
     TooManyInAll,
     /// The place the open took was gone when its start was over.
     PlaceLost,
-    /// The start took longer than [`START_DEADLINE`].
-    StartTimedOut,
     /// No person to keep it for.
     NoPrincipal,
 }
@@ -195,11 +186,9 @@ impl Runtime {
         let person = Some(principal.to_string());
         // The one walk budget of every start by CID, as `run_by_bundle` hands it over.
         let budget = crate::bundle_admission::BUNDLE_WALK_BUDGET;
-        let start = self.start_by_bundle(data_dir, cid, Vec::new(), person, budget, |_| {});
-        let deadline = self.page_start_deadline_ms.load(Ordering::Relaxed);
-        let started = tokio::time::timeout(Duration::from_millis(deadline), start)
+        let started = self
+            .start_by_bundle(data_dir, cid, Vec::new(), person, budget, |_| {})
             .await
-            .map_err(|_| OpenRefusal::StartTimedOut)?
             .map_err(OpenRefusal::Start)?;
         let (Some(launch), Some(page)) = (started.launch, started.page) else {
             return Err(OpenRefusal::NotContent);
@@ -254,12 +243,6 @@ impl Runtime {
         let kept = kept_ones(&self.page_launches);
         let one = kept.get(id)?;
         one.launch.as_ref().map(|_| one.page.clone())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_page_start_deadline(&self, deadline: Duration) {
-        let millis = deadline.as_millis() as u64;
-        self.page_start_deadline_ms.store(millis, Ordering::Relaxed);
     }
 
     #[cfg(test)]

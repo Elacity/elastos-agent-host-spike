@@ -77,9 +77,6 @@ pub struct Runtime {
     /// Launches kept for their page after the program's start is over, by a
     /// launch id of their own (`page_launch.rs`). The bridge never reads them.
     pub(crate) page_launches: crate::page_launch::PageLaunches,
-    /// How long the start of a launch opened for its page may take, in
-    /// milliseconds (`page_launch.rs`, `START_DEADLINE`; shorter in tests).
-    pub(crate) page_start_deadline_ms: std::sync::atomic::AtomicU64,
 }
 
 /// One launch's content in the Runtime's table, for as long as this value
@@ -134,9 +131,6 @@ impl Runtime {
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
-            page_start_deadline_ms: std::sync::atomic::AtomicU64::new(
-                crate::page_launch::START_DEADLINE.as_millis() as u64,
-            ),
         }
     }
 
@@ -156,9 +150,6 @@ impl Runtime {
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
-            page_start_deadline_ms: std::sync::atomic::AtomicU64::new(
-                crate::page_launch::START_DEADLINE.as_millis() as u64,
-            ),
         }
     }
 
