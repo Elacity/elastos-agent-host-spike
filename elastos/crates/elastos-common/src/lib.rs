@@ -27,7 +27,7 @@ pub use error::{ElastosError, Result};
 pub use free_space::{require_free_space, NotEnoughFreeSpace, FREE_SPACE_RESERVE_BYTES};
 pub use manifest::{
     elastos_bus_v1_wit_sha256, validate_model_content_path, AffordanceApprovalMode,
-    AffordanceAuditMode, AffordanceRisk, AgentDeclaration, AgentKind, AskAction,
+    AffordanceAuditMode, AffordanceRisk, AgentDeclaration, AgentKind, AskAction, AuthorityBound,
     CapsuleAffordanceDescriptor, CapsuleExecution, CapsuleInterfaceDescriptor, CapsuleManifest,
     CapsuleProjection, CapsuleRequirement, CapsuleRole, CapsuleRuntimeAbi, CapsuleType,
     CapsuleWindowPolicy, ManifestAsk, MicroVmConfig, ModelContentMetadata, Permissions,

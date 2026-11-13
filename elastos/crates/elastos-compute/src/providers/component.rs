@@ -192,10 +192,11 @@ impl ComponentProvider {
     /// to the bridge is refused by this provider, and no handler sees it,
     /// whichever handler is installed and whenever. The seal is a mark on
     /// this one activation's entry and on nothing else, so it can never seal
-    /// another capsule. The entry is taken away when the start returns; a
+    /// another capsule. The entry is taken away when the start returns. A
     /// start that is cancelled before it returns leaves its entry behind,
-    /// still sealed and still marked running, and `stop` does not take away
-    /// an entry that is marked running.
+    /// still sealed. If the start had not yet marked it running it is still
+    /// marked loading, and `stop` takes it away; once it is marked running
+    /// `stop` refuses it, and it stays.
     pub async fn load_admitted_sealed(
         &self,
         bytes: Vec<u8>,
@@ -413,19 +414,17 @@ impl ComputeProvider for ComponentProvider {
     }
 
     async fn stop(&self, handle: &CapsuleHandle) -> Result<()> {
-        if self
-            .instances
-            .read()
-            .await
-            .get(&handle.id)
-            .is_some_and(|instance| instance.status == CapsuleStatus::Running)
-        {
+        // One lock for the look and the removal: a start cannot mark the
+        // entry running between the two.
+        let mut instances = self.instances.write().await;
+        let running = |instance: &ComponentActivation| instance.status == CapsuleStatus::Running;
+        if instances.get(&handle.id).is_some_and(running) {
             return Err(ElastosError::Compute(
                 "component/v1 is a bounded activation contract and has no resident stop operation"
                     .to_string(),
             ));
         }
-        self.instances.write().await.remove(&handle.id);
+        instances.remove(&handle.id);
         Ok(())
     }
 
@@ -1084,6 +1083,39 @@ mod tests {
         ));
         assert!(provider.instances.read().await.is_empty());
         assert_eq!(provider.compile_slot.available_permits(), 1);
+    }
+
+    /// What `stop` does with an entry a cancelled start left behind: one
+    /// still marked loading is taken away; one already marked running is
+    /// refused and stays, sealed as it was.
+    #[tokio::test]
+    async fn stop_takes_away_a_loading_entry_and_refuses_a_running_one() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1");
+        let manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(fixture.join("capsule.json")).unwrap()).unwrap();
+        let bytes = std::fs::read(fixture.join("bus-v1-conformance.component.wasm")).unwrap();
+        let provider = ComponentProvider::new();
+        let handle = provider
+            .load_admitted_sealed(bytes, manifest)
+            .await
+            .unwrap();
+        let mark = async |status: CapsuleStatus| {
+            let mut instances = provider.instances.write().await;
+            instances.get_mut(&handle.id).unwrap().status = status;
+        };
+        // As a start leaves it when it is cancelled after its first step.
+        mark(CapsuleStatus::Running).await;
+        let refused = provider.stop(&handle).await.unwrap_err().to_string();
+        assert!(refused.contains("no resident stop operation"), "{refused}");
+        let left = provider.instances.read().await;
+        let entry = left.get(&handle.id).expect("the running entry stays");
+        assert!(entry.sealed);
+        drop(left);
+        // As a start leaves it when it is cancelled before that step.
+        mark(CapsuleStatus::Loading).await;
+        provider.stop(&handle).await.unwrap();
+        assert!(!provider.instances.read().await.contains_key(&handle.id));
     }
 
     /// A sealed activation has no bridge. Its call is refused by the provider
