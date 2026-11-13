@@ -209,13 +209,18 @@ absent after the run. The file evidence is those named fixture paths; a seccomp
 filter carries syscall policy, not path policy, so no run claims a general file
 boundary.
 
-The did run requires its permitted operations under the filter, through
-`did_standin_permitted_operations` and `assert_suite_outcomes` against the
-permitted prefix of `DID_SUITE_CASES`: `init` `ok`, `get_did` `ok` with a
-`did:key:` value, `resolve` `ok` on that DID, `set_nickname` `ok`, `get_nickname`
-returning `Confined`, and `get_persona_did` `ok`. Its `STORAGE_ROOT/seccomp-inside-write`
-fixture must equal `b"did seccomp journey fixture\n"`, the encrypted nickname
-`did/nickname.enc` must keep the bytes `set_nickname` wrote, and the named sibling
+The did run requires all ten did operations under the filter. The six file-state
+calls go through `did_standin_permitted_operations` and `assert_suite_outcomes`
+against the permitted prefix of `DID_SUITE_CASES`: `init` `ok`, `get_did` `ok`
+with a `did:key:` value, `resolve` `ok` on that DID, `set_nickname` `ok`,
+`get_nickname` returning `Confined`, and `get_persona_did` `ok`. The journey then
+drives `sign_chat_message`, `verify` on the payload and signature it just
+answered, `verify_did_recovery` with a well-formed request whose signature is not
+hex (which the provider answers `invalid_signature`), and `shutdown`, through
+`did_standin_linux_only_operations` and `DID_LINUX_ONLY_CASES`. Its
+`STORAGE_ROOT/seccomp-inside-write` fixture must equal
+`b"did seccomp journey fixture\n"`, the encrypted nickname `did/nickname.enc`
+must keep the bytes `set_nickname` wrote, and the named sibling
 `seccomp-outside-write` outside `STORAGE_ROOT` must be absent. The did suite's
 file-denial cases stay in the B3 and C0 journeys, because a seccomp filter cannot
 make them fail. Both callers create the fixed-byte fixture before their
@@ -249,11 +254,13 @@ failed with `the confined provider must return the stored nickname` and
 addition was removed. The block is now resolved in did's store instead:
 `save_nickname_with_device_key` creates `nickname.enc` at 0600 and sets the mode
 on the open file, so `fchmodat` stays out of every list.
-`linux_did_journey_runs_under_the_seccomp_allow_list` passes under the same
+`linux_did_journey_runs_under_the_seccomp_allow_list` passed under the same
 policy as wallet's on aarch64 (receipt
 `~/Sparks/office/evidence/b4-x86/pr1548-6241445e-aarch64.log`) and on x86_64
-(this PR's CI). It is lab stand-in evidence on those hosts, not Runtime
-acceptance.
+(this PR's CI) while it drove the six file-state calls. It now drives all ten
+did operations, and the ten-call run on the host "The file row" names is the
+evidence for the ten Linux cells of `../did-provider/CONFINEMENT.md`. It is lab
+stand-in evidence on those hosts, not Runtime acceptance.
 
 The current journey also compares the key's final bytes with the bytes captured
 immediately after `init`. The key check requires the trailing newline.
@@ -475,8 +482,10 @@ and B4's Linux cells are credited per architecture and boundary, not flipped.
 Every control call succeeded, and under the ruleset the two inside calls and the
 read of the bound executable succeeded while the other six answered `EACCES` (13).
 The outside effect was refused by the kernel for each provider and created
-nothing. Wallet's `Init` is that effect. did's `Init` records the root and writes
-nothing, so its first write is.
+nothing. Wallet's `Init` is that effect. The did caller first plants the root's
+`nickname.enc` beneath `STORAGE_PARENT`; did's outside `Init`, holding the
+fixture device key, is refused when it reads that file, and its write to the
+same path is refused as the returned effect.
 
 ### The bound-executable right
 
@@ -522,6 +531,10 @@ bytes. All 109 passed afterwards.
 | `EXECUTE` alone on the executable row | `linux_wallet_file_row_is_refused_outside_storage_root` | `the test child must start: Permission denied (os error 13)` |
 | Drop `TRUNCATE` from the `STORAGE_ROOT` row | `linux_did_file_row_is_refused_outside_storage_root` | The second `set_nickname` answers `Permission denied (os error 13)`: replacing a file is a truncation, which the oracle's `file-write*` grants |
 | did's store chmods by path, not through its open file | `linux_did_journey_runs_under_the_seccomp_allow_list` | `fchmodat` is refused, so `get_nickname` answers `not_set` |
+
+The did caller now also requires the outside `Init` read refused. The
+skip-install plant therefore reaches that assertion before the write it reached
+in the run above, and that added assertion has not been run on the host yet.
 
 The last one is why did needs no wider policy. `save_nickname_with_device_key`
 creates the file with mode 0600 and calls `fchmod` on the open file, so

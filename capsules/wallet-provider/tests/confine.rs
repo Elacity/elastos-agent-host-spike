@@ -5218,6 +5218,121 @@ fn did_standin_permitted_operations(
     record
 }
 
+/// The four did operations the Linux journey drives after the six
+/// `did_standin_permitted_operations` records, in the order it drives them.
+///
+/// `sign_chat_message` and `verify` answer `ok`, and `shutdown` answers `ok` and
+/// ends the provider, so their class is `Permitted`. `verify_did_recovery`
+/// answers the provider's own typed refusal, `invalid_signature`, for a
+/// well-formed request whose signature is not hex, so its class is `Denied`;
+/// the helper asserts that code and its reason, so "answered under the filter"
+/// is this refusal and not any other answer.
+#[cfg(target_os = "linux")]
+const DID_LINUX_ONLY_CASES: [(&str, SuiteClass); 4] = [
+    ("sign_chat_message", SuiteClass::Permitted),
+    ("verify", SuiteClass::Permitted),
+    ("verify_did_recovery", SuiteClass::Denied),
+    ("shutdown", SuiteClass::Permitted),
+];
+
+/// The four remaining did operations on one started provider, using the record
+/// type and judgement of `did_standin_permitted_operations`.
+///
+/// It starts no provider and reads the device DID it needs from the running
+/// one. `verify` is fed the payload and signature `sign_chat_message` just
+/// answered, so the test renders no signing payload and constructs no
+/// signature. `verify_did_recovery` sends one complete request with a
+/// well-formed binding and timestamps and a signature that is not hex: the
+/// provider answers `invalid_signature` with its `Invalid hex sig:` reason, and
+/// this helper asserts that answer, so the case records the provider's typed
+/// refusal rather than a pass on any answer. `shutdown` answers `ok` and the
+/// child exits with status 0, which `ConfinedProvider::shutdown` asserts.
+#[cfg(target_os = "linux")]
+fn did_standin_linux_only_operations(
+    provider: &mut ConfinedProvider,
+    label: &str,
+) -> Vec<SuiteEntry> {
+    let mut record = Vec::new();
+
+    let did_data = provider.send(&json!({ "op": "get_did" }));
+    let did = did_data["data"]["did"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: get_did must name the DID: {did_data}"))
+        .to_string();
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock must be after the epoch")
+        .as_secs();
+    let signed = provider.send(&json!({
+        "op": "sign_chat_message", "sender_id": did, "ts": ts, "content": "confined"
+    }));
+    let payload = signed["data"]["payload"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: sign_chat_message must return its payload: {signed}"))
+        .to_string();
+    let signature = signed["data"]["signature"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: sign_chat_message must return its signature: {signed}"))
+        .to_string();
+    record.push(suite_entry(
+        "sign_chat_message",
+        SuiteClass::Permitted,
+        &signed,
+    ));
+
+    let verified = provider
+        .send(&json!({ "op": "verify", "did": did, "data": payload, "signature": signature }));
+    assert_eq!(
+        verified["data"]["valid"], true,
+        "{label}: verify must accept the payload and signature sign_chat_message answered: {verified}"
+    );
+    record.push(suite_entry("verify", SuiteClass::Permitted, &verified));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock must be after the epoch")
+        .as_secs();
+    let recovery = provider.send(&json!({
+        "op": "verify_did_recovery",
+        "did": did,
+        "principal_id": "person:local:confined",
+        "localhost_root": "localhost://Users/person:local:confined",
+        "protector_id": "protector:did:confined",
+        "data_key_id": "pdek:confined",
+        "nonce": "nonce:confined",
+        "issued_at": now,
+        "expires_at": now + 300,
+        "signature": "not-hex"
+    }));
+    assert_eq!(
+        recovery["status"], "error",
+        "{label}: verify_did_recovery must answer a typed refusal, not a crash: {recovery}"
+    );
+    assert_eq!(
+        recovery["code"], "invalid_signature",
+        "{label}: verify_did_recovery must refuse the non-hex signature with invalid_signature: \
+         {recovery}"
+    );
+    assert!(
+        recovery["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Invalid hex sig:"),
+        "{label}: the refusal must come from the signature decode: {recovery}"
+    );
+    record.push(suite_entry(
+        "verify_did_recovery",
+        SuiteClass::Denied,
+        &recovery,
+    ));
+
+    let shutdown = provider.shutdown();
+    record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
+
+    record
+}
+
 /// The did suite on one started provider and one root, using the record type
 /// and judgement of `wallet_standin_suite`. It returns one entry per case of
 /// `DID_SUITE_CASES` in its order: the six permitted operations of
@@ -13000,6 +13115,12 @@ fn linux_landlock_requires_no_new_privs() {
     }
 }
 
+/// The one base name the journey puts under `STORAGE_PARENT` and outside
+/// `STORAGE_ROOT`, so a caller that must prepare that path before the launch
+/// names it here instead of repeating the name.
+#[cfg(target_os = "linux")]
+const LANDLOCK_OUTSIDE_BASE: &str = "landlock-outside-base";
+
 /// The journey: `name` starts under the Landlock file row built from that
 /// provider's own declared rights and under the seccomp list built the same
 /// way, and one probe child under the same ruleset shows the file row refusing
@@ -13124,7 +13245,7 @@ fn landlock_file_row_journey(
         profile_dir.display()
     );
 
-    let outside_base = storage_parent(name, base).join("landlock-outside-base");
+    let outside_base = storage_parent(name, base).join(LANDLOCK_OUTSIDE_BASE);
     let outside = first_effect_outside(&mut provider, &outside_base);
     assert_eq!(
         outside["status"], "error",
@@ -13283,6 +13404,15 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
 /// `get_persona_did`, judged against `DID_SUITE_CASES`' permitted prefix, so
 /// the did run proves its own operations answer under did's ruleset.
 ///
+/// The outside effect is a `set_nickname` write that did's ruleset refuses at
+/// `did/nickname.enc`. The caller creates that outside `did` directory before
+/// the launch and copies the root's `nickname.enc` into it, so the outside
+/// `Init` that holds the fixture device key is refused when it reads the copy
+/// and the `set_nickname` that follows meets an existing directory, opens
+/// `nickname.enc` and is refused on that write. The caller removes the planted
+/// file and the directory it made, so the journey's "creates nothing" check
+/// still holds.
+///
 /// The two Linux-only plants are the wallet caller's: a did launcher that skips
 /// only its own Landlock install fails the outside `Init`, and a
 /// `STORAGE_PARENT` row that grants a read fails the planted read beneath did's
@@ -13295,6 +13425,12 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
     let loader = landlock_loader_paths(DID_PROVIDER);
     let fixture = landlock_file_fixture(DID_PROVIDER, binary, &loader);
     let label = "did-provider landlock file row";
+    fs::create_dir_all(
+        storage_parent(DID_PROVIDER, &fixture.base)
+            .join(LANDLOCK_OUTSIDE_BASE)
+            .join("did"),
+    )
+    .expect("the outside nickname directory must stand before the launch");
     landlock_file_row_journey(
         DID_PROVIDER,
         binary,
@@ -13318,12 +13454,41 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
                 "{label}: the replaced nickname must read back: {nickname}"
             );
         },
-        // did's Init records the root and writes nothing, so the kernel's refusal
-        // comes at its first write there.
+        // did's outside `Init` reads `did/nickname.enc`. A nickname file copied
+        // beneath `STORAGE_PARENT` from the root gives that read its path, so
+        // the kernel refuses the read itself. Removing only that copy leaves the
+        // outside `did` directory standing, so the `set_nickname` this closure
+        // returns is refused on the open of `nickname.enc`, not on a directory
+        // it would have created.
         |provider, outside| {
-            let init = provider.init(outside);
-            assert_eq!(init["status"], "ok", "did's Init writes nothing: {init}");
-            provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }))
+            let inside_nickname =
+                provider_storage_root(DID_PROVIDER, &fixture.base).join("nickname.enc");
+            let outside_nickname = outside.join("did").join("nickname.enc");
+            fs::copy(&inside_nickname, &outside_nickname)
+                .expect("the outside nickname file must take the root's bytes");
+            let init = provider.send(&provider_init_request(DID_PROVIDER, outside));
+            assert_eq!(
+                init["status"], "error",
+                "the outside nickname read must be refused: {init}"
+            );
+            assert_eq!(init["code"], "storage_error", "{init}");
+            let reason = init["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the refused init must carry a reason: {init}"));
+            assert!(
+                reason.contains("Permission denied"),
+                "the kernel's denial must reach init's reason, and it answered: {reason}"
+            );
+            fs::remove_file(&outside_nickname)
+                .expect("the planted outside nickname file must be removable");
+            let refused = provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
+            assert!(
+                !outside_nickname.exists(),
+                "a refused outside write must leave no nickname file at {}",
+                outside_nickname.display()
+            );
+            fs::remove_dir_all(outside).expect("the outside fixture must be removable");
+            refused
         },
     );
 }
@@ -13744,6 +13909,36 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         .expect("the provider fixture root must exist");
     fs::write(&files.inside_fixture, files.expected_fixture)
         .expect("the named inside fixture must be writable");
+    // The launched child's mode and the launcher's own install record are read
+    // while that child runs: `launched_seccomp_mode` opens its
+    // `/proc/<pid>/status`, which exists only until the child exits, and every
+    // provider's run ends with `shutdown`. These checks therefore run before
+    // any operation suite sends a request; every later check reads files or
+    // fields that outlive the child.
+    assert_eq!(
+        provider.launched_seccomp_mode(),
+        SECCOMP_MODE_FILTER,
+        "the launched provider must carry SECCOMP_MODE_FILTER in its own /proc status, \
+         so the launcher's pre_exec install is observed"
+    );
+    let [before_install, after_install] = provider
+        .seccomp_launch_answers
+        .expect("the launcher must report its own install's before and after answers");
+    eprintln!("launcher marker: before {before_install}, after {after_install}");
+    assert_ne!(
+        before_install, after_install,
+        "an inherited filter alone must not satisfy the launcher's own install"
+    );
+    assert_eq!(
+        after_install,
+        -i64::from(SECCOMP_DENY_ERRNO),
+        "this launcher's install must supply the deny marker"
+    );
+    assert!(
+        profile_dir_entries(&profile_dir).is_empty(),
+        "a seccomp start writes no profile: {}",
+        profile_dir.display()
+    );
     // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
     // the provider wrote it: wallet's `init` writes the random key, and did's
     // `set_nickname` writes the encrypted nickname. The model's `init` creates
@@ -13774,6 +13969,11 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         DID_PROVIDER => {
             let record = did_standin_permitted_operations(&mut provider, &base, &label);
             assert_suite_outcomes(&label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+            // The four remaining did operations drive after the six, so this
+            // caller answers all ten under the filter. `shutdown` is the last
+            // of them and ends the provider here.
+            let linux_only = did_standin_linux_only_operations(&mut provider, &label);
+            assert_suite_outcomes(&label, &linux_only, &DID_LINUX_ONLY_CASES);
             let nickname = files.inside.as_ref().expect("did names its nickname file");
             Some(fs::read(nickname).unwrap_or_else(|err| {
                 panic!(
@@ -13793,31 +13993,15 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         }
         other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
     };
-    assert_eq!(
-        provider.launched_seccomp_mode(),
-        SECCOMP_MODE_FILTER,
-        "the launched provider must carry SECCOMP_MODE_FILTER in its own /proc status, \
-         so the launcher's pre_exec install is observed"
-    );
-    let [before_install, after_install] = provider
-        .seccomp_launch_answers
-        .expect("the launcher must report its own install's before and after answers");
-    eprintln!("launcher marker: before {before_install}, after {after_install}");
-    assert_ne!(
-        before_install, after_install,
-        "an inherited filter alone must not satisfy the launcher's own install"
-    );
-    assert_eq!(
-        after_install,
-        -i64::from(SECCOMP_DENY_ERRNO),
-        "this launcher's install must supply the deny marker"
-    );
-    assert!(
-        profile_dir_entries(&profile_dir).is_empty(),
-        "a seccomp start writes no profile: {}",
-        profile_dir.display()
-    );
-    provider.shutdown();
+    // did's `shutdown` is its tenth operation inside
+    // `did_standin_linux_only_operations`; wallet and model send theirs here.
+    // Either way it is the last request: the mode read above already observed
+    // the live child, and `ConfinedProvider::shutdown` waits for the child's
+    // exit and asserts its status is 0, so the answer and its effect are both
+    // shown.
+    if name != DID_PROVIDER {
+        provider.shutdown();
+    }
 
     let written = assert_seccomp_journey_files(name, &files, expected_inside.as_deref());
     if name == WALLET_PROVIDER {
@@ -13920,10 +14104,15 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
 /// program as wallet, with did's own binary, did's own committed declared-rights
 /// file and did's own operations. Wallet owns the four-call probe run.
 ///
-/// The permitted calls are `did_standin_permitted_operations`, judged by
-/// `assert_suite_outcomes` against the permitted prefix of `DID_SUITE_CASES`, so
-/// `init`, `get_did` with a `did:key:` value, `resolve`, `set_nickname`,
-/// `get_nickname` and `get_persona_did` answer under the filter. The did suite's
+/// The permitted calls are all ten did operations. `did_standin_permitted_operations`
+/// drives the six file-state calls, judged by `assert_suite_outcomes` against the
+/// permitted prefix of `DID_SUITE_CASES`: `init`, `get_did` with a `did:key:`
+/// value, `resolve`, `set_nickname`, `get_nickname` and `get_persona_did`.
+/// `did_standin_linux_only_operations` then drives `sign_chat_message`,
+/// `verify` on the payload and signature it just answered,
+/// `verify_did_recovery` with a well-formed request whose signature is not hex
+/// (answered `invalid_signature`), and `shutdown`, judged against
+/// `DID_LINUX_ONLY_CASES`, so each answers under the filter. The did suite's
 /// file-denial cases stay in the B3 and C0 journeys: a seccomp filter carries
 /// syscall policy and not path policy, so they cannot pass under it alone.
 ///
@@ -15956,6 +16145,11 @@ fn operations_table_citation_problems(
     };
     let mut problems = Vec::new();
     let mut citations: Vec<&str> = Vec::new();
+    // The Linux cells cite the one sibling wallet test file, so that citation
+    // resolves against the capsules folder that holds both providers.
+    let capsules_root = capsule_dir
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok());
     for span in backtick_spans(&section) {
         let Some((file, function)) = span.split_once("::") else {
             continue;
@@ -15971,6 +16165,7 @@ fn operations_table_citation_problems(
             ));
             continue;
         }
+        let sibling_citation = file == LINUX_CITATION_FILE;
         let path = capsule_dir.join(file);
         let resolved = match fs::canonicalize(&path) {
             Ok(resolved) => resolved,
@@ -15983,14 +16178,25 @@ fn operations_table_citation_problems(
                 continue;
             }
         };
+        // This citation resolves against the capsules folder, not the provider
+        // folder, because the Linux cells cite the sibling wallet test file.
+        let sibling_allowed = sibling_citation
+            && capsules_root
+                .as_ref()
+                .is_some_and(|root| resolved.starts_with(root));
+        // The falsifier WP82 disables this one line, so the outside refusal
+        // keeps its own condition and the sibling allowance is a second check.
+        #[allow(clippy::collapsible_if)]
         if !resolved.starts_with(&provider_root) {
-            problems.push(format!(
-                "{document_name} CONFINEMENT.md: {span} resolves outside the provider directory: \
-                 {} (provider directory {})",
-                resolved.display(),
-                provider_root.display()
-            ));
-            continue;
+            if !sibling_allowed {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {span} resolves outside the provider directory: \
+                     {} (provider directory {})",
+                    resolved.display(),
+                    provider_root.display()
+                ));
+                continue;
+            }
         }
         let source = match fs::read_to_string(&resolved) {
             Ok(source) => source,
@@ -16448,6 +16654,51 @@ const STORE_FILE_NAME: &str = "wallet-state.json";
 
 /// The one Linux cell value every operations row uses in this lab.
 const LINUX_STATUS: &str = "designed, not enforced";
+
+/// The prefix of a Linux cell that cites the recorded Linux host's tests
+/// instead of staying at `LINUX_STATUS`.
+const LINUX_ENFORCED_PREFIX: &str = "enforced on the recorded Linux host:";
+
+/// The one file a Linux cell's citation names, relative to a provider folder.
+const LINUX_CITATION_FILE: &str = "../wallet-provider/tests/confine.rs";
+
+/// The test file `LINUX_CITATION_FILE` resolves to, relative to this crate.
+const LINUX_CITATION_TEST_FILE: &str = "tests/confine.rs";
+
+/// The one attribute a cited Linux test carries.
+const LINUX_TEST_GATE: &str = "#[cfg(target_os = \"linux\")]";
+
+/// The exact journey and file-row test names one provider's Linux cells cite,
+/// keyed by the provider document name. A provider without an entry records no
+/// Linux cell, and the check refuses one instead of reading a name fragment.
+const LINUX_CITATION_BINDINGS: &[(&str, &str, &str)] = &[
+    (
+        "did-provider",
+        "linux_did_journey_runs_under_the_seccomp_allow_list",
+        "linux_did_file_row_is_refused_outside_storage_root",
+    ),
+    // The row fixture copies did's Linux cells, so it carries did's names.
+    (
+        "fixture-provider",
+        "linux_did_journey_runs_under_the_seccomp_allow_list",
+        "linux_did_file_row_is_refused_outside_storage_root",
+    ),
+];
+
+/// The journey and file-row test names bound to `document_name`, or `None`
+/// when that provider records no Linux cell yet.
+fn linux_citation_binding(document_name: &str) -> Option<(&'static str, &'static str)> {
+    LINUX_CITATION_BINDINGS
+        .iter()
+        .find(|(provider, _, _)| *provider == document_name)
+        .map(|(_, journey, file_row)| (*journey, *file_row))
+}
+
+/// The one test file the Linux cells cite, read once.
+static LINUX_CITATION_SOURCE: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(LINUX_CITATION_TEST_FILE);
+    fs::read_to_string(&path).map_err(|err| format!("{} is not readable: {err}", path.display()))
+});
 
 /// The two sides a row whose Right is a declared right cites in its macOS cell.
 const PERMITTED_SIDE: &str = "permitted:";
@@ -18672,17 +18923,293 @@ fn right_side_problems(document_name: &str, row: &OperationsRow) -> Vec<String> 
     problems
 }
 
+/// `source` with every `//` line comment and every `/* ... */` block comment
+/// removed, and every string, raw string, byte string and character literal
+/// copied as it is written.
+///
+/// A literal's own bytes never open or close a comment, so a `"..."` that
+/// holds `//` or `/*` stays a string, an escaped quote keeps its string open,
+/// a raw string ends at its own hash delimiter, and a character literal such
+/// as `'"'` is not the start of a string. Block comments nest, a line comment
+/// keeps its newline, and a block comment keeps its newlines, so every line
+/// that holds code keeps its own place. The literals are copied rather than
+/// decoded, because this scan reads no value and this file's byte strings hold
+/// escapes wider than a wire name may carry.
+fn strip_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut kept: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some((quote, hashes)) = raw_string_open(bytes, index) {
+            let end = raw_string_end(bytes, quote, hashes);
+            kept.extend_from_slice(&bytes[index..end]);
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                let mut depth = 1usize;
+                while index < bytes.len() && depth > 0 {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        if bytes[index] == b'\n' {
+                            kept.push(b'\n');
+                        }
+                        index += 1;
+                    }
+                }
+            }
+            b'"' => {
+                let end = quoted_end(bytes, index);
+                kept.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            b'\'' => {
+                let end = character_literal_end(bytes, index);
+                kept.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            _ => {
+                kept.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(kept).expect("stripping comments keeps every character it copies")
+}
+
+/// The opening quote and hash count of the raw string that starts at `index`,
+/// or `None` when no raw string opens there. `r`, `br` and `cr` prefixes all
+/// take this one reading.
+fn raw_string_open(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    let start = match bytes[index] {
+        b'r' => index,
+        b'b' | b'c' if bytes.get(index + 1) == Some(&b'r') => index + 1,
+        _ => return None,
+    };
+    let mut quote = start + 1;
+    let mut hashes = 0;
+    while bytes.get(quote) == Some(&b'#') {
+        hashes += 1;
+        quote += 1;
+    }
+    (bytes.get(quote) == Some(&b'"')).then_some((quote, hashes))
+}
+
+/// The byte after the raw string whose opening quote is `quote` and whose
+/// closing delimiter needs `hashes` hashes.
+fn raw_string_end(bytes: &[u8], quote: usize, hashes: usize) -> usize {
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"'
+            && bytes.len() >= index + 1 + hashes
+            && bytes[index + 1..index + 1 + hashes]
+                .iter()
+                .all(|byte| *byte == b'#')
+        {
+            return index + 1 + hashes;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// The byte after the closing quote of the string whose opening quote is
+/// `open`. A backslash escapes the byte after it, so an escaped quote keeps
+/// the string open.
+fn quoted_end(bytes: &[u8], open: usize) -> usize {
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The byte after the character literal that starts at `open`, or the byte
+/// after its apostrophe when that apostrophe starts a lifetime instead. A
+/// plain character sits between two apostrophes, and an escaped character runs
+/// to the next apostrophe within its own escape.
+fn character_literal_end(bytes: &[u8], open: usize) -> usize {
+    match bytes.get(open + 1) {
+        Some(b'\\') => {
+            let mut index = open + 2;
+            while index < bytes.len() && index < open + 12 {
+                if bytes[index] == b'\'' {
+                    return index + 1;
+                }
+                index += 1;
+            }
+            open + 1
+        }
+        Some(_) if bytes.get(open + 2) == Some(&b'\'') => open + 3,
+        _ => open + 1,
+    }
+}
+
+/// Whether `function` in `source` is an item the recorded Linux host runs: a
+/// line whose trimmed text starts `fn <function>(`, or `pub fn <function>(`,
+/// and both `LINUX_TEST_GATE` and `DECLARED_TEST_ATTRIBUTE` among the
+/// attribute lines directly above that line.
+///
+/// `strip_comments` removes every line and block comment before the scan, so
+/// a gate and an item that a `/* ... */` block comment holds are no more an
+/// item than one a `//` line holds, and a string that spells `//` or `/*`
+/// stays a string. Another line between the attributes and the item breaks the
+/// block, so the gate and the test attribute must belong to the cited item
+/// itself; a gated helper with no `#[test]` is refused, because the recorded
+/// host runs no such test.
+fn linux_citation_gate(source: &str, function: &str) -> Result<(), String> {
+    let signature = format!("fn {function}(");
+    let stripped = strip_comments(source);
+    let lines: Vec<&str> = stripped.lines().collect();
+    let item = lines.iter().position(|line| {
+        let declaration = line.trim_start();
+        let declaration = declaration.strip_prefix("pub ").unwrap_or(declaration);
+        declaration.starts_with(&signature)
+    });
+    let Some(item) = item else {
+        if source.contains(&signature) {
+            return Err(format!(
+                "{LINUX_CITATION_FILE} holds {function} only in a comment, and a citation names \
+                 an item"
+            ));
+        }
+        return Err(format!("{LINUX_CITATION_FILE} does not hold {function}"));
+    };
+    let mut gated = false;
+    let mut tested = false;
+    let mut cursor = item;
+    while let Some(previous) = cursor.checked_sub(1) {
+        let line = lines[previous].trim();
+        if !line.starts_with("#[") {
+            break;
+        }
+        gated |= line == LINUX_TEST_GATE;
+        tested |= line == DECLARED_TEST_ATTRIBUTE;
+        cursor = previous;
+    }
+    if !gated {
+        return Err(format!("{function} is not gated by {LINUX_TEST_GATE}"));
+    }
+    if !tested {
+        return Err(format!(
+            "{function} carries {LINUX_TEST_GATE} and no {DECLARED_TEST_ATTRIBUTE}, so the \
+             recorded host runs no test of that name"
+        ));
+    }
+    Ok(())
+}
+
 /// Every problem with one row's Linux cell, naming the document, the row and
 /// the value.
+///
+/// A cell is exactly `LINUX_STATUS`, or it starts `LINUX_ENFORCED_PREFIX` and
+/// every backtick span after that prefix that holds `::` is a
+/// `LINUX_CITATION_FILE::<fn>` citation of an item `linux_citation_gate` finds
+/// Linux-gated in the one test file, while a span with no `::` is prose. A
+/// cell cites only the two names `linux_citation_binding` binds to its
+/// provider: the journey, and on a row whose Right cell names a declared right
+/// also the file row, because the journey shows the call answering and the
+/// file row shows the same file refused outside `STORAGE_ROOT`. The test file
+/// is read once, by `LINUX_CITATION_SOURCE`.
 fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {
     if row.linux == LINUX_STATUS {
         return Vec::new();
     }
-    vec![format!(
-        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Linux cell {}, and \
-         every Linux cell is {LINUX_STATUS}",
-        row.operation, row.linux
-    )]
+    let Some(cell) = row.linux.strip_prefix(LINUX_ENFORCED_PREFIX) else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Linux cell {}, \
+             and a Linux cell is {LINUX_STATUS} or starts {LINUX_ENFORCED_PREFIX} and cites \
+             {LINUX_CITATION_FILE}",
+            row.operation, row.linux
+        )];
+    };
+    let Some((journey_test, file_row_test)) = linux_citation_binding(document_name) else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names a recorded-host \
+             Linux cell, and {document_name} binds no journey and file-row test",
+            row.operation
+        )];
+    };
+    let source = match LINUX_CITATION_SOURCE.as_ref() {
+        Ok(source) => source,
+        Err(reason) => {
+            return vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cannot be \
+                 checked because {reason}",
+                row.operation
+            )];
+        }
+    };
+    let mut problems = Vec::new();
+    let mut journey = false;
+    let mut file_row = false;
+    for span in backtick_spans(cell) {
+        // A span with no `::` is prose, such as a path the cell explains; only
+        // a span that holds two colons is read as a citation.
+        let Some((file, function)) = span.split_once("::") else {
+            continue;
+        };
+        if file != LINUX_CITATION_FILE {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites \
+                 {span} in another file, and a Linux citation names {LINUX_CITATION_FILE}",
+                row.operation
+            ));
+            continue;
+        }
+        if let Err(reason) = linux_citation_gate(source, function) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites \
+                 {span}, and {reason}",
+                row.operation
+            ));
+            continue;
+        }
+        if function == journey_test {
+            journey = true;
+        } else if function == file_row_test {
+            file_row = true;
+        } else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites \
+                 {span}, and this provider's Linux cells cite exactly {journey_test} for the \
+                 journey and {file_row_test} for the file row",
+                row.operation
+            ));
+        }
+    }
+    if !journey {
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites no \
+             journey test of {LINUX_CITATION_FILE}",
+            row.operation
+        ));
+    }
+    if declared_right_cell(&row.right) && row.right != NO_DECLARED_RIGHT && !file_row {
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {} and \
+             its Linux cell cites no file-row test of {LINUX_CITATION_FILE}",
+            row.operation, row.right
+        ));
+    }
+    problems
 }
 
 /// The one declared-rights file under a provider directory. The row check
@@ -19106,8 +19633,10 @@ fn effect_cell_problems_rows(
 /// Right cell must be exactly `NO_DECLARED_RIGHT` or one backtick span holding
 /// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares. A row whose
 /// Right is a declared right must cite `permitted:` and `nearest outside
-/// refused:` in its macOS cell, and a `none:` row must cite neither. Every
-/// Linux cell must be `LINUX_STATUS`. Every Outputs cell must name its error
+/// refused:` in its macOS cell, and a `none:` row must cite neither. A Linux
+/// cell is `LINUX_STATUS` or starts `LINUX_ENFORCED_PREFIX` and cites Linux-gated
+/// tests of `LINUX_CITATION_FILE`, including the journey and, on a declared-right
+/// row, the file row. Every Outputs cell must name its error
 /// side as the provider's serde tag and `Error` fields, and its ok side's
 /// `data` children as its handler's own `json!` keys, or as
 /// `WalletProviderResponseV2`'s declared fields on a `wallet_contract` row.
@@ -22747,8 +23276,10 @@ fn every_operations_table_cites_existing_tests() {
 /// declared id in a backtick span; a row whose Right is a declared right cites
 /// both `permitted:` and `nearest outside refused:`, and a `none:` row cites
 /// neither; a declared-right row's macOS cell quotes at least one allow form of
-/// that right and a `none:` row quotes none; and every Linux cell is exactly
-/// `designed, not enforced`. Each
+/// that right and a `none:` row quotes none; and a Linux cell is either
+/// `designed, not enforced` or `enforced on the recorded Linux host:` with a
+/// citation of a Linux-gated test of the wallet test file, the journey on every
+/// such cell and the file row on a declared-right row. Each
 /// fault is one line naming the document, the row (or the arm) and the value.
 /// The check reads files and starts no process, so it runs on every platform.
 ///
@@ -24137,7 +24668,8 @@ fn operations_table_row_check_refuses_each_bad_table() {
                 ),
                 format!(
                     "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {row_name} names \
-                     the Linux cell enforced, and every Linux cell is {LINUX_STATUS}"
+                     the Linux cell enforced, and a Linux cell is {LINUX_STATUS} or starts \
+                     {LINUX_ENFORCED_PREFIX} and cites {LINUX_CITATION_FILE}"
                 ),
             ],
             "{case} must reach rules 1, 2 and 4"
@@ -24167,7 +24699,8 @@ fn operations_table_row_check_refuses_each_bad_table() {
                 ),
                 format!(
                     "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row phantom names \
-                     the Linux cell enforced, and every Linux cell is {LINUX_STATUS}"
+                     the Linux cell enforced, and a Linux cell is {LINUX_STATUS} or starts \
+                     {LINUX_ENFORCED_PREFIX} and cites {LINUX_CITATION_FILE}"
                 ),
             ],
             "a row with optional outer bars must reach rules 1, 2 and 4: {row}"
@@ -25581,7 +26114,8 @@ enum WalletProviderOperationV2 {
         );
     }
 
-    // Rule 4: a Linux cell that is not `designed, not enforced`, one per row.
+    // Rule 4: a Linux cell that is neither `designed, not enforced` nor a
+    // recorded-host citation, one per row.
     let enforced = passing.replace(LINUX_STATUS, "enforced by Landlock");
     assert_ne!(enforced, passing, "the fixture must name its Linux cells");
     let problems = operations_table_row_problems("fixture-provider", &enforced, provider.path());
@@ -25595,11 +26129,214 @@ enum WalletProviderOperationV2 {
             problem,
             &format!(
                 "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} names the \
-                 Linux cell enforced by Landlock, and every Linux cell is {LINUX_STATUS}"
+                 Linux cell enforced by Landlock, and a Linux cell is {LINUX_STATUS} or starts \
+                 {LINUX_ENFORCED_PREFIX} and cites {LINUX_CITATION_FILE}"
             ),
             "the refusal must name the rule, the row and the value"
         );
     }
+
+    // Rule 4: a recorded-host cell must cite a Linux-gated test of the one test
+    // file, the journey on every such cell, and the file row on a right row.
+    let journey =
+        format!("{LINUX_CITATION_FILE}::linux_did_journey_runs_under_the_seccomp_allow_list");
+    let file_row =
+        format!("{LINUX_CITATION_FILE}::linux_did_file_row_is_refused_outside_storage_root");
+    let with_linux = |operation: &str, linux: &str| -> String {
+        let storage_effect = fixture_storage_effect();
+        let updated = fixture_row(
+            operation,
+            &fixture_inputs(operation),
+            &fixture_outputs(operation),
+            if fixture_writes_storage(operation) {
+                "`storage`"
+            } else {
+                NO_DECLARED_RIGHT
+            },
+            if fixture_writes_storage(operation) {
+                storage_effect.as_str()
+            } else {
+                "answers from the in-memory store"
+            },
+            if fixture_writes_storage(operation) {
+                fixture_storage_macos()
+            } else {
+                "`tests/confine.rs::present_case` shows the answer."
+            },
+            &format!("{LINUX_ENFORCED_PREFIX} {linux}"),
+        );
+        let replaced = passing_fixture_row(operation);
+        assert_ne!(
+            updated, replaced,
+            "the fixture row must carry its Linux cell"
+        );
+        passing.replacen(&replaced, &updated, 1)
+    };
+
+    let missing = format!("{LINUX_CITATION_FILE}::linux_did_journey_absent");
+    let document = with_linux("status", &format!("`{journey}` and `{missing}`"));
+    assert_ne!(
+        document, passing,
+        "the missing-function case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {missing}, and {LINUX_CITATION_FILE} does not hold linux_did_journey_absent"
+        )],
+        "a Linux cell citing a missing function must be refused"
+    );
+
+    let ungated = format!("{LINUX_CITATION_FILE}::sandbox_available");
+    let document = with_linux("status", &format!("`{journey}` and `{ungated}`"));
+    assert_ne!(document, passing, "the ungated case must change the table");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {ungated}, and sandbox_available is not gated by {LINUX_TEST_GATE}"
+        )],
+        "a Linux cell citing a function without the Linux gate must be refused"
+    );
+
+    // A name that appears only in a comment line names no item. The comment
+    // below this case, and the two nested items under it, give the citation
+    // check those two shapes in this file.
+    let comment_only = format!("{LINUX_CITATION_FILE}::linux_citation_comment_only_fixture");
+    let document = with_linux("status", &format!("`{journey}` and `{comment_only}`"));
+    assert_ne!(
+        document, passing,
+        "the comment-only case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {comment_only}, and {LINUX_CITATION_FILE} holds linux_citation_comment_only_fixture \
+             only in a comment, and a citation names an item"
+        )],
+        "a Linux cell citing a name that only a comment holds must be refused"
+    );
+
+    // The Linux gate belongs to the item beside the cited one, so the cited
+    // item is not gated even though the gate sits in the same paragraph.
+    let beside = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_beside_it");
+    let document = with_linux("status", &format!("`{journey}` and `{beside}`"));
+    assert_ne!(
+        document, passing,
+        "the separate-item gate case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {beside}, and linux_citation_gate_fixture_beside_it is not gated by {LINUX_TEST_GATE}"
+        )],
+        "a Linux cell whose gate sits on another item must be refused"
+    );
+
+    // A gate and an item inside a block comment are not an item either. The
+    // scan strips comments before it reads a line, so the nested comment below
+    // cannot keep this citation.
+    let commented = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_block_commented");
+    let document = with_linux("status", &format!("`{journey}` and `{commented}`"));
+    assert_ne!(
+        document, passing,
+        "the block-comment case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {commented}, and {LINUX_CITATION_FILE} holds \
+             linux_citation_gate_fixture_block_commented only in a comment, and a citation names \
+             an item"
+        )],
+        "a Linux cell citing an item a block comment holds must be refused"
+    );
+
+    // A gated function with no test attribute is a helper the recorded host
+    // never runs, so a citation to it is refused.
+    let untested = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_gated");
+    let document = with_linux("status", &format!("`{journey}` and `{untested}`"));
+    assert_ne!(document, passing, "the no-test case must change the table");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {untested}, and linux_citation_gate_fixture_gated carries {LINUX_TEST_GATE} and no \
+             {DECLARED_TEST_ATTRIBUTE}, so the recorded host runs no test of that name"
+        )],
+        "a Linux cell citing a gated function with no test attribute must be refused"
+    );
+
+    let document = with_linux("init", &format!("`{journey}`"));
+    assert_ne!(
+        document, passing,
+        "the right-row case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+             `storage` and its Linux cell cites no file-row test of {LINUX_CITATION_FILE}"
+        )],
+        "a right row that cites only the journey must be refused"
+    );
+
+    // Another provider's real journey is Linux-gated and exists, but it is not
+    // the journey bound to this document's provider, so the cell is refused by
+    // name instead of by a fragment of its name.
+    let wallet_journey =
+        format!("{LINUX_CITATION_FILE}::linux_wallet_journey_runs_under_the_seccomp_allow_list");
+    let document = with_linux("status", &format!("`{journey}` and `{wallet_journey}`"));
+    assert_ne!(
+        document, passing,
+        "the wrong-provider case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {wallet_journey}, and this provider's Linux cells cite exactly \
+             linux_did_journey_runs_under_the_seccomp_allow_list for the journey and \
+             linux_did_file_row_is_refused_outside_storage_root for the file row"
+        )],
+        "a Linux cell citing another provider's journey must be refused by its exact name"
+    );
+
+    // The journey and the file row together pass, so the refusals above come
+    // from the citation rule and not from the cells' form.
+    let passing_linux = with_linux("init", &format!("`{journey}` and `{file_row}`"));
+    assert_ne!(
+        passing_linux, passing,
+        "the passing Linux cell must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing_linux, provider.path()),
+        Vec::<String>::new(),
+        "a right row citing both Linux-gated tests must pass"
+    );
+
+    // The citation check strips comments before it reads an item line and the
+    // attributes above it. These fixtures give its refusals their shape: a line
+    // comment, a block comment with a nested one inside it, a gate on the item
+    // beside the cited one, and a gated item with no test attribute. No
+    // citation names them.
+    // fn linux_citation_comment_only_fixture(
+
+    /* The scan strips this comment, and the gate and item it holds. The nested
+    comment keeps the outer one open past the inner close:
+    /* nested */ #[cfg(target_os = "linux")]
+    fn linux_citation_gate_fixture_block_commented() {}
+    */
+
+    #[allow(dead_code)]
+    #[cfg(target_os = "linux")]
+    fn linux_citation_gate_fixture_gated() {}
+    #[allow(dead_code)]
+    fn linux_citation_gate_fixture_beside_it() {}
 
     // Rule 7: the manifest declares only operations the provider answers. One
     // case per refusal, and the passing table with its manifest present still
