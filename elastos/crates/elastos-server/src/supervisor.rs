@@ -2041,12 +2041,14 @@ mod tests {
     }
 
     /// A capsule folder the supervisor already holds. With a capability alone,
-    /// the loaded manifest's ceiling is that capability (the control). With
-    /// asks beside the capability, and with asks alone, the ceiling is empty
-    /// and a request for that resource is refused: the bounds function decides
-    /// it, whatever else the manifest holds.
+    /// the loaded manifest's ceiling is that capability, for any action (the
+    /// control). With asks beside the capability, and with asks alone, the
+    /// ceiling is the asks and nothing else: the action asked for passes and
+    /// another on the same resource is refused, although the capability
+    /// beside the asks names no action. The bounds function decides it,
+    /// whatever else the manifest holds.
     #[tokio::test]
-    async fn a_loaded_manifest_with_asks_has_an_empty_ceiling() {
+    async fn a_loaded_manifest_with_asks_is_held_to_its_asks() {
         let temp = tempfile::tempdir().unwrap();
         let name = "asks-fixture";
         let capsule_dir = temp.path().join("capsules").join(name);
@@ -2095,20 +2097,22 @@ mod tests {
             .unwrap();
             let (_, loaded) = supervisor.load_capsule_manifest(name).await.unwrap();
             let ceiling = loaded.resource_authority_bounds();
-            let allowed = crate::resource_bridge::manifest_allows_resource(
-                &ceiling,
-                "elastos://did/key",
-                None,
-                None,
-            );
-            ceilings.push((ceiling, allowed));
+            let allowed = |action: &str| {
+                let resource = "elastos://did/key";
+                crate::resource_bridge::manifest_allows_resource(
+                    &ceiling, resource, action, None, None,
+                )
+            };
+            let shown: Vec<String> = ceiling.iter().map(ToString::to_string).collect();
+            ceilings.push((shown, allowed("read"), allowed("write")));
         }
+        let asked = vec!["elastos://did/* [read]".to_string()];
         assert_eq!(
             ceilings,
             vec![
-                (vec!["elastos://did/*".to_string()], true),
-                (Vec::new(), false),
-                (Vec::new(), false),
+                (vec!["elastos://did/*".to_string()], true, true),
+                (asked.clone(), true, false),
+                (asked, true, false),
             ]
         );
     }

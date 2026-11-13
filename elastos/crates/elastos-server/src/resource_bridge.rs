@@ -20,6 +20,7 @@ use elastos_common::localhost::{
     is_supported_resource_scheme, is_system_only_backend_resource, rooted_localhost_fs_path,
     rooted_localhost_uri,
 };
+use elastos_common::AuthorityBound;
 use rand::RngCore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -41,8 +42,9 @@ pub struct BridgeContext {
     pub capsule_id: String,
     /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
     pub principal_id: Option<String>,
-    /// Manifest-declared resource ceilings for capsule-requestable authority.
-    pub manifest_capabilities: Vec<String>,
+    /// Manifest-declared resource ceilings for capsule-requestable authority:
+    /// each a resource pattern and, for a manifest with asks, its actions.
+    pub manifest_capabilities: Vec<AuthorityBound>,
     /// Runtime data directory used by protected principal-root storage helpers.
     pub data_dir: Option<PathBuf>,
 }
@@ -257,14 +259,22 @@ fn resource_invoke_dispatch(
     })
 }
 
+/// Whether the capsule's ceiling lets it ask for `action` on `resource`: one
+/// entry must cover the resource and, when the manifest states actions (its
+/// asks), list that action. `action` is one of the Runtime's action words in
+/// lower case; a word that is none of them is on no ask. An entry that
+/// covers the resource without the action does not stop another entry from
+/// allowing it.
 pub(crate) fn manifest_allows_resource(
-    manifest_capabilities: &[String],
+    manifest_capabilities: &[AuthorityBound],
     resource: &str,
+    action: &str,
     principal_id: Option<&str>,
     data_dir: Option<&Path>,
 ) -> bool {
     let requested = ResourceId::new(resource);
-    manifest_capabilities.iter().any(|capability| {
+    manifest_capabilities.iter().any(|bound| {
+        let capability = &bound.resource;
         let pattern = if is_unscoped_current_user_alias(capability) {
             match scope_current_user_alias(capability, principal_id, data_dir) {
                 Ok(scoped) => scoped,
@@ -273,14 +283,14 @@ pub(crate) fn manifest_allows_resource(
         } else {
             capability.clone()
         };
-        requested.matches(&ResourceId::new(pattern))
+        requested.matches(&ResourceId::new(pattern)) && bound.allows_action(action)
     })
 }
 
-fn manifest_denied_response(resource: &str) -> serde_json::Value {
+fn manifest_denied_response(resource: &str, action: &str) -> serde_json::Value {
     resource_error_response(
         "manifest_capability_denied",
-        &format!("capsule manifest does not declare authority for {resource}"),
+        &format!("capsule manifest does not declare authority to {action} {resource}"),
     )
 }
 
@@ -362,6 +372,7 @@ async fn authorize_and_dispatch_resource_invoke(
     if !manifest_allows_resource(
         &bridge_ctx.manifest_capabilities,
         &dispatch.resource,
+        &dispatch.required_action.to_string(),
         bridge_ctx.principal_id.as_deref(),
         bridge_ctx.data_dir.as_deref(),
     ) {
@@ -370,7 +381,7 @@ async fn authorize_and_dispatch_resource_invoke(
             &audit_id,
             &dispatch,
             "denied",
-            manifest_denied_response(&dispatch.resource),
+            manifest_denied_response(&dispatch.resource, &dispatch.required_action.to_string()),
         );
     }
 
@@ -997,12 +1008,13 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 if !manifest_allows_resource(
                     &ctx.manifest_capabilities,
                     resource,
+                    &action.to_string(),
                     ctx.principal_id.as_deref(),
                     ctx.data_dir.as_deref(),
                 ) {
                     return Ok(serde_json::json!({
                         "id": id,
-                        "response": manifest_denied_response(resource),
+                        "response": manifest_denied_response(resource, &action.to_string()),
                     }));
                 }
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
@@ -1166,7 +1178,7 @@ pub async fn handle_remote_request(
     api_url: &str,
     client_token: &str,
     capsule_id: &str,
-    manifest_capabilities: &[String],
+    manifest_capabilities: &[AuthorityBound],
     principal_id: Option<&str>,
 ) -> Result<serde_json::Value> {
     handle_remote_request_with_audit_dir(
@@ -1186,7 +1198,7 @@ pub async fn handle_remote_request_with_audit_dir(
     api_url: &str,
     client_token: &str,
     capsule_id: &str,
-    manifest_capabilities: &[String],
+    manifest_capabilities: &[AuthorityBound],
     principal_id: Option<&str>,
     audit_data_dir: Option<&Path>,
 ) -> Result<serde_json::Value> {
@@ -1268,10 +1280,14 @@ pub async fn handle_remote_request_with_audit_dir(
             let refusal = if !manifest_allows_resource(
                 manifest_capabilities,
                 &dispatch.resource,
+                &dispatch.required_action.to_string(),
                 principal_id,
                 audit_data_dir,
             ) {
-                Some(manifest_denied_response(&dispatch.resource))
+                Some(manifest_denied_response(
+                    &dispatch.resource,
+                    &dispatch.required_action.to_string(),
+                ))
             } else if cap_token.is_empty() {
                 Some(resource_error_response(
                     "missing_token",
@@ -1409,10 +1425,19 @@ pub async fn handle_remote_request_with_audit_dir(
                     return Ok(bridge_error_envelope(id, "generic_wallet_denied", &message));
                 }
             }
-            if !manifest_allows_resource(manifest_capabilities, resource, principal_id, data_dir) {
+            // The word as the Runtime will read it. One that is no action
+            // word is on no ask; without asks the Runtime's API refuses it.
+            let asked = action_str.to_lowercase();
+            if !manifest_allows_resource(
+                manifest_capabilities,
+                resource,
+                &asked,
+                principal_id,
+                data_dir,
+            ) {
                 return Ok(serde_json::json!({
                     "id": id,
-                    "response": manifest_denied_response(resource),
+                    "response": manifest_denied_response(resource, &asked),
                 }));
             }
 
@@ -1561,6 +1586,12 @@ fn random_hex(bytes_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ceiling of resource patterns alone: any action on each, as a
+    /// manifest without asks gives.
+    fn any_action(resources: Vec<String>) -> Vec<AuthorityBound> {
+        resources.into_iter().map(AuthorityBound::from).collect()
+    }
     use ed25519_dalek::SigningKey;
     use elastos_runtime::{
         capability::token::{Action, CapabilityToken, ResourceId, TokenConstraints},
@@ -1674,9 +1705,9 @@ mod tests {
             ),
             capsule_id: "test-capsule".to_string(),
             principal_id: None,
-            manifest_capabilities: vec![
-                "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string()
-            ],
+            manifest_capabilities: any_action(vec![
+                "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+            ]),
             data_dir: None,
         }
     }
@@ -1689,22 +1720,30 @@ mod tests {
             "{}/.AppData/LocalHost/Chat/state.json",
             crate::auth::principal_localhost_root(principal_id)
         );
-        let bounds = vec!["localhost://Users/self/.AppData/LocalHost/Chat/*".to_string()];
+        let bounds = any_action(vec![
+            "localhost://Users/self/.AppData/LocalHost/Chat/*".to_string()
+        ]);
 
         assert!(manifest_allows_resource(
             &bounds,
             &resource,
+            "read",
             Some(principal_id),
             Some(temp.path())
         ));
-        assert!(!manifest_allows_resource(&bounds, &resource, None, None));
+        assert!(!manifest_allows_resource(
+            &bounds, &resource, "read", None, None
+        ));
     }
 
-    /// An ask grants nothing: a manifest that states asks has an empty ceiling,
-    /// so the ceiling check refuses a request for the very resource it asks
-    /// for. The same resource as a capability is the control.
+    /// A manifest's asks are its ceiling. A request passes the ceiling when
+    /// one ask covers its resource and lists its action; an ask that covers
+    /// the resource without the action does not stop another that has it.
+    /// The control is the same resource as a capability, which names no
+    /// action: any action passes, as for every manifest without asks, even
+    /// a word that is no action (the Runtime refuses that one later).
     #[test]
-    fn a_manifest_with_asks_is_refused_the_resource_it_asks_for() {
+    fn a_manifest_with_asks_is_held_to_their_resources_and_their_actions() {
         let manifest = |extra: serde_json::Value| -> elastos_common::CapsuleManifest {
             let mut value = serde_json::json!({
                 "schema": "elastos.capsule/v1", "name": "asks-bridge", "version": "0.1.0",
@@ -1718,23 +1757,49 @@ mod tests {
             manifest.validate().unwrap();
             manifest
         };
-        let resource = "elastos://did/key";
+        let allows = |manifest: &elastos_common::CapsuleManifest, resource: &str, action: &str| {
+            manifest_allows_resource(
+                &manifest.resource_authority_bounds(),
+                resource,
+                action,
+                None,
+                None,
+            )
+        };
+        let words = ["read", "write", "execute", "message", "delete", "admin"];
+
         let granted = manifest(serde_json::json!({"capabilities": ["elastos://did/*"]}));
-        assert!(manifest_allows_resource(
-            &granted.resource_authority_bounds(),
-            resource,
-            None,
-            None
-        ));
+        assert_eq!(granted.resource_authority_bounds(), ["elastos://did/*"]);
+        for word in words.into_iter().chain(["no-such-action"]) {
+            assert!(allows(&granted, "elastos://did/key", word), "{word}");
+        }
+        assert!(!allows(&granted, "elastos://content/x", "read"));
+
         let asked = manifest(serde_json::json!({
-            "asks": [{"resource": "elastos://did/*", "actions": ["read"]}]
+            "asks": [
+                {"resource": "elastos://did/*", "actions": ["read"]},
+                {"resource": "elastos://did/key", "actions": ["write", "delete"]}
+            ]
         }));
-        assert!(!manifest_allows_resource(
-            &asked.resource_authority_bounds(),
-            resource,
-            None,
-            None
-        ));
+        let bounds = asked.resource_authority_bounds();
+        assert_eq!(bounds.len(), 2);
+        assert_eq!(bounds[0].resource, "elastos://did/*");
+        assert_ne!(bounds[0], "elastos://did/*", "an ask is not a bare pattern");
+        // (resource, the words that pass)
+        let rows: [(&str, &[&str]); 3] = [
+            ("elastos://did/key", &["read", "write", "delete"]),
+            ("elastos://did/other", &["read"]),
+            ("elastos://content/x", &[]),
+        ];
+        for (resource, passing) in rows {
+            for word in words.into_iter().chain(["no-such-action", "READ"]) {
+                assert_eq!(
+                    allows(&asked, resource, word),
+                    passing.contains(&word),
+                    "{word} on {resource}"
+                );
+            }
+        }
     }
 
     /// The production text of a source file: comment lines dropped, and
@@ -1881,8 +1946,9 @@ mod tests {
         }
         let foreign = scope("localhost://UsersAI/000000000000000000000000/a.md").unwrap_err();
         assert!(foreign.contains("roots must use UsersAI/self"), "{foreign}");
-        let allows =
-            |bound: &str, r: &str| manifest_allows_resource(&[bound.into()], r, Some(id), dir);
+        let allows = |bound: &str, r: &str| {
+            manifest_allows_resource(&[bound.into()], r, "read", Some(id), dir)
+        };
         assert!(allows("localhost://UsersAI/self/*", &want));
         assert!(!allows("localhost://Users/self/*", &human_root));
         let (h, human) = ("person:local:h", stored_human_dir("person:local:h"));
@@ -1973,7 +2039,7 @@ mod tests {
         let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
         assert_eq!(refused["code"], "principal_context_required", "{refused}");
         let line = r#"{"id":31,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/a.md","operation":"read","token":"tok","body":{}}}"#;
-        let bounds = [format!("{root}/a.md")];
+        let bounds = any_action(vec![format!("{root}/a.md")]);
         let remote = handle_remote_request_with_audit_dir(
             line,
             "http://127.0.0.1:12345",
@@ -2413,7 +2479,9 @@ mod tests {
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
-            &["localhost://Local/SharedByLocalUsersAndBots/Home/allowed/*".to_string()],
+            &any_action(vec![
+                "localhost://Local/SharedByLocalUsersAndBots/Home/allowed/*".to_string(),
+            ]),
             None,
         )
         .await
@@ -2431,7 +2499,7 @@ mod tests {
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
-            &["elastos://wallet/*".to_string()],
+            &any_action(vec!["elastos://wallet/*".to_string()]),
             None,
         )
         .await
@@ -2449,7 +2517,7 @@ mod tests {
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
-            &["elastos://wallet/*".to_string()],
+            &any_action(vec!["elastos://wallet/*".to_string()]),
             None,
         )
         .await
@@ -2473,7 +2541,7 @@ mod tests {
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
-            &[object_uri],
+            &any_action(vec![object_uri]),
             Some(principal_id),
             Some(temp.path()),
         )
@@ -2718,6 +2786,103 @@ mod tests {
         );
     }
 
+    /// A manifest's asks at the bridge itself, with one ask: read on one
+    /// object. A write to it is refused by the ceiling, although the capsule
+    /// holds a write token for it, and nothing is written. A request to be
+    /// granted the write is refused before any prompt is made. A request for
+    /// the read is inside the ask and is put to the shell like any other:
+    /// the ask itself grants nothing, and when the shell says no the answer
+    /// is that no. The control is the same ask with write listed: the same
+    /// write goes through.
+    #[tokio::test]
+    async fn the_bridge_holds_a_capsule_with_asks_to_their_actions() {
+        use elastos_common::AskAction;
+        use elastos_runtime::capability::pending::Settler;
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:active";
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let alias = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
+        let object_uri = format!(
+            "{}/.AppData/LocalHost/Chat/state.json",
+            protection.localhost_root
+        );
+        let asking = |actions: Vec<AskAction>| {
+            vec![AuthorityBound {
+                resource: object_uri.clone(),
+                actions: Some(actions),
+            }]
+        };
+        let write_line = |ctx: &BridgeContext| {
+            serde_json::json!({
+                "id": 21,
+                "request": {
+                    "type": "resource_invoke", "uri": alias, "operation": "write",
+                    "token": bridge_token(ctx, &object_uri, Action::Write),
+                    "body": {"content": b"chat state".to_vec(), "append": false}
+                }
+            })
+            .to_string()
+        };
+        let stored = rooted_localhost_fs_path(temp.path(), &object_uri).unwrap();
+
+        ctx.manifest_capabilities = asking(vec![AskAction::Read]);
+        let refused = handle_request(&write_line(&ctx), &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        assert_eq!(refused["response"]["code"], "manifest_capability_denied");
+        assert_eq!(
+            refused["response"]["message"],
+            format!("capsule manifest does not declare authority to write {object_uri}")
+        );
+        assert!(!stored.exists(), "nothing was written");
+
+        let request = |action: &str| {
+            format!(
+                r#"{{"id":31,"request":{{"type":"request_capability","resource":"{alias}","action":"{action}"}}}}"#
+            )
+        };
+        let store = ctx.pending_store.clone();
+        let refused = handle_request(&request("write"), &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        assert_eq!(refused["response"]["code"], "manifest_capability_denied");
+        assert!(store.list_pending().await.is_empty(), "no prompt was made");
+
+        let (line, asker) = (request("read"), ctx.clone());
+        let task = tokio::spawn(async move { handle_request(&line, &Some(asker)).await });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let put_to_the_shell = loop {
+            if let Some(request) = store.list_pending().await.first() {
+                break Some((request.id.to_string(), request.action));
+            }
+            if task.is_finished() || std::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::task::yield_now().await;
+        };
+        let (id, action) = put_to_the_shell.expect("a request inside the ask reaches the shell");
+        assert_eq!(action, Action::Read);
+        store
+            .deny_request_by(&id, "the shell says no", Settler::Shell)
+            .await
+            .unwrap();
+        let answer = task.await.unwrap().expect("the bridge answers");
+        assert_eq!(answer["response"]["code"], "denied");
+        assert_eq!(answer["response"]["message"], "the shell says no");
+
+        ctx.manifest_capabilities = asking(vec![AskAction::Read, AskAction::Write]);
+        let written = handle_request(&write_line(&ctx), &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        assert_eq!(written["response"]["result"]["status"], "ok", "{written}");
+        assert!(stored.exists());
+    }
+
     #[tokio::test]
     async fn handle_request_uses_protected_principal_root_object_for_users_self_writes() {
         let temp = tempfile::tempdir().unwrap();
@@ -2733,7 +2898,7 @@ mod tests {
             "{}/.AppData/LocalHost/Chat/state.json",
             protection.localhost_root
         );
-        ctx.manifest_capabilities = vec![object_uri.clone()];
+        ctx.manifest_capabilities = any_action(vec![object_uri.clone()]);
         let write_token = bridge_token(&ctx, &object_uri, Action::Write);
         let write_line = serde_json::json!({
             "id": 21,
@@ -2798,10 +2963,10 @@ mod tests {
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
         crate::auth::store_test_human_principal(temp.path(), principal_id);
-        ctx.manifest_capabilities = vec![format!(
+        ctx.manifest_capabilities = any_action(vec![format!(
             "{}/.AppData/Agents/demo-agent/*",
             protection.localhost_root
-        )];
+        )]);
         let object_uri = format!(
             "{}/.AppData/Agents/demo-agent/tasks/task-1/journal",
             protection.localhost_root
@@ -3080,7 +3245,7 @@ mod tests {
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
         crate::auth::store_test_human_principal(temp.path(), principal_id);
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let object_uri = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
@@ -3187,7 +3352,7 @@ mod tests {
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
         crate::auth::store_test_human_principal(temp.path(), principal_id);
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let object_uri = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
@@ -3222,7 +3387,7 @@ mod tests {
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
         crate::auth::store_test_human_principal(temp.path(), principal_id);
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let other = format!("{root}/Documents/note.txt");
@@ -3362,7 +3527,7 @@ mod tests {
     async fn a_folded_or_misspelled_agents_path_is_refused_before_storage() {
         let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let first = journal_write(
             &ctx,
             &format!("{root}/*"),
@@ -3420,7 +3585,7 @@ mod tests {
     async fn only_read_and_write_are_allowed_under_agents() {
         let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         journal_write(
@@ -3494,7 +3659,7 @@ mod tests {
     /// past the rule would fail to connect instead of returning a refusal.
     #[tokio::test]
     async fn the_attached_bridge_applies_the_agents_rule_before_http() {
-        let manifest = ["localhost://Users/self/*".to_string()];
+        let manifest = any_action(vec!["localhost://Users/self/*".to_string()]);
         let temp = stored_human_dir("person:local:journal-owner");
         let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
         let folder = "localhost://Users/self/.AppData/Agents/agent-host";
@@ -3587,7 +3752,7 @@ mod tests {
     #[tokio::test]
     async fn attached_bridge_refusals_are_audited() {
         let temp = stored_human_dir("person:local:journal-owner");
-        let manifest = ["localhost://Users/self/*".to_string()];
+        let manifest = any_action(vec!["localhost://Users/self/*".to_string()]);
         let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
         for (id, operation, uri, token, refused) in [
             (91, "delete", journal, "tok", "operation_not_allowed"),
@@ -3654,7 +3819,7 @@ mod tests {
             "http://example.com:8080",
             "client-token",
             "test-capsule",
-            &["localhost://MyWebSite/*".to_string()],
+            &any_action(vec!["localhost://MyWebSite/*".to_string()]),
             Some("person:local:journal-owner"),
             Some(temp.path()),
         )
@@ -3713,7 +3878,7 @@ mod tests {
             &api_url,
             "client-token",
             "test-capsule",
-            &["localhost://MyWebSite/*".to_string()],
+            &any_action(vec!["localhost://MyWebSite/*".to_string()]),
             Some("person:local:journal-owner"),
             Some(temp.path()),
         )
@@ -3740,7 +3905,7 @@ mod tests {
     async fn a_forbidden_agents_capability_request_is_refused_at_once() {
         let (_temp, mut ctx, _) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let started = std::time::Instant::now();
         for (id, action, resource) in [
             (
@@ -3784,7 +3949,7 @@ mod tests {
                 "http://127.0.0.1:12345",
                 "client-token",
                 "test-capsule",
-                &["localhost://Users/self/*".to_string()],
+                &any_action(vec!["localhost://Users/self/*".to_string()]),
                 Some("person:local:journal-owner"),
                 Some(_temp.path()),
             )
@@ -3874,8 +4039,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_provider_result_is_audited_as_an_error() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities =
-            vec!["localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec![
+            "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+        ]);
         ctx.provider_registry
             .register(Arc::new(FailingProvider))
             .await;
@@ -4061,7 +4227,7 @@ mod tests {
         let (_temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
         let state = format!("{root}/.AppData/LocalHost/Chat/state.json");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let uri = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
         let blind = journal_write(&ctx, &state, uri, b"one", serde_json::json!({})).await;
         assert_eq!(blind["response"]["result"]["status"], "ok");
@@ -4110,7 +4276,7 @@ mod tests {
         let (temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
         let state = format!("{root}/.AppData/LocalHost/Chat/state.json");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let uri = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
         for precondition in [
             serde_json::json!({ "create_only": true, "if_revision": "\"abc\"" }),
@@ -4310,8 +4476,9 @@ mod tests {
     #[tokio::test]
     async fn resource_invoke_enforces_manifest_capability_upper_bound() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities =
-            vec!["localhost://Local/SharedByLocalUsersAndBots/Home/allowed/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec![
+            "localhost://Local/SharedByLocalUsersAndBots/Home/allowed/*".to_string(),
+        ]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/denied/a.md";
@@ -4344,7 +4511,7 @@ mod tests {
     #[tokio::test]
     async fn resource_wallet_status_is_bounded_and_non_principal_specific() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities = vec![WALLET_STATUS_RESOURCE.to_string()];
+        ctx.manifest_capabilities = any_action(vec![WALLET_STATUS_RESOURCE.to_string()]);
         let provider = Arc::new(CapturingWalletProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let token = bridge_token(&ctx, WALLET_STATUS_RESOURCE, Action::Read);
@@ -4378,7 +4545,7 @@ mod tests {
     #[tokio::test]
     async fn component_bridge_wallet_contract_fails_before_provider_invocation() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities = vec!["elastos://wallet/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec!["elastos://wallet/*".to_string()]);
         let provider = Arc::new(CapturingWalletProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let response = handle_component_resource_request(
@@ -4415,7 +4582,7 @@ mod tests {
     #[tokio::test]
     async fn resource_wallet_operations_fail_before_provider_invocation() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities = vec!["elastos://wallet/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec!["elastos://wallet/*".to_string()]);
         let provider = Arc::new(CapturingWalletProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
 
@@ -4460,7 +4627,7 @@ mod tests {
     #[tokio::test]
     async fn request_capability_rejects_wallet_authority_before_pending_capacity() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities = vec!["elastos://wallet/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec!["elastos://wallet/*".to_string()]);
         let pending_store = ctx.pending_store.clone();
         let response = handle_request(
             r#"{"id":35,"request":{"type":"request_capability","resource":"elastos://wallet/account/list","action":"read"}}"#,
@@ -4520,7 +4687,7 @@ mod tests {
             "{}/Documents/a.md",
             crate::auth::principal_localhost_root(principal_id)
         );
-        ctx.manifest_capabilities = vec![object_uri.clone()];
+        ctx.manifest_capabilities = any_action(vec![object_uri.clone()]);
         let read_token = bridge_token(&ctx, &object_uri, Action::Read);
         let line = serde_json::json!({
             "id": 23,

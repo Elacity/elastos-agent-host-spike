@@ -435,20 +435,27 @@ pub fn elastos_bus_v1_wit_sha256() -> String {
 impl CapsuleManifest {
     /// Resource ceilings a capsule may ask Runtime to authorize at launch time.
     ///
-    /// `capabilities` covers provider/capsule authority. `permissions.storage`
-    /// covers localhost/object storage authority. Both are upper bounds only;
-    /// explicit Runtime grants and audit still decide actual use.
-    pub fn resource_authority_bounds(&self) -> Vec<String> {
-        // One ceiling, not two: until the bridge reads `asks`, a manifest
-        // that has them is bounded to nothing. Decided here as well as in
-        // `validate()`, so that it holds for every caller of this function.
+    /// A manifest with `asks` is bounded by them and by nothing else: each
+    /// ask is a resource and the actions that may be asked for on it.
+    /// Without asks, `capabilities` covers provider/capsule authority and
+    /// `permissions.storage` covers localhost/object storage authority, for
+    /// any action. All are upper bounds only; explicit Runtime grants and
+    /// audit still decide actual use.
+    pub fn resource_authority_bounds(&self) -> Vec<AuthorityBound> {
+        // One ceiling, not two: a manifest that has asks is held to them
+        // alone. Decided here as well as in `validate()`, so that it holds
+        // for every caller of this function.
         if !self.asks.is_empty() {
-            return Vec::new();
+            let asked = |ask: &ManifestAsk| AuthorityBound {
+                resource: ask.resource.clone(),
+                actions: Some(ask.actions.clone()),
+            };
+            return self.asks.iter().map(asked).collect();
         }
         let mut bounds = BTreeSet::new();
         bounds.extend(self.capabilities.iter().cloned());
         bounds.extend(self.permissions.storage.iter().cloned());
-        bounds.into_iter().collect()
+        bounds.into_iter().map(AuthorityBound::from).collect()
     }
 
     /// Validate manifest fields after deserialization.
@@ -1018,6 +1025,73 @@ fn validate_json_schema(kind: &str, schema: Option<&Value>) -> Result<(), String
         return Ok(());
     }
     Err(format!("{} schema must be a JSON object or boolean", kind))
+}
+
+/// One entry of a capsule's ceiling: a resource pattern and the actions that
+/// may be asked for on it. `actions` is `None` for a manifest without asks,
+/// whose `capabilities` and storage permissions name resources only: any
+/// action, as before asks existed. An entry grants nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityBound {
+    pub resource: String,
+    pub actions: Option<Vec<AskAction>>,
+}
+
+impl AuthorityBound {
+    /// Whether this entry lets `action`, one of the Runtime's six action
+    /// words in lower case, be asked for on a resource its pattern covers.
+    pub fn allows_action(&self, action: &str) -> bool {
+        let listed = |actions: &Vec<AskAction>| actions.iter().any(|it| it.as_str() == action);
+        self.actions.as_ref().is_none_or(listed)
+    }
+}
+
+/// The pattern, and after it the actions when the entry states them:
+/// `elastos://did/* [read, write]`.
+impl std::fmt::Display for AuthorityBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.resource)?;
+        if let Some(actions) = &self.actions {
+            let words: Vec<&str> = actions.iter().map(|action| action.as_str()).collect();
+            write!(f, " [{}]", words.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+/// A resource pattern alone: any action on it.
+impl From<String> for AuthorityBound {
+    fn from(resource: String) -> Self {
+        AuthorityBound {
+            resource,
+            actions: None,
+        }
+    }
+}
+
+impl From<&str> for AuthorityBound {
+    fn from(resource: &str) -> Self {
+        resource.to_string().into()
+    }
+}
+
+/// Equal to a bare resource pattern only when it bounds no action.
+impl PartialEq<str> for AuthorityBound {
+    fn eq(&self, resource: &str) -> bool {
+        self.actions.is_none() && self.resource == resource
+    }
+}
+
+impl PartialEq<&str> for AuthorityBound {
+    fn eq(&self, resource: &&str) -> bool {
+        self == *resource
+    }
+}
+
+impl PartialEq<String> for AuthorityBound {
+    fn eq(&self, resource: &String) -> bool {
+        self == resource.as_str()
+    }
 }
 
 /// One entry of a manifest's `asks`: a resource and the actions asked on it.
@@ -3627,29 +3701,62 @@ mod tests {
         );
     }
 
+    /// The asks of a manifest are its whole ceiling, each with its actions,
+    /// whatever else the manifest holds; without asks the ceiling is the
+    /// capabilities and storage permissions, for any action.
     #[test]
-    fn a_manifest_with_asks_has_empty_bounds_whatever_else_it_holds() {
-        let asks_only = asks_manifest(
-            serde_json::json!({"asks":[{"resource":"elastos://did/*","actions":["read"]}]}),
-        );
-        assert_eq!(asks_only.resource_authority_bounds(), Vec::<String>::new());
+    fn a_manifest_with_asks_is_bounded_by_them_whatever_else_it_holds() {
+        let asked = vec![
+            AuthorityBound {
+                resource: "elastos://did/*".to_string(),
+                actions: Some(vec![AskAction::Read]),
+            },
+            AuthorityBound {
+                resource: "localhost://Users/self/Documents/*".to_string(),
+                actions: Some(vec![AskAction::Read, AskAction::Write]),
+            },
+        ];
+        let asks = serde_json::json!([
+            {"resource":"elastos://did/*","actions":["read"]},
+            {"resource":"localhost://Users/self/Documents/*","actions":["read","write"]},
+        ]);
+        let asks_only = asks_manifest(serde_json::json!({"asks": asks}));
+        asks_only.validate().unwrap();
+        assert_eq!(asks_only.resource_authority_bounds(), asked);
         // Not a valid manifest; the bounds function itself must still
-        // give nothing, whoever calls it.
+        // give the asks and nothing beside them, whoever calls it.
         let with_capability = asks_manifest(serde_json::json!({
-            "capabilities":["elastos://did/*"],
-            "permissions":{"storage":["localhost://Users/self/Documents/*"]},
-            "asks":[{"resource":"elastos://did/*","actions":["read"]}],
+            "capabilities":["elastos://content/*"],
+            "permissions":{"storage":["localhost://Users/self/Pictures/*"]},
+            "asks": asks,
         }));
         assert!(with_capability.validate().is_err());
-        assert_eq!(
-            with_capability.resource_authority_bounds(),
-            Vec::<String>::new()
-        );
+        assert_eq!(with_capability.resource_authority_bounds(), asked);
         let no_asks = asks_manifest(serde_json::json!({"capabilities":["elastos://did/*"]}));
         assert_eq!(
             no_asks.resource_authority_bounds(),
             vec!["elastos://did/*".to_string()]
         );
+
+        // An entry with actions lets exactly those words through; one
+        // without lets any word through; and an entry with actions is never
+        // equal to a bare pattern.
+        let words = ["read", "write", "execute", "message", "delete", "admin"];
+        let passing = |bound: &AuthorityBound| -> Vec<&str> {
+            let all = words.into_iter().chain(["no-such-action", "READ"]);
+            all.filter(|word| bound.allows_action(word)).collect()
+        };
+        assert_eq!(passing(&asked[0]), ["read"]);
+        assert_eq!(passing(&asked[1]), ["read", "write"]);
+        let bare = AuthorityBound::from("elastos://did/*");
+        assert_eq!(passing(&bare).len(), 8);
+        assert_ne!(asked[0], "elastos://did/*");
+        assert_eq!(bare, "elastos://did/*");
+        assert_eq!(
+            asked[1].to_string(),
+            "localhost://Users/self/Documents/* [read, write]"
+        );
+        assert_eq!(bare.to_string(), "elastos://did/*");
     }
 
     /// The folder signature is over the manifest serialised again from the

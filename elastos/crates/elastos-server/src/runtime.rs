@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 
 use crate::bundle_admission::{self, AcceptedSignature, BundleRefusal};
 use elastos_bundle_identity::{checked_bundle_within, LabCid};
-use elastos_common::{CapsuleManifest, CapsuleType, ElastosError, Result};
+use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
@@ -69,7 +69,7 @@ pub struct Runtime {
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
-    bridge_manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+    bridge_manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
 }
 
 impl Runtime {
@@ -452,14 +452,13 @@ impl Runtime {
         Ok((handle, accepted))
     }
 
-    /// Test only: the ceiling the bridge holds the capsule `id` to right now.
+    /// Test only: the ceiling the bridge holds the capsule `id` to right now,
+    /// each entry as it prints.
     #[cfg(test)]
     pub(crate) fn ceiling_of(&self, id: &str) -> Option<Vec<String>> {
-        self.bridge_manifest_capabilities
-            .read()
-            .unwrap()
-            .get(id)
-            .cloned()
+        let ceilings = self.bridge_manifest_capabilities.read().unwrap();
+        let ceiling = ceilings.get(id);
+        ceiling.map(|ceiling| ceiling.iter().map(ToString::to_string).collect())
     }
 
     /// The end of every start, and the one place in this file that fills a
@@ -839,7 +838,7 @@ pub(crate) mod tests {
     }
 
     /// The map the launch entry fills: capsule id to ceiling.
-    type Ceilings = Arc<StdRwLock<HashMap<String, Vec<String>>>>;
+    type Ceilings = Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>;
 
     /// Records, when a capsule starts, the ceiling the launch entry filled for it.
     #[derive(Default)]
@@ -860,7 +859,8 @@ pub(crate) mod tests {
 
         async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
             let ceilings = self.ceilings.get().unwrap().read().unwrap();
-            let ceiling = ceilings.get(&handle.id.0).cloned();
+            let ceiling = ceilings.get(&handle.id.0);
+            let ceiling = ceiling.map(|ceiling| ceiling.iter().map(ToString::to_string).collect());
             self.seen.lock().unwrap().push(ceiling);
             Ok(())
         }
@@ -888,10 +888,11 @@ pub(crate) mod tests {
     }
 
     /// The launch entry fills a capsule's ceiling from the bounds function: a
-    /// capability is its ceiling (the control), and a manifest whose only
-    /// authority field is asks is started with an empty one.
+    /// capability is its ceiling, for any action (the control), and a
+    /// manifest whose only authority field is asks is started under those
+    /// asks, each with its actions.
     #[tokio::test]
-    async fn the_launch_entry_starts_a_manifest_with_only_asks_under_an_empty_ceiling() {
+    async fn the_launch_entry_starts_a_manifest_with_asks_under_its_asks() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
             LocalFSProvider::new(temp_dir.path().join("storage"))
@@ -930,7 +931,10 @@ pub(crate) mod tests {
         }
         assert_eq!(
             *provider.seen.lock().unwrap(),
-            vec![Some(vec!["elastos://did/*".to_string()]), Some(Vec::new())]
+            vec![
+                Some(vec!["elastos://did/*".to_string()]),
+                Some(vec!["elastos://did/* [read]".to_string()])
+            ]
         );
     }
 
@@ -1013,7 +1017,8 @@ pub(crate) mod tests {
 
         async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
             let ceilings = self.ceilings.get().unwrap().read().unwrap();
-            let ceiling = ceilings.get(&handle.id.0).cloned();
+            let ceiling = ceilings.get(&handle.id.0);
+            let ceiling = ceiling.map(|ceiling| ceiling.iter().map(ToString::to_string).collect());
             self.starts
                 .lock()
                 .unwrap()
@@ -1148,6 +1153,7 @@ pub(crate) mod tests {
         let ceilings = runtime.bridge_manifest_capabilities.clone();
         runtime.set_bridge_hostcall(Arc::new(move |_line, capsule_id, principal_id| {
             let ceiling = ceilings.read().unwrap().get(capsule_id).cloned();
+            let ceiling = ceiling.map(|ceiling| ceiling.iter().map(ToString::to_string).collect());
             seen.lock().unwrap().push((
                 capsule_id.to_string(),
                 principal_id.map(ToOwned::to_owned),
