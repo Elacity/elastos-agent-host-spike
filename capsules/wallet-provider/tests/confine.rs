@@ -688,10 +688,16 @@ fn provider_init_request(name: &str, base: &Path) -> Value {
     json!({ "op": "init", "config": provider_init_config(name, base) })
 }
 
-/// `init` and `status` report the model provider with its one offer ready.
+/// The protocol version every model status answer names.
+#[cfg(target_os = "linux")]
+const MODEL_PROTOCOL_VERSION: &str = "elastos.model-provider/v1";
+
+/// `init` and `status` report the model provider with its one offer ready, and
+/// both name the provider protocol version.
 #[cfg(target_os = "linux")]
 fn assert_serving(data: &Value) {
     assert_eq!(data["provider"], MODEL_PROVIDER, "{data}");
+    assert_eq!(data["protocol_version"], MODEL_PROTOCOL_VERSION, "{data}");
     assert_eq!(data["offers_ready"], 1, "{data}");
 }
 
@@ -943,6 +949,11 @@ fn model_standin_linux_only_operations(
     record.push(suite_entry("unsupported", SuiteClass::Denied, &unsupported));
 
     let shutdown = provider.shutdown();
+    assert_eq!(
+        shutdown["data"],
+        json!({ "shutdown": true }),
+        "{label}: shutdown must answer its one field: {shutdown}"
+    );
     record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
 
     record
@@ -7069,6 +7080,10 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("readlinkat", Some(267), Some(78)),
     ("readv", Some(19), Some(65)),
     ("recvmsg", Some(47), Some(212)),
+    // x86-64 only: aarch64 has no rename call, so glibc's rename calls
+    // renameat there.
+    ("rename", Some(82), None),
+    ("renameat", Some(264), Some(38)),
     ("renameat2", Some(316), Some(276)),
     ("rseq", Some(334), Some(293)),
     ("rt_sigaction", Some(13), Some(134)),
@@ -7102,7 +7117,14 @@ const SECCOMP_AUDIT_ARCH: u32 = 0;
 
 /// The calls the table carries for x86-64 alone: older forms of admitted
 /// calls, or calls aarch64 does not have.
-const X86_64_ONLY_SYSCALLS: &[&str] = &["arch_prctl", "epoll_wait", "mkdir", "poll", "unlink"];
+const X86_64_ONLY_SYSCALLS: &[&str] = &[
+    "arch_prctl",
+    "epoll_wait",
+    "mkdir",
+    "poll",
+    "rename",
+    "unlink",
+];
 
 /// The first number of the x32 call space on x86-64.
 const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
@@ -7169,6 +7191,14 @@ impl SeccompInstruction {
 /// `munmap` also passes when refused, and stays as a stated exception, not a
 /// measured need: it unmaps only the caller's own memory, so refusing it takes
 /// no authority away and only stops memory being returned. No run shows a leak.
+///
+/// `rename` and `renameat` are the model's record replace: `runs_create` writes
+/// one run through `std::fs::rename`, which calls libc `rename`. glibc's
+/// `rename` is the `rename` call on x86-64 and `renameat` on aarch64, where the
+/// kernel has no `rename`. The storage row names only `renameat2`, so without
+/// these two the replace fails with `EACCES`, Rust reads that as
+/// `PermissionDenied`, and the provider answers `journal_access_denied`. Each
+/// architecture admits only the form it has.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "epoll_create1",
     "epoll_ctl",
@@ -7179,6 +7209,8 @@ const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "flock",
     "geteuid",
     "munmap",
+    "rename",
+    "renameat",
     "rseq",
 ];
 /// Argument words in `seccomp_data`: each argument is 64 bits, low word first on
@@ -11234,10 +11266,10 @@ macro_rules! model_allowed_x86_64 {
             SYS_pread64 = 17, SYS_pwrite64 = 18, SYS_readv = 19, SYS_writev = 20,
             SYS_socketpair = 53, SYS_clone = 56, SYS_execve = 59, SYS_exit = 60, SYS_uname = 63,
             SYS_fcntl = 72, SYS_flock = 73, SYS_fsync = 74, SYS_fdatasync = 75, SYS_ftruncate = 77,
-            SYS_mkdir = 83, SYS_unlink = 87, SYS_fchmod = 91, SYS_sysinfo = 99, SYS_geteuid = 107,
+            SYS_rename = 82, SYS_mkdir = 83, SYS_unlink = 87, SYS_fchmod = 91, SYS_sysinfo = 99, SYS_geteuid = 107,
             SYS_arch_prctl = 158, SYS_futex = 202, SYS_getdents64 = 217, SYS_exit_group = 231,
             SYS_epoll_wait = 232, SYS_epoll_ctl = 233, SYS_openat = 257, SYS_mkdirat = 258,
-            SYS_newfstatat = 262, SYS_unlinkat = 263, SYS_linkat = 265, SYS_readlinkat = 267,
+            SYS_newfstatat = 262, SYS_unlinkat = 263, SYS_renameat = 264, SYS_linkat = 265, SYS_readlinkat = 267,
             SYS_faccessat = 269, SYS_ppoll = 271, SYS_epoll_pwait = 281, SYS_eventfd2 = 290,
             SYS_epoll_create1 = 291, SYS_prlimit64 = 302, SYS_renameat2 = 316, SYS_getrandom = 318,
             SYS_execveat = 322, SYS_statx = 332, SYS_rseq = 334, SYS_openat2 = 437,
@@ -11249,6 +11281,7 @@ macro_rules! model_allowed_aarch64 {
         $rows! {
             SYS_eventfd2 = 19, SYS_epoll_create1 = 20, SYS_epoll_ctl = 21, SYS_epoll_pwait = 22,
             SYS_fcntl = 25, SYS_flock = 32, SYS_mkdirat = 34, SYS_unlinkat = 35, SYS_linkat = 37,
+            SYS_renameat = 38,
             SYS_ftruncate = 46, SYS_faccessat = 48, SYS_fchmod = 52, SYS_openat = 56,
             SYS_close = 57, SYS_getdents64 = 61, SYS_lseek = 62, SYS_read = 63, SYS_write = 64,
             SYS_readv = 65, SYS_writev = 66, SYS_pread64 = 67, SYS_pwrite64 = 68, SYS_ppoll = 73,
@@ -14242,6 +14275,10 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
             let status = provider.send(&json!({ "op": "status" }));
             assert_eq!(status["status"], "ok", "status must answer: {status}");
             assert_serving(&status["data"]);
+            assert_eq!(
+                status["data"], init["data"],
+                "status must answer exactly what init did: {status} against {init}"
+            );
             // The seven remaining model operations, `shutdown` last, so this
             // caller answers all nine under the filter.
             let linux_only = model_standin_linux_only_operations(&mut provider, &label);
