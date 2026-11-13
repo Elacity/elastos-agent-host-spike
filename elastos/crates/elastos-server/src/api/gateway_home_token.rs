@@ -599,19 +599,48 @@ pub(crate) fn require_internal_shell_projection_context(
     selected_resource: &str,
     executable_actor: &str,
 ) -> anyhow::Result<HomeLaunchTokenContext> {
-    let required = require_home_launch_token_for_any_from_with_origin(
-        data_dir,
-        headers,
-        &[executable_actor],
-        None,
-        HomeLaunchOriginPolicy::InternalShell,
-    )?;
-    if required.launch_context.selected_resource != selected_resource
-        || required.launch_context.executable_actor != executable_actor
-    {
+    let (id, _token, context) =
+        require_launch_bound_token(data_dir, headers, executable_actor, true)?;
+    if format!("{LAUNCH_BOUND}{id}") != selected_resource {
         anyhow::bail!("home launch token projection authority mismatch");
     }
-    Ok(required.context)
+    Ok(context)
+}
+
+/// A page's own token for a kept content launch, in the one header: bound to
+/// `elastos://launch/<id>`, with `page` as its executable, under the browser
+/// policy (the page's frame) or the internal-shell one (the gateway asking
+/// the Runtime). Gives the launch id, the token as carried, and its context.
+/// The only check that takes a launch-bound token.
+pub(crate) fn require_launch_bound_token(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+    page: &str,
+    internal_shell: bool,
+) -> anyhow::Result<(String, String, HomeLaunchTokenContext)> {
+    let token = single_home_launch_token_header(headers)?
+        .ok_or_else(|| anyhow::anyhow!("missing home launch token"))?;
+    let expected_did = load_existing_gateway_runtime_did(data_dir)
+        .ok_or_else(|| anyhow::anyhow!("gateway identity is unavailable"))?;
+    let auth_data_dir = home_launch_auth_data_dir(data_dir);
+    let required = verify_home_launch_token_value(
+        data_dir,
+        &token,
+        &[page],
+        expected_did,
+        &auth_data_dir,
+        LaunchBound::Required,
+    )?;
+    match internal_shell {
+        true => require_internal_shell_origin(headers)?,
+        false => require_capsule_browser_origin(headers)?,
+    }
+    let bound = &required.launch_context.selected_resource;
+    let id = bound
+        .strip_prefix(LAUNCH_BOUND)
+        .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| anyhow::anyhow!("home launch token is not bound to a content launch"))?;
+    Ok((id.to_string(), token.trim().to_string(), required.context))
 }
 
 pub(crate) fn require_home_token(
@@ -702,6 +731,20 @@ fn presented_launch_origin_policy(headers: &HeaderMap) -> HomeLaunchOriginPolicy
 }
 
 /// Verify a launch before body extraction. The handler retains its actor gate.
+/// The front door's admission of `path`: a page's read of its kept launch is
+/// admitted by that page's launch-bound token and nothing else; every other
+/// path as [`require_gateway_launch`], which takes no launch-bound token.
+pub(super) fn require_gateway_launch_for(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+    path: &str,
+) -> anyhow::Result<()> {
+    match launch_read_page(path) {
+        Some(page) => require_launch_bound_token(data_dir, headers, page, false).map(|_| ()),
+        None => require_gateway_launch(data_dir, headers),
+    }
+}
+
 pub(super) fn require_gateway_launch(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
@@ -725,6 +768,15 @@ pub(super) fn require_gateway_launch(
         presented_launch_origin_policy(headers),
     )
     .map(|_| ())
+}
+
+/// The page whose kept launch `path` reads, for the two page reads only:
+/// `/api/viewers/<page>/launch/output/...` and `.../launch/content/...`.
+fn launch_read_page(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/viewers/")?;
+    let (page, rest) = rest.split_once('/')?;
+    let read = rest.starts_with("launch/output/") || rest.starts_with("launch/content/");
+    (read && !page.is_empty()).then_some(page)
 }
 
 pub(crate) fn home_launch_token_header(headers: &HeaderMap) -> Option<String> {
@@ -989,12 +1041,44 @@ pub(in crate::api) fn require_home_launch_token_value_from_expected_did_for_test
     )
 }
 
+/// The bound resource of a page's token for a kept content launch:
+/// `elastos://launch/<launch id>`.
+pub(crate) const LAUNCH_BOUND: &str = "elastos://launch/";
+
+/// Whether a check takes a token bound to a kept content launch. Every Home
+/// check refuses one, except the two reads of a page's kept launch, which take
+/// only one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchBound {
+    Refused,
+    Required,
+}
+
 fn require_home_launch_token_value_from_expected_did(
     data_dir: &std::path::Path,
     token: &str,
     allowed_apps: &[&str],
     expected_did: String,
     auth_data_dir: &std::path::Path,
+) -> anyhow::Result<RequiredHomeLaunchToken> {
+    let refused = LaunchBound::Refused;
+    verify_home_launch_token_value(
+        data_dir,
+        token,
+        allowed_apps,
+        expected_did,
+        auth_data_dir,
+        refused,
+    )
+}
+
+fn verify_home_launch_token_value(
+    data_dir: &std::path::Path,
+    token: &str,
+    allowed_apps: &[&str],
+    expected_did: String,
+    auth_data_dir: &std::path::Path,
+    launch_bound: LaunchBound,
 ) -> anyhow::Result<RequiredHomeLaunchToken> {
     let token = token.trim();
     if token.is_empty() || token.len() > 16 * 1024 {
@@ -1010,6 +1094,20 @@ fn require_home_launch_token_value_from_expected_did(
     let signer = crate::auth::VerifiedLaunchTokenSigner::verify(&bytes, &expected_dids)
         .map_err(|err| anyhow::anyhow!("invalid home launch token: {}", err))?;
     envelope.payload.launch_context.validate()?;
+    let bound = envelope
+        .payload
+        .launch_context
+        .selected_resource
+        .starts_with(LAUNCH_BOUND);
+    match (launch_bound, bound) {
+        (LaunchBound::Refused, true) => {
+            anyhow::bail!("home launch token is bound to a content launch")
+        }
+        (LaunchBound::Required, false) => {
+            anyhow::bail!("home launch token is not bound to a content launch")
+        }
+        _ => {}
+    }
     if !valid_home_launch_id(&envelope.payload.launch_id) {
         anyhow::bail!("home launch token has an invalid launch id");
     }

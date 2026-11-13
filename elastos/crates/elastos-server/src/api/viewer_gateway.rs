@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::gateway::{
-    content_type, require_home_projection_launch_token_context,
-    require_home_viewer_launch_token_context, viewer_object_shell_description,
-    viewer_object_shell_title, GatewayState, HomeLaunchTokenContext,
+    content_type, gateway_attach_runtime_token, load_live_runtime_coords,
+    require_home_projection_launch_token_context, require_home_viewer_launch_token_context,
+    require_launch_bound_token, viewer_object_shell_description, viewer_object_shell_title,
+    GatewayState, HomeLaunchTokenContext,
 };
 
 #[derive(Debug, Serialize)]
@@ -917,6 +918,112 @@ fn clean_storage_file_name(name: &str) -> anyhow::Result<String> {
         anyhow::bail!("invalid viewer storage file name");
     }
     Ok(file_name.to_string())
+}
+
+/// `GET /api/viewers/:viewer/launch/output/:name`: what the program of the
+/// page's kept launch wrote under that one name (`page_launch.rs`).
+pub async fn viewer_launch_output(
+    State(state): State<GatewayState>,
+    Path((viewer, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let plain = !name.is_empty() && !matches!(name.as_str(), "." | "..") && !name.contains('/');
+    viewer_launch_read(&state.data_dir, &viewer, &headers, "output", &name, plain).await
+}
+
+/// `GET /api/viewers/:viewer/launch/content/*path`: the file at exactly that
+/// path of the content the page's kept launch was opened with.
+pub async fn viewer_launch_content(
+    State(state): State<GatewayState>,
+    Path((viewer, path)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let plain = crate::page_launch::plain_content_path(&path);
+    viewer_launch_read(&state.data_dir, &viewer, &headers, "content", &path, plain).await
+}
+
+/// A page's read of its kept launch. Only the page's own launch token opens
+/// it: bound to `elastos://launch/<id>` with `viewer` as its executable. The
+/// gateway then asks the Runtime as the shell, carrying that same token, and
+/// passes back its bytes, never to be stored. Anything else alike answers
+/// `not_found`, and the Runtime is not asked for a token or a path that
+/// fails here. Each read a valid token makes is audited once.
+async fn viewer_launch_read(
+    data_dir: &FsPath,
+    viewer: &str,
+    headers: &HeaderMap,
+    kind: &str,
+    rest: &str,
+    plain: bool,
+) -> Response {
+    let not_found = || (StatusCode::NOT_FOUND, "not_found").into_response();
+    let Ok((id, token, context)) = require_launch_bound_token(data_dir, headers, viewer, false)
+    else {
+        return not_found();
+    };
+    let bytes = match plain {
+        true => kept_launch_from_runtime(data_dir, &id, &token, kind, rest).await,
+        false => None,
+    };
+    let result = if bytes.is_some() { "ok" } else { "not_found" };
+    let request_id = format!("{id}:{kind}:{rest}");
+    let _ = append_viewer_library_audit(
+        data_dir,
+        &context,
+        viewer,
+        &request_id,
+        "viewer.launch.read",
+        result,
+        &format!("{kind} {rest}"),
+    );
+    match bytes {
+        Some(bytes) => (
+            StatusCode::OK,
+            [
+                ("content-type", "application/octet-stream"),
+                ("cache-control", "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => not_found(),
+    }
+}
+
+/// The Runtime's answer to a read of a kept launch, asked as the shell with
+/// the page's own token: the bytes, or `None` for any other answer.
+async fn kept_launch_from_runtime(
+    data_dir: &FsPath,
+    id: &str,
+    token: &str,
+    kind: &str,
+    rest: &str,
+) -> Option<Vec<u8>> {
+    let coords = load_live_runtime_coords(data_dir).await?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let shell =
+        gateway_attach_runtime_token(&client, &coords.api_url, &coords.attach_secret, "shell")
+            .await
+            .ok()?;
+    let mut url = reqwest::Url::parse(&coords.api_url).ok()?;
+    url.path_segments_mut()
+        .ok()?
+        .extend(["api", "launch", id, kind])
+        .extend(rest.split('/'));
+    let answer = client
+        .get(url)
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {shell}"))
+        .header("x-elastos-home-token", token)
+        .send()
+        .await
+        .ok()?;
+    if answer.status() != reqwest::StatusCode::OK {
+        return None;
+    }
+    answer.bytes().await.ok().map(|bytes| bytes.to_vec())
 }
 
 pub(super) fn viewer_error_response(err: anyhow::Error) -> Response {

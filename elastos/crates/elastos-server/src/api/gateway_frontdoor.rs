@@ -273,7 +273,7 @@ pub(super) async fn gateway_admission(
     // so does every other route.
     let mut browser_launch_renewal = None;
     if !public && !sign_in && !ticket && !runtime_session {
-        match gateway_home_token::require_gateway_launch(&state.data_dir, headers) {
+        match gateway_home_token::require_gateway_launch_for(&state.data_dir, headers, path) {
             Ok(()) => {}
             Err(_) if browser_api_path(path) => {
                 if let Some(err) =
