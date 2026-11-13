@@ -79,6 +79,8 @@ pub enum OpenRefusal {
     TooManyInFlight,
     /// The place the open took was gone when its start was over.
     PlaceLost,
+    /// The open's own task failed (it panicked).
+    OpenFailed,
     /// No person to keep it for.
     NoPrincipal,
 }
@@ -181,7 +183,7 @@ impl Runtime {
     /// on the launch ends with its start; what is kept is read by
     /// [`Runtime::read_kept_launch`] only.
     pub(crate) async fn open_for_page(
-        &self,
+        self: &Arc<Self>,
         data_dir: &Path,
         cid: &str,
         principal: &str,
@@ -192,8 +194,28 @@ impl Runtime {
         // The place is taken before anything is walked or run: a full person
         // or a full Runtime is refused here, and two opens at once cannot
         // both take the last place. The place goes back if no launch fills it.
-        let mut place = take_place(&self.page_launches, principal)?;
-        let person = Some(principal.to_string());
+        let place = take_place(&self.page_launches, principal)?;
+        // The start and the filling run in a task of their own, which owns the
+        // place. The request only waits for it: a request dropped part way
+        // (the caller gone) neither gives the place back early nor skips the
+        // start's own clean-up; the place goes back only when the start does.
+        let runtime = self.clone();
+        let (data_dir, cid) = (data_dir.to_path_buf(), cid.to_string());
+        let person = principal.to_string();
+        let fill = async move { runtime.start_and_fill(place, &data_dir, &cid, person).await };
+        let task = tokio::spawn(fill);
+        task.await.map_err(|_| OpenRefusal::OpenFailed)?
+    }
+
+    /// The start of an open and the filling of its place, in the open's task.
+    async fn start_and_fill(
+        &self,
+        mut place: Place,
+        data_dir: &Path,
+        cid: &str,
+        principal: String,
+    ) -> Result<Opened, OpenRefusal> {
+        let person = Some(principal);
         // The one walk budget of every start by CID, as `run_by_bundle` hands it over.
         let budget = crate::bundle_admission::BUNDLE_WALK_BUDGET;
         let started = self

@@ -533,6 +533,10 @@ pub async fn open_launch(
             StatusCode::SERVICE_UNAVAILABLE,
             "too_many_opens_in_flight".into(),
         )),
+        Err(OpenRefusal::OpenFailed) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "kept_launch_open_failed".into(),
+        )),
         Err(OpenRefusal::PlaceLost) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "kept_launch_place_lost".into(),

@@ -3024,3 +3024,79 @@ async fn at_most_four_opens_run_their_starts_at_once() {
     runtime.open_for_page(&data, &cid, fifth).await.unwrap();
     assert_eq!(runtime.kept_launch_count(), 2 + OPENS_IN_FLIGHT - 1);
 }
+
+/// D1a-dropped. A request dropped part way through its start (the caller gone)
+/// does not give its place back early: the start runs on in the open's own
+/// task, its place stays taken and counts among the opens in flight, so the
+/// count never goes over four; the place goes back only when the start does.
+#[tokio::test]
+async fn a_dropped_open_keeps_its_place_until_its_start_returns() {
+    use crate::page_launch::{take_place, OpenRefusal, OPENS_IN_FLIGHT};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let publisher = key(98);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let core = manifest_with("core", "asks", asks);
+    let core = home
+        .staged("core", &core, &calling_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let cid = home
+        .staged("pictures", &content, b"a picture", &publisher)
+        .await;
+
+    // The bridge's answer to the core's one call: held until the test lets
+    // it go, and at most ten seconds, so a test that fails does not hang.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    let reached = Arc::new(AtomicBool::new(false));
+    let seen = reached.clone();
+    home.runtime
+        .set_bridge_hostcall(Arc::new(move |_line, _capsule, _principal| {
+            seen.store(true, Ordering::SeqCst);
+            let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            Err("the test's bridge handler let go".to_string())
+        }));
+
+    let data = home.data();
+    let runtime = &home.runtime;
+    // The request, dropped at the end of this block.
+    {
+        let open = runtime.open_for_page(&data, &cid, PERSON);
+        tokio::pin!(open);
+        let in_the_call = async {
+            while !reached.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            done = &mut open => panic!("the open ended before its call: {done:?}"),
+            () = in_the_call => {}
+        }
+    }
+    assert_eq!(runtime.kept_launch_count(), 1, "the place stays taken");
+    let places: Vec<_> = (1..OPENS_IN_FLIGHT)
+        .map(|n| take_place(&runtime.page_launches, &format!("person:local:{n}")).unwrap())
+        .collect();
+    let refused = take_place(&runtime.page_launches, "person:local:last").err();
+    assert!(
+        matches!(refused, Some(OpenRefusal::TooManyInFlight)),
+        "{refused:?}"
+    );
+
+    release.send(()).unwrap();
+    for _ in 0..1000 {
+        if runtime.kept_launch_count() == places.len() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        runtime.kept_launch_count(),
+        places.len(),
+        "the place went back when the start did"
+    );
+}
