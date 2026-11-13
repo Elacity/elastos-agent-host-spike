@@ -3853,6 +3853,23 @@
         "seccomp_model_program_lets_run_exactly_the_listed_calls",
         "seccomp_model_program_equals_its_golden_copy"
       ]
+    },
+    {
+      "id": "WP258",
+      "title": "the wallet runtime list loses rename and renameat, so its store replace has no admitted call and each architecture's golden differs from the rendered program",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "const WALLET_RUNTIME_ESSENTIALS: &[&str] = &[\"rename\", \"renameat\"];",
+          "new": "const WALLET_RUNTIME_ESSENTIALS: &[&str] = &[];"
+        }
+      ],
+      "tests": [
+        "seccomp_wallet_program_equals_its_golden_copy",
+        "seccomp_wallet_program_adds_only_the_store_replace"
+      ]
     }
   ]
 }

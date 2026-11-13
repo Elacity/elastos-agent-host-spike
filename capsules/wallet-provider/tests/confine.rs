@@ -5404,190 +5404,793 @@ fn wallet_standin_suite(
     record
 }
 
-/// The answer every effectful wallet call gives under the wallet allow list.
+/// The wallet operations the Linux journey drives after `init` and `status`, in
+/// the order it drives them. Each answers `ok` and each answer is asserted
+/// exactly, so the journey shows the call under the filter and not a refusal.
 ///
-/// `save_store` in `src/storage.rs` replaces `wallet-state.json` atomically: it
-/// writes `.<store>.<pid>.<rand>.tmp` beside the store, then calls
-/// `std::fs::rename`. Rust's `rename` is the Linux `renameat` call, and the
-/// storage row's one allow form maps to its syscalls through
-/// `SECCOMP_RULE_SYSCALLS`, where that form names `renameat2` alone. The kernel
-/// therefore refuses the replace with `EACCES`, Rust reports
-/// `PermissionDenied`, and the provider answers `storage_error` with the
-/// operating system's sentence. The recorded Linux run read the refused call:
-/// `renameat(AT_FDCWD, ".../.wallet-state.json.<pid>.<rand>.tmp", AT_FDCWD,
-/// ".../wallet-state.json") = -1 EACCES`.
-///
-/// So no effectful wallet call can write its store under this filter, and its
-/// operations-table cell stays `designed, not enforced`. Admitting the replace
-/// changes the filter and is the CTO's decision; this caller makes none.
+/// Every effectful call needs a stored effect. The store's replace is admitted
+/// for wallet, so the first `create_managed_account` writes the account and the
+/// later calls use it: rename, the default account, one approved Browser
+/// personal_sign request, one rejected request, the transaction handoff and its
+/// Chain outcome, the protected-content rights request, and the recovery
+/// exports and imports. The proof calls use the local test keys and the ERC-1271
+/// evidence the macOS stand-in test builds, so none needs a network or a chain.
 #[cfg(target_os = "linux")]
-const WALLET_STORE_REPLACE_REFUSAL: &str = "Permission denied (os error 13)";
-
-/// The five wallet operations the Linux journey drives after `init` and
-/// `status`, in the order it drives them.
-///
-/// `list_accounts`, `list_approvals` and `shutdown` answer `ok` and write no
-/// file, so their class is `Permitted`. `default_account` answers the provider's
-/// own typed refusal, `not_found` with `default linked account not set`, because
-/// no default can be stored under this filter, so its class is `Denied`.
-/// `create_managed_account` answers `storage_error` with
-/// `WALLET_STORE_REPLACE_REFUSAL`, so its class is `Denied` too; the helper
-/// asserts that exact sentence and the absent store, so "answered under the
-/// filter" is this refusal and not any other answer.
-///
-/// The other twenty wallet operations need a stored effect, and no effect can
-/// be stored while the replace is refused, so this journey drives none of them.
-#[cfg(target_os = "linux")]
-const WALLET_LINUX_ONLY_CASES: [(&str, SuiteClass); 5] = [
+const WALLET_LINUX_ONLY_CASES: [(&str, SuiteClass); 29] = [
+    ("create_managed_account", SuiteClass::Permitted),
     ("list_accounts", SuiteClass::Permitted),
-    ("default_account", SuiteClass::Denied),
+    ("rename_account", SuiteClass::Permitted),
+    ("set_default_account", SuiteClass::Permitted),
+    ("default_account", SuiteClass::Permitted),
+    ("challenge", SuiteClass::Permitted),
+    ("verify_proof", SuiteClass::Permitted),
+    // The contract proof path needs its own challenge, so `challenge` answers
+    // twice: once for the EOA proof and once for the ERC-1271 evidence.
+    ("challenge", SuiteClass::Permitted),
+    ("verify_contract_proof", SuiteClass::Permitted),
+    ("link_verified_account", SuiteClass::Permitted),
+    ("bitcoin_challenge", SuiteClass::Permitted),
+    ("verify_bip322_proof", SuiteClass::Permitted),
+    ("request_approval", SuiteClass::Permitted),
+    ("approve_and_sign_managed", SuiteClass::Permitted),
+    // A second personal_sign request is refused, so `request_approval` answers
+    // once for the approved request and once for the rejected one.
+    ("request_approval", SuiteClass::Permitted),
+    ("reject_approval", SuiteClass::Permitted),
     ("list_approvals", SuiteClass::Permitted),
-    ("create_managed_account", SuiteClass::Denied),
+    // The connector is its own linked account, and its transaction handoff
+    // needs one further approval, so both operations answer twice.
+    ("link_verified_account", SuiteClass::Permitted),
+    ("request_approval", SuiteClass::Permitted),
+    ("approve_connector_handoff", SuiteClass::Permitted),
+    ("complete_connector_handoff", SuiteClass::Permitted),
+    ("attach_validated_chain_outcome", SuiteClass::Permitted),
+    (
+        "request_protected_content_rights_signature",
+        SuiteClass::Permitted,
+    ),
+    ("export_managed_recovery_key", SuiteClass::Permitted),
+    ("export_managed_recovery_set", SuiteClass::Permitted),
+    ("import_managed_recovery_key", SuiteClass::Permitted),
+    ("import_managed_recovery_set", SuiteClass::Permitted),
+    ("revoke_account", SuiteClass::Permitted),
     ("shutdown", SuiteClass::Permitted),
 ];
 
-/// The five wallet operations of `WALLET_LINUX_ONLY_CASES` on one started
-/// provider and one root, using the record type and judgement of
-/// `wallet_standin_suite`.
+/// The wallet operations of `WALLET_LINUX_ONLY_CASES` on one started provider
+/// and one root. It starts no provider and ends with `shutdown`, whose child
+/// exit `ConfinedProvider::shutdown` asserts.
 ///
-/// It starts no provider. The three `none:` calls read the store `init` loaded
-/// and assert what they answer for a wallet with no account: the empty listing,
-/// the empty approval listing, and the `not_found` lookup refusal, each beside
-/// its envelope's schema, protocol version and operation name. The one
-/// effectful call then asserts the filter's own answer: `storage_error` with
-/// `WALLET_STORE_REPLACE_REFUSAL`, and afterwards the wallet directory holds
-/// only `wallet-key.hex`, so the refused replace created no store and left no
-/// staging file. `shutdown` is last: it answers `ok` and the child exits with
-/// status 0, which `ConfinedProvider::shutdown` asserts.
+/// One managed account is created first and every stored effect uses it. A
+/// second linked account is the external connector for the transaction handoff,
+/// and the last call revokes it, so the run leaves one active managed account.
+/// The recovery set is exported before the imports, and the set import restores
+/// the renamed label last. Each case is recorded through `wallet_suite_entry`
+/// and judged by `assert_suite_outcomes` against `WALLET_LINUX_ONLY_CASES`.
 #[cfg(target_os = "linux")]
 fn wallet_standin_linux_only_operations(
     provider: &mut ConfinedProvider,
-    root: &Path,
+    _root: &Path,
     label: &str,
 ) -> Vec<SuiteEntry> {
+    macro_rules! wallet_case {
+        ($provider:expr, $record:expr, $label:expr, $case:literal, $operation:expr) => {{
+            let (request, answer) = $provider.wallet_request_and_answer($operation);
+            assert_eq!(
+                answer["data"]["schema"], WALLET_RESPONSE_SCHEMA,
+                "{}: {} must answer its response schema: {answer}",
+                $label, $case
+            );
+            assert_eq!(
+                answer["data"]["protocol_version"], WALLET_PROTOCOL_VERSION,
+                "{}: {} must answer the contract's protocol version: {answer}",
+                $label, $case
+            );
+            $record.push(wallet_suite_entry(
+                $label,
+                $case,
+                SuiteClass::Permitted,
+                &request,
+                &answer,
+            ));
+            answer["data"]["result"].clone()
+        }};
+    }
+
     let mut record = Vec::new();
 
-    let (request, answer) =
-        provider.wallet_request_and_answer(WalletProviderOperationV2::ListAccounts {
-            include_revoked: false,
-        });
-    assert_eq!(
-        answer["data"]["schema"], WALLET_RESPONSE_SCHEMA,
-        "{label}: list_accounts must answer its response schema: {answer}"
-    );
-    assert_eq!(
-        answer["data"]["protocol_version"], WALLET_PROTOCOL_VERSION,
-        "{label}: list_accounts must answer the contract's protocol version: {answer}"
-    );
-    assert_eq!(
-        answer["data"]["operation"], "list_accounts",
-        "{label}: list_accounts must name its own operation: {answer}"
-    );
-    assert_eq!(
-        answer["data"]["result"],
-        json!({ "status": "ok", "data": { "accounts": [], "default_accounts": [] } }),
-        "{label}: a wallet with no account must list none: {answer}"
-    );
-    record.push(wallet_suite_entry(
-        label,
-        "list_accounts",
-        SuiteClass::Permitted,
-        &request,
-        &answer,
-    ));
-
-    let (request, answer) =
-        provider.wallet_request_and_answer(WalletProviderOperationV2::DefaultAccount {
-            chain_namespace: "eip155:20".to_string(),
-            intent: "publish_envelope".to_string(),
-        });
-    assert_eq!(
-        answer["data"]["operation"], "default_account",
-        "{label}: default_account must name its own operation: {answer}"
-    );
-    assert_eq!(
-        answer["data"]["result"],
-        json!({
-            "status": "error",
-            "code": "not_found",
-            "message": "default linked account not set",
-        }),
-        "{label}: a wallet with no default must answer its typed refusal: {answer}"
-    );
-    record.push(wallet_suite_entry(
-        label,
-        "default_account",
-        SuiteClass::Denied,
-        &request,
-        &answer,
-    ));
-
-    let (request, answer) =
-        provider.wallet_request_and_answer(WalletProviderOperationV2::ListApprovals {
-            include_resolved: false,
-        });
-    assert_eq!(
-        answer["data"]["operation"], "list_approvals",
-        "{label}: list_approvals must name its own operation: {answer}"
-    );
-    assert_eq!(
-        answer["data"]["result"],
-        json!({ "status": "ok", "data": { "approval_requests": [] } }),
-        "{label}: a wallet with no approval must list none: {answer}"
-    );
-    record.push(wallet_suite_entry(
-        label,
-        "list_approvals",
-        SuiteClass::Permitted,
-        &request,
-        &answer,
-    ));
-
-    let (request, answer) =
-        provider.wallet_request_and_answer(WalletProviderOperationV2::CreateManagedAccount {
-            chain_namespace: "eip155:20".to_string(),
-            label: Some("Confined".to_string()),
-            create_new: false,
-        });
-    assert_eq!(
-        answer["data"]["result"],
-        json!({
-            "status": "error",
-            "code": "storage_error",
-            "message": WALLET_STORE_REPLACE_REFUSAL,
-        }),
-        "{label}: the refused store replace must answer its exact sentence: {answer}"
-    );
-    record.push(wallet_suite_entry(
+    // The managed account every later stored effect uses.
+    let result = wallet_case!(
+        provider,
+        &mut record,
         label,
         "create_managed_account",
-        SuiteClass::Denied,
-        &request,
-        &answer,
-    ));
-    let wallet = wallet_dir(root);
-    let mut entries: Vec<String> = fs::read_dir(&wallet)
-        .unwrap_or_else(|err| panic!("{label}: the wallet directory must be readable: {err}"))
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    entries.sort();
-    // The journey's own fixed-byte sentinel is written here before the suite
-    // runs, so the two names are that sentinel and `init`'s key. A refused
-    // replace leaves neither a store nor its staging file.
-    assert_eq!(
-        entries,
-        vec![
-            SECCOMP_INSIDE_FIXTURE_NAME.to_string(),
-            WALLET_KEY_FILE.to_string(),
-        ],
-        "{label}: the refused replace must leave no store and no staging file under {}",
-        wallet.display()
+        WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Journey".to_string()),
+            create_new: true,
+        }
     );
+    let created = &result["data"];
+    assert_eq!(result["status"], "ok", "{label}: create answer: {result}");
+    assert_eq!(created["created"], true);
+    assert_eq!(created["account"]["principal_id"], "person:local:alice");
+    assert_eq!(created["account"]["chain_namespace"], "eip155:20");
+    assert_eq!(created["account"]["proof_type"], "managed_evm");
+    assert_eq!(created["account"]["label"], "Journey");
+    assert_eq!(created["account"]["connector_id"], Value::Null);
+    assert_eq!(created["account"]["revoked_at"], Value::Null);
+    let account_id = created["account"]["account_id"]
+        .as_str()
+        .expect("the created account must name its id")
+        .to_string();
+    let account_address = created["account"]["address"]
+        .as_str()
+        .expect("the created account must name its address")
+        .to_string();
+    assert_eq!(
+        created["account"]["proof_binding_id"],
+        format!("proof:wallet:managed:eip155:20:{account_address}")
+    );
+    assert!(created["account"]["linked_at"].is_u64());
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "list_accounts",
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["default_accounts"], json!([]));
+    let accounts = data["accounts"]
+        .as_array()
+        .expect("list_accounts must answer its accounts");
+    assert_eq!(accounts.len(), 1, "{label}: list_accounts answer: {result}");
+    assert_eq!(accounts[0]["account_id"], account_id);
+    assert_eq!(accounts[0]["label"], "Journey");
+    assert_eq!(accounts[0]["signing_available"], true);
+    assert_eq!(accounts[0]["signing_status"], "managed_key_available");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "rename_account",
+        WalletProviderOperationV2::RenameAccount {
+            account_id: account_id.clone(),
+            label: "Renamed".to_string(),
+        }
+    );
+    assert_eq!(result["data"]["account"]["account_id"], account_id);
+    assert_eq!(result["data"]["account"]["label"], "Renamed");
+    assert_eq!(result["data"]["account"]["revoked_at"], Value::Null);
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "set_default_account",
+        WalletProviderOperationV2::SetDefaultAccount {
+            chain_namespace: "eip155:20".to_string(),
+            intent: "publish_envelope".to_string(),
+            account_id: account_id.clone(),
+        }
+    );
+    let default = &result["data"]["default_account"];
+    assert_eq!(default["schema"], "elastos.wallet.default_account/v1");
+    assert_eq!(default["principal_id"], "person:local:alice");
+    assert_eq!(default["chain_namespace"], "eip155:20");
+    assert_eq!(default["intent"], "publish_envelope");
+    assert_eq!(default["account_id"], account_id);
+    assert!(default["set_at"].is_u64());
+    assert_eq!(result["data"]["account"]["account_id"], account_id);
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "default_account",
+        WalletProviderOperationV2::DefaultAccount {
+            chain_namespace: "eip155:20".to_string(),
+            intent: "publish_envelope".to_string(),
+        }
+    );
+    assert_eq!(
+        result["data"]["default_account"],
+        json!({
+            "schema": "elastos.wallet.default_account/v1",
+            "principal_id": "person:local:alice",
+            "chain_namespace": "eip155:20",
+            "intent": "publish_envelope",
+            "account_id": account_id,
+            "set_at": result["data"]["default_account"]["set_at"],
+        })
+    );
+    assert_eq!(result["data"]["account"]["account_id"], account_id);
+
+    // The EVM proof calls use a fixed local key, so no network is touched.
+    let evm_key = evm_test_signing_key();
+    let eoa_address = evm_test_address(&evm_key);
+    let contract = "0x00000000000000000000000000000000000000cc";
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "challenge",
+        WalletProviderOperationV2::Challenge {
+            domain: "http://elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: eoa_address.clone(),
+            chain_id: 20,
+            resources: vec!["elastos://wallet/account/link".to_string()],
+        }
+    );
+    let eoa_message = result["data"]["message"]
+        .as_str()
+        .expect("challenge must answer its message")
+        .to_string();
+    let eoa_challenge_id = result["data"]["challenge_id"]
+        .as_str()
+        .expect("challenge must answer its id")
+        .to_string();
+    assert_eq!(result["data"]["schema"], "elastos.auth.challenge/v1");
+    assert_eq!(
+        result["data"]["resources"],
+        json!([
+            format!("elastos://auth/challenge/{eoa_challenge_id}"),
+            "elastos://wallet/account/link"
+        ])
+    );
+    assert!(result["data"]["expires_at"].is_u64());
+
+    let eoa_signature = sign_test_message(&evm_key, &eoa_message);
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "verify_proof",
+        WalletProviderOperationV2::VerifyProof {
+            message: eoa_message.clone(),
+            signature: eoa_signature.clone(),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["schema"], "elastos.wallet.proof/v1");
+    assert_eq!(data["proof_type"], "siwe");
+    assert_eq!(data["chain_namespace"], "eip155:20");
+    assert_eq!(data["address"], eoa_address.to_ascii_lowercase());
+    assert_eq!(
+        data["proof_binding_id"],
+        format!(
+            "proof:wallet:eip155:20:{}",
+            eoa_address.to_ascii_lowercase()
+        )
+    );
+    assert_eq!(data["challenge_id"], eoa_challenge_id);
+    let proof_binding_id = data["proof_binding_id"]
+        .as_str()
+        .expect("the proof must answer its binding")
+        .to_string();
+    assert_message_hash(data, label, "verify_proof");
+
+    // The contract proof uses the same local challenge and supplied ERC-1271
+    // evidence; no chain is contacted.
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "challenge",
+        WalletProviderOperationV2::Challenge {
+            domain: "http://elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: contract.to_string(),
+            chain_id: 20,
+            resources: vec!["elastos://wallet/account/link".to_string()],
+        }
+    );
+    let contract_message = result["data"]["message"]
+        .as_str()
+        .expect("a contract challenge must answer its message")
+        .to_string();
+    let contract_signature = "0x01020304";
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "verify_contract_proof",
+        WalletProviderOperationV2::VerifyContractProof {
+            message: contract_message.clone(),
+            signature: contract_signature.to_string(),
+            evidence: erc1271_evidence(&contract_message, contract_signature, contract),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["proof_type"], "siwe_erc1271");
+    assert_eq!(data["chain_namespace"], "eip155:20");
+    assert_eq!(data["address"], contract);
+    assert_eq!(
+        data["proof_binding_id"],
+        format!("proof:wallet:eip155:20:{contract}")
+    );
+    assert_message_hash(data, label, "verify_contract_proof");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "link_verified_account",
+        WalletProviderOperationV2::LinkVerifiedAccount {
+            proof_binding_id: proof_binding_id.clone(),
+            chain_namespace: "eip155:20".to_string(),
+            address: eoa_address.clone(),
+            proof_type: "siwe".to_string(),
+            label: Some("Proof".to_string()),
+        }
+    );
+    let linked = &result["data"]["account"];
+    assert_eq!(linked["proof_binding_id"], proof_binding_id);
+    assert_eq!(linked["address"], eoa_address.to_ascii_lowercase());
+    assert_eq!(linked["proof_type"], "siwe");
+    assert_eq!(linked["connector_id"], "wallet");
+    assert_eq!(linked["label"], "Proof");
+    assert_eq!(
+        linked["account_id"],
+        format!("wallet:eip155:20:{}", eoa_address.to_ascii_lowercase())
+    );
+
+    // The Bitcoin proof calls sign with a local key on a P2PKH address.
+    let bitcoin_key = bitcoin_test_signing_key();
+    let bitcoin_address = bitcoin_test_address(&bitcoin_key);
+    let bitcoin_public_key = bitcoin_test_public_key(&bitcoin_key);
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "bitcoin_challenge",
+        WalletProviderOperationV2::BitcoinChallenge {
+            domain: "elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: bitcoin_address.clone(),
+            network: PublicNetwork::bitcoin(),
+            resources: vec!["elastos://wallet/account/link".to_string()],
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["schema"], "elastos.wallet.bitcoin_challenge/v1");
+    assert_eq!(data["network"], "bitcoin");
+    assert_eq!(data["address"], bitcoin_address);
+    assert_eq!(data["proof_type"], "bitcoin_signed_message");
+    let bitcoin_message = data["message"]
+        .as_str()
+        .expect("a Bitcoin challenge must answer its message")
+        .to_string();
+    let bitcoin_challenge_id = data["challenge_id"]
+        .as_str()
+        .expect("a Bitcoin challenge must answer its id")
+        .to_string();
+    assert_eq!(
+        data["resources"],
+        json!([
+            format!("elastos://auth/bitcoin-challenge/{bitcoin_challenge_id}"),
+            "elastos://wallet/account/link"
+        ])
+    );
+
+    let bitcoin_signature = sign_bitcoin_test_message(&bitcoin_key, &bitcoin_message);
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "verify_bip322_proof",
+        WalletProviderOperationV2::VerifyBip322Proof {
+            message: bitcoin_message.clone(),
+            signature: bitcoin_signature.clone(),
+            signature_type: "bitcoin_signed_message".to_string(),
+            public_key: Some(bitcoin_public_key.clone()),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["schema"], "elastos.wallet.proof/v1");
+    assert_eq!(data["proof_type"], "bitcoin_signed_message");
+    assert_eq!(data["proof_strength"], "standard");
+    assert_eq!(
+        data["chain_namespace"],
+        "bip122:000000000019d6689c085ae165831e93"
+    );
+    assert_eq!(data["address"], bitcoin_address);
+    assert_eq!(data["challenge_id"], bitcoin_challenge_id);
+    assert_eq!(
+        data["proof_binding_id"],
+        format!("proof:wallet:bip122:000000000019d6689c085ae165831e93:{bitcoin_address}")
+    );
+    assert_message_hash(data, label, "verify_bip322_proof");
+
+    // One managed approval is signed, one is rejected, and both use the
+    // account created above.
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "request_approval",
+        personal_sign_approval(&account_id, &account_address, "First managed approval")
+    );
+    let approval = &result["data"]["approval_request"];
+    assert_eq!(result["data"]["requires_approval"], true);
+    assert_eq!(result["data"]["signature"], Value::Null);
+    assert_eq!(approval["schema"], "elastos.wallet.approval_request/v1");
+    assert_eq!(approval["kind"], "signature");
+    assert_eq!(approval["status"], "pending");
+    assert_eq!(approval["principal_id"], "person:local:alice");
+    assert_eq!(approval["session_id"], "session:confine");
+    assert_eq!(approval["requested_by_actor"], "wallet");
+    assert_eq!(approval["account_id"], account_id);
+    assert_eq!(approval["chain_namespace"], "eip155:20");
+    assert_eq!(approval["intent"], "browser_personal_sign");
+    assert_eq!(approval["connector_id"], Value::Null);
+    assert_eq!(approval["resolved_at"], Value::Null);
+    let payload_hash = approval["payload_hash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: request_approval must name its payload hash"));
+    assert!(
+        payload_hash.starts_with("0x"),
+        "{label}: payload hash: {payload_hash}"
+    );
+    assert_eq!(
+        payload_hash.len(),
+        66,
+        "{label}: payload hash: {payload_hash}"
+    );
+    let first_request_id = approval["request_id"]
+        .as_str()
+        .expect("an approval must name its id")
+        .to_string();
+    let first_payload_hash = approval["payload_hash"]
+        .as_str()
+        .expect("an approval must name its payload hash")
+        .to_string();
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "approve_and_sign_managed",
+        WalletProviderOperationV2::ApproveAndSignManaged {
+            request_id: first_request_id.clone(),
+            reason: "approved by the confined journey".to_string(),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["approval_request"]["status"], "completed");
+    let signature = data["signature"]
+        .as_str()
+        .expect("approve_and_sign_managed must answer a signature");
+    assert!(
+        signature.starts_with("0x"),
+        "{label}: signature: {signature}"
+    );
+    assert_eq!(signature.len(), 132, "{label}: signature: {signature}");
+    assert_eq!(
+        data["signature_receipt"]["schema"],
+        "elastos.wallet.signature_receipt/v1"
+    );
+    assert_eq!(data["signature_receipt"]["request_id"], first_request_id);
+    assert_eq!(data["signature_receipt"]["signer"], account_address);
+    assert_eq!(
+        data["signature_receipt"]["payload_hash"],
+        first_payload_hash
+    );
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "request_approval",
+        personal_sign_approval(&account_id, &account_address, "Second managed approval")
+    );
+    let second_request_id = result["data"]["approval_request"]["request_id"]
+        .as_str()
+        .expect("an approval must name its id")
+        .to_string();
+    assert_eq!(result["data"]["approval_request"]["status"], "pending");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "reject_approval",
+        WalletProviderOperationV2::RejectApproval {
+            request_id: second_request_id.clone(),
+            reason: "rejected by the confined journey".to_string(),
+        }
+    );
+    assert_eq!(result["data"]["approval_request"]["status"], "rejected");
+    assert_eq!(
+        result["data"]["approval_request"]["rejection_reason"],
+        "rejected by the confined journey"
+    );
+    assert_eq!(
+        result["data"]["approval_request"]["request_id"],
+        second_request_id
+    );
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "list_approvals",
+        WalletProviderOperationV2::ListApprovals {
+            include_resolved: true,
+        }
+    );
+    let requests = result["data"]["approval_requests"]
+        .as_array()
+        .expect("list_approvals must answer its requests");
+    assert_eq!(requests.len(), 2, "{label}: list_approvals: {result}");
+    for (request_id, expected) in [
+        (&first_request_id, "completed"),
+        (&second_request_id, "rejected"),
+    ] {
+        let request = requests
+            .iter()
+            .find(|request| request["request_id"].as_str() == Some(request_id.as_str()))
+            .unwrap_or_else(|| panic!("{label}: list_approvals must hold {request_id}"));
+        assert_eq!(request["status"], expected);
+    }
+
+    // The external connector account and its transaction handoff.
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "link_verified_account",
+        WalletProviderOperationV2::LinkVerifiedAccount {
+            proof_binding_id: format!("proof:eip155:20:{CONNECTOR_ADDRESS}"),
+            chain_namespace: "eip155:20".to_string(),
+            address: CONNECTOR_ADDRESS.to_string(),
+            proof_type: "siwe".to_string(),
+            label: None,
+        }
+    );
+    let connector = &result["data"]["account"];
+    assert_eq!(connector["connector_id"], "wallet");
+    assert_eq!(connector["address"], CONNECTOR_ADDRESS);
+    let connector_account_id = connector["account_id"]
+        .as_str()
+        .expect("the connector account must name its id")
+        .to_string();
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "request_approval",
+        WalletProviderOperationV2::RequestApproval {
+            account_id: connector_account_id.clone(),
+            chain_namespace: "eip155:20".to_string(),
+            intent: "transaction_intent".to_string(),
+            resource: "elastos://chain/esc-mainnet/broadcast_transaction".to_string(),
+            reason: "Send EVM transaction".to_string(),
+            payload: external_transaction_payload(CONNECTOR_ADDRESS),
+            expires_at: now_ts().saturating_add(10 * 60),
+        }
+    );
+    let transaction_approval = &result["data"]["approval_request"];
+    assert_eq!(transaction_approval["status"], "pending");
+    assert_eq!(transaction_approval["intent"], "transaction_intent");
+    assert_eq!(transaction_approval["connector_id"], "wallet");
+    assert_eq!(transaction_approval["address"], CONNECTOR_ADDRESS);
+    let transaction_request_id = transaction_approval["request_id"]
+        .as_str()
+        .expect("the transaction approval must name its id")
+        .to_string();
+    let transaction_payload_hash = transaction_approval["payload_hash"]
+        .as_str()
+        .expect("the transaction approval must name its payload hash")
+        .to_string();
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "approve_connector_handoff",
+        WalletProviderOperationV2::ApproveConnectorHandoff {
+            request_id: transaction_request_id.clone(),
+            reason: "approved by the confined journey".to_string(),
+        }
+    );
+    assert_eq!(result["data"]["approval_request"]["status"], "approved");
+    assert_eq!(
+        result["data"]["approval_request"]["approval_reason"],
+        "approved by the confined journey"
+    );
+    assert_eq!(result["data"]["handoff"]["intent"], "transaction_intent");
+    assert_eq!(result["data"]["signature"], Value::Null);
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "complete_connector_handoff",
+        WalletProviderOperationV2::CompleteConnectorHandoff {
+            request_id: transaction_request_id.clone(),
+            payload_hash: transaction_payload_hash.clone(),
+            signature: None,
+            signature_type: None,
+            public_key: None,
+            signer: CONNECTOR_ADDRESS.to_string(),
+            transaction_hash: Some(CONNECTOR_TRANSACTION_HASH.to_string()),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["approval_request"]["status"], "completed");
+    assert_eq!(
+        data["approval_request"]["signed_result"]["transaction_hash"],
+        CONNECTOR_TRANSACTION_HASH
+    );
+    assert_eq!(
+        data["signature_receipt"]["request_id"],
+        transaction_request_id
+    );
+    assert_eq!(data["signature_receipt"]["signer"], CONNECTOR_ADDRESS);
+
+    let outcome = external_chain_outcome(
+        &transaction_request_id,
+        &connector_account_id,
+        CONNECTOR_TRANSACTION_HASH,
+    );
+    let expected_outcome = serde_json::to_value(&outcome).expect("the outcome must serialize");
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "attach_validated_chain_outcome",
+        WalletProviderOperationV2::AttachValidatedChainOutcome {
+            outcome: outcome.clone(),
+        }
+    );
+    assert_eq!(
+        result["data"]["approval_request"]["validated_chain_outcome"], expected_outcome,
+        "{label}: attach must answer the stored outcome"
+    );
+
+    // The protected-content rights request is a pending approval on the managed
+    // account; it stays pending and is listed by its id.
+    let issued_at = now_ts();
+    let rights_request =
+        protected_content_rights_request(&account_address, issued_at, issued_at + 120, 0x51);
+    let canonical_rights_request_hex = hex::encode(
+        rights_request
+            .canonical_bytes()
+            .expect("the rights request must encode canonically"),
+    );
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "request_protected_content_rights_signature",
+        WalletProviderOperationV2::RequestProtectedContentRightsSignature {
+            account_id: account_id.clone(),
+            canonical_rights_request_hex: canonical_rights_request_hex.clone(),
+            reason: "Review and sign the exact protected-content rights request".to_string(),
+        }
+    );
+    let approval = &result["data"]["approval_request"];
+    assert_eq!(result["data"]["requires_approval"], true);
+    assert_eq!(result["data"]["signature"], Value::Null);
+    assert_eq!(approval["status"], "pending");
+    assert_eq!(approval["account_id"], account_id);
+    assert_eq!(
+        approval["intent"],
+        PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT
+    );
+    assert_eq!(
+        approval["payload"]["canonical_rights_request_hex"],
+        canonical_rights_request_hex
+    );
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "export_managed_recovery_key",
+        WalletProviderOperationV2::ExportManagedRecoveryKey {
+            account_id: account_id.clone(),
+        }
+    );
+    let recovery_key = result["data"].clone();
+    assert_eq!(recovery_key["schema"], "elastos.wallet.recovery-key/v1");
+    assert_eq!(recovery_key["account_id"], account_id);
+    assert_eq!(recovery_key["chain_namespace"], "eip155:20");
+    assert_eq!(recovery_key["address"], account_address);
+    assert_eq!(recovery_key["secret_type"], "secp256k1_private_key_hex");
+    let private_key_hex = recovery_key["private_key_hex"]
+        .as_str()
+        .expect("the recovery key must name its private key");
+    assert_eq!(private_key_hex.len(), 64, "{label}: private key length");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "export_managed_recovery_set",
+        WalletProviderOperationV2::ExportManagedRecoverySet {}
+    );
+    let recovery_set_value = result["data"].clone();
+    assert_eq!(
+        recovery_set_value["schema"],
+        "elastos.wallet.managed-recovery-set/v1"
+    );
+    let keys = recovery_set_value["keys"]
+        .as_array()
+        .expect("the recovery set must answer its keys");
+    assert_eq!(keys.len(), 1, "{label}: recovery set: {result}");
+    assert_eq!(keys[0]["account_id"], account_id);
+    assert_eq!(keys[0]["label"], "Renamed");
+    assert_eq!(keys[0]["recovery_key"]["account_id"], account_id);
+    let recovery_set: ManagedRecoverySetV1 = serde_json::from_value(recovery_set_value.clone())
+        .expect("the exported set must decode as a recovery set");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "import_managed_recovery_key",
+        WalletProviderOperationV2::ImportManagedRecoveryKey {
+            recovery_key: recovery_key.clone(),
+            label: Some("Recovered".to_string()),
+        }
+    );
+    assert_eq!(result["data"]["imported"], true);
+    assert_eq!(result["data"]["account"]["account_id"], account_id);
+    assert_eq!(result["data"]["account"]["label"], "Recovered");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "import_managed_recovery_set",
+        WalletProviderOperationV2::ImportManagedRecoverySet {
+            recovery_set: recovery_set.clone(),
+        }
+    );
+    assert_eq!(result["data"]["imported"], true);
+    assert_eq!(result["data"]["account_count"], 1);
+    assert_eq!(result["data"]["accounts"][0]["account_id"], account_id);
+    assert_eq!(result["data"]["accounts"][0]["label"], "Renamed");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "revoke_account",
+        WalletProviderOperationV2::RevokeAccount {
+            account_id: connector_account_id.clone(),
+        }
+    );
+    assert_eq!(
+        result["data"]["account"]["account_id"],
+        connector_account_id
+    );
+    assert!(result["data"]["account"]["revoked_at"].is_u64());
+
     let shutdown = provider.shutdown();
     record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
 
     record
+}
+
+/// The proof answers name a `0x`-prefixed 32-byte hash.
+#[cfg(target_os = "linux")]
+fn assert_message_hash(data: &Value, label: &str, call: &str) {
+    let hash = data["message_hash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: {call} must answer a message hash: {data}"));
+    assert!(hash.starts_with("0x"), "{label}: {call}: {hash}");
+    assert_eq!(hash.len(), 66, "{label}: {call}: {hash}");
+    assert!(hash[2..].bytes().all(|byte| byte.is_ascii_hexdigit()));
 }
 
 /// The permitted did operations on one started provider and one root, using the
@@ -7367,8 +7970,9 @@ impl SeccompInstruction {
 
 /// What a runtime with threads needs beyond `LAUNCH_ESSENTIALS`, measured with
 /// strace on the model provider's `init`, `status` and `shutdown` on aarch64,
-/// kernel 7.0. did and wallet are single-threaded and have none of these, so their
-/// programs stay byte-equal. `clone`, `clone3` and `socketpair` are not here: they
+/// kernel 7.0. did and wallet are single-threaded and have none of these, so
+/// their programs stay byte-equal apart from wallet's store replace below.
+/// `clone`, `clone3` and `socketpair` are not here: they
 /// take the argument-checked rules in `seccomp_program_with_thread_rules`.
 /// `epoll_wait` is the x86-64 form of `epoll_pwait`, named by a run on GitHub's
 /// x86-64 runner whose filter logged instead of refusing (run 42448113772);
@@ -7408,6 +8012,18 @@ const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "renameat",
     "rseq",
 ];
+
+/// The wallet's store replace, beside `LAUNCH_ESSENTIALS`: `save_store` writes
+/// `.wallet-state.json.<pid>.<rand>.tmp` beside the store and calls
+/// `std::fs::rename`, which calls libc `rename`. glibc's `rename` is the
+/// `rename` call on x86-64 and `renameat` on aarch64, where the kernel has no
+/// `rename`. The storage row names only `renameat2`, so without these two the
+/// replace fails with `EACCES`, Rust reads that as `PermissionDenied`, and the
+/// provider answers `storage_error`. Each architecture admits only the form it
+/// has, through the number table's empty cell for the other. did has no store
+/// replace, so its list stays as it is.
+const WALLET_RUNTIME_ESSENTIALS: &[&str] = &["rename", "renameat"];
+
 /// Argument words in `seccomp_data`: each argument is 64 bits, low word first on
 /// both aarch64 and x86_64.
 const SECCOMP_ARG0_LOW: u32 = 16;
@@ -7490,6 +8106,8 @@ impl SeccompAllowList {
         let mut syscalls = self.syscalls.clone();
         let runtime: &[&'static str] = if threaded {
             MODEL_RUNTIME_ESSENTIALS
+        } else if self.provider == WALLET_PROVIDER {
+            WALLET_RUNTIME_ESSENTIALS
         } else {
             &[]
         };
@@ -11622,6 +12240,24 @@ fn model_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
         0xc000_00b7 => include_str!("model-seccomp-aarch64.golden"),
         other => panic!("no golden model program for audit architecture {other:#x}"),
     };
+    parse_seccomp_golden(text)
+}
+
+/// The checked-in golden copy of the wallet's final program for `audit_arch`,
+/// in the same one-instruction-per-line form as the model's.
+fn wallet_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
+    let text = match audit_arch {
+        0xc000_003e => include_str!("wallet-seccomp-x86_64.golden"),
+        0xc000_00b7 => include_str!("wallet-seccomp-aarch64.golden"),
+        other => panic!("no golden wallet program for audit architecture {other:#x}"),
+    };
+    parse_seccomp_golden(text)
+}
+
+/// One checked-in golden program's lines, read as four plain integers and the
+/// comment: `code jt jf k  # comment`. A line that does not carry that shape is
+/// a panic, not a skipped line.
+fn parse_seccomp_golden(text: &'static str) -> Vec<([u32; 4], &'static str)> {
     let number = |word: &str| match word.strip_prefix("0x") {
         Some(hex) => u32::from_str_radix(hex, 16),
         None => word.parse(),
@@ -11648,6 +12284,32 @@ fn model_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
             ([code, jt, jf, k], comment)
         })
         .collect()
+}
+
+/// One provider's rendered program on `audit_arch` equals that provider's
+/// golden copy, instruction for instruction, and the golden's call lines name
+/// libc's numbers where the host has them.
+fn assert_program_equals_golden(
+    provider: &str,
+    arch_name: &str,
+    program: &[SeccompInstruction],
+    golden: Vec<([u32; 4], &'static str)>,
+) {
+    let program: Vec<[u32; 4]> = program
+        .iter()
+        .map(|at| [u32::from(at.code), u32::from(at.jt), u32::from(at.jf), at.k])
+        .collect();
+    let golden: Vec<[u32; 4]> = golden.into_iter().map(|(at, _)| at).collect();
+    let first = (0..program.len().max(golden.len())).find(|&i| program.get(i) != golden.get(i));
+    assert!(
+        first.is_none(),
+        "the {arch_name} {provider} program must equal its golden copy: it has {} instructions \
+         and the golden {}, and instruction {first:?} differs, in hex: {:x?} against {:x?}",
+        program.len(),
+        golden.len(),
+        first.and_then(|i| program.get(i)),
+        first.and_then(|i| golden.get(i)),
+    );
 }
 
 /// The model's final program on each architecture equals its checked-in golden
@@ -11679,23 +12341,90 @@ fn seccomp_model_program_equals_its_golden_copy() {
         }
         // Both sides are plain integers: the rendered program's four fields read
         // directly, and the golden's own parse.
-        let program: Vec<[u32; 4]> = program
-            .iter()
-            .map(|at| [u32::from(at.code), u32::from(at.jt), u32::from(at.jf), at.k])
-            .collect();
-        let golden: Vec<[u32; 4]> = model_seccomp_golden(arch)
-            .into_iter()
-            .map(|(at, _)| at)
-            .collect();
-        let first = (0..program.len().max(golden.len())).find(|&i| program.get(i) != golden.get(i));
+        assert_program_equals_golden(
+            MODEL_PROVIDER,
+            arch_name,
+            &program,
+            model_seccomp_golden(arch),
+        );
+    }
+}
+
+/// The wallet's final program on each architecture equals its checked-in golden
+/// copy, instruction for instruction: every call, return action and jump target.
+/// Any change to the filter fails here until the golden file changes in the same
+/// diff, where a reviewer reads it. The program is rendered through the one
+/// builder and join, the host's being the launch's, with no kernel call, so the
+/// test runs on every OS.
+///
+/// Falsifier: WP258 removes `rename` and `renameat` from
+/// `WALLET_RUNTIME_ESSENTIALS`, so each golden shows two more call rows than the
+/// rendered program and this test fails on both architectures.
+#[test]
+fn seccomp_wallet_program_equals_its_golden_copy() {
+    let host = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = seccomp_probe_list_for_arch(WALLET_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
+        if arch == host.audit_arch {
+            assert_eq!(
+                program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        assert_program_equals_golden(
+            WALLET_PROVIDER,
+            arch_name,
+            &program,
+            wallet_seccomp_golden(arch),
+        );
+    }
+}
+
+/// The wallet's launch list is did's plus the store replace, and each
+/// architecture admits only its own form of that replace: `rename` on x86-64 and
+/// `renameat` on aarch64. did has no store replace, so its list gains nothing.
+/// The list and both programs are built through the one builder and join, with
+/// no kernel call, so the test runs on every OS.
+///
+/// Falsifier: WP258 removes `rename` and `renameat` from
+/// `WALLET_RUNTIME_ESSENTIALS`, so wallet's list equals did's and this test fails
+/// on the missing row for both architectures.
+#[test]
+fn seccomp_wallet_program_adds_only_the_store_replace() {
+    for (arch, arch_name, own_form, other_form) in [
+        (0xc000_003e_u32, "x86-64", "rename", "renameat"),
+        (0xc000_00b7, "aarch64", "renameat", "rename"),
+    ] {
+        let did =
+            seccomp_probe_list_for_arch(DID_PROVIDER, arch).unwrap_or_else(|err| panic!("{err}"));
+        let wallet = seccomp_probe_list_for_arch(WALLET_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let mut expected = did.syscalls.clone();
+        expected.push(own_form);
+        expected.sort_unstable();
+        assert_eq!(
+            wallet.syscalls, expected,
+            "the {arch_name} wallet list must be did's plus {own_form}"
+        );
         assert!(
-            first.is_none(),
-            "the {arch_name} model program must equal its golden copy: it has {} instructions \
-             and the golden {}, and instruction {first:?} differs, in hex: {:x?} against {:x?}",
-            program.len(),
-            golden.len(),
-            first.and_then(|i| program.get(i)),
-            first.and_then(|i| golden.get(i)),
+            wallet.admits(own_form),
+            "the {arch_name} wallet list must admit its own {own_form}"
+        );
+        assert!(
+            !wallet.admits(other_form),
+            "the {arch_name} wallet list must not admit {other_form}"
+        );
+        assert_eq!(
+            wallet.program,
+            seccomp_program(&expected, arch),
+            "the {arch_name} wallet program must be that list"
+        );
+        assert_eq!(
+            did.syscalls.len() + 1,
+            wallet.syscalls.len(),
+            "the {arch_name} wallet list must add exactly one call"
         );
     }
 }
@@ -14371,11 +15100,29 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
             "the model program must be that list with the thread rules"
         );
     } else {
+        // did and wallet share their declared rights, so the two launch lists
+        // differ only by wallet's store replace. A difference in any other call
+        // is a per-provider widening and fails here.
+        let mut expected = allow.syscalls.clone();
+        for syscall in WALLET_RUNTIME_ESSENTIALS {
+            // A call this architecture lacks is never admitted: the replace is
+            // renameat on aarch64 and rename on x86-64.
+            if seccomp_syscall_number(syscall, allow.audit_arch).is_none() {
+                continue;
+            }
+            if !expected.contains(syscall) {
+                expected.push(syscall);
+            }
+        }
+        expected.sort_unstable();
         assert_eq!(
-            allow.program, wallet_allow.program,
-            "the {name} program must equal wallet's: the two declared-rights files \
-             declare the same rights and the same two platform-baseline ids with \
-             identical rule text, so a difference is a per-provider widening"
+            wallet_allow.syscalls, expected,
+            "the wallet list must differ from {name}'s only by the store replace"
+        );
+        assert_eq!(
+            wallet_allow.program,
+            seccomp_program(&expected, wallet_allow.audit_arch),
+            "the wallet program must be that list"
         );
     }
     eprintln!("{}", linux_seccomp_journey_label());
@@ -14597,13 +15344,16 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
 ///
 /// The operations are `init` with wallet's fixture config, which the launch
 /// sends; `status`, asserted field by field for a fresh wallet; then
-/// `wallet_standin_linux_only_operations`, whose five cases `WALLET_LINUX_ONLY_CASES`
-/// judges: `list_accounts` and `list_approvals` answer `ok` with an empty
-/// listing, `default_account` answers `not_found`, `create_managed_account`
-/// answers `storage_error` with the refused store replace's own sentence, and
-/// `shutdown` is last. Every other wallet operation needs a stored effect, and
-/// the filter refuses the store's replace, so none of them is driven here and
-/// their operations-table cells stay `designed, not enforced`.
+/// `wallet_standin_linux_only_operations`, which drives the twenty-nine answers
+/// of `WALLET_LINUX_ONLY_CASES` and asserts each exact result: the managed
+/// account with `create_managed_account`, the listing, rename, the default
+/// account, the EOA and ERC-1271 proof calls, the proof account and connector
+/// links, the Bitcoin challenge and BIP322 proof, the approved, rejected and
+/// connector approvals with signing, handoff and Chain outcome, the
+/// protected-content rights request, both recovery exports and imports, the
+/// revoked connector, and `shutdown` last. The store replace is admitted, so
+/// every effectful call writes its store and every operations-table Linux cell
+/// cites this journey.
 ///
 /// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
 /// self-filtering probe intact. The journey inherits an allow-all fixture filter,
