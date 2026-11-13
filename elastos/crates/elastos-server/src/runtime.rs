@@ -372,10 +372,16 @@ impl Runtime {
     /// is the one returned; the manifest must be one a start by CID takes;
     /// and the component that is compiled is the bytes that walk read, never
     /// a second read of the file. A missing slot is a refusal: nothing is
-    /// fetched. What starts has no authority: it is loaded sealed, so the
-    /// component provider refuses its every call to the bridge before any
-    /// handler sees it; and its ceiling, filled like every capsule's from
-    /// the one bounds function, is empty for any manifest this start admits.
+    /// fetched.
+    ///
+    /// What starts may ask for no more than its own signed manifest asks
+    /// for. Its ceiling is filled like every capsule's, from the one bounds
+    /// function, and for a manifest this start admits that is its `asks`
+    /// and nothing else. A manifest without asks gives an empty ceiling,
+    /// and that capsule is also loaded sealed: the component provider
+    /// refuses its every call to the bridge before any handler sees it. A
+    /// manifest with asks is loaded unsealed, so that it can ask; the asks
+    /// grant nothing, and the bridge refuses whatever is beyond them.
     ///
     /// A manifest's requirements must each pin a bundle by CID, and every
     /// pinned bundle, and every bundle those pin, must be in the store and
@@ -460,16 +466,20 @@ impl Runtime {
                 "No component compute provider is configured".to_string(),
             ));
         };
-        // No authority. Loaded sealed: the provider refuses this capsule's
-        // calls to the bridge itself, so no handler sees one, whoever
-        // installed it. Its ceiling is filled where every capsule's is, by
-        // the shared end below from the one bounds function; for a manifest
-        // this start admits that is empty, because the key list keeps out
-        // every field that function reads.
-        let mut handle = component
-            .load_admitted_sealed(admitted.component, admitted.manifest)
-            .await
-            .map_err(failed)?;
+        // The seal follows the asks. A capsule whose manifest asks for
+        // nothing is loaded sealed: the provider refuses its calls to the
+        // bridge itself, so no handler sees one, whoever installed it. One
+        // with asks is loaded unsealed, because it must be able to ask. Its
+        // ceiling is filled where every capsule's is, by the shared end
+        // below from the one bounds function; for a manifest this start
+        // admits that is the asks and nothing else, because `asks` is the
+        // one field on the key list that function reads.
+        let (bytes, manifest) = (admitted.component, admitted.manifest);
+        let loaded = match manifest.asks.is_empty() {
+            true => component.load_admitted_sealed(bytes, manifest).await,
+            false => component.load_admitted(bytes, manifest).await,
+        };
+        let mut handle = loaded.map_err(failed)?;
         self.start_loaded(component, &mut handle, args, principal_id)
             .await
             .map_err(failed)?;
@@ -2192,6 +2202,153 @@ pub(crate) mod tests {
             elastos_common::localhost::rooted_localhost_fs_path(&fx.data_dir, &journal).unwrap();
         assert!(!path.exists());
         assert!(component_invoke_outcomes(&fx.audit_log).is_empty());
+    }
+
+    /// A capsule started by its CID is held to its asks by the real bridge.
+    /// The bus fixture component asks the Runtime for a read grant on its
+    /// probe resource, then reads it. Staged with a manifest that asks for
+    /// exactly that, its request reaches the shell as a pending request: the
+    /// ask itself granted nothing. Granted there, the read reaches the
+    /// provider and the run ends well, and no ceiling is left behind. Staged
+    /// with an ask on the same resource that lists only `write`, the bridge
+    /// refuses the request for the read, in the sentence that names the
+    /// action; no prompt is made and the provider sees nothing more.
+    #[tokio::test]
+    async fn a_capsule_started_by_cid_is_held_to_its_asks_by_the_real_bridge() {
+        use crate::bundle_admission::tests::{key, signed};
+        use crate::stage_cmd::{bundle_cid, stage_bundle};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let publisher = key(71);
+        let trusted = [hex::encode(publisher.verifying_key().to_bytes())];
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &trusted, false)
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store = Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
+        );
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(BusConformanceProvider::default());
+        registry.register(provider.clone()).await;
+        runtime
+            .set_provider_registry(
+                registry,
+                capability_manager.clone(),
+                pending_store.clone(),
+                temp_dir.path().join("runtime-data"),
+            )
+            .await;
+
+        let component = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"),
+        )
+        .unwrap();
+        let probe = "elastos://test/bus/probe";
+        // Stage a bundle named `name` whose manifest asks for `actions` on the probe.
+        let staged = |name: &'static str, actions: &'static [&'static str]| {
+            let (runtime, data_dir, component) = (runtime.clone(), data_dir.clone(), &component);
+            let folder = temp_dir.path().join("source").join(name);
+            let signature = temp_dir.path().join(format!("{name}.sig.json"));
+            let publisher = &publisher;
+            async move {
+                let mut manifest: serde_json::Value =
+                    serde_json::from_str(&component_manifest_json(name)).unwrap();
+                manifest["asks"] = serde_json::json!([{"resource": probe, "actions": actions}]);
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("capsule.json"), manifest.to_string()).unwrap();
+                std::fs::write(folder.join("app.component.wasm"), component).unwrap();
+                let cid = bundle_cid(&folder).unwrap();
+                std::fs::write(&signature, signed(&cid, publisher)).unwrap();
+                stage_bundle(&runtime, &data_dir, &folder, &signature)
+                    .await
+                    .unwrap();
+                cid
+            }
+        };
+        let start = |cid: String| {
+            let (runtime, data_dir) = (runtime.clone(), data_dir.clone());
+            tokio::spawn(async move {
+                let person = Some("person:local:bus-conformance".to_string());
+                let ran = runtime.run_by_bundle(&data_dir, &cid, Vec::new(), person);
+                ran.await.map(|(handle, _)| handle.manifest.name)
+            })
+        };
+
+        // Inside the asks.
+        let launch = start(staged("asks-read", &["read"]).await);
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = pending_store.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a request inside the asks reaches the shell");
+        assert_eq!(pending.resource.as_str(), probe);
+        assert_eq!(pending.action, elastos_runtime::capability::Action::Read);
+        assert!(provider.requests.lock().await.is_empty(), "no grant yet");
+        let capsule_id = pending.session_id.as_str().to_string();
+        assert_eq!(
+            runtime.ceiling_of(&capsule_id),
+            Some(vec![format!("{probe} [read]")]),
+            "while it runs, its ceiling is its asks"
+        );
+        let token = capability_manager.grant(
+            pending.session_id.as_str(),
+            pending.resource.clone(),
+            pending.action,
+            TokenConstraints::default(),
+            None,
+        );
+        pending_store
+            .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+            .await
+            .unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), launch)
+            .await
+            .expect("the run ends after the grant")
+            .expect("the launch task does not panic");
+        assert_eq!(ended.unwrap(), "asks-read");
+        assert_eq!(provider.requests.lock().await.len(), 1);
+        assert_eq!(runtime.ceiling_of(&capsule_id), None, "none left after");
+
+        // Beyond the asks: the same resource, but the action is not listed.
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            start(staged("asks-write", &["write"]).await),
+        )
+        .await
+        .expect("a refused run ends at once")
+        .expect("the launch task does not panic")
+        .expect_err("the request for the read is refused");
+        assert_eq!(refused.code(), "bundle_start_failed");
+        let sentence = format!("capsule manifest does not declare authority to read {probe}");
+        assert!(refused.to_string().contains(&sentence), "{refused}");
+        assert!(
+            pending_store.list_pending().await.is_empty(),
+            "no prompt was made"
+        );
+        assert_eq!(provider.requests.lock().await.len(), 1, "nothing more");
     }
 
     #[tokio::test]

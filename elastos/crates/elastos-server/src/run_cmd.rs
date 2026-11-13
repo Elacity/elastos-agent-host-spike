@@ -92,8 +92,10 @@ pub async fn run_capsule(
 /// `elastos run --bundle <cid>`: start a bundle from this Home's store of
 /// bundles named by CID. The Runtime is made as `stage-bundle` makes it, so
 /// the keys asked are the keys that staging asked. This path fetches nothing
-/// and attaches to no running Runtime: what starts has an empty ceiling and
-/// no bridge to ask through.
+/// and attaches to no running Runtime, and no bridge handler is installed
+/// here. So a capsule whose manifest has asks is held to them as anywhere,
+/// and has nothing to ask through: its call to the bridge is answered
+/// "unavailable". One without asks is sealed.
 pub async fn run_bundle(cid: &str) -> anyhow::Result<()> {
     let data_dir = crate::default_data_dir();
     let runtime = crate::create_runtime(data_dir.join("storage")).await?;
