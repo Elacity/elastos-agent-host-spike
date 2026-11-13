@@ -13115,6 +13115,12 @@ fn linux_landlock_requires_no_new_privs() {
     }
 }
 
+/// The one base name the journey puts under `STORAGE_PARENT` and outside
+/// `STORAGE_ROOT`, so a caller that must prepare that path before the launch
+/// names it here instead of repeating the name.
+#[cfg(target_os = "linux")]
+const LANDLOCK_OUTSIDE_BASE: &str = "landlock-outside-base";
+
 /// The journey: `name` starts under the Landlock file row built from that
 /// provider's own declared rights and under the seccomp list built the same
 /// way, and one probe child under the same ruleset shows the file row refusing
@@ -13239,7 +13245,7 @@ fn landlock_file_row_journey(
         profile_dir.display()
     );
 
-    let outside_base = storage_parent(name, base).join("landlock-outside-base");
+    let outside_base = storage_parent(name, base).join(LANDLOCK_OUTSIDE_BASE);
     let outside = first_effect_outside(&mut provider, &outside_base);
     assert_eq!(
         outside["status"], "error",
@@ -13398,11 +13404,14 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
 /// `get_persona_did`, judged against `DID_SUITE_CASES`' permitted prefix, so
 /// the did run proves its own operations answer under did's ruleset.
 ///
-/// The outside effect is a `set_nickname` write that did's ruleset refuses.
-/// Before it, the caller copies the root's `nickname.enc` beneath
-/// `STORAGE_PARENT` and requires the outside `Init` that holds the fixture
-/// device key to be refused when it reads that copy, so the `init` row's read
-/// has its own refusal.
+/// The outside effect is a `set_nickname` write that did's ruleset refuses at
+/// `did/nickname.enc`. The caller creates that outside `did` directory before
+/// the launch and copies the root's `nickname.enc` into it, so the outside
+/// `Init` that holds the fixture device key is refused when it reads the copy
+/// and the `set_nickname` that follows meets an existing directory, opens
+/// `nickname.enc` and is refused on that write. The caller removes the planted
+/// file and the directory it made, so the journey's "creates nothing" check
+/// still holds.
 ///
 /// The two Linux-only plants are the wallet caller's: a did launcher that skips
 /// only its own Landlock install fails the outside `Init`, and a
@@ -13416,6 +13425,12 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
     let loader = landlock_loader_paths(DID_PROVIDER);
     let fixture = landlock_file_fixture(DID_PROVIDER, binary, &loader);
     let label = "did-provider landlock file row";
+    fs::create_dir_all(
+        storage_parent(DID_PROVIDER, &fixture.base)
+            .join(LANDLOCK_OUTSIDE_BASE)
+            .join("did"),
+    )
+    .expect("the outside nickname directory must stand before the launch");
     landlock_file_row_journey(
         DID_PROVIDER,
         binary,
@@ -13441,18 +13456,14 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
         },
         // did's outside `Init` reads `did/nickname.enc`. A nickname file copied
         // beneath `STORAGE_PARENT` from the root gives that read its path, so
-        // the kernel refuses the read itself; the write to the same path is
-        // refused next, and it is the effect this closure returns.
+        // the kernel refuses the read itself. Removing only that copy leaves the
+        // outside `did` directory standing, so the `set_nickname` this closure
+        // returns is refused on the open of `nickname.enc`, not on a directory
+        // it would have created.
         |provider, outside| {
             let inside_nickname =
                 provider_storage_root(DID_PROVIDER, &fixture.base).join("nickname.enc");
             let outside_nickname = outside.join("did").join("nickname.enc");
-            fs::create_dir_all(
-                outside_nickname
-                    .parent()
-                    .expect("the outside nickname file has a directory"),
-            )
-            .expect("the outside nickname directory must be creatable");
             fs::copy(&inside_nickname, &outside_nickname)
                 .expect("the outside nickname file must take the root's bytes");
             let init = provider.send(&provider_init_request(DID_PROVIDER, outside));
@@ -13468,8 +13479,16 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
                 reason.contains("Permission denied"),
                 "the kernel's denial must reach init's reason, and it answered: {reason}"
             );
+            fs::remove_file(&outside_nickname)
+                .expect("the planted outside nickname file must be removable");
+            let refused = provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
+            assert!(
+                !outside_nickname.exists(),
+                "a refused outside write must leave no nickname file at {}",
+                outside_nickname.display()
+            );
             fs::remove_dir_all(outside).expect("the outside fixture must be removable");
-            provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }))
+            refused
         },
     );
 }
@@ -18904,27 +18923,168 @@ fn right_side_problems(document_name: &str, row: &OperationsRow) -> Vec<String> 
     problems
 }
 
+/// `source` with every `//` line comment and every `/* ... */` block comment
+/// removed, and every string, raw string, byte string and character literal
+/// copied as it is written.
+///
+/// A literal's own bytes never open or close a comment, so a `"..."` that
+/// holds `//` or `/*` stays a string, an escaped quote keeps its string open,
+/// a raw string ends at its own hash delimiter, and a character literal such
+/// as `'"'` is not the start of a string. Block comments nest, a line comment
+/// keeps its newline, and a block comment keeps its newlines, so every line
+/// that holds code keeps its own place. The literals are copied rather than
+/// decoded, because this scan reads no value and this file's byte strings hold
+/// escapes wider than a wire name may carry.
+fn strip_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut kept: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some((quote, hashes)) = raw_string_open(bytes, index) {
+            let end = raw_string_end(bytes, quote, hashes);
+            kept.extend_from_slice(&bytes[index..end]);
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                let mut depth = 1usize;
+                while index < bytes.len() && depth > 0 {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        if bytes[index] == b'\n' {
+                            kept.push(b'\n');
+                        }
+                        index += 1;
+                    }
+                }
+            }
+            b'"' => {
+                let end = quoted_end(bytes, index);
+                kept.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            b'\'' => {
+                let end = character_literal_end(bytes, index);
+                kept.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            _ => {
+                kept.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(kept).expect("stripping comments keeps every character it copies")
+}
+
+/// The opening quote and hash count of the raw string that starts at `index`,
+/// or `None` when no raw string opens there. `r`, `br` and `cr` prefixes all
+/// take this one reading.
+fn raw_string_open(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    let start = match bytes[index] {
+        b'r' => index,
+        b'b' | b'c' if bytes.get(index + 1) == Some(&b'r') => index + 1,
+        _ => return None,
+    };
+    let mut quote = start + 1;
+    let mut hashes = 0;
+    while bytes.get(quote) == Some(&b'#') {
+        hashes += 1;
+        quote += 1;
+    }
+    (bytes.get(quote) == Some(&b'"')).then_some((quote, hashes))
+}
+
+/// The byte after the raw string whose opening quote is `quote` and whose
+/// closing delimiter needs `hashes` hashes.
+fn raw_string_end(bytes: &[u8], quote: usize, hashes: usize) -> usize {
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"'
+            && bytes.len() >= index + 1 + hashes
+            && bytes[index + 1..index + 1 + hashes]
+                .iter()
+                .all(|byte| *byte == b'#')
+        {
+            return index + 1 + hashes;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// The byte after the closing quote of the string whose opening quote is
+/// `open`. A backslash escapes the byte after it, so an escaped quote keeps
+/// the string open.
+fn quoted_end(bytes: &[u8], open: usize) -> usize {
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The byte after the character literal that starts at `open`, or the byte
+/// after its apostrophe when that apostrophe starts a lifetime instead. A
+/// plain character sits between two apostrophes, and an escaped character runs
+/// to the next apostrophe within its own escape.
+fn character_literal_end(bytes: &[u8], open: usize) -> usize {
+    match bytes.get(open + 1) {
+        Some(b'\\') => {
+            let mut index = open + 2;
+            while index < bytes.len() && index < open + 12 {
+                if bytes[index] == b'\'' {
+                    return index + 1;
+                }
+                index += 1;
+            }
+            open + 1
+        }
+        Some(_) if bytes.get(open + 2) == Some(&b'\'') => open + 3,
+        _ => open + 1,
+    }
+}
+
 /// Whether `function` in `source` is an item the recorded Linux host runs: a
 /// line whose trimmed text starts `fn <function>(`, or `pub fn <function>(`,
-/// and the `LINUX_TEST_GATE` attribute among the attribute and doc lines
-/// directly above that line.
+/// and both `LINUX_TEST_GATE` and `DECLARED_TEST_ATTRIBUTE` among the
+/// attribute lines directly above that line.
 ///
-/// A name that appears only in a comment line is not an item, so it cannot
-/// satisfy a citation. Another line between the gate and the item breaks the
-/// block, so the gate must belong to the cited item itself.
+/// `strip_comments` removes every line and block comment before the scan, so
+/// a gate and an item that a `/* ... */` block comment holds are no more an
+/// item than one a `//` line holds, and a string that spells `//` or `/*`
+/// stays a string. Another line between the attributes and the item breaks the
+/// block, so the gate and the test attribute must belong to the cited item
+/// itself; a gated helper with no `#[test]` is refused, because the recorded
+/// host runs no such test.
 fn linux_citation_gate(source: &str, function: &str) -> Result<(), String> {
     let signature = format!("fn {function}(");
-    let lines: Vec<&str> = source.lines().collect();
+    let stripped = strip_comments(source);
+    let lines: Vec<&str> = stripped.lines().collect();
     let item = lines.iter().position(|line| {
         let declaration = line.trim_start();
         let declaration = declaration.strip_prefix("pub ").unwrap_or(declaration);
         declaration.starts_with(&signature)
     });
     let Some(item) = item else {
-        if lines.iter().any(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("//") && trimmed.contains(&signature)
-        }) {
+        if source.contains(&signature) {
             return Err(format!(
                 "{LINUX_CITATION_FILE} holds {function} only in a comment, and a citation names \
                  an item"
@@ -18933,20 +19093,27 @@ fn linux_citation_gate(source: &str, function: &str) -> Result<(), String> {
         return Err(format!("{LINUX_CITATION_FILE} does not hold {function}"));
     };
     let mut gated = false;
+    let mut tested = false;
     let mut cursor = item;
     while let Some(previous) = cursor.checked_sub(1) {
         let line = lines[previous].trim();
-        if !line.starts_with("#[") && !line.starts_with("///") {
+        if !line.starts_with("#[") {
             break;
         }
         gated |= line == LINUX_TEST_GATE;
+        tested |= line == DECLARED_TEST_ATTRIBUTE;
         cursor = previous;
     }
-    if gated {
-        Ok(())
-    } else {
-        Err(format!("{function} is not gated by {LINUX_TEST_GATE}"))
+    if !gated {
+        return Err(format!("{function} is not gated by {LINUX_TEST_GATE}"));
     }
+    if !tested {
+        return Err(format!(
+            "{function} carries {LINUX_TEST_GATE} and no {DECLARED_TEST_ATTRIBUTE}, so the \
+             recorded host runs no test of that name"
+        ));
+    }
+    Ok(())
 }
 
 /// Every problem with one row's Linux cell, naming the document, the row and
@@ -26069,6 +26236,41 @@ enum WalletProviderOperationV2 {
         "a Linux cell whose gate sits on another item must be refused"
     );
 
+    // A gate and an item inside a block comment are not an item either. The
+    // scan strips comments before it reads a line, so the nested comment below
+    // cannot keep this citation.
+    let commented = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_block_commented");
+    let document = with_linux("status", &format!("`{journey}` and `{commented}`"));
+    assert_ne!(
+        document, passing,
+        "the block-comment case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {commented}, and {LINUX_CITATION_FILE} holds \
+             linux_citation_gate_fixture_block_commented only in a comment, and a citation names \
+             an item"
+        )],
+        "a Linux cell citing an item a block comment holds must be refused"
+    );
+
+    // A gated function with no test attribute is a helper the recorded host
+    // never runs, so a citation to it is refused.
+    let untested = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_gated");
+    let document = with_linux("status", &format!("`{journey}` and `{untested}`"));
+    assert_ne!(document, passing, "the no-test case must change the table");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {untested}, and linux_citation_gate_fixture_gated carries {LINUX_TEST_GATE} and no \
+             {DECLARED_TEST_ATTRIBUTE}, so the recorded host runs no test of that name"
+        )],
+        "a Linux cell citing a gated function with no test attribute must be refused"
+    );
+
     let document = with_linux("init", &format!("`{journey}`"));
     assert_ne!(
         document, passing,
@@ -26117,10 +26319,18 @@ enum WalletProviderOperationV2 {
         "a right row citing both Linux-gated tests must pass"
     );
 
-    // The citation check reads item lines and comment lines in this file. These
-    // two paragraphs give its comment-only and its separate-item gate refusals
-    // their shape. No other citation names them.
+    // The citation check strips comments before it reads an item line and the
+    // attributes above it. These fixtures give its refusals their shape: a line
+    // comment, a block comment with a nested one inside it, a gate on the item
+    // beside the cited one, and a gated item with no test attribute. No
+    // citation names them.
     // fn linux_citation_comment_only_fixture(
+
+    /* The scan strips this comment, and the gate and item it holds. The nested
+    comment keeps the outer one open past the inner close:
+    /* nested */ #[cfg(target_os = "linux")]
+    fn linux_citation_gate_fixture_block_commented() {}
+    */
 
     #[allow(dead_code)]
     #[cfg(target_os = "linux")]
