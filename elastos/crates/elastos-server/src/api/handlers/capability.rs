@@ -97,6 +97,18 @@ pub async fn request_capability(
         ));
     }
 
+    // A launch name is the Runtime's own to answer, at once, for the program
+    // of a content launch. It is never a request for the shell, from anyone.
+    if input
+        .resource
+        .starts_with(crate::resource_bridge::LAUNCH_NAMES)
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no content launch binds this name".to_string(),
+        ));
+    }
+
     if input.resource == "elastos://browser/internet" {
         return Ok(Json(RequestCapabilityOutput {
             status: "denied".into(),
@@ -1580,6 +1592,35 @@ mod tests {
         let want = record(&id, "session-d", "expired", None);
         let message = "a grant-written expiry reads expired with no settler";
         assert_eq!(by_id.get(&id).cloned(), want, "{message}");
+    }
+
+    /// A launch name is never a request for the shell: the route refuses it
+    /// before a pending request exists, whoever asks and for whatever action.
+    #[tokio::test]
+    async fn a_launch_name_is_never_put_to_the_shell() {
+        let state = test_state();
+        for (resource, action) in [
+            ("elastos://launch/content/*", "read"),
+            ("elastos://launch/content/images/01.png", "read"),
+            ("elastos://launch/output/playlist.json", "write"),
+            ("elastos://launch/anything", "admin"),
+        ] {
+            let refused = request_capability(
+                State(state.clone()),
+                Extension(Session::new_capsule("some-capsule".into())),
+                Json(RequestCapabilityInput {
+                    resource: resource.into(),
+                    action: action.into(),
+                    reason: "a picture".into(),
+                }),
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err();
+            assert_eq!(refused.0, StatusCode::NOT_FOUND, "{resource}");
+            assert_eq!(refused.1, "no content launch binds this name");
+        }
+        assert!(state.pending_store.list_pending().await.is_empty());
     }
 
     #[tokio::test]

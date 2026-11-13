@@ -1858,15 +1858,24 @@ async fn a_bundle_two_pins_reach_is_checked_and_counted_once() {
             let name = format!("{order}-{levels}");
             let root = manifest_pinning(&name, &pins);
             let root = home.staged(&name, &root, &quiet, &publisher).await;
-            let result = home.run(&root, None).await;
+            let (result, walked) = home.run_watched(&root, None, BUNDLE_WALK_BUDGET).await;
             match refused {
                 true => assert_eq!(
                     result.unwrap_err(),
                     under(&named("below"), BundleRefusal::ClosureTooDeep),
                     "{order}"
                 ),
-                false => assert_eq!(result.unwrap().0, name, "{order}"),
+                false => assert_eq!(result.unwrap(), name, "{order}"),
             }
+            // Measuring again reads nothing: every bundle is walked once at
+            // most, the shared one and what is below it included, and the
+            // bundle refused for its depth the long way round is not read.
+            let mut once = walked.clone();
+            once.sort();
+            once.dedup();
+            assert_eq!(once.len(), walked.len(), "{order}: {walked:?}");
+            let unread = usize::from(refused && order == "long-first");
+            assert_eq!(walked.len(), levels + 3 - unread, "{order}: {walked:?}");
         }
     }
 }
@@ -2290,4 +2299,62 @@ async fn each_kind_of_bundle_has_its_places_and_no_other() {
             format!("bundle_member_kind_refused: {found} is pinned where a program must be (requirement {name})")
         );
     }
+}
+
+/// L-held. While the program of a content launch runs, the Runtime holds
+/// that launch's content for the program's own capsule id: every file the
+/// walk read from the content bundle, by its path, and nothing of the page
+/// or of the program. It is held for no one else and not kept afterwards. A
+/// program started by its own CID has none.
+#[tokio::test]
+async fn the_content_of_a_launch_is_held_for_its_program_while_it_runs() {
+    let publisher = key(84);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let core = manifest_with("core", "asks", asks);
+    let core = home
+        .staged("core", &core, &calling_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let content = home
+        .staged("pictures", &content, b"a picture", &publisher)
+        .await;
+
+    // Asked from inside the bridge handler, which the core reaches because
+    // it has asks: what is held for the caller, and for another id.
+    type Seen = (String, Option<Vec<String>>, Option<Vec<String>>);
+    let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
+    let (record, runtime) = (seen.clone(), Arc::downgrade(&home.runtime));
+    home.runtime
+        .set_bridge_hostcall(Arc::new(move |_line, capsule, _principal| {
+            let runtime = runtime.upgrade().expect("the Home");
+            let (own, other) = (
+                runtime.launch_paths_of(capsule),
+                runtime.launch_paths_of("another"),
+            );
+            record
+                .lock()
+                .unwrap()
+                .push((capsule.to_string(), own, other));
+            Err("the test's bridge handler was reached".to_string())
+        }));
+
+    let refusal = home.run(&content, Some(PERSON)).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_start_failed", "{refusal}");
+    let held = seen.lock().unwrap().clone();
+    assert_eq!(held.len(), 1);
+    let (capsule, own, other) = &held[0];
+    let files = vec![ENTRYPOINT.to_string(), "capsule.json".to_string()];
+    assert_eq!(own.as_ref(), Some(&files));
+    assert_eq!(other, &None);
+    assert_eq!(home.runtime.launch_paths_of(capsule), None, "not kept");
+
+    // The same program started by its own CID: no content is held for it.
+    let refusal = home.run(&core, Some(PERSON)).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_start_failed", "{refusal}");
+    let held = seen.lock().unwrap().clone();
+    assert_eq!(held.len(), 2);
+    assert_eq!(held[1].1, None);
 }

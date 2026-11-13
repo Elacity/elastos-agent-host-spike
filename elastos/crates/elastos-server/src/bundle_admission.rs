@@ -9,6 +9,7 @@
 //! these checks in order, for the bundle it was asked for and then for every
 //! bundle that one pins.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -129,6 +130,9 @@ pub enum BundleRefusal {
     /// A bundle of a kind this start knows sits where that kind may not.
     /// The text names the kind and the place.
     MemberKindRefused(String),
+    /// The listing of a content's files would be longer than a launch
+    /// serves. The number is its length in bytes.
+    ContentListingTooLong(usize),
     /// A pin sits deeper than [`CLOSURE_MAX_DEPTH`].
     ClosureTooDeep,
     /// A pin reaches one bundle more than [`CLOSURE_MAX_MEMBERS`].
@@ -168,6 +172,7 @@ impl BundleRefusal {
             BundleRefusal::ContentRequiresInvalid(_) => "bundle_content_requires_invalid",
             BundleRefusal::ViewerCoreInvalid(_) => "bundle_viewer_core_invalid",
             BundleRefusal::MemberKindRefused(_) => "bundle_member_kind_refused",
+            BundleRefusal::ContentListingTooLong(_) => "bundle_content_listing_too_long",
             BundleRefusal::ClosureTooDeep => "bundle_closure_too_deep",
             BundleRefusal::ClosureTooMany => "bundle_closure_too_many",
             BundleRefusal::Requirement { refusal, .. } => refusal.code(),
@@ -226,6 +231,12 @@ impl fmt::Display for BundleRefusal {
             }
             BundleRefusal::ViewerCoreInvalid(why) => write!(f, "{code}: {why}"),
             BundleRefusal::MemberKindRefused(why) => write!(f, "{code}: {why}"),
+            BundleRefusal::ContentListingTooLong(bytes) => {
+                write!(
+                    f,
+                    "{code}: the listing of the content's files is {bytes} bytes"
+                )
+            }
             BundleRefusal::ClosureTooDeep => {
                 write!(f, "{code}: a pin sits below depth {CLOSURE_MAX_DEPTH}")
             }
@@ -515,6 +526,10 @@ pub struct AdmittedBundle {
     /// The entrypoint's bytes as the walk read them: for a program, the
     /// component that may run.
     pub component: Vec<u8>,
+    /// For content, every file the walk read, by its path in the bundle: a
+    /// content launch serves reads from these and not from the store. Empty
+    /// for the other kinds.
+    pub files: BTreeMap<String, Vec<u8>>,
     /// The bundles the manifest pins: requirement name and CID text, in the
     /// manifest's order. Every requirement of the manifest is one of them.
     pub pins: Vec<(String, String)>,
@@ -646,10 +661,18 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
     if let Some(loose) = manifest.requires.iter().find(|it| !pinned(&it.name)) {
         return Err(BundleRefusal::RequirementUnpinned(loose.name.clone()));
     }
+    let walked = bundle.entries().iter();
+    let files = match kind {
+        BundleKind::Content => walked
+            .map(|it| (it.path.clone(), it.content.clone()))
+            .collect(),
+        BundleKind::Program | BundleKind::Page => BTreeMap::new(),
+    };
     Ok(AdmittedBundle {
         component: component.to_vec(),
         manifest,
         kind,
+        files,
         pins,
     })
 }
