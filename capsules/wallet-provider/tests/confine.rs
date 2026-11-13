@@ -13890,6 +13890,36 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         .expect("the provider fixture root must exist");
     fs::write(&files.inside_fixture, files.expected_fixture)
         .expect("the named inside fixture must be writable");
+    // The launched child's mode and the launcher's own install record are read
+    // while that child runs: `launched_seccomp_mode` opens its
+    // `/proc/<pid>/status`, which exists only until the child exits, and every
+    // provider's run ends with `shutdown`. These checks therefore run before
+    // any operation suite sends a request; every later check reads files or
+    // fields that outlive the child.
+    assert_eq!(
+        provider.launched_seccomp_mode(),
+        SECCOMP_MODE_FILTER,
+        "the launched provider must carry SECCOMP_MODE_FILTER in its own /proc status, \
+         so the launcher's pre_exec install is observed"
+    );
+    let [before_install, after_install] = provider
+        .seccomp_launch_answers
+        .expect("the launcher must report its own install's before and after answers");
+    eprintln!("launcher marker: before {before_install}, after {after_install}");
+    assert_ne!(
+        before_install, after_install,
+        "an inherited filter alone must not satisfy the launcher's own install"
+    );
+    assert_eq!(
+        after_install,
+        -i64::from(SECCOMP_DENY_ERRNO),
+        "this launcher's install must supply the deny marker"
+    );
+    assert!(
+        profile_dir_entries(&profile_dir).is_empty(),
+        "a seccomp start writes no profile: {}",
+        profile_dir.display()
+    );
     // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
     // the provider wrote it: wallet's `init` writes the random key, and did's
     // `set_nickname` writes the encrypted nickname. The model's `init` creates
@@ -13944,32 +13974,12 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         }
         other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
     };
-    assert_eq!(
-        provider.launched_seccomp_mode(),
-        SECCOMP_MODE_FILTER,
-        "the launched provider must carry SECCOMP_MODE_FILTER in its own /proc status, \
-         so the launcher's pre_exec install is observed"
-    );
-    let [before_install, after_install] = provider
-        .seccomp_launch_answers
-        .expect("the launcher must report its own install's before and after answers");
-    eprintln!("launcher marker: before {before_install}, after {after_install}");
-    assert_ne!(
-        before_install, after_install,
-        "an inherited filter alone must not satisfy the launcher's own install"
-    );
-    assert_eq!(
-        after_install,
-        -i64::from(SECCOMP_DENY_ERRNO),
-        "this launcher's install must supply the deny marker"
-    );
-    assert!(
-        profile_dir_entries(&profile_dir).is_empty(),
-        "a seccomp start writes no profile: {}",
-        profile_dir.display()
-    );
-    // did's `shutdown` is its tenth operation and already ended it above, so
-    // only the wallet and model callers shut their provider down here.
+    // did's `shutdown` is its tenth operation inside
+    // `did_standin_linux_only_operations`; wallet and model send theirs here.
+    // Either way it is the last request: the mode read above already observed
+    // the live child, and `ConfinedProvider::shutdown` waits for the child's
+    // exit and asserts its status is 0, so the answer and its effect are both
+    // shown.
     if name != DID_PROVIDER {
         provider.shutdown();
     }
