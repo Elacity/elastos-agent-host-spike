@@ -2178,12 +2178,14 @@ fn an_owner_root_protection_the_agent_file_does_not_store_opens_nothing() {
 #[test]
 fn with_the_feature_off_the_owner_load_carries_no_agent_record() {
     let home = Home::new();
-    let caller = home.caller();
-    let agent_id = plant_enabled_home_with_one_agent(
-        home.path(),
-        caller.principal_id,
-        caller.proof_binding_id,
-    );
+    // The agent file is written directly, with no writer and no audit append:
+    // this row is about the owner's load, and its setup must not itself save
+    // what the load would merge.
+    turn_on(&home);
+    home.plant(&as_json(&enabled_file(vec![stored_agent(
+        OWNER_ID, AGENT_A,
+    )])));
+    let agent_id = AGENT_A.to_string();
     let state = crate::auth::load_auth_state(home.path()).unwrap();
     assert_eq!(state.principals.len(), 1, "{:?}", state.principals);
     assert!(state
