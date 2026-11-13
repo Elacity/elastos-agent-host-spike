@@ -9,6 +9,7 @@
     "elastos/crates/elastos-server/src/capsule_cmd.rs",
     "elastos/crates/elastos-server/src/resource_bridge.rs",
     "elastos/crates/elastos-server/src/provider_resource.rs",
+    "elastos/crates/elastos-server/src/page_launch.rs",
     "elastos/crates/elastos-compute/src/providers/component.rs",
     "elastos/crates/elastos-server/src/component.rs",
     "elastos/crates/elastos-server/src/bundle_admission.rs",

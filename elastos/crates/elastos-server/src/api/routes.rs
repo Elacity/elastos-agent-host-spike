@@ -1289,3 +1289,169 @@ mod tests {
         assert_eq!(error.1, "an agent launch needs this Home's data directory");
     }
 }
+
+/// `POST /api/launch/open` (shell only), `{cid}`: start the content at `cid`
+/// for the person whose Home launch grant the shell carries, and keep its launch
+/// for the page it pins (`page_launch.rs`). Answers the launch's id and the
+/// page's name; a refusal names its reason.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenLaunchRequest {
+    cid: String,
+}
+
+#[derive(Serialize)]
+pub struct OpenLaunchResponse {
+    id: String,
+    page: String,
+}
+
+pub async fn open_launch(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    Extension(data_dir): Extension<Option<std::path::PathBuf>>,
+    headers: HeaderMap,
+    Json(req): Json<OpenLaunchRequest>,
+) -> Result<Json<OpenLaunchResponse>, (StatusCode, String)> {
+    use crate::page_launch::OpenRefusal;
+    let data_dir = data_dir.ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no data folder for launches".to_string(),
+    ))?;
+    let person = super::gateway::require_internal_shell_launch_grant_for_any_context(
+        &data_dir,
+        &headers,
+        &[super::gateway::HOME_CAPSULE_ID],
+    )
+    .map_err(|err| (StatusCode::UNAUTHORIZED, err.to_string()))?;
+    match runtime
+        .open_for_page(&data_dir, &req.cid, person.principal_id())
+        .await
+    {
+        Ok(opened) => Ok(Json(OpenLaunchResponse {
+            id: opened.id,
+            page: opened.page,
+        })),
+        Err(OpenRefusal::Start(refusal)) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("{}: {refusal}", refusal.code()),
+        )),
+        Err(OpenRefusal::NotContent) => Err((StatusCode::BAD_REQUEST, "not_content".into())),
+        Err(OpenRefusal::TooManyOpen) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_open_launches".into(),
+        )),
+        Err(OpenRefusal::NoPrincipal) => Err((StatusCode::UNAUTHORIZED, "no_principal".into())),
+        Err(OpenRefusal::TooManyInFlight) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too_many_opens_in_flight".into(),
+        )),
+        Err(OpenRefusal::OpenFailed) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "kept_launch_open_failed".into(),
+        )),
+        Err(OpenRefusal::PlaceLost) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "kept_launch_place_lost".into(),
+        )),
+        Err(OpenRefusal::TooManyInAll) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too_many_kept_launches".into(),
+        )),
+    }
+}
+
+/// Who reads a kept launch: the page's own launch token, bound to
+/// `elastos://launch/<id>` with the page the launch was kept for as its
+/// executable, gives the person. Nothing else does.
+fn kept_launch_reader(
+    runtime: &Runtime,
+    data_dir: Option<&std::path::Path>,
+    headers: &HeaderMap,
+    id: &str,
+) -> Option<(String, String)> {
+    let page = runtime.kept_launch_page(id)?;
+    let bound = format!("elastos://launch/{id}");
+    let token = super::gateway::require_internal_shell_projection_context(
+        data_dir?, headers, &bound, &page,
+    )
+    .ok()?;
+    Some((token.principal_id().to_string(), page))
+}
+
+/// The answer to a read of a kept launch: its bytes, never stored by the
+/// reader, or `not_found` for anything else alike.
+fn kept_launch_answer(bytes: Option<Vec<u8>>) -> axum::response::Response {
+    match bytes {
+        Some(bytes) => (
+            StatusCode::OK,
+            [
+                ("content-type", "application/octet-stream"),
+                ("cache-control", "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "not_found").into_response(),
+    }
+}
+
+/// `GET /api/launch/:id/output/:name` (shell only, with the page's token):
+/// what the program of a kept launch wrote under that one name.
+pub async fn kept_launch_output(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    Extension(data_dir): Extension<Option<std::path::PathBuf>>,
+    axum::extract::Path((id, name)): axum::extract::Path<(String, String)>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let read = kept_launch_reader(&runtime, data_dir.as_deref(), &headers, &id).and_then(
+        |(person, page)| {
+            let what = crate::page_launch::KeptRead::Output(&name);
+            runtime.read_kept_launch(&id, &person, &page, what)
+        },
+    );
+    kept_launch_answer(read)
+}
+
+/// `GET /api/launch/:id/content/*path` (shell only, with the page's token):
+/// the content's file at exactly that path, under the path rule of
+/// `page_launch.rs`.
+pub async fn kept_launch_content(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    Extension(data_dir): Extension<Option<std::path::PathBuf>>,
+    axum::extract::Path((id, path)): axum::extract::Path<(String, String)>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let read = kept_launch_reader(&runtime, data_dir.as_deref(), &headers, &id).and_then(
+        |(person, page)| {
+            let what = crate::page_launch::KeptRead::Content(&path);
+            runtime.read_kept_launch(&id, &person, &page, what)
+        },
+    );
+    kept_launch_answer(read)
+}
+
+/// Tokens for the kept-launch tests, minted as the gateway mints them.
+#[cfg(test)]
+pub(crate) mod kept_launch_test_tokens {
+    /// The person's own Home token.
+    pub(crate) fn home(data_dir: &std::path::Path) -> String {
+        let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
+        super::super::gateway::issue_home_launch_token_with_context(data_dir, "home", &context)
+            .unwrap()
+    }
+
+    /// A page's token bound to `resource`, with `page` as its executable.
+    pub(crate) fn page(data_dir: &std::path::Path, resource: &str, page: &str) -> String {
+        let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
+        super::super::gateway::issue_home_projection_launch_token_with_context(
+            data_dir, resource, page, &context,
+        )
+        .unwrap()
+    }
+
+    /// The person these tokens are for.
+    pub(crate) fn person(data_dir: &std::path::Path) -> String {
+        let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
+        context.principal_id().to_string()
+    }
+}

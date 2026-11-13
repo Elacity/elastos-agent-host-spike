@@ -1005,7 +1005,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         let body = &source[source.find(signature).unwrap()..];
         &body[..body.find("\n    }\n").unwrap()]
     };
-    let start = body_of("pub(crate) async fn run_by_bundle_observed(");
+    let start = body_of("pub(crate) async fn start_by_bundle(");
     let member = body_of("async fn admit_closure_member(");
     let walk = ["checked_bundle", "_within("].concat();
     assert_eq!(start.matches(&walk).count(), 0);
@@ -1087,6 +1087,30 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         .collect();
     callers.sort();
     assert_eq!(callers, ["bundle_start_tests.rs", "runtime.rs"]);
+    // The start itself is called by the observed form and by the open for a
+    // page, and nowhere else; the open hands over the same one budget.
+    let start_itself = ["start_by", "_bundle("].concat();
+    let mut callers: Vec<String> = files
+        .iter()
+        .filter(|path| {
+            fs::read_to_string(path)
+                .expect("read")
+                .contains(&start_itself)
+        })
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    callers.sort();
+    assert_eq!(
+        callers,
+        ["bundle_start_tests.rs", "page_launch.rs", "runtime.rs"]
+    );
+    let open = include_str!("page_launch.rs");
+    assert_eq!(open.matches(&start_itself).count(), 1);
+    assert_eq!(
+        open.matches("let budget = crate::bundle_admission::BUNDLE_WALK_BUDGET;")
+            .count(),
+        1
+    );
     for body in [start, member] {
         for never in [
             "fs::read",
@@ -2472,4 +2496,607 @@ async fn a_cancelled_start_takes_the_launchs_content_away() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert_eq!(*looked.lock().unwrap(), [Some(files), None]);
+}
+
+/// A photo set as the start tests stage one: content pinning a page pinning a
+/// quiet core that asks for nothing, so the start ends well. Returns the
+/// content's CID and its manifest's text.
+async fn staged_quiet_set(home: &Home, publisher: &SigningKey, picture: &[u8]) -> (String, String) {
+    let core = home
+        .staged("core", &manifest("core"), &quiet_component(), publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", publisher).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let cid = home.staged("pictures", &content, picture, publisher).await;
+    (cid, content)
+}
+
+/// D1a-keep. A launch opened for its page is kept after its start is over,
+/// under an id of its own, for the person who opened it and the page the
+/// content pins; it is read for them only, one output name or one content
+/// file at a time, and for nobody else: another person, another page, an id
+/// that is not kept. The program's own hold ended with its start.
+#[tokio::test]
+async fn a_launch_opened_for_its_page_is_kept_and_read_for_that_person_and_page() {
+    let publisher = key(90);
+    let home = Home::trusting(&[&publisher]).await;
+    let picture = b"the bytes of a picture".to_vec();
+    let (cid, content) = staged_quiet_set(&home, &publisher, &picture).await;
+
+    let opened = home
+        .runtime
+        .open_for_page(&home.data(), &cid, PERSON)
+        .await
+        .unwrap();
+    assert_eq!(opened.page, "page");
+    assert_eq!(opened.id.len(), 32);
+    assert_eq!(home.runtime.kept_launch_count(), 1);
+    home.runtime
+        .write_kept_output(&opened.id, "playlist.json", b"{\"items\":[]}");
+
+    let read = |id: &str, person: &str, page: &str, what| {
+        home.runtime.read_kept_launch(id, person, page, what)
+    };
+    use crate::page_launch::KeptRead::{Content, Output};
+    assert_eq!(
+        read(&opened.id, PERSON, "page", Content(ENTRYPOINT)),
+        Some(picture.clone())
+    );
+    assert_eq!(
+        read(&opened.id, PERSON, "page", Content("capsule.json")),
+        Some(content.into_bytes())
+    );
+    assert_eq!(
+        read(&opened.id, PERSON, "page", Output("playlist.json")),
+        Some(b"{\"items\":[]}".to_vec())
+    );
+    assert_eq!(read(&opened.id, PERSON, "page", Output("other.json")), None);
+    assert_eq!(
+        read(&opened.id, PERSON, "page", Content("images/none.png")),
+        None
+    );
+    assert_eq!(
+        read(
+            &opened.id,
+            "person:local:another",
+            "page",
+            Content(ENTRYPOINT)
+        ),
+        None
+    );
+    assert_eq!(
+        read(&opened.id, PERSON, "another-page", Content(ENTRYPOINT)),
+        None
+    );
+    assert_eq!(
+        read(&"0".repeat(32), PERSON, "page", Content(ENTRYPOINT)),
+        None
+    );
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
+/// D1a-paths. A content file is read at a plain path only, looked up as text:
+/// the bare name (the listing), a leading `/`, an empty, `.` or `..` part and a
+/// backslash are refused; an output name with a `/` is refused.
+#[tokio::test]
+async fn a_kept_launch_is_read_at_plain_paths_only() {
+    let publisher = key(91);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let opened = home
+        .runtime
+        .open_for_page(&home.data(), &cid, PERSON)
+        .await
+        .unwrap();
+    use crate::page_launch::KeptRead::{Content, Output};
+    let read = |what| {
+        home.runtime
+            .read_kept_launch(&opened.id, PERSON, "page", what)
+    };
+    assert!(read(Content(ENTRYPOINT)).is_some(), "the control");
+    for path in [
+        "",
+        "/capsule.json",
+        "./capsule.json",
+        "x/../capsule.json",
+        "..",
+        "a//capsule.json",
+        "capsule.json/",
+        "a\\capsule.json",
+    ] {
+        assert_eq!(read(Content(path)), None, "{path:?}");
+    }
+    home.runtime
+        .write_kept_output(&opened.id, "playlist.json", b"[]");
+    assert!(read(Output("playlist.json")).is_some(), "the control");
+    for name in ["../playlist.json", "x/playlist.json", "/playlist.json"] {
+        assert_eq!(read(Output(name)), None, "{name:?}");
+    }
+    for (path, plain) in [
+        ("a", true),
+        ("images/01.png", true),
+        ("", false),
+        ("/a", false),
+        ("a/./b", false),
+        ("a/../b", false),
+        ("..", false),
+        ("a//b", false),
+        ("a/", false),
+        ("a\\b", false),
+    ] {
+        assert_eq!(
+            crate::page_launch::plain_content_path(path),
+            plain,
+            "{path:?}"
+        );
+    }
+}
+
+/// D1a-bounds. One person keeps at most eight launches: the ninth open is
+/// refused before anything runs, and nothing kept is dropped for it; another
+/// person still opens. A kept launch goes when its time is up, and then reads
+/// as nothing and frees its place.
+#[tokio::test]
+async fn a_person_keeps_eight_launches_and_each_goes_when_its_time_is_up() {
+    let publisher = key(92);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let data = home.data();
+    let open = |person: &'static str| home.runtime.open_for_page(&data, &cid, person);
+    let mut ids = Vec::new();
+    for _ in 0..crate::page_launch::KEPT_PER_PRINCIPAL {
+        ids.push(open(PERSON).await.unwrap().id);
+    }
+    let ninth = open(PERSON).await.unwrap_err();
+    assert!(
+        matches!(ninth, crate::page_launch::OpenRefusal::TooManyOpen),
+        "{ninth:?}"
+    );
+    // Refused before the start: even a CID that would be refused by the
+    // start is answered as the ninth.
+    let ninth = home
+        .runtime
+        .open_for_page(&data, "not-a-cid", PERSON)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(ninth, crate::page_launch::OpenRefusal::TooManyOpen),
+        "{ninth:?}"
+    );
+    assert_eq!(home.runtime.kept_launch_count(), 8);
+    open("person:local:another").await.unwrap();
+    assert_eq!(home.runtime.kept_launch_count(), 9);
+
+    home.runtime.expire_kept_launches();
+    use crate::page_launch::KeptRead::Content;
+    assert_eq!(
+        home.runtime
+            .read_kept_launch(&ids[0], PERSON, "page", Content(ENTRYPOINT)),
+        None
+    );
+    assert_eq!(home.runtime.kept_launch_count(), 0);
+    open(PERSON).await.unwrap();
+}
+
+/// D1a-what. Only content is kept for a page: a program started by its own
+/// CID is refused as not content, and a start that is refused keeps nothing
+/// and says why. No person: refused before anything runs.
+#[tokio::test]
+async fn only_a_started_content_is_kept_for_its_page() {
+    let publisher = key(93);
+    let home = Home::trusting(&[&publisher]).await;
+    let program = home
+        .staged("core", &manifest("core"), &quiet_component(), &publisher)
+        .await;
+    let open = |cid: String, person: &'static str| {
+        let data = home.data();
+        let runtime = home.runtime.clone();
+        async move { runtime.open_for_page(&data, &cid, person).await }
+    };
+    let refusal = open(program, PERSON).await.unwrap_err();
+    assert!(
+        matches!(refusal, crate::page_launch::OpenRefusal::NotContent),
+        "{refusal:?}"
+    );
+    let refusal = open("not-a-cid".to_string(), PERSON).await.unwrap_err();
+    assert!(
+        matches!(&refusal, crate::page_launch::OpenRefusal::Start(start) if start.code() == "bundle_cid_form_invalid"),
+        "{refusal:?}"
+    );
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let refusal = open(cid, " ").await.unwrap_err();
+    assert!(
+        matches!(refusal, crate::page_launch::OpenRefusal::NoPrincipal),
+        "{refusal:?}"
+    );
+    assert_eq!(home.runtime.kept_launch_count(), 0);
+}
+
+/// D1a-api. Through the Runtime API: the person's Home token opens the
+/// content by its CID; the page's own token, bound to that launch with that
+/// page as its executable, reads the output and a file, never to be stored.
+/// Anything else alike is `not_found`: no token, the person's Home token, a
+/// page token bound to another launch or naming another page, a path that is
+/// not plain, an id that is not kept. A program, not content, is not opened.
+/// (The routes sit behind the shell-only layers in `api/server.rs`.)
+#[tokio::test]
+async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
+    use crate::api::routes::kept_launch_test_tokens as tokens;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use tower::ServiceExt;
+    let publisher = key(94);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let data = home.data();
+    let app = axum::Router::new()
+        .route("/api/launch/open", post(crate::api::routes::open_launch))
+        .route(
+            "/api/launch/:id/output/:name",
+            get(crate::api::routes::kept_launch_output),
+        )
+        .route(
+            "/api/launch/:id/content/*path",
+            get(crate::api::routes::kept_launch_content),
+        )
+        .layer(axum::Extension(Some(data.clone())))
+        .layer(axum::Extension(home.runtime.clone()));
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let answer = app.oneshot(request).await.unwrap();
+            let status = answer.status();
+            let store = answer.headers().get("cache-control").cloned();
+            let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, store, body.to_vec())
+        }
+    };
+    let open = |cid: &str, token: Option<String>| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/launch/open")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("x-elastos-home-token", token);
+        }
+        request
+            .body(Body::from(serde_json::json!({"cid": cid}).to_string()))
+            .unwrap()
+    };
+    let (status, _, _) = send(open(&cid, None)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "no Home token, nothing opened"
+    );
+    assert_eq!(home.runtime.kept_launch_count(), 0);
+    let (status, _, body) = send(open(&cid, Some(tokens::home(&data)))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let opened: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let (id, page) = (
+        opened["id"].as_str().unwrap(),
+        opened["page"].as_str().unwrap(),
+    );
+    assert_eq!(page, "page");
+    home.runtime.write_kept_output(id, "playlist.json", b"[1]");
+
+    let read = |uri: String, token: Option<String>| {
+        let mut request = Request::builder().uri(uri);
+        if let Some(token) = token {
+            request = request.header("x-elastos-home-token", token);
+        }
+        request.body(Body::empty()).unwrap()
+    };
+    let own = || {
+        Some(tokens::page(
+            &data,
+            &format!("elastos://launch/{id}"),
+            "page",
+        ))
+    };
+    let (status, store, body) = send(read(
+        format!("/api/launch/{id}/output/playlist.json"),
+        own(),
+    ))
+    .await;
+    assert_eq!((status, body), (StatusCode::OK, b"[1]".to_vec()));
+    assert_eq!(store.unwrap(), "no-store");
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        own(),
+    ))
+    .await;
+    assert_eq!((status, body), (StatusCode::OK, b"a picture".to_vec()));
+
+    let other = "0".repeat(32);
+    for (uri, token) in [
+        (format!("/api/launch/{id}/content/{ENTRYPOINT}"), None),
+        (
+            format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+            Some(tokens::home(&data)),
+        ),
+        (
+            format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+            Some(tokens::page(
+                &data,
+                &format!("elastos://launch/{other}"),
+                "page",
+            )),
+        ),
+        (
+            format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+            Some(tokens::page(
+                &data,
+                &format!("elastos://launch/{id}"),
+                "another-page",
+            )),
+        ),
+        (
+            format!("/api/launch/{id}/content/x%2F..%2Fcapsule.json"),
+            own(),
+        ),
+        (format!("/api/launch/{id}/output/other.json"), own()),
+        (format!("/api/launch/{other}/content/{ENTRYPOINT}"), own()),
+    ] {
+        let (status, _, body) = send(read(uri.clone(), token)).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::NOT_FOUND, b"not_found".to_vec()),
+            "{uri}"
+        );
+    }
+
+    let program = home
+        .staged("core", &manifest("core"), &quiet_component(), &publisher)
+        .await;
+    let (status, _, body) = send(open(&program, Some(tokens::home(&data)))).await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::BAD_REQUEST, b"not_content".to_vec())
+    );
+    assert!(!tokens::person(&data).is_empty());
+}
+
+/// D1a-all. The Runtime keeps at most sixteen launches for everyone together:
+/// two people fill it, a third person's open is refused as the Runtime's,
+/// nothing kept is dropped for it, and when the time is up it opens.
+#[tokio::test]
+async fn the_runtime_keeps_sixteen_launches_for_everyone_together() {
+    use crate::page_launch::{OpenRefusal, KEPT_IN_ALL, KEPT_PER_PRINCIPAL};
+    let publisher = key(95);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let data = home.data();
+    let open = |person: &'static str| home.runtime.open_for_page(&data, &cid, person);
+    assert_eq!(KEPT_IN_ALL, 2 * KEPT_PER_PRINCIPAL);
+    for person in [PERSON, "person:local:second"] {
+        for _ in 0..KEPT_PER_PRINCIPAL {
+            open(person).await.unwrap();
+        }
+    }
+    let third = open("person:local:third").await.unwrap_err();
+    assert!(matches!(third, OpenRefusal::TooManyInAll), "{third:?}");
+    assert_eq!(home.runtime.kept_launch_count(), KEPT_IN_ALL);
+    home.runtime.expire_kept_launches();
+    open("person:local:third").await.unwrap();
+}
+
+/// D1a-place. An open takes its place before its start runs, and the place
+/// counts at once: with eight places taken and no start run, the next open is
+/// refused before its start (a CID the start would refuse is answered as the
+/// ninth). A place no launch fills reads as nothing. A place is given back
+/// when its start is refused or what started is not content, so failed opens
+/// leave nothing behind. Nine opens at once keep exactly eight.
+#[tokio::test]
+async fn a_place_is_taken_before_the_start_and_given_back_when_no_launch_fills_it() {
+    use crate::page_launch::{
+        take_place, KeptRead, OpenRefusal, KEPT_PER_PRINCIPAL, OPENS_IN_FLIGHT,
+    };
+    let publisher = key(96);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let program = home
+        .staged("core", &manifest("core"), &quiet_component(), &publisher)
+        .await;
+    let data = home.data();
+    let runtime = &home.runtime;
+
+    // Four launches kept, and four places taken by hand with no start run:
+    // the person is full, and so are the opens in flight.
+    for _ in 0..KEPT_PER_PRINCIPAL - OPENS_IN_FLIGHT {
+        runtime.open_for_page(&data, &cid, PERSON).await.unwrap();
+    }
+    let places: Vec<_> = (0..OPENS_IN_FLIGHT)
+        .map(|_| take_place(&runtime.page_launches, PERSON).unwrap())
+        .collect();
+    let refused = runtime
+        .open_for_page(&data, "not-a-cid", PERSON)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, OpenRefusal::TooManyOpen), "{refused:?}");
+    // A place whose start is still running does not expire: only a filled
+    // place does, 15 minutes after it was filled. The four kept launches go;
+    // the four places stay, and the next open meets the opens in flight.
+    runtime.expire_kept_launches();
+    assert_eq!(
+        runtime.kept_launch_count(),
+        OPENS_IN_FLIGHT,
+        "unfilled places do not expire"
+    );
+    let refused = runtime
+        .open_for_page(&data, "not-a-cid", PERSON)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, OpenRefusal::TooManyInFlight),
+        "{refused:?}"
+    );
+    let (id, page) = (places[0].id().to_string(), "");
+    assert_eq!(
+        runtime.kept_launch_page(&id),
+        None,
+        "a place no launch fills"
+    );
+    assert_eq!(
+        runtime.read_kept_launch(&id, PERSON, page, KeptRead::Content(ENTRYPOINT)),
+        None
+    );
+    drop(places);
+    assert_eq!(runtime.kept_launch_count(), 0, "the places went back");
+
+    for _ in 0..3 * KEPT_PER_PRINCIPAL {
+        let refused = runtime
+            .open_for_page(&data, "not-a-cid", PERSON)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, OpenRefusal::Start(_)), "{refused:?}");
+        let refused = runtime
+            .open_for_page(&data, &program, PERSON)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, OpenRefusal::NotContent), "{refused:?}");
+    }
+    assert_eq!(runtime.kept_launch_count(), 0, "failed opens left nothing");
+
+    let mut opens = tokio::task::JoinSet::new();
+    for _ in 0..=KEPT_PER_PRINCIPAL {
+        let (runtime, data, cid) = (runtime.clone(), data.clone(), cid.clone());
+        opens.spawn(async move { runtime.open_for_page(&data, &cid, PERSON).await });
+    }
+    let opened: Vec<_> = opens.join_all().await;
+    // However the nine interleave: at most eight are kept, each refusal is
+    // the person's cap or the opens in flight, and what was answered as
+    // kept is exactly what the table holds.
+    let kept = opened.iter().filter(|open| open.is_ok()).count();
+    assert!((1..=KEPT_PER_PRINCIPAL).contains(&kept), "{kept} kept");
+    assert!(opened.iter().all(|open| matches!(
+        open,
+        Ok(_) | Err(OpenRefusal::TooManyOpen | OpenRefusal::TooManyInFlight)
+    )));
+    assert_eq!(runtime.kept_launch_count(), kept);
+}
+
+/// D1a-in-flight. At most four opens run their starts at once, for everyone
+/// together: with four places taken by four people and no start back, a
+/// fifth person's open is refused before its start, while a launch already
+/// kept is still read; one place given back, the fifth person opens. (A start
+/// that never comes back would hold its place like these: the cap bounds how
+/// many places that can take.)
+#[tokio::test]
+async fn at_most_four_opens_run_their_starts_at_once() {
+    use crate::page_launch::{take_place, KeptRead, OpenRefusal, OPENS_IN_FLIGHT};
+    let publisher = key(97);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let data = home.data();
+    let runtime = &home.runtime;
+    let fifth = "person:local:fifth";
+    let kept = runtime.open_for_page(&data, &cid, fifth).await.unwrap();
+
+    let people = [
+        "person:local:a",
+        "person:local:b",
+        "person:local:c",
+        "person:local:d",
+    ];
+    assert_eq!(people.len(), OPENS_IN_FLIGHT);
+    let mut places: Vec<_> = people
+        .iter()
+        .map(|person| take_place(&runtime.page_launches, person).unwrap())
+        .collect();
+    let refused = runtime.open_for_page(&data, &cid, fifth).await.unwrap_err();
+    assert!(
+        matches!(refused, OpenRefusal::TooManyInFlight),
+        "{refused:?}"
+    );
+    let read = runtime.read_kept_launch(&kept.id, fifth, "page", KeptRead::Content(ENTRYPOINT));
+    assert_eq!(
+        read,
+        Some(b"a picture".to_vec()),
+        "a kept launch is still read"
+    );
+
+    places.pop();
+    runtime.open_for_page(&data, &cid, fifth).await.unwrap();
+    assert_eq!(runtime.kept_launch_count(), 2 + OPENS_IN_FLIGHT - 1);
+}
+
+/// D1a-dropped. A request dropped part way through its start (the caller gone)
+/// does not give its place back early: the start runs on in the open's own
+/// task, its place stays taken and counts among the opens in flight, so the
+/// count never goes over four; the place goes back only when the start does.
+#[tokio::test]
+async fn a_dropped_open_keeps_its_place_until_its_start_returns() {
+    use crate::page_launch::{take_place, OpenRefusal, OPENS_IN_FLIGHT};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let publisher = key(98);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let core = manifest_with("core", "asks", asks);
+    let core = home
+        .staged("core", &core, &calling_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let cid = home
+        .staged("pictures", &content, b"a picture", &publisher)
+        .await;
+
+    // The bridge's answer to the core's one call: held until the test lets
+    // it go, and at most ten seconds, so a test that fails does not hang.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    let reached = Arc::new(AtomicBool::new(false));
+    let seen = reached.clone();
+    home.runtime
+        .set_bridge_hostcall(Arc::new(move |_line, _capsule, _principal| {
+            seen.store(true, Ordering::SeqCst);
+            let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            Err("the test's bridge handler let go".to_string())
+        }));
+
+    let data = home.data();
+    let runtime = &home.runtime;
+    // The request, dropped at the end of this block.
+    {
+        let open = runtime.open_for_page(&data, &cid, PERSON);
+        tokio::pin!(open);
+        let in_the_call = async {
+            while !reached.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            done = &mut open => panic!("the open ended before its call: {done:?}"),
+            () = in_the_call => {}
+        }
+    }
+    assert_eq!(runtime.kept_launch_count(), 1, "the place stays taken");
+    let places: Vec<_> = (1..OPENS_IN_FLIGHT)
+        .map(|n| take_place(&runtime.page_launches, &format!("person:local:{n}")).unwrap())
+        .collect();
+    let refused = take_place(&runtime.page_launches, "person:local:last").err();
+    assert!(
+        matches!(refused, Some(OpenRefusal::TooManyInFlight)),
+        "{refused:?}"
+    );
+
+    release.send(()).unwrap();
+    for _ in 0..1000 {
+        if runtime.kept_launch_count() == places.len() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        runtime.kept_launch_count(),
+        places.len(),
+        "the place went back when the start did"
+    );
 }

@@ -590,6 +590,30 @@ pub(crate) fn require_internal_shell_launch_grant_for_any_context(
     .map(|required| required.context)
 }
 
+/// A page's launch token carried by the shell to the Runtime (no browser
+/// provenance on the request), bound to exactly `selected_resource` with
+/// `executable_actor` as its executable.
+pub(crate) fn require_internal_shell_projection_context(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+    selected_resource: &str,
+    executable_actor: &str,
+) -> anyhow::Result<HomeLaunchTokenContext> {
+    let required = require_home_launch_token_for_any_from_with_origin(
+        data_dir,
+        headers,
+        &[executable_actor],
+        None,
+        HomeLaunchOriginPolicy::InternalShell,
+    )?;
+    if required.launch_context.selected_resource != selected_resource
+        || required.launch_context.executable_actor != executable_actor
+    {
+        anyhow::bail!("home launch token projection authority mismatch");
+    }
+    Ok(required.context)
+}
+
 pub(crate) fn require_home_token(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
