@@ -966,9 +966,11 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
 /// by CID judges a bundle's manifest, which the pin above holds to after
 /// that bundle's CID and signature checks. The Runtime's reader of pins
 /// still hands out no manifest (its own test, in the common crate, is as it
-/// was). What comes out is the manifest exactly as the ordinary type reads
-/// the same text without the pin, beside the pins; the bundle's own bytes
-/// are not changed. (The needle is split so that this file is not counted.)
+/// was). What comes out is the manifest as the ordinary type reads the same
+/// text with every `cid` left out, beside the pins: shown for one pin on the
+/// base manifest and for two pins on a manifest that sets every key the
+/// start takes. The bundle's own bytes are not changed. (The needle is
+/// split so that this file is not counted.)
 #[test]
 fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
     use crate::bundle_admission::admit_bundle_manifest;
@@ -1008,17 +1010,74 @@ fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
         admitted.pins,
         [("needed".to_string(), ASKS_NOTHING_CID.to_string())]
     );
-    let without_the_pin = manifest_with(
-        "pinning",
-        "requires",
-        serde_json::json!([{"name": "needed", "kind": "capsule"}]),
-    );
-    let ordinary: elastos_common::CapsuleManifest = serde_json::from_str(&without_the_pin).unwrap();
-    assert_eq!(
-        serde_json::to_value(&admitted.manifest).unwrap(),
-        serde_json::to_value(&ordinary).unwrap()
-    );
+    // The expected manifest is the tested text itself, read by the ordinary
+    // type once every requirement's `cid` is left out of it.
+    let without_the_pins = |text: &str| -> elastos_common::CapsuleManifest {
+        let mut value: serde_json::Value = serde_json::from_str(text).unwrap();
+        for requirement in value["requires"].as_array_mut().unwrap() {
+            let fields = requirement.as_object_mut().unwrap();
+            fields.retain(|key, _| key != "cid");
+        }
+        serde_json::from_value(value).unwrap()
+    };
+    let same = |admitted: &elastos_common::CapsuleManifest, text: &str| {
+        assert_eq!(
+            serde_json::to_value(admitted).unwrap(),
+            serde_json::to_value(without_the_pins(text)).unwrap()
+        );
+    };
+    same(&admitted.manifest, &pinning);
     assert_eq!(walked.entry("capsule.json").unwrap(), pinning.as_bytes());
+
+    // A manifest with two pins and a value under every key the start takes.
+    let other = "bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q";
+    let mut full: serde_json::Value = serde_json::from_str(&manifest("full")).unwrap();
+    let keys = full.as_object_mut().unwrap();
+    keys.insert("description".into(), serde_json::json!("every allowed key"));
+    keys.insert("author".into(), serde_json::json!("a test"));
+    keys.insert("projections".into(), serde_json::json!(["cli", "web"]));
+    keys.insert("window_policy".into(), serde_json::json!("multiple"));
+    keys.insert("icon".into(), serde_json::json!("icons"));
+    keys.insert("resources".into(), serde_json::json!({"memory_mb": 64}));
+    keys.insert(
+        "requires".into(),
+        serde_json::json!([
+            {"name": "first", "kind": "capsule", "cid": ASKS_NOTHING_CID},
+            {"name": "second", "kind": "capsule", "cid": other}
+        ]),
+    );
+    for key in BUNDLE_MANIFEST_KEYS {
+        assert!(keys.contains_key(key), "{key} is not set in this row");
+    }
+    let walk_of = |name: &str, text: &str| {
+        let folder = dir.path().join(name);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("capsule.json"), text).unwrap();
+        fs::write(folder.join(ENTRYPOINT), quiet_component()).unwrap();
+        walk(&folder, BUNDLE_WALK_BUDGET)
+    };
+    let text = full.to_string();
+    let admitted = admit_bundle_manifest(&walk_of("full", &text).unwrap()).unwrap();
+    let pins = [("first", ASKS_NOTHING_CID), ("second", other)];
+    assert_eq!(
+        admitted.pins,
+        pins.map(|(name, cid)| (name.to_string(), cid.to_string()))
+    );
+    same(&admitted.manifest, &text);
+
+    // Two things the conversion never sees. A manifest that pins and also
+    // has `asks` is refused by name before it; one with a key the manifest
+    // type does not know is refused by the walk.
+    full["asks"] = serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]);
+    let with_asks = walk_of("with-asks", &full.to_string()).unwrap();
+    assert_eq!(
+        admit_bundle_manifest(&with_asks).unwrap_err().to_string(),
+        "bundle_manifest_field_refused: asks"
+    );
+    full.as_object_mut().unwrap().remove("asks");
+    full["no_such_key"] = serde_json::json!(true);
+    let refusal = walk_of("unknown-key", &full.to_string()).unwrap_err();
+    assert!(refusal.to_string().contains("no_such_key"), "{refusal}");
 }
 
 /// C-walk, the control. A bundle that pins staged bundles starts, and it is
