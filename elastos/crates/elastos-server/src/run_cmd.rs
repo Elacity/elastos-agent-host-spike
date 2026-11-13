@@ -90,7 +90,9 @@ pub async fn run_capsule(
 }
 
 /// `elastos run --bundle <cid>`: start a bundle from this Home's store of
-/// bundles named by CID. The Runtime is made as `stage-bundle` makes it, so
+/// bundles named by CID: a program, or content, for which the program of
+/// its viewer starts (the name printed is then that program's, the signer
+/// the content's). The Runtime is made as `stage-bundle` makes it, so
 /// the keys asked are the keys that staging asked. This path fetches nothing
 /// and attaches to no running Runtime, and no bridge handler is installed
 /// here. So a capsule whose manifest has asks has nothing to ask through:

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
-use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleRefusal};
+use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal};
 use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider};
@@ -366,13 +366,20 @@ impl Runtime {
     /// Start the bundle that the Home at `data_dir` holds under the name
     /// `cid`, and return who signed it.
     ///
+    /// The bundle is a program, and it is what starts; or it is content, and
+    /// then what starts is the one program of the page that content pins:
+    /// content pins exactly its viewer, a page, and a page pins exactly its
+    /// program, the core. The content and the page get no instance, and the
+    /// handle returned is the core's. A page is not started by its own CID.
+    /// Under a program only programs may be pinned.
+    ///
     /// Nothing in the store is trusted. The slot is walked again under the
     /// staging limits and must recompute to `cid`; the signature file that is
     /// beside it now must pass the one signature check again, and its signer
     /// is the one returned; the manifest must be one a start by CID takes;
-    /// and the component that is compiled is the bytes that walk read, never
-    /// a second read of the file. A missing slot is a refusal: nothing is
-    /// fetched.
+    /// and the component that is compiled is the bytes the walk of its
+    /// bundle read, never a second read of the file. A missing slot is a
+    /// refusal: nothing is fetched.
     ///
     /// What starts may ask for no more than its own signed manifest asks
     /// for. Its ceiling is filled like every capsule's, from the one bounds
@@ -387,8 +394,9 @@ impl Runtime {
     /// pinned bundle, and every bundle those pin, must be in the store and
     /// pass the same checks, under its own signature and inside the one
     /// walk budget they all share, before anything starts. A pinned bundle
-    /// is checked and nothing more: it is not started, and the capsule that
-    /// starts gets no way to reach it or its bytes. A bundle that two pins
+    /// is checked and nothing more, the core under content aside: it is not
+    /// started, and the capsule that starts gets no way to reach it or its
+    /// bytes, the content's included. A bundle that two pins
     /// reach is checked and counted once. Who is trusted is read once for
     /// the whole start.
     pub async fn run_by_bundle(
@@ -428,46 +436,76 @@ impl Runtime {
         // until the last of them is judged: trust cannot change between two
         // bundles of one start. It is let go before anything is loaded.
         let trust = self.signature_verifier.read().await;
-        let (admitted, accepted) = self
+        let (mut admitted, accepted) = self
             .admit_closure_member(data_dir, &asked, &trust, &mut left, &mut after_walk)
             .await?;
+        // What may sit below the bundle asked for follows from what it is. A
+        // program pins programs. Content pins exactly one bundle, its
+        // viewer, which must be a page. A page is reached through the
+        // content that pins it and is not started by its own CID.
+        let below_root = match (admitted.kind, admitted.pins.len()) {
+            (BundleKind::Program, _) => BundleKind::Program,
+            (BundleKind::Content, 1) => BundleKind::Page,
+            (BundleKind::Content, pins) => return Err(BundleRefusal::ContentRequiresInvalid(pins)),
+            (BundleKind::Page, _) => {
+                return Err(bundle_admission::misplaced(BundleKind::Page, None))
+            }
+        };
         // The bundles it pins, and the ones those pin, in the manifests'
         // order and depth first: each is held to the checks just made, then
-        // to its requirement's name. None is started.
-        let below = |depth: usize, pins: Vec<(String, String)>| {
+        // to its requirement's name and to the kind its place allows. The
+        // flag marks the one program a content's page pins: its core.
+        let below = |depth: usize, kind: BundleKind, core: bool, pins: Vec<(String, String)>| {
             let pins = pins.into_iter().rev();
-            pins.map(move |(name, pin)| (depth + 1, name, pin))
+            pins.map(move |(name, pin)| (depth + 1, kind, core, name, pin))
         };
-        let mut pending: Vec<_> = below(1, admitted.pins).collect();
+        let pins = std::mem::take(&mut admitted.pins);
+        let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
-        // Every bundle admitted so far, by its CID, with the name it carries.
-        let mut names = HashMap::from([(asked.to_string(), admitted.manifest.name.clone())]);
-        while let Some((depth, name, pin)) = pending.pop() {
+        // Every bundle admitted so far, by its CID, with the name it carries
+        // and what it is.
+        let root = (admitted.manifest.name.clone(), admitted.kind);
+        let mut known = HashMap::from([(asked.to_string(), root)]);
+        // What starts: the program asked for or, under content, the core.
+        let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
+        while let Some((depth, expected, core, name, pin)) = pending.pop() {
             let refused = |refusal| BundleRefusal::Requirement {
                 name: name.clone(),
                 refusal: Box::new(refusal),
             };
-            let Ok(pinned) = pin.parse::<LabCid>() else {
-                return Err(refused(BundleRefusal::CidFormInvalid(pin)));
-            };
-            // A bundle reached a second time, through another pin, was
-            // admitted on its first reach. Its name must be this
-            // requirement's too, and that is all: it is not walked or
-            // counted again, and its own pins were followed then.
-            if let Some(known) = names.get(&pinned.to_string()) {
-                if *known != name {
-                    return Err(refused(BundleRefusal::RequirementMismatch(known.clone())));
-                }
-                continue;
-            }
-            members += 1;
+            // No pin sits below the depth limit, whatever it pins: also a
+            // pin on a bundle this start has already admitted higher up.
             if depth > bundle_admission::CLOSURE_MAX_DEPTH {
                 return Err(refused(BundleRefusal::ClosureTooDeep));
             }
+            let Ok(pinned) = pin.parse::<LabCid>() else {
+                return Err(refused(BundleRefusal::CidFormInvalid(pin)));
+            };
+            let placed = |found: BundleKind| match found == expected {
+                true => Ok(()),
+                false if core => Err(BundleRefusal::ViewerCoreInvalid(format!(
+                    "the viewer pins {}, not a program",
+                    bundle_admission::kind_word(found)
+                ))),
+                false => Err(bundle_admission::misplaced(found, Some(expected))),
+            };
+            // A bundle reached a second time, through another pin, was
+            // admitted on its first reach. Its name must be this
+            // requirement's too and its kind what this place allows, and
+            // that is all: it is not walked or counted again, and its own
+            // pins were followed then.
+            if let Some((carried, kind)) = known.get(&pinned.to_string()) {
+                if *carried != name {
+                    return Err(refused(BundleRefusal::RequirementMismatch(carried.clone())));
+                }
+                placed(*kind).map_err(refused)?;
+                continue;
+            }
+            members += 1;
             if members > bundle_admission::CLOSURE_MAX_MEMBERS {
                 return Err(refused(BundleRefusal::ClosureTooMany));
             }
-            let (member, _) = self
+            let (mut member, _) = self
                 .admit_closure_member(data_dir, &pinned, &trust, &mut left, &mut after_walk)
                 .await
                 .map_err(refused)?;
@@ -476,8 +514,25 @@ impl Runtime {
                     member.manifest.name,
                 )));
             }
-            names.insert(pinned.to_string(), member.manifest.name);
-            pending.extend(below(depth, member.pins));
+            placed(member.kind).map_err(refused)?;
+            known.insert(
+                pinned.to_string(),
+                (member.manifest.name.clone(), member.kind),
+            );
+            // A page pins exactly one bundle, its program. Whatever a
+            // program pins is a program.
+            let pins = std::mem::take(&mut member.pins);
+            let page = member.kind == BundleKind::Page;
+            if page && pins.len() != 1 {
+                return Err(refused(BundleRefusal::ViewerCoreInvalid(format!(
+                    "the viewer pins {} bundles, not its one program",
+                    pins.len()
+                ))));
+            }
+            pending.extend(below(depth, BundleKind::Program, page, pins));
+            if core {
+                starts = Some(member);
+            }
         }
         drop(trust);
 
@@ -495,7 +550,12 @@ impl Runtime {
         // below from the one bounds function; for a manifest this start
         // admits that is the asks and nothing else, because `asks` is the
         // one field on the key list that function reads.
-        let (bytes, manifest) = (admitted.component, admitted.manifest);
+        let Some(starts) = starts else {
+            return Err(BundleRefusal::ViewerCoreInvalid(
+                "no program was found under the viewer".to_string(),
+            ));
+        };
+        let (bytes, manifest) = (starts.component, starts.manifest);
         let loaded = match manifest.asks.is_empty() {
             true => component.load_admitted_sealed(bytes, manifest).await,
             false => component.load_admitted(bytes, manifest).await,
@@ -558,8 +618,10 @@ impl Runtime {
         let signature = bundle_admission::bundle_signature_path(data_dir, asked);
         let accepted = bundle_admission::check_bundle_signature(&signature, asked, trust)?;
         let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
-        crate::component::validate_component_imports(&admitted.component)
-            .map_err(BundleRefusal::NotAComponent)?;
+        if admitted.kind == BundleKind::Program {
+            crate::component::validate_component_imports(&admitted.component)
+                .map_err(BundleRefusal::NotAComponent)?;
+        }
         Ok((admitted, accepted))
     }
 

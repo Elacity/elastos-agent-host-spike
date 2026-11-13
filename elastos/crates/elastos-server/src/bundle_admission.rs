@@ -117,6 +117,18 @@ pub enum BundleRefusal {
     RequirementMismatch(String),
     /// An ask covers a whole scheme. The text is the ask's resource.
     AskTooWide(String),
+    /// A content manifest holds a field that passive content does not. The
+    /// text is the field's key.
+    ContentNotPassive(String),
+    /// Content pins something other than exactly one bundle, its viewer.
+    /// The number is how many it pins.
+    ContentRequiresInvalid(usize),
+    /// A content's viewer pins something other than exactly one bundle, or
+    /// the one it pins is not a program. The text says which.
+    ViewerCoreInvalid(String),
+    /// A bundle of a kind this start knows sits where that kind may not.
+    /// The text names the kind and the place.
+    MemberKindRefused(String),
     /// A pin sits deeper than [`CLOSURE_MAX_DEPTH`].
     ClosureTooDeep,
     /// A pin reaches one bundle more than [`CLOSURE_MAX_MEMBERS`].
@@ -152,6 +164,10 @@ impl BundleRefusal {
             BundleRefusal::RequirementUnpinned(_) => "bundle_requirement_unpinned",
             BundleRefusal::RequirementMismatch(_) => "bundle_requirement_mismatch",
             BundleRefusal::AskTooWide(_) => "bundle_ask_too_wide",
+            BundleRefusal::ContentNotPassive(_) => "bundle_content_not_passive",
+            BundleRefusal::ContentRequiresInvalid(_) => "bundle_content_requires_invalid",
+            BundleRefusal::ViewerCoreInvalid(_) => "bundle_viewer_core_invalid",
+            BundleRefusal::MemberKindRefused(_) => "bundle_member_kind_refused",
             BundleRefusal::ClosureTooDeep => "bundle_closure_too_deep",
             BundleRefusal::ClosureTooMany => "bundle_closure_too_many",
             BundleRefusal::Requirement { refusal, .. } => refusal.code(),
@@ -204,6 +220,12 @@ impl fmt::Display for BundleRefusal {
             BundleRefusal::AskTooWide(resource) => {
                 write!(f, "{code}: the ask for {resource:?} covers a whole scheme")
             }
+            BundleRefusal::ContentNotPassive(field) => write!(f, "{code}: {field}"),
+            BundleRefusal::ContentRequiresInvalid(pins) => {
+                write!(f, "{code}: content pins its one viewer; this pins {pins}")
+            }
+            BundleRefusal::ViewerCoreInvalid(why) => write!(f, "{code}: {why}"),
+            BundleRefusal::MemberKindRefused(why) => write!(f, "{code}: {why}"),
             BundleRefusal::ClosureTooDeep => {
                 write!(f, "{code}: a pin sits below depth {CLOSURE_MAX_DEPTH}")
             }
@@ -411,6 +433,10 @@ pub fn walk_refusal(refusal: Refusal) -> BundleRefusal {
 /// relation to another capsule, and a field would be admitted without the
 /// code that gives it meaning. So the one authority field this start takes
 /// is `asks`, and what starts has its asks as its ceiling, or an empty one.
+///
+/// The list holds for every kind of bundle. Two kinds are held to less of
+/// it: content may hold none of the keys that make a manifest not passive,
+/// `asks` among them, but for its one requirement; and a page may not ask.
 pub const BUNDLE_MANIFEST_KEYS: [&str; 18] = [
     // What it is called.
     "schema",
@@ -451,11 +477,43 @@ pub const BUNDLE_MANIFEST_KEYS: [&str; 18] = [
     "asks",
 ];
 
-/// The manifest and the component of a bundle that a start by CID may run.
+/// What a bundle is, as a start by CID tells them apart by the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleKind {
+    /// An app component of the one contract: the only kind that runs.
+    Program,
+    /// Passive content: bytes that are described. It pins its viewer.
+    Content,
+    /// A viewer that is a web projection: a page. It pins its one program.
+    Page,
+}
+
+/// How a refusal names a kind.
+pub fn kind_word(kind: BundleKind) -> &'static str {
+    match kind {
+        BundleKind::Program => "a program",
+        BundleKind::Content => "content",
+        BundleKind::Page => "a page",
+    }
+}
+
+/// The refusal of a bundle whose kind its place does not allow: `found`
+/// where `expected` must be, or `found` as the bundle asked for.
+pub fn misplaced(found: BundleKind, expected: Option<BundleKind>) -> BundleRefusal {
+    let found = kind_word(found);
+    BundleRefusal::MemberKindRefused(match expected {
+        Some(expected) => format!("{found} is pinned where {} must be", kind_word(expected)),
+        None => format!("{found} is not started by its own CID"),
+    })
+}
+
+/// The manifest and the entrypoint of a bundle that a start by CID takes.
 #[derive(Debug, Clone)]
 pub struct AdmittedBundle {
     pub manifest: CapsuleManifest,
-    /// The entrypoint's bytes as the walk read them.
+    pub kind: BundleKind,
+    /// The entrypoint's bytes as the walk read them: for a program, the
+    /// component that may run.
     pub component: Vec<u8>,
     /// The bundles the manifest pins: requirement name and CID text, in the
     /// manifest's order. Every requirement of the manifest is one of them.
@@ -469,8 +527,10 @@ pub struct AdmittedBundle {
 /// them; here, and nowhere else in the server, the pins are then taken off
 /// and the ordinary manifest type parses and validates what is left, so the
 /// manifest that can start exists only beside its pins, in the value this
-/// returns; it is an app component of the one contract; its entrypoint is
+/// returns; it is one of the three kinds (passive content, a page that asks
+/// for nothing, or an app component of the one contract); its entrypoint is
 /// one of the walked files; every requirement has a plain name and a pin.
+/// Where each kind may sit is the start's to judge, not this function's.
 /// Nothing is read from disk here. The start calls this only for a bundle
 /// whose files recomputed to the CID asked for and whose signature was
 /// accepted. (The walk before it has already parsed and validated the same
@@ -540,7 +600,26 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
             manifest.bus_contract.as_deref(),
             None | Some(ELASTOS_BUS_V1_CONTRACT)
         );
-    if !component_of_the_contract {
+    // What this bundle is, by its manifest. Content is passive by the one
+    // list of that condition, with one field excused: its requirement, which
+    // pins its viewer; so it has no asks, and its entrypoint is a plain path.
+    // A page is a viewer that is a web projection; it asks for nothing.
+    // Whatever is neither is held to the program contract.
+    let kind = if manifest.role == CapsuleRole::Content {
+        let mut active = manifest.active_fields().into_iter();
+        if let Some(field) = active.find(|field| *field != "requires") {
+            return Err(BundleRefusal::ContentNotPassive(field.to_string()));
+        }
+        elastos_common::validate_model_content_path(&manifest.entrypoint).map_err(invalid)?;
+        BundleKind::Content
+    } else if manifest.role == CapsuleRole::Viewer && manifest.is_runtime_projection() {
+        if !manifest.asks.is_empty() {
+            return Err(BundleRefusal::ManifestFieldRefused("asks".to_string()));
+        }
+        BundleKind::Page
+    } else if component_of_the_contract {
+        BundleKind::Program
+    } else {
         return Err(BundleRefusal::NotAComponent(format!(
             "role {}, type {:?}, runtime_abi {:?}, execution {:?}, bus_contract {:?}",
             manifest.role.as_str(),
@@ -549,7 +628,7 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
             manifest.execution,
             manifest.bus_contract
         )));
-    }
+    };
     let component = bundle.entry(&manifest.entrypoint).ok_or_else(|| {
         invalid(format!(
             "entrypoint {:?} is not a file of the bundle",
@@ -570,6 +649,7 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
     Ok(AdmittedBundle {
         component: component.to_vec(),
         manifest,
+        kind,
         pins,
     })
 }
