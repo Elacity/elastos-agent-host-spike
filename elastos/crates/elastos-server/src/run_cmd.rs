@@ -93,9 +93,9 @@ pub async fn run_capsule(
 /// bundles named by CID. The Runtime is made as `stage-bundle` makes it, so
 /// the keys asked are the keys that staging asked. This path fetches nothing
 /// and attaches to no running Runtime, and no bridge handler is installed
-/// here. So a capsule whose manifest has asks is held to them as anywhere,
-/// and has nothing to ask through: its call to the bridge is answered
-/// "unavailable". One without asks is sealed.
+/// here. So a capsule whose manifest has asks has nothing to ask through:
+/// its call to the bridge is answered "unavailable" before any ceiling is
+/// looked at. One without asks is sealed.
 pub async fn run_bundle(cid: &str) -> anyhow::Result<()> {
     let data_dir = crate::default_data_dir();
     let runtime = crate::create_runtime(data_dir.join("storage")).await?;
