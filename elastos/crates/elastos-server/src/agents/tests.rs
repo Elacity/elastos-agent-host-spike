@@ -159,6 +159,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             agent_host_package: Some(AgentHostPackage {
                 name: "agent-host".to_string(),
                 registry_cid: "bafyagenthost".to_string(),
+                bundle_cid: "bafyagenthostbytes".to_string(),
             }),
             retired_at: None,
             version: PRINCIPAL_RECORD_VERSION,
@@ -1007,6 +1008,7 @@ fn admit(agent_host: &str) -> anyhow::Result<VerifiedAgentHost> {
     Ok(VerifiedAgentHost::unchecked_for_test(
         agent_host,
         "bafyagenthost",
+        "bafyagenthostbytes",
     ))
 }
 
@@ -1085,6 +1087,7 @@ fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
         Some(AgentHostPackage {
             name: "agent-host".to_string(),
             registry_cid: "bafyagenthost".to_string(),
+            bundle_cid: "bafyagenthostbytes".to_string(),
         })
     );
     assert_eq!((record.retired_at, record.version), (None, 1));
@@ -1777,8 +1780,10 @@ fn with_the_feature_off_the_launch_lookup_refuses_by_name() {
 }
 
 /// A Home with agents on and `count` real agents, each with its own wrap.
+/// `bundle_cid` is the CID creation stores for the Agent Host's bytes, from the
+/// one walk the Runtime uses.
 #[cfg(feature = "prototype-agents")]
-fn home_with_agents(count: usize) -> (crate::agents::tests::Home, Vec<String>) {
+fn home_with_agents(count: usize, bundle_cid: &str) -> (crate::agents::tests::Home, Vec<String>) {
     let home = crate::agents::tests::Home::new();
     let caller = home.caller();
     crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();
@@ -1797,6 +1802,7 @@ fn home_with_agents(count: usize) -> (crate::agents::tests::Home, Vec<String>) {
                         crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
                             host,
                             crate::agent_admission::tests::AGENT_HOST_CID,
+                            bundle_cid,
                         ),
                     )
                 },
@@ -1809,10 +1815,11 @@ fn home_with_agents(count: usize) -> (crate::agents::tests::Home, Vec<String>) {
     (home, agents)
 }
 
-/// The capsule directory of one Agent Host package: a manifest that names it
-/// and the package CID its install records.
+/// One Agent Host capsule folder: a manifest that declares the agent kind and a
+/// component, the entrypoint bytes, and an `.elastos-cid` receipt. Returns the
+/// folder and the CID the Runtime's own walk gives its bytes.
 #[cfg(feature = "prototype-agents")]
-fn host_capsule(name: &str, cid: &str) -> tempfile::TempDir {
+fn host_capsule(name: &str, entrypoint: &[u8]) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("capsule.json"),
@@ -1822,13 +1829,21 @@ fn host_capsule(name: &str, cid: &str) -> tempfile::TempDir {
             "name": name,
             "role": "app",
             "type": "wasm",
-            "entrypoint": "main.wasm"
+            "runtime_abi": "elastos.component/v1",
+            "bus_contract": "elastos:bus@v1",
+            "wit_world_sha256": "7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2",
+            "execution": "component",
+            "entrypoint": "main.wasm",
+            "agent": {"kind": "agent"}
         })
         .to_string(),
     )
     .unwrap();
+    std::fs::write(dir.path().join("main.wasm"), entrypoint).unwrap();
+    let cid = crate::stage_cmd::bundle_cid(dir.path()).unwrap();
     std::fs::write(dir.path().join(".elastos-cid"), format!("{cid}\n")).unwrap();
-    dir
+    let cid = crate::stage_cmd::bundle_cid(dir.path()).unwrap();
+    (dir, cid)
 }
 
 /// Two stored agents of one owner admit two actors, and each actor owns
@@ -1837,12 +1852,12 @@ fn host_capsule(name: &str, cid: &str) -> tempfile::TempDir {
 #[cfg(feature = "prototype-agents")]
 #[test]
 fn an_agent_launch_admits_each_agents_own_actor_and_root() {
-    let (home, agents) = home_with_agents(2);
-    let caller = home.caller();
-    let host = host_capsule(
+    let (host, host_cid) = host_capsule(
         crate::agent_admission::tests::AGENT_HOST,
-        crate::agent_admission::tests::AGENT_HOST_CID,
+        b"agent host entrypoint",
     );
+    let (home, agents) = home_with_agents(2, &host_cid);
+    let caller = home.caller();
     let first = crate::agent_admission::admit_launch(
         home.path(),
         home.path(),
@@ -1888,11 +1903,11 @@ fn an_agent_launch_admits_each_agents_own_actor_and_root() {
 #[cfg(feature = "prototype-agents")]
 #[test]
 fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
-    let (home, agents) = home_with_agents(1);
-    let host = host_capsule(
+    let (host, host_cid) = host_capsule(
         crate::agent_admission::tests::AGENT_HOST,
-        crate::agent_admission::tests::AGENT_HOST_CID,
+        b"agent host entrypoint",
     );
+    let (home, agents) = home_with_agents(1, &host_cid);
     crate::auth::store_test_principal_root_protection(home.path(), "person:local:a5-other");
     let error = crate::agent_admission::admit_launch(
         home.path(),
@@ -1919,12 +1934,12 @@ fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
 #[cfg(feature = "prototype-agents")]
 #[test]
 fn an_agent_launch_needs_its_launcher_and_its_own_home() {
-    let (home, agents) = home_with_agents(1);
-    let caller = home.caller();
-    let host = host_capsule(
+    let (host, host_cid) = host_capsule(
         crate::agent_admission::tests::AGENT_HOST,
-        crate::agent_admission::tests::AGENT_HOST_CID,
+        b"agent host entrypoint",
     );
+    let (home, agents) = home_with_agents(1, &host_cid);
+    let caller = home.caller();
     let error = crate::agent_admission::admit_launch(
         home.path(),
         home.path(),
@@ -1946,13 +1961,19 @@ fn an_agent_launch_needs_its_launcher_and_its_own_home() {
     assert_eq!(error.to_string(), crate::agent_admission::NOT_THE_HOME);
 }
 
-/// The capsule a launch would load must be the Agent Host package the agent
-/// was created for. A different name, a different package CID, or no recorded
-/// package CID is refused by name and admits no actor.
+/// The capsule a launch would load must walk to the Agent Host bytes the agent
+/// was created for. A different name, different bytes, a missing receipt, and a
+/// forged receipt that claims the stored CID are all refused by name, and
+/// admit no actor. The forged receipt is the round-2 case: the folder writes
+/// the stored CID itself, and only the Runtime's own walk decides.
 #[cfg(feature = "prototype-agents")]
 #[test]
 fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
-    let (home, agents) = home_with_agents(1);
+    let (stored_host, stored_cid) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"agent host entrypoint",
+    );
+    let (home, agents) = home_with_agents(1, &stored_cid);
     let caller = home.caller();
     let launch = |capsule: &Path| {
         crate::agent_admission::admit_launch(
@@ -1963,32 +1984,48 @@ fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
             Some(agents[0].as_str()),
         )
     };
-    let other_name = host_capsule(
-        "another-host",
-        crate::agent_admission::tests::AGENT_HOST_CID,
-    );
+    let (other_name, _) = host_capsule("another-host", b"agent host entrypoint");
     assert_eq!(
         launch(other_name.path()).unwrap_err().to_string(),
         crate::agent_admission::NOT_THE_STORED_HOST
     );
-    let other_cid = host_capsule(crate::agent_admission::tests::AGENT_HOST, "bafkreianother");
+    let (other_bytes, _) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"different entrypoint bytes",
+    );
     assert_eq!(
-        launch(other_cid.path()).unwrap_err().to_string(),
+        launch(other_bytes.path()).unwrap_err().to_string(),
         crate::agent_admission::NOT_THE_STORED_HOST
     );
-    let no_receipt = host_capsule(crate::agent_admission::tests::AGENT_HOST, "");
+    let (no_receipt, _) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"agent host entrypoint",
+    );
     std::fs::remove_file(no_receipt.path().join(".elastos-cid")).unwrap();
-    let error = launch(no_receipt.path()).unwrap_err().to_string();
-    assert!(
-        error.starts_with("read the launching capsule's package CID receipt:"),
-        "{error}"
+    assert_eq!(
+        launch(no_receipt.path()).unwrap_err().to_string(),
+        crate::agent_admission::NOT_THE_STORED_HOST
+    );
+    // The forged receipt: the stored manifest name, the stored CID written into
+    // the folder's own receipt, and different bytes. Only the walk decides.
+    let (forged, _) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"forged agent host bytes",
+    );
+    std::fs::write(
+        forged.path().join(".elastos-cid"),
+        format!("{stored_cid}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        launch(forged.path()).unwrap_err().to_string(),
+        crate::agent_admission::NOT_THE_STORED_HOST
     );
     // The stored host itself still admits the agent's actor.
-    let stored = host_capsule(
-        crate::agent_admission::tests::AGENT_HOST,
-        crate::agent_admission::tests::AGENT_HOST_CID,
+    assert_eq!(
+        launch(stored_host.path()).unwrap().unwrap().actor,
+        agents[0]
     );
-    assert_eq!(launch(stored.path()).unwrap().unwrap().actor, agents[0]);
 }
 
 /// With the feature off, an agent launch is refused before any lookup.

@@ -1082,12 +1082,16 @@ pub struct StoredAuthChallenge {
 }
 
 /// The installed Agent Host package an agent record is bound to.
-/// Both strings are the release-signed components entry: the package name
-/// and the registry CID that entry carries.
+/// `name` and `registry_cid` are the release-signed components entry: the
+/// package name and the registry CID that entry carries. `bundle_cid` is the
+/// CID the Runtime computed by walking the installed files, exactly the bytes a
+/// launch must present; an older record without it admits no launch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHostPackage {
     pub name: String,
     pub registry_cid: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bundle_cid: String,
 }
 
 /// The record shape written for an agent. A record stored before this field
@@ -5929,6 +5933,7 @@ fn edit_malformed_agent(agent: &mut PrincipalRecord, case: usize) -> &'static st
             agent.agent_host_package = Some(AgentHostPackage {
                 name: String::new(),
                 registry_cid: "bafyrecord".to_string(),
+                bundle_cid: "bafyrecordbytes".to_string(),
             });
             "agent admission package name missing"
         }
@@ -5936,6 +5941,7 @@ fn edit_malformed_agent(agent: &mut PrincipalRecord, case: usize) -> &'static st
             agent.agent_host_package = Some(AgentHostPackage {
                 name: "agent-host".to_string(),
                 registry_cid: String::new(),
+                bundle_cid: "bafyrecordbytes".to_string(),
             });
             "agent admission package cid missing"
         }
@@ -12922,6 +12928,7 @@ fn test_agent_record(agent_id: &str) -> PrincipalRecord {
         agent_host_package: Some(AgentHostPackage {
             name: "agent-host".to_string(),
             registry_cid: "bafyrecord".to_string(),
+            bundle_cid: "bafyrecordbytes".to_string(),
         }),
         retired_at: None,
         version: PRINCIPAL_RECORD_VERSION,
@@ -20738,12 +20745,14 @@ pub(crate) mod tests {
             agent.agent_host_package = Some(AgentHostPackage {
                 name: String::new(),
                 registry_cid: "bafyrecord".to_string(),
+                bundle_cid: "bafyrecordbytes".to_string(),
             });
         });
         assert_invalid_agent_refused("agent admission package cid missing", |agent| {
             agent.agent_host_package = Some(AgentHostPackage {
                 name: "agent-host".to_string(),
                 registry_cid: String::new(),
+                bundle_cid: "bafyrecordbytes".to_string(),
             });
         });
         assert_invalid_agent_refused("agent admission binding id mismatch", |agent| {

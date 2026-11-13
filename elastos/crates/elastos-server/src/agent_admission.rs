@@ -1,4 +1,5 @@
-//! The checks made when an agent is created. Nothing here runs an agent.
+//! The checks made when an agent is created or launched. Nothing here starts an
+//! agent itself.
 //!
 //! - Agents stay on their owner's Home. A Runtime whose sign-in store is not
 //!   its own data folder is a child of another Runtime and creates none.
@@ -8,17 +9,20 @@
 //!   refused whatever `dev_mode` says, and so is one the release records but
 //!   no key signed. Other configured publisher keys, and keys trusted only by
 //!   this Home's own configuration, are not asked.
-//!
-//! This proves the package is the one the signed release installed at that
-//! path. It does not hash the unpacked files.
+//! - The Runtime names the host's bytes itself: one walk, the same one staging
+//!   uses, gives both the CID creation stores and the bytes a later launch must
+//!   present. No receipt file written by whoever prepares a directory decides
+//!   that identity.
 
 use std::path::Path;
 
+use elastos_bundle_identity::{checked_bundle_within, MANIFEST_FILE};
 use elastos_common::CapsuleManifest;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
 
 use crate::agents::Refused;
 use crate::auth::{AgentHostPackage, PrincipalKind};
+use crate::bundle_admission::BUNDLE_WALK_BUDGET;
 
 /// The refusal a child Runtime gives.
 pub(crate) const NOT_THE_HOME: &str =
@@ -35,10 +39,11 @@ impl VerifiedAgentHost {
 
     /// A package no check has passed, for tests of what follows the check.
     #[cfg(test)]
-    pub(crate) fn unchecked_for_test(name: &str, registry_cid: &str) -> Self {
+    pub(crate) fn unchecked_for_test(name: &str, registry_cid: &str, bundle_cid: &str) -> Self {
         Self(AgentHostPackage {
             name: name.to_string(),
             registry_cid: registry_cid.to_string(),
+            bundle_cid: bundle_cid.to_string(),
         })
     }
 }
@@ -51,13 +56,17 @@ pub(crate) fn require_home_runtime(data_dir: &Path, sign_in_store: &Path) -> any
     Ok(())
 }
 
-/// What one launch was admitted as: the stored agent's principal id. The
-/// bridge runs as `actor`. Its root comes from the one root rule at the bridge,
-/// and its owner and its storage protection are read again from the stored
-/// record, so neither is copied here.
+/// What one launch was admitted as: the stored agent's principal id and the
+/// exact manifest and entrypoint bytes the Runtime walked. The bridge runs as
+/// `actor`. Its root comes from the one root rule at the bridge, and its owner
+/// and its storage protection are read again from the stored record, so neither
+/// is copied here. The loader compiles `entrypoint` and parses `manifest` from
+/// these bytes; it reads neither back from the folder.
 #[derive(Debug)]
 pub(crate) struct AdmissionContext {
     pub(crate) actor: String,
+    pub(crate) manifest: CapsuleManifest,
+    pub(crate) entrypoint: Vec<u8>,
 }
 
 /// The refusal a launch gives when it names an agent and no launcher is.
@@ -68,40 +77,46 @@ pub(crate) const NO_LAUNCHER: &str = "an agent launch needs its owner's launch g
 pub(crate) const NOT_THE_STORED_HOST: &str =
     "this capsule is not the Agent Host this agent was created for";
 
-/// The package a launch directory names: the name its signed manifest declares
-/// and the package CID the directory records for it. An installed capsule
-/// carries this CID beside its manifest, and creation stored the same two
-/// fields for its Agent Host.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct LaunchedPackage {
-    pub(crate) name: String,
-    pub(crate) registry_cid: String,
-}
+/// The refusal a launch gives for a capsule whose manifest declares no agent.
+pub(crate) const NOT_AN_AGENT: &str =
+    "this capsule does not declare an agent, so no stored agent runs it";
 
-/// Reads the package identity of the capsule at `capsule_dir`. A directory
-/// with no recorded package CID names no package, so it cannot be a stored
-/// Agent Host.
-fn launched_package(capsule_dir: &Path) -> anyhow::Result<LaunchedPackage> {
-    let manifest = std::fs::read(capsule_dir.join("capsule.json"))
-        .map_err(|err| anyhow::anyhow!("read the launching capsule's manifest: {err}"))?;
-    let manifest: CapsuleManifest = serde_json::from_slice(&manifest)
+/// The refusal a launch gives for a package the Runtime cannot compile from the
+/// bytes it walked.
+pub(crate) const NOT_A_COMPONENT: &str =
+    "an agent launch runs only a component capsule the Runtime can name";
+
+/// Walk `capsule_dir` once, under the same limits staging uses, and return its
+/// CID, the manifest that walk read, and its entrypoint bytes. Nothing else
+/// reads the folder for the launch: these bytes are what runs.
+fn walked_package(capsule_dir: &Path) -> anyhow::Result<(String, CapsuleManifest, Vec<u8>)> {
+    let bundle = checked_bundle_within(capsule_dir, BUNDLE_WALK_BUDGET)
+        .map_err(|refusal| anyhow::anyhow!("walk the launching capsule: {refusal}"))?;
+    let manifest_bytes = bundle
+        .entry(MANIFEST_FILE)
+        .ok_or_else(|| anyhow::anyhow!("the launching capsule has no manifest"))?;
+    let manifest: CapsuleManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|err| anyhow::anyhow!("parse the launching capsule's manifest: {err}"))?;
-    let cid = std::fs::read_to_string(capsule_dir.join(".elastos-cid")).map_err(|err| {
-        anyhow::anyhow!("read the launching capsule's package CID receipt: {err}")
-    })?;
-    Ok(LaunchedPackage {
-        name: manifest.name,
-        registry_cid: cid.trim().to_string(),
-    })
+    let entrypoint = bundle
+        .entry(&manifest.entrypoint)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the launching capsule has no entrypoint file '{}'",
+                manifest.entrypoint
+            )
+        })?
+        .to_vec();
+    Ok((bundle.cid().to_string(), manifest, entrypoint))
 }
 
 /// Admits a launch that names a stored agent, and leaves every other launch
 /// exactly as it was. `None` means no agent was named. Otherwise this Runtime
 /// holds its own sign-in store, the launcher is a stored person, the named id
-/// is that person's stored agent, the capsule about to be loaded is the Agent
-/// Host package that agent was created for, and the agent's stored protection
-/// opens with that person's key. A launch that cannot meet any of that is
-/// refused here, before any provider starts and before any principal is bound.
+/// is that person's stored agent, the capsule about to be loaded walks to the
+/// byte CID the agent's storage records for its Agent Host, and the agent's
+/// stored protection opens with that person's key. A launch that cannot meet
+/// any of that is refused here, before any provider starts and before any
+/// principal is bound.
 pub(crate) fn admit_launch(
     data_dir: &Path,
     sign_in_store: &Path,
@@ -118,16 +133,22 @@ pub(crate) fn admit_launch(
         return Err(Refused(NO_LAUNCHER.to_string()).into());
     };
     let stored = crate::agents::stored_agent(data_dir, launcher, agent_id)?;
-    // The stored agent carries the Agent Host package it was created for. The
-    // capsule this launch would load must be that same package: its signed
-    // manifest's name and the package CID its directory records. A record with
-    // no stored host, or any different package, is refused before the key is
-    // opened and before the principal is bound.
+    // The Runtime names the bytes it would run. The stored agent carries the
+    // Agent Host package it was created for, with the CID the walk of its
+    // installed files gave; this launch's walk must give the same CID and the
+    // same manifest name. No receipt file in the launching folder is read.
+    let (launched_cid, manifest, entrypoint) = walked_package(capsule_dir)?;
+    if manifest.agent.is_none() {
+        return Err(Refused(NOT_AN_AGENT.to_string()).into());
+    }
+    if !manifest.is_component_capsule() {
+        return Err(Refused(NOT_A_COMPONENT.to_string()).into());
+    }
     let stored_host = stored.record.agent_host_package.as_ref();
-    let launched = launched_package(capsule_dir)?;
-    if stored_host
-        .is_none_or(|host| host.name != launched.name || host.registry_cid != launched.registry_cid)
-    {
+    let same_bytes = stored_host.is_some_and(|host| {
+        !host.bundle_cid.is_empty() && host.name == manifest.name && host.bundle_cid == launched_cid
+    });
+    if !same_bytes {
         return Err(Refused(NOT_THE_STORED_HOST.to_string()).into());
     }
     // The root is derived from the id, never read from a field of the record
@@ -142,6 +163,8 @@ pub(crate) fn admit_launch(
     )?);
     Ok(Some(AdmissionContext {
         actor: agent_id.to_string(),
+        manifest,
+        entrypoint,
     }))
 }
 
@@ -204,10 +227,15 @@ pub(crate) fn verify_agent_host(
         )));
     }
 
-    let Ok(manifest) = std::fs::read(dir.join("capsule.json")) else {
+    // One walk of the installed folder, the same walk staging uses, names the
+    // bytes this agent runs: its CID, the manifest that walk read, and the
+    // entrypoint bytes the signature check covers. No second read decides them.
+    let bundle = checked_bundle_within(&dir, BUNDLE_WALK_BUDGET)
+        .map_err(|refusal| refuse(&format!("is not a bundle the Runtime can name: {refusal}")))?;
+    let Some(manifest_bytes) = bundle.entry(MANIFEST_FILE) else {
         return Err(refuse("has no manifest"));
     };
-    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(&manifest) else {
+    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(manifest_bytes) else {
         return Err(refuse("has a manifest that does not parse"));
     };
     let entrypoint = Path::new(&manifest.entrypoint);
@@ -220,12 +248,12 @@ pub(crate) fn verify_agent_host(
     }
     let mut verifier = SignatureVerifier::new();
     verifier.add_trusted_key(crate::crypto::decode_did_key(release_signer)?)?;
-    let Ok(content) = std::fs::read(dir.join(entrypoint)) else {
+    let Some(content) = bundle.entry(&manifest.entrypoint) else {
         return Err(refuse("has no entrypoint file"));
     };
     let key_signed = manifest.signature.is_some()
         && verifier
-            .verify_capsule(&manifest, &hash_content(&content))
+            .verify_capsule(&manifest, &hash_content(content))
             .is_ok_and(|key| key.is_some());
     if !key_signed {
         return Err(refuse(
@@ -235,6 +263,7 @@ pub(crate) fn verify_agent_host(
     Ok(VerifiedAgentHost(AgentHostPackage {
         name: agent_host.to_string(),
         registry_cid: entry.cid.clone(),
+        bundle_cid: bundle.cid().to_string(),
     }))
 }
 

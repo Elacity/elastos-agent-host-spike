@@ -279,52 +279,78 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<String>,
     ) -> Result<(CapsuleHandle, Signer)> {
-        self.run_local_signer(path, args, principal_id, false).await
+        self.run_signer(path, args, principal_id, None).await
     }
 
-    /// The same start for a launch that admitted its principal. `actor` is
-    /// the admission context's stored agent id, and it is the only way an
-    /// agent's id reaches a bridge principal.
+    /// The same start for a launch that admitted its principal. `actor` is the
+    /// admission context's stored agent id, and it is the only way an agent's
+    /// id reaches a bridge principal. The manifest and the entrypoint are the
+    /// exact bytes admission walked; this reads neither back from `path`.
     pub(crate) async fn run_local_admitted(
         &self,
         path: &Path,
         args: Vec<String>,
-        actor: &str,
+        admission: crate::agent_admission::AdmissionContext,
     ) -> Result<(CapsuleHandle, Signer)> {
-        self.run_local_signer(path, args, Some(actor.to_string()), true)
+        let crate::agent_admission::AdmissionContext {
+            actor,
+            manifest,
+            entrypoint,
+        } = admission;
+        self.run_signer(path, args, Some(actor), Some((manifest, entrypoint)))
             .await
     }
 
-    async fn run_local_signer(
+    /// Load one local start. `admitted` is the walked manifest and entrypoint
+    /// when this start may hand the bridge a stored agent's id; nothing is read
+    /// again for them. A start with no record reads the folder and refuses an
+    /// agent's id.
+    async fn run_signer(
         &self,
         path: &Path,
         args: Vec<String>,
         principal_id: Option<String>,
-        admitted: bool,
+        admitted: Option<(CapsuleManifest, Vec<u8>)>,
     ) -> Result<(CapsuleHandle, Signer)> {
-        if !admitted {
+        if admitted.is_none() {
             crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())
                 .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
         }
-        // Read manifest
-        let manifest_path = path.join("capsule.json");
-        let manifest_data = tokio::fs::read_to_string(&manifest_path)
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    ElastosError::InvalidManifest(format!(
-                        "capsule.json not found in {}",
-                        path.display()
-                    ))
-                } else {
-                    ElastosError::Io(e)
-                }
-            })?;
-
-        let manifest: CapsuleManifest = serde_json::from_str(&manifest_data).map_err(|e| {
-            ElastosError::InvalidManifest(format!("Failed to parse capsule.json: {}", e))
-        })?;
-        manifest.validate().map_err(ElastosError::InvalidManifest)?;
+        let (manifest, walked) = match admitted {
+            Some((manifest, entrypoint)) => (Some(manifest), Some(entrypoint)),
+            None => (None, None),
+        };
+        let manifest: CapsuleManifest = match manifest {
+            Some(manifest) => {
+                manifest.validate().map_err(ElastosError::InvalidManifest)?;
+                manifest
+            }
+            None => {
+                let manifest_path = path.join("capsule.json");
+                let manifest_data =
+                    tokio::fs::read_to_string(&manifest_path)
+                        .await
+                        .map_err(|e| {
+                            if e.kind() == std::io::ErrorKind::NotFound {
+                                ElastosError::InvalidManifest(format!(
+                                    "capsule.json not found in {}",
+                                    path.display()
+                                ))
+                            } else {
+                                ElastosError::Io(e)
+                            }
+                        })?;
+                let manifest: CapsuleManifest =
+                    serde_json::from_str(&manifest_data).map_err(|e| {
+                        ElastosError::InvalidManifest(format!(
+                            "Failed to parse capsule.json: {}",
+                            e
+                        ))
+                    })?;
+                manifest.validate().map_err(ElastosError::InvalidManifest)?;
+                manifest
+            }
+        };
 
         // Reject entrypoints that escape the capsule directory
         if manifest.entrypoint.contains("..")
@@ -344,19 +370,29 @@ impl Runtime {
         // Check provider dependencies
         self.check_provider_dependencies(&manifest).await?;
 
-        // A component's entrypoint is read once. The signature check, the import
-        // check and the compiler below all use these same bytes.
-        let admitted = if manifest.is_component_capsule() {
-            Some(crate::component::read_admitted_entrypoint(path, &manifest).await?)
+        // A component's entrypoint is one buffer. The signature check, the
+        // import check and the compiler below all use these same bytes: the
+        // walked ones for an admitted launch, the one read from the folder
+        // otherwise.
+        let admitted_bytes = if manifest.is_component_capsule() {
+            match walked {
+                Some(bytes) => Some(bytes),
+                None => Some(crate::component::read_admitted_entrypoint(path, &manifest).await?),
+            }
         } else {
+            if walked.is_some() {
+                return Err(ElastosError::InvalidManifest(
+                    crate::agent_admission::NOT_A_COMPONENT.to_string(),
+                ));
+            }
             None
         };
 
         // Verify signature if verifier is configured
         let signer = self
-            .verify_capsule_signature(&manifest, path, admitted.as_deref())
+            .verify_capsule_signature(&manifest, path, admitted_bytes.as_deref())
             .await?;
-        if let Some(bytes) = &admitted {
+        if let Some(bytes) = &admitted_bytes {
             crate::component::validate_component_imports(bytes)
                 .map_err(ElastosError::InvalidManifest)?;
         }
@@ -377,7 +413,7 @@ impl Runtime {
         // A component is always compiled from the bytes checked above. The
         // provider's own `load(path)` reads the file itself and checks nothing,
         // so it is for capsules that are not components.
-        let mut handle = match (admitted, &self.component_provider) {
+        let mut handle = match (admitted_bytes, &self.component_provider) {
             (Some(bytes), Some(component)) => component.load_admitted(bytes, manifest).await?,
             (Some(_), None) => {
                 return Err(ElastosError::Compute(

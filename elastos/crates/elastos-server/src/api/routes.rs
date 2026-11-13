@@ -108,13 +108,10 @@ pub async fn launch_capsule(
         )?),
     };
     // An admitted agent launch starts through the one entry that may hand the
-    // bridge an agent's own id. Every other launch is exactly as it was.
-    let started = match &admission {
-        Some(admission) => {
-            runtime
-                .run_local_admitted(path, vec![], &admission.actor)
-                .await
-        }
+    // bridge an agent's own id, and from the bytes admission walked. Every
+    // other launch is exactly as it was.
+    let started = match admission {
+        Some(admission) => runtime.run_local_admitted(path, vec![], admission).await,
         None => runtime.run_local_with_signer(path, vec![], launcher).await,
     };
 
@@ -156,25 +153,6 @@ fn admit_agent_launch(
     launcher: Option<&str>,
     agent_id: &str,
 ) -> Result<crate::agent_admission::AdmissionContext, (StatusCode, String)> {
-    let bytes = std::fs::read(capsule_dir.join("capsule.json")).map_err(|err| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("read capsule manifest for an agent launch: {err}"),
-        )
-    })?;
-    let manifest: elastos_common::CapsuleManifest =
-        serde_json::from_slice(&bytes).map_err(|err| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("parse capsule manifest for an agent launch: {err}"),
-            )
-        })?;
-    if manifest.agent.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "this capsule does not declare an agent, so no stored agent runs it".to_string(),
-        ));
-    }
     let data_dir = data_dir.ok_or((
         StatusCode::BAD_REQUEST,
         "an agent launch needs this Home's data directory".to_string(),
@@ -307,6 +285,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        std::fs::write(capsule_dir.join("main.wasm"), b"entrypoint").unwrap();
         capsule_dir
     }
 
@@ -564,7 +543,8 @@ mod tests {
     }
 
     const PROBE_HOST: &str = "a5-launch-probe";
-    const PROBE_HOST_CID: &str = "bafkreia5probe";
+    /// The package CID the install records; the launch compares the Runtime's own walk.
+    const PROBE_REGISTRY_CID: &str = "bafkreia5probe";
 
     impl ProbeLaunch {
         async fn new(names: &[&str]) -> Self {
@@ -629,31 +609,6 @@ mod tests {
                 session_id: "session:a5-launch",
             };
             agents::set_enabled(&data_dir, &caller, true, 1).unwrap();
-            let agents = names
-                .iter()
-                .map(|name| {
-                    agents::create(
-                        &data_dir,
-                        &caller,
-                        &agents::CreateRequest {
-                            display_name: name.to_string(),
-                            agent_host: PROBE_HOST.to_string(),
-                            request_id: format!("request-{name}"),
-                        },
-                        |host| {
-                            Ok(
-                                crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
-                                    host,
-                                    PROBE_HOST_CID,
-                                ),
-                            )
-                        },
-                        1,
-                    )
-                    .unwrap()
-                    .agent_id
-                })
-                .collect();
 
             let capsule_dir = temp.path().join(PROBE_HOST);
             std::fs::create_dir_all(&capsule_dir).unwrap();
@@ -664,7 +619,7 @@ mod tests {
             }
             std::fs::write(
                 capsule_dir.join(".elastos-cid"),
-                format!("{PROBE_HOST_CID}\n"),
+                format!("{PROBE_REGISTRY_CID}\n"),
             )
             .unwrap();
             let wasm = std::fs::read(capsule_dir.join("a5-launch-probe.component.wasm")).unwrap();
@@ -684,6 +639,37 @@ mod tests {
                 serde_json::to_vec(&manifest).unwrap(),
             )
             .unwrap();
+            // The bytes are final. The stored host CID is the one walk the
+            // Runtime makes of exactly these files; `.elastos-cid` is beside
+            // them and takes no part in it.
+            let probe_cid = crate::stage_cmd::bundle_cid(&capsule_dir)
+                .expect("the probe host bundle is walkable");
+            let agents = names
+                .iter()
+                .map(|name| {
+                    agents::create(
+                        &data_dir,
+                        &caller,
+                        &agents::CreateRequest {
+                            display_name: name.to_string(),
+                            agent_host: PROBE_HOST.to_string(),
+                            request_id: format!("request-{name}"),
+                        },
+                        |host| {
+                            Ok(
+                                crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
+                                    host,
+                                    PROBE_REGISTRY_CID,
+                                    &probe_cid,
+                                ),
+                            )
+                        },
+                        1,
+                    )
+                    .unwrap()
+                    .agent_id
+                })
+                .collect();
             let grant =
                 gateway::issue_home_launch_token_with_context(&data_dir, PROBE_HOST, &context)
                     .unwrap();
@@ -931,16 +917,19 @@ mod tests {
         grants.abort();
     }
 
-    /// Row 1 refusal: an agent stored with host A is refused the launch of
-    /// capsule B. Admission refuses before the runtime starts, so no principal
-    /// is bound and no launch or bridge call is audited.
+    /// Row 1 refusal, round 2: the folder that would load names the stored
+    /// Agent Host and writes the stored byte CID into its own `.elastos-cid`,
+    /// but its entrypoint bytes are other code. Admission compares the walk of
+    /// the folder with the CID the Runtime stored at creation, so the forged
+    /// receipt decides nothing. Nothing is bound and no launch is audited.
     #[tokio::test]
-    async fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
+    async fn an_agent_launch_refuses_a_forged_package_receipt() {
         use crate::agents;
         if crate::agents::require_build().is_err() {
             return;
         }
         use elastos_compute::providers::ComponentProvider;
+        use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
         use elastos_storage::providers::LocalFSProvider;
 
         let temp = tempfile::tempdir().unwrap();
@@ -955,6 +944,15 @@ mod tests {
             Vec::new(),
             Some(Arc::new(ComponentProvider::new())),
         ));
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        runtime
+            .configure_capsule_admission(
+                &data_dir,
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
         let audit_log = Arc::new(AuditLog::new());
 
         let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
@@ -970,19 +968,52 @@ mod tests {
             session_id: "session:a5-host",
         };
         agents::set_enabled(&data_dir, &caller, true, 1).unwrap();
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components");
+        let sign = |dir: &std::path::Path, entrypoint: &str, wasm: &[u8]| {
+            let fixture = fixtures.join("a5-launch-probe/capsule.json");
+            let mut manifest: elastos_common::CapsuleManifest =
+                serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
+            manifest.entrypoint = entrypoint.to_string();
+            sign_capsule(&key, &mut manifest, &hash_content(wasm)).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(dir.join(entrypoint), wasm).unwrap();
+        };
+
+        // The stored host: the probe's own bytes, named by the Runtime's walk.
+        let stored_dir = temp.path().join(PROBE_HOST);
+        std::fs::create_dir_all(&stored_dir).unwrap();
+        sign(
+            &stored_dir,
+            "a5-launch-probe.component.wasm",
+            &std::fs::read(fixtures.join("a5-launch-probe/a5-launch-probe.component.wasm"))
+                .unwrap(),
+        );
+        std::fs::write(
+            stored_dir.join(".elastos-cid"),
+            format!("{PROBE_REGISTRY_CID}\n"),
+        )
+        .unwrap();
+        let stored_cid =
+            crate::stage_cmd::bundle_cid(&stored_dir).expect("the stored host is walkable");
         let agent = agents::create(
             &data_dir,
             &caller,
             &agents::CreateRequest {
                 display_name: "a".to_string(),
-                agent_host: "agent-host".to_string(),
+                agent_host: PROBE_HOST.to_string(),
                 request_id: "request-a".to_string(),
             },
             |host| {
                 Ok(
                     crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
                         host,
-                        "bafyagenthost",
+                        PROBE_REGISTRY_CID,
+                        &stored_cid,
                     ),
                 )
             },
@@ -991,27 +1022,23 @@ mod tests {
         .unwrap()
         .agent_id;
 
-        // The capsule that would load is the probe, not the stored host.
-        let capsule_dir = temp.path().join("a5-launch-probe");
-        std::fs::create_dir_all(&capsule_dir).unwrap();
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/components/a5-launch-probe");
-        std::fs::copy(
-            fixture.join("capsule.json"),
-            capsule_dir.join("capsule.json"),
-        )
-        .unwrap();
-        std::fs::write(capsule_dir.join(".elastos-cid"), "bafkreia5probe\n").unwrap();
+        // The forged capsule: the stored manifest name and the stored CID in
+        // its own `.elastos-cid`, signed by a trusted key, over other code.
+        let forged_dir = temp.path().join("forged-probe");
+        std::fs::create_dir_all(&forged_dir).unwrap();
+        let other_wasm =
+            std::fs::read(fixtures.join("bus-v1/bus-v1-conformance.component.wasm")).unwrap();
+        sign(&forged_dir, "forged.component.wasm", &other_wasm);
+        std::fs::write(forged_dir.join(".elastos-cid"), format!("{stored_cid}\n")).unwrap();
         let grant =
-            gateway::issue_home_launch_token_with_context(&data_dir, "a5-launch-probe", &context)
-                .unwrap();
+            gateway::issue_home_launch_token_with_context(&data_dir, PROBE_HOST, &context).unwrap();
 
         let response = launch_capsule(
             Extension(runtime),
             Extension(audit_log.clone()),
             Extension(Some(data_dir.clone())),
             Json(LaunchRequest {
-                path: capsule_dir.to_string_lossy().into_owned(),
+                path: forged_dir.to_string_lossy().into_owned(),
                 principal_id: None,
                 launch_grant: Some(grant),
                 agent_id: Some(agent),
@@ -1019,7 +1046,7 @@ mod tests {
         )
         .await;
         let (status, message) = match response {
-            Ok(_) => panic!("the capsule was admitted"),
+            Ok(_) => panic!("the forged capsule was admitted"),
             Err(error) => error,
         };
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1054,16 +1081,34 @@ mod tests {
     }
 
     /// A capsule whose manifest does not declare an agent cannot be launched
-    /// as one, whatever the request names or the person owns.
-    #[test]
-    fn a_capsule_that_does_not_declare_an_agent_is_refused() {
+    /// as one, whatever the request names or the person owns. With agents off
+    /// the launch is refused before any folder is read, by name.
+    #[tokio::test]
+    async fn a_capsule_that_does_not_declare_an_agent_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "not-an-agent");
+        if !crate::agents::build_allows() {
+            let error = admit_agent_launch(
+                Some(dir.path()),
+                &capsule_dir,
+                Some("person:local:a5-owner"),
+                "agent:v2:cccccccccccccccccccccccccccccccc",
+            )
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error.1, crate::agents::FEATURE_OFF);
+            return;
+        }
+        // A Home whose owner has a stored agent, so the launch reaches the
+        // manifest rule instead of stopping at the lookup.
+        let home = ProbeLaunch::new(&["a"]).await;
+        let context = gateway::local_home_launch_token_context(&home.data_dir).unwrap();
+        let agent = home.agents.first().expect("one agent").clone();
         let error = admit_agent_launch(
-            Some(dir.path()),
+            Some(home.data_dir.as_path()),
             &capsule_dir,
-            Some("person:local:a5-owner"),
-            "agent:v2:cccccccccccccccccccccccccccccccc",
+            Some(context.principal_id()),
+            &agent,
         )
         .unwrap_err();
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
