@@ -2911,6 +2911,19 @@ async fn a_place_is_taken_before_the_start_and_given_back_when_no_launch_fills_i
         .await
         .unwrap_err();
     assert!(matches!(refused, OpenRefusal::TooManyOpen), "{refused:?}");
+    // A place whose start is still running does not expire: only a filled
+    // place does, 15 minutes after it was filled.
+    runtime.expire_kept_launches();
+    assert_eq!(
+        runtime.kept_launch_count(),
+        KEPT_PER_PRINCIPAL,
+        "unfilled places do not expire"
+    );
+    let refused = runtime
+        .open_for_page(&data, "not-a-cid", PERSON)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, OpenRefusal::TooManyOpen), "{refused:?}");
     let (id, page) = (places[0].id().to_string(), "");
     assert_eq!(
         runtime.kept_launch_page(&id),

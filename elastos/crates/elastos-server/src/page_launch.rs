@@ -70,6 +70,8 @@ pub enum OpenRefusal {
     TooManyOpen,
     /// The Runtime keeps [`KEPT_IN_ALL`] launches already.
     TooManyInAll,
+    /// The place the open took was gone when its start was over.
+    PlaceLost,
     /// No person to keep it for.
     NoPrincipal,
 }
@@ -96,7 +98,10 @@ fn kept_ones(table: &PageLaunches) -> std::sync::MutexGuard<'_, HashMap<String, 
     // A poisoned lock still holds the map.
     let mut kept = table.lock().unwrap_or_else(|it| it.into_inner());
     let now = Instant::now();
-    kept.retain(|_, one| one.until > now);
+    // Only a filled place expires, 15 minutes after it was filled. A place an
+    // open has taken lasts until its start is over: it is then filled, or
+    // given back by its `Place`.
+    kept.retain(|_, one| one.launch.is_none() || one.until > now);
     kept
 }
 
@@ -135,7 +140,11 @@ pub(crate) fn take_place(table: &PageLaunches, principal: &str) -> Result<Place,
     if held_by(&kept, principal) >= KEPT_PER_PRINCIPAL {
         return Err(OpenRefusal::TooManyOpen);
     }
-    let id = hex::encode(rand::random::<[u8; 16]>());
+    // A new id, drawn again in the (128-bit) case it is already in the table.
+    let mut id = hex::encode(rand::random::<[u8; 16]>());
+    while kept.contains_key(&id) {
+        id = hex::encode(rand::random::<[u8; 16]>());
+    }
     let one = Kept {
         principal: principal.to_string(),
         page: String::new(),
@@ -185,9 +194,10 @@ impl Runtime {
             return Err(OpenRefusal::NotContent);
         };
         let mut kept = kept_ones(&self.page_launches);
-        // The place this open took is filled and its time starts now. (It
-        // cannot have expired: a place lasts as long as a kept launch.)
-        let one = kept.get_mut(&place.id).ok_or(OpenRefusal::TooManyOpen)?;
+        // The place this open took is filled and its time starts now. It is
+        // still there: an unfilled place does not expire, and only its own
+        // `Place` gives it back. Were it gone, the open says so by name.
+        let one = kept.get_mut(&place.id).ok_or(OpenRefusal::PlaceLost)?;
         one.page = page.clone();
         one.launch = Some(launch);
         one.until = Instant::now() + KEPT_FOR;

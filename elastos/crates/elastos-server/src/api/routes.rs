@@ -529,6 +529,10 @@ pub async fn open_launch(
             "too_many_open_launches".into(),
         )),
         Err(OpenRefusal::NoPrincipal) => Err((StatusCode::UNAUTHORIZED, "no_principal".into())),
+        Err(OpenRefusal::PlaceLost) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "kept_launch_place_lost".into(),
+        )),
         Err(OpenRefusal::TooManyInAll) => Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "too_many_kept_launches".into(),
