@@ -128,18 +128,29 @@ fn the_copied_admission_check_refuses_a_core_module() {
 }
 
 #[test]
-fn manifest_is_a_valid_component_capsule_with_narrow_storage_bounds() {
+fn manifest_is_a_valid_component_capsule_with_narrow_asks() {
     let manifest = manifest();
     manifest.validate().expect("manifest validates");
     assert!(manifest.is_component_capsule());
     assert_eq!(manifest.entrypoint, "photo-viewer.component.wasm");
+    // The ceiling is the asks and nothing else: each resource with its
+    // actions. No storage permission and no capability stands beside them.
+    let bounds: Vec<String> = manifest
+        .resource_authority_bounds()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(
-        manifest.resource_authority_bounds(),
-        vec![
-            "localhost://Users/self/.AppData/App/photo-viewer/*".to_string(),
-            "localhost://Users/self/Pictures/*".to_string(),
+        bounds,
+        [
+            "elastos://launch/content/* [read]",
+            "elastos://launch/output/* [write]",
+            "localhost://Users/self/Pictures/* [read]",
+            "localhost://Users/self/.AppData/App/photo-viewer/* [read, write]",
         ]
     );
+    assert!(manifest.permissions.storage.is_empty());
+    assert!(manifest.capabilities.is_empty());
 }
 
 // --- runs in the Runtime's ComponentProvider ------------------------------------------

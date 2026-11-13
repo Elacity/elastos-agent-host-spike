@@ -2,7 +2,7 @@
   "schema": "elastos.capsule/v1",
   "name": "photo-viewer",
   "version": "0.1.0",
-  "description": "Read an album of PNG, JPEG and WebP images by grant, check type, size and dimensions, and write a playlist. No display of its own.",
+  "description": "Read an album of PNG, JPEG and WebP images by grant, check type, size and dimensions, and write a playlist: the person's album, or the photo set it was launched with. No display of its own.",
   "author": "local-development",
   "role": "app",
   "type": "wasm",
@@ -12,12 +12,12 @@
   "execution": "component",
   "projections": ["facts"],
   "entrypoint": "photo-viewer.component.wasm",
-  "permissions": {
-    "storage": [
-      "localhost://Users/self/Pictures/*",
-      "localhost://Users/self/.AppData/App/photo-viewer/*"
-    ]
-  },
+  "asks": [
+    { "resource": "elastos://launch/content/*", "actions": ["read"] },
+    { "resource": "elastos://launch/output/*", "actions": ["write"] },
+    { "resource": "localhost://Users/self/Pictures/*", "actions": ["read"] },
+    { "resource": "localhost://Users/self/.AppData/App/photo-viewer/*", "actions": ["read", "write"] }
+  ],
   "resources": {
     "memory_mb": 16,
     "cpu_shares": 10,

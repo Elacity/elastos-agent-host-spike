@@ -113,6 +113,11 @@ impl Bridge {
     pub fn capability(&mut self, request: &Value) -> Value {
         let resource = request["resource"].as_str().unwrap_or_default().to_string();
         let action = request["action"].as_str().unwrap_or_default().to_string();
+        // The Runtime answers a launch name itself, at once. These runs are
+        // not content launches, so the answer is the one it gives then.
+        if resource.starts_with("elastos://launch/") {
+            return error("not_found", "no content launch binds this name for this capsule");
+        }
         if !self.allowed.contains(&(resource.clone(), action.clone())) {
             return error("denied", &format!("no {action} grant for {resource}"));
         }
@@ -386,6 +391,8 @@ pub mod measure {
             "denied" | "capability_denied" | "missing_token" | "invalid_token" => {
                 BusError::Denied(message)
             }
+            // As the Runtime's component provider maps it.
+            "not_found" => BusError::NotFound(message),
             _ => BusError::Invalid(message),
         }
     }

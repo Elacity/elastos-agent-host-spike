@@ -35,15 +35,15 @@ GUEST = [
     (
         "image read without a grant",
         "src/lib.rs",
-        'let item_grant = grant(bus, uri, "read", "read the header of an image in the album")?;',
-        'let item_grant = grant(bus, uri, "read", "read the header of an image in the album").unwrap_or_default();',
+        'None => grant(bus, uri, "read", "read the header of an image in the album")?,',
+        'None => grant(bus, uri, "read", "read the header of an image in the album").unwrap_or_default(),',
         ["image_without_a_read_grant_stops_the_run_and_is_not_skipped"],
     ),
     (
         "playlist write without a grant",
         "src/lib.rs",
-        'let write_grant = grant(bus, PLAYLIST_URI, "write", "write the checked playlist")?;',
-        'let write_grant = grant(bus, PLAYLIST_URI, "write", "write the checked playlist").unwrap_or_default();',
+        'let write_grant = grant(bus, granted, "write", "write the checked playlist")?;',
+        'let write_grant = grant(bus, granted, "write", "write the checked playlist").unwrap_or_default();',
         ["playlist_without_a_write_grant_stops_and_is_not_written"],
     ),
     (
@@ -71,8 +71,8 @@ GUEST = [
     (
         "content failure stops the run instead of skipping",
         "src/lib.rs",
-        "match check_item(bus, order, item)? {",
-        "match check_item(bus, order, item)?.map_err(|_| Refusal::InputTooLarge).map(Ok)? {",
+        "match check_item(bus, order, item, launch.as_deref())? {",
+        "match check_item(bus, order, item, launch.as_deref())?.map_err(|_| Refusal::InputTooLarge).map(Ok)? {",
         ["a_bad_item_is_skipped_and_the_rest_play_in_order"],
     ),
     (
@@ -125,6 +125,42 @@ GUEST = [
         'body.push_str(r#"{"content":["#);',
         ["the_playlist_is_written_as_bytes_with_append_false", "plays_png_jpeg_and_webp_in_album_order"],
     ),
+    # A content launch (the launch question, then the set and the launch's output).
+    (
+        "any failure of the launch question taken as no launch",
+        "src/lib.rs",
+        "Err(BusFailure::NotFound(_)) => None,",
+        "Err(_) => None,",
+        ["any_other_answer_to_the_launch_question_ends_the_run"],
+    ),
+    (
+        "a launched picture asked for on its own",
+        "src/lib.rs",
+        "Some(content) => content.to_string(),",
+        'Some(_) => grant(bus, uri, "read", "read the header of an image in the album")?,',
+        ["a_launched_photo_set_plays_from_the_launch_and_its_output"],
+    ),
+    (
+        "the playlist of a launched set written to the person's storage",
+        "src/lib.rs",
+        "Some(_) => (LAUNCH_OUTPUT_PATTERN, LAUNCH_PLAYLIST_URI),",
+        "Some(_) => (PLAYLIST_URI, PLAYLIST_URI),",
+        ["a_launched_photo_set_plays_from_the_launch_and_its_output"],
+    ),
+    (
+        "every file of a launched set taken as a picture",
+        "src/lib.rs",
+        ".filter(|path| path.starts_with(LAUNCH_IMAGES))",
+        ".filter(|_| true)",
+        ["a_launched_photo_set_plays_from_the_launch_and_its_output"],
+    ),
+    (
+        "a launched set with no pictures played",
+        "src/lib.rs",
+        "if images.is_empty() || images.len() > MAX_ALBUM_ITEMS {",
+        "if images.len() > MAX_ALBUM_ITEMS {",
+        ["a_launched_set_with_no_pictures_or_too_many_is_refused"],
+    ),
 ]
 
 # The kit's straight writer and the `json!` serializer it replaced. The JSON
@@ -166,8 +202,8 @@ RUNTIME = [
     (
         "image read without a grant (in the component)",
         "src/lib.rs",
-        'let item_grant = grant(bus, uri, "read", "read the header of an image in the album")?;',
-        'let item_grant = grant(bus, uri, "read", "read the header of an image in the album").unwrap_or_default();',
+        'None => grant(bus, uri, "read", "read the header of an image in the album")?,',
+        'None => grant(bus, uri, "read", "read the header of an image in the album").unwrap_or_default(),',
         ["no_grant_stops_the_run_through_the_runtime"],
     ),
     (
