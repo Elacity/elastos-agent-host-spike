@@ -1712,6 +1712,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `F_DUPFD_CLOEXEC` equality into a bit test, so `fcntl` commands 2, 4 and 15
   are allowed. The golden is read as plain integers, not through that
   constructor, so `seccomp_model_program_equals_its_golden_copy` checks this rule.
+- WP257: The model's runtime table loses `rename` and `renameat`, so the
+  `runs_create` record replace has no admitted call and the provider answers
+  `journal_access_denied` on a Linux host.
+  `seccomp_model_program_lets_run_exactly_the_listed_calls` checks that the
+  program lets those numbers run, and
+  `seccomp_model_program_equals_its_golden_copy` checks each architecture's
+  golden program.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
