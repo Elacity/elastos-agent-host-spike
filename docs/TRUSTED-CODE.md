@@ -2,8 +2,9 @@
 
 `elastos/trusted-code.json` lists the code the Runtime trusts: the ElastOS-written files that decide
 who may do what, the in-process libraries from `elastos/Cargo.lock`, and the host programs of the
-signed component set in `components.json`. `scripts/trusted-code.py` prints their numbers as text and
-as JSON.
+signed component set in `components.json`. This fork maintains an expanded list: the upstream #461
+candidates plus every ElastOS-written file where a capsule-rights decision lives (13 Nov 2026).
+`scripts/trusted-code.py` prints their numbers as text and as JSON.
 
 ## The count rule
 

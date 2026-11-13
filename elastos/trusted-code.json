@@ -1,6 +1,6 @@
 {
   "schema": "elastos.trusted-code/v1",
-  "source": "upstream issue #461 candidate lists: ElastOS-written authority files, the in-process libraries from elastos/Cargo.lock and the host programs of the signed component set",
+  "source": "upstream issue #461 candidate lists expanded by this fork on 13 Nov 2026 to every ElastOS-written file where a capsule-rights decision lives, plus the in-process libraries from elastos/Cargo.lock and the host programs of the signed component set",
   "count_rule": "docs/TRUSTED-CODE.md",
   "files": [
     "elastos/crates/elastos-server/src/runtime.rs",
@@ -40,7 +40,28 @@
     "elastos/crates/elastos-runtime/src/capability/token.rs",
     "elastos/crates/elastos-runtime/src/capability/store.rs",
     "elastos/crates/elastos-runtime/src/capability/pending.rs",
-    "elastos/crates/elastos-runtime/src/signature/verifier.rs"
+    "elastos/crates/elastos-runtime/src/signature/verifier.rs",
+    "elastos/crates/elastos-server/src/api/middleware.rs",
+    "elastos/crates/elastos-server/src/api/gateway_frontdoor.rs",
+    "elastos/crates/elastos-server/src/api/gateway_home_token.rs",
+    "elastos/crates/elastos-server/src/api/gateway_home_external_link.rs",
+    "elastos/crates/elastos-server/src/api/gateway_home_shared_content.rs",
+    "elastos/crates/elastos-server/src/api/gateway_home_wallet_connector.rs",
+    "elastos/crates/elastos-server/src/api/gateway_site.rs",
+    "elastos/crates/elastos-server/src/api/gateway_capsule_catalog.rs",
+    "elastos/crates/elastos-server/src/api/gateway_capsule_catalog/bindings.rs",
+    "elastos/crates/elastos-server/src/api/gateway_provider_proxy.rs",
+    "elastos/crates/elastos-server/src/api/gateway_browser_internet.rs",
+    "elastos/crates/elastos-server/src/api/gateway_browser_operator.rs",
+    "elastos/crates/elastos-server/src/api/gateway_browser_operator_client.rs",
+    "elastos/crates/elastos-server/src/api/gateway_browser_wallet.rs",
+    "elastos/crates/elastos-server/src/api/gateway_browser_wallet_reads.rs",
+    "elastos/crates/elastos-server/src/api/handlers/provider.rs",
+    "elastos/crates/elastos-server/src/api/handlers/namespace.rs",
+    "elastos/crates/elastos-server/src/api/handlers/storage.rs",
+    "elastos/crates/elastos-server/src/collaboration_presence_grant.rs",
+    "elastos/crates/elastos-server/src/room_service.rs",
+    "elastos/crates/elastos-server/src/protected_content_runtime.rs"
   ],
   "absent_candidates": [],
   "libraries": [
