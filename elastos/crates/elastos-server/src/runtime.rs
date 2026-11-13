@@ -447,6 +447,11 @@ impl Runtime {
                 name: name.clone(),
                 refusal: Box::new(refusal),
             };
+            // No pin sits below the depth limit, whatever it pins: also a
+            // pin on a bundle this start has already admitted higher up.
+            if depth > bundle_admission::CLOSURE_MAX_DEPTH {
+                return Err(refused(BundleRefusal::ClosureTooDeep));
+            }
             let Ok(pinned) = pin.parse::<LabCid>() else {
                 return Err(refused(BundleRefusal::CidFormInvalid(pin)));
             };
@@ -461,9 +466,6 @@ impl Runtime {
                 continue;
             }
             members += 1;
-            if depth > bundle_admission::CLOSURE_MAX_DEPTH {
-                return Err(refused(BundleRefusal::ClosureTooDeep));
-            }
             if members > bundle_admission::CLOSURE_MAX_MEMBERS {
                 return Err(refused(BundleRefusal::ClosureTooMany));
             }

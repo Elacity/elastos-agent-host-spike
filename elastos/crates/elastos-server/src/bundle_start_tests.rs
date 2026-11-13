@@ -1687,7 +1687,8 @@ async fn a_closure_is_limited_in_depth_and_in_number() {
 /// counted once, so a closure that fits its limits exactly still fits when
 /// one of its bundles is reached twice. On the second reach the one thing
 /// compared is the name: a requirement that calls the bundle something else
-/// than it is called is refused, and nothing is read for that.
+/// than it is called is refused, and nothing is read for that. The depth
+/// limit is the one limit that still holds there: no pin sits below it.
 #[tokio::test]
 async fn a_bundle_two_pins_reach_is_checked_and_counted_once() {
     let publisher = key(70);
@@ -1772,6 +1773,51 @@ async fn a_bundle_two_pins_reach_is_checked_and_counted_once() {
         walked.iter().collect::<Vec<_>>(),
         [&alias, &left_cid, &shared_cid]
     );
+
+    // The depth limit holds for a second reach too. `shared` is first
+    // reached at depth 2. `c` pins it again: with `c` at depth 3 that pin
+    // sits at depth 4 and the start goes ahead; with `c` at depth 4 it sits
+    // at depth 5 and is refused, though nothing would be read for it.
+    let c = manifest_pinning("c", &[("shared", &shared_cid)]);
+    let c = home.staged("c", &c, &quiet, &publisher).await;
+    let b = manifest_pinning("b", &[("c", &c)]);
+    let b = home.staged("b", &b, &quiet, &publisher).await;
+    let a = manifest_pinning("a", &[("b", &b)]);
+    let a = home.staged("a", &a, &quiet, &publisher).await;
+    let at_four = manifest_pinning("at-four", &[("shared", &shared_cid), ("b", &b)]);
+    let at_four = home.staged("at-four", &at_four, &quiet, &publisher).await;
+    let (ran, walked) = home.run_watched(&at_four, None, BUNDLE_WALK_BUDGET).await;
+    assert_eq!(ran.unwrap(), "at-four");
+    assert_eq!(
+        walked.iter().collect::<Vec<_>>(),
+        [&at_four, &shared_cid, &b, &c]
+    );
+    let at_five = manifest_pinning("at-five", &[("shared", &shared_cid), ("a", &a)]);
+    let at_five = home.staged("at-five", &at_five, &quiet, &publisher).await;
+    let (result, walked) = home.run_watched(&at_five, None, BUNDLE_WALK_BUDGET).await;
+    assert_eq!(
+        result.unwrap_err(),
+        under("shared", BundleRefusal::ClosureTooDeep)
+    );
+    assert_eq!(
+        walked.iter().collect::<Vec<_>>(),
+        [&at_five, &shared_cid, &a, &b, &c]
+    );
+    // The answer does not turn on the order of the root's requirements. With
+    // the long way first, the pin at depth 5 is the first reach of `shared`,
+    // and it is refused the same.
+    let long_first = manifest_pinning("long-first", &[("a", &a), ("shared", &shared_cid)]);
+    let long_first = home
+        .staged("long-first", &long_first, &quiet, &publisher)
+        .await;
+    let (result, walked) = home
+        .run_watched(&long_first, None, BUNDLE_WALK_BUDGET)
+        .await;
+    assert_eq!(
+        result.unwrap_err(),
+        under("shared", BundleRefusal::ClosureTooDeep)
+    );
+    assert_eq!(walked.iter().collect::<Vec<_>>(), [&long_first, &a, &b, &c]);
 }
 
 /// C-trust. One reading of who is trusted judges every bundle of a start.
