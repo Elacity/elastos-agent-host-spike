@@ -2400,3 +2400,74 @@ async fn content_whose_listing_is_too_long_is_refused_at_the_start() {
     );
     assert_eq!(walked, [content.as_str()]);
 }
+
+/// L-cancel. A start that is cancelled while its program runs takes the
+/// launch's content away at once. The program here is held inside its one
+/// call to the bridge; the start is cancelled there; the content is gone
+/// before the call returns, so the program, still running, finds none when
+/// it looks again, and none is kept.
+#[tokio::test]
+async fn a_cancelled_start_takes_the_launchs_content_away() {
+    let publisher = key(86);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let core = manifest_with("core", "asks", asks);
+    let core = home
+        .staged("core", &core, &calling_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let content = content_manifest("pictures", &[("page", &page)]).to_string();
+    let content = home
+        .staged("pictures", &content, b"a picture", &publisher)
+        .await;
+
+    let (called, on_call) = std::sync::mpsc::channel::<String>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let looked: Arc<Mutex<Vec<Option<Vec<String>>>>> = Arc::default();
+    let (record, runtime) = (looked.clone(), Arc::downgrade(&home.runtime));
+    home.runtime
+        .set_bridge_hostcall(Arc::new(move |_line, capsule, _principal| {
+            let runtime = runtime.upgrade().expect("the Home");
+            record
+                .lock()
+                .unwrap()
+                .push(runtime.launch_paths_of(capsule));
+            called.send(capsule.to_string()).unwrap();
+            // Held here, inside the program's call, until the test says.
+            released.lock().unwrap().recv().unwrap();
+            record
+                .lock()
+                .unwrap()
+                .push(runtime.launch_paths_of(capsule));
+            Err("the test's bridge handler was reached".to_string())
+        }));
+
+    let (runtime, data) = (home.runtime.clone(), home.data());
+    let start = tokio::spawn(async move {
+        let person = Some(PERSON.to_string());
+        let started = runtime.run_by_bundle(&data, &content, Vec::new(), person);
+        started.await.map(|_| ())
+    });
+    let capsule = tokio::task::spawn_blocking(move || on_call.recv().unwrap())
+        .await
+        .unwrap();
+    let files = vec![ENTRYPOINT.to_string(), "capsule.json".to_string()];
+    assert_eq!(home.runtime.launch_paths_of(&capsule), Some(files.clone()));
+
+    start.abort();
+    assert!(start.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        home.runtime.launch_paths_of(&capsule),
+        None,
+        "taken away at the cancel"
+    );
+
+    release.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while looked.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(*looked.lock().unwrap(), [Some(files), None]);
+}

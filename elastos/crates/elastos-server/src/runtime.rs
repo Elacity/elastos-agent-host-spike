@@ -76,6 +76,42 @@ pub struct Runtime {
     launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
 }
 
+/// One launch's content in the Runtime's table, for as long as this value
+/// lives. It is put there when the value is made and taken away when the
+/// value is dropped, however that happens: at the end of the start, or when
+/// the start is cancelled and its future dropped.
+struct LaunchHeld {
+    table: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+    id: String,
+}
+
+impl LaunchHeld {
+    fn new(
+        table: &Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+        id: &str,
+        launch: Arc<LaunchContent>,
+    ) -> Self {
+        if let Ok(mut launches) = table.write() {
+            launches.insert(id.to_string(), launch);
+        }
+        Self {
+            table: table.clone(),
+            id: id.to_string(),
+        }
+    }
+}
+
+impl Drop for LaunchHeld {
+    fn drop(&mut self) {
+        // A poisoned lock still holds the map: the entry goes all the same.
+        let mut launches = match self.table.write() {
+            Ok(launches) => launches,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        launches.remove(&self.id);
+    }
+}
+
 impl Runtime {
     /// Create a new runtime with a single compute provider (backward compatible)
     pub fn new(storage: Arc<dyn StorageProvider>, compute: Arc<dyn ComputeProvider>) -> Self {
@@ -602,16 +638,15 @@ impl Runtime {
         };
         let mut handle = loaded.map_err(failed)?;
         // The launch's content is the program's to read from before it
-        // starts until the start returns, as its ceiling is, and it is kept
-        // under the program's own capsule id.
-        if let (Some(launch), Ok(mut launches)) = (launch, self.launch_contents.write()) {
-            launches.insert(handle.id.0.clone(), launch);
-        }
+        // starts until the start is over, kept under the program's own
+        // capsule id. "Over" is when the start returns, and also when it is
+        // cancelled: the program may run on in its own thread after that,
+        // and from then on it reads nothing of the content.
+        let held =
+            launch.map(|launch| LaunchHeld::new(&self.launch_contents, &handle.id.0, launch));
         let started = self.start_loaded(component, &mut handle, args, principal_id);
         let started = started.await;
-        if let Ok(mut launches) = self.launch_contents.write() {
-            launches.remove(&handle.id.0);
-        }
+        drop(held);
         started.map_err(failed)?;
         Ok((handle, accepted))
     }

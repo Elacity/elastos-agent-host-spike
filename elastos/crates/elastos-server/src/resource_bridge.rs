@@ -2138,9 +2138,11 @@ mod tests {
     /// Where no content launch binds the name, the answer comes at once and
     /// is `not_found`: that one code is how a program learns it was not
     /// launched with content. Nothing is put to the shell. A program whose
-    /// manifest does not ask for the name is refused before that, by its own
-    /// ceiling, by name: under content too, so a program that does not ask
-    /// starts and cannot read.
+    /// manifest asks for other names but not this one is refused before
+    /// that, by its own ceiling, by name: under content too, so such a
+    /// program starts and cannot read. (A program that asks for nothing at
+    /// all never gets this far: a start by CID loads it sealed, and its call
+    /// is refused before any bridge sees it.)
     #[tokio::test]
     async fn a_launch_name_without_a_launch_is_not_found_at_once() {
         let base = bridge_context();
