@@ -883,6 +883,13 @@ fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
     // it read is the ceiling the request is judged under.
     assert_eq!(handler.matches("host_manifest_capabilities").count(), 1);
     assert_eq!(handler.matches("manifest_capabilities,\n").count(), 1);
+    // The content of a launch is looked up the same way: by the caller's own
+    // id, there and nowhere else, and a caller with no entry gets none.
+    let held = "let launch = host_launch_contents.read().ok();\n                \
+                let launch = launch.and_then(|guard| guard.get(capsule_id).cloned());";
+    assert_eq!(handler.matches(held).count(), 1);
+    assert_eq!(handler.matches("host_launch_contents").count(), 1);
+    assert_eq!(handler.matches("launch,\n").count(), 1);
 }
 
 /// A-asks. A capsule whose manifest has asks is started unsealed, under
@@ -2357,4 +2364,39 @@ async fn the_content_of_a_launch_is_held_for_its_program_while_it_runs() {
     let held = seen.lock().unwrap().clone();
     assert_eq!(held.len(), 2);
     assert_eq!(held[1].1, None);
+}
+
+/// L-long. A content whose listing would be longer than a launch serves is
+/// refused at the start, by name, before anything it pins is read. Here: 700
+/// empty files, each under a path about four hundred bytes long (a whole
+/// path must stay under what the file system allows).
+#[tokio::test]
+async fn content_whose_listing_is_too_long_is_refused_at_the_start() {
+    let publisher = key(85);
+    let home = Home::trusting(&[&publisher]).await;
+    let core = home
+        .staged("core", &manifest("core"), &quiet_component(), &publisher)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = home.staged("page", &page, b"a page", &publisher).await;
+    let manifest = content_manifest("long", &[("page", &page)]).to_string();
+    let folder = home.bundle("long", &manifest, b"a picture");
+    let deep = (0..2).fold(folder.clone(), |at, _| at.join("d".repeat(200)));
+    fs::create_dir_all(&deep).unwrap();
+    for file in 0..700 {
+        fs::write(deep.join(format!("{file:03}")), b"").unwrap();
+    }
+    let content = home.stage(&folder, &publisher).await;
+    let (result, walked) = home.run_watched(&content, None, BUNDLE_WALK_BUDGET).await;
+    let refusal = result.unwrap_err();
+    assert_eq!(
+        refusal.code(),
+        "bundle_content_listing_too_long",
+        "{refusal}"
+    );
+    assert!(
+        matches!(refusal, BundleRefusal::ContentListingTooLong(bytes) if bytes > 256 * 1024),
+        "{refusal}"
+    );
+    assert_eq!(walked, [content.as_str()]);
 }
