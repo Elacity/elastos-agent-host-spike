@@ -1775,3 +1775,128 @@ fn with_the_feature_off_the_launch_lookup_refuses_by_name() {
         FEATURE_OFF
     );
 }
+
+/// A Home with agents on and `count` real agents, each with its own wrap.
+#[cfg(feature = "prototype-agents")]
+fn home_with_agents(count: usize) -> (crate::agents::tests::Home, Vec<String>) {
+    let home = crate::agents::tests::Home::new();
+    let caller = home.caller();
+    crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();
+    let agents = (0..count)
+        .map(|index| {
+            crate::agents::create(
+                home.path(),
+                &caller,
+                &crate::agents::CreateRequest {
+                    display_name: format!("Agent {index}"),
+                    agent_host: crate::agent_admission::tests::AGENT_HOST.to_string(),
+                    request_id: format!("request-{index}"),
+                },
+                |host| Ok(crate::agent_admission::VerifiedAgentHost::unchecked_for_test(host, crate::agent_admission::tests::AGENT_HOST_CID)),
+                1,
+            )
+            .unwrap()
+            .agent_id
+        })
+        .collect();
+    (home, agents)
+}
+
+/// Two stored agents of one owner admit two actors, and each actor owns
+/// the `UsersAI` root its own id derives. The owner's launch with no agent
+/// stays unbound.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_launch_admits_each_agents_own_actor_and_root() {
+    let (home, agents) = home_with_agents(2);
+    let caller = home.caller();
+    let first = crate::agent_admission::admit_launch(
+        home.path(),
+        home.path(),
+        Some(caller.principal_id),
+        Some(agents[0].as_str()),
+    )
+    .unwrap()
+    .unwrap();
+    let second = crate::agent_admission::admit_launch(
+        home.path(),
+        home.path(),
+        Some(caller.principal_id),
+        Some(agents[1].as_str()),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.actor, agents[0]);
+    assert_eq!(second.actor, agents[1]);
+    assert_ne!(first.actor, second.actor);
+    let root = |id: &str| crate::auth::principal_kind_localhost_root(id, PrincipalKind::Agent);
+    assert_ne!(root(&agents[0]), root(&agents[1]));
+    for id in &agents {
+        let own = root(id);
+        assert!(own.starts_with("localhost://UsersAI/"), "{own}");
+        assert_eq!(root(&first.actor), root(&agents[0]));
+    }
+    assert!(crate::agent_admission::admit_launch(home.path(), home.path(), Some(caller.principal_id), None)
+        .unwrap()
+        .is_none());
+}
+
+/// A launcher who does not own the agent is refused, whether that person
+/// is stored with no agents or is no stored person at all.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
+    let (home, agents) = home_with_agents(1);
+    crate::auth::store_test_principal_root_protection(home.path(), "person:local:a5-other");
+    let error = crate::agent_admission::admit_launch(
+        home.path(),
+        home.path(),
+        Some("person:local:a5-other"),
+        Some(agents[0].as_str()),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "the caller owns no agent with that id");
+    let error = crate::agent_admission::admit_launch(
+        home.path(),
+        home.path(),
+        Some("person:local:a5-stranger"),
+        Some(agents[0].as_str()),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), crate::agents::NOT_A_PERSON);
+}
+
+/// No launcher, no launch, and a child Runtime is not the Home that owns
+/// the agent, whatever the launcher says.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_launch_needs_its_launcher_and_its_own_home() {
+    let (home, agents) = home_with_agents(1);
+    let caller = home.caller();
+    let error = crate::agent_admission::admit_launch(home.path(), home.path(), None, Some(agents[0].as_str())).unwrap_err();
+    assert_eq!(error.to_string(), crate::agent_admission::NO_LAUNCHER);
+    let child = tempfile::tempdir().unwrap();
+    let error = crate::agent_admission::admit_launch(
+        home.path(),
+        child.path(),
+        Some(caller.principal_id),
+        Some(agents[0].as_str()),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), crate::agent_admission::NOT_THE_HOME);
+}
+
+/// With the feature off, an agent launch is refused before any lookup.
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn with_the_feature_off_an_agent_launch_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = crate::agent_admission::admit_launch(
+        dir.path(),
+        dir.path(),
+        Some("person:local:a5-owner"),
+        Some("agent:v2:cccccccccccccccccccccccccccccccc"),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), crate::agents::FEATURE_OFF);
+}

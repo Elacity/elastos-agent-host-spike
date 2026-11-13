@@ -18,7 +18,7 @@ use elastos_common::CapsuleManifest;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
 
 use crate::agents::Refused;
-use crate::auth::AgentHostPackage;
+use crate::auth::{AgentHostPackage, PrincipalKind};
 
 /// The refusal a child Runtime gives.
 pub(crate) const NOT_THE_HOME: &str =
@@ -49,6 +49,65 @@ pub(crate) fn require_home_runtime(data_dir: &Path, sign_in_store: &Path) -> any
         return Err(Refused(NOT_THE_HOME.to_string()).into());
     }
     Ok(())
+}
+
+/// What one launch was admitted as: the stored agent's principal id. The
+/// bridge runs as `actor`. Its root comes from the one root rule at the bridge,
+/// and its owner is the stored record's owner, so neither is copied here.
+#[derive(Debug)]
+pub(crate) struct AdmissionContext {
+    pub(crate) actor: String,
+}
+
+/// The refusal a launch gives when it names an agent and no launcher is.
+pub(crate) const NO_LAUNCHER: &str = "an agent launch needs its owner's launch grant";
+
+/// Admits a launch that names a stored agent, and leaves every other launch
+/// exactly as it was. `None` means no agent was named. Otherwise this Runtime
+/// holds its own sign-in store, the launcher is a stored person, the named id
+/// is that person's stored agent, and the agent's stored protection opens with
+/// that person's key. A launch that cannot open the agent's key is refused
+/// here, before any provider starts.
+pub(crate) fn admit_launch(
+    data_dir: &Path,
+    sign_in_store: &Path,
+    launcher: Option<&str>,
+    agent: Option<&str>,
+) -> anyhow::Result<Option<AdmissionContext>> {
+    let Some(agent_id) = agent else {
+        return Ok(None);
+    };
+    crate::agents::require_build()?;
+    require_home_runtime(data_dir, sign_in_store)?;
+    let Some(launcher) = launcher else {
+        return Err(Refused(NO_LAUNCHER.to_string()).into());
+    };
+    let stored = crate::agents::stored_agent(data_dir, launcher, agent_id)?;
+    // The root is derived from the id, never read from a field of the record
+    // on its own, and the record must hold the root its own id owns.
+    let root = crate::auth::principal_kind_localhost_root(agent_id, PrincipalKind::Agent);
+    if stored.record.localhost_root != root {
+        return Err(Refused("agent record's root is not the root its id owns".to_string()).into());
+    }
+    // The owner's key must open the agent's stored wrap before anything starts.
+    let (owner_id, nonce, wrapped) = crate::agents::stored_wrap(data_dir, &stored.protection)?;
+    let owner_root = crate::auth::principal_stored_localhost_root(Some(data_dir), &owner_id)?;
+    let Some(wrap_key) =
+        crate::auth::owner_root_wrap_key(data_dir, &owner_id, &owner_root, &stored.protection)?
+    else {
+        anyhow::bail!("agent's owner holds no storage protection");
+    };
+    let key = zeroize::Zeroizing::new(crate::auth::decrypt_aes256_gcm_bytes(
+        wrap_key.as_slice(),
+        &nonce,
+        &wrapped,
+    ).map_err(|_| anyhow::anyhow!("principal-root decrypt failed"))?);
+    if crate::auth::principal_data_key_id(&key) != stored.protection.data_key_id {
+        anyhow::bail!("agent data key does not match its protection");
+    }
+    Ok(Some(AdmissionContext {
+        actor: agent_id.to_string(),
+    }))
 }
 
 /// Checks the Agent Host named by a create request. See the module rules.

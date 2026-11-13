@@ -124,8 +124,8 @@ pub(crate) struct Enabled {
 /// One agent: its record and the protection of its storage key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StoredAgent {
-    record: PrincipalRecord,
-    protection: PrincipalRootProtectionV1,
+    pub(crate) record: PrincipalRecord,
+    pub(crate) protection: PrincipalRootProtectionV1,
 }
 
 impl AgentRecordsFile {
