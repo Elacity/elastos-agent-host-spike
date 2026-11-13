@@ -165,9 +165,9 @@ impl Runtime {
             one.launch.clone()
         };
         match what {
-            KeptRead::Output(name) if !name.contains('/') => {
-                launch.read(&format!("{LAUNCH_OUTPUT}{name}"))
-            }
+            // An output name with a `/` names nothing: the output's write rule
+            // keeps one plain name per entry, so no key holds one.
+            KeptRead::Output(name) => launch.read(&format!("{LAUNCH_OUTPUT}{name}")),
             KeptRead::Content(path) if plain_content_path(path) => {
                 launch.read(&format!("{LAUNCH_CONTENT}{path}"))
             }

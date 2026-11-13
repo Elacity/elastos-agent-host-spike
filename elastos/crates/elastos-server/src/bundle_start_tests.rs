@@ -2619,6 +2619,11 @@ async fn a_kept_launch_is_read_at_plain_paths_only() {
         ("", false),
         ("/a", false),
         ("a/./b", false),
+        ("a/../b", false),
+        ("..", false),
+        ("a//b", false),
+        ("a/", false),
+        ("a\\b", false),
     ] {
         assert_eq!(
             crate::page_launch::plain_content_path(path),
@@ -2644,6 +2649,17 @@ async fn a_person_keeps_eight_launches_and_each_goes_when_its_time_is_up() {
         ids.push(open(PERSON).await.unwrap().id);
     }
     let ninth = open(PERSON).await.unwrap_err();
+    assert!(
+        matches!(ninth, crate::page_launch::OpenRefusal::TooManyOpen),
+        "{ninth:?}"
+    );
+    // Refused before the start: even a CID that would be refused by the
+    // start is answered as the ninth.
+    let ninth = home
+        .runtime
+        .open_for_page(&data, "not-a-cid", PERSON)
+        .await
+        .unwrap_err();
     assert!(
         matches!(ninth, crate::page_launch::OpenRefusal::TooManyOpen),
         "{ninth:?}"
