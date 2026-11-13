@@ -1,0 +1,24 @@
+{
+  "schema": "elastos.capsule/v1",
+  "version": "0.1.0",
+  "name": "a5-launch-probe",
+  "description": "Test-only Component Agent Host fixture. Through the bridge it writes a format-2 journal entry and memory/notes.md under its own UsersAI root, reads them back, and reports a refusal when asked for another agent's root. The launch binds the principal; this capsule names none.",
+  "author": "ElastOS",
+  "role": "app",
+  "type": "wasm",
+  "runtime_abi": "elastos.component/v1",
+  "bus_contract": "elastos:bus@v1",
+  "wit_world_sha256": "7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2",
+  "execution": "component",
+  "entrypoint": "a5-launch-probe.component.wasm",
+  "agent": {
+    "kind": "agent"
+  },
+  "capabilities": [
+    "localhost://UsersAI/self/*"
+  ],
+  "resources": {
+    "memory_mb": 16,
+    "cpu_shares": 10
+  }
+}

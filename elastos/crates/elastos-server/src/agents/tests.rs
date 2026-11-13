@@ -52,10 +52,15 @@ impl Home {
         std::fs::read(self.agent_file()).unwrap()
     }
 
+    /// The sign-in file's own records: the loader also hands agents through,
+    /// and that file holds none.
     fn owner_file(&self) -> Vec<PrincipalRecord> {
         crate::auth::load_auth_state(self.path())
             .unwrap()
             .principals
+            .into_iter()
+            .filter(|record| record.kind != PrincipalKind::Agent)
+            .collect()
     }
 
     fn load(&self) -> AgentFile {
@@ -154,6 +159,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             agent_host_package: Some(AgentHostPackage {
                 name: "agent-host".to_string(),
                 registry_cid: "bafyagenthost".to_string(),
+                bundle_cid: "bafyagenthostbytes".to_string(),
             }),
             retired_at: None,
             version: PRINCIPAL_RECORD_VERSION,
@@ -1002,6 +1008,7 @@ fn admit(agent_host: &str) -> anyhow::Result<VerifiedAgentHost> {
     Ok(VerifiedAgentHost::unchecked_for_test(
         agent_host,
         "bafyagenthost",
+        "bafyagenthostbytes",
     ))
 }
 
@@ -1080,6 +1087,7 @@ fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
         Some(AgentHostPackage {
             name: "agent-host".to_string(),
             registry_cid: "bafyagenthost".to_string(),
+            bundle_cid: "bafyagenthostbytes".to_string(),
         })
     );
     assert_eq!((record.retired_at, record.version), (None, 1));
@@ -1679,4 +1687,588 @@ fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
     // Each stored event has exactly the frozen event's fields.
     let ours = serde_json::to_value(home.audit()).unwrap();
     assert_eq!(serde_json::to_value(&stored.audit).unwrap(), ours);
+}
+
+/// The launch lookup: one stored agent of the launcher's own, enabled and not
+/// retired, and nothing else. The root reader the bridge calls gives the same
+/// record, and the protection the sign-in loader keeps apart.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    let stored = crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id).unwrap();
+    assert_eq!(stored.record.principal_id, agent.agent_id);
+    assert_eq!(stored.record.owner.as_deref(), Some(OWNER_ID));
+    let root =
+        crate::auth::principal_stored_localhost_root(Some(home.path()), &agent.agent_id).unwrap();
+    let by_root = stored_agent_for_root(home.path(), &agent.agent_id, &root)
+        .unwrap()
+        .expect("the root reader finds the same agent");
+    assert_eq!(by_root.record.principal_id, agent.agent_id);
+    let protection = stored_protection(home.path(), &agent.agent_id, &root)
+        .unwrap()
+        .expect("the agent's protection is in the file");
+    assert_eq!(protection.principal_id, agent.agent_id);
+
+    // A stored person who does not own it sees nothing, and so does a
+    // person the Home does not hold.
+    crate::auth::store_test_principal_root_protection(home.path(), "person:local:a5-other");
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), "person:local:a5-other", &agent.agent_id)
+            .unwrap_err()
+            .to_string(),
+        NO_SUCH_AGENT
+    );
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), "person:local:a5-stranger", &agent.agent_id)
+            .unwrap_err()
+            .to_string(),
+        NOT_A_PERSON
+    );
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), OWNER_ID, AGENT_B)
+            .unwrap_err()
+            .to_string(),
+        NO_SUCH_AGENT
+    );
+
+    // Retired and turned off are both no agent.
+    retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id)
+            .unwrap_err()
+            .to_string(),
+        NO_SUCH_AGENT
+    );
+    set_enabled_in_any_build(home.path(), &home.caller(), false, 12).unwrap();
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id)
+            .unwrap_err()
+            .to_string(),
+        NOT_ENABLED
+    );
+}
+
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn with_the_feature_off_the_launch_lookup_refuses_by_name() {
+    let home = Home::new();
+    let caller = home.caller();
+    let agent_id = plant_enabled_home_with_one_agent(
+        home.path(),
+        caller.principal_id,
+        caller.proof_binding_id,
+    );
+    assert_eq!(loaded(&home).agents.len(), 1);
+    assert_eq!(
+        crate::agents::stored_agent(home.path(), OWNER_ID, &agent_id)
+            .unwrap_err()
+            .to_string(),
+        FEATURE_OFF
+    );
+    // The root reader answers nothing rather than an error: a save that
+    // carries a stored agent must not fail on the Home's own setting.
+    assert!(stored_agent_for_root(
+        home.path(),
+        &agent_id,
+        &crate::auth::principal_kind_localhost_root(&agent_id, PrincipalKind::Agent),
+    )
+    .unwrap()
+    .is_none());
+}
+
+/// A Home with agents on and `count` real agents, each with its own wrap.
+/// `bundle_cid` is the CID creation stores for the Agent Host's bytes, from the
+/// one walk the Runtime uses.
+#[cfg(feature = "prototype-agents")]
+fn home_with_agents(count: usize, bundle_cid: &str) -> (crate::agents::tests::Home, Vec<String>) {
+    let home = crate::agents::tests::Home::new();
+    let caller = home.caller();
+    crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();
+    let agents = (0..count)
+        .map(|index| {
+            crate::agents::create(
+                home.path(),
+                &caller,
+                &crate::agents::CreateRequest {
+                    display_name: format!("Agent {index}"),
+                    agent_host: crate::agent_admission::tests::AGENT_HOST.to_string(),
+                    request_id: format!("request-{index}"),
+                },
+                |host| {
+                    Ok(
+                        crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
+                            host,
+                            crate::agent_admission::tests::AGENT_HOST_CID,
+                            bundle_cid,
+                        ),
+                    )
+                },
+                1,
+            )
+            .unwrap()
+            .agent_id
+        })
+        .collect();
+    (home, agents)
+}
+
+/// Admission over one walk of `capsule`: the same value the launch route
+/// carries through the grant check, admission, and the load. The capsules these
+/// tests build are walkable.
+fn admit_walked(
+    data_dir: &Path,
+    sign_in_store: &Path,
+    capsule: &Path,
+    launcher: Option<&str>,
+    agent: Option<&str>,
+) -> anyhow::Result<Option<crate::agent_admission::AdmissionContext>> {
+    crate::agent_admission::admit_launch(
+        data_dir,
+        sign_in_store,
+        launcher,
+        agent,
+        crate::agent_admission::walk_launch(capsule).expect("the test capsule walks"),
+    )
+}
+
+/// One Agent Host capsule folder: a manifest that declares the agent kind and a
+/// component, the entrypoint bytes, and an `.elastos-cid` receipt. Returns the
+/// folder and the CID the Runtime's own walk gives its bytes.
+#[cfg(feature = "prototype-agents")]
+fn host_capsule(name: &str, entrypoint: &[u8]) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("capsule.json"),
+        serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": name,
+            "role": "app",
+            "type": "wasm",
+            "runtime_abi": "elastos.component/v1",
+            "bus_contract": "elastos:bus@v1",
+            "wit_world_sha256": "7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2",
+            "execution": "component",
+            "entrypoint": "main.wasm",
+            "agent": {"kind": "agent"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("main.wasm"), entrypoint).unwrap();
+    let cid = crate::stage_cmd::bundle_cid(dir.path()).unwrap();
+    std::fs::write(dir.path().join(".elastos-cid"), format!("{cid}\n")).unwrap();
+    let cid = crate::stage_cmd::bundle_cid(dir.path()).unwrap();
+    (dir, cid)
+}
+
+/// Two stored agents of one owner admit two actors, and each actor owns
+/// the `UsersAI` root its own id derives. The owner's launch with no agent
+/// stays unbound.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_launch_admits_each_agents_own_actor_and_root() {
+    let (host, host_cid) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"agent host entrypoint",
+    );
+    let (home, agents) = home_with_agents(2, &host_cid);
+    let caller = home.caller();
+    let first = admit_walked(
+        home.path(),
+        home.path(),
+        host.path(),
+        Some(caller.principal_id),
+        Some(agents[0].as_str()),
+    )
+    .unwrap()
+    .unwrap();
+    let second = admit_walked(
+        home.path(),
+        home.path(),
+        host.path(),
+        Some(caller.principal_id),
+        Some(agents[1].as_str()),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.actor, agents[0]);
+    assert_eq!(second.actor, agents[1]);
+    assert_ne!(first.actor, second.actor);
+    let root =
+        |id: &str| crate::auth::principal_stored_localhost_root(Some(home.path()), id).unwrap();
+    assert_ne!(root(&agents[0]), root(&agents[1]));
+    for id in &agents {
+        let own = root(id);
+        assert!(own.starts_with("localhost://UsersAI/"), "{own}");
+        assert_eq!(root(&first.actor), root(&agents[0]));
+    }
+    assert!(admit_walked(
+        home.path(),
+        home.path(),
+        host.path(),
+        Some(caller.principal_id),
+        None
+    )
+    .unwrap()
+    .is_none());
+}
+
+/// A launcher who does not own the agent is refused, whether that person
+/// is stored with no agents or is no stored person at all.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_launch_refuses_a_launcher_who_does_not_own_the_agent() {
+    let (host, host_cid) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"agent host entrypoint",
+    );
+    let (home, agents) = home_with_agents(1, &host_cid);
+    crate::auth::store_test_principal_root_protection(home.path(), "person:local:a5-other");
+    let error = admit_walked(
+        home.path(),
+        home.path(),
+        host.path(),
+        Some("person:local:a5-other"),
+        Some(agents[0].as_str()),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "the caller owns no agent with that id");
+    let error = admit_walked(
+        home.path(),
+        home.path(),
+        host.path(),
+        Some("person:local:a5-stranger"),
+        Some(agents[0].as_str()),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), crate::agents::NOT_A_PERSON);
+}
+
+/// No launcher, no launch, and a child Runtime is not the Home that owns
+/// the agent, whatever the launcher says.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_launch_needs_its_launcher_and_its_own_home() {
+    let (host, host_cid) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"agent host entrypoint",
+    );
+    let (home, agents) = home_with_agents(1, &host_cid);
+    let caller = home.caller();
+    let error = admit_walked(
+        home.path(),
+        home.path(),
+        host.path(),
+        None,
+        Some(agents[0].as_str()),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), crate::agent_admission::NO_LAUNCHER);
+    let child = tempfile::tempdir().unwrap();
+    let error = admit_walked(
+        home.path(),
+        child.path(),
+        host.path(),
+        Some(caller.principal_id),
+        Some(agents[0].as_str()),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), crate::agent_admission::NOT_THE_HOME);
+}
+
+/// The capsule a launch would load must walk to the Agent Host bytes the agent
+/// was created for. A different name, different bytes, a missing receipt, and a
+/// forged receipt that claims the stored CID are all refused by name, and
+/// admit no actor. The forged receipt is the round-2 case: the folder writes
+/// the stored CID itself, and only the Runtime's own walk decides.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
+    let (stored_host, stored_cid) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"agent host entrypoint",
+    );
+    let (home, agents) = home_with_agents(1, &stored_cid);
+    let caller = home.caller();
+    let launch = |capsule: &Path| {
+        admit_walked(
+            home.path(),
+            home.path(),
+            capsule,
+            Some(caller.principal_id),
+            Some(agents[0].as_str()),
+        )
+    };
+    let (other_name, _) = host_capsule("another-host", b"agent host entrypoint");
+    assert_eq!(
+        launch(other_name.path()).unwrap_err().to_string(),
+        crate::agent_admission::NOT_THE_STORED_HOST
+    );
+    let (other_bytes, _) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"different entrypoint bytes",
+    );
+    assert_eq!(
+        launch(other_bytes.path()).unwrap_err().to_string(),
+        crate::agent_admission::NOT_THE_STORED_HOST
+    );
+    let (no_receipt, _) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"agent host entrypoint",
+    );
+    std::fs::remove_file(no_receipt.path().join(".elastos-cid")).unwrap();
+    assert_eq!(
+        launch(no_receipt.path()).unwrap_err().to_string(),
+        crate::agent_admission::NOT_THE_STORED_HOST
+    );
+    // The forged receipt: the stored manifest name, the stored CID written into
+    // the folder's own receipt, and different bytes. Only the walk decides.
+    let (forged, _) = host_capsule(
+        crate::agent_admission::tests::AGENT_HOST,
+        b"forged agent host bytes",
+    );
+    std::fs::write(
+        forged.path().join(".elastos-cid"),
+        format!("{stored_cid}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        launch(forged.path()).unwrap_err().to_string(),
+        crate::agent_admission::NOT_THE_STORED_HOST
+    );
+    // The stored host itself still admits the agent's actor.
+    assert_eq!(
+        launch(stored_host.path()).unwrap().unwrap().actor,
+        agents[0]
+    );
+}
+
+/// With the feature off, an agent launch is refused before any lookup.
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn with_the_feature_off_an_agent_launch_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let capsule = dir.path().join("capsule");
+    std::fs::create_dir_all(&capsule).unwrap();
+    std::fs::write(
+        capsule.join("capsule.json"),
+        serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": "agent-host",
+            "role": "app",
+            "type": "wasm",
+            "entrypoint": "main.wasm"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(capsule.join("main.wasm"), b"entrypoint").unwrap();
+    let error = admit_walked(
+        dir.path(),
+        dir.path(),
+        &capsule,
+        Some("person:local:a5-owner"),
+        Some("agent:v2:cccccccccccccccccccccccccccccccc"),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), crate::agents::FEATURE_OFF);
+}
+
+/// The merged loader returns the stored agent once, from either return path,
+/// and a save of what it returned writes the owner's records only.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn the_loader_returns_the_stored_agent_and_the_save_holds_it_back() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    // The cold read and the cached read both carry the agent, once.
+    for _ in 0..2 {
+        let state = crate::auth::load_auth_state(home.path()).unwrap();
+        let found: Vec<&PrincipalRecord> = state
+            .principals
+            .iter()
+            .filter(|record| record.principal_id == agent.agent_id)
+            .collect();
+        assert_eq!(found.len(), 1, "the agent is returned once");
+        assert_eq!(found[0].kind, PrincipalKind::Agent);
+        assert_eq!(found[0].owner.as_deref(), Some(OWNER_ID));
+        assert_eq!(found[0].role, RuntimePrincipalRole::Guest);
+        assert_eq!(
+            found[0].proof_binding.kind,
+            ProofBindingKind::AgentAdmission
+        );
+        assert_eq!(found[0].proof_binding.subject, found[0].principal_id);
+    }
+
+    // A save of the loader's answer writes the sign-in file's own records.
+    let state = crate::auth::load_auth_state(home.path()).unwrap();
+    crate::auth::save_auth_state(home.path(), &state, None).unwrap();
+    let path = crate::auth::auth_state_path(home.path()).unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let ids: Vec<&str> = saved["principals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|record| record["principal_id"].as_str())
+        .collect();
+    assert!(ids.contains(&OWNER_ID));
+    assert!(
+        !ids.contains(&agent.agent_id.as_str()),
+        "the sign-in file holds no agent: {ids:?}"
+    );
+    // The agent file keeps its one record, and its protection still opens.
+    assert_eq!(loaded(&home).agents.len(), 1);
+    let root =
+        crate::auth::principal_stored_localhost_root(Some(home.path()), &agent.agent_id).unwrap();
+    assert!(
+        crate::auth::load_principal_root_protection(home.path(), &agent.agent_id, &root)
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// Row 4: an agent writes and reads only its own root, in its own key. The
+/// bytes at rest are not the plaintext, and another person cannot read them.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_agent_writes_and_reads_its_own_root_only() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    let root =
+        crate::auth::principal_stored_localhost_root(Some(home.path()), &agent.agent_id).unwrap();
+    let owner_root =
+        crate::auth::principal_stored_localhost_root(Some(home.path()), OWNER_ID).unwrap();
+    assert_ne!(root, owner_root);
+    let object_uri = format!("{root}/journal/notes.md");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(home.path(), &object_uri)
+        .expect("the URI has a canonical path");
+    let body = b"agent a journal";
+    crate::auth::write_principal_root_object(
+        home.path(),
+        &agent.agent_id,
+        &root,
+        &object_uri,
+        &path,
+        body,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(
+            home.path(),
+            &agent.agent_id,
+            &root,
+            &object_uri,
+            &path,
+        )
+        .unwrap(),
+        body
+    );
+    // The plaintext is nowhere at rest under the data folder.
+    let mut files = Vec::new();
+    collect_files(home.path(), &mut files);
+    assert!(
+        !files
+            .iter()
+            .any(|bytes| bytes.windows(body.len()).any(|w| w == body)),
+        "the journal is not stored in the clear"
+    );
+    // The owner cannot read it through the agent's root.
+    assert!(crate::auth::read_principal_root_object(
+        home.path(),
+        OWNER_ID,
+        &root,
+        &object_uri,
+        &path,
+    )
+    .is_err());
+}
+
+/// Every file under `dir`, for a test that looks for plaintext at rest.
+#[cfg(feature = "prototype-agents")]
+fn collect_files(dir: &Path, found: &mut Vec<Vec<u8>>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_files(&path, found);
+        } else {
+            found.push(std::fs::read(&path).unwrap());
+        }
+    }
+}
+
+/// The owner-root arm opens only the protection the agent file stores.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn an_owner_root_protection_the_agent_file_does_not_store_opens_nothing() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    let root =
+        crate::auth::principal_stored_localhost_root(Some(home.path()), &agent.agent_id).unwrap();
+    let stored = crate::auth::load_principal_root_protection(home.path(), &agent.agent_id, &root)
+        .unwrap()
+        .expect("the loader finds the agent's protection");
+    // The same shape for a person's root: the file holds no agent for it.
+    let owner_root =
+        crate::auth::principal_stored_localhost_root(Some(home.path()), OWNER_ID).unwrap();
+    let mut person = stored.clone();
+    person.principal_id = OWNER_ID.to_string();
+    person.localhost_root = owner_root;
+    assert_eq!(
+        crate::auth::open_agent_root_data_key(home.path(), &person)
+            .unwrap_err()
+            .to_string(),
+        "agent file holds no record for this principal root"
+    );
+    // The agent's own protection with one field changed is not the stored one.
+    let mut changed = stored.clone();
+    changed.data_key_id = "00".repeat(32);
+    assert_eq!(
+        crate::auth::open_agent_root_data_key(home.path(), &changed)
+            .unwrap_err()
+            .to_string(),
+        "principal-root protection is not the agent file's stored one"
+    );
+    // The stored protection opens the key the record names.
+    let key = crate::auth::open_agent_root_data_key(home.path(), &stored).unwrap();
+    assert_eq!(
+        crate::auth::principal_data_key_id(&key),
+        stored.data_key_id.as_str()
+    );
+}
+
+/// With the feature off the owner's load carries no agent and no agent's
+/// protection, though a valid enabled agent file sits beside it.
+#[cfg(not(feature = "prototype-agents"))]
+#[test]
+fn with_the_feature_off_the_owner_load_carries_no_agent_record() {
+    let home = Home::new();
+    // The agent file is written directly, with no writer and no audit append:
+    // this row is about the owner's load, and its setup must not itself save
+    // what the load would merge.
+    turn_on(&home);
+    home.plant(&as_json(&enabled_file(vec![stored_agent(
+        OWNER_ID, AGENT_A,
+    )])));
+    let agent_id = AGENT_A.to_string();
+    let state = crate::auth::load_auth_state(home.path()).unwrap();
+    assert_eq!(state.principals.len(), 1, "{:?}", state.principals);
+    assert!(state
+        .principals
+        .iter()
+        .all(|record| record.principal_id != agent_id));
+    assert_eq!(state.principals[0].principal_id, OWNER_ID);
+    let root = crate::auth::principal_kind_localhost_root(&agent_id, PrincipalKind::Agent);
+    assert!(
+        crate::auth::load_principal_root_protection(home.path(), &agent_id, &root)
+            .unwrap()
+            .is_none()
+    );
 }

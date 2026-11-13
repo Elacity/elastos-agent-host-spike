@@ -675,8 +675,10 @@ mod tests {
             }
         }
         // Staging makes four (the name, the source, a slot that is there,
-        // the slot it wrote); the start by CID makes one, of each slot.
-        assert_eq!(walks, 5, "the walks the server makes");
+        // the slot it wrote); the start by CID makes one, of each slot; agent
+        // admission makes two (the installed Agent Host at creation, and the
+        // launch folder, walked once and loaded from that walk).
+        assert_eq!(walks, 7, "the walks the server makes");
         assert_eq!(of_a_start, 1, "the one walk under what is left");
     }
 }
