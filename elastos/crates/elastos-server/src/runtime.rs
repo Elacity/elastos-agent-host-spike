@@ -388,7 +388,9 @@ impl Runtime {
     /// pass the same checks, under its own signature and inside the one
     /// walk budget they all share, before anything starts. A pinned bundle
     /// is checked and nothing more: it is not started, and the capsule that
-    /// starts gets no way to reach it or its bytes.
+    /// starts gets no way to reach it or its bytes. A bundle that two pins
+    /// reach is checked and counted once. Who is trusted is read once for
+    /// the whole start.
     pub async fn run_by_bundle(
         &self,
         data_dir: &Path,
@@ -421,8 +423,13 @@ impl Runtime {
         // it: the files and bytes each walk takes in come off what the next
         // may take.
         let mut left = budget;
+        // Who is trusted is read once, here. That one reading judges the
+        // bundle asked for and every bundle pinned below it, and it is held
+        // until the last of them is judged: trust cannot change between two
+        // bundles of one start. It is let go before anything is loaded.
+        let trust = self.signature_verifier.read().await;
         let (admitted, accepted) = self
-            .admit_closure_member(data_dir, &asked, &mut left, &mut after_walk)
+            .admit_closure_member(data_dir, &asked, &trust, &mut left, &mut after_walk)
             .await?;
         // The bundles it pins, and the ones those pin, in the manifests'
         // order and depth first: each is held to the checks just made, then
@@ -433,11 +440,26 @@ impl Runtime {
         };
         let mut pending: Vec<_> = below(1, admitted.pins).collect();
         let mut members = 1;
+        // Every bundle admitted so far, by its CID, with the name it carries.
+        let mut names = HashMap::from([(asked.to_string(), admitted.manifest.name.clone())]);
         while let Some((depth, name, pin)) = pending.pop() {
             let refused = |refusal| BundleRefusal::Requirement {
                 name: name.clone(),
                 refusal: Box::new(refusal),
             };
+            let Ok(pinned) = pin.parse::<LabCid>() else {
+                return Err(refused(BundleRefusal::CidFormInvalid(pin)));
+            };
+            // A bundle reached a second time, through another pin, was
+            // admitted on its first reach. Its name must be this
+            // requirement's too, and that is all: it is not walked or
+            // counted again, and its own pins were followed then.
+            if let Some(known) = names.get(&pinned.to_string()) {
+                if *known != name {
+                    return Err(refused(BundleRefusal::RequirementMismatch(known.clone())));
+                }
+                continue;
+            }
             members += 1;
             if depth > bundle_admission::CLOSURE_MAX_DEPTH {
                 return Err(refused(BundleRefusal::ClosureTooDeep));
@@ -445,11 +467,8 @@ impl Runtime {
             if members > bundle_admission::CLOSURE_MAX_MEMBERS {
                 return Err(refused(BundleRefusal::ClosureTooMany));
             }
-            let Ok(pinned) = pin.parse::<LabCid>() else {
-                return Err(refused(BundleRefusal::CidFormInvalid(pin)));
-            };
             let (member, _) = self
-                .admit_closure_member(data_dir, &pinned, &mut left, &mut after_walk)
+                .admit_closure_member(data_dir, &pinned, &trust, &mut left, &mut after_walk)
                 .await
                 .map_err(refused)?;
             if member.manifest.name != name {
@@ -457,8 +476,10 @@ impl Runtime {
                     member.manifest.name,
                 )));
             }
+            names.insert(pinned.to_string(), member.manifest.name);
             pending.extend(below(depth, member.pins));
         }
+        drop(trust);
 
         let failed = |error: ElastosError| BundleRefusal::StartFailed(error.to_string());
         let Some(component) = self.component_provider.clone() else {
@@ -489,9 +510,10 @@ impl Runtime {
     /// The checks every bundle of a start by CID passes, the one asked for
     /// and each pinned one alike, in this order: the store has a slot for
     /// `cid`; one walk of it, inside what is `left` of the closure's budget;
-    /// the files recompute to `cid`; the signature beside it is accepted;
-    /// and only then this start judges its manifest and its component's
-    /// imports. What the walk took in comes off `left`.
+    /// the files recompute to `cid`; the signature beside it is accepted
+    /// under `trust`, the start's one reading of who is trusted; and only
+    /// then this start judges its manifest and its component's imports.
+    /// What the walk took in comes off `left`.
     ///
     /// The walk is not blind to the manifest: to name a bundle it parses
     /// and validates `capsule.json` with the Runtime's reader, before the
@@ -503,6 +525,7 @@ impl Runtime {
         &self,
         data_dir: &Path,
         asked: &LabCid,
+        trust: &SignatureVerifier,
         left: &mut Budget,
         after_walk: &mut impl FnMut(&LabCid),
     ) -> std::result::Result<(AdmittedBundle, AcceptedSignature), BundleRefusal> {
@@ -533,11 +556,18 @@ impl Runtime {
             });
         }
         let signature = bundle_admission::bundle_signature_path(data_dir, asked);
-        let accepted = self.check_bundle_signature(&signature, asked).await?;
+        let accepted = bundle_admission::check_bundle_signature(&signature, asked, trust)?;
         let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
         crate::component::validate_component_imports(&admitted.component)
             .map_err(BundleRefusal::NotAComponent)?;
         Ok((admitted, accepted))
+    }
+
+    /// Test only: whether who is trusted could be replaced at this moment.
+    /// It cannot while a start by CID holds its one reading.
+    #[cfg(test)]
+    pub(crate) fn trust_can_change_now(&self) -> bool {
+        self.signature_verifier.try_write().is_ok()
     }
 
     /// Test only: the ceiling the bridge holds the capsule `id` to right now,

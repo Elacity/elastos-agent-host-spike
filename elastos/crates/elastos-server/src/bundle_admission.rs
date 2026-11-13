@@ -18,6 +18,7 @@ use elastos_common::{
     CapsuleExecution, CapsuleManifest, CapsuleRole, CapsuleRuntimeAbi, CapsuleType, PinnedManifest,
     PinnedManifestError, ELASTOS_BUS_V1_CONTRACT,
 };
+use elastos_runtime::capability::ResourceId;
 use elastos_runtime::signature::SignatureVerifier;
 use serde::Deserialize;
 
@@ -61,7 +62,7 @@ pub const BUNDLE_WALK_BUDGET: Budget = Budget {
 };
 
 /// The most bundles one start by CID takes in: the one asked for and every
-/// bundle pinned below it, each counted every time a pin reaches it.
+/// bundle pinned below it, each counted once however many pins reach it.
 pub const CLOSURE_MAX_MEMBERS: usize = 16;
 
 /// How far below the bundle asked for a pin may reach. That bundle is at
@@ -114,6 +115,8 @@ pub enum BundleRefusal {
     /// The bundle staged under a pin is called something else than the
     /// requirement that pins it. The text is the name the bundle carries.
     RequirementMismatch(String),
+    /// An ask covers a whole scheme. The text is the ask's resource.
+    AskTooWide(String),
     /// A pin sits deeper than [`CLOSURE_MAX_DEPTH`].
     ClosureTooDeep,
     /// A pin reaches one bundle more than [`CLOSURE_MAX_MEMBERS`].
@@ -148,6 +151,7 @@ impl BundleRefusal {
             BundleRefusal::RequirementNameInvalid(_) => "bundle_requirement_name_invalid",
             BundleRefusal::RequirementUnpinned(_) => "bundle_requirement_unpinned",
             BundleRefusal::RequirementMismatch(_) => "bundle_requirement_mismatch",
+            BundleRefusal::AskTooWide(_) => "bundle_ask_too_wide",
             BundleRefusal::ClosureTooDeep => "bundle_closure_too_deep",
             BundleRefusal::ClosureTooMany => "bundle_closure_too_many",
             BundleRefusal::Requirement { refusal, .. } => refusal.code(),
@@ -196,6 +200,9 @@ impl fmt::Display for BundleRefusal {
                     f,
                     "{code}: the bundle staged under the pin is called {found:?}"
                 )
+            }
+            BundleRefusal::AskTooWide(resource) => {
+                write!(f, "{code}: the ask for {resource:?} covers a whole scheme")
             }
             BundleRefusal::ClosureTooDeep => {
                 write!(f, "{code}: a pin sits below depth {CLOSURE_MAX_DEPTH}")
@@ -513,6 +520,18 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
     }
     .map_err(|error| invalid(error.to_string()))?;
     manifest.validate().map_err(invalid)?;
+    // An ask names something under its scheme. One that, read as the bridge
+    // reads a pattern, covers two different names directly under the scheme
+    // covers the scheme: that is no ceiling, and this start refuses it. (A
+    // start from a folder is not held to this.)
+    let covers = |ask: &str, top: &str| {
+        let scheme = ask.split("://").next().unwrap_or_default();
+        ResourceId::new(format!("{scheme}://{top}")).matches(&ResourceId::new(ask))
+    };
+    let mut asked = manifest.asks.iter().map(|ask| &ask.resource);
+    if let Some(wide) = asked.find(|ask| covers(ask, "a") && covers(ask, "b")) {
+        return Err(BundleRefusal::AskTooWide(wide.clone()));
+    }
     let component_of_the_contract = manifest.role == CapsuleRole::App
         && manifest.capsule_type == CapsuleType::Wasm
         && manifest.runtime_abi == Some(CapsuleRuntimeAbi::ElastosComponentV1)

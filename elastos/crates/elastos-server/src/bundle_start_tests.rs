@@ -39,7 +39,8 @@ const ENTRYPOINT: &str = "app.component.wasm";
 /// Its bridge handler is set from outside (`set_bridge_hostcall`) and reads no
 /// ceiling: it records each call it sees. A capsule started from a folder
 /// reaches such a handler (the runtime module's test of the folder start
-/// shows that with the same component); a capsule started by CID must not.
+/// shows that with the same component); a capsule started by CID reaches it
+/// only when its manifest has asks, and without asks must not.
 struct Home {
     runtime: Arc<Runtime>,
     dir: tempfile::TempDir,
@@ -1006,7 +1007,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         walk.as_str(),
         "after_walk(asked)",
         "bundle.cid() != *asked",
-        "self.check_bundle_signature(",
+        "bundle_admission::check_bundle_signature(&signature, asked, trust)",
         "bundle_admission::admit_bundle_manifest(",
         "validate_component_imports(",
     ];
@@ -1021,6 +1022,24 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         places.windows(2).all(|pair| pair[0] < pair[1]),
         "{places:?}"
     );
+    // Who is trusted is read once, by the start, before the first bundle;
+    // the member check is handed that reading and takes none of its own;
+    // and the reading is let go before anything is loaded.
+    let reading = "let trust = self.signature_verifier.read().await;";
+    assert_eq!(start.matches(reading).count(), 1);
+    assert_eq!(start.matches("signature_verifier").count(), 1);
+    assert_eq!(
+        start
+            .matches(", &trust, &mut left, &mut after_walk)")
+            .count(),
+        2
+    );
+    assert!(!member.contains("signature_verifier"));
+    assert!(!member.contains("self.check_bundle_signature"));
+    let let_go = start.find("drop(trust);").expect("let go");
+    assert!(start.find(reading).unwrap() < start.find(".admit_closure_member(").unwrap());
+    assert!(start.rfind(".admit_closure_member(").unwrap() < let_go);
+    assert!(let_go < start.find("load_admitted").unwrap());
     // The bundle asked for and each pinned one go through that function, and
     // nothing else in the server's code judges a bundle's manifest.
     assert_eq!(start.matches(".admit_closure_member(").count(), 2);
@@ -1231,10 +1250,10 @@ fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
 /// C-walk, the control. A bundle that pins staged bundles starts, and it is
 /// the only thing that runs: every pinned bundle here holds the calling
 /// component, which, started for its person, calls the bridge and ends in an
-/// error. Each pinned bundle is walked once per pin that reaches it, depth
-/// first in the manifests' order (`shared` is pinned twice and checked
-/// twice), each under its own publisher's signature. The capsule that
-/// starts is still sealed: a requirement gives it no bridge.
+/// error. Each pinned bundle is walked once, depth first in the manifests'
+/// order (`shared` is pinned twice and checked on its first reach only),
+/// each under its own publisher's signature. The capsule that starts is
+/// still sealed: a requirement gives it no bridge.
 #[tokio::test]
 async fn a_bundle_that_pins_staged_bundles_starts_and_only_it_runs() {
     let (publisher, other) = (key(60), key(61));
@@ -1265,8 +1284,7 @@ async fn a_bundle_that_pins_staged_bundles_starts_and_only_it_runs() {
             root.as_str(),
             left.as_str(),
             shared.as_str(),
-            right.as_str(),
-            shared.as_str()
+            right.as_str()
         ]
     );
     assert_eq!(
@@ -1662,4 +1680,255 @@ async fn a_closure_is_limited_in_depth_and_in_number() {
     );
     assert_eq!(walked.len(), 16);
     assert!(!walked.contains(&leaves[15].1));
+}
+
+/// C-diamond. A bundle that two pins reach is admitted on its first reach and
+/// only there: it is walked once, taken off the shared budget once and
+/// counted once, so a closure that fits its limits exactly still fits when
+/// one of its bundles is reached twice. On the second reach the one thing
+/// compared is the name: a requirement that calls the bundle something else
+/// than it is called is refused, and nothing is read for that.
+#[tokio::test]
+async fn a_bundle_two_pins_reach_is_checked_and_counted_once() {
+    let publisher = key(70);
+    let home = Home::trusting(&[&publisher]).await;
+    let quiet = quiet_component();
+    let bytes = |manifest: &str| (manifest.len() + quiet.len()) as u64;
+    let shared = manifest("shared");
+    let shared_cid = home.staged("shared", &shared, &quiet, &publisher).await;
+    let left = manifest_pinning("left", &[("shared", &shared_cid)]);
+    let left_cid = home.staged("left", &left, &quiet, &publisher).await;
+    let right = manifest_pinning("right", &[("shared", &shared_cid)]);
+    let right_cid = home.staged("right", &right, &quiet, &publisher).await;
+    let root = manifest_pinning("root", &[("left", &left_cid), ("right", &right_cid)]);
+    let root_cid = home.staged("root", &root, &quiet, &publisher).await;
+
+    // Four bundles of two files each; the shared one's bytes once.
+    let exact = Budget {
+        max_entries: 8,
+        max_total_bytes: bytes(&root) + bytes(&left) + bytes(&right) + bytes(&shared),
+        ..BUNDLE_WALK_BUDGET
+    };
+    let (ran, walked) = home.run_watched(&root_cid, None, exact).await;
+    assert_eq!(ran.unwrap(), "root");
+    let once = [&root_cid, &left_cid, &shared_cid, &right_cid];
+    assert_eq!(walked.iter().collect::<Vec<_>>(), once);
+    // The control: that budget is exact. A byte or a file less and the last
+    // bundle walked, the one under `right`, no longer fits.
+    for short in [
+        Budget {
+            max_total_bytes: exact.max_total_bytes - 1,
+            ..exact
+        },
+        Budget {
+            max_entries: 7,
+            ..exact
+        },
+    ] {
+        let (result, walked) = home.run_watched(&root_cid, None, short).await;
+        let refusal = result.unwrap_err();
+        assert_eq!(refusal.code(), "bundle_walk_over_budget", "{refusal}");
+        assert!(
+            matches!(&refusal, BundleRefusal::Requirement { name, .. } if name == "right"),
+            "{refusal}"
+        );
+        assert_eq!(walked.iter().collect::<Vec<_>>(), once[..3]);
+    }
+
+    // Counted once: sixteen different bundles, one of them reached through
+    // two pins, are sixteen and start.
+    let mut pins = vec![
+        ("left".to_string(), left_cid.clone()),
+        ("right".to_string(), right_cid.clone()),
+    ];
+    for leaf in 1..=12 {
+        let name = format!("d{leaf}");
+        let cid = home
+            .staged(&name, &manifest(&name), &quiet, &publisher)
+            .await;
+        pins.push((name, cid));
+    }
+    let pins: Vec<(&str, &str)> = pins
+        .iter()
+        .map(|(name, cid)| (name.as_str(), cid.as_str()))
+        .collect();
+    let sixteen = manifest_pinning("sixteen-with-a-diamond", &pins);
+    let sixteen = home.staged("sixteen", &sixteen, &quiet, &publisher).await;
+    let (ran, walked) = home.run_watched(&sixteen, None, BUNDLE_WALK_BUDGET).await;
+    assert_eq!(ran.unwrap(), "sixteen-with-a-diamond");
+    assert_eq!(walked.len(), 16);
+    assert_eq!(walked.iter().filter(|cid| **cid == shared_cid).count(), 1);
+
+    // The second reach under another name. `left` reaches the shared bundle
+    // first, as `shared`; the root then pins the same bundle as `alias`.
+    let alias = manifest_pinning("alias-root", &[("left", &left_cid), ("alias", &shared_cid)]);
+    let alias = home.staged("alias-root", &alias, &quiet, &publisher).await;
+    let (result, walked) = home.run_watched(&alias, None, BUNDLE_WALK_BUDGET).await;
+    assert_eq!(
+        result.unwrap_err(),
+        under("alias", BundleRefusal::RequirementMismatch("shared".into()))
+    );
+    assert_eq!(
+        walked.iter().collect::<Vec<_>>(),
+        [&alias, &left_cid, &shared_cid]
+    );
+}
+
+/// C-trust. One reading of who is trusted judges every bundle of a start.
+/// While the start walks its bundles, the bundle asked for and each pinned
+/// one, trust cannot be replaced; before the start, after it, after a start
+/// that was refused, and while the started capsule runs, it can.
+#[tokio::test]
+async fn one_reading_of_trust_judges_every_bundle_of_a_start() {
+    let publisher = key(71);
+    let home = Home::trusting(&[&publisher]).await;
+    let asks = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let first = home
+        .staged("first", &manifest("first"), &quiet_component(), &publisher)
+        .await;
+    let second = home
+        .staged(
+            "second",
+            &manifest("second"),
+            &quiet_component(),
+            &publisher,
+        )
+        .await;
+    let mut root: serde_json::Value = serde_json::from_str(&manifest_pinning(
+        "root",
+        &[("first", &first), ("second", &second)],
+    ))
+    .unwrap();
+    root["asks"] = asks;
+    let root = home
+        .staged("root", &root.to_string(), &calling_component(), &publisher)
+        .await;
+
+    // While the capsule runs: asked from inside the Home's bridge handler,
+    // which the calling component reaches because its manifest has asks.
+    let (during_run, runtime) = (
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::downgrade(&home.runtime),
+    );
+    let seen = during_run.clone();
+    home.runtime
+        .set_bridge_hostcall(Arc::new(move |_line, _capsule, _principal| {
+            let free = runtime.upgrade().map(|it| it.trust_can_change_now());
+            seen.lock().unwrap().push(free);
+            Err("the test's bridge handler was reached".to_string())
+        }));
+
+    assert!(home.runtime.trust_can_change_now());
+    let mut during_walks = Vec::new();
+    let person = Some(PERSON.to_string());
+    let result = home
+        .runtime
+        .run_by_bundle_observed(
+            &home.data(),
+            &root,
+            Vec::new(),
+            person,
+            BUNDLE_WALK_BUDGET,
+            |_| during_walks.push(home.runtime.trust_can_change_now()),
+        )
+        .await;
+    // The component's one call was refused by the test's handler, so the
+    // start ends in that error: everything before it passed.
+    assert_eq!(result.unwrap_err().code(), "bundle_start_failed");
+    assert_eq!(during_walks, [false, false, false]);
+    assert_eq!(*during_run.lock().unwrap(), [Some(true)]);
+    assert!(home.runtime.trust_can_change_now());
+
+    // A start that is refused part-way lets its reading go too.
+    let missing = manifest_pinning("lonely", &[("gone", crate::bundle_admission::tests::CID_A)]);
+    let missing = home
+        .staged("lonely", &missing, &quiet_component(), &publisher)
+        .await;
+    assert_eq!(code(home.run(&missing, None).await), "bundle_missing");
+    assert!(home.runtime.trust_can_change_now());
+}
+
+/// C-external. A requirement of kind `external` names a host dependency,
+/// not a bundle. The manifest type refuses one on an app capsule, and a start
+/// by CID takes only app components: so no bundle that starts by CID has one,
+/// and this start needs no rule for who serves it. Staging refuses such a
+/// bundle, so the slot is written here by hand.
+#[tokio::test]
+async fn an_external_requirement_is_refused_at_a_start_by_cid() {
+    let publisher = key(72);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("plain", &manifest("plain"), &quiet_component());
+    let cid = home.stage(&folder, &publisher).await;
+    let external = serde_json::json!([{"name": "did-provider", "kind": "external"}]);
+    let external = manifest_with("plain", "requires", external);
+    home.overwrite(&cid, "capsule.json", external.as_bytes());
+    let refusal = home.run(&cid, None).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_walk_manifest_invalid");
+    assert!(
+        refusal
+            .to_string()
+            .contains("app capsules cannot require external host dependencies"),
+        "{refusal}"
+    );
+}
+
+/// A-wide. An ask that covers a whole scheme is refused at a start by CID,
+/// however it is spelled; an ask that names something under its scheme is
+/// taken. Judged as the bridge reads a pattern, so the spellings the bridge
+/// would fold into `scheme://*` are refused with it.
+#[tokio::test]
+async fn an_ask_that_covers_a_whole_scheme_is_refused_at_a_start_by_cid() {
+    let publisher = key(73);
+    let home = Home::trusting(&[&publisher]).await;
+    let asking = |resource: &str| {
+        let asks = serde_json::json!([
+            {"resource": "elastos://test/bus/probe", "actions": ["read"]},
+            {"resource": resource, "actions": ["read"]}
+        ]);
+        manifest_with("asking", "asks", asks)
+    };
+    for wide in [
+        "elastos://*",
+        "elastos:///*",
+        "elastos://./*",
+        "localhost://*",
+    ] {
+        let cid = home
+            .staged("wide", &asking(wide), &quiet_component(), &publisher)
+            .await;
+        let refusal = home.run(&cid, None).await.unwrap_err();
+        assert_eq!(refusal, BundleRefusal::AskTooWide(wide.into()), "{wide}");
+        assert_eq!(
+            refusal.to_string(),
+            format!("bundle_ask_too_wide: the ask for {wide:?} covers a whole scheme")
+        );
+    }
+    for named in [
+        "elastos://did/*",
+        "elastos://a",
+        "elastos://launch/content/*",
+        "localhost://Users/self/Documents/*",
+    ] {
+        let cid = home
+            .staged("named", &asking(named), &quiet_component(), &publisher)
+            .await;
+        assert_eq!(home.run(&cid, None).await.unwrap().0, "asking", "{named}");
+    }
+}
+
+/// C-fresh. A start by CID never hands the start to a capsule that is
+/// already there: two starts of one CID are two instances, each under an id
+/// of its own.
+#[tokio::test]
+async fn two_starts_of_one_cid_are_two_instances() {
+    let publisher = key(74);
+    let home = Home::trusting(&[&publisher]).await;
+    let cid = home
+        .staged("twice", &manifest("twice"), &quiet_component(), &publisher)
+        .await;
+    let data = home.data();
+    let start = || home.runtime.run_by_bundle(&data, &cid, Vec::new(), None);
+    let (first, _) = start().await.unwrap();
+    let (second, _) = start().await.unwrap();
+    assert_ne!(first.id.0, second.id.0);
 }
