@@ -1082,12 +1082,16 @@ pub struct StoredAuthChallenge {
 }
 
 /// The installed Agent Host package an agent record is bound to.
-/// Both strings are the release-signed components entry: the package name
-/// and the registry CID that entry carries.
+/// `name` and `registry_cid` are the release-signed components entry: the
+/// package name and the registry CID that entry carries. `bundle_cid` is the
+/// CID the Runtime computed by walking the installed files, exactly the bytes a
+/// launch must present; an older record without it admits no launch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHostPackage {
     pub name: String,
     pub registry_cid: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bundle_cid: String,
 }
 
 /// The record shape written for an agent. A record stored before this field
@@ -5154,6 +5158,7 @@ fn load_auth_state_locked_once(
         }
         let mut state = cached;
         prune_auth_state(&mut state, now_ts());
+        crate::agents::merge_into(data_dir, &mut state);
         return Ok(Some((state, initial_runtime_device_key_identity)));
     }
 
@@ -5227,6 +5232,7 @@ fn load_auth_state_locked_once(
         &state,
     );
     prune_auth_state(&mut state, now_ts());
+    crate::agents::merge_into(data_dir, &mut state);
     Ok(Some((state, initial_runtime_device_key_identity)))
 }
 
@@ -5927,6 +5933,7 @@ fn edit_malformed_agent(agent: &mut PrincipalRecord, case: usize) -> &'static st
             agent.agent_host_package = Some(AgentHostPackage {
                 name: String::new(),
                 registry_cid: "bafyrecord".to_string(),
+                bundle_cid: "bafyrecordbytes".to_string(),
             });
             "agent admission package name missing"
         }
@@ -5934,6 +5941,7 @@ fn edit_malformed_agent(agent: &mut PrincipalRecord, case: usize) -> &'static st
             agent.agent_host_package = Some(AgentHostPackage {
                 name: "agent-host".to_string(),
                 registry_cid: String::new(),
+                bundle_cid: "bafyrecordbytes".to_string(),
             });
             "agent admission package cid missing"
         }
@@ -6118,7 +6126,11 @@ pub(crate) fn save_auth_state_allowing(
     // an AgentAdmission record is refused and this function writes nothing.
     with_audit_chain_activation_lock(data_dir, || {
         invalidate_verified_auth_state_cache(data_dir);
-        refuse_agent_admission_changes(data_dir, state, permit)?;
+        // Agents are in the loaded state but never in the sign-in file: the
+        // guard and the bytes both see the records that file holds.
+        let stripped = crate::agents::without_agent_roots(data_dir, state);
+        let saved = stripped.as_ref().unwrap_or(state);
+        refuse_agent_admission_changes(data_dir, saved, permit)?;
         let device_key_identity = observe_runtime_device_key_file_identity(data_dir)?;
         verify_audit_chain_from(data_dir, state, baseline)?;
         let mut activation_identity = observe_audit_chain_activation_file_identity(data_dir)?;
@@ -6146,7 +6158,7 @@ pub(crate) fn save_auth_state_allowing(
             }
             _ => {}
         }
-        let bytes = persisted_auth_state_bytes(state)?;
+        let bytes = persisted_auth_state_bytes(saved)?;
         let written_identity = write_secret_bytes_atomic(&path, &bytes)?;
         // Metadata sampled after rename alone cannot establish which bytes we wrote.
         let readback = read_auth_state_bytes(data_dir).ok().flatten();
@@ -6187,7 +6199,7 @@ pub(crate) fn save_auth_state_allowing(
                     Some(identity),
                     activation_identity,
                     device_key_identity,
-                    state,
+                    saved,
                 );
             }
         }
@@ -6680,7 +6692,8 @@ pub fn load_principal_root_protection(
     let Some(protection) = state.principal_root_protections.iter().find(|stored| {
         stored.principal_id == principal_id && stored.localhost_root == localhost_root
     }) else {
-        return Ok(None);
+        // An agent's protection is kept in the agent records file, never here.
+        return crate::agents::stored_protection(data_dir, principal_id, localhost_root);
     };
     validate_sign_in_file_protection(protection)?;
     ensure_users_ai_protection_owner(&state, protection)?;
@@ -9342,6 +9355,13 @@ fn principal_root_data_key_from_protection(
     if protection.crypto.cipher != DEFAULT_PRINCIPAL_ROOT_CIPHER {
         anyhow::bail!("unsupported principal-root cipher");
     }
+    if protection
+        .protectors
+        .iter()
+        .any(|protector| protector.kind == PrincipalRootProtectorKind::OwnerRoot)
+    {
+        return open_agent_root_data_key(data_dir, protection);
+    }
     let archive = protection
         .protectors
         .iter()
@@ -9357,6 +9377,27 @@ fn principal_root_data_key_from_protection(
         anyhow::bail!("recovery kit archive is not bound to this principal root");
     }
     recovery_kit_data_key(&kit)
+}
+
+/// An agent's data key, opened from the wrap its own stored protection holds.
+/// Nothing but the checked key leaves this function.
+pub(crate) fn open_agent_root_data_key(
+    data_dir: &Path,
+    protection: &PrincipalRootProtectionV1,
+) -> anyhow::Result<[u8; 32]> {
+    let (owner_id, nonce, wrapped) = crate::agents::stored_wrap(data_dir, protection)?;
+    let owner_root =
+        principal_stored_localhost_root(Some(data_dir), &owner_id).map_err(anyhow::Error::msg)?;
+    let wrap_key = owner_root_wrap_key(data_dir, &owner_id, &owner_root, protection)?
+        .ok_or_else(|| anyhow!("agent's owner holds no storage protection"))?;
+    let key = decrypt_aes256_gcm_bytes(wrap_key.as_slice(), &nonce, &wrapped)
+        .map_err(|_| anyhow!("principal-root decrypt failed"))?;
+    if principal_data_key_id(&key) != protection.data_key_id {
+        anyhow::bail!("agent data key does not match its protection");
+    }
+    key.as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("agent data key has the wrong length"))
 }
 
 /// What an owner-root wrap key is derived for. Each part is length-prefixed
@@ -12887,6 +12928,7 @@ fn test_agent_record(agent_id: &str) -> PrincipalRecord {
         agent_host_package: Some(AgentHostPackage {
             name: "agent-host".to_string(),
             registry_cid: "bafyrecord".to_string(),
+            bundle_cid: "bafyrecordbytes".to_string(),
         }),
         retired_at: None,
         version: PRINCIPAL_RECORD_VERSION,
@@ -20703,12 +20745,14 @@ pub(crate) mod tests {
             agent.agent_host_package = Some(AgentHostPackage {
                 name: String::new(),
                 registry_cid: "bafyrecord".to_string(),
+                bundle_cid: "bafyrecordbytes".to_string(),
             });
         });
         assert_invalid_agent_refused("agent admission package cid missing", |agent| {
             agent.agent_host_package = Some(AgentHostPackage {
                 name: "agent-host".to_string(),
                 registry_cid: String::new(),
+                bundle_cid: "bafyrecordbytes".to_string(),
             });
         });
         assert_invalid_agent_refused("agent admission binding id mismatch", |agent| {
