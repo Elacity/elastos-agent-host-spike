@@ -2492,6 +2492,66 @@ mod tests {
         assert_eq!(response["response"]["code"], "manifest_capability_denied");
     }
 
+    /// The attached bridge (a component run from the command line against a
+    /// running Runtime) holds a manifest's asks the same way, before it
+    /// sends anything. With one ask, read on a folder: a write there, and a
+    /// request to be granted the write, are each refused by the ceiling; the
+    /// request's action is written in upper case, and is judged as the
+    /// Runtime will read it. Nothing listens on the address given, so a
+    /// ceiling refusal can only have come from this check. The controls are
+    /// not refused by the ceiling and so go on to that dead address: the
+    /// read under the same ask (the request for it again in upper case),
+    /// and the same write under a ceiling that names no action.
+    #[tokio::test]
+    async fn the_attached_bridge_holds_a_capsule_with_asks_to_their_actions() {
+        let folder = "localhost://Local/SharedByLocalUsersAndBots/Home/allowed";
+        let read_only = vec![AuthorityBound {
+            resource: format!("{folder}/*"),
+            actions: Some(vec![elastos_common::AskAction::Read]),
+        }];
+        let any = any_action(vec![format!("{folder}/*")]);
+        let invoke = |operation: &str| {
+            format!(
+                r#"{{"id":15,"request":{{"type":"resource_invoke","uri":"{folder}/a.md","operation":"{operation}","token":"held","body":{{"content":[1],"append":false}}}}}}"#
+            )
+        };
+        let request = |action: &str| {
+            format!(
+                r#"{{"id":16,"request":{{"type":"request_capability","resource":"{folder}/a.md","action":"{action}"}}}}"#
+            )
+        };
+        let answer = |line: String, ceiling: Vec<AuthorityBound>| async move {
+            let dead = "http://127.0.0.1:12345";
+            handle_remote_request(&line, dead, "client-token", "test-capsule", &ceiling, None).await
+        };
+        let by_the_ceiling = |answer: &Result<serde_json::Value>| {
+            let code = answer
+                .as_ref()
+                .ok()
+                .map(|it| it["response"]["code"].clone());
+            code == Some(serde_json::json!("manifest_capability_denied"))
+        };
+
+        for line in [invoke("write"), request("WRITE")] {
+            let refused = answer(line.clone(), read_only.clone()).await;
+            assert!(by_the_ceiling(&refused), "{line}: {refused:?}");
+            let message = refused.unwrap()["response"]["message"].to_string();
+            assert!(
+                message.contains(&format!("to write {folder}/a.md")),
+                "{message}"
+            );
+        }
+        for (line, ceiling) in [
+            (invoke("read"), read_only.clone()),
+            (request("READ"), read_only.clone()),
+            (invoke("write"), any.clone()),
+            (request("WRITE"), any),
+        ] {
+            let went_on = answer(line.clone(), ceiling).await;
+            assert!(!by_the_ceiling(&went_on), "{line}: {went_on:?}");
+        }
+    }
+
     #[tokio::test]
     async fn attached_bridge_wallet_contract_fails_before_http_dispatch() {
         let response = handle_remote_request(
