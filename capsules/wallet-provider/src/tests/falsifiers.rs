@@ -344,7 +344,7 @@ use std::process::Command;
 /// jump; `seccomp_model_program_equals_its_golden_copy` catches each. WP256
 /// changes the shared `SeccompInstruction::jump` constructor, which the golden
 /// reader does not use, so the same test catches it.
-const EXPECTED_FALSIFIERS: usize = 237;
+const EXPECTED_FALSIFIERS: usize = 238;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -88,7 +88,12 @@ the `rename` call on x86-64 and `renameat` on aarch64, where the kernel has no
 rows the replace answered `EACCES`, Rust read that as `PermissionDenied`, and
 the provider answered `journal_access_denied` at `runs_create`. Each
 architecture admits only the form it has, and the rows stay in the model's own
-runtime set, so wallet's and did's programs are unchanged.
+runtime set, so did's program is unchanged. The wallet's `save_store` calls the
+same libc `rename`, and the wallet's own runtime set names both forms too, so
+wallet's launch list is did's plus its own form: `rename` on x86-64, `renameat`
+on aarch64. Each architecture's program equals its checked-in golden under
+`tests/`, and `seccomp_wallet_program_adds_only_the_store_replace` checks that
+one difference; WP258 removes the wallet rows and both fail.
 
 TODO, x86-64 drop-one not yet run: the model's runtime calls `epoll_create1`,
 `epoll_ctl`, `epoll_pwait`, `eventfd2`, `exit`, `flock`, `geteuid` and `rseq`
@@ -214,12 +219,56 @@ caller alone, because the journey runs the probe only when the provider is
 wallet. In that 31 Oct run the did caller also stopped earlier, at the
 `fchmodat` block recorded below, which is since resolved.
 
-The wallet run requires `init` `ok`, one read-only wallet call `ok`, a
-`wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no profile
-written, and the named sibling `seccomp-outside-write` outside `STORAGE_ROOT`
-absent after the run. The file evidence is those named fixture paths; a seccomp
-filter carries syscall policy, not path policy, so no run claims a general file
-boundary.
+The wallet run requires `init` `ok` with the launch's own config; `status` `ok`
+naming `wallet-provider`, with storage and managed wallets configured and each
+of its five counts zero; then twenty-nine answers under the filter through
+`wallet_standin_linux_only_operations` and `assert_suite_outcomes`, which are
+the cases of `WALLET_LINUX_ONLY_CASES`: `create_managed_account` `ok` with the
+new account, `list_accounts`, `rename_account`, `set_default_account` and
+`default_account` answering the stored default; the EVM and ERC-1271 proof
+calls, `link_verified_account` for the proof account, the Bitcoin challenge and
+BIP322 proof, the approved and rejected approval requests with their signing
+and listing, the connector link with its handoff, completion and Chain outcome,
+the protected-content rights request, both recovery exports and imports, and
+`revoke_account`; `shutdown` last. Three cases answer more than once because the
+journey needs more than one stored effect: `challenge` twice for the EOA and
+ERC-1271 proofs, `request_approval` three times for the approved, rejected and
+connector requests, and `link_verified_account` twice. Every answer is asserted
+exactly: its response schema and protocol version, and the handler's own fields,
+including the managed key's address, the stored label, the default account, each
+proof hash, the approval status transitions, the transaction handoff, the
+recovered account labels, and the managed signature, which recovers from the
+signed message to that account's address. It also requires a `wallet-key.hex` of
+64 hex digits and a newline under `STORAGE_ROOT`, no profile written, and the
+named sibling `seccomp-outside-write` outside `STORAGE_ROOT` absent after the
+run. The file evidence is those named fixture paths; a seccomp filter carries
+syscall policy, not path policy, so no run claims a general file boundary.
+
+The effectful calls write their store. `save_store` replaces `wallet-state.json`
+by writing a staging file beside it and calling `std::fs::rename`, which is the
+Linux `rename` call on x86-64 and `renameat` on aarch64; the shared storage row
+maps to `renameat2` alone, so the wallet's own runtime set admits the replace
+beside it. The number table's empty cell drops the other architecture's form, so
+each launch list holds exactly its own form and `wallet.admits` refuses the
+other. A run that removed both rows from the wallet's set failed both
+`seccomp_wallet_program_equals_its_golden_copy` and
+`seccomp_wallet_program_adds_only_the_store_replace`, and no other test changed
+colour. With the rows present every operation in the table answers `ok` under
+the filter, so every Linux cell of `../wallet-provider/CONFINEMENT.md` cites this
+journey and none stays `designed, not enforced`. The file row is separate: its
+launch adds Landlock and needs ABI 5, and its recorded run is the one "The file
+row" names.
+
+On 2026-11-13 the same wallet journey ran on `elastos-bvm`, a Lima virtual
+machine on the Mac: `aarch64`, Debian, kernel `6.1.0-49-cloud-arm64`, 8 cores,
+unprivileged. The run passed all twenty-nine answers, the `init` key file, the
+absent outside sibling and the mode read, and it printed
+`launcher marker: before -22, after -13`, so `create_managed_account` replaced
+the store under the filter. The earlier runs in this section used
+`spark1.local`; this one adds no host status and no grant. That kernel reports
+Landlock ABI 2, below the ABI 5 the file row needs, so the file row's launch is
+refused there and its evidence stays the run "The file row" records on kernel
+`7.0.0-42-generic` with ABI 8.
 
 The did run requires all ten did operations under the filter. The six file-state
 calls go through `did_standin_permitted_operations` and `assert_suite_outcomes`
@@ -242,10 +291,11 @@ that one comparison for both providers with a changed inside file, a changed
 fixed-byte fixture and a present outside sibling.
 
 The list each journey asserts about itself: its `provider` field is the name it
-asked for, and its `program` equals the program built the same way for wallet.
-That equality follows from the two committed declared-rights files declaring the
-same two rights and the same two `platform-baseline` ids with identical rule text,
-so a difference would be a per-provider widening and the assertion fails on it.
+asked for, and each program equals the one built from its own allow list. The
+two committed declared-rights files declare the same two rights and the same two
+`platform-baseline` ids with identical rule text, so did's list equals wallet's
+apart from wallet's own store-replace form; the journey requires exactly that
+difference, so any further per-provider widening fails the assertion.
 
 The earlier did run measured `LAUNCH_ESSENTIALS` on its own binary, entry by entry,
 by dropping each entry alone from the whole list and reading what then failed. All
