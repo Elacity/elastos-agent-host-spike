@@ -177,8 +177,11 @@ impl Runtime {
                 // The content this caller was launched with, if it is the
                 // program of a content launch: looked up by its own id, as
                 // its ceiling is, and nobody else's.
-                let launch = host_launch_contents.read().ok();
-                let launch = launch.and_then(|guard| guard.get(capsule_id).cloned());
+                // A poisoned lock still holds the table, as for the guard.
+                let launch = host_launch_contents
+                    .read()
+                    .unwrap_or_else(|it| it.into_inner());
+                let launch = launch.get(capsule_id).cloned();
                 let ctx = crate::resource_bridge::BridgeContext {
                     provider_registry: host_reg.clone(),
                     capability_manager: host_cap_mgr.clone(),

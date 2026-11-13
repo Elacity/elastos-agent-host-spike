@@ -47,6 +47,15 @@ pub async fn provider_proxy(
     };
     request["op"] = Value::String(op.clone());
 
+    // A launch name is the Runtime's own to answer, in its bridge, for the
+    // program of a content launch. No provider serves it, from anyone.
+    if scheme == "launch" {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no content launch binds this name".to_string(),
+        ));
+    }
+
     // Build capability resource
     let resource = build_capability_resource(&scheme, &op, &request)
         .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
@@ -536,6 +545,40 @@ mod tests {
         attach_localhost_provider_wire_token("chain", "status", &headers, &mut request);
 
         assert!(request.get("token").is_none());
+    }
+
+    /// A launch name is refused by this route at once, to read or to write,
+    /// before it would be handed to the registry. (The registry takes no
+    /// provider under `launch` either: it is not a name it reserves.)
+    #[tokio::test]
+    async fn the_provider_proxy_refuses_a_launch_name() {
+        for (op, body) in [
+            (
+                "read",
+                r#"{"path":"elastos://launch/content/images/01.png"}"#,
+            ),
+            (
+                "write",
+                r#"{"path":"elastos://launch/output/playlist.json","content":"x"}"#,
+            ),
+        ] {
+            let state = ProviderProxyState {
+                registry: Arc::new(ProviderRegistry::new()),
+                capability_manager: None,
+            };
+            let refused = provider_proxy(
+                State(state),
+                Extension(Session::new(SessionType::Shell, None)),
+                Path(("launch".to_string(), op.to_string())),
+                HeaderMap::new(),
+                body.to_string(),
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err();
+            assert_eq!(refused.0, StatusCode::NOT_FOUND, "{op}");
+            assert_eq!(refused.1, "no content launch binds this name", "{op}");
+        }
     }
 
     #[tokio::test]
