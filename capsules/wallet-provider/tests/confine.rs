@@ -33,7 +33,7 @@ use elastos_wallet_contract::{
 };
 #[cfg(target_os = "linux")]
 use elastos_wallet_contract::{WALLET_PROTOCOL_VERSION, WALLET_RESPONSE_SCHEMA};
-use k256::ecdsa::SigningKey;
+use k256::ecdsa::{RecoveryId, Signature as EcdsaSignature, SigningKey, VerifyingKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
@@ -2453,6 +2453,48 @@ fn sign_test_message(signing_key: &SigningKey, message: &str) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
+/// The bytes `personal_sign` signs for `message`, computed as
+/// `src/crypto/evm/browser.rs::browser_personal_sign_message_bytes` computes
+/// them: a `0x` prefix with even hex digits is decoded, and every other message
+/// is its own UTF-8 bytes.
+fn browser_personal_sign_message_bytes(message: &str) -> Vec<u8> {
+    match message
+        .strip_prefix("0x")
+        .or_else(|| message.strip_prefix("0X"))
+    {
+        Some(raw) if raw.len() % 2 == 0 && raw.chars().all(|ch| ch.is_ascii_hexdigit()) => {
+            hex::decode(raw).expect("even hex digits must decode")
+        }
+        _ => message.as_bytes().to_vec(),
+    }
+}
+
+/// The address `signature` recovers to over `message`, computed as
+/// `src/crypto/evm/signature.rs::recover_evm_address_from_hash` computes it:
+/// the EIP-191 hash of the signed bytes, the 65-byte signature, and the Keccak
+/// digest of the recovered public key without its prefix byte. A signature the
+/// wallet answers must name the account's own address through this path.
+fn recover_evm_message_address(message: &str, signature: &str) -> String {
+    let hash = ethereum_signed_message_hash(&browser_personal_sign_message_bytes(message));
+    let signature_hex = signature
+        .strip_prefix("0x")
+        .unwrap_or_else(|| panic!("an EVM signature must carry 0x: {signature}"));
+    let bytes = hex::decode(signature_hex).expect("an EVM signature must be hex");
+    assert_eq!(bytes.len(), 65, "an EVM signature must be 65 bytes");
+    let ecdsa = EcdsaSignature::try_from(&bytes[..64]).expect("the signature must decode");
+    let recovery_id = match bytes[64] {
+        0 | 1 => bytes[64],
+        27 | 28 => bytes[64] - 27,
+        other => panic!("unsupported EVM recovery id: {other}"),
+    };
+    let recovery_id = RecoveryId::try_from(recovery_id).expect("the recovery id must decode");
+    let verifying_key = VerifyingKey::recover_from_prehash(&hash, &ecdsa, recovery_id)
+        .expect("the signature must recover a signer");
+    let encoded = verifying_key.to_encoded_point(false);
+    let digest = Keccak256::digest(&encoded.as_bytes()[1..]);
+    format!("0x{}", hex::encode(&digest[12..]))
+}
+
 /// The ERC-1271 evidence in `src/tests/support.rs::erc1271_proof`'s shape: the
 /// SIWE message hash, a SHA-256 of the signature bytes, and no chain access.
 fn erc1271_evidence(message: &str, signature: &str, contract: &str) -> Erc1271ProofEvidenceV1 {
@@ -2983,6 +3025,7 @@ fn managed_approvals_persist_under_storage_root() {
         .to_string();
 
     let mut request_ids = Vec::new();
+    let mut request_messages = Vec::new();
     for message in ["First managed approval", "Second managed approval"] {
         let data = ok_data(provider.wallet(personal_sign_approval(&account_id, &address, message)));
         let approval = &data["approval_request"];
@@ -2990,6 +3033,7 @@ fn managed_approvals_persist_under_storage_root() {
             approval["status"], "pending",
             "request_approval must answer a pending request"
         );
+        request_messages.push(message);
         request_ids.push(
             approval["request_id"]
                 .as_str()
@@ -3048,6 +3092,14 @@ fn managed_approvals_persist_under_storage_root() {
             .as_str()
             .is_some_and(|signature| !signature.is_empty()),
         "approve_and_sign_managed must answer a signature"
+    );
+    let signature = data["signature"]
+        .as_str()
+        .expect("approve_and_sign_managed must answer a signature");
+    assert_eq!(
+        recover_evm_message_address(request_messages[0], signature),
+        address,
+        "the signature must recover the created account's address"
     );
 
     let data = ok_data(provider.wallet(WalletProviderOperationV2::RejectApproval {
@@ -5810,12 +5862,13 @@ fn wallet_standin_linux_only_operations(
 
     // One managed approval is signed, one is rejected, and both use the
     // account created above.
+    let first_managed_message = "First managed approval";
     let result = wallet_case!(
         provider,
         &mut record,
         label,
         "request_approval",
-        personal_sign_approval(&account_id, &account_address, "First managed approval")
+        personal_sign_approval(&account_id, &account_address, first_managed_message)
     );
     let approval = &result["data"]["approval_request"];
     assert_eq!(result["data"]["requires_approval"], true);
@@ -5872,6 +5925,11 @@ fn wallet_standin_linux_only_operations(
         "{label}: signature: {signature}"
     );
     assert_eq!(signature.len(), 132, "{label}: signature: {signature}");
+    assert_eq!(
+        recover_evm_message_address(first_managed_message, signature),
+        account_address,
+        "{label}: the signature must recover the created account's address"
+    );
     assert_eq!(
         data["signature_receipt"]["schema"],
         "elastos.wallet.signature_receipt/v1"
@@ -15211,10 +15269,18 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
                 status["data"]["managed_wallets_configured"], true,
                 "the launch's init must have configured managed wallets: {status}"
             );
-            assert_eq!(
-                status["data"]["active_account_count"], 0,
-                "a fresh wallet counts no active account: {status}"
-            );
+            for count in [
+                "active_account_count",
+                "managed_account_count",
+                "pending_challenge_count",
+                "pending_bitcoin_challenge_count",
+                "pending_approval_count",
+            ] {
+                assert_eq!(
+                    status["data"][count], 0,
+                    "a fresh wallet counts no {count}: {status}"
+                );
+            }
             // The five remaining wallet operations, `shutdown` last. Every other
             // wallet operation needs a stored effect, and the filter refuses the
             // store's replace, so this journey drives the calls that answer and

@@ -220,8 +220,8 @@ wallet. In that 31 Oct run the did caller also stopped earlier, at the
 `fchmodat` block recorded below, which is since resolved.
 
 The wallet run requires `init` `ok` with the launch's own config; `status` `ok`
-naming `wallet-provider`, with storage and managed wallets configured and every
-count zero; then twenty-nine answers under the filter through
+naming `wallet-provider`, with storage and managed wallets configured and each
+of its five counts zero; then twenty-nine answers under the filter through
 `wallet_standin_linux_only_operations` and `assert_suite_outcomes`, which are
 the cases of `WALLET_LINUX_ONLY_CASES`: `create_managed_account` `ok` with the
 new account, `list_accounts`, `rename_account`, `set_default_account` and
@@ -236,12 +236,13 @@ ERC-1271 proofs, `request_approval` three times for the approved, rejected and
 connector requests, and `link_verified_account` twice. Every answer is asserted
 exactly: its response schema and protocol version, and the handler's own fields,
 including the managed key's address, the stored label, the default account, each
-proof hash, the approval status transitions, the transaction handoff and the
-recovered account labels. It also requires a `wallet-key.hex` of 64 hex digits
-and a newline under `STORAGE_ROOT`, no profile written, and the named sibling
-`seccomp-outside-write` outside `STORAGE_ROOT` absent after the run. The file
-evidence is those named fixture paths; a seccomp filter carries syscall policy,
-not path policy, so no run claims a general file boundary.
+proof hash, the approval status transitions, the transaction handoff, the
+recovered account labels, and the managed signature, which recovers from the
+signed message to that account's address. It also requires a `wallet-key.hex` of
+64 hex digits and a newline under `STORAGE_ROOT`, no profile written, and the
+named sibling `seccomp-outside-write` outside `STORAGE_ROOT` absent after the
+run. The file evidence is those named fixture paths; a seccomp filter carries
+syscall policy, not path policy, so no run claims a general file boundary.
 
 The effectful calls write their store. `save_store` replaces `wallet-state.json`
 by writing a staging file beside it and calling `std::fs::rename`, which is the
@@ -265,7 +266,7 @@ absent outside sibling and the mode read, and it printed
 `launcher marker: before -22, after -13`, so `create_managed_account` replaced
 the store under the filter. The earlier runs in this section used
 `spark1.local`; this one adds no host status and no grant. That kernel reports
-Landlock ABI 2, below the ABI 3 the file row needs, so the file row's launch is
+Landlock ABI 2, below the ABI 5 the file row needs, so the file row's launch is
 refused there and its evidence stays the run "The file row" records on kernel
 `7.0.0-42-generic` with ABI 8.
 
