@@ -13398,6 +13398,12 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
 /// `get_persona_did`, judged against `DID_SUITE_CASES`' permitted prefix, so
 /// the did run proves its own operations answer under did's ruleset.
 ///
+/// The outside effect is a `set_nickname` write that did's ruleset refuses.
+/// Before it, the caller copies the root's `nickname.enc` beneath
+/// `STORAGE_PARENT` and requires the outside `Init` that holds the fixture
+/// device key to be refused when it reads that copy, so the `init` row's read
+/// has its own refusal.
+///
 /// The two Linux-only plants are the wallet caller's: a did launcher that skips
 /// only its own Landlock install fails the outside `Init`, and a
 /// `STORAGE_PARENT` row that grants a read fails the planted read beneath did's
@@ -13433,11 +13439,36 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
                 "{label}: the replaced nickname must read back: {nickname}"
             );
         },
-        // did's Init records the root and writes nothing, so the kernel's refusal
-        // comes at its first write there.
+        // did's outside `Init` reads `did/nickname.enc`. A nickname file copied
+        // beneath `STORAGE_PARENT` from the root gives that read its path, so
+        // the kernel refuses the read itself; the write to the same path is
+        // refused next, and it is the effect this closure returns.
         |provider, outside| {
-            let init = provider.init(outside);
-            assert_eq!(init["status"], "ok", "did's Init writes nothing: {init}");
+            let inside_nickname =
+                provider_storage_root(DID_PROVIDER, &fixture.base).join("nickname.enc");
+            let outside_nickname = outside.join("did").join("nickname.enc");
+            fs::create_dir_all(
+                outside_nickname
+                    .parent()
+                    .expect("the outside nickname file has a directory"),
+            )
+            .expect("the outside nickname directory must be creatable");
+            fs::copy(&inside_nickname, &outside_nickname)
+                .expect("the outside nickname file must take the root's bytes");
+            let init = provider.send(&provider_init_request(DID_PROVIDER, outside));
+            assert_eq!(
+                init["status"], "error",
+                "the outside nickname read must be refused: {init}"
+            );
+            assert_eq!(init["code"], "storage_error", "{init}");
+            let reason = init["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the refused init must carry a reason: {init}"));
+            assert!(
+                reason.contains("Permission denied"),
+                "the kernel's denial must reach init's reason, and it answered: {reason}"
+            );
+            fs::remove_dir_all(outside).expect("the outside fixture must be removable");
             provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }))
         },
     );
@@ -16608,11 +16639,31 @@ const LINUX_CITATION_TEST_FILE: &str = "tests/confine.rs";
 /// The one attribute a cited Linux test carries.
 const LINUX_TEST_GATE: &str = "#[cfg(target_os = \"linux\")]";
 
-/// The marker in a cited function's name that makes it the seccomp journey.
-const LINUX_JOURNEY_MARKER: &str = "journey";
+/// The exact journey and file-row test names one provider's Linux cells cite,
+/// keyed by the provider document name. A provider without an entry records no
+/// Linux cell, and the check refuses one instead of reading a name fragment.
+const LINUX_CITATION_BINDINGS: &[(&str, &str, &str)] = &[
+    (
+        "did-provider",
+        "linux_did_journey_runs_under_the_seccomp_allow_list",
+        "linux_did_file_row_is_refused_outside_storage_root",
+    ),
+    // The row fixture copies did's Linux cells, so it carries did's names.
+    (
+        "fixture-provider",
+        "linux_did_journey_runs_under_the_seccomp_allow_list",
+        "linux_did_file_row_is_refused_outside_storage_root",
+    ),
+];
 
-/// The marker in a cited function's name that makes it the file-row test.
-const LINUX_FILE_ROW_MARKER: &str = "file_row";
+/// The journey and file-row test names bound to `document_name`, or `None`
+/// when that provider records no Linux cell yet.
+fn linux_citation_binding(document_name: &str) -> Option<(&'static str, &'static str)> {
+    LINUX_CITATION_BINDINGS
+        .iter()
+        .find(|(provider, _, _)| *provider == document_name)
+        .map(|(_, journey, file_row)| (*journey, *file_row))
+}
 
 /// The one test file the Linux cells cite, read once.
 static LINUX_CITATION_SOURCE: LazyLock<Result<String, String>> = LazyLock::new(|| {
@@ -18843,16 +18894,45 @@ fn right_side_problems(document_name: &str, row: &OperationsRow) -> Vec<String> 
     problems
 }
 
-/// Whether `function` in `source` is a test the recorded Linux host runs:
-/// `fn <function>(` exists and the `LINUX_TEST_GATE` attribute sits in the same
-/// paragraph above it.
+/// Whether `function` in `source` is an item the recorded Linux host runs: a
+/// line whose trimmed text starts `fn <function>(`, or `pub fn <function>(`,
+/// and the `LINUX_TEST_GATE` attribute among the attribute and doc lines
+/// directly above that line.
+///
+/// A name that appears only in a comment line is not an item, so it cannot
+/// satisfy a citation. Another line between the gate and the item breaks the
+/// block, so the gate must belong to the cited item itself.
 fn linux_citation_gate(source: &str, function: &str) -> Result<(), String> {
     let signature = format!("fn {function}(");
-    let Some(index) = source.find(&signature) else {
+    let lines: Vec<&str> = source.lines().collect();
+    let item = lines.iter().position(|line| {
+        let declaration = line.trim_start();
+        let declaration = declaration.strip_prefix("pub ").unwrap_or(declaration);
+        declaration.starts_with(&signature)
+    });
+    let Some(item) = item else {
+        if lines.iter().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("//") && trimmed.contains(&signature)
+        }) {
+            return Err(format!(
+                "{LINUX_CITATION_FILE} holds {function} only in a comment, and a citation names \
+                 an item"
+            ));
+        }
         return Err(format!("{LINUX_CITATION_FILE} does not hold {function}"));
     };
-    let paragraph = source[..index].rsplit("\n\n").next().unwrap_or_default();
-    if paragraph.lines().any(|line| line.trim() == LINUX_TEST_GATE) {
+    let mut gated = false;
+    let mut cursor = item;
+    while let Some(previous) = cursor.checked_sub(1) {
+        let line = lines[previous].trim();
+        if !line.starts_with("#[") && !line.starts_with("///") {
+            break;
+        }
+        gated |= line == LINUX_TEST_GATE;
+        cursor = previous;
+    }
+    if gated {
         Ok(())
     } else {
         Err(format!("{function} is not gated by {LINUX_TEST_GATE}"))
@@ -18864,14 +18944,13 @@ fn linux_citation_gate(source: &str, function: &str) -> Result<(), String> {
 ///
 /// A cell is exactly `LINUX_STATUS`, or it starts `LINUX_ENFORCED_PREFIX` and
 /// every backtick span after that prefix that holds `::` is a
-/// `LINUX_CITATION_FILE::<fn>` citation of a function `linux_citation_gate`
-/// finds Linux-gated in the one test file, while a span with no `::` is prose.
-/// Such a cell cites at least one function whose name holds
-/// `LINUX_JOURNEY_MARKER`, and a row whose Right cell names a declared right
-/// also cites one whose name holds `LINUX_FILE_ROW_MARKER`, because the journey
-/// shows the call answering and the file row shows the same file refused
-/// outside `STORAGE_ROOT`. The test file is read once, by
-/// `LINUX_CITATION_SOURCE`.
+/// `LINUX_CITATION_FILE::<fn>` citation of an item `linux_citation_gate` finds
+/// Linux-gated in the one test file, while a span with no `::` is prose. A
+/// cell cites only the two names `linux_citation_binding` binds to its
+/// provider: the journey, and on a row whose Right cell names a declared right
+/// also the file row, because the journey shows the call answering and the
+/// file row shows the same file refused outside `STORAGE_ROOT`. The test file
+/// is read once, by `LINUX_CITATION_SOURCE`.
 fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {
     if row.linux == LINUX_STATUS {
         return Vec::new();
@@ -18882,6 +18961,13 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
              and a Linux cell is {LINUX_STATUS} or starts {LINUX_ENFORCED_PREFIX} and cites \
              {LINUX_CITATION_FILE}",
             row.operation, row.linux
+        )];
+    };
+    let Some((journey_test, file_row_test)) = linux_citation_binding(document_name) else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names a recorded-host \
+             Linux cell, and {document_name} binds no journey and file-row test",
+            row.operation
         )];
     };
     let source = match LINUX_CITATION_SOURCE.as_ref() {
@@ -18911,12 +18997,23 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
             ));
             continue;
         }
-        journey |= function.contains(LINUX_JOURNEY_MARKER);
-        file_row |= function.contains(LINUX_FILE_ROW_MARKER);
         if let Err(reason) = linux_citation_gate(source, function) {
             problems.push(format!(
                 "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites \
                  {span}, and {reason}",
+                row.operation
+            ));
+            continue;
+        }
+        if function == journey_test {
+            journey = true;
+        } else if function == file_row_test {
+            file_row = true;
+        } else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites \
+                 {span}, and this provider's Linux cells cite exactly {journey_test} for the \
+                 journey and {file_row_test} for the file row",
                 row.operation
             ));
         }
@@ -25900,7 +25997,7 @@ enum WalletProviderOperationV2 {
     };
 
     let missing = format!("{LINUX_CITATION_FILE}::linux_did_journey_absent");
-    let document = with_linux("status", &format!("`{missing}`"));
+    let document = with_linux("status", &format!("`{journey}` and `{missing}`"));
     assert_ne!(
         document, passing,
         "the missing-function case must change the table"
@@ -25926,6 +26023,42 @@ enum WalletProviderOperationV2 {
         "a Linux cell citing a function without the Linux gate must be refused"
     );
 
+    // A name that appears only in a comment line names no item. The comment
+    // below this case, and the two nested items under it, give the citation
+    // check those two shapes in this file.
+    let comment_only = format!("{LINUX_CITATION_FILE}::linux_citation_comment_only_fixture");
+    let document = with_linux("status", &format!("`{journey}` and `{comment_only}`"));
+    assert_ne!(
+        document, passing,
+        "the comment-only case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {comment_only}, and {LINUX_CITATION_FILE} holds linux_citation_comment_only_fixture \
+             only in a comment, and a citation names an item"
+        )],
+        "a Linux cell citing a name that only a comment holds must be refused"
+    );
+
+    // The Linux gate belongs to the item beside the cited one, so the cited
+    // item is not gated even though the gate sits in the same paragraph.
+    let beside = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_beside_it");
+    let document = with_linux("status", &format!("`{journey}` and `{beside}`"));
+    assert_ne!(
+        document, passing,
+        "the separate-item gate case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {beside}, and linux_citation_gate_fixture_beside_it is not gated by {LINUX_TEST_GATE}"
+        )],
+        "a Linux cell whose gate sits on another item must be refused"
+    );
+
     let document = with_linux("init", &format!("`{journey}`"));
     assert_ne!(
         document, passing,
@@ -25940,8 +26073,29 @@ enum WalletProviderOperationV2 {
         "a right row that cites only the journey must be refused"
     );
 
-    // The journey and the file row together pass, so the three refusals above
-    // come from the citation rule and not from the cells' form.
+    // Another provider's real journey is Linux-gated and exists, but it is not
+    // the journey bound to this document's provider, so the cell is refused by
+    // name instead of by a fragment of its name.
+    let wallet_journey =
+        format!("{LINUX_CITATION_FILE}::linux_wallet_journey_runs_under_the_seccomp_allow_list");
+    let document = with_linux("status", &format!("`{journey}` and `{wallet_journey}`"));
+    assert_ne!(
+        document, passing,
+        "the wrong-provider case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {wallet_journey}, and this provider's Linux cells cite exactly \
+             linux_did_journey_runs_under_the_seccomp_allow_list for the journey and \
+             linux_did_file_row_is_refused_outside_storage_root for the file row"
+        )],
+        "a Linux cell citing another provider's journey must be refused by its exact name"
+    );
+
+    // The journey and the file row together pass, so the refusals above come
+    // from the citation rule and not from the cells' form.
     let passing_linux = with_linux("init", &format!("`{journey}` and `{file_row}`"));
     assert_ne!(
         passing_linux, passing,
@@ -25952,6 +26106,17 @@ enum WalletProviderOperationV2 {
         Vec::<String>::new(),
         "a right row citing both Linux-gated tests must pass"
     );
+
+    // The citation check reads item lines and comment lines in this file. These
+    // two paragraphs give its comment-only and its separate-item gate refusals
+    // their shape. No other citation names them.
+    // fn linux_citation_comment_only_fixture(
+
+    #[allow(dead_code)]
+    #[cfg(target_os = "linux")]
+    fn linux_citation_gate_fixture_gated() {}
+    #[allow(dead_code)]
+    fn linux_citation_gate_fixture_beside_it() {}
 
     // Rule 7: the manifest declares only operations the provider answers. One
     // case per refusal, and the passing table with its manifest present still

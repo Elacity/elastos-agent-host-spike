@@ -482,8 +482,10 @@ and B4's Linux cells are credited per architecture and boundary, not flipped.
 Every control call succeeded, and under the ruleset the two inside calls and the
 read of the bound executable succeeded while the other six answered `EACCES` (13).
 The outside effect was refused by the kernel for each provider and created
-nothing. Wallet's `Init` is that effect. did's `Init` records the root and writes
-nothing, so its first write is.
+nothing. Wallet's `Init` is that effect. The did caller first plants the root's
+`nickname.enc` beneath `STORAGE_PARENT`; did's outside `Init`, holding the
+fixture device key, is refused when it reads that file, and its write to the
+same path is refused as the returned effect.
 
 ### The bound-executable right
 
@@ -529,6 +531,10 @@ bytes. All 109 passed afterwards.
 | `EXECUTE` alone on the executable row | `linux_wallet_file_row_is_refused_outside_storage_root` | `the test child must start: Permission denied (os error 13)` |
 | Drop `TRUNCATE` from the `STORAGE_ROOT` row | `linux_did_file_row_is_refused_outside_storage_root` | The second `set_nickname` answers `Permission denied (os error 13)`: replacing a file is a truncation, which the oracle's `file-write*` grants |
 | did's store chmods by path, not through its open file | `linux_did_journey_runs_under_the_seccomp_allow_list` | `fchmodat` is refused, so `get_nickname` answers `not_set` |
+
+The did caller now also requires the outside `Init` read refused. The
+skip-install plant therefore reaches that assertion before the write it reached
+in the run above, and that added assertion has not been run on the host yet.
 
 The last one is why did needs no wider policy. `save_nickname_with_device_key`
 creates the file with mode 0600 and calls `fchmod` on the open file, so

@@ -126,10 +126,11 @@ not decide whether the function is a `#[test]`. The check
 row to four rules: the row set follows the provider's own dispatch, a Right
 cell names a declared id or `none: needs no declared right`, a right row cites
 both sides, and every Linux cell is `designed, not enforced` or starts
-`enforced on the recorded Linux host:` and cites a Linux-gated test of
-`../wallet-provider/tests/confine.rs`, the journey on each such cell and the
-file row on a right row. A fifth rule,
-beside those four row rules, holds the capsule's own `capsule.json`, and
+`enforced on the recorded Linux host:` and cites a Linux-gated item of
+`../wallet-provider/tests/confine.rs` whose gate sits directly above it, the
+provider's own journey on each such cell and its own file row on a right row.
+A fifth rule, beside those four row rules, holds the capsule's own
+`capsule.json`, and
 `operations_table_row_check_refuses_each_bad_table` refuses a manifest that
 breaks it, because a manifest declares only operations the provider answers and
 a provider may own operations its manifest does not name. The same check
@@ -171,7 +172,7 @@ answers `parse_error`; it is not an operation and gets no row.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
-| init | `op`, `config` | ok: `status`, `data` (`protocol_version`, `provider`). error: `status`, `code`, `message`. | `storage` | reads `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_read_denied` shows the read refused with `storage_error` when that path resolves outside. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. permitted: `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows this call reading `did/nickname.enc` under `STORAGE_ROOT`, and its removal is DID10. nearest outside refused: the read half of `tests/confine.rs::planted_file_beneath_storage_parent_is_neither_read_nor_written` shows the same file beneath `STORAGE_PARENT` refused with `storage_error`, and the widened parent read is DID27. | enforced on the recorded Linux host: `../wallet-provider/tests/confine.rs::linux_did_journey_runs_under_the_seccomp_allow_list` shows the call answering under the seccomp filter; `../wallet-provider/tests/confine.rs::linux_did_file_row_is_refused_outside_storage_root` shows `did/nickname.enc` outside `STORAGE_ROOT` refused by Landlock. |
+| init | `op`, `config` | ok: `status`, `data` (`protocol_version`, `provider`). error: `status`, `code`, `message`. | `storage` | reads `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_read_denied` shows the read refused with `storage_error` when that path resolves outside. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. permitted: `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows this call reading `did/nickname.enc` under `STORAGE_ROOT`, and its removal is DID10. nearest outside refused: the read half of `tests/confine.rs::planted_file_beneath_storage_parent_is_neither_read_nor_written` shows the same file beneath `STORAGE_PARENT` refused with `storage_error`, and the widened parent read is DID27. | enforced on the recorded Linux host: `../wallet-provider/tests/confine.rs::linux_did_journey_runs_under_the_seccomp_allow_list` shows the call answering under the seccomp filter; `../wallet-provider/tests/confine.rs::linux_did_file_row_is_refused_outside_storage_root` shows an outside `init` that holds the fixture device key refused with `storage_error` when it reads a `nickname.enc` copied beneath `STORAGE_PARENT`, and it shows the write to that path refused. |
 | get_did | `op` | ok: `status`, `data` (`did`). error: `status`, `code`, `message`. | none: needs no declared right | derives the DID from the device key in memory; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the answer; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call, and `DID31` is the plant that reaches this call. | enforced on the recorded Linux host: `../wallet-provider/tests/confine.rs::linux_did_journey_runs_under_the_seccomp_allow_list` shows the call answering under the seccomp filter. |
 | resolve | `op`, `did` | ok: `status`, `data` (`public_key`, `document`). error: `status`, `code`, `message`. | none: needs no declared right | builds the document from the DID in memory; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the document id; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call. The only registered plants for this test are `DID31` in `get_did` and `DID32` in `shutdown`, so a regression in this call alone fails the test with no plant of its own. | enforced on the recorded Linux host: `../wallet-provider/tests/confine.rs::linux_did_journey_runs_under_the_seccomp_allow_list` shows the call answering under the seccomp filter. |
 | sign_chat_message | `op`, `sender_id`, `ts`, `content` | ok: `status`, `data` (`payload`, `signature`). error: `status`, `code`, `message`. | none: needs no declared right | signs the rendered payload in memory; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the payload and the signature; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call. The only registered plants for this test are `DID31` in `get_did` and `DID32` in `shutdown`, so a regression in this call alone fails the test with no plant of its own. | enforced on the recorded Linux host: `../wallet-provider/tests/confine.rs::linux_did_journey_runs_under_the_seccomp_allow_list` shows the call answering under the seccomp filter. |
@@ -197,9 +198,11 @@ error; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls
 it with `macos` and a missing path and expects the failure.
 This table records did's Linux half. Each Linux cell of a row that names no
 granted resource cites the shared seccomp journey, and each `storage` row cites
-that journey and the file row; the row check requires the cited function to
-exist with its Linux gate. A provider-status claim still needs host-specific
-test evidence and the Runtime acceptance step, so no status document records
+that journey and the file row; the row check reads the cited function as an item
+line and requires its Linux gate directly above it, and it binds the journey
+name and the file-row name to this provider. A provider-status claim still
+needs host-specific test evidence and the Runtime acceptance step, so no status
+document records
 `did-provider` or `wallet-provider` as confined on Linux (P10, P11). The status
 change lands when the Runtime side does.
 
@@ -234,7 +237,11 @@ contract evidence, not Linux execution evidence.
 The file row has a did caller, `linux_did_file_row_is_refused_outside_storage_root`,
 which is `linux_wallet_file_row_is_refused_outside_storage_root`'s one body with
 did's own binary, did's own declared rights, did's own bindings and
-`did_standin_permitted_operations` driven whole. `landlock_probe_paths_follow_the_bound_parameters`
+`did_standin_permitted_operations` driven whole. Its outside effect is a
+`set_nickname` write refused at `did/nickname.enc`; before that write the caller
+copies the root's `nickname.enc` beneath `STORAGE_PARENT` and requires an
+outside `init`, holding the fixture device key, to be refused when it reads the
+copy. `landlock_probe_paths_follow_the_bound_parameters`
 holds on every OS that did's probe reads `<base>/did`, `<base>` and did's own
 binary. That row passes for did on the host and with the limits
 `../wallet-provider/CONFINEMENT-LINUX.md` records, including its open loader route.
