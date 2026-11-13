@@ -695,6 +695,259 @@ fn assert_serving(data: &Value) {
     assert_eq!(data["offers_ready"], 1, "{data}");
 }
 
+/// The id of the one hosted text offer the journey's `init` config names.
+#[cfg(target_os = "linux")]
+const MODEL_HOSTED_OFFER_ID: &str = "confine-hosted-text";
+
+/// The wire schema of a model run view and of one run-events page.
+#[cfg(target_os = "linux")]
+const MODEL_RUN_SCHEMA: &str = "elastos.model.run/v1";
+#[cfg(target_os = "linux")]
+const MODEL_RUN_EVENTS_SCHEMA: &str = "elastos.model.run-events/v1";
+
+/// The seven model operations the Linux journey drives after `init` and
+/// `status`, in the order it drives them.
+///
+/// `offers_list`, `runs_create`, `runs_get`, `runs_events`, `runs_cancel` and
+/// `shutdown` answer `ok`, so their class is `Permitted`. The unsupported
+/// operation answers the provider's own typed refusal,
+/// `unsupported_operation`, so its class is `Denied`; the helper asserts that
+/// code and its message, so "answered under the filter" is this refusal and
+/// not any other answer.
+#[cfg(target_os = "linux")]
+const MODEL_LINUX_ONLY_CASES: [(&str, SuiteClass); 7] = [
+    ("offers_list", SuiteClass::Permitted),
+    ("runs_create", SuiteClass::Permitted),
+    ("runs_get", SuiteClass::Permitted),
+    ("runs_events", SuiteClass::Permitted),
+    ("runs_cancel", SuiteClass::Permitted),
+    ("unsupported", SuiteClass::Denied),
+    ("shutdown", SuiteClass::Permitted),
+];
+
+/// One `runs_create` body for the journey's hosted offer.
+///
+/// The binding carries a fresh `model-v1:` request id and the input hash the
+/// contract derives from the exact input, so the provider's own binding checks
+/// pass. The config names no `runtime_hosted_socket`, and hosted containment is
+/// granted on macOS only, so the provider refuses the hosted dispatch before
+/// any socket on Linux: the run is stored and answers `terminal.error`
+/// `context_rejected` with `Hosted external HTTPS is paused.`, and no request
+/// needs a network.
+#[cfg(target_os = "linux")]
+fn model_linux_run_create_request() -> Value {
+    let input = json!({
+        "schema": "elastos.model.input.text/v1",
+        "prompt": "confined read",
+    });
+    let canonical = serde_json::to_vec(&input).expect("the model input must serialize");
+    let input_hash = format!("sha256:{}", hex::encode(Sha256::digest(canonical)));
+    let issued = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock must be after the epoch")
+        .as_millis() as u64;
+    json!({
+        "op": "runs_create",
+        "offer_id": MODEL_HOSTED_OFFER_ID,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": "elastos.model.runtime-binding/v1",
+            "principal_id": "person:local:confine",
+            "session_id": "session:confine",
+            "capsule_id": "assistant",
+            "grant_id": "grant:confine",
+            "request_id": format!("model-v1:{issued}:confine-model"),
+            "offer_id": MODEL_HOSTED_OFFER_ID,
+            "operation": "text.generate",
+            "input_hash": input_hash,
+        },
+    })
+}
+
+/// The access binding one model read of `run_id` sends. It keeps the create
+/// binding's owner fields, which the provider compares with the stored run, and
+/// names the run the create answered.
+#[cfg(target_os = "linux")]
+fn model_linux_access_binding(create: &Value, run_id: &str) -> Value {
+    let binding = &create["runtime_binding"];
+    json!({
+        "schema": "elastos.model.runtime-access-binding/v1",
+        "principal_id": binding["principal_id"].clone(),
+        "session_id": binding["session_id"].clone(),
+        "capsule_id": binding["capsule_id"].clone(),
+        "grant_id": binding["grant_id"].clone(),
+        "request_id": binding["request_id"].clone(),
+        "run_id": run_id,
+    })
+}
+
+/// The seven model operations the Linux journey drives after `init` and
+/// `status`, using the record type and judgement of the did and wallet suites.
+///
+/// It starts no provider. `offers_list` answers with the configured hosted
+/// offer. `runs_create` stores one run and asserts its typed answer: the run is
+/// `failed` with `terminal.error` `context_rejected` and
+/// `Hosted external HTTPS is paused.`, because the provider refuses hosted
+/// dispatch before any socket when the config names none. `runs_get` reads that
+/// run back equal to the create data, `runs_events` shows the terminal page
+/// with a last `failed` event and no more pages, and `runs_cancel` on a
+/// terminal run returns the same run data. The unsupported operation asserts
+/// `unsupported_operation`, and `shutdown` is last: it answers `ok` and the
+/// child exits with status 0, which `ConfinedProvider::shutdown` asserts.
+#[cfg(target_os = "linux")]
+fn model_standin_linux_only_operations(
+    provider: &mut ConfinedProvider,
+    label: &str,
+) -> Vec<SuiteEntry> {
+    let mut record = Vec::new();
+
+    let offers = provider.send(&json!({ "op": "offers_list" }));
+    assert_eq!(
+        offers["status"], "ok",
+        "{label}: offers_list must answer: {offers}"
+    );
+    assert_eq!(
+        offers["data"]["schema"], "elastos.model.offers-list/v1",
+        "{label}: offers_list must use its own schema: {offers}"
+    );
+    assert_eq!(
+        offers["data"]["provider"], MODEL_PROVIDER,
+        "{label}: offers_list must name the provider: {offers}"
+    );
+    assert_eq!(
+        offers["data"]["offers"][0]["id"], MODEL_HOSTED_OFFER_ID,
+        "{label}: offers_list must name the configured offer: {offers}"
+    );
+    assert_eq!(
+        offers["data"]["offers"][0]["operation"], "text.generate",
+        "{label}: the configured offer must be the text offer: {offers}"
+    );
+    record.push(suite_entry("offers_list", SuiteClass::Permitted, &offers));
+
+    let create_request = model_linux_run_create_request();
+    let created = provider.send(&create_request);
+    assert_eq!(
+        created["status"], "ok",
+        "{label}: runs_create must store the run: {created}"
+    );
+    let data = &created["data"];
+    assert_eq!(
+        data["schema"], MODEL_RUN_SCHEMA,
+        "{label}: runs_create must answer a run view: {created}"
+    );
+    assert_eq!(
+        data["offer_id"], MODEL_HOSTED_OFFER_ID,
+        "{label}: the run must name the configured offer: {created}"
+    );
+    assert_eq!(
+        data["operation"], "text.generate",
+        "{label}: the run must name its operation: {created}"
+    );
+    assert_eq!(
+        data["status"], "failed",
+        "{label}: the refused hosted dispatch must fail the run: {created}"
+    );
+    assert_eq!(
+        data["terminal"]["error"],
+        json!({
+            "class": "context_rejected",
+            "code": "context_rejected",
+            "message": "Hosted external HTTPS is paused.",
+        }),
+        "{label}: the provider's own hosted refusal must settle the run: {created}"
+    );
+    let run_id = data["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: runs_create must name the run id: {created}"))
+        .to_string();
+    assert!(
+        run_id.starts_with("run:sha256:") && run_id.len() == "run:sha256:".len() + 64,
+        "{label}: the run id must be the contract id: {created}"
+    );
+    record.push(suite_entry("runs_create", SuiteClass::Permitted, &created));
+
+    let access = model_linux_access_binding(&create_request, &run_id);
+    let got = provider.send(&json!({
+        "op": "runs_get", "run_id": run_id.clone(), "runtime_binding": access.clone()
+    }));
+    assert_eq!(got["status"], "ok", "{label}: runs_get must answer: {got}");
+    assert_eq!(
+        got["data"], created["data"],
+        "{label}: runs_get must read back the stored run: {got}"
+    );
+    record.push(suite_entry("runs_get", SuiteClass::Permitted, &got));
+
+    let events = provider.send(&json!({
+        "op": "runs_events",
+        "run_id": run_id.clone(),
+        "after_sequence": 0,
+        "runtime_binding": access.clone(),
+    }));
+    assert_eq!(
+        events["status"], "ok",
+        "{label}: runs_events must answer: {events}"
+    );
+    assert_eq!(
+        events["data"]["schema"], MODEL_RUN_EVENTS_SCHEMA,
+        "{label}: runs_events must use the run-events schema: {events}"
+    );
+    assert_eq!(
+        events["data"]["run_id"], run_id,
+        "{label}: runs_events must name the stored run: {events}"
+    );
+    assert_eq!(
+        events["data"]["has_more"], false,
+        "{label}: the terminal page must not continue: {events}"
+    );
+    let last = events["data"]["events"]
+        .as_array()
+        .and_then(|page| page.last())
+        .unwrap_or_else(|| panic!("{label}: the stored run must keep a last event: {events}"));
+    assert_eq!(
+        last["kind"], "failed",
+        "{label}: the last event kind must be failed: {events}"
+    );
+    record.push(suite_entry("runs_events", SuiteClass::Permitted, &events));
+
+    let cancelled = provider.send(&json!({
+        "op": "runs_cancel", "run_id": run_id.clone(), "runtime_binding": access.clone()
+    }));
+    assert_eq!(
+        cancelled["status"], "ok",
+        "{label}: runs_cancel must answer: {cancelled}"
+    );
+    assert_eq!(
+        cancelled["data"], created["data"],
+        "{label}: a terminal runs_cancel must return the stored run: {cancelled}"
+    );
+    record.push(suite_entry(
+        "runs_cancel",
+        SuiteClass::Permitted,
+        &cancelled,
+    ));
+
+    let unsupported = provider.send(&json!({ "op": "not_an_op" }));
+    assert_eq!(
+        unsupported["status"], "error",
+        "{label}: an unknown operation must be refused: {unsupported}"
+    );
+    assert_eq!(
+        unsupported["code"], "unsupported_operation",
+        "{label}: an unknown operation must answer unsupported_operation: {unsupported}"
+    );
+    assert_eq!(
+        unsupported["message"], "unsupported model provider operation",
+        "{label}: the refusal must name the unsupported operation: {unsupported}"
+    );
+    record.push(suite_entry("unsupported", SuiteClass::Denied, &unsupported));
+
+    let shutdown = provider.shutdown();
+    record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
+
+    record
+}
+
 /// The test creates the directory `STORAGE_PARENT` names before the launch,
 /// and the provider creates its storage root (`Wallet` or `did`). The binding
 /// the launch receives names that directory, so the folder created and the
@@ -13989,17 +14242,20 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
             let status = provider.send(&json!({ "op": "status" }));
             assert_eq!(status["status"], "ok", "status must answer: {status}");
             assert_serving(&status["data"]);
+            // The seven remaining model operations, `shutdown` last, so this
+            // caller answers all nine under the filter.
+            let linux_only = model_standin_linux_only_operations(&mut provider, &label);
+            assert_suite_outcomes(&label, &linux_only, &MODEL_LINUX_ONLY_CASES);
             None
         }
         other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
     };
-    // did's `shutdown` is its tenth operation inside
-    // `did_standin_linux_only_operations`; wallet and model send theirs here.
-    // Either way it is the last request: the mode read above already observed
-    // the live child, and `ConfinedProvider::shutdown` waits for the child's
-    // exit and asserts its status is 0, so the answer and its effect are both
-    // shown.
-    if name != DID_PROVIDER {
+    // did's and model's `shutdown` is their last operation inside their own
+    // Linux-only helper; wallet sends its one here. Either way it is the last
+    // request: the mode read above already observed the live child, and
+    // `ConfinedProvider::shutdown` waits for the child's exit and asserts its
+    // status is 0, so the answer and its effect are both shown.
+    if name == WALLET_PROVIDER {
         provider.shutdown();
     }
 
@@ -16682,6 +16938,11 @@ const LINUX_CITATION_BINDINGS: &[(&str, &str, &str)] = &[
         "fixture-provider",
         "linux_did_journey_runs_under_the_seccomp_allow_list",
         "linux_did_file_row_is_refused_outside_storage_root",
+    ),
+    (
+        "model-provider",
+        "linux_model_journey_runs_under_the_seccomp_allow_list",
+        "linux_model_file_row_is_refused_outside_storage_root",
     ),
 ];
 
@@ -23279,7 +23540,11 @@ fn every_operations_table_cites_existing_tests() {
 /// that right and a `none:` row quotes none; and a Linux cell is either
 /// `designed, not enforced` or `enforced on the recorded Linux host:` with a
 /// citation of a Linux-gated test of the wallet test file, the journey on every
-/// such cell and the file row on a declared-right row. Each
+/// such cell and the file row on a declared-right row. The model provider is
+/// not in `OPERATIONS_TABLES` yet, because its macOS and Effect cells do not
+/// carry these claims; its nine Linux cells are read by
+/// `model_operations_linux_cell_problems` through the same rule and row reader,
+/// and `model_linux_cell_refusal_cases` holds that rule's refusals. Each
 /// fault is one line naming the document, the row (or the arm) and the value.
 /// The check reads files and starts no process, so it runs on every platform.
 ///
@@ -23309,7 +23574,120 @@ fn every_operations_table_row_matches_its_provider_and_the_contract() {
             &capsules.join(name),
         ));
     }
+    problems.extend(model_operations_linux_cell_problems(capsules));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+    model_linux_cell_refusal_cases();
+}
+
+/// Every problem with the model provider's nine Linux cells, in row order.
+///
+/// The model table is not one of `OPERATIONS_TABLES`, because its macOS and
+/// Effect cells do not yet carry the three providers' row claims. Its Linux
+/// cells are ready to be checked, so this helper reads the same document, the
+/// same row reader and the same `linux_status_problems` rule. It requires the
+/// nine operations in the provider's order, then applies the Linux-cell rule to
+/// every row: the bound model journey, and the bound model file row on a
+/// `storage` row.
+fn model_operations_linux_cell_problems(capsules: &Path) -> Vec<String> {
+    let document = match read_confinement_document(capsules, MODEL_PROVIDER) {
+        Ok(document) => document,
+        Err(reason) => return vec![reason],
+    };
+    let section = match section_under_one_heading(MODEL_PROVIDER, &document, OPERATIONS_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let (rows, mut problems) = match operations_table_rows(MODEL_PROVIDER, &section) {
+        Ok(read) => read,
+        Err(problems) => return problems,
+    };
+    let operations: Vec<&str> = rows.iter().map(|row| row.operation.as_str()).collect();
+    let expected = [
+        "init",
+        "status",
+        "shutdown",
+        "offers_list",
+        "runs_create",
+        "runs_get",
+        "runs_events",
+        "runs_cancel",
+        "unsupported",
+    ];
+    if operations != expected {
+        problems.push(format!(
+            "model-provider CONFINEMENT.md: {OPERATIONS_HEADING} must hold the nine model \
+             operations in this order: {operations:?}"
+        ));
+    }
+    for row in &rows {
+        problems.extend(linux_status_problems(MODEL_PROVIDER, row));
+    }
+    problems
+}
+
+/// The refusals the model Linux-cell rule makes, built from the row type so
+/// they do not depend on a mutated document.
+///
+/// A model cell that cites the did journey is refused by exact name, even
+/// though that journey is a Linux-gated test of the cited file. A model
+/// `storage` row that cites only the journey is refused, because the journey
+/// shows the call answering and the file row shows the same file refused
+/// outside `STORAGE_ROOT`. Both citations pass, so the refusals come from the
+/// binding and not from the cell's form.
+fn model_linux_cell_refusal_cases() {
+    let journey =
+        format!("{LINUX_CITATION_FILE}::linux_model_journey_runs_under_the_seccomp_allow_list");
+    let file_row =
+        format!("{LINUX_CITATION_FILE}::linux_model_file_row_is_refused_outside_storage_root");
+    let did_journey =
+        format!("{LINUX_CITATION_FILE}::linux_did_journey_runs_under_the_seccomp_allow_list");
+    let wrong = OperationsRow {
+        operation: "status".to_string(),
+        inputs: String::new(),
+        outputs: String::new(),
+        right: NO_DECLARED_RIGHT.to_string(),
+        effect: String::new(),
+        macos: String::new(),
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}` and `{did_journey}`"),
+    };
+    assert_eq!(
+        linux_status_problems(MODEL_PROVIDER, &wrong),
+        vec![format!(
+            "model-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {did_journey}, and this provider's Linux cells cite exactly \
+             linux_model_journey_runs_under_the_seccomp_allow_list for the journey and \
+             linux_model_file_row_is_refused_outside_storage_root for the file row"
+        )],
+        "a model cell citing the did journey must be refused by its exact name"
+    );
+
+    let right_only = OperationsRow {
+        operation: "runs_get".to_string(),
+        inputs: String::new(),
+        outputs: String::new(),
+        right: "`storage`".to_string(),
+        effect: String::new(),
+        macos: String::new(),
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}`"),
+    };
+    assert_eq!(
+        linux_status_problems(MODEL_PROVIDER, &right_only),
+        vec![format!(
+            "model-provider CONFINEMENT.md: {OPERATIONS_HEADING} row runs_get names the Right \
+             `storage` and its Linux cell cites no file-row test of {LINUX_CITATION_FILE}"
+        )],
+        "a model storage row citing only the journey must be refused"
+    );
+
+    let complete = OperationsRow {
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}` and `{file_row}`"),
+        ..right_only
+    };
+    assert_eq!(
+        linux_status_problems(MODEL_PROVIDER, &complete),
+        Vec::<String>::new(),
+        "a storage row citing the journey and the file row must pass"
+    );
 }
 
 /// The removal check reports an allow form that no entry removes, and only a
