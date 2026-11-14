@@ -148,6 +148,7 @@ pub(crate) fn principal_root_protected_object_inventory(
 }
 
 pub(in crate::api) use gateway_home_runtime::capsule_icon_variants;
+pub(super) use gateway_home_runtime::{gateway_attach_runtime_token, load_live_runtime_coords};
 pub(super) use gateway_home_runtime::{viewer_object_shell_description, viewer_object_shell_title};
 pub(in crate::api) use gateway_home_system::profile_readiness_for_principal;
 use gateway_home_system::*;
@@ -173,8 +174,9 @@ pub(super) use gateway_home_token::{
     require_home_projection_launch_token_context, require_home_runtime_wallet_authority,
     require_home_token, require_home_token_context, require_home_viewer_launch_token_context,
     require_internal_shell_launch_grant_for_any_context, require_internal_shell_projection_context,
-    require_internal_shell_runtime_wallet_authority, require_runtime_wallet_authority,
-    runtime_wallet_authority, HomeLaunchContext, RequiredHomeLaunchToken,
+    require_internal_shell_runtime_wallet_authority, require_launch_bound_token,
+    require_runtime_wallet_authority, runtime_wallet_authority, HomeLaunchContext,
+    RequiredHomeLaunchToken,
 };
 use gateway_home_update::*;
 
@@ -1273,6 +1275,14 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/viewers/:viewer/content/:capsule",
             get(super::viewer_gateway::viewer_content),
+        )
+        .route(
+            "/api/viewers/:viewer/launch/output/:name",
+            get(super::viewer_gateway::viewer_launch_output),
+        )
+        .route(
+            "/api/viewers/:viewer/launch/content/*path",
+            get(super::viewer_gateway::viewer_launch_content),
         )
         .route(
             "/api/viewers/:viewer/library-object",

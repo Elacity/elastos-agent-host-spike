@@ -1874,7 +1874,7 @@ pub(super) async fn ensure_home_runtime(data_dir: &std::path::Path) -> HomeRunti
     }
 }
 
-pub(super) async fn load_live_runtime_coords(
+pub(in crate::api) async fn load_live_runtime_coords(
     data_dir: &std::path::Path,
 ) -> Option<crate::runtime_control::RuntimeCoords> {
     let path = crate::runtime_control::home_runtime_coord_path(data_dir);
@@ -1889,7 +1889,7 @@ pub(super) async fn home_attach_shell(
     gateway_attach_runtime_token(client, api_url, attach_secret, "shell").await
 }
 
-pub(super) async fn gateway_attach_runtime_token(
+pub(in crate::api) async fn gateway_attach_runtime_token(
     client: &reqwest::Client,
     api_url: &str,
     attach_secret: &str,

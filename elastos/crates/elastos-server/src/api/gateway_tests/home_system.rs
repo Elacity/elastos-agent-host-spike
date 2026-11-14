@@ -2313,6 +2313,7 @@ async fn services_contact_fixture(
             provider_requests: Arc::new(TokioMutex::new(Vec::new())),
             pending_capabilities: Arc::new(TokioMutex::new(HashMap::new())),
             capabilities_start_pending: false,
+            kept_launch_reads: runtime.kept_launch_reads.clone(),
         },
         send_failure: Arc::new(TokioMutex::new(String::new())),
     };

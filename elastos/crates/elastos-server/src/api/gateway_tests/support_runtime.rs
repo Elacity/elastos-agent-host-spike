@@ -745,11 +745,13 @@ struct FakeRuntimeState {
     provider_requests: Arc<TokioMutex<Vec<serde_json::Value>>>,
     pending_capabilities: Arc<TokioMutex<HashMap<String, String>>>,
     capabilities_start_pending: bool,
+    kept_launch_reads: Arc<TokioMutex<Vec<serde_json::Value>>>,
 }
 
 struct FakeRuntimeHandle {
     _task: tokio::task::JoinHandle<()>,
     launch_requests: Arc<TokioMutex<Vec<serde_json::Value>>>,
+    kept_launch_reads: Arc<TokioMutex<Vec<serde_json::Value>>>,
 }
 
 fn verifying_key_from_did(did: &str) -> Option<ed25519_dalek::VerifyingKey> {
@@ -790,7 +792,9 @@ async fn start_fake_runtime_configured(
         provider_requests: provider_requests.clone(),
         pending_capabilities: Arc::new(TokioMutex::new(HashMap::new())),
         capabilities_start_pending,
+        kept_launch_reads: Arc::new(TokioMutex::new(Vec::new())),
     };
+    let kept_launch_reads = state.kept_launch_reads.clone();
     let app = Router::new()
         .route("/api/auth/attach", post(fake_runtime_attach))
         .route("/api/health", get(fake_runtime_health))
@@ -808,6 +812,9 @@ async fn start_fake_runtime_configured(
         )
         .route("/api/audit", get(fake_runtime_audit_log))
         .route("/api/provider/:scheme/:op", post(fake_runtime_provider))
+        .route("/api/launch/:id/output/:name", get(fake_runtime_kept_launch_read))
+        .route("/api/launch/:id/content/*path", get(fake_runtime_kept_launch_read))
+        .fallback(fake_runtime_unmatched)
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -833,7 +840,55 @@ async fn start_fake_runtime_configured(
     FakeRuntimeHandle {
         _task: task,
         launch_requests,
+        kept_launch_reads,
     }
+}
+
+/// Any request no route of the fake takes: one under `/api/launch/` is
+/// recorded with the kept-launch reads, so a test sees every ask of the
+/// Runtime there, also one no route would match; all answer `not_found`.
+async fn fake_runtime_unmatched(
+    AxumState(state): AxumState<FakeRuntimeState>,
+    uri: axum::http::Uri,
+) -> Response {
+    if uri.path().starts_with("/api/launch/") {
+        let ask = json!({ "path": uri.path(), "unmatched": true });
+        state.kept_launch_reads.lock().await.push(ask);
+    }
+    (StatusCode::NOT_FOUND, "not_found").into_response()
+}
+
+/// The Runtime's reads of a kept launch, as the fake answers them: it records
+/// each (its path, the shell's bearer, the page's token, any browser marks)
+/// and answers `[1]` for the output's `playlist.json`, `a picture` for the
+/// content's `images/01.png`, a redirect to the playlist for the output's
+/// `redirect.json`, and `not_found` for anything else.
+async fn fake_runtime_kept_launch_read(
+    AxumState(state): AxumState<FakeRuntimeState>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    state.kept_launch_reads.lock().await.push(json!({
+        "path": uri.path(),
+        "bearer": header("authorization"),
+        "token": header("x-elastos-home-token"),
+        "origin": header("origin"),
+    }));
+    let path = uri.path();
+    if path.ends_with("/output/playlist.json") {
+        return (StatusCode::OK, b"[1]".to_vec()).into_response();
+    }
+    if path.ends_with("/content/images/01.png") {
+        return (StatusCode::OK, b"a picture".to_vec()).into_response();
+    }
+    // A redirect to the playlist: a gateway that followed it would read the
+    // playlist under another name.
+    if let Some(launch) = path.strip_suffix("/output/redirect.json") {
+        let to = format!("{launch}/output/playlist.json");
+        return (StatusCode::TEMPORARY_REDIRECT, [("location", to)]).into_response();
+    }
+    (StatusCode::NOT_FOUND, "not_found").into_response()
 }
 
 async fn fake_runtime_attach(
