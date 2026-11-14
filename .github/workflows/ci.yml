@@ -501,6 +501,17 @@ jobs:
         run: cargo test --workspace --no-fail-fast
         # Network-sensitive tests are #[ignore] and won't run.
         # Run them explicitly with: cargo test --workspace -- --ignored
+      # The workspace run above uses default features, so no test behind
+      # `prototype-agents` runs in CI. Run the same provider-backed lib suite
+      # with the feature on. The provider binaries built above let every test
+      # run, so none is skipped by name.
+      - name: cargo test with prototype-agents
+        working-directory: elastos
+        env:
+          ELASTOS_TEST_PROTECT_PROVIDER_BIN: ${{ github.workspace }}/capsules/protected-content-protect-provider/target/release/protected-content-protect-provider
+          ELASTOS_TEST_DECRYPT_PROVIDER_BIN: ${{ github.workspace }}/capsules/protected-content-decrypt-provider/target/release/protected-content-decrypt-provider
+          ELASTOS_TEST_CUSTODY_PROVIDER_BIN: ${{ github.workspace }}/capsules/custody-provider/target/release/custody-provider
+        run: cargo test --locked -p elastos-server --lib --features prototype-agents
       - name: list workspace tests
         working-directory: elastos
         run: |
