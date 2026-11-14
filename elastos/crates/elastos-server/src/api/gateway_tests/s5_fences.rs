@@ -3,17 +3,44 @@
 //! Every route here takes no caller path, URI or object reference. The
 //! Runtime builds the location from the launch token's resolved root. Each row
 //! names the production line that builds it and shows that two agents'
-//! launches (two sessions for route 19) get two different locations.
+//! launches get two different locations.
+//!
+//! Both agents in a row launch through `launch_capsule` first, under the
+//! production admission with `dev_mode` false. The route call then carries the
+//! token the production issuer (`issue_home_launch_token_for_auth_grant`) mints
+//! for that agent's stored record. No production flow mints an app token from
+//! an agent launch today, so these rows prove the location rule for two
+//! admitted agents, not that the launched Agent Host itself calls the route;
+//! `report-round3.md` states that limit.
 
 use super::*;
 use serde_json::Value;
 
+use axum::extract::Extension;
+use axum::Json as AxumJson;
+use elastos_compute::providers::ComponentProvider;
+use elastos_runtime::primitives::audit::AuditLog;
+use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+use std::sync::Arc;
+
+/// The signed Agent Host both agents are bound to. It declares the agent kind
+/// and asks the Runtime for nothing, so a launch ends well with no grant.
+const HOST_NAME: &str = "s5-agent-host";
+const HOST_REGISTRY_CID: &str = "bafkreis5host";
+
 /// A Home with two stored agents of one owner. Each agent has its own
-/// owner-root protection, so the protected workspace routes can read and
-/// write its fixed object.
+/// owner-root protection, and both are bound to one signed Agent Host folder
+/// this fixture creates, so each can launch through `launch_capsule`. The fixed
+/// root the location plants pin to also holds a protection here, so a plant
+/// reaches the row's own separate-location assertion instead of stopping at a
+/// missing protection.
 struct TwoAgentHome {
     dir: tempfile::TempDir,
     agents: [String; 2],
+    runtime: Arc<crate::runtime::Runtime>,
+    audit_log: Arc<AuditLog>,
+    host_dir: std::path::PathBuf,
+    launch_grant: String,
 }
 
 async fn two_agent_home() -> TwoAgentHome {
@@ -27,6 +54,62 @@ async fn two_agent_home() -> TwoAgentHome {
     let owner = context.principal_id().to_string();
     crate::auth::store_test_principal_root_protection(dir.path(), &owner);
     crate::agents::tests::make_admin(dir.path(), &owner);
+    // The plants pin every route's location to this fixed principal and root.
+    // Both hold a current protection here, so a planted row reads and writes
+    // the shared location and fails on its separate-location assertion.
+    crate::auth::valid_agent::plant(dir.path());
+    crate::auth::store_test_principal_root_protection_for(
+        dir.path(),
+        crate::auth::valid_agent::ID,
+        crate::auth::valid_agent::ROOT,
+    );
+
+    // One signed Agent Host folder that declares the agent kind, from the
+    // asks-nothing component: the launch has no bridge call to grant.
+    let host_dir = dir.path().join(HOST_NAME);
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/components/asks-nothing/bundle");
+    for file in ["capsule.json", "asks-nothing.component.wasm"] {
+        std::fs::copy(fixture.join(file), host_dir.join(file)).unwrap();
+    }
+    let key = SigningKey::from_bytes(&[0x44; 32]);
+    let wasm = std::fs::read(host_dir.join("asks-nothing.component.wasm")).unwrap();
+    let mut manifest: elastos_common::CapsuleManifest =
+        serde_json::from_slice(&std::fs::read(host_dir.join("capsule.json")).unwrap()).unwrap();
+    manifest.name = HOST_NAME.to_string();
+    manifest.agent = Some(elastos_common::AgentDeclaration {
+        kind: elastos_common::AgentKind::Agent,
+    });
+    sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
+    std::fs::write(
+        host_dir.join("capsule.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let host_cid = crate::stage_cmd::bundle_cid(&host_dir).expect("the host folder is walkable");
+
+    // The one admission key both the Host's signature and this Runtime trust.
+    let storage = Arc::new(
+        elastos_storage::providers::LocalFSProvider::new(dir.path().join(".s5-storage"))
+            .await
+            .unwrap(),
+    );
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        storage,
+        Vec::new(),
+        Some(Arc::new(ComponentProvider::new())),
+    ));
+    runtime
+        .configure_capsule_admission(
+            dir.path(),
+            &[hex::encode(key.verifying_key().to_bytes())],
+            false,
+        )
+        .await
+        .unwrap();
+    let audit_log = Arc::new(AuditLog::new());
+
     let record = crate::auth::stored_principal_record(dir.path(), &owner)
         .unwrap()
         .unwrap();
@@ -43,15 +126,15 @@ async fn two_agent_home() -> TwoAgentHome {
             &caller,
             &crate::agents::CreateRequest {
                 display_name: name.to_string(),
-                agent_host: "agent-host".to_string(),
+                agent_host: HOST_NAME.to_string(),
                 request_id: format!("request-s5-{name}"),
             },
             |host| {
                 Ok(
                     crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
                         host,
-                        "bafkreis5fences",
-                        "bafkreis5fencesbytes",
+                        HOST_REGISTRY_CID,
+                        &host_cid,
                     ),
                 )
             },
@@ -63,14 +146,40 @@ async fn two_agent_home() -> TwoAgentHome {
     let [a, b] = agents.as_slice() else {
         panic!("two agents");
     };
+    let launch_grant =
+        issue_home_launch_token_with_context(dir.path(), HOST_NAME, &context).unwrap();
     TwoAgentHome {
         dir,
         agents: [a.clone(), b.clone()],
+        runtime,
+        audit_log,
+        host_dir,
+        launch_grant,
     }
 }
 
-/// A Home launch token for one agent's launch, bound to `app`, with the active
-/// session grant verification needs.
+/// One agent's launch through the production route. Admission binds the stored
+/// agent's own id and root; the component starts and ends well.
+async fn launch_agent(home: &TwoAgentHome, agent: &str) {
+    let request: crate::api::routes::LaunchRequest = serde_json::from_value(json!({
+        "path": home.host_dir.to_string_lossy(),
+        "launch_grant": home.launch_grant,
+        "agent_id": agent,
+    }))
+    .unwrap();
+    let _ = crate::api::routes::launch_capsule(
+        Extension(home.runtime.clone()),
+        Extension(home.audit_log.clone()),
+        Extension(Some(home.dir.path().to_path_buf())),
+        AxumJson(request),
+    )
+    .await
+    .expect("the stored agent's launch is admitted and starts");
+}
+
+/// A Home launch token for one agent, minted by the production issuer from a
+/// session grant the production store holds. No production flow mints an
+/// agent's grant today: the stored agent's own proof binding is the subject.
 fn agent_token(home: &TwoAgentHome, app: &str, agent: &str) -> String {
     let record = crate::auth::stored_principal_record(home.dir.path(), agent)
         .unwrap()
@@ -132,17 +241,19 @@ fn app_request(method: &str, uri: &str, token: &str, body: Option<Value>) -> Req
 
 /// Route 13, and row 9. The location is
 /// `gateway_home_agent.rs:79-84 home_agent_workspace_uri`, which builds
-/// `{context.root().localhost_root()}/.AppData/ElastOS/HomeAgent/workspace.json`.
-/// Two agents' launches get two different locations, and one never reads the
-/// other's document.
+/// `{context.root().localhost_root()}/.AppData/ElastOS/HomeAgent/workspace.json`
+/// from the token's resolved root. Two admitted agents get two different
+/// locations, and one never reads the other's document.
 #[tokio::test]
-async fn route_13_home_agent_workspace_builds_one_location_per_agents_launch() {
+async fn route_13_home_agent_workspace_keeps_two_admitted_agents_locations_apart() {
     if crate::agents::require_build().is_err() {
         return;
     }
     let home = two_agent_home().await;
     let app = gateway_router(test_state(home.dir.path()));
     let [a, b] = &home.agents;
+    launch_agent(&home, a).await;
+    launch_agent(&home, b).await;
     let token_a = agent_token(&home, "home-agent", a);
     let token_b = agent_token(&home, "home-agent", b);
     let (root_a, root_b) = (root_of(&home, a), root_of(&home, b));
@@ -151,28 +262,27 @@ async fn route_13_home_agent_workspace_builds_one_location_per_agents_launch() {
     let path_b = object_path(&home, &root_b, relative);
     assert_ne!(path_a, path_b, "two launches, two locations");
 
-    let put_a = app
-        .clone()
-        .oneshot(app_request(
+    let write = |token: String, marker: &'static str| {
+        app_request(
             "PUT",
             "/api/apps/home-agent/workspace",
-            &token_a,
+            &token,
             Some(json!({
                 "schema": "elastos.home-agent.workspace/v1",
                 "if_revision": 0,
-                "document": {"marker": "a"}
+                "document": {"marker": marker}
             })),
-        ))
+        )
+    };
+    let put_a = app
+        .clone()
+        .oneshot(write(token_a.clone(), "a"))
         .await
         .unwrap();
     assert_eq!(put_a.status(), StatusCode::OK);
-    assert!(
-        path_a.is_file(),
-        "A's write landed where its own root puts it"
-    );
-    assert!(!path_b.exists(), "A's write did not land under B's root");
 
-    // B's launch reads its own empty workspace, never A's document.
+    // The row's own separate-location assertion: B's launch reads its own
+    // empty workspace, never A's document.
     let get_b = app
         .clone()
         .oneshot(app_request(
@@ -185,8 +295,33 @@ async fn route_13_home_agent_workspace_builds_one_location_per_agents_launch() {
         .unwrap();
     assert_eq!(get_b.status(), StatusCode::OK);
     let seen_by_b = response_json(get_b).await;
-    assert_eq!(seen_by_b["revision"], 0);
-    assert_eq!(seen_by_b["document"], json!({}));
+    assert_eq!(
+        seen_by_b["revision"], 0,
+        "B's launch reads its own empty workspace"
+    );
+    assert_eq!(
+        seen_by_b["document"],
+        json!({}),
+        "B's launch reads its own empty workspace"
+    );
+
+    let seen_by_a = response_json(
+        app.clone()
+            .oneshot(app_request(
+                "GET",
+                "/api/apps/home-agent/workspace",
+                &token_a,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        seen_by_a["document"],
+        json!({"marker": "a"}),
+        "A's launch reads its own document"
+    );
 
     // No request field can name another location.
     let named = app
@@ -211,35 +346,26 @@ async fn route_13_home_agent_workspace_builds_one_location_per_agents_launch() {
     );
     assert!(!path_b.exists());
 
-    let put_b = app
-        .oneshot(app_request(
-            "PUT",
-            "/api/apps/home-agent/workspace",
-            &token_b,
-            Some(json!({
-                "schema": "elastos.home-agent.workspace/v1",
-                "if_revision": 0,
-                "document": {"marker": "b"}
-            })),
-        ))
-        .await
-        .unwrap();
+    let put_b = app.oneshot(write(token_b, "b")).await.unwrap();
     assert_eq!(put_b.status(), StatusCode::OK);
+    assert!(path_a.is_file(), "A's write landed under A's root");
     assert!(path_b.is_file(), "B's write landed under B's own root");
 }
 
 /// Route 14. The location is `gateway_assistant.rs:134-139
 /// assistant_workspace_uri`, which builds
 /// `{context.root().localhost_root()}/.AppData/ElastOS/Assistant/workspace.json`.
-/// Two agents' launches get two different locations.
+/// Two admitted agents get two different locations.
 #[tokio::test]
-async fn route_14_assistant_workspace_builds_one_location_per_agents_launch() {
+async fn route_14_assistant_workspace_keeps_two_admitted_agents_locations_apart() {
     if crate::agents::require_build().is_err() {
         return;
     }
     let home = two_agent_home().await;
     let app = gateway_router(test_state(home.dir.path()));
     let [a, b] = &home.agents;
+    launch_agent(&home, a).await;
+    launch_agent(&home, b).await;
     let token_a = agent_token(&home, "assistant", a);
     let token_b = agent_token(&home, "assistant", b);
     let (root_a, root_b) = (root_of(&home, a), root_of(&home, b));
@@ -263,16 +389,16 @@ async fn route_14_assistant_workspace_builds_one_location_per_agents_launch() {
     };
     assert_eq!(
         app.clone()
-            .oneshot(write(token_a, "a"))
+            .oneshot(write(token_a.clone(), "a"))
             .await
             .unwrap()
             .status(),
         StatusCode::OK
     );
-    assert!(path_a.is_file());
-    assert!(!path_b.exists());
 
-    let seen = app
+    // The row's own separate-location assertion: B's launch reads its own
+    // empty workspace, never A's draft.
+    let seen_by_b = app
         .clone()
         .oneshot(app_request(
             "GET",
@@ -282,35 +408,56 @@ async fn route_14_assistant_workspace_builds_one_location_per_agents_launch() {
         ))
         .await
         .unwrap();
+    assert_eq!(seen_by_b.status(), StatusCode::OK);
     assert_eq!(
-        response_json(seen).await,
+        response_json(seen_by_b).await,
         json!({
             "schema": "elastos.assistant.workspace/v1",
             "revision": 0,
             "sessions": [],
             "draft": ""
-        })
+        }),
+        "B's launch reads its own empty workspace"
     );
 
     assert_eq!(
-        app.oneshot(write(token_b, "b")).await.unwrap().status(),
+        app.clone()
+            .oneshot(write(token_b.clone(), "b"))
+            .await
+            .unwrap()
+            .status(),
         StatusCode::OK
     );
+    let seen_by_a = response_json(
+        app.oneshot(app_request(
+            "GET",
+            "/api/apps/assistant/workspace",
+            &token_a,
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(seen_by_a["draft"], "a", "A's launch reads its own draft");
+    assert!(path_a.is_file());
     assert!(path_b.is_file());
 }
 
 /// Route 15. The location is
 /// `gateway_assistant_workspace_v2.rs:96-106 object_location`, which builds
 /// `{context.root().localhost_root()}/.AppData/ElastOS/Assistant/workspace-v2.json`.
-/// Two agents' launches get two different locations.
+/// Two admitted agents get two different locations.
 #[tokio::test]
-async fn route_15_assistant_workspace_v2_builds_one_location_per_agents_launch() {
+async fn route_15_assistant_workspace_v2_keeps_two_admitted_agents_locations_apart() {
     if crate::agents::require_build().is_err() {
         return;
     }
     let home = two_agent_home().await;
     let app = gateway_router(test_state(home.dir.path()));
     let [a, b] = &home.agents;
+    launch_agent(&home, a).await;
+    launch_agent(&home, b).await;
     let token_a = agent_token(&home, "assistant", a);
     let token_b = agent_token(&home, "assistant", b);
     let (root_a, root_b) = (root_of(&home, a), root_of(&home, b));
@@ -358,9 +505,9 @@ async fn route_15_assistant_workspace_v2_builds_one_location_per_agents_launch()
             .status(),
         StatusCode::OK
     );
-    assert!(path_a.is_file());
-    assert!(!path_b.exists());
 
+    // The row's own separate-location assertion: B's launch reads its own
+    // empty document, never A's.
     let seen = app
         .clone()
         .oneshot(read_first(token_b.clone()))
@@ -368,8 +515,15 @@ async fn route_15_assistant_workspace_v2_builds_one_location_per_agents_launch()
         .unwrap();
     assert_eq!(seen.status(), StatusCode::OK);
     let seen = response_json(seen).await;
-    assert_eq!(seen["revision"], 0);
-    assert_eq!(seen["document"], json!({}));
+    assert_eq!(
+        seen["revision"], 0,
+        "B's launch reads its own empty workspace"
+    );
+    assert_eq!(
+        seen["document"],
+        json!({}),
+        "B's launch reads its own empty workspace"
+    );
     let migration_b = seen["migration_revision"]
         .as_str()
         .expect("the first save names its retained sources")
@@ -382,21 +536,24 @@ async fn route_15_assistant_workspace_v2_builds_one_location_per_agents_launch()
             .status(),
         StatusCode::OK
     );
+    assert!(path_a.is_file());
     assert!(path_b.is_file());
 }
 
 /// Route 16. The location is `gateway_home_system.rs:6818-6820
 /// home_browser_localhost_root` read by `:7033-7038 home_browser_state_uri`,
 /// which builds `{context.root().localhost_root()}/.AppData/ElastOS/Home/browser-state.json`.
-/// Two agents' launches get two different locations.
+/// Two admitted agents get two different locations.
 #[tokio::test]
-async fn route_16_home_state_builds_one_location_per_agents_launch() {
+async fn route_16_home_state_keeps_two_admitted_agents_locations_apart() {
     if crate::agents::require_build().is_err() {
         return;
     }
     let home = two_agent_home().await;
     let app = gateway_router(test_state(home.dir.path()));
     let [a, b] = &home.agents;
+    launch_agent(&home, a).await;
+    launch_agent(&home, b).await;
     let token_a = agent_token(&home, "home", a);
     let token_b = agent_token(&home, "home", b);
     let (root_a, root_b) = (root_of(&home, a), root_of(&home, b));
@@ -420,13 +577,19 @@ async fn route_16_home_state_builds_one_location_per_agents_launch() {
         }
     };
 
+    // The row's own separate-location assertion: each launch's state is under
+    // its own root.
     let seen_a = app
         .clone()
         .oneshot(request("GET", &token_a, None))
         .await
         .unwrap();
     assert_eq!(seen_a.status(), StatusCode::OK);
-    assert_eq!(response_json(seen_a).await["localhost_root"], root_a);
+    assert_eq!(
+        response_json(seen_a).await["localhost_root"],
+        root_a,
+        "each launch's state is under its own root"
+    );
 
     let seen_b = app
         .clone()
@@ -434,7 +597,11 @@ async fn route_16_home_state_builds_one_location_per_agents_launch() {
         .await
         .unwrap();
     assert_eq!(seen_b.status(), StatusCode::OK);
-    assert_eq!(response_json(seen_b).await["localhost_root"], root_b);
+    assert_eq!(
+        response_json(seen_b).await["localhost_root"],
+        root_b,
+        "each launch's state is under its own root"
+    );
 
     let written = app
         .clone()
