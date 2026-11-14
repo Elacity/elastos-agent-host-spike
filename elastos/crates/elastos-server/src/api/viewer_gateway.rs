@@ -13,10 +13,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::gateway::{
-    content_type, gateway_attach_runtime_token, load_live_runtime_coords,
-    require_home_projection_launch_token_context, require_home_viewer_launch_token_context,
-    require_launch_bound_token, viewer_object_shell_description, viewer_object_shell_title,
-    GatewayState, HomeLaunchTokenContext,
+    content_type, gateway_attach_runtime_token, issue_home_launch_token_with_context,
+    issue_launch_page_token, load_live_runtime_coords,
+    require_home_projection_launch_token_context, require_home_token_context,
+    require_home_viewer_launch_token_context, require_launch_bound_token,
+    viewer_object_shell_description, viewer_object_shell_title, GatewayState,
+    HomeLaunchTokenContext,
 };
 
 #[derive(Debug, Serialize)]
@@ -962,7 +964,7 @@ async fn viewer_launch_read(
         return not_found();
     };
     let bytes = match plain {
-        true => kept_launch_from_runtime(data_dir, &id, &token, kind, rest).await,
+        true => kept_launch_from_runtime(data_dir, &id, Some(&token), kind, rest).await,
         false => None,
     };
     let result = if bytes.is_some() { "ok" } else { "not_found" };
@@ -993,10 +995,10 @@ async fn viewer_launch_read(
 
 /// The Runtime's answer to a read of a kept launch, asked as the shell with
 /// the page's own token: the bytes, or `None` for any other answer.
-async fn kept_launch_from_runtime(
+pub(super) async fn kept_launch_from_runtime(
     data_dir: &FsPath,
     id: &str,
-    token: &str,
+    token: Option<&str>,
     kind: &str,
     rest: &str,
 ) -> Option<Vec<u8>> {
@@ -1017,17 +1019,107 @@ async fn kept_launch_from_runtime(
         .ok()?
         .extend(["api", "launch", id, kind])
         .extend(rest.split('/'));
-    let answer = client
+    let mut ask = client
         .get(url)
-        .header(axum::http::header::AUTHORIZATION, format!("Bearer {shell}"))
-        .header("x-elastos-home-token", token)
-        .send()
-        .await
-        .ok()?;
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {shell}"));
+    if let Some(token) = token {
+        ask = ask.header("x-elastos-home-token", token);
+    }
+    let answer = ask.send().await.ok()?;
     if answer.status() != reqwest::StatusCode::OK {
         return None;
     }
     answer.bytes().await.ok().map(|bytes| bytes.to_vec())
+}
+
+/// `POST /api/home/launch/content` with `{cid}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HomeLaunchContentRequest {
+    cid: String,
+}
+
+/// What the Runtime's open answers.
+#[derive(Debug, Deserialize)]
+struct RuntimeOpened {
+    id: String,
+    page: String,
+    entrypoint: String,
+}
+
+/// `POST /api/home/launch/content`: Home opens a content capsule by its CID
+/// for the signed-in person. The Runtime starts it and keeps its launch for
+/// its page (`page_launch.rs`); Home then gets the page's address and the
+/// page's own token, bound to that launch for 15 minutes at most. Any refusal
+/// of the Runtime's (a wrong CID among them) is passed on as it is, by name,
+/// and no token is minted.
+pub async fn home_launch_content(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(request): Json<HomeLaunchContentRequest>,
+) -> Response {
+    let context = match require_home_token_context(&state.data_dir, &headers) {
+        Ok(context) => context,
+        Err(err) => return viewer_error_response(err),
+    };
+    let opened = match open_at_runtime(&state.data_dir, &context, &request.cid).await {
+        Ok(opened) => opened,
+        Err((status, refusal)) => return (status, refusal).into_response(),
+    };
+    let token = match issue_launch_page_token(&state.data_dir, &opened.id, &opened.page, &context) {
+        Ok(token) => token,
+        Err(err) => return viewer_error_response(err),
+    };
+    Json(json!({
+        "page": opened.page,
+        "page_url": format!("/launch/{}/page/{}", opened.id, opened.entrypoint),
+        "token": token,
+    }))
+    .into_response()
+}
+
+/// The Runtime's open, asked as the shell with a grant for `home` minted from
+/// the person's own context: the person is never named by the request.
+async fn open_at_runtime(
+    data_dir: &FsPath,
+    context: &HomeLaunchTokenContext,
+    cid: &str,
+) -> Result<RuntimeOpened, (StatusCode, String)> {
+    let unavailable = |what: &str| (StatusCode::SERVICE_UNAVAILABLE, what.to_string());
+    let coords = load_live_runtime_coords(data_dir)
+        .await
+        .ok_or_else(|| unavailable("local runtime is not running"))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(70))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| unavailable("runtime client unavailable"))?;
+    let shell =
+        gateway_attach_runtime_token(&client, &coords.api_url, &coords.attach_secret, "shell")
+            .await
+            .map_err(|_| unavailable("runtime attach failed"))?;
+    let grant =
+        issue_home_launch_token_with_context(data_dir, super::gateway::HOME_CAPSULE_ID, context)
+            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let answer = client
+        .post(format!("{}/api/launch/open", coords.api_url))
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {shell}"))
+        .header("x-elastos-home-token", grant)
+        .json(&json!({ "cid": cid }))
+        .send()
+        .await
+        .map_err(|_| unavailable("runtime open failed"))?;
+    let status = StatusCode::from_u16(answer.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if status != StatusCode::OK {
+        let refusal = answer.text().await.unwrap_or_default();
+        return Err((status, refusal));
+    }
+    answer.json::<RuntimeOpened>().await.map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "runtime open answered oddly".to_string(),
+        )
+    })
 }
 
 pub(super) fn viewer_error_response(err: anyhow::Error) -> Response {

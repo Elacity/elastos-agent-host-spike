@@ -485,6 +485,10 @@ pub async fn start_server_with_sessions(config: ServerConfig) -> anyhow::Result<
             "/api/launch/:id/content/*path",
             get(routes::kept_launch_content),
         )
+        .route(
+            "/api/launch/:id/page/*path",
+            get(routes::kept_launch_page_file),
+        )
         .layer(axum_middleware::from_fn(shell_only_middleware))
         .layer(axum_middleware::from_fn_with_state(
             api_state.clone(),

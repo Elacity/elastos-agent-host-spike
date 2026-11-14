@@ -1304,6 +1304,7 @@ pub struct OpenLaunchRequest {
 pub struct OpenLaunchResponse {
     id: String,
     page: String,
+    entrypoint: String,
 }
 
 pub async fn open_launch(
@@ -1330,6 +1331,7 @@ pub async fn open_launch(
         Ok(opened) => Ok(Json(OpenLaunchResponse {
             id: opened.id,
             page: opened.page,
+            entrypoint: opened.entrypoint,
         })),
         Err(OpenRefusal::Start(refusal)) => Err((
             StatusCode::BAD_REQUEST,
@@ -1428,6 +1430,16 @@ pub async fn kept_launch_content(
         },
     );
     kept_launch_answer(read)
+}
+
+/// `GET /api/launch/:id/page/*path` (shell only): one file of the page a kept
+/// launch was opened for, at exactly that plain path. No page token: the
+/// page's files are not secret; the launch's id says which page.
+pub async fn kept_launch_page_file(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    axum::extract::Path((id, path)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    kept_launch_answer(runtime.read_kept_page_file(&id, &path))
 }
 
 /// Tokens for the kept-launch tests, minted as the gateway mints them.

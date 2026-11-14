@@ -341,6 +341,66 @@ async fn serve_browser_capsule_asset(
     response
 }
 
+/// `GET /launch/:id/page/*path`: a file of the page a kept launch was opened
+/// for, exactly as the start's walk read it from the bundle the content
+/// pinned, asked of the Runtime as the shell. Answered with the headers an
+/// installed app's asset gets, and for a document the app policy (the
+/// sandbox; `blob:` pictures among what `img-src` allows). No token: a page's
+/// files are not secret; the launch's id says which page, and the page's
+/// reads of its launch take its token.
+pub async fn serve_launch_page(
+    State(state): State<GatewayState>,
+    AxumPath((id, path)): AxumPath<(String, String)>,
+    request_headers: axum::http::HeaderMap,
+) -> Response {
+    let not_found = || (StatusCode::NOT_FOUND, "not_found").into_response();
+    let launch_id = id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !launch_id || !crate::page_launch::plain_content_path(&path) {
+        return not_found();
+    }
+    let read =
+        super::viewer_gateway::kept_launch_from_runtime(&state.data_dir, &id, None, "page", &path);
+    let Some(bytes) = read.await else {
+        return not_found();
+    };
+    let is_document = matches!(
+        content_type(&path),
+        "text/html; charset=utf-8" | "application/xhtml+xml" | "image/svg+xml"
+    );
+    let corp = if is_document {
+        BROWSER_CAPSULE_DOCUMENT_CORP
+    } else {
+        BROWSER_CAPSULE_ASSET_CORP
+    };
+    let mut response = (
+        StatusCode::OK,
+        [
+            ("content-type", content_type(&path)),
+            ("cache-control", BROWSER_CAPSULE_CACHE_CONTROL),
+            ("cross-origin-opener-policy", BROWSER_CAPSULE_COOP),
+            ("cross-origin-embedder-policy", BROWSER_CAPSULE_COEP),
+            ("cross-origin-resource-policy", corp),
+        ],
+        bytes,
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        BROWSER_CAPSULE_OPAQUE_ORIGIN.parse().unwrap(),
+    );
+    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    if is_document {
+        // A page is never Home and never a shell: the sandboxed app policy.
+        let Some(policy) = shell_content_security_policy(&request_headers, "", true, false) else {
+            return not_found();
+        };
+        headers.insert("content-security-policy", policy.parse().unwrap());
+    }
+    response
+}
+
 fn shell_content_security_policy(
     headers: &axum::http::HeaderMap,
     app: &str,

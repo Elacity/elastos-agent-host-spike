@@ -3100,3 +3100,95 @@ async fn a_dropped_open_keeps_its_place_until_its_start_returns() {
         "the place went back when the start did"
     );
 }
+
+/// D2a-page. A content open keeps the page its content pins, as the walk read
+/// it: the open names the page's entrypoint, and each of the page's files is
+/// read back by exact plain path through the shell's route, the page's own
+/// bytes and not the content's under the same name. A path that is not
+/// plain, a file the page does not have, another launch's id, a gone launch
+/// and a place no launch fills read as nothing.
+#[tokio::test]
+async fn a_kept_launch_serves_the_page_its_content_pins() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use tower::ServiceExt;
+    let publisher = key(99);
+    let home = Home::trusting(&[&publisher]).await;
+    let (cid, _) = staged_quiet_set(&home, &publisher, b"a picture").await;
+    let runtime = &home.runtime;
+    let opened = runtime
+        .open_for_page(&home.data(), &cid, PERSON)
+        .await
+        .unwrap();
+    assert_eq!(opened.entrypoint, ENTRYPOINT);
+
+    let id = opened.id.clone();
+    assert_eq!(
+        runtime.read_kept_page_file(&id, ENTRYPOINT),
+        Some(b"a page".to_vec()),
+        "the page's own bytes"
+    );
+    let manifest = runtime.read_kept_page_file(&id, "capsule.json").unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+    assert_eq!(
+        manifest["role"], "viewer",
+        "the page's manifest, not the content's"
+    );
+    for path in [
+        "",
+        "/capsule.json",
+        "x/../capsule.json",
+        "a\\b",
+        "none.html",
+    ] {
+        assert_eq!(runtime.read_kept_page_file(&id, path), None, "{path:?}");
+    }
+    assert_eq!(
+        runtime.read_kept_page_file(&"0".repeat(32), ENTRYPOINT),
+        None
+    );
+    let place = crate::page_launch::take_place(&runtime.page_launches, PERSON).unwrap();
+    assert_eq!(
+        runtime.read_kept_page_file(place.id(), ENTRYPOINT),
+        None,
+        "a place no launch fills"
+    );
+    drop(place);
+
+    let app = axum::Router::new()
+        .route(
+            "/api/launch/:id/page/*path",
+            get(crate::api::routes::kept_launch_page_file),
+        )
+        .layer(axum::Extension(home.runtime.clone()));
+    let ask = |uri: String| {
+        let app = app.clone();
+        async move {
+            let answer = app
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = answer.status();
+            let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body.to_vec())
+        }
+    };
+    assert_eq!(
+        ask(format!("/api/launch/{id}/page/{ENTRYPOINT}")).await,
+        (StatusCode::OK, b"a page".to_vec())
+    );
+    assert_eq!(
+        ask(format!("/api/launch/{id}/page/x%2F..%2Fcapsule.json")).await,
+        (StatusCode::NOT_FOUND, b"not_found".to_vec())
+    );
+
+    runtime.expire_kept_launches();
+    assert_eq!(
+        runtime.read_kept_page_file(&id, ENTRYPOINT),
+        None,
+        "a gone launch"
+    );
+}
