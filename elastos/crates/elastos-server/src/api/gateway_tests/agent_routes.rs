@@ -95,7 +95,7 @@ mod off {
 #[cfg(feature = "prototype-agents")]
 mod on {
     use super::*;
-    use crate::agent_admission::tests::{installed_agent_host, Signed, AGENT_HOST, AGENT_HOST_CID};
+    use crate::agent_admission::tests::{installed_agent_host, Signed, AGENT_HOST};
 
     /// A Home installed from a signed release that lists the Agent Host,
     /// with its gateway and its admin owner. The capsules a plain test
