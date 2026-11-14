@@ -11,24 +11,6 @@
   "execution": "web-projection",
   "projections": ["web"],
   "entrypoint": "browser/index.html",
-  "interfaces": [
-    {
-      "id": "elastos.photos.viewer",
-      "version": "0.1.0",
-      "description": "Discoverability only; grants nothing.",
-      "methods": [
-        {
-          "id": "playlist.show",
-          "description": "Show the playlist bound to this launch",
-          "risk": "read",
-          "approval": "runtime_policy",
-          "audit": "event",
-          "resource": "localhost://Users/self/.AppData/App/photo-viewer/playlist.json",
-          "operation": "show"
-        }
-      ]
-    }
-  ],
   "resources": {
     "memory_mb": 16,
     "gpu": false
