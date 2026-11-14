@@ -1756,11 +1756,11 @@ fn the_walk_keeps_production_text_after_an_inline_test_module() {
 
     // A raw string ending in a backslash is lexed as raw: the real test
     // module after it is still left out (read as a plain string, the `\"`
-    // would run on and hide the module inside the string).
-    let raw_backslash = "const P: &str = r\"a\\\";\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\nconst Q: &str = \"b\";\nfn production_after() {}\n";
+    // would run on to the comment's quote and hide the module in a string).
+    let raw_backslash = "const P: &str = r\"a\\\";\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\nfn production_after() {} // \"\n";
     assert_eq!(
         without_inline_test_modules(raw_backslash),
-        "const P: &str = r\"a\\\";\nconst Q: &str = \"b\";\nfn production_after() {}\n",
+        "const P: &str = r\"a\\\";\nfn production_after() {} // \"\n",
         "a test module after a raw string ending in a backslash is still left out"
     );
 
