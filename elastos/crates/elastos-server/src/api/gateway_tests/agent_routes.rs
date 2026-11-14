@@ -254,9 +254,17 @@ mod on {
         let agent_id = created["agent_id"].as_str().unwrap().to_string();
         assert!(crate::auth::validate_agent_id(&agent_id).is_ok());
         assert_eq!(created["display_name"], "Helper");
+        // The create response returns the exact package admission verified:
+        // the release-signed name and registry CID, and the bundle CID the
+        // Runtime's walk of the installed files gave. An agent launch binds
+        // to those bytes.
+        let stored_package = crate::agent_admission::verify_agent_host(&home.data, AGENT_HOST)
+            .expect("the fixture's Agent Host is admitted")
+            .package()
+            .clone();
         assert_eq!(
             created["agent_host"],
-            json!({"name": AGENT_HOST, "registry_cid": AGENT_HOST_CID})
+            serde_json::to_value(stored_package).unwrap()
         );
         assert_eq!(created["retired_at"], Value::Null);
 

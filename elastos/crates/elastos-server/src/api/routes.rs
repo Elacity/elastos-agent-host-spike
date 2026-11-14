@@ -300,6 +300,7 @@ pub async fn stop_capsule(
 mod tests {
     use super::*;
     use crate::api::gateway;
+    use std::future::Future;
 
     fn write_test_capsule(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let capsule_dir = dir.join(name);
@@ -572,6 +573,9 @@ mod tests {
         capsule_dir: std::path::PathBuf,
         grant: String,
         agents: Vec<String>,
+        /// The stored person every agent here belongs to. It is the person
+        /// `agents::create` records in each agent's `owner`.
+        owner: String,
     }
 
     const PROBE_HOST: &str = "a5-launch-probe";
@@ -715,29 +719,113 @@ mod tests {
                 capsule_dir,
                 grant,
                 agents,
+                owner,
             }
+        }
+
+        /// Writes a second signed Agent Host folder whose manifest adds
+        /// `claim` to its capabilities, exactly as the stored host is
+        /// written, and returns the folder and the CID the Runtime's walk
+        /// gives it. The extra claim names another agent's root; admission
+        /// still binds the agent the request names.
+        fn host_with_claim(&self, name: &str, claim: &str) -> (std::path::PathBuf, String) {
+            use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+
+            let key = SigningKey::from_bytes(&[0x44; 32]);
+            let dir = self._temp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/a5-launch-probe");
+            for file in ["capsule.json", "a5-launch-probe.component.wasm"] {
+                std::fs::copy(fixture.join(file), dir.join(file)).unwrap();
+            }
+            let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
+            let mut manifest: elastos_common::CapsuleManifest =
+                serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
+            manifest.capabilities.push(claim.to_string());
+            sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let cid = crate::stage_cmd::bundle_cid(&dir).expect("the claimed host is walkable");
+            (dir, cid)
+        }
+
+        /// Creates one more agent of this Home's owner, bound to `host_dir`
+        /// and to `host_cid` as its stored Agent Host.
+        fn create_agent_for_host(&self, name: &str, host_cid: &str) -> String {
+            use crate::agents;
+            let record = crate::auth::stored_principal_record(&self.data_dir, &self.owner)
+                .unwrap()
+                .unwrap();
+            let caller = agents::Caller {
+                principal_id: &self.owner,
+                proof_binding_id: &record.proof_binding_id,
+                session_id: "session:a5-launch",
+            };
+            agents::create(
+                &self.data_dir,
+                &caller,
+                &agents::CreateRequest {
+                    display_name: name.to_string(),
+                    agent_host: PROBE_HOST.to_string(),
+                    request_id: format!("request-{name}"),
+                },
+                |host| {
+                    Ok(
+                        crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
+                            host,
+                            PROBE_REGISTRY_CID,
+                            host_cid,
+                        ),
+                    )
+                },
+                2,
+            )
+            .unwrap()
+            .agent_id
         }
 
         fn root(&self, agent_id: &str) -> String {
             crate::auth::principal_stored_localhost_root(Some(&self.data_dir), agent_id).unwrap()
         }
 
-        fn launch(
-            &self,
-            agent_id: &str,
-        ) -> impl std::future::Future<Output = Result<Json<LaunchResponse>, (StatusCode, String)>> + '_
-        {
-            launch_capsule(
-                Extension(self.runtime.clone()),
-                Extension(self.audit_log.clone()),
-                Extension(Some(self.data_dir.clone())),
-                Json(LaunchRequest {
-                    path: self.capsule_dir.to_string_lossy().into_owned(),
-                    principal_id: None,
-                    launch_grant: Some(self.grant.clone()),
-                    agent_id: Some(agent_id.to_string()),
-                }),
-            )
+        fn launch<'a>(
+            &'a self,
+            agent_id: &'a str,
+        ) -> impl Future<Output = Result<Json<LaunchResponse>, (StatusCode, String)>> + 'a {
+            self.launch_from(&self.capsule_dir, agent_id)
+        }
+
+        /// The same launch from `dir`, which must walk to the bytes the agent's
+        /// stored Agent Host names.
+        fn launch_from<'a>(
+            &'a self,
+            dir: &'a std::path::Path,
+            agent_id: &'a str,
+        ) -> impl Future<Output = Result<Json<LaunchResponse>, (StatusCode, String)>> + 'a {
+            let grant = self.grant.clone();
+            let agent_id = agent_id.to_string();
+            let data_dir = Some(self.data_dir.clone());
+            let runtime = self.runtime.clone();
+            let audit_log = self.audit_log.clone();
+            let path = dir.to_string_lossy().into_owned();
+            async move {
+                launch_capsule(
+                    Extension(runtime),
+                    Extension(audit_log),
+                    Extension(data_dir),
+                    Json(LaunchRequest {
+                        path,
+                        principal_id: None,
+                        launch_grant: Some(grant),
+                        agent_id: Some(agent_id),
+                    }),
+                )
+                .await
+            }
         }
 
         /// Every bridge call the persisted audit holds under `agent_id`, in
@@ -814,27 +902,35 @@ mod tests {
 
         // Each bridge call names that agent and its own capsule instance, and
         // carries the concrete URI the guest asked for through `UsersAI/self`.
+        // Every completed bridge call also names the person the agent acts
+        // for, in the existing `reason` field.
+        let owner = home.owner.clone();
         let own_calls = |root: &str, session: &str| {
+            let audit = |reason: String| format!("{reason} owner={owner}");
             vec![
                 (
                     Some(session.to_string()),
                     "ok".to_string(),
-                    format!("write {root}/.AppData/Agents/agent-host/tasks/t1/journal"),
+                    audit(format!(
+                        "write {root}/.AppData/Agents/agent-host/tasks/t1/journal"
+                    )),
                 ),
                 (
                     Some(session.to_string()),
                     "ok".to_string(),
-                    format!("write {root}/memory/notes.md"),
+                    audit(format!("write {root}/memory/notes.md")),
                 ),
                 (
                     Some(session.to_string()),
                     "ok".to_string(),
-                    format!("read {root}/.AppData/Agents/agent-host/tasks/t1/journal"),
+                    audit(format!(
+                        "read {root}/.AppData/Agents/agent-host/tasks/t1/journal"
+                    )),
                 ),
                 (
                     Some(session.to_string()),
                     "ok".to_string(),
-                    format!("read {root}/memory/notes.md"),
+                    audit(format!("read {root}/memory/notes.md")),
                 ),
             ]
         };
@@ -842,7 +938,7 @@ mod tests {
             (
                 Some(session.to_string()),
                 "error".to_string(),
-                format!("read {root}/memory/peer"),
+                format!("read {root}/memory/peer owner={owner}"),
             )
         };
         let (root_a, root_b) = (home.root(a), home.root(b));
@@ -934,7 +1030,10 @@ mod tests {
         // call names it.
         let invoked = home.invoked(x);
         assert_eq!(invoked.len(), 5, "{invoked:?}");
-        assert_eq!(invoked[4].2, format!("read {pointer_uri}"));
+        assert_eq!(
+            invoked[4].2,
+            format!("read {pointer_uri} owner={}", home.owner)
+        );
         assert_eq!(invoked[4].1, "ok");
         assert!(
             invoked.iter().all(|(_, _, reason)| !reason.contains(&peer)),
@@ -945,7 +1044,7 @@ mod tests {
             .invoked(y)
             .iter()
             .any(|(_, result, reason)| result == "ok"
-                && reason == &format!("write {root_y}/memory/notes.md")));
+                && reason == &format!("write {root_y}/memory/notes.md owner={}", home.owner)));
         grants.abort();
     }
 
@@ -1287,5 +1386,293 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         assert_eq!(error.1, "an agent launch needs this Home's data directory");
+    }
+
+    /// Row 8: the record of a real bridge call from an admitted agent is the
+    /// agent as actor (`principal_id`) and the person it acts for (the owner),
+    /// named in the existing `reason` field as `owner=<id>`.
+    #[tokio::test]
+    async fn a_bridge_call_from_an_admitted_agent_names_the_agent_and_its_owner() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents.first().expect("one agent").clone();
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+
+        let run = home.launch(&agent).await.unwrap().0;
+        assert_eq!(run.status, "completed");
+
+        let root = home.root(&agent);
+        let events: Vec<_> = crate::auth::load_auth_state(&home.data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type == "component.invoke.completed")
+            .filter(|event| event.principal_id.as_deref() == Some(agent.as_str()))
+            .collect();
+        assert_eq!(events.len(), 5, "four own-root calls and the peer miss");
+        for event in &events {
+            assert_eq!(
+                event.principal_id.as_deref(),
+                Some(agent.as_str()),
+                "the actor is the admitted agent"
+            );
+            assert!(
+                event.reason.contains(&root),
+                "the record names the agent's own root: {}",
+                event.reason
+            );
+            assert!(
+                event.reason.ends_with(&format!(" owner={}", home.owner)),
+                "the record names the person it acts for: {}",
+                event.reason
+            );
+            assert_eq!(event.session_id.as_deref(), Some(run.id.as_str()));
+        }
+        grants.abort();
+    }
+
+    /// Row 5, entrance one: an agent-declaring capsule does not launch from
+    /// `launch_capsule` without its launcher. A request that names the agent
+    /// and holds no grant stops at admission; a request that names no agent
+    /// stops at the start, because the manifest declares one.
+    #[tokio::test]
+    async fn an_agent_launch_without_a_grant_refuses_on_launch_capsule() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents.first().expect("one agent").clone();
+        let launch = |agent_id: Option<String>| {
+            launch_capsule(
+                Extension(home.runtime.clone()),
+                Extension(home.audit_log.clone()),
+                Extension(Some(home.data_dir.clone())),
+                Json(LaunchRequest {
+                    path: home.capsule_dir.to_string_lossy().into_owned(),
+                    principal_id: None,
+                    launch_grant: None,
+                    agent_id,
+                }),
+            )
+        };
+
+        // The id is named; no launcher is.
+        let (status, message) = launch(Some(agent.clone())).await.map(|_| ()).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, crate::agent_admission::NO_LAUNCHER);
+
+        // No id is named; the manifest still declares the agent.
+        let (status, message) = launch(None).await.map(|_| ()).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            message,
+            format!("Invalid manifest: {}", crate::agent_admission::NO_LAUNCHER)
+        );
+
+        assert!(
+            home.audit_log.recent_events(4).is_empty(),
+            "the runtime started nothing"
+        );
+        assert!(
+            crate::auth::load_auth_state(&home.data_dir)
+                .unwrap()
+                .audit
+                .iter()
+                .all(|event| !event.event_type.starts_with("component.invoke.")),
+            "no principal was bound to a bridge call"
+        );
+    }
+
+    /// Row 5, entrance two: the attach route. `run_cmd` and `capsule_cmd`
+    /// attach a component with `Runtime::run_local`, which has no launcher and
+    /// no admission context, so a manifest that declares an agent is refused.
+    #[tokio::test]
+    async fn a_component_attached_without_an_admitted_launch_refuses_an_agent_host() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let error = home
+            .runtime
+            .run_local(&home.capsule_dir, Vec::new())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("Invalid manifest: {}", crate::agent_admission::NO_LAUNCHER)
+        );
+        assert!(
+            home.audit_log.recent_events(4).is_empty(),
+            "the runtime started nothing"
+        );
+    }
+
+    /// Row 5: unsigned. The same attach start of an unsigned copy of the Agent
+    /// Host refuses by the signature rule before any launcher question, and
+    /// nothing starts.
+    #[tokio::test]
+    async fn an_unsigned_agent_host_refuses_the_attach_route_by_name() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let dir = home._temp.path().join("unsigned-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/a5-launch-probe");
+        for file in ["capsule.json", "a5-launch-probe.component.wasm"] {
+            std::fs::copy(fixture.join(file), dir.join(file)).unwrap();
+        }
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
+        assert!(manifest.signature.is_none(), "the fixture is unsigned");
+
+        let error = home
+            .runtime
+            .run_local(&dir, Vec::new())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Invalid manifest: Capsule 'a5-launch-probe' is unsigned; only a source or development Home with dev_mode = true runs unsigned capsules"
+        );
+        assert!(
+            home.audit_log.recent_events(4).is_empty(),
+            "the runtime started nothing"
+        );
+    }
+
+    /// Row 5: an agent retired or unknown. A retired agent still holds its id
+    /// and root; both spellings of "no such agent of yours" refuse the launch
+    /// with the same literal, and nothing starts.
+    #[tokio::test]
+    async fn a_retired_or_unknown_agent_refuses_its_launch() {
+        use crate::agents;
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, _b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+
+        // An id in the right shape that no record holds.
+        let unknown = "agent:v2:ffffffffffffffffffffffffffffffff";
+        let (status, message) = home.launch(unknown).await.map(|_| ()).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, "the caller owns no agent with that id");
+
+        // A stored agent that was retired.
+        let record = crate::auth::stored_principal_record(&home.data_dir, &home.owner)
+            .unwrap()
+            .unwrap();
+        let caller = agents::Caller {
+            principal_id: &home.owner,
+            proof_binding_id: &record.proof_binding_id,
+            session_id: "session:a5-launch",
+        };
+        agents::retire(&home.data_dir, &caller, a, 3).unwrap();
+        let (status, message) = home.launch(a).await.map(|_| ()).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, "the caller owns no agent with that id");
+
+        assert!(
+            home.audit_log.recent_events(8).is_empty(),
+            "the runtime started nothing"
+        );
+    }
+
+    /// Row 5: the launcher is a stored person whose current protection is
+    /// gone. The agent's data key cannot open, so admission refuses before
+    /// anything starts and mints nothing.
+    #[tokio::test]
+    async fn an_agent_launch_refuses_an_owner_without_current_protection() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents.first().expect("one agent").clone();
+
+        let path = crate::auth::auth_state_path(&home.data_dir).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["principal_root_protections"]
+            .as_array_mut()
+            .expect("the owner holds a protection")
+            .retain(|protection| protection["principal_id"] != serde_json::json!(home.owner));
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        crate::auth::invalidate_verified_auth_state_cache_for_test(&home.data_dir);
+
+        let (status, message) = home.launch(&agent).await.map(|_| ()).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, "agent's owner holds no storage protection");
+        assert!(
+            home.audit_log.recent_events(4).is_empty(),
+            "the runtime started nothing"
+        );
+    }
+
+    /// Row 6, second half: a manifest claim that names another agent's root
+    /// neither selects the actor nor moves its root. The actor is the id
+    /// admission recorded, and every call names that agent's own root.
+    #[tokio::test]
+    async fn a_manifest_claim_naming_another_agents_root_leaves_the_actors_id() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let b = home.agents.get(1).expect("the other agent").clone();
+        let root_b = home.root(&b);
+
+        let (claim_dir, claim_cid) =
+            home.host_with_claim("claimed-probe", &format!("{root_b}/memory/notes.md"));
+        let agent = home.create_agent_for_host("c", &claim_cid);
+        let root = home.root(&agent);
+        assert_ne!(root, root_b, "the claim names another agent's root");
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+
+        // The claim names another agent's root; admission still binds the agent
+        // the request names, so the launch is the stored agent's own.
+        let run = match home.launch_from(&claim_dir, &agent).await {
+            Ok(run) => run.0,
+            Err((status, message)) => {
+                panic!("the claim does not name the actor: {status} {message}")
+            }
+        };
+        assert_eq!(run.status, "completed");
+
+        // Every completed bridge call is the admitted actor, and the record is
+        // the actor's id. The claim names another agent's root; the bridge
+        // refuses that root, so the call is recorded as an error rather than
+        // as a call for the other agent.
+        let events: Vec<_> = crate::auth::load_auth_state(&home.data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type == "component.invoke.completed")
+            .filter(|event| event.principal_id.as_deref() == Some(agent.as_str()))
+            .collect();
+        assert_eq!(events.len(), 5, "four own-root calls and the peer read");
+        let own = events
+            .iter()
+            .filter(|event| event.result == "ok" && event.reason.contains(&root))
+            .count();
+        assert_eq!(own, 4, "the guest's own root still works");
+        assert!(
+            events.iter().all(|event| !event.reason.contains(&root_b)),
+            "the claim moves no call: {events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|event| event.result != "ok").count(),
+            1,
+            "the absent peer pointer is the only failed call: {events:?}"
+        );
+        grants.abort();
     }
 }
