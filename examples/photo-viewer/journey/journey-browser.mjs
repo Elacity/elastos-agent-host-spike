@@ -40,9 +40,30 @@ async function open(page, cid) {
 }
 
 const browser = await chromium.launch({ headless: true });
+let currentPage = null;
+// The failure record: the page the step was on, saved in the evidence folder run-journey.sh gives this step.
+// A check that fails without throwing (a plant) also lands here, so the red is inspectable.
+let failureSaved = false;
+async function saveFailureEvidence() {
+  if (failureSaved) return;
+  failureSaved = true;
+  if (!currentPage) {
+    console.error("no page to save failure evidence from");
+    return;
+  }
+  for (const [name, write] of [
+    ["failure.png", () => currentPage.screenshot({ path: join(EVIDENCE, "failure.png"), fullPage: true })],
+    ["failure.html", async () => writeFileSync(join(EVIDENCE, "failure.html"), await currentPage.content())],
+  ]) {
+    try { await write(); } catch (error) {
+      console.error(`could not write ${name}: ${String(error && error.message || error).slice(0, 300)}`);
+    }
+  }
+}
 try {
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   const home = await context.newPage();
+  currentPage = home;
   const cdp = await context.newCDPSession(home);
   await cdp.send("WebAuthn.enable");
   await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
@@ -55,13 +76,42 @@ try {
   check("Home's page is served", front.ok(), front.status());
   await home.locator("#home-unlock-name").waitFor({ state: "visible", timeout: 60000 });
   await home.locator("#home-unlock-name").fill("Photo journey");
+  // The sign-in click has timed out on the Linux ROG after the button had resolved. Wait on the condition
+  // first, with one 60 s deadline, and name the condition that was not met, with the button as read.
+  let signInState = null;
+  const signInDeadline = Date.now() + 60000;
+  for (;;) {
+    signInState = await home.evaluate(() => {
+      const button = document.querySelector("#home-unlock-primary");
+      if (!button) return { present: false };
+      const style = getComputedStyle(button);
+      const rect = button.getBoundingClientRect();
+      return { present: true, text: button.textContent, disabled: Boolean(button.disabled),
+               visible: style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0 };
+    });
+    if (signInState.present && signInState.visible && !signInState.disabled) break;
+    if (Date.now() >= signInDeadline) {
+      const unmet = [];
+      if (!signInState.present || !signInState.visible) unmet.push("not visible");
+      if (signInState.disabled) unmet.push("disabled");
+      const state = signInState.present
+        ? `text ${JSON.stringify(signInState.text)}, disabled ${signInState.disabled}, visible ${signInState.visible}`
+        : "no #home-unlock-primary in the page";
+      throw new Error(`sign-in button not ready within 60 s: ${unmet.join(" and ")}; ${state}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   const registered = home.waitForResponse((r) => r.url().endsWith("/api/auth/passkey/register/complete"), { timeout: 60000 });
+  // A click that throws leaves this wait pending; closing the browser then rejects it. Handle that rejection
+  // so the failure record and journey-results.json are still written.
+  registered.catch(() => {});
   await home.locator("#home-unlock-primary").click();
   const completion = await registered;
   check("a person registers a passkey and is signed in to Home", completion.ok(),
     { status: completion.status(), text: completion.ok() ? undefined : (await completion.text().catch(() => "")).slice(0, 300) });
 
   // 2. The set, opened by its CID.
+  currentPage = home;
   const opened = await open(home, SET);
   let answer = {};
   try { answer = JSON.parse(opened.text); } catch { /* checked below */ }
@@ -72,6 +122,7 @@ try {
   // 3. The page, loaded at its address with its token in the fragment; the three pictures, in order.
   if (opened.status === 200) {
     const viewer = await context.newPage();
+    currentPage = viewer;
     const asked = [];
     viewer.on("request", (request) => {
       const url = new URL(request.url());
@@ -124,6 +175,7 @@ try {
   }
 
   // 4. The refusals, by name, with no page token.
+  currentPage = home;
   const changed = await open(home, CHANGED);
   check("a set whose bytes no longer match its CID is refused by name",
     changed.status === 400 && changed.text.startsWith("bundle_cid_mismatch") && !changed.text.includes("token"),
@@ -134,8 +186,13 @@ try {
     { status: never.status, text: never.text.slice(0, 200) });
   results.refusals = { changed: changed.text.slice(0, 200), never: never.text.slice(0, 200) };
 } catch (error) {
-  check("the journey ran to its end", false, String(error && error.message || error).slice(0, 300));
+  // The full Playwright message carries its call log, which names the condition it waited on; the old 300-char
+  // cut ended inside that log. This is the detail the result records and prints.
+  const full = String(error && error.message || error).slice(0, 1500);
+  check("the journey ran to its end", false, full);
+  await saveFailureEvidence();
 } finally {
+  if (failures.length > 0) await saveFailureEvidence();
   await browser.close();
 }
 writeFileSync(join(EVIDENCE, "journey-results.json"), JSON.stringify(results, null, 2));
