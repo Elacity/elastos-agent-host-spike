@@ -770,12 +770,20 @@ pub(super) fn require_gateway_launch(
     .map(|_| ())
 }
 
-/// The page whose kept launch `path` reads, for the two page reads only:
-/// `/api/viewers/<page>/launch/output/...` and `.../launch/content/...`.
-fn launch_read_page(path: &str) -> Option<&str> {
+/// The page whose kept launch `path` reads, for the two page reads only, in
+/// their routes' shape: `/api/viewers/<page>/launch/output/<one name>` and
+/// `/api/viewers/<page>/launch/content/<path>`.
+pub(super) fn launch_read_page(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/api/viewers/")?;
     let (page, rest) = rest.split_once('/')?;
-    let read = rest.starts_with("launch/output/") || rest.starts_with("launch/content/");
+    let read = match (
+        rest.strip_prefix("launch/output/"),
+        rest.strip_prefix("launch/content/"),
+    ) {
+        (Some(name), _) => !name.is_empty() && !name.contains('/'),
+        (_, Some(path)) => !path.is_empty(),
+        _ => false,
+    };
     (read && !page.is_empty()).then_some(page)
 }
 

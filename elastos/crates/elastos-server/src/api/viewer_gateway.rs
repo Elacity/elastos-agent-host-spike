@@ -927,7 +927,7 @@ pub async fn viewer_launch_output(
     Path((viewer, name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let plain = !name.is_empty() && !matches!(name.as_str(), "." | "..") && !name.contains('/');
+    let plain = crate::resource_bridge::plain_output_name(&name);
     viewer_launch_read(&state.data_dir, &viewer, &headers, "output", &name, plain).await
 }
 
@@ -967,7 +967,7 @@ async fn viewer_launch_read(
     };
     let result = if bytes.is_some() { "ok" } else { "not_found" };
     let request_id = format!("{id}:{kind}:{rest}");
-    let _ = append_viewer_library_audit(
+    let audited = append_viewer_library_audit(
         data_dir,
         &context,
         viewer,
@@ -976,7 +976,8 @@ async fn viewer_launch_read(
         result,
         &format!("{kind} {rest}"),
     );
-    match bytes {
+    // A read that leaves no record gives no bytes.
+    match bytes.filter(|_| audited.is_ok()) {
         Some(bytes) => (
             StatusCode::OK,
             [
@@ -1000,8 +1001,11 @@ async fn kept_launch_from_runtime(
     rest: &str,
 ) -> Option<Vec<u8>> {
     let coords = load_live_runtime_coords(data_dir).await?;
+    // No redirect is followed: an answer elsewhere would carry the page's
+    // token there. Any answer but 200, a 3xx among them, is `None`.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .ok()?;
     let shell =

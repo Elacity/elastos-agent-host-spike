@@ -159,13 +159,16 @@ async fn a_launch_bound_token_opens_no_other_home_check() {
     );
 }
 
-/// D1b-else. Nothing else reads, and the Runtime is not asked: no token, the
-/// person's Home token, a token bound to another resource or naming another
-/// page are refused at the front door; with the page's own token, a path
-/// that is not plain or an output name that is not one plain name (`..`, a
-/// name with a `/`) answers `not_found`. The fake Runtime records every ask
-/// under `/api/launch/`, also one no route of it matches, so none slips by.
-/// The Runtime's own `not_found` is passed on.
+/// D1b-else. Nothing else reads, and the Runtime is not asked. On the two
+/// read paths, every refusal is `not_found`, the front door's too: no token,
+/// the person's Home token, a token bound to another resource or naming
+/// another page. With the page's own token: a path that is not plain, an
+/// output name the writer would not keep (`..`, a `/`, a space). A path past
+/// the read routes' shape (a part after the output name) is no read path, so
+/// the front door refuses the token there as anywhere else. The fake Runtime
+/// records every ask under `/api/launch/`, also one none of its routes takes.
+/// The Runtime's own `not_found` is passed on, and a redirect from it is not
+/// followed: it answers `not_found`, and the page's token goes nowhere else.
 #[tokio::test]
 async fn anything_else_is_not_found_and_the_runtime_is_not_asked() {
     let dir = tempfile::tempdir().unwrap();
@@ -181,21 +184,37 @@ async fn anything_else_is_not_found_and_the_runtime_is_not_asked() {
     let elsewhere = page_token(dir.path(), "gba-ucity", PAGE);
     let other_page = page_token(dir.path(), &bound, "other-viewer");
 
-    let refused_at_the_door = StatusCode::FORBIDDEN;
     for token in [
         None,
         Some(home.as_str()),
         Some(elsewhere.as_str()),
         Some(other_page.as_str()),
     ] {
-        let (status, _, _) = read(&app, &format!("{base}/output/playlist.json"), token).await;
-        assert_eq!(status, refused_at_the_door, "{token:?}");
+        let (status, _, body) = read(&app, &format!("{base}/output/playlist.json"), token).await;
+        let refused = (status, body);
+        assert_eq!(
+            refused,
+            (StatusCode::NOT_FOUND, b"not_found".to_vec()),
+            "{token:?}"
+        );
     }
+    let (status, _, _) = read(
+        &app,
+        &format!("{base}/output/playlist.json/extra"),
+        Some(&own),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "no read path: the front door's refusal"
+    );
     for uri in [
         format!("{base}/content/x%2F..%2Fcapsule.json"),
         format!("{base}/content/images//01.png"),
         format!("{base}/output/.."),
         format!("{base}/output/a%2Fb"),
+        format!("{base}/output/a%20b"),
     ] {
         let (status, _, body) = read(&app, &uri, Some(&own)).await;
         assert_eq!(
@@ -220,9 +239,29 @@ async fn anything_else_is_not_found_and_the_runtime_is_not_asked() {
         1,
         "asked once"
     );
+    let (status, _, body) = read(&app, &format!("{base}/output/redirect.json"), Some(&own)).await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::NOT_FOUND, b"not_found".to_vec())
+    );
+    let asked = runtime.kept_launch_reads.lock().await.clone();
+    let paths: Vec<&str> = asked
+        .iter()
+        .map(|ask| ask["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            format!("/api/launch/{id}/content/images/none.png"),
+            format!("/api/launch/{id}/output/redirect.json")
+        ],
+        "the redirect is not followed"
+    );
     assert_eq!(
         launch_reads_audited(dir.path()),
         [
+            "not_found",
+            "not_found",
             "not_found",
             "not_found",
             "not_found",

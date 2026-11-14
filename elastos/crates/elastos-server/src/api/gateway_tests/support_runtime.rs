@@ -861,7 +861,8 @@ async fn fake_runtime_unmatched(
 /// The Runtime's reads of a kept launch, as the fake answers them: it records
 /// each (its path, the shell's bearer, the page's token, any browser marks)
 /// and answers `[1]` for the output's `playlist.json`, `a picture` for the
-/// content's `images/01.png`, and `not_found` for anything else.
+/// content's `images/01.png`, a redirect to the playlist for the output's
+/// `redirect.json`, and `not_found` for anything else.
 async fn fake_runtime_kept_launch_read(
     AxumState(state): AxumState<FakeRuntimeState>,
     uri: axum::http::Uri,
@@ -880,6 +881,12 @@ async fn fake_runtime_kept_launch_read(
     }
     if path.ends_with("/content/images/01.png") {
         return (StatusCode::OK, b"a picture".to_vec()).into_response();
+    }
+    // A redirect to the playlist: a gateway that followed it would read the
+    // playlist under another name.
+    if let Some(launch) = path.strip_suffix("/output/redirect.json") {
+        let to = format!("{launch}/output/playlist.json");
+        return (StatusCode::TEMPORARY_REDIRECT, [("location", to)]).into_response();
     }
     (StatusCode::NOT_FOUND, "not_found").into_response()
 }
