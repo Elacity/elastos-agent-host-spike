@@ -1780,10 +1780,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            format!(
-                "{}: {agent}",
-                crate::agent_admission::UNADMITTED_AGENT_PRINCIPAL
-            )
+            format!("a stored agent's principal reaches only a launch that admitted it: {agent}")
         );
 
         // The person who owns the agent starts no VM for the same manifest.
@@ -1795,7 +1792,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), crate::agent_admission::NO_VM_AGENT);
+        assert_eq!(
+            error.to_string(),
+            "an agent-declaring manifest runs only a component launch that admitted it"
+        );
         assert!(
             supervisor.running.read().await.is_empty(),
             "no VM was recorded"

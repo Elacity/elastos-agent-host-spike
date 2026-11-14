@@ -1553,9 +1553,10 @@ fn with_the_feature_on_the_operations_are_served() {
 }
 
 /// Every `.rs` file under `dir` that is not test code, with its text. A test
-/// module declared inside a production file is test code too, so the walk
-/// stops at its header; a `mod tests;` declaration only names a file the walk
-/// already skips by name.
+/// module declared inside a production file is test code too, so its span is
+/// left out (see `without_inline_test_modules`); production text after it stays
+/// in the walk. A `mod tests;` declaration only names a file the walk already
+/// skips by name.
 fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -1566,16 +1567,72 @@ fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
         if path.is_dir() {
             production_sources(&path, found);
         } else if name.ends_with(".rs") {
-            let mut text = std::fs::read_to_string(&path).unwrap();
-            let test_module = text
-                .find("\n#[cfg(test)]\nmod tests {")
-                .or_else(|| text.find("\n#[cfg(test)]\npub(crate) mod tests {"));
-            if let Some(at) = test_module {
-                text.truncate(at);
-            }
-            found.push((path, text));
+            let text = std::fs::read_to_string(&path).unwrap();
+            found.push((path, without_inline_test_modules(&text)));
         }
     }
+}
+
+/// A production file's text without its inline test modules: each span from a
+/// column-0 `#[cfg(test)]` line followed by a column-0 `mod <name> {` or
+/// `pub(crate) mod <name> {` line, through the first column-0 `}` line after
+/// it, which closes the module in rustfmt'd code. Everything after that line
+/// stays. A column-0 `}` inside a raw string would end the span early and keep
+/// more text, never less; a module with no column-0 `}` is kept whole.
+fn without_inline_test_modules(text: &str) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut kept = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let header = lines[i].trim_end() == "#[cfg(test)]"
+            && lines.get(i + 1).is_some_and(|next| {
+                let next = next.trim_end();
+                let item = next.strip_prefix("pub(crate) ").unwrap_or(next);
+                item.starts_with("mod ") && item.ends_with(" {")
+            });
+        if header {
+            let close = (i + 2..lines.len()).find(|&at| lines[at].trim_end() == "}");
+            if let Some(close) = close {
+                i = close + 1;
+                continue;
+            }
+        }
+        kept.push_str(lines[i]);
+        i += 1;
+    }
+    kept
+}
+
+#[test]
+fn the_walk_keeps_production_text_after_an_inline_test_module() {
+    let text = "fn before() {}\n#[cfg(test)]\nmod tests {\n    fn inside() {}\n}\n\nfn after() {}\n#[cfg(test)]\npub(crate) mod more_tests {\n    fn inside_too() {}\n}\nfn last() {}\n";
+    assert_eq!(
+        without_inline_test_modules(text),
+        "fn before() {}\n\nfn after() {}\nfn last() {}\n"
+    );
+    let unclosed = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() {}\n";
+    assert_eq!(without_inline_test_modules(unclosed), unclosed);
+
+    // The real case: api/routes.rs keeps production handlers after its
+    // inline test module, and the walk must still see them.
+    let mut sources = Vec::new();
+    production_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+    let routes = sources
+        .iter()
+        .find(|(path, _)| path.ends_with("api/routes.rs"))
+        .map(|(_, text)| text.as_str())
+        .expect("the walk reads api/routes.rs");
+    assert!(
+        routes.contains("pub async fn kept_launch_page_file("),
+        "production text after routes.rs's test module stays in the walk"
+    );
+    assert!(
+        !routes.contains("pub(crate) mod tests {"),
+        "routes.rs's inline test module is left out of the walk"
+    );
 }
 
 #[test]
