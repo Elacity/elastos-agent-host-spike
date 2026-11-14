@@ -1721,11 +1721,18 @@ mod tests {
     /// S5 part 2 row E (blocker evidence, no production change): a stored
     /// agent's own principal reaches no VM launch, and a manifest that
     /// declares an agent starts no VM even for the person. This is why row 4
-    /// on route 3 has no agent actor to test.
-    #[cfg(feature = "prototype-agents")]
+    /// on route 3 has no agent actor to test. Like the rows above, it runs
+    /// only in a build that carries agents (in another, no agent exists), and
+    /// it does not name the cargo feature, which is read in one place only
+    /// (`agents::build_allows`).
     #[tokio::test]
     async fn a_vm_launch_refuses_a_stored_agents_principal() {
-        let (home, agents) = crate::agents::tests::home_with_agents(1, "bafkreia5probe");
+        let Some((home, agents)) =
+            crate::agents::tests::home_with_agents_if_built(1, "bafkreia5probe")
+        else {
+            assert!(!crate::agents::build_allows());
+            return;
+        };
         let agent = agents.into_iter().next().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();

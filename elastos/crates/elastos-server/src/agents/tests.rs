@@ -1552,11 +1552,7 @@ fn with_the_feature_on_the_operations_are_served() {
     assert!(!set_enabled(home.path(), &caller, false, 12).unwrap());
 }
 
-/// Every `.rs` file under `dir` that is not test code, with its text. A test
-/// module declared inside a production file is test code too, so its span is
-/// left out (see `without_inline_test_modules`); production text after it stays
-/// in the walk. A `mod tests;` declaration only names a file the walk already
-/// skips by name.
+/// Every `.rs` file under `dir` that is not test code, with its text.
 fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -1568,231 +1564,9 @@ fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
             production_sources(&path, found);
         } else if name.ends_with(".rs") {
             let text = std::fs::read_to_string(&path).unwrap();
-            found.push((path, without_inline_test_modules(&text)));
+            found.push((path, text));
         }
     }
-}
-
-/// A production file's text without its inline test modules. A small Rust
-/// lexer follows line and nested block comments, strings (plain, byte, C),
-/// raw strings and char literals, so braces and header-shaped text inside them
-/// count for nothing. A test module is an item at brace depth 0, at a line
-/// start, whose attribute line is exactly `#[cfg(test)]` and whose next line is
-/// `mod <name> {` or `pub(crate) mod <name> {`; it is left out from that
-/// attribute through its matching `}` (and that line's newline). Everything
-/// else stays. Text the lexer cannot close (a string, comment or test module
-/// left open, unbalanced braces) panics by name instead of guessing.
-fn without_inline_test_modules(text: &str) -> String {
-    let b = text.as_bytes();
-    let n = b.len();
-    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut kept = String::with_capacity(n);
-    let mut copied = 0;
-    let mut in_test_module = false;
-    let mut depth: usize = 0;
-    let mut i = 0;
-    while i < n {
-        if !in_test_module
-            && depth == 0
-            && (i == 0 || b[i - 1] == b'\n')
-            && is_test_module_header(&text[i..])
-        {
-            kept.push_str(&text[copied..i]);
-            let item = i + text[i..].find('\n').unwrap() + 1;
-            let item_end = text[item..].find('\n').map_or(n, |at| item + at);
-            in_test_module = true;
-            depth = 1;
-            i = item_end;
-            continue;
-        }
-        match b[i] {
-            b'/' if b.get(i + 1) == Some(&b'/') => {
-                i = text[i..].find('\n').map_or(n, |at| i + at);
-                continue;
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                let mut open = 1;
-                let mut j = i + 2;
-                while open > 0 {
-                    assert!(j + 1 < n, "source walk: a block comment is never closed");
-                    if b[j] == b'/' && b[j + 1] == b'*' {
-                        open += 1;
-                        j += 2;
-                    } else if b[j] == b'*' && b[j + 1] == b'/' {
-                        open -= 1;
-                        j += 2;
-                    } else {
-                        j += 1;
-                    }
-                }
-                i = j;
-                continue;
-            }
-            b'"' => {
-                let mut j = i + 1;
-                loop {
-                    assert!(j < n, "source walk: a string is never closed");
-                    match b[j] {
-                        b'\\' => j += 2,
-                        b'"' => break,
-                        _ => j += 1,
-                    }
-                }
-                i = j + 1;
-                continue;
-            }
-            b'r' => {
-                let start = (0..i)
-                    .rev()
-                    .find(|&at| !ident(b[at]))
-                    .map_or(0, |at| at + 1);
-                let mut j = i + 1;
-                while b.get(j) == Some(&b'#') {
-                    j += 1;
-                }
-                let hashes = j - i - 1;
-                if matches!(&text[start..=i], "r" | "br" | "cr") && b.get(j) == Some(&b'"') {
-                    let close = format!("\"{}", "#".repeat(hashes));
-                    let end = text[j + 1..]
-                        .find(&close)
-                        .expect("source walk: a raw string is never closed");
-                    i = j + 1 + end + close.len();
-                    continue;
-                }
-            }
-            b'\'' => {
-                if b.get(i + 1) == Some(&b'\\') {
-                    let end = text[i + 3..]
-                        .find('\'')
-                        .expect("source walk: a char literal is never closed");
-                    i = i + 3 + end + 1;
-                    continue;
-                }
-                if let Some(c) = text[i + 1..].chars().next() {
-                    if b.get(i + 1 + c.len_utf8()) == Some(&b'\'') {
-                        i += 2 + c.len_utf8();
-                        continue;
-                    }
-                }
-            }
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth
-                    .checked_sub(1)
-                    .expect("source walk: a `}` closes nothing");
-                if depth == 0 && in_test_module {
-                    in_test_module = false;
-                    i += 1;
-                    if b.get(i) == Some(&b'\n') {
-                        i += 1;
-                    }
-                    copied = i;
-                    continue;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    assert!(
-        !in_test_module,
-        "source walk: a test module is never closed"
-    );
-    assert_eq!(depth, 0, "source walk: braces do not balance");
-    kept.push_str(&text[copied..]);
-    kept
-}
-
-/// `#[cfg(test)]` alone on its line, then `mod <name> {` or
-/// `pub(crate) mod <name> {` alone on the next.
-fn is_test_module_header(rest: &str) -> bool {
-    let mut lines = rest.splitn(3, '\n');
-    let (Some(attribute), Some(item)) = (lines.next(), lines.next()) else {
-        return false;
-    };
-    if attribute.trim_end() != "#[cfg(test)]" {
-        return false;
-    }
-    let item = item.trim_end();
-    let item = item.strip_prefix("pub(crate) ").unwrap_or(item);
-    item.strip_prefix("mod ")
-        .and_then(|rest| rest.strip_suffix(" {"))
-        .is_some_and(|name| {
-            !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-        })
-}
-
-#[test]
-fn the_walk_keeps_production_text_after_an_inline_test_module() {
-    let text = "fn before() {}\n#[cfg(test)]\nmod tests {\n    fn inside() {}\n}\n\nfn after() {}\n#[cfg(test)]\npub(crate) mod more_tests {\n    fn inside_too() {}\n}\nfn last() {}\n";
-    assert_eq!(
-        without_inline_test_modules(text),
-        "fn before() {}\n\nfn after() {}\nfn last() {}\n"
-    );
-    let unclosed = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() {}\n";
-    let refused = std::panic::catch_unwind(|| without_inline_test_modules(unclosed));
-    assert!(
-        refused.is_err(),
-        "a test module that is never closed is refused, not kept or cut"
-    );
-
-    // A column-0 `}` inside a test module's multi-line string does not end
-    // the module: the test code after it stays out of the walk.
-    let string_brace = "fn a() {}\n#[cfg(test)]\nmod tests {\n    const S: &str = \"x\n}\ny {\";\n    fn hidden_test_code() {}\n}\nfn b() {}\n";
-    assert_eq!(
-        without_inline_test_modules(string_brace),
-        "fn a() {}\nfn b() {}\n",
-        "a `}}` line inside a test module's string does not end the module"
-    );
-
-    // Header-shaped text inside a production raw string is not a test module:
-    // the production text after it stays in the walk.
-    let raw_header = "fn a() -> &'static str {\n    r#\"\n#[cfg(test)]\nmod tests {\n\"#\n}\nfn production_after() {}\n";
-    assert_eq!(
-        without_inline_test_modules(raw_header),
-        raw_header,
-        "header-shaped text inside a production raw string removes nothing"
-    );
-
-    // A raw string ending in a backslash is lexed as raw: the real test
-    // module after it is still left out (read as a plain string, the `\"`
-    // would run on to the comment's quote and hide the module in a string).
-    let raw_backslash = "const P: &str = r\"a\\\";\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\nfn production_after() {} // \"\n";
-    assert_eq!(
-        without_inline_test_modules(raw_backslash),
-        "const P: &str = r\"a\\\";\nfn production_after() {} // \"\n",
-        "a test module after a raw string ending in a backslash is still left out"
-    );
-
-    // Braces in comments (nested block comments too) and char literals, and
-    // lifetimes, inside a test module count for nothing.
-    let comments = "#[cfg(test)]\nmod tests {\n    // }\n    /* }\n/* } */\n} */\n    const O: char = '{';\n    const C: char = '}';\n    const Q: char = '\\'';\n    fn f<'a>(s: &'a str) -> &'a str { s }\n}\nfn kept() {}\n";
-    assert_eq!(
-        without_inline_test_modules(comments),
-        "fn kept() {}\n",
-        "braces in comments and char literals inside a test module do not end it"
-    );
-
-    // The real case: api/routes.rs keeps production handlers after its
-    // inline test module, and the walk must still see them.
-    let mut sources = Vec::new();
-    production_sources(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut sources,
-    );
-    let routes = sources
-        .iter()
-        .find(|(path, _)| path.ends_with("api/routes.rs"))
-        .map(|(_, text)| text.as_str())
-        .expect("the walk reads api/routes.rs");
-    assert!(
-        routes.contains("pub async fn kept_launch_page_file("),
-        "production text after routes.rs's test module stays in the walk"
-    );
-    assert!(
-        !routes.contains("pub(crate) mod tests {"),
-        "routes.rs's inline test module is left out of the walk"
-    );
 }
 
 #[test]
@@ -2006,6 +1780,27 @@ fn with_the_feature_off_the_launch_lookup_refuses_by_name() {
 }
 
 /// A Home with agents on and `count` real agents, each with its own wrap.
+/// `home_with_agents` for rows in production files' test modules that run in
+/// both builds: `None` in a build without agents. It keeps the cargo feature's
+/// name out of those files, where the guard
+/// `the_cargo_feature_is_read_in_one_place` reads every line.
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn home_with_agents_if_built(
+    count: usize,
+    bundle_cid: &str,
+) -> Option<(crate::agents::tests::Home, Vec<String>)> {
+    Some(home_with_agents(count, bundle_cid))
+}
+
+/// See the feature-on twin: no agents exist in this build.
+#[cfg(not(feature = "prototype-agents"))]
+pub(crate) fn home_with_agents_if_built(
+    _count: usize,
+    _bundle_cid: &str,
+) -> Option<(crate::agents::tests::Home, Vec<String>)> {
+    None
+}
+
 /// `bundle_cid` is the CID creation stores for the Agent Host's bytes, from the
 /// one walk the Runtime uses.
 #[cfg(feature = "prototype-agents")]
