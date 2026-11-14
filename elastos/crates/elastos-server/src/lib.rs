@@ -63,6 +63,7 @@ pub mod local_http;
 pub mod notifications;
 pub mod operator_control;
 pub mod ownership;
+pub(crate) mod page_launch;
 pub mod protected_content_config;
 pub mod protected_content_runtime;
 pub mod provider_resource;

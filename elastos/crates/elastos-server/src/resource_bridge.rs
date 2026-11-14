@@ -71,6 +71,14 @@ pub struct LaunchContent {
     output: std::sync::Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
+/// One plain name of a launch's output: letters, digits, `.`, `_` and `-`,
+/// not `.` or `..`, at most 128 bytes. The writer keeps only such names, and
+/// the gateway asks the Runtime for no other.
+pub(crate) fn plain_output_name(name: &str) -> bool {
+    let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"._-".contains(&byte);
+    !matches!(name, "" | "." | "..") && name.len() <= 128 && name.bytes().all(plain)
+}
+
 /// Why a write to a launch's output was refused.
 #[derive(Debug, PartialEq, Eq)]
 pub enum OutputRefusal {
@@ -106,7 +114,7 @@ impl LaunchContent {
     /// What a read of `name` gets: the listing for the bare name, and for a
     /// name under it the file with exactly that path. The path is looked up
     /// as text among the files the walk read; it is joined onto no folder.
-    fn read(&self, name: &str) -> Option<Vec<u8>> {
+    pub(crate) fn read(&self, name: &str) -> Option<Vec<u8>> {
         if let Some(name) = name.strip_prefix(LAUNCH_OUTPUT) {
             let output = self.output.lock().unwrap_or_else(|it| it.into_inner());
             return output.get(name).cloned();
@@ -122,12 +130,20 @@ impl LaunchContent {
     /// digits, `.`, `_` and `-`, not `.` or `..`, at most 128 bytes. All the
     /// output together, names and contents, stays within the byte cap, and it
     /// holds at most so many names; a write past either changes nothing.
+    #[cfg(test)]
+    pub(crate) fn write_for_test(
+        &self,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<usize, OutputRefusal> {
+        self.write(name, bytes)
+    }
+
     fn write(&self, name: &str, bytes: Vec<u8>) -> std::result::Result<usize, OutputRefusal> {
         let name = name
             .strip_prefix(LAUNCH_OUTPUT)
             .ok_or(OutputRefusal::Name)?;
-        let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"._-".contains(&byte);
-        if matches!(name, "" | "." | "..") || name.len() > 128 || !name.bytes().all(plain) {
+        if !plain_output_name(name) {
             return Err(OutputRefusal::Name);
         }
         let mut output = self.output.lock().unwrap_or_else(|it| it.into_inner());

@@ -526,9 +526,9 @@ pub struct AdmittedBundle {
     /// The entrypoint's bytes as the walk read them: for a program, the
     /// component that may run.
     pub component: Vec<u8>,
-    /// For content, every file the walk read, by its path in the bundle: a
-    /// content launch serves reads from these and not from the store. Empty
-    /// for the other kinds.
+    /// For content and for a page, every file the walk read, by its path in
+    /// the bundle: a content launch serves its program's reads and its page's
+    /// files from these and not from the store. Empty for a program.
     pub files: BTreeMap<String, Vec<u8>>,
     /// The bundles the manifest pins: requirement name and CID text, in the
     /// manifest's order. Every requirement of the manifest is one of them.
@@ -663,10 +663,10 @@ pub fn admit_bundle_manifest(bundle: &CheckedBundle) -> Result<AdmittedBundle, B
     }
     let walked = bundle.entries().iter();
     let files = match kind {
-        BundleKind::Content => walked
+        BundleKind::Content | BundleKind::Page => walked
             .map(|it| (it.path.clone(), it.content.clone()))
             .collect(),
-        BundleKind::Program | BundleKind::Page => BTreeMap::new(),
+        BundleKind::Program => BTreeMap::new(),
     };
     Ok(AdmittedBundle {
         component: component.to_vec(),

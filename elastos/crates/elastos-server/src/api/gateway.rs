@@ -148,6 +148,7 @@ pub(crate) fn principal_root_protected_object_inventory(
 }
 
 pub(in crate::api) use gateway_home_runtime::capsule_icon_variants;
+pub(super) use gateway_home_runtime::{gateway_attach_runtime_token, load_live_runtime_coords};
 pub(super) use gateway_home_runtime::{viewer_object_shell_description, viewer_object_shell_title};
 pub(in crate::api) use gateway_home_system::profile_readiness_for_principal;
 use gateway_home_system::*;
@@ -166,15 +167,17 @@ pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(super) use gateway_home_token::{
     home_browser_origin, home_launch_token_header, home_session_clear_cookie_header,
     home_session_cookie_header_for_token, issue_home_launch_token_for_auth_grant,
-    issue_home_launch_token_for_verified_grant, issue_home_projection_launch_token_with_context,
+    issue_home_launch_token_for_verified_grant, issue_home_launch_token_with_context,
+    issue_home_projection_launch_token_with_context, issue_launch_page_token,
     require_carried_home_launch_token, require_home_launch_token,
     require_home_launch_token_binding, require_home_launch_token_context,
     require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
     require_home_projection_launch_token_context, require_home_runtime_wallet_authority,
     require_home_token, require_home_token_context, require_home_viewer_launch_token_context,
-    require_internal_shell_launch_grant_for_any_context,
-    require_internal_shell_runtime_wallet_authority, require_runtime_wallet_authority,
-    runtime_wallet_authority, HomeLaunchContext, RequiredHomeLaunchToken,
+    require_internal_shell_launch_grant_for_any_context, require_internal_shell_projection_context,
+    require_internal_shell_runtime_wallet_authority, require_launch_bound_token,
+    require_runtime_wallet_authority, runtime_wallet_authority, HomeLaunchContext,
+    RequiredHomeLaunchToken,
 };
 use gateway_home_update::*;
 
@@ -188,8 +191,7 @@ pub(super) use gateway_home_system_ai_provider::{
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
     issue_expired_home_launch_token_with_context, issue_home_launch_token,
-    issue_home_launch_token_with_context, local_home_launch_token_context,
-    set_test_home_launch_auth_data_dir, uuid_like_token,
+    local_home_launch_token_context, set_test_home_launch_auth_data_dir, uuid_like_token,
 };
 use gateway_home_wallet_connector::*;
 use gateway_inbox::*;
@@ -1273,6 +1275,22 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/viewers/:viewer/content/:capsule",
             get(super::viewer_gateway::viewer_content),
+        )
+        .route(
+            "/api/viewers/:viewer/launch/output/:name",
+            get(super::viewer_gateway::viewer_launch_output),
+        )
+        .route(
+            "/api/viewers/:viewer/launch/content/*path",
+            get(super::viewer_gateway::viewer_launch_content),
+        )
+        .route(
+            "/api/home/launch/content",
+            post(super::viewer_gateway::home_launch_content),
+        )
+        .route(
+            "/launch/:id/page/*path",
+            get(super::browser_capsules::serve_launch_page),
         )
         .route(
             "/api/viewers/:viewer/library-object",

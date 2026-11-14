@@ -273,7 +273,7 @@ pub(super) async fn gateway_admission(
     // so does every other route.
     let mut browser_launch_renewal = None;
     if !public && !sign_in && !ticket && !runtime_session {
-        match gateway_home_token::require_gateway_launch(&state.data_dir, headers) {
+        match gateway_home_token::require_gateway_launch_for(&state.data_dir, headers, path) {
             Ok(()) => {}
             Err(_) if browser_api_path(path) => {
                 if let Some(err) =
@@ -283,6 +283,11 @@ pub(super) async fn gateway_admission(
                 } else {
                     return refused();
                 }
+            }
+            // A page's read of its kept launch answers a refused token as it
+            // answers everything else it does not serve: `not_found`.
+            Err(_) if gateway_home_token::launch_read_page(path).is_some() => {
+                return (StatusCode::NOT_FOUND, "not_found").into_response();
             }
             Err(_) => return refused(),
         }

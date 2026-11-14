@@ -74,6 +74,9 @@ pub struct Runtime {
     /// For each program a content launch is running, by its capsule id: the
     /// content it was launched with. Kept like the ceilings, beside them.
     launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+    /// Launches kept for their page after the program's start is over, by a
+    /// launch id of their own (`page_launch.rs`). The bridge never reads them.
+    pub(crate) page_launches: crate::page_launch::PageLaunches,
 }
 
 /// One launch's content in the Runtime's table, for as long as this value
@@ -127,6 +130,7 @@ impl Runtime {
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             launch_contents: Arc::default(),
+            page_launches: Default::default(),
         }
     }
 
@@ -145,6 +149,7 @@ impl Runtime {
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             launch_contents: Arc::default(),
+            page_launches: Default::default(),
         }
     }
 
@@ -558,8 +563,27 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<String>,
         budget: Budget,
-        mut after_walk: impl FnMut(&LabCid),
+        after_walk: impl FnMut(&LabCid),
     ) -> std::result::Result<(CapsuleHandle, AcceptedSignature), BundleRefusal> {
+        let started = self.start_by_bundle(data_dir, cid, args, principal_id, budget, after_walk);
+        started
+            .await
+            .map(|started| (started.handle, started.accepted))
+    }
+
+    /// The start by CID itself. Besides what [`Runtime::run_by_bundle_observed`]
+    /// returns, a start of content gives back its launch (the content's files,
+    /// their listing and what the program wrote) and the name of the page the
+    /// content pins, for a caller that keeps the launch for that page.
+    pub(crate) async fn start_by_bundle(
+        &self,
+        data_dir: &Path,
+        cid: &str,
+        args: Vec<String>,
+        principal_id: Option<String>,
+        budget: Budget,
+        mut after_walk: impl FnMut(&LabCid),
+    ) -> std::result::Result<crate::page_launch::Started, BundleRefusal> {
         // A start by CID names no stored agent, so an agent's own principal
         // is refused here before the walk begins.
         crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())
@@ -622,6 +646,8 @@ impl Runtime {
         let mut seen = HashMap::from([(asked.to_string(), root)]);
         let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
+        // The page a content pins, by its name: the one the launch is for.
+        let mut kept_page = None;
         // What starts: the program asked for or, under content, the core.
         let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
         while let Some((depth, expected, core, name, pin)) = pending.pop() {
@@ -684,6 +710,13 @@ impl Runtime {
             // program pins is a program.
             let pins = std::mem::take(&mut member.pins);
             let page = member.kind == BundleKind::Page;
+            if page {
+                kept_page = Some(crate::page_launch::Page {
+                    name: member.manifest.name.clone(),
+                    entrypoint: member.manifest.entrypoint.clone(),
+                    files: std::mem::take(&mut member.files),
+                });
+            }
             if page && pins.len() != 1 {
                 return Err(refused(BundleRefusal::ViewerCoreInvalid(format!(
                     "the viewer pins {} bundles, not its one program",
@@ -729,13 +762,19 @@ impl Runtime {
         // capsule id. "Over" is when the start returns, and also when it is
         // cancelled: the program may run on in its own thread after that,
         // and from then on it reads nothing of the content.
-        let held =
-            launch.map(|launch| LaunchHeld::new(&self.launch_contents, &handle.id.0, launch));
+        let held = launch
+            .clone()
+            .map(|launch| LaunchHeld::new(&self.launch_contents, &handle.id.0, launch));
         let started = self.start_loaded(component, &mut handle, args, principal_id);
         let started = started.await;
         drop(held);
         started.map_err(failed)?;
-        Ok((handle, accepted))
+        Ok(crate::page_launch::Started {
+            handle,
+            accepted,
+            launch,
+            page: kept_page,
+        })
     }
 
     /// The checks every bundle of a start by CID passes, the one asked for

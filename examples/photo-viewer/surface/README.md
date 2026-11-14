@@ -20,17 +20,20 @@ Home showed it as **Photos**; on this branch nothing opens it from Home.
 
 ## What the page can do
 
-It holds one thing: the launch token Runtime put in its fragment (`#home_token=`). It sends that token in
-`x-elastos-home-token` to the two Photos routes and nowhere else (the routes are the seam's; on this branch
-only the kit's stand-in server answers them):
+It holds one thing: the launch token Home put in its fragment (`#home_token=`), a token bound to the one
+content launch it was opened for (`elastos://launch/<id>`, 15 minutes at most). It sends that token in
+`x-elastos-home-token` to the two reads of that launch and nowhere else (the gateway's `viewer_launch_output`
+and `viewer_launch_content`, which ask the Runtime for the kept launch):
 
-- `GET /api/viewers/image-viewer/playlist`
-- `GET /api/viewers/image-viewer/playlist/item/<position>`
+- `GET /api/viewers/image-viewer/launch/output/playlist.json`: the playlist the photo core wrote
+- `GET /api/viewers/image-viewer/launch/content/<path>`: a picture of the launched set, by its path
 
-An item is asked for by its position. The playlist's `uri` fields are dropped unread, so the page never
-builds a path. Text from the playlist, such as a skipped item's message, is shown with `textContent`, at
-most 200 characters. Images are shown from `blob:` URLs, typed from the playlist (PNG, JPEG or WebP only),
-and released when replaced. Keys: left and right arrows move, space pauses.
+A picture's path comes from the playlist's `uri`, and only a plain path under `elastos://launch/content/` is
+asked for (each part URL-encoded); any other `uri` is listed as not in the set and never asked for. The token
+reaches only that launch, so no path the page builds can name anything outside the set it was opened with.
+Text from the playlist, such as a skipped item's message, is shown with `textContent`, at most 200
+characters. Images are shown from `blob:` URLs, typed from the playlist (PNG, JPEG or WebP only), and
+released when replaced. Keys: left and right arrows move, space pauses.
 
 It uses no storage, sends no messages, makes no other request, and asks for no capability. Runtime's app
 policy (an opaque sandbox, `script-src 'self'`, `connect-src` the Home origin only) holds it there anyway.
