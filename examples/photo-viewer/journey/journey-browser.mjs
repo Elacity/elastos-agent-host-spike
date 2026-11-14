@@ -25,17 +25,29 @@ const failures = [];
 // Playwright puts navigation URLs (with the fragment) in its error call logs, so every recorded text is redacted.
 let pageToken = null;
 function redact(text) {
-  let out = String(text).replace(/home_token=[^\s"'&#)\]]*/g, "home_token=<redacted>");
+  let out = String(text).replace(/home_token=[^\s"'&#)\]\\]*/g, "home_token=<redacted>")
+    // A token field in any answer text, even one that does not parse (so before pageToken is known).
+    .replace(/("token"\s*:\s*")[^"\\]*(?:\\.[^"\\]*)*"/g, '$1<redacted>"');
   if (pageToken) {
     for (const form of [pageToken, encodeURIComponent(pageToken)]) out = out.split(form).join("<redacted>");
   }
   return out;
 }
+// Redact every string inside a recorded value, keeping its shape (no JSON text round-trip, which an escaped
+// quote next to a redacted token could break).
+function redactValue(value) {
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value)) return value.map(redactValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, redactValue(inner)]));
+  }
+  return value;
+}
 // The failure files show the page of the FIRST failed check or error, not wherever the journey went next.
 let currentPage = null;
 let failurePage = null;
 function check(name, ok, detail) {
-  const safe = detail === undefined ? undefined : JSON.parse(redact(JSON.stringify(detail)));
+  const safe = redactValue(detail);
   results[name] = ok ? "passed" : { failed: safe };
   if (!ok) { failures.push(name); if (!failurePage) failurePage = currentPage; }
   console.log(`${ok ? "ok" : "FAILED"}: ${name}${ok ? "" : ` (${JSON.stringify(safe)})`}`);
@@ -71,7 +83,7 @@ async function saveFailureEvidence() {
     ["failure.html", async () => writeFileSync(join(EVIDENCE, "failure.html"), redact(await page.content()))],
   ]) {
     try { await write(); } catch (error) {
-      console.error(`could not write ${name}: ${redact(String(error && error.message || error).slice(0, 300))}`);
+      console.error(`could not write ${name}: ${redact(String(error && error.message || error)).slice(0, 300)}`);
     }
   }
 }
@@ -138,7 +150,7 @@ try {
   await home.locator("#home-unlock-primary").click();
   const completion = await registered;
   check("a person registers a passkey and is signed in to Home", completion.ok(),
-    { status: completion.status(), text: completion.ok() ? undefined : (await completion.text().catch(() => "")).slice(0, 300) });
+    { status: completion.status(), text: completion.ok() ? undefined : redact(await completion.text().catch(() => "")).slice(0, 300) });
 
   // 2. The set, opened by its CID.
   currentPage = home;
@@ -148,7 +160,7 @@ try {
   if (typeof answer.token === "string" && answer.token) pageToken = answer.token;
   check("Home opens the set by its CID", opened.status === 200 && answer.page === "image-viewer"
     && /^\/launch\/[0-9a-f]{32}\/page\/browser\/index\.html$/.test(answer.page_url || "") && typeof answer.token === "string",
-    { status: opened.status, page: answer.page, page_url: answer.page_url, text: opened.status === 200 ? undefined : opened.text.slice(0, 200) });
+    { status: opened.status, page: answer.page, page_url: answer.page_url, text: opened.status === 200 ? undefined : redact(opened.text).slice(0, 200) });
 
   // 3. The page, loaded at its address with its token in the fragment; the three pictures, in order.
   if (opened.status === 200) {
@@ -210,22 +222,24 @@ try {
   const changed = await open(home, CHANGED);
   check("a set whose bytes no longer match its CID is refused by name",
     changed.status === 400 && changed.text.startsWith("bundle_cid_mismatch") && !changed.text.includes("token"),
-    { status: changed.status, text: changed.text.slice(0, 200) });
+    { status: changed.status, text: redact(changed.text).slice(0, 200) });
   const never = await open(home, NEVER);
   check("a CID never staged is refused by name",
     never.status === 400 && never.text.startsWith("bundle_missing") && !never.text.includes("token"),
-    { status: never.status, text: never.text.slice(0, 200) });
-  results.refusals = { changed: changed.text.slice(0, 200), never: never.text.slice(0, 200) };
+    { status: never.status, text: redact(never.text).slice(0, 200) });
+  results.refusals = { changed: redact(changed.text).slice(0, 200), never: redact(never.text).slice(0, 200) };
 } catch (error) {
   // The full Playwright message carries its call log, which names the condition it waited on; the old 300-char
   // cut ended inside that log. This is the detail the result records and prints.
-  const full = String(error && error.message || error).slice(0, 1500);
+  // Redacted BEFORE the cut, so a cut cannot leave part of a token behind.
+  const full = redact(String(error && error.message || error)).slice(0, 1500);
   check("the journey ran to its end", false, full);
   await saveFailureEvidence();
 } finally {
   if (failures.length > 0) await saveFailureEvidence();
   await browser.close();
 }
-writeFileSync(join(EVIDENCE, "journey-results.json"), JSON.stringify(results, null, 2));
+// Every recorded value (results.shown, results.reads, results.refusals too) is redacted before it is written.
+writeFileSync(join(EVIDENCE, "journey-results.json"), JSON.stringify(redactValue(results), null, 2));
 console.log(JSON.stringify({ failures }));
 process.exit(failures.length === 0 ? 0 : 1);
