@@ -969,6 +969,12 @@ impl Supervisor {
         // through the component admission, never here.
         crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())?;
         let (capsule_dir, manifest) = self.load_capsule_manifest(name).await?;
+        // A manifest that declares an agent runs only through the component
+        // admission. A VM launch would put its launcher's principal on the
+        // bridge while the manifest's agent stayed unbound.
+        if manifest.agent.is_some() {
+            bail!("{}", crate::agent_admission::NO_VM_AGENT);
+        }
         if principal_id.is_some() && !manifest.role.is_shell_launchable() {
             bail!("principal launch grants are only valid for shell-launchable capsules");
         }
@@ -1771,6 +1777,72 @@ mod tests {
         assert!(err
             .to_string()
             .contains("principal launch grants are only valid for shell-launchable capsules"));
+    }
+
+    /// The S5 rows review's Low: a shell-launchable VM capsule whose manifest
+    /// declares an agent starts nothing, and the launcher's principal never
+    /// reaches a bridge.
+    #[tokio::test]
+    async fn a_vm_manifest_that_declares_an_agent_launches_no_vm() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let capsule_dir = data_dir.join("capsules/agent-vm-test");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-agent-vm-test\n").unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "agent-vm-test",
+                "version": "0.1.0",
+                "role": "app",
+                "type": "microvm",
+                "entrypoint": "rootfs.ext4",
+                "agent": {"kind": "agent"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "agent-vm-test".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-agent-vm-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+
+        let err = supervisor
+            .launch_capsule(
+                "agent-vm-test",
+                serde_json::json!({}),
+                Some("person:local:alice".to_string()),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), crate::agent_admission::NO_VM_AGENT);
+        assert!(
+            supervisor.running.read().await.is_empty(),
+            "no VM was recorded"
+        );
     }
 
     #[test]
