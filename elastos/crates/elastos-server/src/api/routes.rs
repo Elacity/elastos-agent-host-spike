@@ -1125,6 +1125,73 @@ pub(crate) mod tests {
         grants.abort();
     }
 
+    /// Row 7 (S5 part 2): an object the launched guest writes under its own
+    /// root is an envelope on disk, and only the owner's stored key opens it.
+    /// The launch completes only when the guest's own bridge read returns the
+    /// bytes it wrote, so the read half is already proven by the launch.
+    #[tokio::test]
+    async fn an_agents_guest_object_is_encrypted_and_needs_the_owners_key() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x"]).await;
+        let [x] = home.agents.as_slice() else {
+            panic!("one agent");
+        };
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let run = home.launch(x).await.unwrap().0;
+        assert_eq!(run.status, "completed");
+        grants.abort();
+
+        let root = home.root(x);
+        let notes = format!("{root}/memory/notes.md");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &notes).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+
+        // The bytes on disk are the envelope, not the text the guest wrote.
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|err| panic!("the agent's notes are not an envelope: {err}"));
+        assert_eq!(envelope["schema"], "elastos.principal-root.object/v1");
+        let plaintext = format!("a5-launch-probe notes for {x}");
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(&plaintext),
+            "the notes are stored in the clear"
+        );
+
+        // The guest's own bridge read returned them; the launch only
+        // completes after that comparison.
+        assert!(home.invoked(x).iter().any(|(_, result, reason)| {
+            result == "ok" && reason == &format!("read {notes} owner={}", home.owner)
+        }));
+
+        // The same object opens for its principal through the route's read.
+        assert_eq!(
+            crate::auth::read_principal_root_object(&home.data_dir, x, &root, &notes, &path)
+                .unwrap(),
+            plaintext.as_bytes()
+        );
+
+        // Without the owner's stored key the agent's read refuses by name.
+        crate::auth::clear_test_principal_root_protections(&home.data_dir);
+        assert_eq!(
+            crate::auth::read_principal_root_object(&home.data_dir, x, &root, &notes, &path)
+                .unwrap_err()
+                .to_string(),
+            "agent's owner holds no storage protection"
+        );
+
+        // A fresh owner key is not the one that wrapped this object.
+        crate::auth::store_test_principal_root_protection(&home.data_dir, &home.owner);
+        assert_eq!(
+            crate::auth::read_principal_root_object(&home.data_dir, x, &root, &notes, &path)
+                .unwrap_err()
+                .to_string(),
+            "principal-root decrypt failed"
+        );
+    }
+
     /// Row 1 refusal, round 2: the folder that would load names the stored
     /// Agent Host and writes the stored byte CID into its own `.elastos-cid`,
     /// but its entrypoint bytes are other code. Admission compares the walk of
