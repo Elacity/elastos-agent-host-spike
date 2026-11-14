@@ -140,7 +140,7 @@ async fn home_open_encodes_the_pages_address_and_uses_only_a_well_formed_answer(
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
     let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
-    let _runtime = start_fake_runtime(dir.path(), bus, "launch-open-address").await;
+    let runtime = start_fake_runtime(dir.path(), bus, "launch-open-address").await;
     let cookie = home_cookie(&authority);
 
     let (status, body) = open(&app, "bafy-odd", Some(&cookie), None).await;
@@ -149,6 +149,24 @@ async fn home_open_encodes_the_pages_address_and_uses_only_a_well_formed_answer(
     assert_eq!(
         answer["page_url"],
         format!("/launch/{LAUNCH}/page/browser/my%20page%231.html")
+    );
+    // The address loads that file: the gateway's page route decodes the path
+    // and asks the Runtime for the same name, each part encoded again.
+    let request = Request::builder()
+        .uri(answer["page_url"].as_str().unwrap())
+        .header(HOST, "localhost:61180")
+        .body(Body::empty())
+        .unwrap();
+    let served = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(served.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(served.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"<html>the odd page</html>");
+    let asked = runtime.kept_launch_reads.lock().await.clone();
+    assert_eq!(
+        asked.last().unwrap()["path"],
+        format!("/api/launch/{LAUNCH}/page/browser/my%20page%231.html")
     );
 
     for cid in ["bafy-badid", "bafy-badentry", "bafy-badpage"] {

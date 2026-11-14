@@ -947,6 +947,9 @@ async fn fake_runtime_kept_launch_read(
     if path.ends_with("/page/browser/index.html") {
         return (StatusCode::OK, b"<html>the page</html>".to_vec()).into_response();
     }
+    if path.ends_with("/page/browser/my%20page%231.html") {
+        return (StatusCode::OK, b"<html>the odd page</html>".to_vec()).into_response();
+    }
     if path.ends_with("/page/browser/photos.js") {
         return (StatusCode::OK, b"export {};".to_vec()).into_response();
     }
