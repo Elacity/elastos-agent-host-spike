@@ -26,8 +26,9 @@ const failures = [];
 let pageToken = null;
 function redact(text) {
   let out = String(text).replace(/home_token=[^\s"'&#)\]\\]*/g, "home_token=<redacted>")
-    // A token field in any answer text, even one that does not parse (so before pageToken is known).
-    .replace(/("token"\s*:\s*")[^"\\]*(?:\\.[^"\\]*)*"/g, '$1<redacted>"');
+    // A token field in any answer text, even one that does not parse (so before pageToken is known): a quoted
+    // value up to its closing quote OR the end of the text (an unclosed string), or an unquoted value.
+    .replace(/("token"\s*:\s*)(?:"(?:[^"\\]|\\.)*(?:"|$)|[^,}\s]*)/g, '$1"<redacted>"');
   if (pageToken) {
     for (const form of [pageToken, encodeURIComponent(pageToken)]) out = out.split(form).join("<redacted>");
   }
@@ -39,7 +40,8 @@ function redactValue(value) {
   if (typeof value === "string") return redact(value);
   if (Array.isArray(value)) return value.map(redactValue);
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, redactValue(inner)]));
+    // Keys too: a parsed answer can carry the token as a key.
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [redact(key), redactValue(inner)]));
   }
   return value;
 }
@@ -52,6 +54,20 @@ function check(name, ok, detail) {
   if (!ok) { failures.push(name); if (!failurePage) failurePage = currentPage; }
   console.log(`${ok ? "ok" : "FAILED"}: ${name}${ok ? "" : ` (${JSON.stringify(safe)})`}`);
 }
+
+// What a journey records of a server answer: only which of the refusal names the checks expect it starts with,
+// and its length, never its raw text. Raw answer text is where a token could hide in a shape no redactor
+// anticipates (an unclosed string, a key, an encoding); a fixed allowlist of names cannot carry one.
+const KNOWN_REFUSALS = ["bundle_cid_mismatch", "bundle_missing"];
+function answerName(text) {
+  const t = String(text);
+  const name = KNOWN_REFUSALS.find((known) => t === known || t.startsWith(`${known}:`));
+  return `${name || "<not an expected refusal name>"} (${t.length} chars)`;
+}
+// A parsed answer's page and page_url are recorded only in the shapes the check expects.
+const recordedPage = (page) => (typeof page === "string" && /^[a-z0-9-]{1,64}$/.test(page) ? page : "<not a page name>");
+const PAGE_URL = /^\/launch\/[0-9a-f]{32}\/page\/browser\/index\.html$/;
+const recordedPageUrl = (url) => (typeof url === "string" && PAGE_URL.test(url) ? url : "<not the expected page address>");
 
 // The open, asked from Home's own page as Home asks it: same origin, Home's session cookie.
 async function open(page, cid) {
@@ -150,7 +166,7 @@ try {
   await home.locator("#home-unlock-primary").click();
   const completion = await registered;
   check("a person registers a passkey and is signed in to Home", completion.ok(),
-    { status: completion.status(), text: completion.ok() ? undefined : redact(await completion.text().catch(() => "")).slice(0, 300) });
+    { status: completion.status(), answer: completion.ok() ? undefined : answerName(await completion.text().catch(() => "")) });
 
   // 2. The set, opened by its CID.
   currentPage = home;
@@ -159,8 +175,9 @@ try {
   try { answer = JSON.parse(opened.text); } catch { /* checked below */ }
   if (typeof answer.token === "string" && answer.token) pageToken = answer.token;
   check("Home opens the set by its CID", opened.status === 200 && answer.page === "image-viewer"
-    && /^\/launch\/[0-9a-f]{32}\/page\/browser\/index\.html$/.test(answer.page_url || "") && typeof answer.token === "string",
-    { status: opened.status, page: answer.page, page_url: answer.page_url, text: opened.status === 200 ? undefined : redact(opened.text).slice(0, 200) });
+    && PAGE_URL.test(answer.page_url || "") && typeof answer.token === "string",
+    { status: opened.status, page: recordedPage(answer.page), page_url: recordedPageUrl(answer.page_url),
+      answer: opened.status === 200 ? undefined : answerName(opened.text) });
 
   // 3. The page, loaded at its address with its token in the fragment; the three pictures, in order.
   if (opened.status === 200) {
@@ -222,12 +239,12 @@ try {
   const changed = await open(home, CHANGED);
   check("a set whose bytes no longer match its CID is refused by name",
     changed.status === 400 && changed.text.startsWith("bundle_cid_mismatch") && !changed.text.includes("token"),
-    { status: changed.status, text: redact(changed.text).slice(0, 200) });
+    { status: changed.status, answer: answerName(changed.text) });
   const never = await open(home, NEVER);
   check("a CID never staged is refused by name",
     never.status === 400 && never.text.startsWith("bundle_missing") && !never.text.includes("token"),
-    { status: never.status, text: redact(never.text).slice(0, 200) });
-  results.refusals = { changed: redact(changed.text).slice(0, 200), never: redact(never.text).slice(0, 200) };
+    { status: never.status, answer: answerName(never.text) });
+  results.refusals = { changed: answerName(changed.text), never: answerName(never.text) };
 } catch (error) {
   // The full Playwright message carries its call log, which names the condition it waited on; the old 300-char
   // cut ended inside that log. This is the detail the result records and prints.
