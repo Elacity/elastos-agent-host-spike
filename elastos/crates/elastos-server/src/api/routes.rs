@@ -564,7 +564,10 @@ pub(crate) mod tests {
     /// name and the CID its capsule directory records, signed by a key the
     /// runtime trusts. Two agents, or as many as asked for, share the Home.
     pub(crate) struct ProbeLaunch {
-        _temp: tempfile::TempDir,
+        /// The fixture's own folders. `None` when the probe shares a Home
+        /// that another fixture owns; its folders then live under that Home.
+        _temp: Option<tempfile::TempDir>,
+        fixture_root: std::path::PathBuf,
         pub(crate) data_dir: std::path::PathBuf,
         runtime: Arc<Runtime>,
         audit_log: Arc<AuditLog>,
@@ -584,6 +587,61 @@ pub(crate) mod tests {
 
     impl ProbeLaunch {
         pub(crate) async fn new(names: &[&str]) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path().join("data");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
+            let owner = context.principal_id().to_string();
+            crate::auth::store_test_principal_root_protection(&data_dir, &owner);
+            crate::agents::tests::make_admin(&data_dir, &owner);
+            let record = crate::auth::stored_principal_record(&data_dir, &owner)
+                .unwrap()
+                .unwrap();
+            Self::build(
+                Some(temp),
+                data_dir,
+                &owner,
+                &record.proof_binding_id,
+                "session:a5-launch",
+                &context,
+                names,
+            )
+            .await
+        }
+
+        /// A probe over an existing Home. The stored agents belong to
+        /// `owner`, a person of that Home, and the launch grant is issued from
+        /// that person's sign-in context. A launch from this probe reads and
+        /// writes the same data directory the gateway routes use.
+        pub(in crate::api) async fn over_home(
+            data_dir: std::path::PathBuf,
+            owner: &str,
+            proof_binding_id: &str,
+            session_id: &str,
+            context: &gateway::HomeLaunchTokenContext,
+            names: &[&str],
+        ) -> Self {
+            Self::build(
+                None,
+                data_dir,
+                owner,
+                proof_binding_id,
+                session_id,
+                context,
+                names,
+            )
+            .await
+        }
+
+        async fn build(
+            temp: Option<tempfile::TempDir>,
+            data_dir: std::path::PathBuf,
+            owner: &str,
+            proof_binding_id: &str,
+            session_id: &str,
+            context: &gateway::HomeLaunchTokenContext,
+            names: &[&str],
+        ) -> Self {
             use crate::agents;
             use elastos_compute::providers::ComponentProvider;
             use elastos_runtime::capability::{CapabilityManager, CapabilityStore};
@@ -592,11 +650,12 @@ pub(crate) mod tests {
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
             use elastos_storage::providers::LocalFSProvider;
 
-            let temp = tempfile::tempdir().unwrap();
-            let data_dir = temp.path().join("data");
-            std::fs::create_dir_all(&data_dir).unwrap();
+            let fixture_root = temp
+                .as_ref()
+                .map(|temp| temp.path().to_path_buf())
+                .unwrap_or_else(|| data_dir.join(".s5-probe"));
             let storage = Arc::new(
-                LocalFSProvider::new(temp.path().join("storage"))
+                LocalFSProvider::new(fixture_root.join("storage"))
                     .await
                     .unwrap(),
             );
@@ -632,21 +691,14 @@ pub(crate) mod tests {
                 )
                 .await;
 
-            let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
-            let owner = context.principal_id().to_string();
-            crate::auth::store_test_principal_root_protection(&data_dir, &owner);
-            crate::agents::tests::make_admin(&data_dir, &owner);
-            let record = crate::auth::stored_principal_record(&data_dir, &owner)
-                .unwrap()
-                .unwrap();
             let caller = agents::Caller {
-                principal_id: &owner,
-                proof_binding_id: &record.proof_binding_id,
-                session_id: "session:a5-launch",
+                principal_id: owner,
+                proof_binding_id,
+                session_id,
             };
             agents::set_enabled(&data_dir, &caller, true, 1).unwrap();
 
-            let capsule_dir = temp.path().join(PROBE_HOST);
+            let capsule_dir = fixture_root.join(PROBE_HOST);
             std::fs::create_dir_all(&capsule_dir).unwrap();
             let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../tests/fixtures/components/a5-launch-probe");
@@ -706,11 +758,22 @@ pub(crate) mod tests {
                     .agent_id
                 })
                 .collect();
-            let grant =
-                gateway::issue_home_launch_token_with_context(&data_dir, PROBE_HOST, &context)
-                    .unwrap();
+            // A person's Home launch token is a projection under the Home
+            // capsule's authority (`gateway_home_runtime.rs:149`), which is
+            // the app the person's sign-in grant authorizes. The Runtime-local
+            // fixture has no sign-in grant apps, so its direct token stays.
+            let grant = match context.proof_binding_id() {
+                Some(_) => gateway::issue_home_projection_launch_token_with_context(
+                    &data_dir, PROBE_HOST, PROBE_HOST, context,
+                ),
+                None => {
+                    gateway::issue_home_launch_token_with_context(&data_dir, PROBE_HOST, context)
+                }
+            }
+            .unwrap();
             Self {
                 _temp: temp,
+                fixture_root,
                 data_dir,
                 runtime,
                 audit_log,
@@ -719,7 +782,7 @@ pub(crate) mod tests {
                 capsule_dir,
                 grant,
                 agents,
-                owner,
+                owner: owner.to_string(),
             }
         }
 
@@ -732,7 +795,7 @@ pub(crate) mod tests {
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
 
             let key = SigningKey::from_bytes(&[0x44; 32]);
-            let dir = self._temp.path().join(name);
+            let dir = self.fixture_root.join(name);
             std::fs::create_dir_all(&dir).unwrap();
             let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../tests/fixtures/components/a5-launch-probe");
@@ -1534,7 +1597,7 @@ pub(crate) mod tests {
             return;
         }
         let home = ProbeLaunch::new(&["a"]).await;
-        let dir = home._temp.path().join("unsigned-probe");
+        let dir = home.fixture_root.join("unsigned-probe");
         std::fs::create_dir_all(&dir).unwrap();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/components/a5-launch-probe");
