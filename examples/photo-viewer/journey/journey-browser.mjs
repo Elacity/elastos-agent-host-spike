@@ -21,10 +21,24 @@ const { chromium } = require(process.env.ELASTOS_PLAYWRIGHT_MODULE || env("PLAYW
 
 const results = {};
 const failures = [];
+// The page token is a bearer credential: it must never reach stdout, journey-results.json or the failure files.
+// Playwright puts navigation URLs (with the fragment) in its error call logs, so every recorded text is redacted.
+let pageToken = null;
+function redact(text) {
+  let out = String(text).replace(/home_token=[^\s"'&#)\]]*/g, "home_token=<redacted>");
+  if (pageToken) {
+    for (const form of [pageToken, encodeURIComponent(pageToken)]) out = out.split(form).join("<redacted>");
+  }
+  return out;
+}
+// The failure files show the page of the FIRST failed check or error, not wherever the journey went next.
+let currentPage = null;
+let failurePage = null;
 function check(name, ok, detail) {
-  results[name] = ok ? "passed" : { failed: detail };
-  if (!ok) failures.push(name);
-  console.log(`${ok ? "ok" : "FAILED"}: ${name}${ok ? "" : ` (${JSON.stringify(detail)})`}`);
+  const safe = detail === undefined ? undefined : JSON.parse(redact(JSON.stringify(detail)));
+  results[name] = ok ? "passed" : { failed: safe };
+  if (!ok) { failures.push(name); if (!failurePage) failurePage = currentPage; }
+  console.log(`${ok ? "ok" : "FAILED"}: ${name}${ok ? "" : ` (${JSON.stringify(safe)})`}`);
 }
 
 // The open, asked from Home's own page as Home asks it: same origin, Home's session cookie.
@@ -40,23 +54,24 @@ async function open(page, cid) {
 }
 
 const browser = await chromium.launch({ headless: true });
-let currentPage = null;
-// The failure record: the page the step was on, saved in the evidence folder run-journey.sh gives this step.
+// The failure record: the page of the first failed check or error, saved (redacted) in the evidence folder
+// run-journey.sh gives this step.
 // A check that fails without throwing (a plant) also lands here, so the red is inspectable.
 let failureSaved = false;
 async function saveFailureEvidence() {
   if (failureSaved) return;
   failureSaved = true;
-  if (!currentPage) {
+  const page = failurePage || currentPage;
+  if (!page) {
     console.error("no page to save failure evidence from");
     return;
   }
   for (const [name, write] of [
-    ["failure.png", () => currentPage.screenshot({ path: join(EVIDENCE, "failure.png"), fullPage: true })],
-    ["failure.html", async () => writeFileSync(join(EVIDENCE, "failure.html"), await currentPage.content())],
+    ["failure.png", () => page.screenshot({ path: join(EVIDENCE, "failure.png"), fullPage: true })],
+    ["failure.html", async () => writeFileSync(join(EVIDENCE, "failure.html"), redact(await page.content()))],
   ]) {
     try { await write(); } catch (error) {
-      console.error(`could not write ${name}: ${String(error && error.message || error).slice(0, 300)}`);
+      console.error(`could not write ${name}: ${redact(String(error && error.message || error).slice(0, 300))}`);
     }
   }
 }
@@ -80,8 +95,7 @@ try {
   // first, with one 60 s deadline, and name the condition that was not met, with the button as read.
   let signInState = null;
   const signInDeadline = Date.now() + 60000;
-  for (;;) {
-    signInState = await home.evaluate(() => {
+  const readState = () => home.evaluate(() => {
       const button = document.querySelector("#home-unlock-primary");
       if (!button) return { present: false };
       const style = getComputedStyle(button);
@@ -89,17 +103,33 @@ try {
       return { present: true, text: button.textContent, disabled: Boolean(button.disabled),
                visible: style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0 };
     });
-    if (signInState.present && signInState.visible && !signInState.disabled) break;
+  for (;;) {
+    // Each read is bounded by what is left of the one deadline, so a stalled page cannot carry the wait past it.
+    const left = signInDeadline - Date.now();
+    signInState = left <= 0 ? { present: false, stalled: true } : await Promise.race([
+      readState(),
+      new Promise((resolve) => setTimeout(() => resolve({ present: false, stalled: true }), left)),
+    ]);
+    if (signInState.present && signInState.visible && !signInState.disabled && Date.now() < signInDeadline) break;
     if (Date.now() >= signInDeadline) {
       const unmet = [];
       if (!signInState.present || !signInState.visible) unmet.push("not visible");
       if (signInState.disabled) unmet.push("disabled");
-      const state = signInState.present
+      const state = signInState.stalled ? "the page did not answer the read before the deadline"
+        : signInState.present
         ? `text ${JSON.stringify(signInState.text)}, disabled ${signInState.disabled}, visible ${signInState.visible}`
         : "no #home-unlock-primary in the page";
       throw new Error(`sign-in button not ready within 60 s: ${unmet.join(" and ")}; ${state}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  // Visible and enabled is not all a click needs: Playwright also waits for the button to be stable and to
+  // receive the pointer (no overlay). A trial click checks those, inside the same deadline, without clicking,
+  // and a failure is named as such, with Playwright's call log (redacted when recorded).
+  try {
+    await home.locator("#home-unlock-primary").click({ trial: true, timeout: Math.max(1, signInDeadline - Date.now()) });
+  } catch (error) {
+    throw new Error(`sign-in button visible and enabled but not clickable within 60 s (not stable, or another element takes the pointer): ${String(error && error.message || error)}`);
   }
   const registered = home.waitForResponse((r) => r.url().endsWith("/api/auth/passkey/register/complete"), { timeout: 60000 });
   // A click that throws leaves this wait pending; closing the browser then rejects it. Handle that rejection
@@ -115,6 +145,7 @@ try {
   const opened = await open(home, SET);
   let answer = {};
   try { answer = JSON.parse(opened.text); } catch { /* checked below */ }
+  if (typeof answer.token === "string" && answer.token) pageToken = answer.token;
   check("Home opens the set by its CID", opened.status === 200 && answer.page === "image-viewer"
     && /^\/launch\/[0-9a-f]{32}\/page\/browser\/index\.html$/.test(answer.page_url || "") && typeof answer.token === "string",
     { status: opened.status, page: answer.page, page_url: answer.page_url, text: opened.status === 200 ? undefined : opened.text.slice(0, 200) });
