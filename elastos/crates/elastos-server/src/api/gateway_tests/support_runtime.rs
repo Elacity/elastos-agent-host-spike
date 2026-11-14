@@ -814,6 +814,7 @@ async fn start_fake_runtime_configured(
         .route("/api/provider/:scheme/:op", post(fake_runtime_provider))
         .route("/api/launch/:id/output/:name", get(fake_runtime_kept_launch_read))
         .route("/api/launch/:id/content/*path", get(fake_runtime_kept_launch_read))
+        .fallback(fake_runtime_unmatched)
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -841,6 +842,20 @@ async fn start_fake_runtime_configured(
         launch_requests,
         kept_launch_reads,
     }
+}
+
+/// Any request no route of the fake takes: one under `/api/launch/` is
+/// recorded with the kept-launch reads, so a test sees every ask of the
+/// Runtime there, also one no route would match; all answer `not_found`.
+async fn fake_runtime_unmatched(
+    AxumState(state): AxumState<FakeRuntimeState>,
+    uri: axum::http::Uri,
+) -> Response {
+    if uri.path().starts_with("/api/launch/") {
+        let ask = json!({ "path": uri.path(), "unmatched": true });
+        state.kept_launch_reads.lock().await.push(ask);
+    }
+    (StatusCode::NOT_FOUND, "not_found").into_response()
 }
 
 /// The Runtime's reads of a kept launch, as the fake answers them: it records

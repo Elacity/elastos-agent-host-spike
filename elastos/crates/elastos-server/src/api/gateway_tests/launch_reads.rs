@@ -162,8 +162,10 @@ async fn a_launch_bound_token_opens_no_other_home_check() {
 /// D1b-else. Nothing else reads, and the Runtime is not asked: no token, the
 /// person's Home token, a token bound to another resource or naming another
 /// page are refused at the front door; with the page's own token, a path
-/// that is not plain or an output name that is not one plain name answers
-/// `not_found`. The Runtime's own `not_found` is passed on.
+/// that is not plain or an output name that is not one plain name (`..`, a
+/// name with a `/`) answers `not_found`. The fake Runtime records every ask
+/// under `/api/launch/`, also one no route of it matches, so none slips by.
+/// The Runtime's own `not_found` is passed on.
 #[tokio::test]
 async fn anything_else_is_not_found_and_the_runtime_is_not_asked() {
     let dir = tempfile::tempdir().unwrap();
@@ -193,6 +195,7 @@ async fn anything_else_is_not_found_and_the_runtime_is_not_asked() {
         format!("{base}/content/x%2F..%2Fcapsule.json"),
         format!("{base}/content/images//01.png"),
         format!("{base}/output/.."),
+        format!("{base}/output/a%2Fb"),
     ] {
         let (status, _, body) = read(&app, &uri, Some(&own)).await;
         assert_eq!(
@@ -219,7 +222,13 @@ async fn anything_else_is_not_found_and_the_runtime_is_not_asked() {
     );
     assert_eq!(
         launch_reads_audited(dir.path()),
-        ["not_found", "not_found", "not_found", "not_found"],
+        [
+            "not_found",
+            "not_found",
+            "not_found",
+            "not_found",
+            "not_found"
+        ],
         "each read the page's own token makes is audited once"
     );
 }
