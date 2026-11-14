@@ -2,7 +2,8 @@
 //
 // The capsule kit's stand-in (examples/capsule-kit/surface/stand-in.mjs) plays
 // Runtime: the app headers Runtime sends, the front door's CORS preflight, and
-// here the two Photos routes. The page is framed in Home's opaque sandbox.
+// here the page's two reads of its content launch (the launch's output and its
+// content by path). The page is framed in Home's opaque sandbox.
 //
 // Run: node examples/photo-viewer/surface/photos-browser-smoke.mjs
 import assert from "node:assert/strict";
@@ -38,16 +39,19 @@ function png(width, height, [r, g, b]) {
   ]);
 }
 
-const IMAGES = { 0: png(4, 3, [200, 30, 30]), 2: png(3, 5, [30, 30, 200]) };
+const IMAGES = { "images/a.png": png(4, 3, [200, 30, 30]), "images/c d.png": png(3, 5, [30, 30, 200]) };
 const PLAYLIST = {
   schema: "elastos.photo-viewer.playlist/v1",
-  album: "localhost://Users/self/Pictures/album.json",
+  album: "elastos://launch/content/",
   items: [
-    { order: 0, uri: "localhost://Users/self/Pictures/a.png", mime: "image/png", width: 4, height: 3, duration_ms: 60000 },
-    { order: 2, uri: "localhost://Users/self/Pictures/c.png", mime: "image/png", width: 3, height: 5, duration_ms: 60000 },
+    { order: 0, uri: "elastos://launch/content/images/a.png", mime: "image/png", width: 4, height: 3, duration_ms: 60000 },
+    { order: 2, uri: "elastos://launch/content/images/c d.png", mime: "image/png", width: 3, height: 5, duration_ms: 60000 },
+    { order: 3, uri: "localhost://Users/self/Pictures/secret.png", mime: "image/png", width: 3, height: 5, duration_ms: 60000 },
   ],
-  skipped: [{ order: 1, uri: "localhost://Users/self/Pictures/b.gif", reason: "unsupported", message: HOSTILE }],
+  skipped: [{ order: 1, uri: "elastos://launch/content/images/b.gif", reason: "unsupported", message: HOSTILE }],
 };
+const OUTPUT = "/api/viewers/image-viewer/launch/output/playlist.json";
+const CONTENT = "/api/viewers/image-viewer/launch/content/";
 
 const { base, requests, close } = await standIn({
   app: "image-viewer",
@@ -55,12 +59,12 @@ const { base, requests, close } = await standIn({
   files: ["index.html", "main.js", "photos.js", "photos.css"],
   routes(method, path) {
     if (method !== "GET") return null;
-    if (path === "/api/viewers/image-viewer/playlist") {
-      return { type: "application/json", body: JSON.stringify(PLAYLIST) };
+    if (path === OUTPUT) {
+      return { type: "application/octet-stream", body: JSON.stringify(PLAYLIST) };
     }
-    const item = path.match(/^\/api\/viewers\/image-viewer\/playlist\/item\/(\d+)$/);
-    if (item && IMAGES[item[1]]) {
-      return { type: "application/octet-stream", headers: { "x-content-type-options": "nosniff" }, body: IMAGES[item[1]] };
+    const image = path.startsWith(CONTENT) && IMAGES[decodeURIComponent(path.slice(CONTENT.length))];
+    if (image) {
+      return { type: "application/octet-stream", headers: { "x-content-type-options": "nosniff" }, body: image };
     }
     return null;
   },
@@ -77,7 +81,12 @@ try {
     assert.equal(await frame.locator("#caption").textContent(), "1 / 2 · 4 × 3");
 
     // The skipped entry is text: the markup in it did not run or load anything.
-    assert.equal(await frame.locator("#skipped li").textContent(), `Photo 2: ${HOSTILE}`);
+    // The entry outside the launched set is listed, never asked for.
+    const lines = await frame.locator("#skipped li").allTextContents();
+    assert.deepEqual(lines, [
+      `Photo 2: ${HOSTILE}`,
+      "Photo 4: This entry is not in the photo set this page was opened with.",
+    ]);
     assert.equal(await frame.locator("#skipped img").count(), 0);
 
     await frame.locator("#next").click();
@@ -102,13 +111,10 @@ try {
   const api = requests.filter((line) => line.includes(" /api/"));
   assert.deepEqual(
     api.filter((line) => line.startsWith("GET")),
-    [
-      "GET /api/viewers/image-viewer/playlist",
-      "GET /api/viewers/image-viewer/playlist/item/0",
-      "GET /api/viewers/image-viewer/playlist/item/2",
-    ],
+    [`GET ${OUTPUT}`, `GET ${CONTENT}images/a.png`, `GET ${CONTENT}images/c%20d.png`],
   );
-  assert.ok(api.every((line) => /^(GET|OPTIONS) \/api\/viewers\/image-viewer\/playlist(\/item\/\d+)?$/.test(line)), api.join("\n"));
+  assert.ok(api.every((line) => /^(GET|OPTIONS) \/api\/viewers\/image-viewer\/launch\/(output|content)\//.test(line)), api.join("\n"));
+  assert.ok(!requests.some((line) => line.includes("Users")), "nothing outside the set asked for");
   assert.ok(!requests.some((line) => line.includes("/api/apps/home/state")), "the skipped message ran");
   assert.deepEqual(problems, [], "console errors (CSP or script)");
   console.log("photos browser smoke: ok");

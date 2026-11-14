@@ -8,14 +8,17 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
-  ITEM_ROUTE,
+  CONTENT_ROUTE,
+  LAUNCH_CONTENT,
   MAX_DURATION_MS,
   MIN_DURATION_MS,
   PLAYLIST_ROUTE,
   PLAYLIST_SCHEMA,
   TOKEN_HEADER,
+  launchPath,
   launchToken,
   mountPhotos,
+  photosClient,
   readPlaylist,
 } from "./browser/photos.js";
 import { fakeDocument as kitDocument, response } from "../../capsule-kit/surface/test-kit.mjs";
@@ -27,13 +30,13 @@ const IDS = ["photo", "caption", "status", "skipped", "skipped-title", "previous
 const fakeDocument = () => kitDocument(IDS);
 
 function playlist(items, skipped = []) {
-  return { schema: PLAYLIST_SCHEMA, album: "localhost://Users/self/Pictures/album.json", items, skipped };
+  return { schema: PLAYLIST_SCHEMA, album: LAUNCH_CONTENT, items, skipped };
 }
 
 function item(order, extra = {}) {
   return {
     order,
-    uri: `localhost://Users/self/Pictures/photo-${order}.png`,
+    uri: `${LAUNCH_CONTENT}images/photo-${order}.png`,
     mime: "image/png",
     width: 640,
     height: 480,
@@ -84,11 +87,13 @@ function world({ hash = `#home_token=${TOKEN}`, routes = {} } = {}) {
 }
 
 const bytes = (label) => new TextEncoder().encode(`\x89PNG ${label}`).buffer;
+/** The route the page reads the picture of position `order` at. */
+const at = (order) => `${CONTENT_ROUTE}images/photo-${order}.png`;
 
 function servingPlaylist(list, images = {}) {
   const routes = { [PLAYLIST_ROUTE]: response(200, list) };
   for (const [order, body] of Object.entries(images)) {
-    routes[`${ITEM_ROUTE}${order}`] = response(200, body);
+    routes[at(order)] = response(200, body);
   }
   return routes;
 }
@@ -114,36 +119,60 @@ test("it renders only playlist items, in position order", async () => {
   // Position 1 was skipped: it is never asked for.
   assert.deepEqual(
     requests.map((request) => request.url),
-    [PLAYLIST_ROUTE, `${ITEM_ROUTE}0`, `${ITEM_ROUTE}2`, `${ITEM_ROUTE}0`],
+    [PLAYLIST_ROUTE, at(0), at(2), at(0)],
   );
   assert.deepEqual(urls.revoked, ["blob:photos/0", "blob:photos/1"]);
 });
 
-test("it never requests a path: items are asked for by position, and their URIs are dropped", async () => {
+test("it asks only for plain paths inside the launched set", async () => {
+  const odd = `${LAUNCH_CONTENT}images/a b#?.png`;
   const list = playlist([
     item(0, { uri: "localhost://Users/self/Documents/secret.png" }),
-    item(1, { uri: "../../../etc/passwd" }),
-    { ...item(3), order: "4/../../secret" },
-    { ...item(5), order: -1 },
-    { ...item(6), order: 1.5 },
-    item(0),
+    item(1, { uri: `${LAUNCH_CONTENT}../secret.png` }),
+    item(2, { uri: LAUNCH_CONTENT }),
+    item(3, { uri: `${LAUNCH_CONTENT}images//photo-3.png` }),
+    item(4, { uri: "elastos://launch/output/playlist.json" }),
+    item(5, { uri: `${LAUNCH_CONTENT}images\\photo-5.png` }),
+    { ...item(8), order: -1 },
+    item(6),
+    item(7, { uri: odd }),
   ]);
-  const { env, requests } = world({ routes: servingPlaylist(list, { 0: bytes("a"), 1: bytes("b") }) });
+  const routes = servingPlaylist(list, { 6: bytes("g") });
+  routes[`${CONTENT_ROUTE}images/a%20b%23%3F.png`] = response(200, bytes("h"));
+  const { env, requests } = world({ routes });
   const photos = mountPhotos(env);
   await photos.ready();
   await photos.next();
-  assert.deepEqual(photos.state.slides.map((slide) => slide.order), [0, 1]);
+  assert.deepEqual(photos.state.slides.map((slide) => slide.order), [6, 7]);
+  assert.deepEqual(photos.state.slides.map((slide) => slide.path), ["images/photo-6.png", "images/a b#?.png"]);
   for (const slide of photos.state.slides) {
-    assert.deepEqual(Object.keys(slide).sort(), ["durationMs", "height", "mime", "order", "width"]);
+    assert.deepEqual(Object.keys(slide).sort(), ["durationMs", "height", "mime", "order", "path", "width"]);
   }
-  for (const { url } of requests) {
-    assert.match(url, /^\/api\/viewers\/image-viewer\/playlist(\/item\/\d+)?$/);
-    assert.ok(!url.includes("Users") && !url.includes(".."), url);
-  }
-  // Bad positions and the repeated 0 are listed as not shown, with no position.
+  assert.deepEqual(
+    requests.map((request) => request.url),
+    [PLAYLIST_ROUTE, at(6), `${CONTENT_ROUTE}images/a%20b%23%3F.png`],
+    "each part encoded; nothing outside the set asked for",
+  );
   const lines = env.document.elements.skipped.children.map((line) => line.textContent);
-  assert.equal(lines.filter((line) => line === "This entry could not be read.").length, 3);
-  assert.ok(lines.includes("Photo 1: This entry could not be read."), lines.join("\n"));
+  const outside = lines.filter((line) => line.endsWith("This entry is not in the photo set this page was opened with."));
+  assert.equal(outside.length, 6, lines.join("\n"));
+  assert.ok(lines.includes("This entry could not be read."), lines.join("\n"));
+});
+
+test("a path in the set is plain, and the client asks for no other", async () => {
+  assert.equal(launchPath(`${LAUNCH_CONTENT}images/01.png`), "images/01.png");
+  for (const uri of [LAUNCH_CONTENT, `${LAUNCH_CONTENT}../x`, `${LAUNCH_CONTENT}a/./b`, `${LAUNCH_CONTENT}a//b`, `${LAUNCH_CONTENT}a\\b`, "localhost://Users/self/Pictures/a.png", null]) {
+    assert.equal(launchPath(uri), null, String(uri));
+  }
+  const requests = [];
+  const client = photosClient((url) => {
+    requests.push(url);
+    return Promise.resolve(response(200, bytes("x")));
+  }, TOKEN);
+  for (const path of ["../x", "a//b", "", "a/../b"]) {
+    await assert.rejects(() => client.item(path), /its path in the set only/, path);
+  }
+  assert.deepEqual(requests, [], "no request for a path that is not plain");
 });
 
 test("it shows skipped items as text, never as markup", async () => {
@@ -172,7 +201,7 @@ test("it makes no request other than the two routes, each a GET with the launch 
   await photos.previous();
   assert.equal(requests.length, 4);
   for (const { url, options, self } of requests) {
-    assert.ok(url === PLAYLIST_ROUTE || url.startsWith(ITEM_ROUTE), url);
+    assert.ok(url === PLAYLIST_ROUTE || url.startsWith(CONTENT_ROUTE), url);
     assert.deepEqual(options, {
       method: "GET",
       headers: { [TOKEN_HEADER]: TOKEN },
@@ -194,7 +223,7 @@ test("without a launch token it asks for nothing", async () => {
 test("a refusal is shown as its text", async () => {
   const routes = {
     [PLAYLIST_ROUTE]: response(200, playlist([item(0)])),
-    [`${ITEM_ROUTE}0`]: response(409, { error: "the playlist changed during this launch (pinned sha256:ab)" }),
+    [at(0)]: response(409, { error: "the playlist changed during this launch (pinned sha256:ab)" }),
   };
   const { env } = world({ routes });
   await mountPhotos(env).ready();
@@ -233,8 +262,8 @@ test("a slow answer for an earlier choice does not replace a later one", async (
   });
   const routes = {
     [PLAYLIST_ROUTE]: response(200, playlist([item(0), item(1)])),
-    [`${ITEM_ROUTE}0`]: () => first,
-    [`${ITEM_ROUTE}1`]: response(200, bytes("b")),
+    [at(0)]: () => first,
+    [at(1)]: response(200, bytes("b")),
   };
   const { env, urls } = world({ routes });
   const photos = mountPhotos(env);
