@@ -849,7 +849,10 @@ async fn start_fake_runtime_configured(
 /// The Runtime's open of a kept launch, as the fake answers it: it records the
 /// ask (the shell's bearer, the grant, the body) and opens `bafy-good` as the
 /// page `image-viewer` at launch `abab…`, refuses `bafy-wrong` as a start
-/// refuses a wrong CID, and `bafy-full` as a full person.
+/// refuses a wrong CID, and `bafy-full` as a full person. `bafy-odd` opens a
+/// page whose entrypoint has a space and a `#` in its name; `bafy-badid`,
+/// `bafy-badentry` and `bafy-badpage` answer 200 in a shape the gateway must
+/// not use.
 async fn fake_runtime_open_launch(
     AxumState(state): AxumState<FakeRuntimeState>,
     headers: HeaderMap,
@@ -866,6 +869,30 @@ async fn fake_runtime_open_launch(
         Some("bafy-good") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image-viewer",
+            "entrypoint": "browser/index.html",
+        }))
+        .into_response(),
+        Some("bafy-odd") => AxumJson(json!({
+            "id": "ab".repeat(16),
+            "page": "image-viewer",
+            "entrypoint": "browser/my page#1.html",
+        }))
+        .into_response(),
+        Some("bafy-badid") => AxumJson(json!({
+            "id": format!("{}zz", "ab".repeat(15)),
+            "page": "image-viewer",
+            "entrypoint": "browser/index.html",
+        }))
+        .into_response(),
+        Some("bafy-badentry") => AxumJson(json!({
+            "id": "ab".repeat(16),
+            "page": "image-viewer",
+            "entrypoint": "browser/../index.html",
+        }))
+        .into_response(),
+        Some("bafy-badpage") => AxumJson(json!({
+            "id": "ab".repeat(16),
+            "page": "image/viewer",
             "entrypoint": "browser/index.html",
         }))
         .into_response(),

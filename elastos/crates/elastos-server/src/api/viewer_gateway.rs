@@ -1072,7 +1072,7 @@ pub async fn home_launch_content(
     };
     Json(json!({
         "page": opened.page,
-        "page_url": format!("/launch/{}/page/{}", opened.id, opened.entrypoint),
+        "page_url": format!("/launch/{}/page/{}", opened.id, encoded_path(&opened.entrypoint)),
         "token": token,
     }))
     .into_response()
@@ -1114,12 +1114,40 @@ async fn open_at_runtime(
         let refusal = answer.text().await.unwrap_or_default();
         return Err((status, refusal));
     }
-    answer.json::<RuntimeOpened>().await.map_err(|_| {
+    let odd = || {
         (
             StatusCode::BAD_GATEWAY,
             "runtime open answered oddly".to_string(),
         )
-    })
+    };
+    let opened = answer.json::<RuntimeOpened>().await.map_err(|_| odd())?;
+    // Only an answer of the right shape is used for a token and an address: a
+    // launch id of 32 hex, one plain page name, a plain entrypoint path.
+    let launch_id = opened.id.len() == 32 && opened.id.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let page = !opened.page.is_empty()
+        && !opened.page.contains('/')
+        && crate::page_launch::plain_content_path(&opened.page);
+    let entrypoint = crate::page_launch::plain_content_path(&opened.entrypoint);
+    match launch_id && page && entrypoint {
+        true => Ok(opened),
+        false => Err(odd()),
+    }
+}
+
+/// A plain path for a URL: each part percent-encoded but for letters, digits
+/// and `-._~`, the parts joined by `/`. An entrypoint may be any file name a
+/// manifest allows, `#`, `?` and spaces among them.
+fn encoded_path(path: &str) -> String {
+    let part = |part: &str| -> String {
+        let keep = |byte: u8| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte);
+        part.bytes()
+            .map(|byte| match keep(byte) {
+                true => (byte as char).to_string(),
+                false => format!("%{byte:02X}"),
+            })
+            .collect()
+    };
+    path.split('/').map(part).collect::<Vec<_>>().join("/")
 }
 
 pub(super) fn viewer_error_response(err: anyhow::Error) -> Response {

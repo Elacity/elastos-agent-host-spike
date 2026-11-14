@@ -129,6 +129,41 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
     );
 }
 
+/// D2a-address. The page's address takes each part of the entrypoint
+/// percent-encoded, so a file name with a space or a `#` (a manifest allows
+/// both) names that file and no other. A 200 from the Runtime in any other
+/// shape (an id that is not 32 hex, an entrypoint or page name that is not
+/// plain) is a 502, and no token is minted.
+#[tokio::test]
+async fn home_open_encodes_the_pages_address_and_uses_only_a_well_formed_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority(dir.path());
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let _runtime = start_fake_runtime(dir.path(), bus, "launch-open-address").await;
+    let cookie = home_cookie(&authority);
+
+    let (status, body) = open(&app, "bafy-odd", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        answer["page_url"],
+        format!("/launch/{LAUNCH}/page/browser/my%20page%231.html")
+    );
+
+    for cid in ["bafy-badid", "bafy-badentry", "bafy-badpage"] {
+        let (status, body) = open(&app, cid, Some(&cookie), None).await;
+        assert_eq!(
+            (status, String::from_utf8_lossy(&body).to_string()),
+            (
+                StatusCode::BAD_GATEWAY,
+                "runtime open answered oddly".to_string()
+            ),
+            "{cid}"
+        );
+    }
+}
+
 /// D2a-refused. Without Home's own session nothing is opened and the Runtime
 /// is not asked: no session at all, or another app's token sent as that app's
 /// frame sends it (`Origin: null`), so that only Home's own check refuses it. The Runtime's
@@ -154,8 +189,10 @@ async fn home_open_needs_homes_session_and_passes_refusals_on_by_name() {
     let cookie = home_cookie(&authority);
     let (status, body) = open(&app, "bafy-wrong", Some(&cookie), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let body = String::from_utf8_lossy(&body).to_string();
-    assert!(body.starts_with("bundle_cid_mismatch"), "{body}");
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "bundle_cid_mismatch: the slot's files do not recompute to the CID asked for"
+    );
     let (status, body) = open(&app, "bafy-full", Some(&cookie), None).await;
     assert_eq!(
         (status, body),
