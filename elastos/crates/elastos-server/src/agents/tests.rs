@@ -1783,7 +1783,10 @@ fn with_the_feature_off_the_launch_lookup_refuses_by_name() {
 /// `bundle_cid` is the CID creation stores for the Agent Host's bytes, from the
 /// one walk the Runtime uses.
 #[cfg(feature = "prototype-agents")]
-fn home_with_agents(count: usize, bundle_cid: &str) -> (crate::agents::tests::Home, Vec<String>) {
+pub(crate) fn home_with_agents(
+    count: usize,
+    bundle_cid: &str,
+) -> (crate::agents::tests::Home, Vec<String>) {
     let home = crate::agents::tests::Home::new();
     let caller = home.caller();
     crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();

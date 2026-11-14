@@ -560,6 +560,57 @@ pub(crate) mod tests {
         assert_eq!(cid, None, "S1 records no CID");
     }
 
+    /// A localhost double: it records every raw request the bridge routes to
+    /// the `localhost` scheme and answers `ok`. Own-root reads and writes take
+    /// the protected path and never reach it, so its record shows exactly
+    /// which calls fell past that path.
+    #[derive(Default)]
+    pub(crate) struct CapturingLocalhostProvider {
+        requests: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl CapturingLocalhostProvider {
+        pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl elastos_runtime::provider::Provider for CapturingLocalhostProvider {
+        async fn handle(
+            &self,
+            _request: elastos_runtime::provider::ResourceRequest,
+        ) -> Result<
+            elastos_runtime::provider::ResourceResponse,
+            elastos_runtime::provider::ProviderError,
+        > {
+            Err(elastos_runtime::provider::ProviderError::Provider(
+                "raw provider fixture does not implement ResourceRequest".to_string(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["localhost"]
+        }
+
+        fn name(&self) -> &'static str {
+            "capturing-localhost"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, elastos_runtime::provider::ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "ok": true
+                }
+            }))
+        }
+    }
+
     /// A Home whose stored agents are the probe package: the probe's manifest
     /// name and the CID its capsule directory records, signed by a key the
     /// runtime trusts. Two agents, or as many as asked for, share the Home.
@@ -573,6 +624,7 @@ pub(crate) mod tests {
         audit_log: Arc<AuditLog>,
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+        provider: Arc<CapturingLocalhostProvider>,
         capsule_dir: std::path::PathBuf,
         grant: String,
         pub(crate) agents: Vec<String>,
@@ -682,9 +734,12 @@ pub(crate) mod tests {
             let pending_store = Arc::new(
                 elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
             );
+            let provider = Arc::new(CapturingLocalhostProvider::default());
+            let registry = Arc::new(ProviderRegistry::new());
+            registry.register(provider.clone()).await;
             runtime
                 .set_provider_registry(
-                    Arc::new(ProviderRegistry::new()),
+                    registry,
                     capability_manager.clone(),
                     pending_store.clone(),
                     data_dir.clone(),
@@ -779,6 +834,7 @@ pub(crate) mod tests {
                 audit_log,
                 pending_store,
                 capability_manager,
+                provider,
                 capsule_dir,
                 grant,
                 agents,
@@ -923,6 +979,81 @@ pub(crate) mod tests {
                 })
                 .collect()
         }
+
+        /// Every raw request the bridge routed to the capturing localhost
+        /// double, in order.
+        pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
+            self.provider.requests()
+        }
+
+        /// Writes the plan the guest reads under its own root and issues.
+        pub(crate) fn plan(&self, agent_id: &str, lines: &[String]) {
+            let root = self.root(agent_id);
+            let uri = format!("{root}/memory/plan");
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&self.data_dir, &uri).unwrap();
+            crate::auth::write_principal_root_object(
+                &self.data_dir,
+                agent_id,
+                &root,
+                &uri,
+                &path,
+                lines.join("\n").as_bytes(),
+            )
+            .unwrap();
+        }
+
+        /// The result line the guest wrote for each plan entry, in order.
+        pub(crate) fn results(&self, agent_id: &str) -> Vec<String> {
+            let root = self.root(agent_id);
+            let uri = format!("{root}/memory/results");
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&self.data_dir, &uri).unwrap();
+            let bytes = crate::auth::read_principal_root_object(
+                &self.data_dir,
+                agent_id,
+                &root,
+                &uri,
+                &path,
+            )
+            .unwrap();
+            String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    /// Every file under `dir` as (relative path, SHA-256 of its bytes), sorted.
+    /// Two calls that return the same vector mean the tree's names and bytes
+    /// did not change.
+    pub(crate) fn tree_hashes(dir: &std::path::Path) -> Vec<(String, String)> {
+        use sha2::{Digest, Sha256};
+        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    let bytes = std::fs::read(&path).unwrap();
+                    let digest = format!("{:x}", Sha256::digest(&bytes));
+                    out.push((relative, digest));
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(dir, dir, &mut found);
+        found.sort();
+        found
     }
 
     /// Grants every pending capability request the probe makes, as the shell
@@ -1189,6 +1320,163 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .to_string(),
             "principal-root decrypt failed"
+        );
+    }
+
+    /// Row 3 (S5 part 2): the same spellings with the launched agent's own
+    /// segment name its own root, so the bridge serves them. A bare own root
+    /// stays beyond the probe host's `.../self/*` ceiling, and the traversal
+    /// spellings stay outside the root. The capturing localhost double shows
+    /// exactly which calls fell past the protected path.
+    #[tokio::test]
+    async fn an_agents_guest_serves_its_own_root_on_the_component_bridge() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x", "y"]).await;
+        let [x, y] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let scope = "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+        let ceiling = "capsule manifest does not declare authority for ";
+        let root = home.root(x);
+        let segment = root.trim_start_matches("localhost://UsersAI/").to_string();
+        let notes = format!("{root}/memory/notes.md");
+        let memory = format!("{root}/memory");
+        let doomed = format!("{root}/memory/doomed.txt");
+        let own_text = "row 3 own notes";
+        let upper = segment.to_uppercase();
+        let mut plan = vec![
+            format!("invoke\t{notes}\t{notes}\tread\tread\t"),
+            format!("write\t{notes}\t{notes}\twrite\t{own_text}"),
+            format!("invoke\t{notes}\t{notes}\tread\tread\t"),
+            format!("invoke\t{memory}\t{memory}\tlist\tread\t"),
+            format!("invoke\t{doomed}\t{doomed}\tdelete\tdelete\t"),
+            format!("request\t{root}\tread"),
+            format!("request\t{root}/\tread"),
+            format!("request\t{root}/../{segment}\tread"),
+            format!("request\tlocalhost://UsersAI/./{segment}\tread"),
+            format!("request\tlocalhost://UsersAI//{segment}\tread"),
+            format!("request\tlocalhost://UsersAI/%2e%2e%2f{segment}/memory/notes.md\tread"),
+            format!("invoke\t{notes}\tlocalhost://UsersAI/self\tread\tread\t{notes}"),
+            format!("invoke\t{notes}\t{notes}\tread\tread\t{notes}"),
+        ];
+        let mut upper_index = None;
+        if upper != segment {
+            upper_index = Some(plan.len());
+            plan.push(format!("request\tlocalhost://UsersAI/{upper}\tread"));
+        }
+
+        let root_y = home.root(y);
+        let y_dir =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &root_y).unwrap();
+        let y_before = tree_hashes(&y_dir);
+
+        home.plan(x, &plan);
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let run = home.launch(x).await.unwrap().0;
+        grants.abort();
+        assert_eq!(run.status, "completed");
+
+        let results = home.results(x);
+        assert_eq!(results.len(), plan.len(), "{results:?}");
+        let at = |index: usize| {
+            results
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| panic!("no result for plan entry {index}: {results:?}"))
+        };
+        // A result line is `<index>\t<outcome>`; the outcome is what the
+        // guest recorded for the entry.
+        let outcome =
+            |index: usize| -> String { at(index).split_once('\t').unwrap().1.to_string() };
+        // A read's content is the byte array the bridge returns. Decode it so
+        // the assertion is on the bytes, not their JSON spelling.
+        let content = |index: usize| -> Vec<u8> {
+            let line = outcome(index);
+            let (status, json) = line.split_once(' ').unwrap();
+            assert_eq!(status, "ok", "{line}");
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            value["data"]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_u64().unwrap() as u8)
+                .collect()
+        };
+
+        // S3': the own read returns the bytes the guest wrote, and the write
+        // lands and reads back.
+        assert!(
+            String::from_utf8(content(0))
+                .unwrap()
+                .contains(&format!("a5-launch-probe notes for {x}")),
+            "{}",
+            at(0)
+        );
+        assert!(outcome(1).starts_with("ok"), "{}", at(1));
+        assert_eq!(content(2), own_text.as_bytes());
+
+        // List and delete are own-root operations the protected path does not
+        // serve, so they reach the capturing provider.
+        assert!(outcome(3).starts_with("ok"), "{}", at(3));
+        assert!(outcome(4).starts_with("ok"), "{}", at(4));
+        let requests = home.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(requests[0]["path"], memory);
+        assert_eq!(requests[0]["op"], "list");
+        assert_eq!(requests[1]["path"], doomed);
+        assert_eq!(requests[1]["op"], "delete");
+
+        // A bare own root and its slash form are still beyond the ceiling.
+        for index in [5, 6] {
+            assert!(at(index).contains(ceiling), "{index}: {}", at(index));
+        }
+        // The `..` suffix is on no wildcard, even under the own prefix.
+        assert!(at(7).contains(ceiling), "{}", at(7));
+        // `.`, `//`, an upper-cased segment and an encoded traversal are not
+        // the agent's stored root.
+        for index in [8, 9, 10] {
+            assert!(at(index).contains(scope), "{index}: {}", at(index));
+        }
+        if let Some(index) = upper_index {
+            assert!(at(index).contains(scope), "{index}: {}", at(index));
+        }
+
+        // S10' and S11a': a URI and a body path that would name different
+        // roots name this agent when the own segment is used, and are served.
+        assert_eq!(content(11), own_text.as_bytes(), "{}", at(11));
+        assert_eq!(content(12), own_text.as_bytes(), "{}", at(12));
+
+        // The other agent's tree gained nothing.
+        assert_eq!(tree_hashes(&y_dir), y_before);
+    }
+
+    /// Row E (blocker evidence, no production change): a start that did not
+    /// admit a stored agent refuses its principal by name before reading the
+    /// folder. This is the attached start route that row 4's route 4 lacks.
+    #[tokio::test]
+    async fn an_attached_start_refuses_a_stored_agents_principal() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x"]).await;
+        let [x] = home.agents.as_slice() else {
+            panic!("one agent");
+        };
+        let error = home
+            .runtime
+            .run_local_with_principal(&home.capsule_dir, Vec::new(), Some(x.clone()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "Invalid manifest: a stored agent's principal reaches only a launch that \
+                 admitted it: {x}"
+            )
         );
     }
 

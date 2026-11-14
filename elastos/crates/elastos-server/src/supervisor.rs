@@ -1718,6 +1718,90 @@ mod tests {
         );
     }
 
+    /// S5 part 2 row E (blocker evidence, no production change): a stored
+    /// agent's own principal reaches no VM launch, and a manifest that
+    /// declares an agent starts no VM even for the person. This is why row 4
+    /// on route 3 has no agent actor to test.
+    #[cfg(feature = "prototype-agents")]
+    #[tokio::test]
+    async fn a_vm_launch_refuses_a_stored_agents_principal() {
+        let (home, agents) = crate::agents::tests::home_with_agents(1, "bafkreia5probe");
+        let agent = agents.into_iter().next().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let capsule_dir = data_dir.join("capsules/agent-vm-test");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-agent-vm-test\n").unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "agent-vm-test",
+                "version": "0.1.0",
+                "role": "app",
+                "type": "microvm",
+                "entrypoint": "rootfs.ext4",
+                "agent": {"kind": "agent"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "agent-vm-test".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-agent-vm-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+
+        // The stored agent's own principal is refused before any manifest is
+        // read, even for a capsule that declares the agent kind.
+        let error = supervisor
+            .launch_capsule("agent-vm-test", serde_json::json!({}), Some(agent.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{}: {agent}",
+                crate::agent_admission::UNADMITTED_AGENT_PRINCIPAL
+            )
+        );
+
+        // The person who owns the agent starts no VM for the same manifest.
+        let error = supervisor
+            .launch_capsule(
+                "agent-vm-test",
+                serde_json::json!({}),
+                Some(home.owner.principal_id.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), crate::agent_admission::NO_VM_AGENT);
+        assert!(
+            supervisor.running.read().await.is_empty(),
+            "no VM was recorded"
+        );
+    }
+
     #[tokio::test]
     async fn test_launch_capsule_rejects_principal_for_provider_role() {
         let temp = tempfile::tempdir().unwrap();
