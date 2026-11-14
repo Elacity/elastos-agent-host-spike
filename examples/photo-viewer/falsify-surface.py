@@ -25,7 +25,31 @@ CASES = [
         "a position that is not a whole number is asked for",
         "if (!isPosition(order) || seen.has(order)) {",
         "if (seen.has(order)) {",
-        ["it never requests a path"],
+        ["it asks only for plain paths inside the launched set"],
+    ),
+    (
+        "a uri outside the launched set is asked for",
+        "    if (path === null) {\n",
+        "    if (false) {\n",
+        ["it asks only for plain paths inside the launched set"],
+    ),
+    (
+        "a path with a `..` part is taken as in the set",
+        'const plainPart = (part) => part !== "" && part !== "." && part !== "..";',
+        'const plainPart = (part) => part !== "" && part !== ".";',
+        ["it asks only for plain paths inside the launched set", "a path in the set is plain"],
+    ),
+    (
+        "a path's parts are not encoded",
+        'path.split("/").map(encodeURIComponent).join("/")',
+        "path",
+        ["it asks only for plain paths inside the launched set"],
+    ),
+    (
+        "the client asks for a path that is not plain",
+        "      if (launchPath(`${LAUNCH_CONTENT}${path}`) !== path) {\n",
+        "      if (false) {\n",
+        ["a path in the set is plain"],
     ),
     (
         "a skipped message is shown as markup",

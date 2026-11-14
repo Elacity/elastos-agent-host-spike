@@ -1,17 +1,22 @@
 // Photos: the render-only surface for the photo-viewer playlist.
 //
 // It holds nothing but the launch token Runtime put in this frame's fragment,
-// and reads only through the two Photos routes (viewer_gateway.rs, "Photos
-// surface"): the playlist bound to this launch, and an item by its position.
-// It never builds a path or URI: an item is asked for by `order` alone, and
-// the `uri` fields of the playlist are dropped unread. Text from the playlist
-// is shown with textContent only. No storage, no messages, no other network.
+// and reads only through the two reads of the content launch it was opened
+// for (viewer_gateway.rs, `viewer_launch_output` and `viewer_launch_content`):
+// the playlist the photo core wrote to the launch's output, and each picture
+// of the launched set by its path. A picture's path comes from its `uri`, and
+// only a plain path under `elastos://launch/content/` is ever asked for: any
+// other `uri` is listed as not in the set. The token reaches only that one
+// launch, so no path the page builds can name anything outside the set it was
+// opened with. Text from the playlist is shown with textContent only. No
+// storage, no messages, no other network.
 //
 // Everything it touches comes in through `env` (the window in a browser), so
 // the tests can drive it with a fake fetch and a fake document.
 
-export const PLAYLIST_ROUTE = "/api/viewers/image-viewer/playlist";
-export const ITEM_ROUTE = "/api/viewers/image-viewer/playlist/item/";
+export const PLAYLIST_ROUTE = "/api/viewers/image-viewer/launch/output/playlist.json";
+export const CONTENT_ROUTE = "/api/viewers/image-viewer/launch/content/";
+export const LAUNCH_CONTENT = "elastos://launch/content/";
 export const PLAYLIST_SCHEMA = "elastos.photo-viewer.playlist/v1";
 export const TOKEN_HEADER = "x-elastos-home-token";
 
@@ -28,6 +33,19 @@ export function launchToken(hash) {
   return new URLSearchParams(String(hash || "").replace(/^#/, "")).get("home_token") || "";
 }
 
+/**
+ * The path of a picture in the launched set, from its `uri`: the plain path
+ * after `elastos://launch/content/` (one or more parts, none empty, `.` or
+ * `..`, no backslash), or null for any other `uri`.
+ */
+export function launchPath(uri) {
+  if (typeof uri !== "string" || !uri.startsWith(LAUNCH_CONTENT)) return null;
+  const path = uri.slice(LAUNCH_CONTENT.length);
+  const plainPart = (part) => part !== "" && part !== "." && part !== "..";
+  const plain = path !== "" && !path.includes("\\") && path.split("/").every(plainPart);
+  return plain ? path : null;
+}
+
 function isPosition(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
@@ -39,8 +57,9 @@ function shortText(value, fallback) {
 
 /**
  * What to show, from the playlist bytes' JSON. Throws on a playlist that is
- * not one. An entry that is not a showable image becomes a "not shown" line;
- * nothing from an entry is used except its position, type, size and duration.
+ * not one. An entry that is not a showable image of the launched set becomes a
+ * "not shown" line; nothing from an entry is used except its position, its
+ * path in the set, its type, size and duration.
  */
 export function readPlaylist(value) {
   if (!value || typeof value !== "object" || value.schema !== PLAYLIST_SCHEMA) {
@@ -65,9 +84,15 @@ export function readPlaylist(value) {
       skipped.push({ order, message: "This entry is not a PNG, JPEG or WebP image." });
       continue;
     }
+    const path = launchPath(item.uri);
+    if (path === null) {
+      skipped.push({ order, message: "This entry is not in the photo set this page was opened with." });
+      continue;
+    }
     const duration = Number.isSafeInteger(item.duration_ms) ? item.duration_ms : DEFAULT_DURATION_MS;
     slides.push({
       order,
+      path,
       mime: item.mime,
       width: Number.isSafeInteger(item.width) ? item.width : null,
       height: Number.isSafeInteger(item.height) ? item.height : null,
@@ -114,11 +139,12 @@ export function photosClient(fetchFn, token) {
     async playlist() {
       return (await get(PLAYLIST_ROUTE)).json();
     },
-    async item(order) {
-      if (!isPosition(order)) {
-        throw new Error("A photo is asked for by its position only.");
+    async item(path) {
+      if (launchPath(`${LAUNCH_CONTENT}${path}`) !== path) {
+        throw new Error("A photo is asked for by its path in the set only.");
       }
-      return (await get(`${ITEM_ROUTE}${order}`)).arrayBuffer();
+      const route = `${CONTENT_ROUTE}${path.split("/").map(encodeURIComponent).join("/")}`;
+      return (await get(route)).arrayBuffer();
     },
   };
 }
@@ -177,7 +203,7 @@ export function mountPhotos(env) {
     const ticket = ++state.shown;
     schedule();
     try {
-      const bytes = await client.item(slide.order);
+      const bytes = await client.item(slide.path);
       if (ticket !== state.shown) return; // a later choice won
       const url = env.URL.createObjectURL(new env.Blob([bytes], { type: slide.mime }));
       if (state.url) env.URL.revokeObjectURL(state.url);
