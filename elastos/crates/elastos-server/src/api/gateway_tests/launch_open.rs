@@ -24,7 +24,13 @@ async fn open(
     cookie: Option<&str>,
     token: Option<&str>,
 ) -> (StatusCode, Vec<u8>) {
-    let mut request = test_browser_request("localhost:61180", "http://localhost:61180")
+    // Home's own page sends Home's origin; an app's frame sends `null`.
+    let origin = if token.is_some() {
+        "null"
+    } else {
+        "http://localhost:61180"
+    };
+    let mut request = test_browser_request("localhost:61180", origin)
         .method("POST")
         .uri("/api/home/launch/content")
         .header("content-type", "application/json");
@@ -124,7 +130,8 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
 }
 
 /// D2a-refused. Without Home's own session nothing is opened and the Runtime
-/// is not asked: no session at all, or another app's token. The Runtime's
+/// is not asked: no session at all, or another app's token sent as that app's
+/// frame sends it (`Origin: null`), so that only Home's own check refuses it. The Runtime's
 /// refusals are passed on as they are, by name, and no token is minted.
 #[tokio::test]
 async fn home_open_needs_homes_session_and_passes_refusals_on_by_name() {
