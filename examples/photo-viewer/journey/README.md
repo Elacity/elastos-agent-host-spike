@@ -5,7 +5,8 @@ browser; a set whose bytes no longer match its CID, and a CID never staged, are 
 through the built `elastos` binary as the gateway and as Home's Runtime.
 
 ```bash
-cargo build --locked -p elastos-server --bin elastos -p localhost-provider   # in elastos/
+cargo build --locked -p elastos-server --bin elastos   # in elastos/
+cargo build --locked -p localhost-provider             # its own command: --bin elastos would leave it unbuilt
 bash examples/photo-viewer/journey/run-journey.sh . <new work folder> <photo-viewer.component.wasm>
 bash examples/photo-viewer/journey/falsify-journey.sh . <new work folder> <photo-viewer.component.wasm>
 ```
