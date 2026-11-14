@@ -10,6 +10,17 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 type SnapshotEntry = (u32, Option<Vec<u8>>, Option<PathBuf>);
 type Snapshot = std::collections::BTreeMap<PathBuf, SnapshotEntry>;
 
+/// Controller tests drive the restart path under heavy parallel load, so a
+/// candidate's version probe gets a deadline far above the shipped five
+/// seconds. The production entry fixes the shipped five seconds itself and
+/// takes no deadline; the test sibling takes this one.
+const TEST_PROBE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A crash candidate must get time to start under the same load. The previous
+/// start failure this fixture builds is the assertion; a starved candidate must
+/// not be mistaken for a hung one.
+const TEST_READY_BUDGET: Duration = Duration::from_secs(30);
+
 pub(crate) struct PrivateFixture {
     _root: tempfile::TempDir,
     pub(crate) data: PathBuf,
@@ -3425,6 +3436,198 @@ async fn real_controller_hung_start_restores_previous_home_once() {
     real_controller_restart_failure("hung", 0).await;
 }
 
+/// The test sibling uses the deadline its caller passes; the production entry
+/// fixes the shipped five seconds itself. This row passes one second while the
+/// candidate hangs, so the error proves which deadline reached the probe.
+#[tokio::test]
+async fn restarting_update_uses_the_explicit_controller_probe_deadline() {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        ..
+    } = restart_scenario(
+        |_| "#!/bin/sh\nexec sleep 3600\n".into(),
+        0,
+        Some(Duration::from_secs(3)),
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let error = crate::update::run_restarting_update_with_deadline(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("timed out after 1 seconds"),
+        "{error:#}"
+    );
+    assert!(
+        started.elapsed() < TEST_PROBE_DEADLINE,
+        "probe waited {:?}",
+        started.elapsed()
+    );
+    owner.controller.stop_child().await.unwrap();
+}
+
+/// The production restart entry, not its deadline-taking test sibling, fixes
+/// the shipped deadline. A hung candidate must return at the five-second timer
+/// and leave Home running with every installed file unchanged.
+#[tokio::test]
+async fn production_restarting_update_times_out_a_hung_candidate_at_five_seconds() {
+    // Lower: the five-second timer cannot return sooner. The ceiling is a hang
+    // guard, not the value this row proves: the five-second limit is pinned by
+    // the ProbeDeadline type, its compile-time assert and the error text below.
+    const LOWER: Duration = Duration::from_millis(4_500);
+    const UPPER: Duration = Duration::from_secs(60);
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        old,
+    } = restart_scenario(
+        |fixture| {
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 3600\n",
+                fixture.data.join("probe-pid").display()
+            )
+        },
+        0,
+        None,
+    )
+    .await;
+    // The frozen-offline path stages changed support through the owner before
+    // the probe; the normal path fetches it only after the probe. This marker
+    // therefore shows which apply mode the production entry used.
+    let staged_support = fixture.data.join("support-staged-before-probe");
+    let fetch: crate::update::FetchFn = {
+        let inner = fetch;
+        let staged_support = staged_support.clone();
+        Box::new(move |cid| {
+            if cid == raw_cid(b"new support") {
+                fs::write(&staged_support, b"1").unwrap();
+            }
+            inner(cid)
+        })
+    };
+    let started = std::time::Instant::now();
+    let error =
+        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
+            .await
+            .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= LOWER, "returned after {elapsed:?}");
+    assert!(elapsed < UPPER, "returned after {elapsed:?}");
+    let message = format!("{error:#}");
+    assert!(message.contains("timed out after 5 seconds"), "{message}");
+    // The probe runs before the owner stops Home.
+    assert_eq!(owner.stops, 0);
+    for (path, bytes) in old {
+        assert_eq!(fs::read(&path).unwrap(), bytes, "{}", path.display());
+    }
+    assert_no_recovery_files(&fixture);
+    assert!(
+        staged_support.exists(),
+        "the restart entry did not stage support before the probe (wrong apply mode)"
+    );
+    // A starved shell may not run before the probe's group kill, so no PID file
+    // can appear. Orphan clean-up is pinned by the pipe-retaining row, and
+    // every timeout assertion above runs first.
+    if let Some(pid) = wait_for_recorded_pid(&fixture.data.join("probe-pid")).await {
+        wait_until_gone(pid).await;
+    }
+    owner.controller.stop_child().await.unwrap();
+}
+
+/// The probe may return before a starved shell writes its PID. A missing file
+/// is not a failure here; the caller asserts group clean-up only when it has a
+/// PID to check.
+async fn wait_for_recorded_pid(path: &Path) -> Option<i32> {
+    let until = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(pid) = fs::read_to_string(path).unwrap_or_default().trim().parse() {
+            return Some(pid);
+        }
+        if tokio::time::Instant::now() >= until {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_until_gone(pid: i32) {
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        // SAFETY: signal 0 only checks whether the PID still exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < until,
+            "process {pid} survived"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A candidate whose `--version` answers more slowly than the shipped five
+/// seconds, but inside the deadline the caller passes, is accepted.
+#[tokio::test]
+async fn controller_accepts_a_candidate_whose_version_probe_takes_six_seconds() {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        ..
+    } = restart_scenario(
+        |fixture| {
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'probe\\n' >> '{}'; /bin/sleep 6; printf 'elastos 0.7.1\\n'; exit 0; fi\n{}",
+                fixture.data.join("probe-ran").display(),
+                fixture_home_exec("RESTART_FIXTURE_ROLE=candidate RESTART_FIXTURE_VERSION=0.7.1")
+            )
+        },
+        0,
+        None,
+    )
+    .await;
+    let result = crate::update::run_restarting_update_with_deadline(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
+    owner.controller.publish_apply_result(&result).unwrap();
+    result.unwrap();
+    // The candidate's --version branch leaves this marker. Acceptance cannot
+    // skip the probe, whatever the total wall clock says.
+    assert_eq!(
+        fs::read(fixture.data.join("probe-ran")).unwrap(),
+        b"probe\n",
+        "the candidate's --version branch never ran"
+    );
+    assert_eq!(owner.starts, [RestartPhase::CandidateStartClaimed]);
+    let projected = status(&fixture.data).unwrap().unwrap();
+    assert_eq!(projected.phase, "updated");
+    assert_eq!(projected.current_version, "0.7.1");
+    assert_eq!(
+        fs::read(fixture.data.join("candidate-starts")).unwrap(),
+        b"start\n"
+    );
+    assert!(fixture.data.join("candidate-ready").exists());
+    assert_no_recovery_files(&fixture);
+    owner.controller.stop_child().await.unwrap();
+}
+
 /// A rollback start as slow as Home on a busy Jetson still restores the previous Home.
 #[tokio::test]
 async fn real_controller_rollback_start_taking_45_seconds_restores_previous_home() {
@@ -3622,14 +3825,25 @@ async fn real_controller_restart_failure(failure: &str, previous_delay: u64) {
             _ => "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\nprintf 'candidate start evidence\\n' >&2\nexec /bin/sleep 60\n".into(),
         },
         previous_delay,
-        Some(Duration::from_secs(3)),
+        // The hung row proves the three-second readiness timeout; the loader,
+        // crash and rollback rows only need the candidate to start.
+        Some(if failure == "hung" {
+            Duration::from_secs(3)
+        } else {
+            TEST_READY_BUDGET
+        }),
     )
     .await;
     let interpreter = fixture.data.join("candidate-interpreter");
     let started = std::time::Instant::now();
-    let result =
-        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
-            .await;
+    let result = crate::update::run_restarting_update_with_deadline(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
     assert!(started.elapsed() >= Duration::from_secs(previous_delay));
     owner.controller.publish_apply_result(&result).unwrap();
     let error = format!("{:#}", result.unwrap_err());
@@ -3799,9 +4013,14 @@ async fn real_controller_accepts_a_new_home_ready_after_45_seconds() {
     )
     .await;
     let started = std::time::Instant::now();
-    let result =
-        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
-            .await;
+    let result = crate::update::run_restarting_update_with_deadline(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
     owner.controller.publish_apply_result(&result).unwrap();
     result.unwrap();
     assert!(started.elapsed() >= Duration::from_secs(45));
@@ -3837,11 +4056,16 @@ async fn dead_previous_start() -> (PrivateFixture, Vec<(PathBuf, Vec<u8>)>) {
         request,
         fetch,
         old,
-    } = restart_scenario(crash_candidate, 0, Some(Duration::from_secs(3))).await;
+    } = restart_scenario(crash_candidate, 0, Some(TEST_READY_BUDGET)).await;
     fixture.file(&fixture.data.join("previous-fail"), b"", 0o600);
-    let result =
-        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
-            .await;
+    let result = crate::update::run_restarting_update_with_deadline(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
     owner.controller.publish_apply_result(&result).unwrap();
     let error = format!("{:#}", result.unwrap_err());
     assert!(
@@ -3943,12 +4167,17 @@ async fn unspawnable_rollback_start_is_started_by_the_next_run() {
     } = restart_scenario(
         |_| "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\n/bin/rm previous-interpreter\nexit 7\n".into(),
         0,
-        Some(Duration::from_secs(3)),
+        Some(TEST_READY_BUDGET),
     )
     .await;
-    let result =
-        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
-            .await;
+    let result = crate::update::run_restarting_update_with_deadline(
+        &fixture.data,
+        &fetch,
+        request.head_cid,
+        &mut owner,
+        TEST_PROBE_DEADLINE,
+    )
+    .await;
     let error = format!("{:#}", result.unwrap_err());
     assert!(
         error.contains("previous Home did not become ready; retain recovery journal")
@@ -5092,11 +5321,12 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
                 Ok(bytes)
             })
         });
-        let result = crate::update::run_restarting_update(
+        let result = crate::update::run_restarting_update_with_deadline(
             &fixture.data,
             &fetch,
             request.head_cid,
             &mut owner,
+            TEST_PROBE_DEADLINE,
         )
         .await;
         owner.controller.publish_apply_result(&result).unwrap();
@@ -5395,11 +5625,12 @@ async fn system_update_fetches_the_pinned_network_before_stop_and_joins_after_ac
                 bytes.ok_or_else(|| anyhow::anyhow!("content {cid} is not published"))
             })
         });
-        let result = crate::update::run_restarting_update(
+        let result = crate::update::run_restarting_update_with_deadline(
             &fixture.data,
             &fetch,
             request.head_cid,
             &mut owner,
+            TEST_PROBE_DEADLINE,
         )
         .await;
         owner.controller.publish_apply_result(&result).unwrap();

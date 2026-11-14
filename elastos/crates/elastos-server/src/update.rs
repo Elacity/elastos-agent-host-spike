@@ -363,11 +363,45 @@ pub fn evict_changed_capsule_cache(data_dir: &std::path::Path, changed_capsules:
     cleared
 }
 
+/// The probe deadline is a value only its own module can construct. Production
+/// code names none other than [`probe_deadline::shipped`]; tests use the
+/// `cfg(test)` constructor.
+mod probe_deadline {
+    use std::time::Duration;
+
+    /// Hard limit for an untrusted candidate's `--version` probe. Production
+    /// entries always use this value.
+    pub(super) const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+    const _: () = assert!(VERSION_CHECK_TIMEOUT.as_nanos() == 5_000_000_000);
+
+    #[derive(Clone, Copy)]
+    pub(super) struct ProbeDeadline(Duration);
+
+    /// The only constructor that production code can call.
+    pub(super) fn shipped() -> ProbeDeadline {
+        ProbeDeadline(VERSION_CHECK_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(duration: Duration) -> ProbeDeadline {
+        ProbeDeadline(duration)
+    }
+
+    impl ProbeDeadline {
+        pub(super) fn duration(self) -> Duration {
+            self.0
+        }
+    }
+}
+
+use probe_deadline::ProbeDeadline;
+
 /// The owned probe lives beside the installed binary and closes before migration.
 async fn verify_candidate_before_migration(
     transaction: &InstallTransaction,
     bytes: &[u8],
     version: &str,
+    deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -389,12 +423,13 @@ async fn verify_candidate_before_migration(
     probe.as_file().sync_all()?;
     // Linux requires the writer descriptor to close before executing these bytes.
     let path = probe.into_temp_path();
-    verify_installed_binary_version(&path, version).await
+    verify_installed_binary_version(&path, version, deadline).await
 }
 
 async fn verify_installed_binary_version(
     bin_path: &Path,
     expected_version: &str,
+    deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     use tokio::io::AsyncReadExt;
@@ -419,7 +454,7 @@ async fn verify_installed_binary_version(
     let mut stderr = child.stderr.take().unwrap().take(4097);
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let result = tokio::time::timeout(deadline.duration(), async {
         // Keep the leader unreaped until pipe admission has finished. Its PID
         // then anchors the owned process group throughout any timeout cleanup.
         tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
@@ -441,7 +476,10 @@ async fn verify_installed_binary_version(
             let _ = child.kill().await;
             let _ = child.wait().await;
             match failure {
-                Err(_) => anyhow::bail!("installed binary version check timed out after 5 seconds"),
+                Err(_) => anyhow::bail!(
+                    "installed binary version check timed out after {} seconds",
+                    deadline.duration().as_secs()
+                ),
                 Ok(Err(error)) => return Err(error.into()),
                 _ => unreachable!(),
             }
@@ -678,6 +716,40 @@ pub async fn run_update_for_data_dir(
     .await
 }
 
+/// Test-only sibling of [`run_update_for_data_dir`] with a caller-chosen
+/// deadline. It shares the apply entry's inner argument list through the
+/// deadline-taking sibling below, so the production list exists once.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn run_update_for_data_dir_with_deadline(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    try_p2p_fn: Option<&TryP2pFn>,
+    check_only: bool,
+    head_cid_override: Option<String>,
+    version: &str,
+    auto_confirm: bool,
+    force: bool,
+    repair_invalid_version: bool,
+    probe_deadline: std::time::Duration,
+) -> anyhow::Result<()> {
+    run_update_for_data_dir_with_mode_with_deadline(
+        data_dir,
+        fetch_fn,
+        try_p2p_fn,
+        check_only,
+        head_cid_override,
+        version,
+        auto_confirm,
+        force,
+        repair_invalid_version,
+        crate::setup::FirstPartyCarrierContext::Setup,
+        ApplyMode::Normal,
+        probe_deadline,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_update_for_data_dir_in_context(
     data_dir: &Path,
@@ -864,11 +936,35 @@ pub(crate) trait RestartOwner: Send {
     fn stop<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 }
 
+/// Runs the frozen offline update owned by a Home restart controller. The
+/// untrusted candidate's version probe always uses
+/// [`probe_deadline::VERSION_CHECK_TIMEOUT`];
+/// the entry has no deadline parameter, so a production caller cannot name
+/// another value. Controller tests use the `#[cfg(test)]` sibling.
 pub(crate) async fn run_restarting_update(
     data_dir: &Path,
     fetch_fn: &FetchFn,
     head_cid: String,
     owner: &mut dyn RestartOwner,
+) -> anyhow::Result<()> {
+    run_restarting_update_inner(
+        data_dir,
+        fetch_fn,
+        head_cid,
+        owner,
+        probe_deadline::shipped(),
+    )
+    .await
+}
+
+/// Holds the restarting update's production argument list once. The production
+/// entry supplies the shipped deadline; the test sibling supplies its own.
+async fn run_restarting_update_inner(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    head_cid: String,
+    owner: &mut dyn RestartOwner,
+    probe_deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     run_update_with_restart(
         data_dir,
@@ -883,6 +979,26 @@ pub(crate) async fn run_restarting_update(
         crate::setup::FirstPartyCarrierContext::Setup,
         ApplyMode::FrozenOffline,
         Some(owner),
+        probe_deadline,
+    )
+    .await
+}
+
+/// Test-only sibling of [`run_restarting_update`] with a caller-chosen deadline.
+#[cfg(test)]
+pub(crate) async fn run_restarting_update_with_deadline(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    head_cid: String,
+    owner: &mut dyn RestartOwner,
+    probe_deadline: std::time::Duration,
+) -> anyhow::Result<()> {
+    run_restarting_update_inner(
+        data_dir,
+        fetch_fn,
+        head_cid,
+        owner,
+        probe_deadline::for_test(probe_deadline),
     )
     .await
 }
@@ -901,6 +1017,40 @@ async fn run_update_for_data_dir_with_mode(
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
 ) -> anyhow::Result<()> {
+    run_update_for_data_dir_with_mode_inner(
+        data_dir,
+        fetch_fn,
+        try_p2p_fn,
+        check_only,
+        head_cid_override,
+        version,
+        auto_confirm,
+        force,
+        repair_invalid_version,
+        carrier_context,
+        apply_mode,
+        probe_deadline::shipped(),
+    )
+    .await
+}
+
+/// Holds the apply entry's production argument list once. The production entry
+/// supplies the shipped deadline; the test sibling supplies its own.
+#[allow(clippy::too_many_arguments)]
+async fn run_update_for_data_dir_with_mode_inner(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    try_p2p_fn: Option<&TryP2pFn>,
+    check_only: bool,
+    head_cid_override: Option<String>,
+    version: &str,
+    auto_confirm: bool,
+    force: bool,
+    repair_invalid_version: bool,
+    carrier_context: crate::setup::FirstPartyCarrierContext,
+    apply_mode: ApplyMode,
+    probe_deadline: ProbeDeadline,
+) -> anyhow::Result<()> {
     on_heap(|| {
         run_update_with_restart(
             data_dir,
@@ -915,8 +1065,43 @@ async fn run_update_for_data_dir_with_mode(
             carrier_context,
             apply_mode,
             None,
+            probe_deadline,
         )
     })
+    .await
+}
+
+/// Test-only sibling of [`run_update_for_data_dir_with_mode`] with a caller-chosen deadline.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn run_update_for_data_dir_with_mode_with_deadline(
+    data_dir: &Path,
+    fetch_fn: &FetchFn,
+    try_p2p_fn: Option<&TryP2pFn>,
+    check_only: bool,
+    head_cid_override: Option<String>,
+    version: &str,
+    auto_confirm: bool,
+    force: bool,
+    repair_invalid_version: bool,
+    carrier_context: crate::setup::FirstPartyCarrierContext,
+    apply_mode: ApplyMode,
+    probe_deadline: std::time::Duration,
+) -> anyhow::Result<()> {
+    run_update_for_data_dir_with_mode_inner(
+        data_dir,
+        fetch_fn,
+        try_p2p_fn,
+        check_only,
+        head_cid_override,
+        version,
+        auto_confirm,
+        force,
+        repair_invalid_version,
+        carrier_context,
+        apply_mode,
+        probe_deadline::for_test(probe_deadline),
+    )
     .await
 }
 
@@ -934,6 +1119,7 @@ async fn run_update_with_restart(
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
     restart_owner: Option<&mut dyn RestartOwner>,
+    probe_deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     if !check_only {
         recover_pending_installation(data_dir)?;
@@ -1066,6 +1252,7 @@ async fn run_update_with_restart(
             carrier_context,
             apply_mode,
             restart_owner,
+            probe_deadline,
         )
     })
     .await
@@ -1199,6 +1386,7 @@ async fn run_upgrade_from_head(
         carrier_context,
         apply_mode,
         None,
+        probe_deadline::shipped(),
     )
     .await
 }
@@ -1223,6 +1411,7 @@ async fn run_upgrade_with_restart(
     carrier_context: crate::setup::FirstPartyCarrierContext,
     apply_mode: ApplyMode,
     mut restart_owner: Option<&mut dyn RestartOwner>,
+    probe_deadline: ProbeDeadline,
 ) -> anyhow::Result<()> {
     // Admit the exact signed publication before check-only/version success or artifacts.
     if release_cid.is_empty() {
@@ -1621,7 +1810,10 @@ async fn run_upgrade_with_restart(
             (ReleaseFile::ReleaseManifest, release_bytes.as_slice()),
         ];
         transaction.preflight_prepare(&files, &previous.head, &previous.release)?;
-        on_heap(|| verify_candidate_before_migration(&transaction, &binary_data, version)).await?;
+        on_heap(|| {
+            verify_candidate_before_migration(&transaction, &binary_data, version, probe_deadline)
+        })
+        .await?;
         crate::installed_release::load_or_migrate_for_update(
             data_dir,
             &bin_path,
@@ -1833,7 +2025,10 @@ async fn run_upgrade_with_restart(
         (ReleaseFile::ReleaseManifest, release_bytes.as_slice()),
     ];
     transaction.preflight_prepare(&files, &previous.head, &previous.release)?;
-    on_heap(|| verify_candidate_before_migration(&transaction, &binary_data, version)).await?;
+    on_heap(|| {
+        verify_candidate_before_migration(&transaction, &binary_data, version, probe_deadline)
+    })
+    .await?;
     crate::installed_release::load_or_migrate_for_update(
         data_dir,
         bin_path,
@@ -2246,6 +2441,11 @@ fn optional_release_object_cid(head: &serde_json::Value) -> anyhow::Result<Optio
 mod tests {
     use super::*;
     use crate::sources::save_trusted_sources;
+
+    /// Rows that are not about the probe deadline still start a candidate
+    /// shell. A loaded machine may not run it inside the shipped five seconds,
+    /// so those rows pass a generous value and would fail only for a real bug.
+    const TEST_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
     #[test]
     fn home_stopped_line_names_the_installed_binary() {
@@ -3534,12 +3734,20 @@ mod tests {
         force: bool,
     ) -> anyhow::Result<()> {
         apply_signed_fixture_with_version(
-            data_dir, executable, components, mode, "0.7.1", force, false,
+            data_dir,
+            executable,
+            components,
+            mode,
+            "0.7.1",
+            force,
+            false,
+            TEST_PROBE_DEADLINE,
         )
         .await
     }
 
     #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
     async fn apply_signed_fixture_with_version(
         data_dir: &Path,
         executable: &[u8],
@@ -3548,6 +3756,7 @@ mod tests {
         version: &str,
         repair_invalid_version: bool,
         rollback: bool,
+        probe_deadline: std::time::Duration,
     ) -> anyhow::Result<()> {
         apply_signed_fixture_serving(
             data_dir,
@@ -3558,6 +3767,7 @@ mod tests {
             repair_invalid_version,
             rollback,
             Vec::new(),
+            Some(probe_deadline),
         )
         .await
     }
@@ -3574,6 +3784,7 @@ mod tests {
         repair_invalid_version: bool,
         rollback: bool,
         support: Vec<(String, Vec<u8>)>,
+        probe_deadline: Option<std::time::Duration>,
     ) -> anyhow::Result<()> {
         use sha2::Digest;
 
@@ -3614,20 +3825,40 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
             Box::pin(async move { bytes })
         });
-        run_update_for_data_dir_with_mode(
-            data_dir,
-            &fetch,
-            None,
-            false,
-            Some(head_cid),
-            "0.6.0",
-            true,
-            rollback,
-            repair_invalid_version,
-            crate::setup::FirstPartyCarrierContext::Setup,
-            mode,
-        )
-        .await
+        // `None` drives the production entry, which fixes the shipped deadline
+        // itself; `Some` uses the deadline-taking test sibling.
+        if let Some(deadline) = probe_deadline {
+            run_update_for_data_dir_with_mode_with_deadline(
+                data_dir,
+                &fetch,
+                None,
+                false,
+                Some(head_cid),
+                "0.6.0",
+                true,
+                rollback,
+                repair_invalid_version,
+                crate::setup::FirstPartyCarrierContext::Setup,
+                mode,
+                deadline,
+            )
+            .await
+        } else {
+            run_update_for_data_dir_with_mode(
+                data_dir,
+                &fetch,
+                None,
+                false,
+                Some(head_cid),
+                "0.6.0",
+                true,
+                rollback,
+                repair_invalid_version,
+                crate::setup::FirstPartyCarrierContext::Setup,
+                mode,
+            )
+            .await
+        }
     }
 
     #[cfg(unix)]
@@ -3756,6 +3987,7 @@ mod tests {
             false,
             false,
             vec![(b_cid, b.clone())],
+            Some(TEST_PROBE_DEADLINE),
         )
         .await
         .unwrap();
@@ -3772,6 +4004,7 @@ mod tests {
             false,
             true,
             vec![(a_cid, a.clone())],
+            Some(TEST_PROBE_DEADLINE),
         )
         .await
         .unwrap();
@@ -3788,6 +4021,7 @@ mod tests {
             false,
             true,
             Vec::new(),
+            Some(TEST_PROBE_DEADLINE),
         )
         .await
         .unwrap();
@@ -3817,6 +4051,7 @@ mod tests {
             false,
             false,
             Vec::new(),
+            Some(TEST_PROBE_DEADLINE),
         )
         .await
         .unwrap_err();
@@ -3837,6 +4072,7 @@ mod tests {
             false,
             false,
             vec![(cid, bytes.clone())],
+            Some(TEST_PROBE_DEADLINE),
         )
         .await
         .unwrap();
@@ -3922,6 +4158,7 @@ mod tests {
                 false,
                 false,
                 vec![(catalogue_cid.clone(), catalogue.clone())],
+                Some(TEST_PROBE_DEADLINE),
             )
             .await
             .unwrap();
@@ -4140,7 +4377,7 @@ mod tests {
                         .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
                     Box::pin(async move { bytes })
                 });
-                let error = run_update_for_data_dir_with_mode(
+                let error = run_update_for_data_dir_with_mode_with_deadline(
                     &data,
                     &fetch,
                     None,
@@ -4152,6 +4389,7 @@ mod tests {
                     false,
                     crate::setup::FirstPartyCarrierContext::Setup,
                     mode,
+                    TEST_PROBE_DEADLINE,
                 )
                 .await
                 .unwrap_err();
@@ -4374,6 +4612,7 @@ mod tests {
                         version,
                         true,
                         false,
+                        TEST_PROBE_DEADLINE,
                     )
                     .await;
                     if version == "0.6.9" {
@@ -4427,7 +4666,14 @@ mod tests {
         for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
             let (_fixture, data, binary, _source) = default_apply_fixture(components);
             apply_signed_fixture_with_version(
-                &data, executable, components, mode, "0.6.9", false, true,
+                &data,
+                executable,
+                components,
+                mode,
+                "0.6.9",
+                false,
+                true,
+                TEST_PROBE_DEADLINE,
             )
             .await
             .unwrap();
@@ -4603,6 +4849,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn staged_executable_refusals_preserve_installation_and_allow_corrected_retry() {
+        // The two timeout rows take a short explicit deadline so the suite does
+        // not spend the shipped five seconds twice per mode; they still time out.
+        const SHORT_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+        // The corrected retry checks recovery, not a timing rule: a loaded
+        // machine may start an instant candidate slowly.
+        const RETRY_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
         let correct = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n";
         let components = b"{\"schema\":\"elastos.components/v1\",\"external\":{},\"profiles\":{},\"capsules\":{}}\n";
         let cases = [
@@ -4610,56 +4862,66 @@ mod tests {
                 "wrong version",
                 b"#!/bin/sh\nprintf 'elastos 0.7.0\\n'\n".as_slice(),
                 "version mismatch",
+                TEST_PROBE_DEADLINE,
             ),
             (
                 "version substring",
                 b"#!/bin/sh\nprintf 'elastos 0.7.10\\n'\n".as_slice(),
                 "version mismatch",
+                TEST_PROBE_DEADLINE,
             ),
             (
                 "prefixed version",
                 b"#!/bin/sh\nprintf 'prefix elastos 0.7.1\\n'\n".as_slice(),
                 "version mismatch",
+                TEST_PROBE_DEADLINE,
             ),
             (
                 "stderr-only version",
                 b"#!/bin/sh\nprintf 'elastos 0.7.1\\n' >&2\n".as_slice(),
                 "version mismatch",
+                TEST_PROBE_DEADLINE,
             ),
             (
                 "nonzero exit with matching stdout",
                 b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\nexit 23\n".as_slice(),
                 "version check failed",
+                TEST_PROBE_DEADLINE,
             ),
             (
                 "loader refusal",
                 b"#!/nonexistent-elastos-fixture-interpreter\n".as_slice(),
                 "failed to run installed binary",
+                TEST_PROBE_DEADLINE,
             ),
             (
                 "success with stderr",
                 b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\nprintf 'unexpected diagnostic\\n' >&2\n"
                     .as_slice(),
                 "version mismatch",
+                TEST_PROBE_DEADLINE,
             ),
             (
                 "hung version probe",
                 b"#!/bin/sh\nexec sleep 60\n".as_slice(),
                 "version check timed out",
+                SHORT_PROBE_DEADLINE,
             ),
             (
                 "child retains version pipes",
                 b"#!/bin/sh\nsleep 60 &\nprintf 'elastos 0.7.1\\n'\nexit 0\n".as_slice(),
                 "version check timed out",
+                SHORT_PROBE_DEADLINE,
             ),
             (
                 "excessive version output",
                 b"#!/bin/sh\nprintf '%05000d' 0\n".as_slice(),
                 "output limit",
+                TEST_PROBE_DEADLINE,
             ),
         ];
         for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
-            for (name, executable, error_marker) in cases {
+            for (name, executable, error_marker, probe_deadline) in cases {
                 let name = format!(
                     "{}/{name}",
                     match mode {
@@ -4747,10 +5009,18 @@ mod tests {
                     std::fs::write(data.join(path), bytes).unwrap();
                 }
 
-                let error =
-                    apply_signed_fixture_with_mode(&data, &source, executable, components, mode)
-                        .await
-                        .unwrap_err();
+                let error = apply_signed_fixture_with_version(
+                    &data,
+                    executable,
+                    components,
+                    mode,
+                    "0.7.1",
+                    false,
+                    false,
+                    probe_deadline,
+                )
+                .await
+                .unwrap_err();
                 assert!(
                     error.to_string().contains(error_marker),
                     "{name}: {error:#}"
@@ -4784,9 +5054,18 @@ mod tests {
                     );
                 }
 
-                apply_signed_fixture_with_mode(&data, &source, correct, components, mode)
-                    .await
-                    .unwrap_or_else(|error| panic!("{name}: corrected retry failed: {error:#}"));
+                apply_signed_fixture_with_version(
+                    &data,
+                    correct,
+                    components,
+                    mode,
+                    "0.7.1",
+                    false,
+                    false,
+                    RETRY_PROBE_DEADLINE,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{name}: corrected retry failed: {error:#}"));
                 assert_eq!(std::fs::read(&binary).unwrap(), correct, "{name}");
                 assert_eq!(
                     std::fs::read(data.join("components.json")).unwrap(),
@@ -5057,14 +5336,274 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (bin, release) =
             crate::install_transaction::tests::briefly_busy_binary(dir.path(), "0.1.0");
-        verify_installed_binary_version(&bin, "0.1.0")
-            .await
-            .unwrap();
+        verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            probe_deadline::for_test(std::time::Duration::from_secs(30)),
+        )
+        .await
+        .unwrap();
         release.join().unwrap();
         assert!(
             crate::install_transaction::TEXT_FILE_BUSY_SEEN.get() >= 1,
             "exec must have reported ETXTBSY"
         );
+    }
+
+    #[tokio::test]
+    async fn version_check_allows_a_slow_test_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("slow-candidate");
+        std::fs::write(
+            &bin,
+            b"#!/bin/sh\n/bin/sleep 6\nprintf 'elastos 0.1.0\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Six seconds is slower than the shipped bound, so a loaded harness
+        // needs an explicit generous deadline instead of the production one.
+        verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            probe_deadline::for_test(std::time::Duration::from_secs(30)),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Waits for the candidate shell to publish its grandchild PID. A starved
+    /// machine may not have run the script before the probe returned. The wait
+    /// is async so a test can run it beside the probe future; it returns its
+    /// failure so the probe can finish its clean-up before any assertion.
+    #[cfg(unix)]
+    async fn recorded_pid(
+        path: &std::path::Path,
+        limit: std::time::Duration,
+    ) -> std::result::Result<i32, String> {
+        let until = tokio::time::Instant::now() + limit;
+        loop {
+            if let Ok(text) = tokio::fs::read_to_string(path).await {
+                if let Ok(pid) = text.trim().parse() {
+                    return Ok(pid);
+                }
+            }
+            if tokio::time::Instant::now() >= until {
+                return Err(format!(
+                    "candidate did not record its child PID within {limit:?}"
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_process_gone(pid: i32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // SAFETY: signal 0 only checks whether the PID still exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process {pid} survived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_check_times_out_a_hung_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("hung-candidate");
+        std::fs::write(&bin, b"#!/bin/sh\nexec sleep 3600\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            probe_deadline::for_test(std::time::Duration::from_secs(1)),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("timed out after 1 seconds"),
+            "{error:#}"
+        );
+    }
+
+    /// The shipped deadline reaches the error text, and the timer fires instead
+    /// of hanging. The thirty-second ceiling is only a hang guard for a loaded
+    /// machine: the five-second limit this row proves is the error text, not
+    /// the wall clock.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shipped_probe_times_out_and_names_five_seconds() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("hung-candidate");
+        std::fs::write(&bin, b"#!/bin/sh\nexec sleep 3600\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = std::time::Instant::now();
+        let error = verify_installed_binary_version(&bin, "0.1.0", probe_deadline::shipped())
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            error.to_string().contains("timed out after 5 seconds"),
+            "{error:#}"
+        );
+        assert_eq!(
+            probe_deadline::shipped().duration().as_nanos(),
+            5_000_000_000,
+            "the shipped probe deadline must be exactly five seconds"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "probe hung past the thirty-second hang guard: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_check_times_out_when_a_child_retains_the_pipes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The rule is that a child retaining the pipes keeps the probe until its
+        // deadline, then the group dies. The probe and the PID wait run
+        // together, and the PID wait has its own, smaller budget: a starved
+        // shell fails that wait while the probe is still running, so the
+        // probe's deadline is never the reason the file is missing.
+        const LEAKY_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+        const PID_RECORD_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("child-pid");
+        let bin = dir.path().join("leaky-candidate");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nsleep 3600 &\nprintf '%s' \"$!\" > '{}'\nprintf 'elastos 0.1.0\\n'\nexit 0\n",
+                pid_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut probe = Box::pin(verify_installed_binary_version(
+            &bin,
+            "0.1.0",
+            probe_deadline::for_test(LEAKY_PROBE_DEADLINE),
+        ));
+        // Run both to completion, so the probe's group clean-up finishes before
+        // any assertion. A panic inside the old select! could drop the pending
+        // probe while its PID was ready, or drop it from the PID failure.
+        let (pid, result) =
+            tokio::join!(recorded_pid(&pid_path, PID_RECORD_BUDGET), probe.as_mut(),);
+        let error = result.unwrap_err();
+        let pid = pid.unwrap_or_else(|missing| panic!("{missing}: probe returned {error:?}"));
+        assert!(
+            error.to_string().contains("timed out after 30 seconds"),
+            "{error:#}"
+        );
+        assert_process_gone(pid);
+    }
+
+    /// The production apply entry, not its test sibling, fixes the shipped
+    /// deadline. A hung candidate must return after the five-second timer, not
+    /// before a shorter value or after a longer one, and leave the Home intact.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn production_apply_entry_times_out_a_hung_candidate_at_five_seconds() {
+        // Lower: the five-second timer cannot return sooner. The ceiling is a
+        // hang guard, not the value this row proves: the five-second limit is
+        // pinned by the ProbeDeadline type, its compile-time assert and the
+        // error text below.
+        const LOWER: std::time::Duration = std::time::Duration::from_millis(4_500);
+        const UPPER: std::time::Duration = std::time::Duration::from_secs(60);
+        let components: &'static [u8] =
+            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+        let mut failures = Vec::new();
+        for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
+            let label = match mode {
+                ApplyMode::Normal => "normal",
+                ApplyMode::FrozenOffline => "frozen-offline",
+            };
+            let (_fixture, data, binary, _source) = default_apply_fixture(components);
+            let old_binary = std::fs::read(&binary).unwrap();
+            let pid_path = data.join("probe-pid");
+            let executable = format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 3600\n",
+                pid_path.display()
+            );
+            let started = std::time::Instant::now();
+            let outcome = apply_signed_fixture_serving(
+                &data,
+                executable.as_bytes(),
+                components,
+                mode,
+                "0.7.1",
+                false,
+                false,
+                Vec::new(),
+                None,
+            )
+            .await;
+            let elapsed = started.elapsed();
+            let error = match outcome {
+                Ok(()) => {
+                    failures.push(format!("{label}: accepted a hung candidate"));
+                    continue;
+                }
+                Err(error) => error,
+            };
+            if elapsed < LOWER {
+                failures.push(format!("{label}: returned after {elapsed:?}"));
+            }
+            if elapsed >= UPPER {
+                failures.push(format!("{label}: returned after {elapsed:?}"));
+            }
+            if !error.to_string().contains("timed out after 5 seconds") {
+                failures.push(format!("{label}: {error:#}"));
+            }
+            // A starved shell may not run before the group kill, so no PID file
+            // can appear. Orphan clean-up is pinned by the pipe-retaining row,
+            // and every timeout assertion above runs first.
+            if let Ok(pid) = recorded_pid(&pid_path, std::time::Duration::from_secs(10)).await {
+                assert_process_gone(pid);
+            }
+            let leftovers: Vec<String> = std::fs::read_dir(binary.parent().unwrap())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with(".elastos.candidate-check-"))
+                .collect();
+            if !leftovers.is_empty() {
+                failures.push(format!("{label}: probe copy retained: {leftovers:?}"));
+            }
+            let installed = load_trusted_sources(&data)
+                .unwrap()
+                .default_source()
+                .unwrap()
+                .installed_version
+                .clone();
+            if installed != "0.7.0" {
+                failures.push(format!("{label}: installed release changed to {installed}"));
+            }
+            if std::fs::read(&binary).unwrap() != old_binary {
+                failures.push(format!("{label}: installed binary changed"));
+            }
+            if std::fs::read(data.join("owner-data")).unwrap() != b"owner data" {
+                failures.push(format!("{label}: owner data changed"));
+            }
+            if InstallTransaction::has_pending_recovery(&binary) {
+                failures.push(format!("{label}: journal retained"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// install.sh admission and recovery through the shared installation writer.
@@ -5736,7 +6275,7 @@ mod tests {
                     Box::pin(async move { Ok(bytes) })
                 });
                 // release_cmd maps --rollback-to to this head override and force=true.
-                let result = run_update_for_data_dir(
+                let result = run_update_for_data_dir_with_deadline(
                     &data,
                     &fetch,
                     None,
@@ -5746,6 +6285,7 @@ mod tests {
                     true,
                     true,
                     false,
+                    TEST_PROBE_DEADLINE,
                 )
                 .await;
                 if seed == 7 {
@@ -5999,7 +6539,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("content {cid} is not published by this source"));
             Box::pin(async move { served })
         });
-        let result = run_update_for_data_dir(
+        let result = run_update_for_data_dir_with_deadline(
             data,
             &fetch,
             None,
@@ -6009,6 +6549,7 @@ mod tests {
             true,
             false,
             false,
+            TEST_PROBE_DEADLINE,
         )
         .await;
         let requests = requests.lock().unwrap().clone();
@@ -6109,7 +6650,7 @@ mod tests {
                 Box::pin(async move { served })
             });
             // release_cmd maps --rollback-to to this head override and force=true.
-            run_update_for_data_dir(
+            run_update_for_data_dir_with_deadline(
                 &data,
                 &fetch,
                 None,
@@ -6119,6 +6660,7 @@ mod tests {
                 true,
                 true,
                 false,
+                TEST_PROBE_DEADLINE,
             )
             .await
             .unwrap();
