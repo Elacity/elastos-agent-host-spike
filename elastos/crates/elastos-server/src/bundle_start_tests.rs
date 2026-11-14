@@ -3101,6 +3101,50 @@ async fn a_dropped_open_keeps_its_place_until_its_start_returns() {
     );
 }
 
+/// D2a-entry. A page whose entrypoint is not a plain content path (a
+/// backslash, or a control character, both of which a manifest and the walk
+/// allow) has no address that could name it: the open refuses it by name,
+/// before anything is kept, though the start itself ran.
+#[tokio::test]
+async fn a_page_whose_entrypoint_is_not_plain_is_refused_by_name_and_nothing_kept() {
+    let publisher = key(98);
+    let home = Home::trusting(&[&publisher]).await;
+    let core = home
+        .staged("core", &manifest("core"), &quiet_component(), &publisher)
+        .await;
+    for (label, entrypoint) in [
+        ("backslash", "browser\\a.html"),
+        ("tab", "browser/a\tb.html"),
+    ] {
+        let mut page = page_manifest("page", &[("core", &core)]);
+        page["entrypoint"] = entrypoint.into();
+        let folder = home.bundle(&format!("page-{label}"), &page.to_string(), b"a page");
+        let file = folder.join(entrypoint);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, b"a page").unwrap();
+        let page = home.stage(&folder, &publisher).await;
+        let content =
+            content_manifest(&format!("pictures-{label}"), &[("page", &page)]).to_string();
+        let cid = home
+            .staged(
+                &format!("pictures-{label}"),
+                &content,
+                b"a picture",
+                &publisher,
+            )
+            .await;
+        let refused = home.runtime.open_for_page(&home.data(), &cid, PERSON).await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::page_launch::OpenRefusal::PageEntrypointNotPlain)
+            ),
+            "{label}: {refused:?}"
+        );
+        assert_eq!(home.runtime.kept_launch_count(), 0, "{label}: nothing kept");
+    }
+}
+
 /// D2a-page. A content open keeps the page its content pins, as the walk read
 /// it: the open names the page's entrypoint, and each of the page's files is
 /// read back by exact plain path through the shell's route, the page's own

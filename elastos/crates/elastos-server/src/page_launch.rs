@@ -84,6 +84,9 @@ pub enum OpenRefusal {
     Start(BundleRefusal),
     /// It started, but it is not content: there is no page to keep it for.
     NotContent,
+    /// The page's entrypoint is not a plain content path, so no address
+    /// could name it: refused before anything is kept.
+    PageEntrypointNotPlain,
     /// This person has [`KEPT_PER_PRINCIPAL`] launches kept already.
     TooManyOpen,
     /// The Runtime keeps [`KEPT_IN_ALL`] launches already.
@@ -108,11 +111,14 @@ pub enum KeptRead<'a> {
 
 /// A content path a kept launch is read at: one or more plain parts joined by
 /// `/`. Not empty (that would be the listing), no empty, `.` or `..` part, no
-/// leading `/`, no `\`. The path is then looked up as text among the files the
-/// walk read; it is joined onto no folder.
+/// leading `/`, no `\`, no control character (a URL parser drops a tab or a
+/// line break, so such a path would be asked for as another). The path is
+/// then looked up as text among the files the walk read; it is joined onto
+/// no folder.
 pub fn plain_content_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains('\\')
+        && !path.chars().any(char::is_control)
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
@@ -240,6 +246,9 @@ impl Runtime {
         let (Some(launch), Some(page)) = (started.launch, started.page) else {
             return Err(OpenRefusal::NotContent);
         };
+        if !plain_content_path(&page.entrypoint) {
+            return Err(OpenRefusal::PageEntrypointNotPlain);
+        }
         let mut kept = kept_ones(&self.page_launches);
         // The place this open took is filled and its time starts now. It is
         // still there: an unfilled place does not expire, and only its own

@@ -852,7 +852,8 @@ async fn start_fake_runtime_configured(
 /// refuses a wrong CID, and `bafy-full` as a full person. `bafy-odd` opens a
 /// page whose entrypoint has a space and a `#` in its name; `bafy-badid`,
 /// `bafy-badentry` and `bafy-badpage` answer 200 in a shape the gateway must
-/// not use.
+/// not use; `bafy-backslash` is refused as a page whose entrypoint is not
+/// plain.
 async fn fake_runtime_open_launch(
     AxumState(state): AxumState<FakeRuntimeState>,
     headers: HeaderMap,
@@ -902,6 +903,7 @@ async fn fake_runtime_open_launch(
         )
             .into_response(),
         Some("bafy-full") => (StatusCode::TOO_MANY_REQUESTS, "too_many_open_launches").into_response(),
+        Some("bafy-backslash") => (StatusCode::BAD_REQUEST, "page_entrypoint_not_plain").into_response(),
         _ => (StatusCode::BAD_REQUEST, "bundle_cid_form_invalid").into_response(),
     }
 }

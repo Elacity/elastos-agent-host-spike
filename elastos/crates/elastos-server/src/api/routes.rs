@@ -1338,6 +1338,9 @@ pub async fn open_launch(
             format!("{}: {refusal}", refusal.code()),
         )),
         Err(OpenRefusal::NotContent) => Err((StatusCode::BAD_REQUEST, "not_content".into())),
+        Err(OpenRefusal::PageEntrypointNotPlain) => {
+            Err((StatusCode::BAD_REQUEST, "page_entrypoint_not_plain".into()))
+        }
         Err(OpenRefusal::TooManyOpen) => Err((
             StatusCode::TOO_MANY_REQUESTS,
             "too_many_open_launches".into(),

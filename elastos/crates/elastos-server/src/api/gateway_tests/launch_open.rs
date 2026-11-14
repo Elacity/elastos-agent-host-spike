@@ -211,6 +211,14 @@ async fn home_open_needs_homes_session_and_passes_refusals_on_by_name() {
         String::from_utf8_lossy(&body),
         "bundle_cid_mismatch: the slot's files do not recompute to the CID asked for"
     );
+    let (status, body) = open(&app, "bafy-backslash", Some(&cookie), None).await;
+    assert_eq!(
+        (status, String::from_utf8_lossy(&body).to_string()),
+        (
+            StatusCode::BAD_REQUEST,
+            "page_entrypoint_not_plain".to_string()
+        )
+    );
     let (status, body) = open(&app, "bafy-full", Some(&cookie), None).await;
     assert_eq!(
         (status, body),
