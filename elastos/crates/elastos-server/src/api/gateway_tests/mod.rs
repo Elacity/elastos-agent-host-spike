@@ -1174,6 +1174,7 @@ mod recovery;
 mod remote_engine;
 mod remote_model;
 mod room;
+mod s5_fences;
 mod site_publication;
 mod wallet;
 

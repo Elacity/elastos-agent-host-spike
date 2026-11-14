@@ -371,7 +371,8 @@ impl Runtime {
         principal_id: Option<String>,
         admitted: Option<(CapsuleManifest, Vec<u8>)>,
     ) -> Result<(CapsuleHandle, Signer)> {
-        if admitted.is_none() {
+        let admitted_launch = admitted.is_some();
+        if !admitted_launch {
             crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())
                 .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
         }
@@ -454,6 +455,16 @@ impl Runtime {
         if let Some(bytes) = &admitted_bytes {
             crate::component::validate_component_imports(bytes)
                 .map_err(ElastosError::InvalidManifest)?;
+        }
+
+        // A manifest that declares an agent runs only through a launch that
+        // admitted it. A start with no admission context has no launcher,
+        // whichever entrance it came from: the attach route and a launch
+        // without an agent both stop here.
+        if !admitted_launch && manifest.agent.is_some() {
+            return Err(ElastosError::InvalidManifest(
+                crate::agent_admission::NO_LAUNCHER.to_string(),
+            ));
         }
 
         // Find a compute provider that supports this capsule type

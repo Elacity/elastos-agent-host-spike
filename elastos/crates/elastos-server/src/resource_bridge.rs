@@ -1810,6 +1810,15 @@ fn record_component_invoke_event(data_dir: &Path, event: ComponentInvokeAudit<'_
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64;
+    // The person an agent acts for is read from the actor's stored record, so
+    // an agent's every bridge call names both. A person record holds no owner,
+    // and an event for one keeps the reason it has always had.
+    let owner = event.principal_id.and_then(|principal_id| {
+        crate::auth::stored_principal_record(data_dir, principal_id)
+            .ok()
+            .flatten()
+            .and_then(|record| record.owner)
+    });
     crate::auth::append_audit_event(
         data_dir,
         RuntimeAuditEventV1 {
@@ -1822,7 +1831,10 @@ fn record_component_invoke_event(data_dir: &Path, event: ComponentInvokeAudit<'_
             challenge_id: Some(event.audit_id.to_string()),
             capsule_id: Some(event.capsule_id.to_string()),
             result: event.outcome.to_string(),
-            reason: format!("{} {}", event.operation, event.resource),
+            reason: match owner {
+                Some(owner) => format!("{} {} owner={owner}", event.operation, event.resource),
+                None => format!("{} {}", event.operation, event.resource),
+            },
             occurred_at,
             signer_did: None,
             signature: None,

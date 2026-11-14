@@ -3358,6 +3358,42 @@ pub(crate) mod tests {
 
     pub(crate) static HOME_CMD_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Route 19 fence: `home_cmd.rs:1575-1592 create_session` builds the
+    /// session root itself from a fresh id
+    /// (`format!("{}/{}", HOME_SESSION_ROOT, id)`), and the function takes no
+    /// request and no caller path. Two sessions get two different locations.
+    #[test]
+    fn route_19_home_cli_session_location_is_built_by_the_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = create_session(dir.path()).unwrap();
+        // The id is `{pid}-{millis}`: two opens in one process need distinct
+        // milliseconds, as two separate CLI opens have.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = create_session(dir.path()).unwrap();
+        assert_ne!(
+            first.uri_root, second.uri_root,
+            "two sessions, two locations"
+        );
+        assert_ne!(first.path, second.path);
+        for session in [&first, &second] {
+            assert!(
+                session
+                    .uri_root
+                    .starts_with("localhost://Local/SharedByLocalUsersAndBots/Home/sessions/"),
+                "{}",
+                session.uri_root
+            );
+            assert!(
+                session
+                    .path
+                    .starts_with(dir.path().join("Local/Shared/Home/sessions")),
+                "{}",
+                session.path.display()
+            );
+            assert!(session.path.is_dir());
+        }
+    }
+
     #[test]
     fn home_cli_renderer_resolves_only_the_installed_capsule() {
         let temp = tempfile::tempdir().unwrap();

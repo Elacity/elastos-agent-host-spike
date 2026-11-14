@@ -208,6 +208,12 @@ pub(crate) fn admit_launch(
 pub(crate) const UNADMITTED_AGENT_PRINCIPAL: &str =
     "a stored agent's principal reaches only a launch that admitted it";
 
+/// The refusal a VM launch gives for a manifest that declares an agent. The
+/// component admission is the only entrance that binds an agent, and a VM
+/// launch has no such binding, so it starts nothing under the launcher.
+pub(crate) const NO_VM_AGENT: &str =
+    "an agent-declaring manifest runs only a component launch that admitted it";
+
 /// Refuses an agent's own principal on any entrance that did not admit it. An
 /// agent's id reaches a bridge principal only through `admit_launch`, so every
 /// other entrance closes rather than guesses. A build without the feature
