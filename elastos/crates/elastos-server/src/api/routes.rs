@@ -1327,25 +1327,38 @@ pub(crate) mod tests {
         };
         let grants =
             grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
-        let run = home.launch(x).await.unwrap().0;
-        assert_eq!(run.status, "completed");
-        grants.abort();
+        let launched = home.launch(x).await;
 
         let root = home.root(x);
         let notes = format!("{root}/memory/notes.md");
         let path =
             elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &notes).unwrap();
-        let bytes = std::fs::read(&path).unwrap();
 
-        // The bytes on disk are the envelope, not the text the guest wrote.
+        // The row's at-rest claim, asserted before the launch outcome: the
+        // object the guest wrote is an envelope on disk, and the text it wrote
+        // appears nowhere in it. A production change that stops the agent's
+        // own object from taking the protected path leaves no encrypted object,
+        // and this assertion is where that consequence shows.
+        let bytes = std::fs::read(&path).unwrap_or_else(|err| {
+            panic!("an agent's own object must be at rest as an encrypted envelope, never plaintext: {err}")
+        });
         let envelope: serde_json::Value = serde_json::from_slice(&bytes)
             .unwrap_or_else(|err| panic!("the agent's notes are not an envelope: {err}"));
         assert_eq!(envelope["schema"], "elastos.principal-root.object/v1");
         let plaintext = format!("a5-launch-probe notes for {x}");
         assert!(
             !String::from_utf8_lossy(&bytes).contains(&plaintext),
-            "the notes are stored in the clear"
+            "an agent's own object must be at rest as an encrypted envelope, never plaintext"
         );
+
+        // The launch completes only after the guest's own bridge read returns
+        // the bytes it wrote, so a key that does not open the object refuses
+        // the launch by name.
+        let run = launched
+            .unwrap_or_else(|err| panic!("the launch must complete: {err:?}"))
+            .0;
+        assert_eq!(run.status, "completed");
+        grants.abort();
 
         // The guest's own bridge read returned them; the launch only
         // completes after that comparison.
@@ -1452,7 +1465,7 @@ pub(crate) mod tests {
         let content = |index: usize| -> Vec<u8> {
             let line = outcome(index);
             let (status, json) = line.split_once(' ').unwrap();
-            assert_eq!(status, "ok", "{line}");
+            assert_eq!(status, "ok", "own-root cell {index}: {line}");
             let value: serde_json::Value = serde_json::from_str(json).unwrap();
             value["data"]["content"]
                 .as_array()
@@ -1898,10 +1911,14 @@ pub(crate) mod tests {
             &ctx, "write", &request,
         )
         .unwrap();
-        assert_eq!(refused["code"], "principal_context_required", "{refused}");
+        assert_eq!(
+            refused["code"], "principal_context_required",
+            "protected-path root check: {refused}"
+        );
         assert_eq!(
             refused["message"],
-            "localhost://Users roots must use Users/self or the active principal root"
+            "localhost://Users roots must use Users/self or the active principal root",
+            "protected-path root check: {refused}"
         );
     }
 
