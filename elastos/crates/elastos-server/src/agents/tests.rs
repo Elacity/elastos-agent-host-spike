@@ -1780,10 +1780,34 @@ fn with_the_feature_off_the_launch_lookup_refuses_by_name() {
 }
 
 /// A Home with agents on and `count` real agents, each with its own wrap.
+/// `home_with_agents` for rows in production files' test modules that run in
+/// both builds: `None` in a build without agents. It keeps the cargo feature's
+/// name out of those files, where the guard
+/// `the_cargo_feature_is_read_in_one_place` reads every line.
+#[cfg(feature = "prototype-agents")]
+pub(crate) fn home_with_agents_if_built(
+    count: usize,
+    bundle_cid: &str,
+) -> Option<(crate::agents::tests::Home, Vec<String>)> {
+    Some(home_with_agents(count, bundle_cid))
+}
+
+/// See the feature-on twin: no agents exist in this build.
+#[cfg(not(feature = "prototype-agents"))]
+pub(crate) fn home_with_agents_if_built(
+    _count: usize,
+    _bundle_cid: &str,
+) -> Option<(crate::agents::tests::Home, Vec<String>)> {
+    None
+}
+
 /// `bundle_cid` is the CID creation stores for the Agent Host's bytes, from the
 /// one walk the Runtime uses.
 #[cfg(feature = "prototype-agents")]
-fn home_with_agents(count: usize, bundle_cid: &str) -> (crate::agents::tests::Home, Vec<String>) {
+pub(crate) fn home_with_agents(
+    count: usize,
+    bundle_cid: &str,
+) -> (crate::agents::tests::Home, Vec<String>) {
     let home = crate::agents::tests::Home::new();
     let caller = home.caller();
     crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();

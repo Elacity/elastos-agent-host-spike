@@ -560,6 +560,57 @@ pub(crate) mod tests {
         assert_eq!(cid, None, "S1 records no CID");
     }
 
+    /// A localhost double: it records every raw request the bridge routes to
+    /// the `localhost` scheme and answers `ok`. Own-root reads and writes take
+    /// the protected path and never reach it, so its record shows exactly
+    /// which calls fell past that path.
+    #[derive(Default)]
+    pub(crate) struct CapturingLocalhostProvider {
+        requests: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl CapturingLocalhostProvider {
+        pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl elastos_runtime::provider::Provider for CapturingLocalhostProvider {
+        async fn handle(
+            &self,
+            _request: elastos_runtime::provider::ResourceRequest,
+        ) -> Result<
+            elastos_runtime::provider::ResourceResponse,
+            elastos_runtime::provider::ProviderError,
+        > {
+            Err(elastos_runtime::provider::ProviderError::Provider(
+                "raw provider fixture does not implement ResourceRequest".to_string(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["localhost"]
+        }
+
+        fn name(&self) -> &'static str {
+            "capturing-localhost"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, elastos_runtime::provider::ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "ok": true
+                }
+            }))
+        }
+    }
+
     /// A Home whose stored agents are the probe package: the probe's manifest
     /// name and the CID its capsule directory records, signed by a key the
     /// runtime trusts. Two agents, or as many as asked for, share the Home.
@@ -573,6 +624,7 @@ pub(crate) mod tests {
         audit_log: Arc<AuditLog>,
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+        provider: Arc<CapturingLocalhostProvider>,
         capsule_dir: std::path::PathBuf,
         grant: String,
         pub(crate) agents: Vec<String>,
@@ -682,9 +734,12 @@ pub(crate) mod tests {
             let pending_store = Arc::new(
                 elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
             );
+            let provider = Arc::new(CapturingLocalhostProvider::default());
+            let registry = Arc::new(ProviderRegistry::new());
+            registry.register(provider.clone()).await;
             runtime
                 .set_provider_registry(
-                    Arc::new(ProviderRegistry::new()),
+                    registry,
                     capability_manager.clone(),
                     pending_store.clone(),
                     data_dir.clone(),
@@ -779,6 +834,7 @@ pub(crate) mod tests {
                 audit_log,
                 pending_store,
                 capability_manager,
+                provider,
                 capsule_dir,
                 grant,
                 agents,
@@ -923,6 +979,125 @@ pub(crate) mod tests {
                 })
                 .collect()
         }
+
+        /// Every raw request the bridge routed to the capturing localhost
+        /// double, in order.
+        pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
+            self.provider.requests()
+        }
+
+        /// Every `CapabilityRequested` event's resource, in order. A request
+        /// the bridge refuses before creating a record never appears here, so
+        /// a refused spelling's absence is evidence it reached no store.
+        pub(crate) fn capability_requested(&self) -> Vec<String> {
+            self.audit_log
+                .recent_events(usize::MAX)
+                .into_iter()
+                .filter_map(|event| match event {
+                    elastos_runtime::primitives::audit::AuditEvent::CapabilityRequested {
+                        resource,
+                        ..
+                    } => Some(resource),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Writes the plan the guest reads under its own root and issues.
+        pub(crate) fn plan(&self, agent_id: &str, lines: &[String]) {
+            let root = self.root(agent_id);
+            let uri = format!("{root}/memory/plan");
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&self.data_dir, &uri).unwrap();
+            crate::auth::write_principal_root_object(
+                &self.data_dir,
+                agent_id,
+                &root,
+                &uri,
+                &path,
+                lines.join("\n").as_bytes(),
+            )
+            .unwrap();
+        }
+
+        /// The result line the guest wrote for each plan entry, in order.
+        pub(crate) fn results(&self, agent_id: &str) -> Vec<String> {
+            let root = self.root(agent_id);
+            let uri = format!("{root}/memory/results");
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&self.data_dir, &uri).unwrap();
+            let bytes = crate::auth::read_principal_root_object(
+                &self.data_dir,
+                agent_id,
+                &root,
+                &uri,
+                &path,
+            )
+            .unwrap();
+            String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    /// Every file under `dir` as (relative path, SHA-256 of its bytes), sorted.
+    /// Two calls that return the same vector mean the tree's names and bytes
+    /// did not change.
+    pub(crate) fn tree_hashes(dir: &std::path::Path) -> Vec<(String, String)> {
+        use sha2::{Digest, Sha256};
+        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    let bytes = std::fs::read(&path).unwrap();
+                    let digest = format!("{:x}", Sha256::digest(&bytes));
+                    out.push((relative, digest));
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(dir, dir, &mut found);
+        found.sort();
+        found
+    }
+
+    /// What the code at the base commit answers one planned bridge call.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PlanExpect {
+        /// `principal_context_required` with the UsersAI scope sentence.
+        Scope,
+        /// `manifest_capability_denied` with the ceiling sentence.
+        Ceiling,
+        /// `invalid_resource_invoke` with the UsersAI scope sentence.
+        Invalid,
+        /// The capability request is granted: the spelling stays inside the
+        /// agent's own root.
+        HeldRequest,
+        /// No refusal and no Y data: the held spelling's operation answer.
+        HeldOperation,
+    }
+
+    /// The outcome column of the guest's result line for plan entry `index`.
+    fn plan_outcome(results: &[String], index: usize) -> String {
+        results
+            .get(index)
+            .unwrap_or_else(|| panic!("no result for plan entry {index}: {results:?}"))
+            .split_once('\t')
+            .unwrap_or_else(|| panic!("malformed result line for entry {index}: {results:?}"))
+            .1
+            .to_string()
     }
 
     /// Grants every pending capability request the probe makes, as the shell
@@ -1018,6 +1193,15 @@ pub(crate) mod tests {
                 format!("read {root}/memory/peer owner={owner}"),
             )
         };
+        // The fixture reads a plan under the agent's own root on every launch;
+        // a launch without a plan records the miss and issues no entry.
+        let plan_miss = |root: &str, session: &str| {
+            (
+                Some(session.to_string()),
+                "error".to_string(),
+                format!("read {root}/memory/plan owner={owner}"),
+            )
+        };
         let (root_a, root_b) = (home.root(a), home.root(b));
         assert_ne!(root_a, root_b);
         assert!(root_a.starts_with("localhost://UsersAI/"), "{root_a}");
@@ -1025,8 +1209,10 @@ pub(crate) mod tests {
 
         let mut expected_a = own_calls(&root_a, &first.id);
         expected_a.push(peer_miss(&root_a, &first.id));
+        expected_a.push(plan_miss(&root_a, &first.id));
         let mut expected_b = own_calls(&root_b, &second.id);
         expected_b.push(peer_miss(&root_b, &second.id));
+        expected_b.push(plan_miss(&root_b, &second.id));
         assert_eq!(home.invoked(a), expected_a);
         assert_eq!(home.invoked(b), expected_b);
 
@@ -1039,12 +1225,13 @@ pub(crate) mod tests {
         assert_eq!(home.root(a), root_a);
         let mut relaunched = own_calls(&root_a, &again.id);
         relaunched.push(peer_miss(&root_a, &again.id));
+        relaunched.push(plan_miss(&root_a, &again.id));
         let mut all = expected_a;
         all.extend(relaunched);
         assert_eq!(home.invoked(a), all);
         assert_eq!(
             home.invoked(b).len(),
-            5,
+            6,
             "the other agent's calls are untouched"
         );
         grants.abort();
@@ -1123,6 +1310,643 @@ pub(crate) mod tests {
             .any(|(_, result, reason)| result == "ok"
                 && reason == &format!("write {root_y}/memory/notes.md owner={}", home.owner)));
         grants.abort();
+    }
+
+    /// Row 7 (S5 part 2): an object the launched guest writes under its own
+    /// root is an envelope on disk, and only the owner's stored key opens it.
+    /// The launch completes only when the guest's own bridge read returns the
+    /// bytes it wrote, so the read half is already proven by the launch.
+    #[tokio::test]
+    async fn an_agents_guest_object_is_encrypted_and_needs_the_owners_key() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x"]).await;
+        let [x] = home.agents.as_slice() else {
+            panic!("one agent");
+        };
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let launched = home.launch(x).await;
+
+        let root = home.root(x);
+        let notes = format!("{root}/memory/notes.md");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &notes).unwrap();
+
+        // The row's at-rest claim, asserted before the launch outcome: the
+        // object the guest wrote is an envelope on disk, and the text it wrote
+        // appears nowhere in it. A production change that stops the agent's
+        // own object from taking the protected path leaves no encrypted object,
+        // and this assertion is where that consequence shows.
+        let bytes = std::fs::read(&path).unwrap_or_else(|err| {
+            panic!("an agent's own object must be at rest as an encrypted envelope, never plaintext: {err}")
+        });
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|err| panic!("the agent's notes are not an envelope: {err}"));
+        assert_eq!(envelope["schema"], "elastos.principal-root.object/v1");
+        let plaintext = format!("a5-launch-probe notes for {x}");
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(&plaintext),
+            "an agent's own object must be at rest as an encrypted envelope, never plaintext"
+        );
+
+        // The launch completes only after the guest's own bridge read returns
+        // the bytes it wrote, so a key that does not open the object refuses
+        // the launch by name.
+        let run = launched
+            .unwrap_or_else(|err| panic!("the launch must complete: {err:?}"))
+            .0;
+        assert_eq!(run.status, "completed");
+        grants.abort();
+
+        // The guest's own bridge read returned them; the launch only
+        // completes after that comparison.
+        assert!(home.invoked(x).iter().any(|(_, result, reason)| {
+            result == "ok" && reason == &format!("read {notes} owner={}", home.owner)
+        }));
+
+        // The same object opens for its principal through the route's read.
+        assert_eq!(
+            crate::auth::read_principal_root_object(&home.data_dir, x, &root, &notes, &path)
+                .unwrap(),
+            plaintext.as_bytes()
+        );
+
+        // Without the owner's stored key the agent's read refuses by name.
+        crate::auth::clear_test_principal_root_protections(&home.data_dir);
+        assert_eq!(
+            crate::auth::read_principal_root_object(&home.data_dir, x, &root, &notes, &path)
+                .unwrap_err()
+                .to_string(),
+            "agent's owner holds no storage protection"
+        );
+
+        // A fresh owner key is not the one that wrapped this object.
+        crate::auth::store_test_principal_root_protection(&home.data_dir, &home.owner);
+        assert_eq!(
+            crate::auth::read_principal_root_object(&home.data_dir, x, &root, &notes, &path)
+                .unwrap_err()
+                .to_string(),
+            "principal-root decrypt failed"
+        );
+    }
+
+    /// Row 3 (S5 part 2): the same spellings with the launched agent's own
+    /// segment name its own root, so the bridge serves them. A bare own root
+    /// stays beyond the probe host's `.../self/*` ceiling, and the traversal
+    /// spellings stay outside the root. The capturing localhost double shows
+    /// exactly which calls fell past the protected path.
+    #[tokio::test]
+    async fn an_agents_guest_serves_its_own_root_on_the_component_bridge() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x", "y"]).await;
+        let [x, y] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let scope = "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+        let ceiling = "capsule manifest does not declare authority for ";
+        let root = home.root(x);
+        let segment = root.trim_start_matches("localhost://UsersAI/").to_string();
+        let notes = format!("{root}/memory/notes.md");
+        let memory = format!("{root}/memory");
+        let doomed = format!("{root}/memory/doomed.txt");
+        let own_text = "row 3 own notes";
+        let upper = segment.to_uppercase();
+        let mut plan = vec![
+            format!("invoke\t{notes}\t{notes}\tread\tread\t"),
+            format!("write\t{notes}\t{notes}\twrite\t{own_text}"),
+            format!("invoke\t{notes}\t{notes}\tread\tread\t"),
+            format!("invoke\t{memory}\t{memory}\tlist\tread\t"),
+            format!("invoke\t{doomed}\t{doomed}\tdelete\tdelete\t"),
+            format!("request\t{root}\tread"),
+            format!("request\t{root}/\tread"),
+            format!("request\t{root}/../{segment}\tread"),
+            format!("request\tlocalhost://UsersAI/./{segment}\tread"),
+            format!("request\tlocalhost://UsersAI//{segment}\tread"),
+            format!("request\tlocalhost://UsersAI/%2e%2e%2f{segment}/memory/notes.md\tread"),
+            format!("invoke\t{notes}\tlocalhost://UsersAI/self\tread\tread\t{notes}"),
+            format!("invoke\t{notes}\t{notes}\tread\tread\t{notes}"),
+        ];
+        let mut upper_index = None;
+        if upper != segment {
+            upper_index = Some(plan.len());
+            plan.push(format!("request\tlocalhost://UsersAI/{upper}\tread"));
+        }
+
+        let root_y = home.root(y);
+        let y_dir =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &root_y).unwrap();
+        let y_before = tree_hashes(&y_dir);
+
+        home.plan(x, &plan);
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let run = home.launch(x).await.unwrap().0;
+        grants.abort();
+        assert_eq!(run.status, "completed");
+
+        let results = home.results(x);
+        assert_eq!(results.len(), plan.len(), "{results:?}");
+        let at = |index: usize| {
+            results
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| panic!("no result for plan entry {index}: {results:?}"))
+        };
+        // A result line is `<index>\t<outcome>`; the outcome is what the
+        // guest recorded for the entry.
+        let outcome =
+            |index: usize| -> String { at(index).split_once('\t').unwrap().1.to_string() };
+        // A read's content is the byte array the bridge returns. Decode it so
+        // the assertion is on the bytes, not their JSON spelling.
+        let content = |index: usize| -> Vec<u8> {
+            let line = outcome(index);
+            let (status, json) = line.split_once(' ').unwrap();
+            assert_eq!(status, "ok", "own-root cell {index}: {line}");
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            value["data"]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_u64().unwrap() as u8)
+                .collect()
+        };
+
+        // S3': the own read returns the bytes the guest wrote, and the write
+        // lands and reads back.
+        assert!(
+            String::from_utf8(content(0))
+                .unwrap()
+                .contains(&format!("a5-launch-probe notes for {x}")),
+            "{}",
+            at(0)
+        );
+        assert!(outcome(1).starts_with("ok"), "{}", at(1));
+        assert_eq!(content(2), own_text.as_bytes());
+
+        // List and delete are own-root operations the protected path does not
+        // serve, so they reach the capturing provider.
+        assert!(outcome(3).starts_with("ok"), "{}", at(3));
+        assert!(outcome(4).starts_with("ok"), "{}", at(4));
+        let requests = home.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(requests[0]["path"], memory);
+        assert_eq!(requests[0]["op"], "list");
+        assert_eq!(requests[1]["path"], doomed);
+        assert_eq!(requests[1]["op"], "delete");
+
+        // A bare own root and its slash form are still beyond the ceiling.
+        for index in [5, 6] {
+            assert!(at(index).contains(ceiling), "{index}: {}", at(index));
+        }
+        // The `..` suffix is on no wildcard, even under the own prefix.
+        assert!(at(7).contains(ceiling), "{}", at(7));
+        // `.`, `//`, an upper-cased segment and an encoded traversal are not
+        // the agent's stored root.
+        for index in [8, 9, 10] {
+            assert!(at(index).contains(scope), "{index}: {}", at(index));
+        }
+        if let Some(index) = upper_index {
+            assert!(at(index).contains(scope), "{index}: {}", at(index));
+        }
+
+        // S10' and S11a': a URI and a body path that would name different
+        // roots name this agent when the own segment is used, and are served.
+        assert_eq!(content(11), own_text.as_bytes(), "{}", at(11));
+        assert_eq!(content(12), own_text.as_bytes(), "{}", at(12));
+
+        // The other agent's tree gained nothing.
+        assert_eq!(tree_hashes(&y_dir), y_before);
+    }
+
+    /// Row A (S5 part 2, route 1 row 4): agent X's launched guest sends every
+    /// bridge spelling of agent Y's stored root, for read, list, write and
+    /// delete. Every Y-naming spelling is refused with the production
+    /// sentence. The encoded traversal under X's own prefix stays inside X's
+    /// root (the census's four held cells); its answer carries none of Y's
+    /// data, and it neither lists nor changes Y's tree. The pending store and
+    /// the capturing provider show that nothing reached Y on a refused cell.
+    #[tokio::test]
+    async fn an_agents_guest_is_refused_every_other_spelling_of_another_agents_root() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x", "y"]).await;
+        let [x, y] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let (root_x, root_y) = (home.root(x), home.root(y));
+        let seg_y = root_y.trim_start_matches("localhost://UsersAI/");
+        let scope = "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+        let ceiling = "capsule manifest does not declare authority for ";
+        let own_notes = format!("{root_x}/memory/notes.md");
+        let y_notes = format!("{root_y}/memory/notes.md");
+        let encoded = format!("{root_x}/%2e%2e%2f{seg_y}/memory/notes.md");
+        let (canary_name, canary_text) = ("canary-do-not-leak", "y-agent canary bytes");
+
+        // Y's root holds two protected objects before X's launch starts, so a
+        // leak would have a name and bytes to show.
+        for (name, text) in [
+            (canary_name, canary_text),
+            ("notes.md", "y-agent notes bytes"),
+        ] {
+            let uri = format!("{root_y}/memory/{name}");
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &uri).unwrap();
+            crate::auth::write_principal_root_object(
+                &home.data_dir,
+                y,
+                &root_y,
+                &uri,
+                &path,
+                text.as_bytes(),
+            )
+            .unwrap();
+        }
+        let y_dir =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &root_y).unwrap();
+        let y_before = tree_hashes(&y_dir);
+
+        let mut lines: Vec<(String, String, PlanExpect)> = Vec::new();
+        let mut refused_requests: Vec<String> = Vec::new();
+        let mut cells = 0;
+        for operation in ["read", "list", "write", "delete"] {
+            let action = match operation {
+                "read" | "list" => "read",
+                "write" => "write",
+                _ => "delete",
+            };
+            let spellings: Vec<(&str, String, PlanExpect)> = vec![
+                ("S1", root_y.clone(), PlanExpect::Scope),
+                ("S2", format!("{root_y}/"), PlanExpect::Scope),
+                ("S3", y_notes.clone(), PlanExpect::Scope),
+                ("S4", format!("{root_x}/../{seg_y}"), PlanExpect::Ceiling),
+                (
+                    "S5",
+                    format!("localhost://UsersAI/./{seg_y}"),
+                    PlanExpect::Scope,
+                ),
+                (
+                    "S6",
+                    format!("localhost://UsersAI//{seg_y}"),
+                    PlanExpect::Scope,
+                ),
+                (
+                    "S7",
+                    format!("localhost://UsersAI/{}", seg_y.to_uppercase()),
+                    PlanExpect::Scope,
+                ),
+                ("S8", encoded.clone(), PlanExpect::HeldRequest),
+                (
+                    "S9",
+                    format!("localhost://UsersAI/%2e%2e%2f{seg_y}/memory/notes.md"),
+                    PlanExpect::Scope,
+                ),
+            ];
+            for (id, resource, expect) in spellings {
+                cells += 1;
+                lines.push((
+                    format!("{id} {operation} request"),
+                    format!("request\t{resource}\t{action}"),
+                    expect,
+                ));
+                if expect != PlanExpect::HeldRequest {
+                    refused_requests.push(resource);
+                }
+            }
+            // The held cell also asks the operation itself, so its answer can
+            // be checked for Y's data. This line is not a second cell.
+            lines.push((
+                format!("S8 {operation} operation"),
+                if operation == "write" {
+                    format!("write\t{encoded}\t{encoded}\t{action}\tencoded write")
+                } else {
+                    format!("invoke\t{encoded}\t{encoded}\t{operation}\t{action}\t")
+                },
+                PlanExpect::HeldOperation,
+            ));
+            for (id, uri, body) in [
+                (
+                    "S10",
+                    "localhost://UsersAI/self".to_string(),
+                    y_notes.clone(),
+                ),
+                ("S11a", y_notes.clone(), own_notes.clone()),
+                ("S11b", own_notes.clone(), y_notes.clone()),
+            ] {
+                cells += 1;
+                lines.push((
+                    format!("{id} {operation}"),
+                    format!("invoke\t{own_notes}\t{uri}\t{operation}\t{action}\t{body}"),
+                    PlanExpect::Invalid,
+                ));
+            }
+        }
+        assert_eq!(cells, 48, "four operations over twelve spellings");
+
+        let plan: Vec<String> = lines.iter().map(|(_, line, _)| line.clone()).collect();
+        home.plan(x, &plan);
+        let run = home.launch_with_grants(x).await.unwrap().0;
+        assert_eq!(run.status, "completed");
+
+        let results = home.results(x);
+        assert_eq!(results.len(), lines.len(), "{results:?}");
+        for (index, (label, line, expect)) in lines.iter().enumerate() {
+            let outcome = plan_outcome(&results, index);
+            match expect {
+                PlanExpect::Scope => {
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(scope), "{label}: {outcome}");
+                }
+                PlanExpect::Ceiling => {
+                    let resource = line.split('\t').nth(1).unwrap();
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(ceiling), "{label}: {outcome}");
+                    assert!(outcome.contains(resource), "{label}: {outcome}");
+                }
+                PlanExpect::Invalid => {
+                    assert!(outcome.contains("Invalid("), "{label}: {outcome}");
+                    assert!(outcome.contains(scope), "{label}: {outcome}");
+                }
+                PlanExpect::HeldRequest => {
+                    assert_eq!(outcome, "ok", "{label}: {outcome}");
+                }
+                PlanExpect::HeldOperation => {
+                    assert!(!outcome.contains(canary_name), "{label}: {outcome}");
+                    assert!(!outcome.contains(canary_text), "{label}: {outcome}");
+                }
+            }
+        }
+        // Every answer, refused or held, carries none of Y's bytes or names.
+        for result in &results {
+            assert!(!result.contains(canary_name), "{result}");
+            assert!(!result.contains(canary_text), "{result}");
+        }
+
+        // No pending record survives, and a refused spelling never became one.
+        assert!(home.pending_store.list_pending().await.is_empty());
+        let requested = home.capability_requested();
+        for resource in &refused_requests {
+            assert!(
+                !requested.iter().any(|recorded| recorded == resource),
+                "a capability request record exists for {resource}: {requested:?}"
+            );
+        }
+        // The provider saw only the two held cells the protected path does not
+        // serve: list and delete of the encoded path under X's own root.
+        let requests = home.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        for request in &requests {
+            assert_eq!(request["path"], encoded);
+        }
+        assert_eq!(requests[0]["op"], "list");
+        assert_eq!(requests[1]["op"], "delete");
+        // No completed bridge call names Y's root.
+        assert!(home
+            .invoked(x)
+            .iter()
+            .all(|(_, _, reason)| !reason.contains(&root_y)));
+        // Y's listing and hashes are identical before and after.
+        assert_eq!(tree_hashes(&y_dir), y_before);
+    }
+
+    /// Row C (S5 part 2, route 18 row 4): the protected principal-root path
+    /// serves read and write only, and the same twelve spellings are refused
+    /// for both. The encoded traversal under X's own prefix stays inside X's
+    /// root (the census's two held cells). The launch's own journal and notes
+    /// writes are the route's own-root control. A labelled unit companion then
+    /// drives the protected path's root check with the agent id the launch
+    /// admitted; it is not actor evidence, because the capability request that
+    /// precedes every invoke refuses a foreign root before that check runs.
+    #[tokio::test]
+    async fn an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x", "y"]).await;
+        let [x, y] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let (root_x, root_y) = (home.root(x), home.root(y));
+        let seg_y = root_y.trim_start_matches("localhost://UsersAI/");
+        let scope = "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+        let ceiling = "capsule manifest does not declare authority for ";
+        let own_notes = format!("{root_x}/memory/notes.md");
+        let y_notes = format!("{root_y}/memory/notes.md");
+        let encoded = format!("{root_x}/%2e%2e%2f{seg_y}/memory/notes.md");
+        let (canary_name, canary_text) = ("canary-do-not-leak", "y-agent canary bytes");
+
+        for (name, text) in [
+            (canary_name, canary_text),
+            ("notes.md", "y-agent notes bytes"),
+        ] {
+            let uri = format!("{root_y}/memory/{name}");
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &uri).unwrap();
+            crate::auth::write_principal_root_object(
+                &home.data_dir,
+                y,
+                &root_y,
+                &uri,
+                &path,
+                text.as_bytes(),
+            )
+            .unwrap();
+        }
+        let y_dir =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &root_y).unwrap();
+        let y_before = tree_hashes(&y_dir);
+
+        let mut lines: Vec<(String, String, PlanExpect)> = Vec::new();
+        let mut refused_requests: Vec<String> = Vec::new();
+        let mut cells = 0;
+        for operation in ["read", "write"] {
+            let spellings: Vec<(&str, String, PlanExpect)> = vec![
+                ("S1", root_y.clone(), PlanExpect::Scope),
+                ("S2", format!("{root_y}/"), PlanExpect::Scope),
+                ("S3", y_notes.clone(), PlanExpect::Scope),
+                ("S4", format!("{root_x}/../{seg_y}"), PlanExpect::Ceiling),
+                (
+                    "S5",
+                    format!("localhost://UsersAI/./{seg_y}"),
+                    PlanExpect::Scope,
+                ),
+                (
+                    "S6",
+                    format!("localhost://UsersAI//{seg_y}"),
+                    PlanExpect::Scope,
+                ),
+                (
+                    "S7",
+                    format!("localhost://UsersAI/{}", seg_y.to_uppercase()),
+                    PlanExpect::Scope,
+                ),
+                ("S8", encoded.clone(), PlanExpect::HeldRequest),
+                (
+                    "S9",
+                    format!("localhost://UsersAI/%2e%2e%2f{seg_y}/memory/notes.md"),
+                    PlanExpect::Scope,
+                ),
+            ];
+            for (id, resource, expect) in spellings {
+                cells += 1;
+                lines.push((
+                    format!("{id} {operation} request"),
+                    format!("request\t{resource}\t{operation}"),
+                    expect,
+                ));
+                if expect != PlanExpect::HeldRequest {
+                    refused_requests.push(resource);
+                }
+            }
+            lines.push((
+                format!("S8 {operation} operation"),
+                if operation == "write" {
+                    format!("write\t{encoded}\t{encoded}\twrite\tencoded write")
+                } else {
+                    format!("invoke\t{encoded}\t{encoded}\t{operation}\tread\t")
+                },
+                PlanExpect::HeldOperation,
+            ));
+            for (id, uri, body) in [
+                (
+                    "S10",
+                    "localhost://UsersAI/self".to_string(),
+                    y_notes.clone(),
+                ),
+                ("S11a", y_notes.clone(), own_notes.clone()),
+                ("S11b", own_notes.clone(), y_notes.clone()),
+            ] {
+                cells += 1;
+                lines.push((
+                    format!("{id} {operation}"),
+                    format!("invoke\t{own_notes}\t{uri}\t{operation}\t{operation}\t{body}"),
+                    PlanExpect::Invalid,
+                ));
+            }
+        }
+        assert_eq!(cells, 24, "read and write over twelve spellings");
+
+        let plan: Vec<String> = lines.iter().map(|(_, line, _)| line.clone()).collect();
+        home.plan(x, &plan);
+        let run = home.launch_with_grants(x).await.unwrap().0;
+        assert_eq!(run.status, "completed");
+
+        // The route's own-root control: the launch only completes after the
+        // guest's own protected writes and reads return their bytes.
+        assert!(home.invoked(x).iter().any(|(_, result, reason)| {
+            result == "ok" && reason == &format!("write {own_notes} owner={}", home.owner)
+        }));
+
+        let results = home.results(x);
+        assert_eq!(results.len(), lines.len(), "{results:?}");
+        for (index, (label, line, expect)) in lines.iter().enumerate() {
+            let outcome = plan_outcome(&results, index);
+            match expect {
+                PlanExpect::Scope => {
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(scope), "{label}: {outcome}");
+                }
+                PlanExpect::Ceiling => {
+                    let resource = line.split('\t').nth(1).unwrap();
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(ceiling), "{label}: {outcome}");
+                    assert!(outcome.contains(resource), "{label}: {outcome}");
+                }
+                PlanExpect::Invalid => {
+                    assert!(outcome.contains("Invalid("), "{label}: {outcome}");
+                    assert!(outcome.contains(scope), "{label}: {outcome}");
+                }
+                PlanExpect::HeldRequest => {
+                    assert_eq!(outcome, "ok", "{label}: {outcome}");
+                }
+                PlanExpect::HeldOperation => {
+                    assert!(!outcome.contains(canary_name), "{label}: {outcome}");
+                    assert!(!outcome.contains(canary_text), "{label}: {outcome}");
+                }
+            }
+        }
+        for result in &results {
+            assert!(!result.contains(canary_name), "{result}");
+            assert!(!result.contains(canary_text), "{result}");
+        }
+
+        assert!(home.pending_store.list_pending().await.is_empty());
+        let requested = home.capability_requested();
+        for resource in &refused_requests {
+            assert!(
+                !requested.iter().any(|recorded| recorded == resource),
+                "a capability request record exists for {resource}: {requested:?}"
+            );
+        }
+        // Read and write both take the protected path, so no provider call is
+        // made for any cell, held or refused.
+        assert!(home.requests().is_empty(), "{:?}", home.requests());
+        assert!(home
+            .invoked(x)
+            .iter()
+            .all(|(_, _, reason)| !reason.contains(&root_y)));
+        assert_eq!(tree_hashes(&y_dir), y_before);
+
+        // Labelled unit companion, not actor evidence: the protected path's
+        // own root check, driven with the id the launch admitted and a foreign
+        // root. No launched guest can reach this check with Y's root, because
+        // the capability request refuses the spelling first.
+        let foreign = format!("{root_y}/memory/{canary_name}");
+        let ctx = crate::resource_bridge::BridgeContext {
+            provider_registry: Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+            capability_manager: home.capability_manager.clone(),
+            pending_store: home.pending_store.clone(),
+            capsule_id: "a5-s5-protected-path-companion".to_string(),
+            principal_id: Some(x.clone()),
+            manifest_capabilities: Vec::new(),
+            data_dir: Some(home.data_dir.clone()),
+            launch: None,
+        };
+        let request = serde_json::json!({"path": foreign, "content": "x"});
+        let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(
+            &ctx, "write", &request,
+        )
+        .unwrap();
+        assert_eq!(
+            refused["code"], "principal_context_required",
+            "protected-path root check: {refused}"
+        );
+        assert_eq!(
+            refused["message"],
+            "localhost://Users roots must use Users/self or the active principal root",
+            "protected-path root check: {refused}"
+        );
+    }
+
+    /// Row E (blocker evidence, no production change): a start that did not
+    /// admit a stored agent refuses its principal by name before reading the
+    /// folder. This is the attached start route that row 4's route 4 lacks.
+    #[tokio::test]
+    async fn an_attached_start_refuses_a_stored_agents_principal() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x"]).await;
+        let [x] = home.agents.as_slice() else {
+            panic!("one agent");
+        };
+        let error = home
+            .runtime
+            .run_local_with_principal(&home.capsule_dir, Vec::new(), Some(x.clone()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "Invalid manifest: a stored agent's principal reaches only a launch that \
+                 admitted it: {x}"
+            )
+        );
     }
 
     /// Row 1 refusal, round 2: the folder that would load names the stored
@@ -1489,7 +2313,11 @@ pub(crate) mod tests {
             .filter(|event| event.event_type == "component.invoke.completed")
             .filter(|event| event.principal_id.as_deref() == Some(agent.as_str()))
             .collect();
-        assert_eq!(events.len(), 5, "four own-root calls and the peer miss");
+        assert_eq!(
+            events.len(),
+            6,
+            "four own-root calls, the peer miss and the plan miss"
+        );
         for event in &events {
             assert_eq!(
                 event.principal_id.as_deref(),
@@ -1735,7 +2563,11 @@ pub(crate) mod tests {
             .filter(|event| event.event_type == "component.invoke.completed")
             .filter(|event| event.principal_id.as_deref() == Some(agent.as_str()))
             .collect();
-        assert_eq!(events.len(), 5, "four own-root calls and the peer read");
+        assert_eq!(
+            events.len(),
+            6,
+            "four own-root calls, the peer read and the plan miss"
+        );
         let own = events
             .iter()
             .filter(|event| event.result == "ok" && event.reason.contains(&root))
@@ -1747,8 +2579,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             events.iter().filter(|event| event.result != "ok").count(),
-            1,
-            "the absent peer pointer is the only failed call: {events:?}"
+            2,
+            "the absent peer pointer and the absent plan are the only failed calls: {events:?}"
         );
         grants.abort();
     }

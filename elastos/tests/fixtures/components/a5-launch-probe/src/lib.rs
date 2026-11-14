@@ -6,7 +6,8 @@
 //! principal-root path, reads both back, and refuses to finish unless the
 //! bytes come back. When the test plants a pointer under its own root, it
 //! tries to read the pointer's URI, which is another agent's stored root, and
-//! reports the bridge's refusal.
+//! reports the bridge's refusal. When the test writes a plan under its own
+//! root, it issues each planned request and records the answer.
 
 wit_bindgen::generate!({
     path: "../../../../wit",
@@ -16,6 +17,8 @@ wit_bindgen::generate!({
 const JOURNAL: &str = "localhost://UsersAI/self/.AppData/Agents/agent-host/tasks/t1/journal";
 const NOTES: &str = "localhost://UsersAI/self/memory/notes.md";
 const PEER: &str = "localhost://UsersAI/self/memory/peer";
+const PLAN: &str = "localhost://UsersAI/self/memory/plan";
+const RESULTS: &str = "localhost://UsersAI/self/memory/results";
 
 struct LaunchProbe;
 
@@ -37,7 +40,20 @@ impl LaunchProbe {
         operation: &str,
         body: String,
     ) -> Result<(String, Vec<u8>), elastos::bus::types::BusError> {
-        let grant = Self::grant(resource, operation)?;
+        Self::call_with(resource, resource, operation, operation, body)
+    }
+
+    /// A call whose grant is asked for `grant_resource`, which may differ from
+    /// the URI the invoke names and from its body path. The plan uses this so a
+    /// cell can hold a grant for one root and name another.
+    fn call_with(
+        grant_resource: &str,
+        resource: &str,
+        operation: &str,
+        action: &str,
+        body: String,
+    ) -> Result<(String, Vec<u8>), elastos::bus::types::BusError> {
+        let grant = Self::grant(grant_resource, action)?;
         let response = elastos::bus::providers::invoke(&elastos::bus::types::InvokeRequest {
             resource: resource.to_string(),
             operation: operation.to_string(),
@@ -133,6 +149,58 @@ impl LaunchProbe {
             }
         }
     }
+
+    /// Reads the plan the host wrote under this agent's own root, issues one
+    /// request per line, and writes one result line per entry under the same
+    /// root. A plan line is one of:
+    ///
+    /// - `request <resource> <action>`
+    /// - `invoke <grant resource> <uri> <operation> <action> <body path>`
+    /// - `write <grant resource> <uri> <action> <text>`
+    ///
+    /// Fields are tab-separated; an empty body path means no body. A missing
+    /// plan leaves the probe's original behaviour untouched.
+    fn plan() -> Result<(), elastos::bus::types::BusError> {
+        let Ok(bytes) = Self::read(PLAN) else {
+            return Ok(());
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let mut results = Vec::new();
+        for (index, line) in text.lines().enumerate() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let outcome = match fields.as_slice() {
+                ["request", resource, action] => match Self::grant(resource, action) {
+                    Ok(_) => "ok".to_string(),
+                    Err(err) => format!("{err:?}"),
+                },
+                ["invoke", grant_resource, resource, operation, action, body_path] => {
+                    let body = if body_path.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        format!("{{\"path\":\"{body_path}\"}}")
+                    };
+                    match Self::call_with(grant_resource, resource, operation, action, body) {
+                        Ok((status, response)) => {
+                            format!("{status} {}", String::from_utf8_lossy(&response))
+                        }
+                        Err(err) => format!("{err:?}"),
+                    }
+                }
+                ["write", grant_resource, resource, action, text] => {
+                    let body = format!("{{\"content\":[{}]}}", numbers(text.as_bytes()));
+                    match Self::call_with(grant_resource, resource, "write", action, body) {
+                        Ok((status, response)) => {
+                            format!("{status} {}", String::from_utf8_lossy(&response))
+                        }
+                        Err(err) => format!("{err:?}"),
+                    }
+                }
+                _ => continue,
+            };
+            results.push(format!("{index}\t{outcome}"));
+        }
+        Self::write(RESULTS, results.join("\n").as_bytes())
+    }
 }
 
 impl exports::elastos::bus::lifecycle::Guest for LaunchProbe {
@@ -144,7 +212,8 @@ impl exports::elastos::bus::lifecycle::Guest for LaunchProbe {
         journal.extend_from_slice(principal.as_bytes());
         let notes = format!("a5-launch-probe notes for {principal}");
         Self::place(&journal, notes.as_bytes())?;
-        Self::peer()
+        Self::peer()?;
+        Self::plan()
     }
 }
 

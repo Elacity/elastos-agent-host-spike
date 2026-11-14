@@ -12875,6 +12875,17 @@ pub(crate) fn store_test_principal_root_protection(
     store_test_principal_root_protection_for(data_dir, principal_id, &localhost_root)
 }
 
+/// Forgets every protection the sign-in file stores, as a Home whose owner
+/// lost the key. Agent-file protections stay where they are. Test-only.
+#[cfg(test)]
+pub(crate) fn clear_test_principal_root_protections(data_dir: &Path) {
+    mutate_auth_state(data_dir, |state| {
+        state.principal_root_protections.clear();
+        Ok(())
+    })
+    .unwrap();
+}
+
 /// Stores a Human record under a fixed test principal id, so a test that
 /// names its own id has the stored record a kind check reads. Test-only.
 #[cfg(test)]
