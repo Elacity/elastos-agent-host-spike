@@ -1053,6 +1053,33 @@ pub(in crate::api) fn require_home_launch_token_value_from_expected_did_for_test
 /// `elastos://launch/<launch id>`.
 pub(crate) const LAUNCH_BOUND: &str = "elastos://launch/";
 
+/// How long a page's token for a kept launch lives: the life of the kept
+/// launch (`page_launch.rs`, `KEPT_FOR`).
+pub(crate) const LAUNCH_PAGE_TOKEN_TTL_SECS: u64 = 15 * 60;
+
+/// A page's token for a kept launch: bound to `elastos://launch/<id>`, with
+/// the page as its executable, for the person `context` names; it expires at
+/// the earlier of 15 minutes and the person's session grant.
+pub(in crate::api) fn issue_launch_page_token(
+    data_dir: &std::path::Path,
+    id: &str,
+    page: &str,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<String> {
+    let issued_at = now_ts();
+    let ttl = LAUNCH_PAGE_TOKEN_TTL_SECS;
+    let expires_at = grant_bound_token_expiry(data_dir, context, issued_at, ttl)?;
+    let bound = format!("{LAUNCH_BOUND}{id}");
+    let launch_context = HomeLaunchContext::projection(&bound, page);
+    issue_home_launch_token_at(
+        data_dir,
+        &launch_context,
+        context,
+        issued_at,
+        Some(expires_at),
+    )
+}
+
 /// Whether a check takes a token bound to a kept content launch. Every Home
 /// check refuses one, except the two reads of a page's kept launch, which take
 /// only one.

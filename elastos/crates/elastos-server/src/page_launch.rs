@@ -9,7 +9,7 @@
 //! through [`Runtime::read_kept_launch`] only, and the bridge never looks
 //! here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,8 +40,17 @@ pub(crate) struct Started {
     pub accepted: AcceptedSignature,
     /// The launch, for a start of content.
     pub launch: Option<Arc<LaunchContent>>,
-    /// The name of the page the content pins, for a start of content.
-    pub page: Option<String>,
+    /// The page the content pins, for a start of content.
+    pub page: Option<Page>,
+}
+
+/// The page a content pins, as the start's walk read it: its name, its
+/// entrypoint, and its files by path. Kept with the launch, so the page that
+/// is served is exactly the bundle the content pinned.
+pub(crate) struct Page {
+    pub name: String,
+    pub entrypoint: String,
+    pub files: BTreeMap<String, Vec<u8>>,
 }
 
 /// One place in the table: taken by an open before its start runs, and
@@ -49,6 +58,9 @@ pub(crate) struct Started {
 pub(crate) struct Kept {
     principal: String,
     page: String,
+    /// The page's entrypoint and files, as the walk read them.
+    entrypoint: String,
+    page_files: BTreeMap<String, Vec<u8>>,
     /// `None` while the open's start runs.
     launch: Option<Arc<LaunchContent>>,
     until: Instant,
@@ -62,6 +74,7 @@ pub(crate) type PageLaunches = Arc<Mutex<HashMap<String, Kept>>>;
 pub struct Opened {
     pub id: String,
     pub page: String,
+    pub entrypoint: String,
 }
 
 /// Why a launch was not opened for a page.
@@ -71,6 +84,9 @@ pub enum OpenRefusal {
     Start(BundleRefusal),
     /// It started, but it is not content: there is no page to keep it for.
     NotContent,
+    /// The page's entrypoint is not a plain content path, so no address
+    /// could name it: refused before anything is kept.
+    PageEntrypointNotPlain,
     /// This person has [`KEPT_PER_PRINCIPAL`] launches kept already.
     TooManyOpen,
     /// The Runtime keeps [`KEPT_IN_ALL`] launches already.
@@ -95,11 +111,14 @@ pub enum KeptRead<'a> {
 
 /// A content path a kept launch is read at: one or more plain parts joined by
 /// `/`. Not empty (that would be the listing), no empty, `.` or `..` part, no
-/// leading `/`, no `\`. The path is then looked up as text among the files the
-/// walk read; it is joined onto no folder.
+/// leading `/`, no `\`, no control character (a URL parser drops a tab or a
+/// line break, so such a path would be asked for as another). The path is
+/// then looked up as text among the files the walk read; it is joined onto
+/// no folder.
 pub fn plain_content_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains('\\')
+        && !path.chars().any(char::is_control)
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
@@ -160,6 +179,8 @@ pub(crate) fn take_place(table: &PageLaunches, principal: &str) -> Result<Place,
     let one = Kept {
         principal: principal.to_string(),
         page: String::new(),
+        entrypoint: String::new(),
+        page_files: BTreeMap::new(),
         launch: None,
         until: Instant::now() + KEPT_FOR,
     };
@@ -225,18 +246,24 @@ impl Runtime {
         let (Some(launch), Some(page)) = (started.launch, started.page) else {
             return Err(OpenRefusal::NotContent);
         };
+        if !plain_content_path(&page.entrypoint) {
+            return Err(OpenRefusal::PageEntrypointNotPlain);
+        }
         let mut kept = kept_ones(&self.page_launches);
         // The place this open took is filled and its time starts now. It is
         // still there: an unfilled place does not expire, and only its own
         // `Place` gives it back. Were it gone, the open says so by name.
         let one = kept.get_mut(&place.id).ok_or(OpenRefusal::PlaceLost)?;
-        one.page = page.clone();
+        one.page = page.name.clone();
+        one.entrypoint = page.entrypoint.clone();
+        one.page_files = page.files;
         one.launch = Some(launch);
         one.until = Instant::now() + KEPT_FOR;
         place.filled = true;
         Ok(Opened {
             id: place.id.clone(),
-            page,
+            page: page.name,
+            entrypoint: page.entrypoint,
         })
     }
 
@@ -267,6 +294,19 @@ impl Runtime {
                 launch.read(&format!("{LAUNCH_CONTENT}{path}"))
             }
             _ => None,
+        }
+    }
+
+    /// One file of the page a kept launch was opened for, at exactly that plain
+    /// path, while it is kept. The page's files are not secret (anyone may
+    /// fetch a page); the launch's id says which one.
+    pub(crate) fn read_kept_page_file(&self, id: &str, path: &str) -> Option<Vec<u8>> {
+        let kept = kept_ones(&self.page_launches);
+        let one = kept.get(id)?;
+        one.launch.as_ref()?;
+        match plain_content_path(path) {
+            true => one.page_files.get(path).cloned(),
+            false => None,
         }
     }
 

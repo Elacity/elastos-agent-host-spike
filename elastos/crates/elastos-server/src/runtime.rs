@@ -636,7 +636,7 @@ impl Runtime {
         let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
         // The page a content pins, by its name: the one the launch is for.
-        let mut page_name = None;
+        let mut kept_page = None;
         // What starts: the program asked for or, under content, the core.
         let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
         while let Some((depth, expected, core, name, pin)) = pending.pop() {
@@ -700,7 +700,11 @@ impl Runtime {
             let pins = std::mem::take(&mut member.pins);
             let page = member.kind == BundleKind::Page;
             if page {
-                page_name = Some(member.manifest.name.clone());
+                kept_page = Some(crate::page_launch::Page {
+                    name: member.manifest.name.clone(),
+                    entrypoint: member.manifest.entrypoint.clone(),
+                    files: std::mem::take(&mut member.files),
+                });
             }
             if page && pins.len() != 1 {
                 return Err(refused(BundleRefusal::ViewerCoreInvalid(format!(
@@ -758,7 +762,7 @@ impl Runtime {
             handle,
             accepted,
             launch,
-            page: page_name,
+            page: kept_page,
         })
     }
 
