@@ -1552,7 +1552,10 @@ fn with_the_feature_on_the_operations_are_served() {
     assert!(!set_enabled(home.path(), &caller, false, 12).unwrap());
 }
 
-/// Every `.rs` file under `dir` that is not test code, with its text.
+/// Every `.rs` file under `dir` that is not test code, with its text. A test
+/// module declared inside a production file is test code too, so the walk
+/// stops at its header; a `mod tests;` declaration only names a file the walk
+/// already skips by name.
 fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -1563,7 +1566,13 @@ fn production_sources(dir: &Path, found: &mut Vec<(PathBuf, String)>) {
         if path.is_dir() {
             production_sources(&path, found);
         } else if name.ends_with(".rs") {
-            let text = std::fs::read_to_string(&path).unwrap();
+            let mut text = std::fs::read_to_string(&path).unwrap();
+            let test_module = text
+                .find("\n#[cfg(test)]\nmod tests {")
+                .or_else(|| text.find("\n#[cfg(test)]\npub(crate) mod tests {"));
+            if let Some(at) = test_module {
+                text.truncate(at);
+            }
             found.push((path, text));
         }
     }

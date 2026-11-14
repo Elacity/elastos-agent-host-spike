@@ -986,6 +986,23 @@ pub(crate) mod tests {
             self.provider.requests()
         }
 
+        /// Every `CapabilityRequested` event's resource, in order. A request
+        /// the bridge refuses before creating a record never appears here, so
+        /// a refused spelling's absence is evidence it reached no store.
+        pub(crate) fn capability_requested(&self) -> Vec<String> {
+            self.audit_log
+                .recent_events(usize::MAX)
+                .into_iter()
+                .filter_map(|event| match event {
+                    elastos_runtime::primitives::audit::AuditEvent::CapabilityRequested {
+                        resource,
+                        ..
+                    } => Some(resource),
+                    _ => None,
+                })
+                .collect()
+        }
+
         /// Writes the plan the guest reads under its own root and issues.
         pub(crate) fn plan(&self, agent_id: &str, lines: &[String]) {
             let root = self.root(agent_id);
@@ -1054,6 +1071,33 @@ pub(crate) mod tests {
         walk(dir, dir, &mut found);
         found.sort();
         found
+    }
+
+    /// What the code at the base commit answers one planned bridge call.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PlanExpect {
+        /// `principal_context_required` with the UsersAI scope sentence.
+        Scope,
+        /// `manifest_capability_denied` with the ceiling sentence.
+        Ceiling,
+        /// `invalid_resource_invoke` with the UsersAI scope sentence.
+        Invalid,
+        /// The capability request is granted: the spelling stays inside the
+        /// agent's own root.
+        HeldRequest,
+        /// No refusal and no Y data: the held spelling's operation answer.
+        HeldOperation,
+    }
+
+    /// The outcome column of the guest's result line for plan entry `index`.
+    fn plan_outcome(results: &[String], index: usize) -> String {
+        results
+            .get(index)
+            .unwrap_or_else(|| panic!("no result for plan entry {index}: {results:?}"))
+            .split_once('\t')
+            .unwrap_or_else(|| panic!("malformed result line for entry {index}: {results:?}"))
+            .1
+            .to_string()
     }
 
     /// Grants every pending capability request the probe makes, as the shell
@@ -1149,6 +1193,15 @@ pub(crate) mod tests {
                 format!("read {root}/memory/peer owner={owner}"),
             )
         };
+        // The fixture reads a plan under the agent's own root on every launch;
+        // a launch without a plan records the miss and issues no entry.
+        let plan_miss = |root: &str, session: &str| {
+            (
+                Some(session.to_string()),
+                "error".to_string(),
+                format!("read {root}/memory/plan owner={owner}"),
+            )
+        };
         let (root_a, root_b) = (home.root(a), home.root(b));
         assert_ne!(root_a, root_b);
         assert!(root_a.starts_with("localhost://UsersAI/"), "{root_a}");
@@ -1156,8 +1209,10 @@ pub(crate) mod tests {
 
         let mut expected_a = own_calls(&root_a, &first.id);
         expected_a.push(peer_miss(&root_a, &first.id));
+        expected_a.push(plan_miss(&root_a, &first.id));
         let mut expected_b = own_calls(&root_b, &second.id);
         expected_b.push(peer_miss(&root_b, &second.id));
+        expected_b.push(plan_miss(&root_b, &second.id));
         assert_eq!(home.invoked(a), expected_a);
         assert_eq!(home.invoked(b), expected_b);
 
@@ -1170,12 +1225,13 @@ pub(crate) mod tests {
         assert_eq!(home.root(a), root_a);
         let mut relaunched = own_calls(&root_a, &again.id);
         relaunched.push(peer_miss(&root_a, &again.id));
+        relaunched.push(plan_miss(&root_a, &again.id));
         let mut all = expected_a;
         all.extend(relaunched);
         assert_eq!(home.invoked(a), all);
         assert_eq!(
             home.invoked(b).len(),
-            5,
+            6,
             "the other agent's calls are untouched"
         );
         grants.abort();
@@ -1451,6 +1507,402 @@ pub(crate) mod tests {
 
         // The other agent's tree gained nothing.
         assert_eq!(tree_hashes(&y_dir), y_before);
+    }
+
+    /// Row A (S5 part 2, route 1 row 4): agent X's launched guest sends every
+    /// bridge spelling of agent Y's stored root, for read, list, write and
+    /// delete. Every Y-naming spelling is refused with the production
+    /// sentence. The encoded traversal under X's own prefix stays inside X's
+    /// root (the census's four held cells); its answer carries none of Y's
+    /// data, and it neither lists nor changes Y's tree. The pending store and
+    /// the capturing provider show that nothing reached Y on a refused cell.
+    #[tokio::test]
+    async fn an_agents_guest_is_refused_every_other_spelling_of_another_agents_root() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x", "y"]).await;
+        let [x, y] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let (root_x, root_y) = (home.root(x), home.root(y));
+        let seg_y = root_y.trim_start_matches("localhost://UsersAI/");
+        let scope = "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+        let ceiling = "capsule manifest does not declare authority for ";
+        let own_notes = format!("{root_x}/memory/notes.md");
+        let y_notes = format!("{root_y}/memory/notes.md");
+        let encoded = format!("{root_x}/%2e%2e%2f{seg_y}/memory/notes.md");
+        let (canary_name, canary_text) = ("canary-do-not-leak", "y-agent canary bytes");
+
+        // Y's root holds two protected objects before X's launch starts, so a
+        // leak would have a name and bytes to show.
+        for (name, text) in [
+            (canary_name, canary_text),
+            ("notes.md", "y-agent notes bytes"),
+        ] {
+            let uri = format!("{root_y}/memory/{name}");
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &uri).unwrap();
+            crate::auth::write_principal_root_object(
+                &home.data_dir,
+                y,
+                &root_y,
+                &uri,
+                &path,
+                text.as_bytes(),
+            )
+            .unwrap();
+        }
+        let y_dir =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &root_y).unwrap();
+        let y_before = tree_hashes(&y_dir);
+
+        let mut lines: Vec<(String, String, PlanExpect)> = Vec::new();
+        let mut refused_requests: Vec<String> = Vec::new();
+        let mut cells = 0;
+        for operation in ["read", "list", "write", "delete"] {
+            let action = match operation {
+                "read" | "list" => "read",
+                "write" => "write",
+                _ => "delete",
+            };
+            let spellings: Vec<(&str, String, PlanExpect)> = vec![
+                ("S1", root_y.clone(), PlanExpect::Scope),
+                ("S2", format!("{root_y}/"), PlanExpect::Scope),
+                ("S3", y_notes.clone(), PlanExpect::Scope),
+                ("S4", format!("{root_x}/../{seg_y}"), PlanExpect::Ceiling),
+                (
+                    "S5",
+                    format!("localhost://UsersAI/./{seg_y}"),
+                    PlanExpect::Scope,
+                ),
+                (
+                    "S6",
+                    format!("localhost://UsersAI//{seg_y}"),
+                    PlanExpect::Scope,
+                ),
+                (
+                    "S7",
+                    format!("localhost://UsersAI/{}", seg_y.to_uppercase()),
+                    PlanExpect::Scope,
+                ),
+                ("S8", encoded.clone(), PlanExpect::HeldRequest),
+                (
+                    "S9",
+                    format!("localhost://UsersAI/%2e%2e%2f{seg_y}/memory/notes.md"),
+                    PlanExpect::Scope,
+                ),
+            ];
+            for (id, resource, expect) in spellings {
+                cells += 1;
+                lines.push((
+                    format!("{id} {operation} request"),
+                    format!("request\t{resource}\t{action}"),
+                    expect,
+                ));
+                if expect != PlanExpect::HeldRequest {
+                    refused_requests.push(resource);
+                }
+            }
+            // The held cell also asks the operation itself, so its answer can
+            // be checked for Y's data. This line is not a second cell.
+            lines.push((
+                format!("S8 {operation} operation"),
+                if operation == "write" {
+                    format!("write\t{encoded}\t{encoded}\t{action}\tencoded write")
+                } else {
+                    format!("invoke\t{encoded}\t{encoded}\t{operation}\t{action}\t")
+                },
+                PlanExpect::HeldOperation,
+            ));
+            for (id, uri, body) in [
+                (
+                    "S10",
+                    "localhost://UsersAI/self".to_string(),
+                    y_notes.clone(),
+                ),
+                ("S11a", y_notes.clone(), own_notes.clone()),
+                ("S11b", own_notes.clone(), y_notes.clone()),
+            ] {
+                cells += 1;
+                lines.push((
+                    format!("{id} {operation}"),
+                    format!("invoke\t{own_notes}\t{uri}\t{operation}\t{action}\t{body}"),
+                    PlanExpect::Invalid,
+                ));
+            }
+        }
+        assert_eq!(cells, 48, "four operations over twelve spellings");
+
+        let plan: Vec<String> = lines.iter().map(|(_, line, _)| line.clone()).collect();
+        home.plan(x, &plan);
+        let run = home.launch_with_grants(x).await.unwrap().0;
+        assert_eq!(run.status, "completed");
+
+        let results = home.results(x);
+        assert_eq!(results.len(), lines.len(), "{results:?}");
+        for (index, (label, line, expect)) in lines.iter().enumerate() {
+            let outcome = plan_outcome(&results, index);
+            match expect {
+                PlanExpect::Scope => {
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(scope), "{label}: {outcome}");
+                }
+                PlanExpect::Ceiling => {
+                    let resource = line.split('\t').nth(1).unwrap();
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(ceiling), "{label}: {outcome}");
+                    assert!(outcome.contains(resource), "{label}: {outcome}");
+                }
+                PlanExpect::Invalid => {
+                    assert!(outcome.contains("Invalid("), "{label}: {outcome}");
+                    assert!(outcome.contains(scope), "{label}: {outcome}");
+                }
+                PlanExpect::HeldRequest => {
+                    assert_eq!(outcome, "ok", "{label}: {outcome}");
+                }
+                PlanExpect::HeldOperation => {
+                    assert!(!outcome.contains(canary_name), "{label}: {outcome}");
+                    assert!(!outcome.contains(canary_text), "{label}: {outcome}");
+                }
+            }
+        }
+        // Every answer, refused or held, carries none of Y's bytes or names.
+        for result in &results {
+            assert!(!result.contains(canary_name), "{result}");
+            assert!(!result.contains(canary_text), "{result}");
+        }
+
+        // No pending record survives, and a refused spelling never became one.
+        assert!(home.pending_store.list_pending().await.is_empty());
+        let requested = home.capability_requested();
+        for resource in &refused_requests {
+            assert!(
+                !requested.iter().any(|recorded| recorded == resource),
+                "a capability request record exists for {resource}: {requested:?}"
+            );
+        }
+        // The provider saw only the two held cells the protected path does not
+        // serve: list and delete of the encoded path under X's own root.
+        let requests = home.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        for request in &requests {
+            assert_eq!(request["path"], encoded);
+        }
+        assert_eq!(requests[0]["op"], "list");
+        assert_eq!(requests[1]["op"], "delete");
+        // No completed bridge call names Y's root.
+        assert!(home
+            .invoked(x)
+            .iter()
+            .all(|(_, _, reason)| !reason.contains(&root_y)));
+        // Y's listing and hashes are identical before and after.
+        assert_eq!(tree_hashes(&y_dir), y_before);
+    }
+
+    /// Row C (S5 part 2, route 18 row 4): the protected principal-root path
+    /// serves read and write only, and the same twelve spellings are refused
+    /// for both. The encoded traversal under X's own prefix stays inside X's
+    /// root (the census's two held cells). The launch's own journal and notes
+    /// writes are the route's own-root control. A labelled unit companion then
+    /// drives the protected path's root check with the agent id the launch
+    /// admitted; it is not actor evidence, because the capability request that
+    /// precedes every invoke refuses a foreign root before that check runs.
+    #[tokio::test]
+    async fn an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x", "y"]).await;
+        let [x, y] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let (root_x, root_y) = (home.root(x), home.root(y));
+        let seg_y = root_y.trim_start_matches("localhost://UsersAI/");
+        let scope = "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+        let ceiling = "capsule manifest does not declare authority for ";
+        let own_notes = format!("{root_x}/memory/notes.md");
+        let y_notes = format!("{root_y}/memory/notes.md");
+        let encoded = format!("{root_x}/%2e%2e%2f{seg_y}/memory/notes.md");
+        let (canary_name, canary_text) = ("canary-do-not-leak", "y-agent canary bytes");
+
+        for (name, text) in [
+            (canary_name, canary_text),
+            ("notes.md", "y-agent notes bytes"),
+        ] {
+            let uri = format!("{root_y}/memory/{name}");
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &uri).unwrap();
+            crate::auth::write_principal_root_object(
+                &home.data_dir,
+                y,
+                &root_y,
+                &uri,
+                &path,
+                text.as_bytes(),
+            )
+            .unwrap();
+        }
+        let y_dir =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &root_y).unwrap();
+        let y_before = tree_hashes(&y_dir);
+
+        let mut lines: Vec<(String, String, PlanExpect)> = Vec::new();
+        let mut refused_requests: Vec<String> = Vec::new();
+        let mut cells = 0;
+        for operation in ["read", "write"] {
+            let spellings: Vec<(&str, String, PlanExpect)> = vec![
+                ("S1", root_y.clone(), PlanExpect::Scope),
+                ("S2", format!("{root_y}/"), PlanExpect::Scope),
+                ("S3", y_notes.clone(), PlanExpect::Scope),
+                ("S4", format!("{root_x}/../{seg_y}"), PlanExpect::Ceiling),
+                (
+                    "S5",
+                    format!("localhost://UsersAI/./{seg_y}"),
+                    PlanExpect::Scope,
+                ),
+                (
+                    "S6",
+                    format!("localhost://UsersAI//{seg_y}"),
+                    PlanExpect::Scope,
+                ),
+                (
+                    "S7",
+                    format!("localhost://UsersAI/{}", seg_y.to_uppercase()),
+                    PlanExpect::Scope,
+                ),
+                ("S8", encoded.clone(), PlanExpect::HeldRequest),
+                (
+                    "S9",
+                    format!("localhost://UsersAI/%2e%2e%2f{seg_y}/memory/notes.md"),
+                    PlanExpect::Scope,
+                ),
+            ];
+            for (id, resource, expect) in spellings {
+                cells += 1;
+                lines.push((
+                    format!("{id} {operation} request"),
+                    format!("request\t{resource}\t{operation}"),
+                    expect,
+                ));
+                if expect != PlanExpect::HeldRequest {
+                    refused_requests.push(resource);
+                }
+            }
+            lines.push((
+                format!("S8 {operation} operation"),
+                if operation == "write" {
+                    format!("write\t{encoded}\t{encoded}\twrite\tencoded write")
+                } else {
+                    format!("invoke\t{encoded}\t{encoded}\t{operation}\tread\t")
+                },
+                PlanExpect::HeldOperation,
+            ));
+            for (id, uri, body) in [
+                (
+                    "S10",
+                    "localhost://UsersAI/self".to_string(),
+                    y_notes.clone(),
+                ),
+                ("S11a", y_notes.clone(), own_notes.clone()),
+                ("S11b", own_notes.clone(), y_notes.clone()),
+            ] {
+                cells += 1;
+                lines.push((
+                    format!("{id} {operation}"),
+                    format!("invoke\t{own_notes}\t{uri}\t{operation}\t{operation}\t{body}"),
+                    PlanExpect::Invalid,
+                ));
+            }
+        }
+        assert_eq!(cells, 24, "read and write over twelve spellings");
+
+        let plan: Vec<String> = lines.iter().map(|(_, line, _)| line.clone()).collect();
+        home.plan(x, &plan);
+        let run = home.launch_with_grants(x).await.unwrap().0;
+        assert_eq!(run.status, "completed");
+
+        // The route's own-root control: the launch only completes after the
+        // guest's own protected writes and reads return their bytes.
+        assert!(home.invoked(x).iter().any(|(_, result, reason)| {
+            result == "ok" && reason == &format!("write {own_notes} owner={}", home.owner)
+        }));
+
+        let results = home.results(x);
+        assert_eq!(results.len(), lines.len(), "{results:?}");
+        for (index, (label, line, expect)) in lines.iter().enumerate() {
+            let outcome = plan_outcome(&results, index);
+            match expect {
+                PlanExpect::Scope => {
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(scope), "{label}: {outcome}");
+                }
+                PlanExpect::Ceiling => {
+                    let resource = line.split('\t').nth(1).unwrap();
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(ceiling), "{label}: {outcome}");
+                    assert!(outcome.contains(resource), "{label}: {outcome}");
+                }
+                PlanExpect::Invalid => {
+                    assert!(outcome.contains("Invalid("), "{label}: {outcome}");
+                    assert!(outcome.contains(scope), "{label}: {outcome}");
+                }
+                PlanExpect::HeldRequest => {
+                    assert_eq!(outcome, "ok", "{label}: {outcome}");
+                }
+                PlanExpect::HeldOperation => {
+                    assert!(!outcome.contains(canary_name), "{label}: {outcome}");
+                    assert!(!outcome.contains(canary_text), "{label}: {outcome}");
+                }
+            }
+        }
+        for result in &results {
+            assert!(!result.contains(canary_name), "{result}");
+            assert!(!result.contains(canary_text), "{result}");
+        }
+
+        assert!(home.pending_store.list_pending().await.is_empty());
+        let requested = home.capability_requested();
+        for resource in &refused_requests {
+            assert!(
+                !requested.iter().any(|recorded| recorded == resource),
+                "a capability request record exists for {resource}: {requested:?}"
+            );
+        }
+        // Read and write both take the protected path, so no provider call is
+        // made for any cell, held or refused.
+        assert!(home.requests().is_empty(), "{:?}", home.requests());
+        assert!(home
+            .invoked(x)
+            .iter()
+            .all(|(_, _, reason)| !reason.contains(&root_y)));
+        assert_eq!(tree_hashes(&y_dir), y_before);
+
+        // Labelled unit companion, not actor evidence: the protected path's
+        // own root check, driven with the id the launch admitted and a foreign
+        // root. No launched guest can reach this check with Y's root, because
+        // the capability request refuses the spelling first.
+        let foreign = format!("{root_y}/memory/{canary_name}");
+        let ctx = crate::resource_bridge::BridgeContext {
+            provider_registry: Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+            capability_manager: home.capability_manager.clone(),
+            pending_store: home.pending_store.clone(),
+            capsule_id: "a5-s5-protected-path-companion".to_string(),
+            principal_id: Some(x.clone()),
+            manifest_capabilities: Vec::new(),
+            data_dir: Some(home.data_dir.clone()),
+            launch: None,
+        };
+        let request = serde_json::json!({"path": foreign, "content": "x"});
+        let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(
+            &ctx, "write", &request,
+        )
+        .unwrap();
+        assert_eq!(refused["code"], "principal_context_required", "{refused}");
+        assert_eq!(
+            refused["message"],
+            "localhost://Users roots must use Users/self or the active principal root"
+        );
     }
 
     /// Row E (blocker evidence, no production change): a start that did not
@@ -1844,7 +2296,11 @@ pub(crate) mod tests {
             .filter(|event| event.event_type == "component.invoke.completed")
             .filter(|event| event.principal_id.as_deref() == Some(agent.as_str()))
             .collect();
-        assert_eq!(events.len(), 5, "four own-root calls and the peer miss");
+        assert_eq!(
+            events.len(),
+            6,
+            "four own-root calls, the peer miss and the plan miss"
+        );
         for event in &events {
             assert_eq!(
                 event.principal_id.as_deref(),
@@ -2090,7 +2546,11 @@ pub(crate) mod tests {
             .filter(|event| event.event_type == "component.invoke.completed")
             .filter(|event| event.principal_id.as_deref() == Some(agent.as_str()))
             .collect();
-        assert_eq!(events.len(), 5, "four own-root calls and the peer read");
+        assert_eq!(
+            events.len(),
+            6,
+            "four own-root calls, the peer read and the plan miss"
+        );
         let own = events
             .iter()
             .filter(|event| event.result == "ok" && event.reason.contains(&root))
@@ -2102,8 +2562,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             events.iter().filter(|event| event.result != "ok").count(),
-            1,
-            "the absent peer pointer is the only failed call: {events:?}"
+            2,
+            "the absent peer pointer and the absent plan are the only failed calls: {events:?}"
         );
         grants.abort();
     }

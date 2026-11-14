@@ -955,6 +955,18 @@ fn principal_root_read_write_uri(operation: &str, request: &serde_json::Value) -
         .then_some(rooted)
 }
 
+/// The protected path's answer for one request, for a test that drives this
+/// entry directly with a context it builds. The bridge's own callers reach it
+/// through `handle_request`; no production caller needs this name.
+#[cfg(test)]
+pub(crate) fn protected_principal_root_resource_response_for_test(
+    bridge_ctx: &BridgeContext,
+    operation: &str,
+    request: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    protected_principal_root_resource_response(bridge_ctx, operation, request)
+}
+
 fn request_content_bytes(request: &serde_json::Value) -> Result<Vec<u8>, String> {
     let Some(value) = request.get("content") else {
         return Err("write request missing content".to_string());
