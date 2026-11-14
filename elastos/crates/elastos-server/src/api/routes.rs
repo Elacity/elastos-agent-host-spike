@@ -297,7 +297,7 @@ pub async fn stop_capsule(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::api::gateway;
     use std::future::Future;
@@ -563,16 +563,16 @@ mod tests {
     /// A Home whose stored agents are the probe package: the probe's manifest
     /// name and the CID its capsule directory records, signed by a key the
     /// runtime trusts. Two agents, or as many as asked for, share the Home.
-    struct ProbeLaunch {
+    pub(crate) struct ProbeLaunch {
         _temp: tempfile::TempDir,
-        data_dir: std::path::PathBuf,
+        pub(crate) data_dir: std::path::PathBuf,
         runtime: Arc<Runtime>,
         audit_log: Arc<AuditLog>,
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
         capsule_dir: std::path::PathBuf,
         grant: String,
-        agents: Vec<String>,
+        pub(crate) agents: Vec<String>,
         /// The stored person every agent here belongs to. It is the person
         /// `agents::create` records in each agent's `owner`.
         owner: String,
@@ -583,7 +583,7 @@ mod tests {
     const PROBE_REGISTRY_CID: &str = "bafkreia5probe";
 
     impl ProbeLaunch {
-        async fn new(names: &[&str]) -> Self {
+        pub(crate) async fn new(names: &[&str]) -> Self {
             use crate::agents;
             use elastos_compute::providers::ComponentProvider;
             use elastos_runtime::capability::{CapabilityManager, CapabilityStore};
@@ -788,15 +788,29 @@ mod tests {
             .agent_id
         }
 
-        fn root(&self, agent_id: &str) -> String {
+        pub(crate) fn root(&self, agent_id: &str) -> String {
             crate::auth::principal_stored_localhost_root(Some(&self.data_dir), agent_id).unwrap()
         }
 
-        fn launch<'a>(
+        pub(crate) fn launch<'a>(
             &'a self,
             agent_id: &'a str,
         ) -> impl Future<Output = Result<Json<LaunchResponse>, (StatusCode, String)>> + 'a {
             self.launch_from(&self.capsule_dir, agent_id)
+        }
+
+        /// One stored agent's launch, with the probe's capability requests
+        /// granted as the shell would grant them, so the launch runs to its
+        /// own answer instead of waiting for a grant.
+        pub(crate) async fn launch_with_grants(
+            &self,
+            agent_id: &str,
+        ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
+            let grants =
+                grant_probe_requests(self.pending_store.clone(), self.capability_manager.clone());
+            let launched = self.launch(agent_id).await;
+            grants.abort();
+            launched
         }
 
         /// The same launch from `dir`, which must walk to the bytes the agent's
@@ -850,7 +864,7 @@ mod tests {
 
     /// Grants every pending capability request the probe makes, as the shell
     /// would, and keeps doing it until the test stops the task.
-    fn grant_probe_requests(
+    pub(crate) fn grant_probe_requests(
         store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         manager: Arc<elastos_runtime::capability::CapabilityManager>,
     ) -> tokio::task::JoinHandle<()> {

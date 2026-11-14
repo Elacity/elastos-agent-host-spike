@@ -5,29 +5,36 @@
 //! names the production line that builds it and shows that two launches'
 //! locations differ.
 //!
-//! Routes 13-16 are Home-page routes, and their tokens come only from a
-//! person's Home launch. `launch_capsule` starts the capsule and returns
+//! Routes 13-16 are Home-page routes. Their tokens come from a person's Home
+//! launch, and each row also launches a stored agent through the production
+//! `launch_capsule` entry to show what an agent launch gets there.
+//! `launch_capsule` starts the capsule and returns
 //! `LaunchResponse { id, name, status }` with no token (`api/routes.rs:157-161`),
-//! and no code on the admitted start path mints an app token or stores a
-//! session grant (`runtime.rs:348-361`, `agent_admission.rs`). The Home launch
-//! route needs a `home` token from a person (`gateway_home_runtime.rs:46`) and
-//! mints the app token from that person's context (`:149`). So, as the S5
-//! definition allows for a person-only route, each row here uses two people,
-//! P and Q: each signs in through `auth::grant_passkey_session` (the production
-//! call a completed WebAuthn ceremony ends in), and each app token is minted by
-//! the production Home launch path.
+//! and no code on the admitted start path stores a session grant
+//! (`runtime.rs:348-361`, `agent_admission.rs`). So an agent launch has no
+//! token of its own: its capsule instance id is the only launch-bound value,
+//! and that id is also the bridge session id. Presenting it as a Home launch
+//! token is refused by the gateway's admission step
+//! (`gateway_frontdoor.rs:277`) with `Gateway request requires an admitted
+//! host and caller` (`gateway_frontdoor.rs:190`), and no file is written.
+//! Each row therefore uses two people, P and Q, for the
+//! location fence the S5 definition asks for: each signs in through
+//! `auth::grant_passkey_session` (the production call a completed WebAuthn
+//! ceremony ends in), and each app token is minted by the production Home
+//! launch path. The same row then adds the agent launch and its refusal.
 //!
 //! Route 13's app is not a Home target: the Home launch route maps the
 //! `home-agent` bookmark to `assistant` (`gateway_home_runtime.rs:56-58`) and
 //! hides it from the target list (`:360`, `:425`). Its row therefore calls the
 //! same production mint the Home launch route uses
 //! (`issue_home_projection_launch_token_with_context`, `gateway_home_runtime.rs:149`)
-//! from the person's own sign-in context. `report-round4.md` gives the file:line
+//! from the person's own sign-in context. `report-round5.md` gives the file:line
 //! proof for this choice.
 
 use super::*;
 use serde_json::Value;
 
+use crate::api::routes::tests::ProbeLaunch;
 use crate::auth::{PasskeySessionPurpose, PasskeySessionRequest, ResolvedPrincipalRoot};
 
 const RP_ID: &str = "elastos.elacitylabs.com";
@@ -208,12 +215,12 @@ fn app_token(home: &TwoPersonHome, person: usize, app: &str) -> String {
     .expect("the person's app token")
 }
 
+fn root_object_path(dir: &std::path::Path, root: &str, relative: &str) -> std::path::PathBuf {
+    elastos_common::localhost::rooted_localhost_fs_path(dir, &format!("{root}/{relative}")).unwrap()
+}
+
 fn object_path(home: &TwoPersonHome, root: &str, relative: &str) -> std::path::PathBuf {
-    elastos_common::localhost::rooted_localhost_fs_path(
-        home.dir.path(),
-        &format!("{root}/{relative}"),
-    )
-    .unwrap()
+    root_object_path(home.dir.path(), root, relative)
 }
 
 async fn response_json(response: axum::response::Response) -> Value {
@@ -247,18 +254,106 @@ fn app_request(method: &str, uri: &str, token: &str, body: Option<Value>) -> Req
     }
 }
 
+/// Launches one stored agent through the production `launch_capsule` entry
+/// (`api/routes.rs:88`), with the probe's capability requests granted as a
+/// shell would grant them, so the launch runs to its own answer.
+///
+/// The answer is `LaunchResponse { id, name, status }` (`api/routes.rs:157-161`):
+/// it carries no token, and the admitted start stores no session grant for the
+/// agent (`runtime.rs:348-361`). The capsule instance id is the only
+/// launch-bound value; the bridge audit records the same id as the launch's
+/// session id. That id is what each row presents to its route.
+async fn launch_stored_agent() -> (ProbeLaunch, String, String) {
+    let agent_home = ProbeLaunch::new(&["s5-route-agent"]).await;
+    let agent = agent_home.agents.first().expect("one stored agent").clone();
+    let launched = agent_home
+        .launch_with_grants(&agent)
+        .await
+        .expect("the stored agent launches");
+    let answer = serde_json::to_value(&launched.0).unwrap();
+    assert_eq!(
+        answer["status"], "completed",
+        "the agent launch ran to its own answer"
+    );
+    let keys = answer
+        .as_object()
+        .expect("the launch answer is an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        ["id", "name", "status"],
+        "an agent launch returns no token (`api/routes.rs:157-161`)"
+    );
+    let sessions = crate::auth::load_auth_state(&agent_home.data_dir)
+        .expect("the agent Home reads")
+        .sessions;
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session.grant.principal_id != agent),
+        "an admitted agent launch stores no session grant (`runtime.rs:348-361`)"
+    );
+    let instance = answer["id"]
+        .as_str()
+        .expect("the launch names its instance")
+        .to_string();
+    (agent_home, agent, instance)
+}
+
+/// Presents an agent launch's only launch-bound value, its capsule instance
+/// id, to `uri` as the Home launch token. The gateway's admission step refuses
+/// it before the handler runs: `require_gateway_launch_for`
+/// (`gateway_frontdoor.rs:277`) rejects a token that is not a signed launch
+/// token, and `gateway_frontdoor.rs:190` answers with the production literal.
+/// The route writes no file under the agent's own root.
+async fn assert_agent_launch_refused(
+    app: axum::Router,
+    uri: &str,
+    method: &str,
+    body: Value,
+    instance: &str,
+    agent_path: &std::path::Path,
+    route: &str,
+) {
+    let refused = app
+        .oneshot(app_request(method, uri, instance, Some(body)))
+        .await
+        .unwrap();
+    let status = refused.status();
+    let text = response_text_json(refused).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an agent launch's token is refused at {route}: {text}"
+    );
+    assert_eq!(
+        text,
+        json!("Gateway request requires an admitted host and caller"),
+        "the gateway refuses an agent launch's instance id ({route})"
+    );
+    assert!(
+        !agent_path.exists(),
+        "an agent launch writes no file at {route}"
+    );
+}
+
 /// Route 13, and row 9. The location is
 /// `gateway_home_agent.rs:79-84 home_agent_workspace_uri`, which builds
 /// `{context.root().localhost_root()}/.AppData/ElastOS/HomeAgent/workspace.json`
-/// from the token's resolved root. The route is person-only: no agent launch
-/// mints a `home-agent` token, and the Home target normalization at
-/// `gateway_home_runtime.rs:56-58` sends the `home-agent` bookmark to
-/// `assistant`. Two people's launches get two different locations, and the
-/// first person's document never reaches the second. Row 9's fence is this
-/// person-only reach plus the route's fixed relative path: the request carries
-/// no path field, and a body that names one is refused.
+/// from the token's resolved root. Two people's launches get two different
+/// locations, and the first person's document never reaches the second. Row
+/// 9's fence is this fixed relative path plus the agent case: the request
+/// carries no path field, a body that names one is refused, and a stored
+/// agent's launch has no token this route accepts. An agent launch returns
+/// `LaunchResponse { id, name, status }` and stores no session grant
+/// (`api/routes.rs:157-161`, `runtime.rs:348-361`); presenting that launch's
+/// instance id is refused by the gateway's admission step before the
+/// route's own token check runs (`gateway_frontdoor.rs:277`, literal at
+/// `:190`) and writes nothing.
 #[tokio::test]
-async fn route_13_home_agent_workspace_is_person_only_and_two_people_get_two_locations() {
+async fn route_13_home_agent_workspace_refuses_an_agent_launch_and_two_people_get_two_locations() {
     let home = two_person_home().await;
     let app = gateway_router(test_state(home.dir.path()));
     let token_p = app_token(&home, 0, "home-agent");
@@ -353,19 +448,45 @@ async fn route_13_home_agent_workspace_is_person_only_and_two_people_get_two_loc
     );
     assert!(!path_q.exists());
 
-    let put_q = app.oneshot(write(token_q, "q")).await.unwrap();
+    let put_q = app.clone().oneshot(write(token_q, "q")).await.unwrap();
     assert_eq!(put_q.status(), StatusCode::OK);
     assert!(path_p.is_file(), "P's write landed under P's root");
     assert!(path_q.is_file(), "Q's write landed under Q's own root");
+
+    // The agent case: a stored agent's launch yields no token, so the only
+    // value it can present is the capsule instance id. The route refuses it.
+    if crate::agents::require_build().is_ok() {
+        let (agent_home, agent, instance) = launch_stored_agent().await;
+        let agent_root = agent_home.root(&agent);
+        let agent_path = root_object_path(&agent_home.data_dir, &agent_root, relative);
+        assert_agent_launch_refused(
+            app,
+            "/api/apps/home-agent/workspace",
+            "PUT",
+            json!({
+                "schema": "elastos.home-agent.workspace/v1",
+                "if_revision": 0,
+                "document": {"marker": "agent"}
+            }),
+            &instance,
+            &agent_path,
+            "route 13",
+        )
+        .await;
+    }
 }
 
 /// Route 14. The location is `gateway_assistant.rs:134-139
 /// assistant_workspace_uri`, which builds
 /// `{context.root().localhost_root()}/.AppData/ElastOS/Assistant/workspace.json`.
 /// The token is the one the person's Home launch produced for `assistant`.
-/// Two people's launches get two different locations.
+/// Two people's launches get two different locations. A stored agent's launch
+/// has no token for the route (`api/routes.rs:157-161`,
+/// `runtime.rs:348-361`); its instance id is refused by the gateway's
+/// admission step before the route's own token check runs
+/// (`gateway_frontdoor.rs:277`, literal at `:190`) and writes nothing.
 #[tokio::test]
-async fn route_14_assistant_workspace_is_person_only_and_two_people_get_two_locations() {
+async fn route_14_assistant_workspace_refuses_an_agent_launch_and_two_people_get_two_locations() {
     let home = two_person_home().await;
     let state = test_state(home.dir.path());
     make_web_projection(home.dir.path(), "assistant");
@@ -433,28 +554,57 @@ async fn route_14_assistant_workspace_is_person_only_and_two_people_get_two_loca
         StatusCode::OK
     );
     let seen_by_p = response_json(
-        app.oneshot(app_request(
-            "GET",
-            "/api/apps/assistant/workspace",
-            &token_p,
-            None,
-        ))
-        .await
-        .unwrap(),
+        app.clone()
+            .oneshot(app_request(
+                "GET",
+                "/api/apps/assistant/workspace",
+                &token_p,
+                None,
+            ))
+            .await
+            .unwrap(),
     )
     .await;
     assert_eq!(seen_by_p["draft"], "p", "P's launch reads its own draft");
     assert!(path_p.is_file());
     assert!(path_q.is_file());
+
+    // The agent case: a stored agent's launch yields no token, so the only
+    // value it can present is the capsule instance id. The route refuses it.
+    if crate::agents::require_build().is_ok() {
+        let (agent_home, agent, instance) = launch_stored_agent().await;
+        let agent_root = agent_home.root(&agent);
+        let agent_path = root_object_path(&agent_home.data_dir, &agent_root, relative);
+        assert_agent_launch_refused(
+            app,
+            "/api/apps/assistant/workspace",
+            "PUT",
+            json!({
+                "schema": "elastos.assistant.workspace/v1",
+                "if_revision": 0,
+                "sessions": [],
+                "draft": "agent"
+            }),
+            &instance,
+            &agent_path,
+            "route 14",
+        )
+        .await;
+    }
 }
 
 /// Route 15. The location is
 /// `gateway_assistant_workspace_v2.rs:96-106 object_location`, which builds
 /// `{context.root().localhost_root()}/.AppData/ElastOS/Assistant/workspace-v2.json`.
 /// The token is the one the person's Home launch produced for `assistant`.
-/// Two people's launches get two different locations.
+/// Two people's launches get two different locations. A stored agent's launch
+/// has no token for the route (`api/routes.rs:157-161`,
+/// `runtime.rs:348-361`); its instance id is refused by the gateway's
+/// admission step before the route's own token check runs
+/// (`gateway_frontdoor.rs:277`, literal at `:190`) and writes nothing.
 #[tokio::test]
-async fn route_15_assistant_workspace_v2_is_person_only_and_two_people_get_two_locations() {
+async fn route_15_assistant_workspace_v2_refuses_an_agent_launch_and_two_people_get_two_locations()
+{
     let home = two_person_home().await;
     let state = test_state(home.dir.path());
     make_web_projection(home.dir.path(), "assistant");
@@ -531,7 +681,8 @@ async fn route_15_assistant_workspace_v2_is_person_only_and_two_people_get_two_l
         .to_string();
 
     assert_eq!(
-        app.oneshot(write(token_q, "q", migration_q))
+        app.clone()
+            .oneshot(write(token_q, "q", migration_q))
             .await
             .unwrap()
             .status(),
@@ -539,6 +690,29 @@ async fn route_15_assistant_workspace_v2_is_person_only_and_two_people_get_two_l
     );
     assert!(path_p.is_file());
     assert!(path_q.is_file());
+
+    // The agent case: a stored agent's launch yields no token, so the only
+    // value it can present is the capsule instance id. The route refuses it.
+    if crate::agents::require_build().is_ok() {
+        let (agent_home, agent, instance) = launch_stored_agent().await;
+        let agent_root = agent_home.root(&agent);
+        let agent_path = root_object_path(&agent_home.data_dir, &agent_root, relative);
+        assert_agent_launch_refused(
+            app,
+            "/api/apps/assistant/workspace-v2",
+            "PUT",
+            json!({
+                "schema": "elastos.assistant.workspace/v2",
+                "if_revision": 0,
+                "document": {"marker": "agent"},
+                "migration_revision": "agent"
+            }),
+            &instance,
+            &agent_path,
+            "route 15",
+        )
+        .await;
+    }
 }
 
 /// Route 16. The location is `gateway_home_system.rs:6818-6820
@@ -546,9 +720,13 @@ async fn route_15_assistant_workspace_v2_is_person_only_and_two_people_get_two_l
 /// which builds `{context.root().localhost_root()}/.AppData/ElastOS/Home/browser-state.json`.
 /// The token is the one the person's Home launch produced for the `home-gui`
 /// shell, one of the three shell ids the route accepts (`:6453`).
-/// Two people's launches get two different locations.
+/// Two people's launches get two different locations. A stored agent's launch
+/// has no token for the route (`api/routes.rs:157-161`,
+/// `runtime.rs:348-361`); its instance id is refused by the gateway's
+/// admission step before the route's own token check runs
+/// (`gateway_frontdoor.rs:277`, literal at `:190`) and writes nothing.
 #[tokio::test]
-async fn route_16_home_state_is_person_only_and_two_people_get_two_locations() {
+async fn route_16_home_state_refuses_an_agent_launch_and_two_people_get_two_locations() {
     let home = two_person_home().await;
     let state = test_state(home.dir.path());
     make_web_projection(home.dir.path(), "home-gui");
@@ -617,7 +795,11 @@ async fn route_16_home_state_is_person_only_and_two_people_get_two_locations() {
     assert!(path_p.is_file());
     assert!(!path_q.exists());
 
-    let response = app.oneshot(request("GET", &token_q, None)).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(request("GET", &token_q, None))
+        .await
+        .unwrap();
     let status = response.status();
     let seen_q = response_text_json(response).await;
     assert_eq!(status, StatusCode::OK, "{seen_q}");
@@ -626,4 +808,22 @@ async fn route_16_home_state_is_person_only_and_two_people_get_two_locations() {
         Value::Null,
         "Q's launch reads its own state"
     );
+
+    // The agent case: a stored agent's launch yields no token, so the only
+    // value it can present is the capsule instance id. The route refuses it.
+    if crate::agents::require_build().is_ok() {
+        let (agent_home, agent, instance) = launch_stored_agent().await;
+        let agent_root = agent_home.root(&agent);
+        let agent_path = root_object_path(&agent_home.data_dir, &agent_root, relative);
+        assert_agent_launch_refused(
+            app,
+            "/api/apps/home/state",
+            "POST",
+            json!({"layout": {"columns": 3}}),
+            &instance,
+            &agent_path,
+            "route 16",
+        )
+        .await;
+    }
 }
