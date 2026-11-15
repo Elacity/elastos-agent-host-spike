@@ -78,8 +78,11 @@ The receipt's `host_triple` reads `Linux aarch64`. The Runtime binary is that ma
    a symlink and its device and inode are checked against the folder the run made; the Home is opened from it and
    checked the same way on the open descriptor, then emptied through that descriptor. If a check fails, nothing is
    removed there and the run fails, naming what may remain. Boundary: the folders above the work folder are resolved
-   normally (the identity check on the open folder is what binds the removal); a Home moved away after its contents
-   were removed leaves only an empty folder. The work folder is made owner-only and must lie outside the checkout (real paths).
+   normally (the identity check on the open folder is what binds the removal); the emptied Home is then removed by
+   name, and rmdir removes only an empty folder (a failure there fails the run); a Home moved away after its contents
+   were removed leaves only an empty folder. This is an examples script run by the owner in owner-only folders: a
+   process of the same user could read the throwaway key directly, so the bar is that removal stays inside the run's
+   own folders and no credential is left without the run failing. The work folder is made owner-only and must lie outside the checkout (real paths).
 5. `results.json` is written in the run's folder. Exit 0 only when the good open answered `200` with a page named
    and the changed-byte open answered `400` with `bundle_cid_mismatch`.
 

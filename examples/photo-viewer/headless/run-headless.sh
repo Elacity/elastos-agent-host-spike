@@ -56,7 +56,9 @@ secrets_rm() { secure_cleanup credentials || { failed=1; return 1; }; }
 cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null
   # falsify-headless.sh only: put another folder where the Home was, so cleanup must refuse rather than remove it
-  [ "$PLANT" = home-swapped ] && [ -n "$HOME_ID" ] && mv "$WORK/home" "$WORK/home.moved" && mkdir "$WORK/home" && echo "PLANT: the Home was swapped before cleanup"
+  # (it writes the folders' identities, not secrets, to plant-ids so the falsifier can remove the moved Home checked)
+  [ "$PLANT" = home-swapped ] && [ -n "$HOME_ID" ] && mv "$WORK/home" "$WORK/home.moved" && mkdir "$WORK/home" \
+    && echo "$WORK_ID $HOME_ID $(dir_id "$WORK/home")" > "$WORK/plant-ids" && echo "PLANT: the Home was swapped before cleanup"
   secure_cleanup all || { echo "HEADLESS FAILED (cleanup)"; exit 1; }
 }
 trap cleanup EXIT

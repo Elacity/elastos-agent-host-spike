@@ -92,7 +92,13 @@ else
 fi
 # the plant's moved Home still holds its throwaway device key: removed through this falsifier's own work folder
 # (opened as itself, identity checked) by secure_rm.py, never by following a path
-python3 -I "$HERE/secure_rm.py" "$WORK" "$WORK_ID" --tree swapped/home.moved --tree swapped/home || missed=1
+# Each folder is bound to the identity the run recorded (plant-ids); a missing or different folder is a failure.
+if read -r S_ID M_ID D_ID < "$WORK/swapped/plant-ids" 2>/dev/null && [ -n "$D_ID" ]; then
+  python3 -I "$HERE/secure_rm.py" "$WORK/swapped" "$S_ID" --tree home.moved --expect "$M_ID" --tree home --expect "$D_ID" \
+    || { echo "NOT AS EXPECTED: the plant's moved Home was not removed"; missed=1; }
+else
+  echo "NOT AS EXPECTED: the plant recorded no folder identities; its moved Home may remain under $WORK/swapped"; missed=1
+fi
 
 [ "$missed" = 0 ] && echo "all 5 headless plants red where expected" || echo "SOME HEADLESS PLANTS NOT AS EXPECTED"
 exit $missed

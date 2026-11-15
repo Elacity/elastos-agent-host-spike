@@ -7,8 +7,10 @@ The root is opened without following a symlink and must be the very folder the r
 recorded when it was made). Everything below is reached from that open folder: each path component is opened with
 O_NOFOLLOW, a tree's own folder is opened first and its identity read from the open descriptor (and, with --expect,
 checked), then its contents are removed through that descriptor, so a path changed after the check cannot redirect
-the removal. The emptied folder is then removed by name; if that name no longer holds an empty folder, it is left
-and a note says so (its contents, the credentials, are already gone).
+the removal of its contents. The emptied folder is then removed by name (rmdir removes only an empty folder); if that
+fails, the run fails. Without --expect, a missing tree is not an error. Boundary: folders above the root are resolved
+normally (the root's identity check binds the removal), and a folder put at a tree's name between the check and the
+final rmdir is removed only if it is empty.
 --credentials removes the run's credential files at the root (by name, through the root's descriptor).
 Exit 0 when everything named was removed; exit 1 naming what may remain otherwise.
 """
@@ -66,7 +68,7 @@ def remove_tree(root_fd, relative, expect):
         try:
             os.rmdir(name, dir_fd=parent)
         except OSError as error:
-            print("note: %s was emptied but its name now holds something else (%s); left in place" % (relative, error.strerror))
+            raise SystemExit("NOT AS EXPECTED (cleanup: %s was emptied but its folder was not removed (%s))" % (relative, error.strerror))
     finally:
         os.close(parent)
 
