@@ -9,9 +9,10 @@
 # What runs: the built `elastos` binary as the gateway (it holds the host lock) and
 # as Home's Runtime (`serve`, a subordinate of the gateway, writing its coordinates
 # where Home's open reads them), on one throwaway data folder; Home installed from
-# this checkout's `capsules/home`; the GBA core built from `examples/gba-viewer/core`
-# with its own `build.sh`; three bundles, each signed by a publisher of its own made
-# for this run only: the core, the product page (`capsules/gba-emulator/browser`,
+# this checkout's `capsules/home`; the GBA core built from a throwaway copy of
+# `examples/gba-viewer/core` under the work folder with the repo's
+# `scripts/build-component-capsule.sh`; three bundles, each signed by a publisher of its own
+# made for this run only: the core, the product page (`capsules/gba-emulator/browser`,
 # pinning the core) and the product ROM (`capsules/gba-ucity/ucity.gba`, pinning the
 # page). The page assets and the ROM are staged byte-for-byte by
 # `examples/gba-viewer/prepare_bundles.py`, which derives both manifests. The browser
@@ -92,16 +93,18 @@ git -C "$WT" rev-parse HEAD
 git -C "$WT" status --porcelain | wc -l | sed 's/^ *//; s/^/changed paths: /'
 ls -l "$BIN" | awk '{print $5, $6, $7, $8}'
 
-step "1. the GBA core, built from this checkout with its own build.sh"
-CORE_SRC="$GV/core"
+step "1. the GBA core, built from a throwaway copy in the work folder"
+# The build writes its component beside the source, so the source is always a copy under $WORK: the checkout
+# keeps no build output. The copy's capsule-kit path dependency points at this checkout's kit.
+CORE_TREE="$WORK/core"
+mkdir -p "$CORE_TREE/examples/gba-viewer"
+cp -R "$GV/core" "$CORE_TREE/examples/gba-viewer/core"
+rm -f "$CORE_TREE/examples/gba-viewer/core/$CORE_ART_NAME"
+ln -s "$WT/examples/capsule-kit" "$CORE_TREE/examples/capsule-kit"
+CORE_SRC="$CORE_TREE/examples/gba-viewer/core"
 if [ "$PLANT" = rom-record-mismatch ]; then
-  # The plant lives only in a throwaway copy: the checkout's core source is read, never changed.
-  PLANT_TREE="$HOME/plant"
-  mkdir -p "$PLANT_TREE/examples/gba-viewer"
-  cp -R "$GV/core" "$PLANT_TREE/examples/gba-viewer/core"
-  rm -f "$PLANT_TREE/examples/gba-viewer/core/$CORE_ART_NAME"
-  ln -s "$WT/examples/capsule-kit" "$PLANT_TREE/examples/capsule-kit"
-  python3 -I - "$PLANT_TREE/examples/gba-viewer/core/src/lib.rs" <<'PYEOF'
+  # The plant lives only in this copy: the checkout's core source is read, never changed.
+  python3 -I - "$CORE_SRC/src/lib.rs" <<'PYEOF'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
@@ -115,13 +118,14 @@ if text.count(anchor) != 1:
 path.write_text(text.replace(anchor, plant))
 print("PLANT: the core copies the Runtime's digest and alters one hex digit")
 PYEOF
-  CORE_SRC="$PLANT_TREE/examples/gba-viewer/core"
   CORE_TARGET="$TARGET_DIR/plant-core"
-  nice -n 10 bash "$WT/scripts/build-component-capsule.sh" "$CORE_SRC" || { not_expected "the planted core did not build"; exit 1; }
+  BUILD_LABEL="the planted core"
 else
   CORE_TARGET="$TARGET_DIR/core"
-  CARGO_TARGET_DIR="$CORE_TARGET" nice -n 10 bash "$CORE_SRC/build.sh" || { not_expected "the core did not build"; exit 1; }
+  BUILD_LABEL="the core"
 fi
+CARGO_TARGET_DIR="$CORE_TARGET" nice -n 10 bash "$WT/scripts/build-component-capsule.sh" "$CORE_SRC" \
+  || { not_expected "$BUILD_LABEL did not build"; exit 1; }
 CORE_ART="$CORE_SRC/$CORE_ART_NAME"
 [ -f "$CORE_ART" ] && as_expected "the core's component exists at $CORE_ART" || { not_expected "the core did not build"; exit 1; }
 echo "core sha256: $(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$CORE_ART")"

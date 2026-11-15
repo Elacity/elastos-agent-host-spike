@@ -11,18 +11,21 @@ bash examples/gba-viewer/journey/run-journey.sh . <new work folder>
 bash examples/gba-viewer/journey/falsify-journey.sh . <new work folder>
 ```
 
-The core is built by the journey itself with `examples/gba-viewer/core/build.sh`; it needs the
+The core is built by the journey itself from a throwaway copy of `examples/gba-viewer/core` in the work folder,
+using `scripts/build-component-capsule.sh` (the builder `examples/gba-viewer/core/build.sh` wraps); it needs the
 `wasm32-unknown-unknown` target. Playwright with Chromium is taken from `ELASTOS_PLAYWRIGHT_MODULE`, or from
 `elastos/tools/browser-playwright-engine`; its browsers from `PLAYWRIGHT_BROWSERS_PATH`, or the usual cache. The
 binary and the storage provider are read from `${CARGO_TARGET_DIR:-elastos/target}/debug`. The work folder must be
-outside the checkout: the bundle sources (`prepare_bundles.py`) are written there, never into the tree.
+outside the checkout: the bundle sources (`prepare_bundles.py`), the copied core and its component are written
+there, and the journey writes nothing into the tree.
 
 ## What runs
 
 1. A throwaway HOME and data folder, owner-only. Home's capsule and the storage provider installed in it as
    `elastos setup` lays them out.
-2. The GBA core built from `examples/gba-viewer/core`. Three publishers with a key each made for this run: the
-   core, the product page (`capsules/gba-emulator/browser`, pinning the core) and the product ROM
+2. The GBA core built from a throwaway copy of `examples/gba-viewer/core` under the work folder. Three
+   publishers with a key each made for this run: the core, the product page
+   (`capsules/gba-emulator/browser`, pinning the core) and the product ROM
    (`capsules/gba-ucity/ucity.gba`, pinning the page). `prepare_bundles.py` copies the page assets and the ROM
    byte-for-byte and derives both manifests; `elastos stage-bundle` names the core, the page and the content in
    dependency order, then stages them under this Home's trust.
