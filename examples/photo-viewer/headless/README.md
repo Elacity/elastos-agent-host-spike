@@ -84,7 +84,9 @@ The receipt's `host_triple` reads `Linux aarch64`. The Runtime binary is that ma
    folders. A process of the same user could read the throwaway key directly, so such a process is not defended
    against: removal never leaves the run's own work folder (symlinks are never followed, the folders are checked by
    identity), every credential is removed when nothing moves folders inside the work folder during the run, and the
-   checked points (the work folder, the Home) fail the run loudly if they were swapped. A same-user process that
+   checked points fail the run loudly if the work folder or the Home is not the one the run made at the moment it is
+   checked (after the Home is opened, an empty folder put at its name can be removed). The work folder is made
+   atomically (plain mkdir), so the run never adopts a folder or symlink already at that name. A same-user process that
    moves folders INSIDE the Home during cleanup can make it miss what it moved out, or empty what it moved in. The work folder is made owner-only and must lie outside the checkout (real paths).
 5. `results.json` is written in the run's folder. Exit 0 only when the good open answered `200` with a page named
    and the changed-byte open answered `400` with `bundle_cid_mismatch`.

@@ -11,7 +11,7 @@ set -u
 WT="$1"; WORK="$2"; CORE_WASM="$3"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 [ -e "$WORK" ] && { echo "the work folder must be new: $WORK"; exit 2; }
-mkdir -p "$WORK" || exit 2
+mkdir -p "$(dirname "$WORK")" && mkdir -m 700 "$WORK" || { echo "the work folder could not be made new: $WORK"; exit 2; }  # atomic: never adopt an existing folder
 WORK=$(cd -P "$WORK" && pwd -P)
 WORK_ID=$(python3 -I -c 'import os, sys; s = os.stat(sys.argv[1], follow_symlinks=False); print("%d:%d" % (s.st_dev, s.st_ino))' "$WORK") || exit 2
 missed=0

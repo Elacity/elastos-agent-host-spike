@@ -62,7 +62,10 @@ cleanup() {
   secure_cleanup all || { echo "HEADLESS FAILED (cleanup)"; exit 1; }
 }
 trap cleanup EXIT
-mkdir -p "$WORK/home" "$WORK/out" || exit 2
+# Made atomically: plain mkdir fails if anything (a folder or a symlink) is already at that name, so the run never
+# adopts a folder it did not make.
+mkdir -p "$(dirname "$WORK")" && mkdir -m 700 "$WORK" || { echo "the work folder could not be made new: $WORK"; exit 2; }
+mkdir "$WORK/home" "$WORK/out" || exit 2
 WORK=$(cd -P "$WORK" && pwd -P) || exit 2  # the real path from here on
 chmod 700 "$WORK" || exit 2
 WORK_ID=$(dir_id "$WORK") && HOME_ID=$(dir_id "$WORK/home") || exit 2
