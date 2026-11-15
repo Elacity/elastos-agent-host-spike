@@ -17,7 +17,7 @@
 #
 # Usage: run-headless.sh <checkout> <work folder (new, empty)> <photo core .wasm, at its reference hash>
 # Needs: the built binary and storage provider in the checkout's target (CARGO_TARGET_DIR, or elastos/target),
-# python3 and curl. HEADLESS_PLANT=changed-byte-not-refused plants one fault, for falsify-headless.sh only.
+# python3 and curl. HEADLESS_PLANT=changed-byte-not-refused or home-swapped plants one fault, for falsify-headless.sh only.
 set -u
 umask 077  # every file this run makes (keys, tokens, receipts) is owner-only
 PLANT="${HEADLESS_PLANT:-}"
@@ -89,6 +89,8 @@ PYEOF
 secrets_rm() { secure_cleanup credentials || { failed=1; return 1; }; }
 cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null
+  # falsify-headless.sh only: put another folder where the Home was, so cleanup must refuse rather than remove it
+  [ "$PLANT" = home-swapped ] && [ -n "$HOME_ID" ] && mv "$WORK/home" "$WORK/home.moved" && mkdir "$WORK/home" && echo "PLANT: the Home was swapped before cleanup"
   secure_cleanup all || { echo "HEADLESS FAILED (cleanup)"; exit 1; }
 }
 trap cleanup EXIT

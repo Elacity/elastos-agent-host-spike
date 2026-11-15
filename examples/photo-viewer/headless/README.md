@@ -131,5 +131,6 @@ Not proved here:
 Each must turn the receipt red at the check named, not at a build error: the changed-byte copy left alone (the
 run's own refusal check), one CID altered in a copy of the receipt (compare names `content_cid`), a required
 field removed from a copy (compare names `component_sha256`), and a reference receipt whose changed copy was not
-refused (compare names it `INVALID reference: changed_start_status 200 is not 400`). The plants change no file in the checkout: one is an
+refused (compare names it `INVALID reference: changed_start_status 200 is not 400`), and the Home swapped for another
+folder before cleanup (the run refuses to remove it and fails: `is not the Home this run made; nothing removed there`). The plants change no file in the checkout: one is an
 environment variable and two work on copies under the work folder.

@@ -80,5 +80,17 @@ else
   not_red "reference-not-refused (exit $code)"; cat "$WORK/badref.log"
 fi
 
-[ "$missed" = 0 ] && echo "all 4 headless plants red where expected" || echo "SOME HEADLESS PLANTS NOT AS EXPECTED"
+HEADLESS_PLANT=home-swapped bash "$HERE/run-headless.sh" "$WT" "$WORK/swapped" "$CORE_WASM" > "$WORK/swapped.log" 2>&1
+code=$?
+expect="is not the Home this run made; nothing removed there"
+if [ "$code" != 0 ] && grep -q "HEADLESS FAILED (cleanup)" "$WORK/swapped.log" && grep -qF "$expect" "$WORK/swapped.log" \
+   && [ -d "$WORK/swapped/home" ] && [ -d "$WORK/swapped/home.moved" ]; then
+  red "home-swapped" "$expect"
+else
+  not_red "home-swapped (exit $code)"; tail -5 "$WORK/swapped.log"
+fi
+# the plant's moved Home still holds its throwaway device key: this falsifier removes its own plant folder's copy
+rm -rf -- "$WORK/swapped/home.moved" "$WORK/swapped/home"
+
+[ "$missed" = 0 ] && echo "all 5 headless plants red where expected" || echo "SOME HEADLESS PLANTS NOT AS EXPECTED"
 exit $missed
