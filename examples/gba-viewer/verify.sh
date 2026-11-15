@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
+# The gba-viewer example's gate (AP4 slice 1a): the by-CID mapping, the staging
+# script, the rows that drive both, and this gate's own falsifier.
 set -euo pipefail
 
 VIEWER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-python3 -I "${VIEWER_DIR}/verify_empty_test.py"
-python3 -I "${VIEWER_DIR}/verify_empty_test.py" --falsify
+python3 -I "${VIEWER_DIR}/rows_test.py"
+python3 -I "${VIEWER_DIR}/verify_gate_test.py"
+python3 -I "${VIEWER_DIR}/verify_gate_test.py" --falsify
 
-cd -- "$VIEWER_DIR"
-refused="$(find . -mindepth 1 \
-    ! \( -type f \( -path './.gitignore' -o -path './verify.sh' \
-        -o -path './verify_empty_test.py' \) \) -print -quit)"
-if [[ -n "$refused" ]]; then
-    printf 'gba-viewer has no viewer yet; refusing %s\n' "${refused#./}" >&2
-    exit 1
-fi
-printf 'gba-viewer: no viewer sources\n'
+echo "gba-viewer: rows green, gate falsifier caught"
