@@ -3280,6 +3280,119 @@ mod tests {
         );
     }
 
+    /// G1-r4 (r4 §3, kept by r6 §0): the production `SupervisorRequest`
+    /// variant set and `LaunchCapsule`'s field set are exact literals read
+    /// from supervisor.rs's production text, and every production site that
+    /// builds a bridge principal or hands one to a bridge is pinned as a
+    /// `(file, count)` list with the same walker as the row above. A new
+    /// variant, a new field or a new caller turns this row red and forces a
+    /// ruling. It is a review trigger, not a proof that a future variant is
+    /// safe: the walker cannot see a call split across lines, and it walks
+    /// `elastos/crates` only.
+    #[test]
+    fn r6_g1_supervisor_variants_and_principal_sites_hold_tree_wide() {
+        let supervisor = production_text(include_str!("supervisor.rs"));
+        let body = {
+            let rest = &supervisor[supervisor.find("pub enum SupervisorRequest {").unwrap()..];
+            &rest[..rest.find("\n}\n").expect("the enum closes at column 0")]
+        };
+        let variants: Vec<&str> = body
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| {
+                line.chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+            })
+            .filter_map(|line| line.split('{').next().map(str::trim))
+            .collect();
+        assert_eq!(
+            variants,
+            [
+                "EnsureCapsule",
+                "LaunchCapsule",
+                "StopCapsule",
+                "WaitCapsule",
+                "CapsuleStatus",
+                "DownloadExternal",
+                "StartGateway",
+            ],
+            "SupervisorRequest variant set"
+        );
+        let launch = {
+            let rest = &body[body.find("LaunchCapsule {").unwrap()..];
+            &rest[..rest
+                .find("\n    },")
+                .expect("the variant closes at field indent")]
+        };
+        let mut fields: Vec<&str> = launch
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_lowercase())
+            })
+            .filter_map(|line| line.split(':').next())
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "capsule_args",
+                "guest_payload",
+                "interactive",
+                "name",
+                "principal_id"
+            ],
+            "LaunchCapsule field set"
+        );
+
+        // The production sites that build a bridge principal or hand one to a
+        // bridge. `BridgeContext` and the two constructors are pinned above.
+        for (needle, expected) in [
+            (
+                "set_bridge_principal",
+                &[("elastos-server/src/runtime.rs", 1)][..],
+            ),
+            (
+                "set_bridge_hostcall",
+                &[
+                    ("elastos-server/src/capsule_cmd.rs", 1),
+                    ("elastos-server/src/run_cmd.rs", 1),
+                ][..],
+            ),
+            ("start_loaded", &[("elastos-server/src/runtime.rs", 2)][..]),
+            (
+                "run_local_admitted",
+                &[("elastos-server/src/api/routes.rs", 1)][..],
+            ),
+            (
+                "spawn_resource_bridge",
+                &[("elastos-server/src/supervisor.rs", 1)][..],
+            ),
+            ("handle_remote_request", &[][..]),
+            (
+                "handle_remote_request_with_audit_dir",
+                &[
+                    ("elastos-server/src/capsule_cmd.rs", 1),
+                    ("elastos-server/src/resource_bridge.rs", 1),
+                    ("elastos-server/src/run_cmd.rs", 1),
+                ][..],
+            ),
+            (
+                "handle_component_resource_request",
+                &[("elastos-server/src/runtime.rs", 1)][..],
+            ),
+        ] {
+            assert_eq!(
+                production_counts(needle),
+                expected_counts(expected),
+                "{needle} callers"
+            );
+        }
+    }
+
     /// G3b (r6 §3 M-c, r5 §4; A3): the guest payload is moved whole and read
     /// once. Every production use of `guest_payload` under `elastos/crates` is
     /// pinned by `(file, count)` with the same walker as the r3 row above: the
@@ -4146,6 +4259,84 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("protected storage bridge"));
+    }
+
+    /// F4.3 (r3/r4, options §2.2): direct drive of the attached bridge entry,
+    /// not a real attached launch. A real launch needs a live operator
+    /// Runtime and a staged component capsule (costed in the facts); that
+    /// form is Sash's or Rong's definition question. With the `None` that
+    /// route 4's CLI entrances pass, a Users/self resource_invoke is refused
+    /// before dispatch as `invalid_resource_invoke`; with `Some(person)` the
+    /// protected-bridge refusal names the principal context. Neither reads nor
+    /// writes real data placed under the person's root.
+    #[tokio::test]
+    async fn an_attached_bridge_serves_no_principal_root() {
+        let principal_id = "person:local:active";
+        let temp = stored_human_dir(principal_id);
+        let object_uri = format!(
+            "{}/Documents/a.md",
+            crate::auth::principal_localhost_root(principal_id)
+        );
+        let disk = rooted_localhost_fs_path(temp.path(), &object_uri).unwrap();
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        std::fs::write(&disk, b"person's real data").unwrap();
+        let line = r#"{"id":13,"request":{"type":"resource_invoke","uri":"localhost://Users/self/Documents/a.md","operation":"read","token":"tok","body":{}}}"#;
+        let capabilities = any_action(vec![object_uri]);
+        let without_principal = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &capabilities,
+            None,
+            Some(temp.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(without_principal["id"], 13);
+        assert_eq!(without_principal["response"]["type"], "error");
+        assert_eq!(
+            without_principal["response"]["code"],
+            "invalid_resource_invoke"
+        );
+        assert_eq!(
+            without_principal["response"]["message"],
+            "localhost://Users/self requires a principal-scoped launch context"
+        );
+
+        let with_principal = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &capabilities,
+            Some(principal_id),
+            Some(temp.path()),
+        )
+        .await
+        // A dispatch error folds into the response so the code assertion, not
+        // an unwrap, is the row's observable failure.
+        .unwrap_or_else(|err| serde_json::json!({"dispatch_error": format!("{err:#}")}));
+        assert_eq!(
+            with_principal["response"]["code"], "principal_context_required",
+            "{with_principal}"
+        );
+        assert_eq!(
+            with_principal["response"]["message"],
+            "principal-root storage requires an in-runtime protected storage bridge"
+        );
+
+        assert_eq!(
+            std::fs::read(&disk).unwrap(),
+            b"person's real data",
+            "the person's file is not written"
+        );
+        for response in [&without_principal, &with_principal] {
+            assert!(
+                !response.to_string().contains("person's real data"),
+                "nothing from the person's root is returned: {response}"
+            );
+        }
     }
 
     #[tokio::test]

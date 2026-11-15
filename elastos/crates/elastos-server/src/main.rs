@@ -2473,6 +2473,68 @@ mod tests {
         assert!(parsed(&["elastos", "run"]).is_err());
     }
 
+    /// G2 (r2/r3): the `run` and `capsule` parsers take no principal
+    /// argument. Both refuse `--agent-id` and `--principal-id` as unknown
+    /// arguments, before any launch code runs. `run --component` does not
+    /// exist at this head (a component launch is `run` on a component
+    /// folder), so this row makes no claim about a `--component` subparser.
+    ///
+    /// The trailing-argument half shows the one place such a word is accepted:
+    /// after `--`, `run` passes it to the capsule unchanged, and the host
+    /// takes no principal from it.
+    #[test]
+    fn run_and_capsule_refuse_a_principal_argument() {
+        use clap::Parser;
+        let parsed = |args: &[&str]| super::Cli::try_parse_from(args);
+        for refused in [
+            &[
+                "elastos",
+                "run",
+                "--agent-id",
+                "person:local:x",
+                "some/folder",
+            ][..],
+            &[
+                "elastos",
+                "run",
+                "--principal-id",
+                "person:local:x",
+                "some/folder",
+            ],
+            &["elastos", "capsule", "chat", "--agent-id", "person:local:x"],
+            &[
+                "elastos",
+                "capsule",
+                "chat",
+                "--principal-id",
+                "person:local:x",
+            ],
+        ] {
+            let error = parsed(refused)
+                .err()
+                .unwrap_or_else(|| panic!("{refused:?}"));
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{refused:?}: {error}"
+            );
+        }
+        let cli = parsed(&["elastos", "run", "some/folder", "--", "--agent-id", "x"]).unwrap();
+        match cli.command {
+            Some(super::Commands::Run {
+                path, capsule_args, ..
+            }) => {
+                assert_eq!(path, Some(std::path::PathBuf::from("some/folder")));
+                assert_eq!(
+                    capsule_args,
+                    ["--agent-id".to_string(), "x".to_string()],
+                    "after -- the word belongs to the capsule"
+                );
+            }
+            _ => panic!("not a run"),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn nofile_soft_target_raises_to_capped_hard_limit() {
