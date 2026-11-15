@@ -58,6 +58,7 @@ product_ui() {
   node --test scripts/home-clipboard-source-gate.test.mjs
   node scripts/public-copy-entropy-check.mjs
   node scripts/library-product-behavior-smoke.mjs
+  node --test scripts/gba-launch-page.test.mjs
 }
 
 release() {
