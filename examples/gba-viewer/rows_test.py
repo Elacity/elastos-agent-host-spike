@@ -147,7 +147,7 @@ class Rows(unittest.TestCase):
     def test_r3_an_unknown_key_is_refused_by_name(self):
         """r3 an unknown key in a product manifest copy is refused"""
         with tempfile.TemporaryDirectory(prefix="gba-r3-") as temporary:
-            root = pathlib.Path(temporary)
+            root = pathlib.Path(temporary).resolve()
             copy = root / "capsule.json"
             manifest = json.loads(PAGE_MANIFEST.read_text())
             manifest["agent"] = {"id": "nobody"}
@@ -321,6 +321,23 @@ class Rows(unittest.TestCase):
                 result.stderr, f"prepare_bundles_source_symlink: {rom}\n",
             )
             self.assertFalse((out / "content" / "ucity.gba").exists())
+
+    def test_r9_a_manifest_under_a_symlinked_folder_is_refused(self):
+        """r9 derive_manifest refuses a product manifest reached through a symlinked folder"""
+        with tempfile.TemporaryDirectory(prefix="gba-r9-") as temporary:
+            base = pathlib.Path(temporary).resolve()
+            real = base / "elsewhere"
+            real.mkdir()
+            shutil.copy(PAGE_MANIFEST, real / "capsule.json")
+            (base / "linked").symlink_to(real)
+            capsule = base / "linked" / "capsule.json"
+            out = base / "out"
+            result = derive(capsule, out, CORE_CID, CORE_NAME)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr, f"derive_manifest_manifest_symlink: {base / 'linked'}\n",
+            )
+            self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":
