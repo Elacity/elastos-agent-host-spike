@@ -3906,6 +3906,84 @@ mod tests {
             .contains("protected storage bridge"));
     }
 
+    /// F4.3 (r3/r4, options §2.2): direct drive of the attached bridge entry,
+    /// not a real attached launch. A real launch needs a live operator
+    /// Runtime and a staged component capsule (costed in the facts); that
+    /// form is Sash's or Rong's definition question. With the `None` that
+    /// route 4's CLI entrances pass, a Users/self resource_invoke is refused
+    /// before dispatch as `invalid_resource_invoke`; with `Some(person)` the
+    /// protected-bridge refusal names the principal context. Neither reads nor
+    /// writes real data placed under the person's root.
+    #[tokio::test]
+    async fn an_attached_bridge_serves_no_principal_root() {
+        let principal_id = "person:local:active";
+        let temp = stored_human_dir(principal_id);
+        let object_uri = format!(
+            "{}/Documents/a.md",
+            crate::auth::principal_localhost_root(principal_id)
+        );
+        let disk = rooted_localhost_fs_path(temp.path(), &object_uri).unwrap();
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        std::fs::write(&disk, b"person's real data").unwrap();
+        let line = r#"{"id":13,"request":{"type":"resource_invoke","uri":"localhost://Users/self/Documents/a.md","operation":"read","token":"tok","body":{}}}"#;
+        let capabilities = any_action(vec![object_uri]);
+        let without_principal = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &capabilities,
+            None,
+            Some(temp.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(without_principal["id"], 13);
+        assert_eq!(without_principal["response"]["type"], "error");
+        assert_eq!(
+            without_principal["response"]["code"],
+            "invalid_resource_invoke"
+        );
+        assert_eq!(
+            without_principal["response"]["message"],
+            "localhost://Users/self requires a principal-scoped launch context"
+        );
+
+        let with_principal = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &capabilities,
+            Some(principal_id),
+            Some(temp.path()),
+        )
+        .await
+        // A dispatch error folds into the response so the code assertion, not
+        // an unwrap, is the row's observable failure.
+        .unwrap_or_else(|err| serde_json::json!({"dispatch_error": format!("{err:#}")}));
+        assert_eq!(
+            with_principal["response"]["code"], "principal_context_required",
+            "{with_principal}"
+        );
+        assert_eq!(
+            with_principal["response"]["message"],
+            "principal-root storage requires an in-runtime protected storage bridge"
+        );
+
+        assert_eq!(
+            std::fs::read(&disk).unwrap(),
+            b"person's real data",
+            "the person's file is not written"
+        );
+        for response in [&without_principal, &with_principal] {
+            assert!(
+                !response.to_string().contains("person's real data"),
+                "nothing from the person's root is returned: {response}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn handle_request_rejects_raw_runtime_control_api() {
         let response = handle_request(
