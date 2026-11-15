@@ -765,10 +765,10 @@ mod tests {
     ///
     /// The path names that stored segment. Y's namespace owner is the route's
     /// own fallback rule (`session_owner`, namespace.rs:539) applied to the
-    /// segment: `hex(SHA-256(segment))`. Y's own bytes are seeded in that
-    /// namespace at the stored spelling before X acts. A regression that derives
-    /// the owner from the request path with the same rule opens Y's valid,
-    /// seeded key instead of failing on an invalid owner, and the row's Y-bytes
+    /// segment: `hex(SHA-256(segment))`. Y writes its own bytes through the
+    /// production route at the stored spelling before X acts. A regression that
+    /// derives the owner from the request path with the same rule opens Y's
+    /// valid key instead of failing on an invalid owner, and the row's Y-bytes
     /// assertions catch it.
     #[tokio::test]
     async fn the_namespace_route_addresses_the_session_owners_own_key() {
@@ -810,12 +810,6 @@ mod tests {
         );
 
         let (state, dir) = test_namespace_state();
-        // Y's own namespace is seeded through the store before X acts.
-        state
-            .namespace_store
-            .write_path(OWNER_Y, COLLAPSED, Y_PAYLOAD, None)
-            .await
-            .unwrap();
         let app = |session: Session| {
             axum::Router::new()
                 .route("/api/namespace/list", get(list_path))
@@ -877,7 +871,23 @@ mod tests {
                 .unwrap()
         };
 
-        // Y's seeded listing and CID are the state X's write must not touch.
+        // Y writes its own bytes through the production route before X acts,
+        // so the state X's write must not touch is the state Y's own write
+        // minted.
+        let (y_write_status, y_write_body) = send(y.clone(), write(Y_PAYLOAD)).await;
+        assert_eq!(
+            y_write_status,
+            StatusCode::OK,
+            "Y's own write at the spelling lands in Y's own namespace key"
+        );
+        let y_written: serde_json::Value = serde_json::from_slice(&y_write_body).unwrap();
+        assert_eq!(
+            y_written["path"], COLLAPSED,
+            "Y's write reports the collapsed spelling it stored"
+        );
+
+        // Y's listing and CID after its own write are the state X's write must
+        // not touch.
         let (_, y_listing_before) = send(y.clone(), listing()).await;
         let (_, y_status_before) = send(y.clone(), status()).await;
         let y_status_before_json: serde_json::Value =
@@ -899,25 +909,25 @@ mod tests {
         );
         assert_ne!(
             x_written["namespace_cid"], y_status_before_json["namespace_cid"],
-            "the same spelling gives X a namespace other than Y's seeded one"
+            "the same spelling gives X a namespace other than Y's own one"
         );
 
-        // Y still reads its own seeded bytes. With the owner taken from the
+        // Y still reads its own bytes. With the owner taken from the
         // path at write_content, X's write lands in Y's key and this fails here.
         let (_, y_read) = send(y.clone(), read()).await;
         assert_eq!(
             y_read,
             Y_PAYLOAD.to_vec(),
-            "Y reads its own seeded namespace key at the spelling"
+            "Y reads its own namespace key at the spelling"
         );
 
-        // X reads its own bytes, not Y's seeded ones. With the owner taken from
+        // X reads its own bytes, not Y's. With the owner taken from
         // the path at read_content, X's read opens Y's key and this fails here.
         let (_, x_read) = send(x.clone(), read()).await;
         assert_eq!(
             x_read,
             b"x-payload".to_vec(),
-            "X reads its own namespace key, not Y's seeded bytes"
+            "X reads its own namespace key, not Y's bytes"
         );
 
         // Resolve reports the collapsed spelling under X's owner key.
@@ -940,7 +950,7 @@ mod tests {
             "status names the CID the write minted"
         );
 
-        // No response to X carries Y's seeded bytes: a read as well as a write.
+        // No response to X carries Y's bytes: a read as well as a write.
         let (_, x_listing_body) = send(x.clone(), listing()).await;
         let carries_y = |body: &[u8]| {
             body.windows(Y_PAYLOAD.len())
@@ -955,7 +965,7 @@ mod tests {
         ];
         assert!(
             x_answers.iter().all(|body| !carries_y(body)),
-            "no response to X carries Y's seeded bytes"
+            "no response to X carries Y's bytes"
         );
 
         // X's write left Y's namespace listing and CID exactly as they were.
