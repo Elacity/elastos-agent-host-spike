@@ -337,6 +337,32 @@ fn k5d_a_digest_of_a_missing_content_file_answers_not_found() {
     );
 }
 
+/// The fake's own rule, stricter than R3-1: a digest body may name only
+/// `path`, `offset` and `length`, and every other key is refused with
+/// `invalid_request`. R3-1 ignores other keys on a digest
+/// (`elastos-server/src/resource_bridge.rs:202,206-218` at cde4c8b1), so
+/// this refusal is the fake's alone.
+#[test]
+fn k5e_a_digest_body_with_a_key_other_than_path_offset_length_is_refused() {
+    let mut bus = FakeBus::default()
+        .object(CONTENT, b"abc".to_vec())
+        .allow(CONTENT, "read");
+    let taken = digest_reply(&mut bus, CONTENT, json!({ "path": CONTENT }));
+    assert_eq!(taken["status"], "ok", "{taken}");
+    for (body, problem) in [
+        (
+            json!({ "path": CONTENT, "encoding": "utf8" }),
+            "unknown field `encoding`",
+        ),
+        (json!({ "path": CONTENT, "x": 1 }), "unknown field `x`"),
+    ] {
+        let answer = digest_reply(&mut bus, CONTENT, body);
+        assert_eq!(answer["status"], "error", "{answer}");
+        assert_eq!(answer["code"], "invalid_request", "{answer}");
+        assert_eq!(answer["message"], problem, "{answer}");
+    }
+}
+
 #[test]
 fn a_runtime_denial_of_an_invoke_is_reported_as_denied() {
     let denied = BusFailure::Denied("Capability validation failed".into());
