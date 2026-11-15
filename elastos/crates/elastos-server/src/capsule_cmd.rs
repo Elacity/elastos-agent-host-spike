@@ -243,10 +243,7 @@ pub async fn run_capsule(
         }
     }
 
-    let mut config = parse_config_object(&name, config)?;
-    if interactive {
-        config.insert("_elastos_interactive".into(), serde_json::json!(true));
-    }
+    let config = parse_config_object(&name, config)?;
 
     let capsule_dir = ensured_paths
         .get(&name)
@@ -289,6 +286,7 @@ pub async fn run_capsule(
         serde_json::json!({
             "name": name,
             "config": serde_json::Value::Object(config),
+            "interactive": interactive,
         }),
     )
     .await?;

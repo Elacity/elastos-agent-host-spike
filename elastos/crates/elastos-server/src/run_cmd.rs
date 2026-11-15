@@ -219,10 +219,9 @@ async fn run_microvm_via_operator_runtime(
         .header("Authorization", format!("Bearer {}", tokens.shell_token))
         .json(&serde_json::json!({
             "name": &manifest.name,
-            "config": {
-                "_elastos_interactive": true,
-                "_elastos_capsule_args": capsule_args,
-            },
+            "config": {},
+            "interactive": true,
+            "capsule_args": capsule_args,
         }))
         .send()
         .await?;
@@ -406,5 +405,64 @@ mod tests {
             error.to_string().starts_with("unknown field `cid`"),
             "{error}"
         );
+    }
+
+    /// a4 (R6-2a): the three CLI senders put the host keys in the typed
+    /// `interactive` / `capsule_args` fields and carry no `_elastos_` key in
+    /// `config`. These are source pins with exact literals: each body is one
+    /// inline `json!` sent straight to the runtime, with no seam a test can
+    /// hold, and `elastos run` then blocks on Ctrl-C, so no in-process drive
+    /// reaches a literal outcome. A sender that moves a key back turns this
+    /// row red at the pinned line.
+    #[test]
+    fn r6_2a_cli_senders_use_the_typed_fields_and_send_no_host_key() {
+        fn production_text(source: &str) -> &str {
+            let end = source.find("\nmod tests {").unwrap_or(source.len());
+            &source[..end]
+        }
+
+        let run = production_text(include_str!("run_cmd.rs"));
+        assert_eq!(run.matches("\"config\": {},").count(), 1, "run config");
+        assert_eq!(
+            run.matches("\"interactive\": true,").count(),
+            1,
+            "run interactive"
+        );
+        assert_eq!(
+            run.matches("\"capsule_args\": capsule_args,").count(),
+            1,
+            "run capsule_args"
+        );
+        assert_eq!(run.matches("_elastos_").count(), 0, "run host key");
+
+        let capsule = production_text(include_str!("capsule_cmd.rs"));
+        assert_eq!(
+            capsule
+                .matches("\"config\": serde_json::Value::Object(config),")
+                .count(),
+            1,
+            "capsule config"
+        );
+        assert_eq!(
+            capsule.matches("\"interactive\": interactive,").count(),
+            1,
+            "capsule interactive"
+        );
+        assert_eq!(capsule.matches("_elastos_").count(), 0, "capsule host key");
+
+        let shell = production_text(include_str!("../../../capsules/shell/src/main.rs"));
+        assert_eq!(
+            shell.matches("\"config\": config,").count(),
+            1,
+            "shell config"
+        );
+        assert_eq!(
+            shell
+                .matches("\"interactive\": i == last_idx && spec.interactive_target,")
+                .count(),
+            1,
+            "shell interactive"
+        );
+        assert_eq!(shell.matches("_elastos_").count(), 0, "shell host key");
     }
 }

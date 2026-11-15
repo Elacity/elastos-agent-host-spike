@@ -55,6 +55,12 @@ pub enum SupervisorRequest {
         name: String,
         #[serde(default)]
         config: serde_json::Value,
+        /// Guest stdio: a shell-launched capsule that needs a terminal.
+        #[serde(default)]
+        interactive: bool,
+        /// Arguments forwarded to the capsule entrypoint by the guest init.
+        #[serde(default)]
+        capsule_args: Vec<String>,
         /// Typed: a request that deserialises carries `None`, because the
         /// wire cannot mint a `BridgePrincipal` (`#[serde(skip, default)]`).
         #[serde(skip, default)]
@@ -269,6 +275,19 @@ impl Supervisor {
                      ({name} is not published for it)"
                 )
             })
+    }
+
+    /// The guest boot argument that forwards capsule arguments: the arguments
+    /// joined by newlines and base64-encoded, or none when there are none. The
+    /// guest init decodes with `base64 -d` and splits on newlines.
+    fn capsule_args_boot_arg(capsule_args: &[String]) -> Option<String> {
+        if capsule_args.is_empty() {
+            return None;
+        }
+        use base64::Engine as _;
+        let joined = capsule_args.join("\n");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
+        Some(format!("elastos.capsule_args={encoded}"))
     }
 
     fn verify_host_artifact(&self, component: &str, path: &Path) -> Result<()> {
@@ -501,8 +520,13 @@ impl Supervisor {
             SupervisorRequest::LaunchCapsule {
                 name,
                 config,
+                interactive,
+                capsule_args,
                 principal_id,
-            } => match self.launch_capsule(&name, config, principal_id).await {
+            } => match self
+                .launch_capsule(&name, config, interactive, capsule_args, principal_id)
+                .await
+            {
                 Ok((handle, cid)) => SupervisorResponse::ok_with_handle(handle, cid),
                 Err(e) => SupervisorResponse::err(format!("launch_capsule failed: {e}")),
             },
@@ -965,6 +989,8 @@ impl Supervisor {
         &self,
         name: &str,
         config: serde_json::Value,
+        interactive: bool,
+        capsule_args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(String, u32)> {
         // An agent's own principal reaches no VM: a stored agent launches
@@ -1027,32 +1053,15 @@ impl Supervisor {
 
         let handle = Self::unique_handle(name, cid);
 
-        // Normalize supervisor-reserved launch config keys.
-        let mut launch_config = config;
-        let interactive_stdio = launch_config
-            .get("_elastos_interactive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let capsule_args: Vec<String> = launch_config
-            .get("_elastos_capsule_args")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Some(obj) = launch_config.as_object_mut() {
-            obj.remove("_elastos_interactive");
-            obj.remove("_elastos_capsule_args");
-        }
+        // The guest payload is moved whole; the host reads none of it here.
+        let launch_config = config;
 
         // Create VM config from manifest, override vsock CID
         let mut vm_config =
             VmConfig::from_manifest(&manifest, &capsule_dir, &self.crosvm_config.kernel_path);
         vm_config.vsock_cid = cid;
         vm_config.boot_args = format!("{} elastos.data_dir=/opt/elastos", vm_config.boot_args);
-        vm_config.interactive_stdio = interactive_stdio;
+        vm_config.interactive_stdio = interactive;
         let vm_id = vm_config.vm_id.clone();
 
         // TAP networking only when explicitly requested via permissions.guest_network.
@@ -1067,7 +1076,7 @@ impl Supervisor {
         // guest TUI can render at the correct size and use matching escape sequences.
         // Serial consoles lack TIOCGWINSZ and default to TERM=linux which causes
         // key misinterpretation when the host terminal is xterm-256color etc.
-        if interactive_stdio {
+        if interactive {
             let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
             let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
             if ok == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
@@ -1131,16 +1140,9 @@ impl Supervisor {
             vm_config.boot_args = format!("{} elastos.command={}", vm_config.boot_args, encoded);
         }
 
-        // Pass capsule arguments as base64-encoded boot arg so the guest
-        // init can forward them to the entrypoint binary.
-        // Encoding: args joined by newlines, then base64-encoded. Guest init
-        // decodes with `base64 -d` and splits on newlines.
-        if !capsule_args.is_empty() {
-            use base64::Engine as _;
-            let joined = capsule_args.join("\n");
-            let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
-            vm_config.boot_args =
-                format!("{} elastos.capsule_args={}", vm_config.boot_args, encoded);
+        // Pass the typed capsule arguments to the guest init.
+        if let Some(boot_arg) = Self::capsule_args_boot_arg(&capsule_args) {
+            vm_config.boot_args = format!("{} {}", vm_config.boot_args, boot_arg);
         }
 
         // Provider capsules expose their request/response bridge on a fixed
@@ -1710,6 +1712,29 @@ mod tests {
         }
     }
 
+    /// a5 (R6-2a): the guest boot arg `elastos.capsule_args=` is built from the
+    /// typed field. The expected value is independent: base64 of `--demo` and
+    /// `a b` joined by a newline. The source pin shows the VM path calls the
+    /// builder with the typed parameter.
+    #[test]
+    fn r6_2a_the_capsule_args_boot_arg_is_built_from_the_typed_field() {
+        assert_eq!(
+            Supervisor::capsule_args_boot_arg(&["--demo".to_string(), "a b".to_string()]),
+            Some("elastos.capsule_args=LS1kZW1vCmEgYg==".to_string())
+        );
+        assert_eq!(Supervisor::capsule_args_boot_arg(&[]), None);
+
+        let production = include_str!("supervisor.rs");
+        let end = production.find("\nmod tests {").unwrap();
+        assert_eq!(
+            production[..end]
+                .matches("capsule_args_boot_arg(&capsule_args)")
+                .count(),
+            1,
+            "the VM path builds the guest boot arg from the typed parameter"
+        );
+    }
+
     /// Amendment row S(b): a stored agent's principal sent straight to the
     /// supervisor is refused by name, before any manifest is read, so no
     /// bridge and no VM is made.
@@ -1735,6 +1760,8 @@ mod tests {
             .launch_capsule(
                 "not-installed",
                 serde_json::json!({}),
+                false,
+                Vec::new(),
                 Some(crate::resource_bridge::BridgePrincipal::for_test(agent)),
             )
             .await
@@ -1818,6 +1845,8 @@ mod tests {
             .launch_capsule(
                 "plain-vm-test",
                 serde_json::json!({}),
+                false,
+                Vec::new(),
                 Some(crate::resource_bridge::BridgePrincipal::for_test(
                     agent.as_str(),
                 )),
@@ -1885,6 +1914,8 @@ mod tests {
             .launch_capsule(
                 "provider-test",
                 serde_json::json!({}),
+                false,
+                Vec::new(),
                 Some(crate::resource_bridge::BridgePrincipal::for_test(
                     "person:local:alice",
                 )),
@@ -1951,6 +1982,8 @@ mod tests {
             .launch_capsule(
                 "agent-vm-test",
                 serde_json::json!({}),
+                false,
+                Vec::new(),
                 Some(crate::resource_bridge::BridgePrincipal::for_test(
                     "person:local:alice",
                 )),
@@ -2386,7 +2419,13 @@ mod tests {
             },
         );
         let error = supervisor
-            .launch_capsule("pinned-fixture", serde_json::json!({}), None)
+            .launch_capsule(
+                "pinned-fixture",
+                serde_json::json!({}),
+                false,
+                Vec::new(),
+                None,
+            )
             .await
             .unwrap_err();
         let chain = format!("{error:#}");

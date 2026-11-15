@@ -45,6 +45,12 @@ pub struct LaunchCapsuleInput {
     pub name: String,
     #[serde(default)]
     pub config: serde_json::Value,
+    /// Guest stdio: a shell-launched capsule that needs a terminal.
+    #[serde(default)]
+    pub interactive: bool,
+    /// Arguments forwarded to the capsule entrypoint by the guest init.
+    #[serde(default)]
+    pub capsule_args: Vec<String>,
     #[serde(default)]
     pub principal_id: Option<serde_json::Value>,
     #[serde(default)]
@@ -168,11 +174,7 @@ pub async fn launch_capsule(
     Json(input): Json<LaunchCapsuleInput>,
 ) -> Result<Json<SupervisorOutput>, (StatusCode, String)> {
     let principal_id = supervisor_launch_principal_from_input(state.data_dir.as_deref(), &input)?;
-    let req = SupervisorRequest::LaunchCapsule {
-        name: input.name,
-        config: input.config,
-        principal_id,
-    };
+    let req = supervisor_launch_request(input, principal_id);
     let resp = state.supervisor.handle_request(req).await;
     if resp.status != "ok" {
         return Err((
@@ -181,6 +183,22 @@ pub async fn launch_capsule(
         ));
     }
     Ok(Json(resp.into()))
+}
+
+/// The supervisor request the HTTP handler builds. A plain constructor, so a
+/// test can hold the request the handler hands the supervisor without a hook
+/// on the security path.
+fn supervisor_launch_request(
+    input: LaunchCapsuleInput,
+    principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+) -> SupervisorRequest {
+    SupervisorRequest::LaunchCapsule {
+        name: input.name,
+        config: input.config,
+        interactive: input.interactive,
+        capsule_args: input.capsule_args,
+        principal_id,
+    }
 }
 
 const SUPERVISOR_PRINCIPAL_AUTHORITY_KEYS: &[&str] =
@@ -216,6 +234,18 @@ fn supervisor_launch_principal_from_input(
                     ),
                 ));
             }
+        }
+        // Compatibility refusal, not an authority rule: a payload that still
+        // carries a top-level `_elastos_` key was written for the old host-key
+        // spelling. The host keys are typed fields now, so an old sender fails
+        // closed here instead of handing a host key to the guest (r5 §3 M6).
+        if let Some(key) = config.keys().find(|key| key.starts_with("_elastos_")) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "launch_config_reserved_key: supervisor launch config must not carry {key}"
+                ),
+            ));
         }
     }
 
@@ -344,18 +374,34 @@ mod tests {
             .contains("supervisor launch config must not carry launch_grant"));
     }
 
+    /// a2/a4 (R6-2a): the old `_elastos_` spelling is refused at the entrance.
+    /// This test inverts `supervisor_launch_allows_runtime_reserved_config`,
+    /// which asserted the same two keys passed before the host keys became
+    /// typed fields. Any other top-level key in that namespace is refused too.
     #[test]
-    fn supervisor_launch_allows_runtime_reserved_config() {
-        let input = launch_input(serde_json::json!({
-            "name": "chat",
-            "config": {
-                "_elastos_interactive": true,
-                "_elastos_capsule_args": ["--demo"]
-            }
-        }));
+    fn supervisor_launch_refuses_reserved_config_keys() {
+        for key in [
+            "_elastos_interactive",
+            "_elastos_capsule_args",
+            "_elastos_x",
+        ] {
+            let mut config = serde_json::Map::new();
+            config.insert(key.to_string(), serde_json::json!(true));
+            let input = launch_input(serde_json::json!({
+                "name": "chat",
+                "config": config
+            }));
 
-        supervisor_launch_principal_from_input(None, &input)
-            .expect("runtime reserved config should pass");
+            let err = supervisor_launch_principal_from_input(None, &input)
+                .expect_err("a reserved config key must fail");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+            assert!(
+                err.1.contains("launch_config_reserved_key"),
+                "{key}: {:?}",
+                err.1
+            );
+            assert!(err.1.contains(key), "{key}: {:?}", err.1);
+        }
     }
 
     #[test]
@@ -584,5 +630,154 @@ mod tests {
             "{:?}",
             provider_without_grant.1
         );
+    }
+
+    fn test_state(data_dir: &std::path::Path) -> SupervisorState {
+        use crate::setup::ComponentsManifest;
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules: std::collections::HashMap::new(),
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        SupervisorState {
+            supervisor: Arc::new(supervisor),
+            data_dir: Some(data_dir.to_path_buf()),
+        }
+    }
+
+    async fn post_launch(app: axum::Router, body: serde_json::Value) -> (StatusCode, String) {
+        use tower::ServiceExt as _;
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/api/supervisor/launch-capsule")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn launch_router(state: SupervisorState) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/api/supervisor/launch-capsule",
+                axum::routing::post(launch_capsule),
+            )
+            .with_state(state)
+    }
+
+    /// a1 (R6-2a): the HTTP handler hands the supervisor `interactive` and
+    /// `capsule_args` from the typed fields. This captures the built
+    /// `SupervisorRequest` through the handler's own constructor
+    /// (`supervisor_launch_request`, the only place the handler builds one);
+    /// this Mac reaches no VM, so a boot-arg assertion cannot observe them
+    /// end to end. The body's guest config moves unchanged.
+    #[test]
+    fn r6_2a_the_launch_request_carries_the_typed_fields() {
+        let input = launch_input(serde_json::json!({
+            "name": "chat",
+            "config": {"nick": "alice"},
+            "interactive": true,
+            "capsule_args": ["--demo", "a b"]
+        }));
+        match supervisor_launch_request(input, None) {
+            SupervisorRequest::LaunchCapsule {
+                name,
+                config,
+                interactive,
+                capsule_args,
+                principal_id,
+            } => {
+                assert_eq!(name, "chat");
+                assert_eq!(config, serde_json::json!({"nick": "alice"}));
+                assert!(
+                    interactive,
+                    "the typed interactive field reaches the request"
+                );
+                assert_eq!(
+                    capsule_args,
+                    vec!["--demo".to_string(), "a b".to_string()],
+                    "the typed capsule_args reach the request"
+                );
+                assert!(principal_id.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Old bodies carry neither field and keep parsing with defaults.
+        match supervisor_launch_request(launch_input(serde_json::json!({"name": "chat"})), None) {
+            SupervisorRequest::LaunchCapsule {
+                interactive,
+                capsule_args,
+                ..
+            } => {
+                assert!(!interactive);
+                assert!(capsule_args.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// a2 (R6-2a): a config object with any top-level `_elastos_` key is
+    /// refused by name at the real HTTP entrance, before the request is built,
+    /// so nothing is launched. The old spelling fails closed.
+    #[tokio::test]
+    async fn r6_2a_a_reserved_config_key_is_refused_at_the_entrance() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = launch_router(test_state(dir.path()));
+        for (key, body) in [
+            (
+                "_elastos_interactive",
+                serde_json::json!({"name": "chat", "config": {"_elastos_interactive": true}}),
+            ),
+            (
+                "_elastos_capsule_args",
+                serde_json::json!({"name": "chat", "config": {"_elastos_capsule_args": ["--demo"]}}),
+            ),
+            (
+                "_elastos_x",
+                serde_json::json!({"name": "chat", "config": {"_elastos_x": 1}}),
+            ),
+        ] {
+            let (status, text) = post_launch(app.clone(), body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{key}");
+            assert!(text.contains("launch_config_reserved_key"), "{key}: {text}");
+            assert!(text.contains(key), "{key}: {text}");
+            assert!(
+                !text.contains("Cannot launch capsule"),
+                "the refusal precedes any launch: {text}"
+            );
+        }
+    }
+
+    /// a3 (R6-2a): a non-string `capsule_args` element and a non-bool
+    /// `interactive` are refused by axum's JSON extractor before the handler
+    /// runs. The exact status is 422 Unprocessable Entity (a data error, not a
+    /// syntax error). Nothing is launched because the handler never runs.
+    #[tokio::test]
+    async fn r6_2a_a_bad_typed_field_is_refused_at_deserialisation() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = launch_router(test_state(dir.path()));
+        for body in [
+            serde_json::json!({"name": "chat", "capsule_args": [1]}),
+            serde_json::json!({"name": "chat", "interactive": "yes"}),
+        ] {
+            let (status, _) = post_launch(app.clone(), body.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "axum's JSON data error: {body}"
+            );
+        }
     }
 }
