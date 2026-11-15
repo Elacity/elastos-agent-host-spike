@@ -1098,6 +1098,10 @@ pub(crate) mod tests {
         HeldRequest,
         /// No refusal and no Y data: the held spelling's operation answer.
         HeldOperation,
+        /// The bare area, normalized to `localhost://UsersAI`, is refused at
+        /// the manifest ceiling: no stored root is named, so the request is
+        /// junk (definition:36) and carries none of Y's data.
+        BareArea,
     }
 
     /// The outcome column of the guest's result line for plan entry `index`.
@@ -1540,6 +1544,9 @@ pub(crate) mod tests {
     /// root (the census's four held cells); its answer carries none of Y's
     /// data, and it neither lists nor changes Y's tree. The pending store and
     /// the capturing provider show that nothing reached Y on a refused cell.
+    /// The bare area and its slash form (B4, B5) are junk spellings
+    /// (definition:36): the ceiling refuses each, it creates no pending
+    /// request, and it carries none of Y's data.
     #[tokio::test]
     async fn an_agents_guest_is_refused_every_other_spelling_of_another_agents_root() {
         if crate::agents::require_build().is_err() {
@@ -1616,6 +1623,19 @@ pub(crate) mod tests {
                     format!("localhost://UsersAI/%2e%2e%2f{seg_y}/memory/notes.md"),
                     PlanExpect::Scope,
                 ),
+                // B4 and B5: the two bare-area forms. They are junk spellings
+                // (definition:36), normalized to `localhost://UsersAI`, so the
+                // ceiling refuses them and nothing reaches Y.
+                (
+                    "B4",
+                    "localhost://UsersAI".to_string(),
+                    PlanExpect::BareArea,
+                ),
+                (
+                    "B5",
+                    "localhost://UsersAI/".to_string(),
+                    PlanExpect::BareArea,
+                ),
             ];
             for (id, resource, expect) in spellings {
                 cells += 1;
@@ -1656,7 +1676,7 @@ pub(crate) mod tests {
                 ));
             }
         }
-        assert_eq!(cells, 48, "four operations over twelve spellings");
+        assert_eq!(cells, 56, "four operations over fourteen spellings");
 
         let plan: Vec<String> = lines.iter().map(|(_, line, _)| line.clone()).collect();
         home.plan(x, &plan);
@@ -1686,6 +1706,18 @@ pub(crate) mod tests {
                     assert_eq!(outcome, "ok", "{label}: {outcome}");
                 }
                 PlanExpect::HeldOperation => {
+                    assert!(!outcome.contains(canary_name), "{label}: {outcome}");
+                    assert!(!outcome.contains(canary_text), "{label}: {outcome}");
+                }
+                PlanExpect::BareArea => {
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(
+                        outcome.contains(
+                            "capsule manifest does not declare authority for localhost://UsersAI"
+                        ),
+                        "{label}: {outcome}"
+                    );
+                    // The junk clause: no Y name or byte in the answer.
                     assert!(!outcome.contains(canary_name), "{label}: {outcome}");
                     assert!(!outcome.contains(canary_text), "{label}: {outcome}");
                 }
@@ -1725,13 +1757,16 @@ pub(crate) mod tests {
     }
 
     /// Row C (S5 part 2, route 18 row 4): the protected principal-root path
-    /// serves read and write only, and the same twelve spellings are refused
+    /// serves read and write only, and the same fourteen spellings are refused
     /// for both. The encoded traversal under X's own prefix stays inside X's
     /// root (the census's two held cells). The launch's own journal and notes
     /// writes are the route's own-root control. A labelled unit companion then
     /// drives the protected path's root check with the agent id the launch
     /// admitted; it is not actor evidence, because the capability request that
     /// precedes every invoke refuses a foreign root before that check runs.
+    /// The bare area and its slash form (B4, B5) are junk spellings
+    /// (definition:36): the ceiling refuses each, it creates no pending
+    /// request, and it carries none of Y's data.
     #[tokio::test]
     async fn an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path() {
         if crate::agents::require_build().is_err() {
@@ -1801,6 +1836,19 @@ pub(crate) mod tests {
                     format!("localhost://UsersAI/%2e%2e%2f{seg_y}/memory/notes.md"),
                     PlanExpect::Scope,
                 ),
+                // B4 and B5: the two bare-area forms. They are junk spellings
+                // (definition:36), normalized to `localhost://UsersAI`, so the
+                // ceiling refuses them and nothing reaches Y.
+                (
+                    "B4",
+                    "localhost://UsersAI".to_string(),
+                    PlanExpect::BareArea,
+                ),
+                (
+                    "B5",
+                    "localhost://UsersAI/".to_string(),
+                    PlanExpect::BareArea,
+                ),
             ];
             for (id, resource, expect) in spellings {
                 cells += 1;
@@ -1839,7 +1887,7 @@ pub(crate) mod tests {
                 ));
             }
         }
-        assert_eq!(cells, 24, "read and write over twelve spellings");
+        assert_eq!(cells, 28, "read and write over fourteen spellings");
 
         let plan: Vec<String> = lines.iter().map(|(_, line, _)| line.clone()).collect();
         home.plan(x, &plan);
@@ -1875,6 +1923,18 @@ pub(crate) mod tests {
                     assert_eq!(outcome, "ok", "{label}: {outcome}");
                 }
                 PlanExpect::HeldOperation => {
+                    assert!(!outcome.contains(canary_name), "{label}: {outcome}");
+                    assert!(!outcome.contains(canary_text), "{label}: {outcome}");
+                }
+                PlanExpect::BareArea => {
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(
+                        outcome.contains(
+                            "capsule manifest does not declare authority for localhost://UsersAI"
+                        ),
+                        "{label}: {outcome}"
+                    );
+                    // The junk clause: no Y name or byte in the answer.
                     assert!(!outcome.contains(canary_name), "{label}: {outcome}");
                     assert!(!outcome.contains(canary_text), "{label}: {outcome}");
                 }
