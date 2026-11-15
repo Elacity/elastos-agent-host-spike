@@ -11,7 +11,8 @@ publish = false
 #
 # Features:
 # - `bus` (default): the Bus calls, the refusals, the reads and the write;
-# - `fake`: the fake Runtime, for guests' tests;
+# - `fake`: the fake Runtime, for guests' tests; it carries `sha2`, the only
+#   user of which is the digest answer;
 # - `wit`: the `elastos:bus@v1` glue for wasm32 (`WitBus`, `lifecycle_run`,
 #   the export macro). Only a Bus v1 component turns it on;
 # - with no features: the strict input list, the text and image checks and the
@@ -20,7 +21,7 @@ publish = false
 [features]
 default = ["bus"]
 bus = ["dep:serde"]
-fake = ["bus"]
+fake = ["bus", "dep:sha2"]
 wit = ["bus", "dep:wit-bindgen"]
 
 # `serde_json` is not optional: the input list (`list`) has no feature gate,
@@ -28,8 +29,13 @@ wit = ["bus", "dep:wit-bindgen"]
 [dependencies]
 serde = { version = "1.0.229", default-features = false, features = ["std"], optional = true }
 serde_json = "1.0.151"
-sha2 = "0.10.9"
+sha2 = { version = "0.10.9", optional = true }
 wit-bindgen = { version = "0.57.1", optional = true }
+
+# The kit's own tests turn on `cfg(test)`, not the `fake` feature, so the
+# optional `sha2` above is off in them; this dev-dependency is its copy there.
+[dev-dependencies]
+sha2 = "0.10.9"
 
 # Tested on its own here; when it is a dependency, this table is ignored.
 [workspace]
