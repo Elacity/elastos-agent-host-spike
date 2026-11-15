@@ -22,6 +22,7 @@ set -u
 umask 077  # every file this run makes (keys, tokens, receipts) is owner-only
 PLANT="${HEADLESS_PLANT:-}"
 WT=$(cd "$1" && pwd); WORK="$2"; CORE_WASM="$3"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 TARGET="${CARGO_TARGET_DIR:-}"
 [ -n "$TARGET" ] || TARGET="$WT/elastos/target"
 TARGET=$(cd "$TARGET" 2>/dev/null && pwd) || { echo "no target folder at ${CARGO_TARGET_DIR:-$WT/elastos/target} (cargo build -p elastos-server --bin elastos; cargo build -p localhost-provider)"; exit 3; }
@@ -39,52 +40,17 @@ case "$(real_path "$WORK")/" in "$(real_path "$WT")"/*) echo "the work folder mu
 pids=()
 WORK_ID=""; HOME_ID=""
 dir_id() { python3 -I -c 'import os, sys; s = os.stat(sys.argv[1], follow_symlinks=False); print("%d:%d" % (s.st_dev, s.st_ino))' "$1"; }
-# Removes the credential files and the throwaway Home (device key; attach secret while serve ran). The work folder is
-# opened without following a symlink and must be the very folder this run made (device and inode recorded when it was
-# made); the Home inside it must be the Home this run made. Everything is removed through that open folder, so no path
-# change can redirect the removal. If either check fails, nothing is removed and the run fails, naming what may remain.
+# Removes the credential files and the throwaway Home (device key; attach secret while serve ran) through
+# secure_rm.py: the work folder is opened without following a symlink and must be the folder this run made (device and
+# inode recorded when it was made); the Home is opened from it, its identity checked on the open descriptor, and
+# emptied through that descriptor. If a check fails, nothing is removed there and the run fails, naming what may remain.
 secure_cleanup() { # <credentials | all>: "all" also removes the Home, once its processes are gone
   [ -n "$WORK_ID" ] || return 0
-  python3 -I - "$WORK" "$WORK_ID" "$HOME_ID" "$1" <<'PYEOF'
-import os, stat, sys
-work, work_id, home_id, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-CREDENTIALS = ("open.cfg", "attach.json", "attach-body.json", "home-token", "did-signing.key",
-               "token-payload.json", "signed.json")
-def ident(st):
-    return "%d:%d" % (st.st_dev, st.st_ino)
-def rm_tree(dir_fd, name):
-    st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-    if stat.S_ISDIR(st.st_mode):
-        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
-        try:
-            for entry in list(os.scandir(fd)):
-                rm_tree(fd, entry.name)
-        finally:
-            os.close(fd)
-        os.rmdir(name, dir_fd=dir_fd)
-    else:
-        os.unlink(name, dir_fd=dir_fd)
-try:
-    fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-except OSError as error:
-    sys.exit("NOT AS EXPECTED (cleanup: the work folder cannot be opened as itself (%s); credentials may remain under %s)" % (error.strerror, work))
-try:
-    if ident(os.fstat(fd)) != work_id:
-        sys.exit("NOT AS EXPECTED (cleanup: %s is no longer the folder this run made; credentials may remain)" % work)
-    for name in os.listdir(fd):
-        if name in CREDENTIALS or (name.startswith("of-") and name.endswith(".key")):
-            os.unlink(name, dir_fd=fd)
-    if mode == "all" and home_id:
-        try:
-            st = os.stat("home", dir_fd=fd, follow_symlinks=False)
-        except FileNotFoundError:
-            sys.exit("NOT AS EXPECTED (cleanup: this run's Home is gone from %s; its device key may remain wherever it was moved)" % work)
-        if not stat.S_ISDIR(st.st_mode) or ident(st) != home_id:
-            sys.exit("NOT AS EXPECTED (cleanup: %s/home is not the Home this run made; nothing removed there)" % work)
-        rm_tree(fd, "home")
-finally:
-    os.close(fd)
-PYEOF
+  if [ "$1" = all ] && [ -n "$HOME_ID" ]; then
+    python3 -I "$HERE/secure_rm.py" "$WORK" "$WORK_ID" --credentials --tree home --expect "$HOME_ID"
+  else
+    python3 -I "$HERE/secure_rm.py" "$WORK" "$WORK_ID" --credentials
+  fi
 }
 secrets_rm() { secure_cleanup credentials || { failed=1; return 1; }; }
 cleanup() {

@@ -74,9 +74,12 @@ The receipt's `host_triple` reads `Linux aarch64`. The Runtime binary is that ma
    that token from the run's own `identity/device.key`, uses it for this run's two opens (the good one and the changed
    copy), and deletes it with every other credential file when the run ends, on success or failure; it is never
    printed or recorded. When the run ends, on success or failure, the throwaway Home (its device key and the Runtime's
-   attach secret) and the credential files are removed through the work folder opened as itself (no symlink
-   followed, device and inode checked against the folder the run made); if the folder or its Home is no longer the
-   one the run made, nothing is removed there and the run fails, naming what may remain. The work folder is made owner-only and must lie outside the checkout (real paths).
+   attach secret) and the credential files are removed by `secure_rm.py`: the work folder is opened without following
+   a symlink and its device and inode are checked against the folder the run made; the Home is opened from it and
+   checked the same way on the open descriptor, then emptied through that descriptor. If a check fails, nothing is
+   removed there and the run fails, naming what may remain. Boundary: the folders above the work folder are resolved
+   normally (the identity check on the open folder is what binds the removal); a Home moved away after its contents
+   were removed leaves only an empty folder. The work folder is made owner-only and must lie outside the checkout (real paths).
 5. `results.json` is written in the run's folder. Exit 0 only when the good open answered `200` with a page named
    and the changed-byte open answered `400` with `bundle_cid_mismatch`.
 
@@ -132,5 +135,5 @@ Each must turn the receipt red at the check named, not at a build error: the cha
 run's own refusal check), one CID altered in a copy of the receipt (compare names `content_cid`), a required
 field removed from a copy (compare names `component_sha256`), and a reference receipt whose changed copy was not
 refused (compare names it `INVALID reference: changed_start_status 200 is not 400`), and the Home swapped for another
-folder before cleanup (the run refuses to remove it and fails: `is not the Home this run made; nothing removed there`). The plants change no file in the checkout: one is an
+folder before cleanup (the run refuses to remove it and fails: `home is not the folder this run made; nothing removed there`). The plants change no file in the checkout: one is an
 environment variable and two work on copies under the work folder.

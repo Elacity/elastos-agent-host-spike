@@ -12,7 +12,8 @@ WT="$1"; WORK="$2"; CORE_WASM="$3"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 [ -e "$WORK" ] && { echo "the work folder must be new: $WORK"; exit 2; }
 mkdir -p "$WORK" || exit 2
-WORK=$(cd "$WORK" && pwd)
+WORK=$(cd -P "$WORK" && pwd -P)
+WORK_ID=$(python3 -I -c 'import os, sys; s = os.stat(sys.argv[1], follow_symlinks=False); print("%d:%d" % (s.st_dev, s.st_ino))' "$WORK") || exit 2
 missed=0
 red() { echo "RED: $1 -> $2"; }
 not_red() { echo "NOT AS EXPECTED: $1"; missed=1; }
@@ -82,15 +83,16 @@ fi
 
 HEADLESS_PLANT=home-swapped bash "$HERE/run-headless.sh" "$WT" "$WORK/swapped" "$CORE_WASM" > "$WORK/swapped.log" 2>&1
 code=$?
-expect="is not the Home this run made; nothing removed there"
+expect="home is not the folder this run made; nothing removed there"
 if [ "$code" != 0 ] && grep -q "HEADLESS FAILED (cleanup)" "$WORK/swapped.log" && grep -qF "$expect" "$WORK/swapped.log" \
    && [ -d "$WORK/swapped/home" ] && [ -d "$WORK/swapped/home.moved" ]; then
   red "home-swapped" "$expect"
 else
   not_red "home-swapped (exit $code)"; tail -5 "$WORK/swapped.log"
 fi
-# the plant's moved Home still holds its throwaway device key: this falsifier removes its own plant folder's copy
-rm -rf -- "$WORK/swapped/home.moved" "$WORK/swapped/home"
+# the plant's moved Home still holds its throwaway device key: removed through this falsifier's own work folder
+# (opened as itself, identity checked) by secure_rm.py, never by following a path
+python3 -I "$HERE/secure_rm.py" "$WORK" "$WORK_ID" --tree swapped/home.moved --tree swapped/home || missed=1
 
 [ "$missed" = 0 ] && echo "all 5 headless plants red where expected" || echo "SOME HEADLESS PLANTS NOT AS EXPECTED"
 exit $missed
