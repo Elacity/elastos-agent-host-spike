@@ -175,9 +175,11 @@ def main(argv):
     args = parser.parse_args(argv)
 
     refuse_output_inside_repo(args.out)
-    source = pathlib.Path(args.capsule)
-    if source.is_symlink():
-        refuse(f"derive_manifest_manifest_symlink: {args.capsule}")
+    source = pathlib.Path(os.path.abspath(args.capsule))
+    # Every component of the manifest's absolute path, from the filesystem
+    # root down, is lstat-checked: a symlinked parent cannot lead the read
+    # elsewhere (#1670 Codex r2 Medium).
+    refuse_symlink_below(source.anchor, source, "derive_manifest_manifest_symlink")
     try:
         manifest = json.loads(source.read_bytes())
     except (OSError, ValueError):
