@@ -8,7 +8,8 @@
 # derived as `elastos-identity` derives it) for the device principal, with a `local:` session and a `grant:local:`
 # grant. The token is written to this run's own folder, serves the run's two opens, and is removed; it is never
 # printed or recorded. When the run ends, on success or failure, the throwaway Home (its device key and the Runtime's
-# attach secret) is removed too.
+# attach secret) is removed too, through the work folder opened as itself; if it is no longer the folder this run
+# made, nothing is removed there and the run fails (secure_cleanup).
 #
 # Writes results.json in the run's folder: the host triple, the content, page and core CIDs, the component's
 # sha256, the Runtime binary's sha256, the open's answer status and page, and the changed-byte refusal name.
@@ -36,23 +37,66 @@ real_path() { python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1])
 case "$(real_path "$WORK")/" in "$(real_path "$WT")"/*) echo "the work folder must be outside the checkout: $WORK"; exit 2 ;; esac
 # Cleanup is armed BEFORE the work folder is made, so every later exit runs it.
 pids=()
-HOME_REAL=""
-# Credentials this run makes: removed on every exit path, success or failure.
-secrets_rm() { [ -n "$HOME_REAL" ] || return 0; rm -f "$WORK/open.cfg" "$WORK/attach.json" "$WORK/attach-body.json" \
-  "$WORK/home-token" "$WORK/did-signing.key" "$WORK/token-payload.json" "$WORK/signed.json" "$WORK"/of-*.key; }
-# The throwaway Home holds the device key and, while serve runs, the attach secret: removed once its processes are
-# gone. Only the folder this run made is removed: its real path is recorded when it is made, and it is removed only
-# if that path still resolves to itself (no symlink put in its way since).
-home_rm() {
-  [ -n "$HOME_REAL" ] && [ -d "$HOME_REAL" ] || return 0
-  if [ "$(cd -P "$HOME_REAL" 2>/dev/null && pwd -P)" = "$HOME_REAL" ]; then rm -rf -- "$HOME_REAL"
-  else echo "NOT AS EXPECTED (the throwaway Home moved; not removed: $HOME_REAL)"; fi; }
-cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; secrets_rm; home_rm; }
+WORK_ID=""; HOME_ID=""
+dir_id() { python3 -I -c 'import os, sys; s = os.stat(sys.argv[1], follow_symlinks=False); print("%d:%d" % (s.st_dev, s.st_ino))' "$1"; }
+# Removes the credential files and the throwaway Home (device key; attach secret while serve ran). The work folder is
+# opened without following a symlink and must be the very folder this run made (device and inode recorded when it was
+# made); the Home inside it must be the Home this run made. Everything is removed through that open folder, so no path
+# change can redirect the removal. If either check fails, nothing is removed and the run fails, naming what may remain.
+secure_cleanup() { # <credentials | all>: "all" also removes the Home, once its processes are gone
+  [ -n "$WORK_ID" ] || return 0
+  python3 -I - "$WORK" "$WORK_ID" "$HOME_ID" "$1" <<'PYEOF'
+import os, stat, sys
+work, work_id, home_id, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+CREDENTIALS = ("open.cfg", "attach.json", "attach-body.json", "home-token", "did-signing.key",
+               "token-payload.json", "signed.json")
+def ident(st):
+    return "%d:%d" % (st.st_dev, st.st_ino)
+def rm_tree(dir_fd, name):
+    st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    if stat.S_ISDIR(st.st_mode):
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        try:
+            for entry in list(os.scandir(fd)):
+                rm_tree(fd, entry.name)
+        finally:
+            os.close(fd)
+        os.rmdir(name, dir_fd=dir_fd)
+    else:
+        os.unlink(name, dir_fd=dir_fd)
+try:
+    fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as error:
+    sys.exit("NOT AS EXPECTED (cleanup: the work folder cannot be opened as itself (%s); credentials may remain under %s)" % (error.strerror, work))
+try:
+    if ident(os.fstat(fd)) != work_id:
+        sys.exit("NOT AS EXPECTED (cleanup: %s is no longer the folder this run made; credentials may remain)" % work)
+    for name in os.listdir(fd):
+        if name in CREDENTIALS or (name.startswith("of-") and name.endswith(".key")):
+            os.unlink(name, dir_fd=fd)
+    if mode == "all" and home_id:
+        try:
+            st = os.stat("home", dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            sys.exit("NOT AS EXPECTED (cleanup: this run's Home is gone from %s; its device key may remain wherever it was moved)" % work)
+        if not stat.S_ISDIR(st.st_mode) or ident(st) != home_id:
+            sys.exit("NOT AS EXPECTED (cleanup: %s/home is not the Home this run made; nothing removed there)" % work)
+        rm_tree(fd, "home")
+finally:
+    os.close(fd)
+PYEOF
+}
+secrets_rm() { secure_cleanup credentials || { failed=1; return 1; }; }
+cleanup() {
+  for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null
+  secure_cleanup all || { echo "HEADLESS FAILED (cleanup)"; exit 1; }
+}
 trap cleanup EXIT
 mkdir -p "$WORK/home" "$WORK/out" || exit 2
-WORK=$(cd -P "$WORK" && pwd -P) || exit 2  # the real path from here on: no symlink in what cleanup removes
-HOME_REAL="$WORK/home"
+WORK=$(cd -P "$WORK" && pwd -P) || exit 2  # the real path from here on
 chmod 700 "$WORK" || exit 2
+WORK_ID=$(dir_id "$WORK") && HOME_ID=$(dir_id "$WORK/home") || exit 2
+HOME_REAL="$WORK/home"
 export HOME="$HOME_REAL"
 unset XDG_DATA_HOME
 case "$(uname)" in
@@ -216,7 +260,7 @@ RT="http://127.0.0.1:$RT_PORT"
 
 step "the open by CID, and the changed-byte refusal"
 # The shell attach token and the launch token go into a curl config file (0600) so neither appears in a process
-# list; every credential file is removed when the run ends, on success or failure (secrets_rm, also in the EXIT trap).
+# list; the credential files are removed right after the opens (secrets_rm) and again by the EXIT trap on any exit.
 python3 -I - "$DATA/home-runtime-coords.json" "$WORK/attach-body.json" <<'PYEOF'
 import json, os, sys
 coords = json.load(open(sys.argv[1]))
