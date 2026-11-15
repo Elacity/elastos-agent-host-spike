@@ -90,6 +90,20 @@ def prepare(out):
     )
 
 
+def fake_checkout(base):
+    """A throwaway checkout: the two scripts and the two product manifests
+    and page folder copied; the ROM is left for the row to place."""
+    fake = base / "repo"
+    (fake / "examples" / "gba-viewer").mkdir(parents=True)
+    for script in ("derive_manifest.py", "prepare_bundles.py"):
+        shutil.copy(HERE / script, fake / "examples" / "gba-viewer" / script)
+    shutil.copytree(REPO_ROOT / "capsules" / "gba-emulator",
+                    fake / "capsules" / "gba-emulator", symlinks=True)
+    (fake / "capsules" / "gba-ucity").mkdir(parents=True)
+    shutil.copy(CONTENT_MANIFEST, fake / "capsules" / "gba-ucity" / "capsule.json")
+    return fake
+
+
 class Rows(unittest.TestCase):
     def test_r1_the_page_manifest_is_derived_by_the_mapping(self):
         """r1 the derived page manifest has no interfaces or permissions"""
@@ -203,21 +217,35 @@ class Rows(unittest.TestCase):
 
     def test_r5_an_output_folder_inside_the_repo_is_refused(self):
         """r5 an output folder inside the checkout is refused"""
-        inside = HERE / "probe-inside-repo"
-        self.assertFalse(inside.exists())
-        result = derive(PAGE_MANIFEST, inside, CORE_CID, CORE_NAME)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(
-            result.stderr, f"derive_manifest_output_inside_repo: {inside}\n",
-        )
-        self.assertFalse(inside.exists())
+        # Run in a throwaway checkout, so a planted (removed) refusal writes
+        # only there and never inside the real checkout (#1670 Codex r1 Low).
+        with tempfile.TemporaryDirectory(prefix="gba-r5-") as temporary:
+            fake = fake_checkout(pathlib.Path(temporary).resolve())
+            viewer = fake / "examples" / "gba-viewer"
+            inside = viewer / "probe-inside-repo"
+            self.assertFalse(inside.exists())
+            result = run(
+                viewer / "derive_manifest.py",
+                "--capsule", str(fake / "capsules" / "gba-emulator" / "capsule.json"),
+                "--out", str(inside), "--cid", CORE_CID,
+                "--requires-name", CORE_NAME,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr, f"derive_manifest_output_inside_repo: {inside}\n",
+            )
+            self.assertFalse(inside.exists())
 
-        result = prepare(inside)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(
-            result.stderr, f"derive_manifest_output_inside_repo: {inside}\n",
-        )
-        self.assertFalse(inside.exists())
+            result = run(
+                viewer / "prepare_bundles.py",
+                "--out", str(inside), "--core-cid", CORE_CID,
+                "--core-name", CORE_NAME, "--page-cid", PAGE_CID,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr, f"derive_manifest_output_inside_repo: {inside}\n",
+            )
+            self.assertFalse(inside.exists())
 
     def test_r6_a_symlinked_output_folder_is_refused(self):
         """r6 a symlink at out/page is refused and nothing is written through it"""
@@ -258,14 +286,7 @@ class Rows(unittest.TestCase):
             base = pathlib.Path(temporary).resolve()
             # A throwaway checkout: the two scripts and the product folders,
             # with the ROM replaced by a symlink to the real ROM.
-            fake = base / "repo"
-            (fake / "examples" / "gba-viewer").mkdir(parents=True)
-            for script in ("derive_manifest.py", "prepare_bundles.py"):
-                shutil.copy(HERE / script, fake / "examples" / "gba-viewer" / script)
-            shutil.copytree(REPO_ROOT / "capsules" / "gba-emulator",
-                            fake / "capsules" / "gba-emulator", symlinks=True)
-            (fake / "capsules" / "gba-ucity").mkdir(parents=True)
-            shutil.copy(CONTENT_MANIFEST, fake / "capsules" / "gba-ucity" / "capsule.json")
+            fake = fake_checkout(base)
             rom = fake / "capsules" / "gba-ucity" / "ucity.gba"
             rom.symlink_to(REPO_ROOT / "capsules" / "gba-ucity" / "ucity.gba")
             out = base / "out"
