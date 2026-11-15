@@ -104,7 +104,7 @@ ln -s "$WT/examples/capsule-kit" "$CORE_TREE/examples/capsule-kit"
 CORE_SRC="$CORE_TREE/examples/gba-viewer/core"
 if [ "$PLANT" = rom-record-mismatch ]; then
   # The plant lives only in this copy: the checkout's core source is read, never changed.
-  python3 -I - "$CORE_SRC/src/lib.rs" <<'PYEOF'
+  python3 -I - "$CORE_SRC/src/lib.rs" <<'PYEOF' || { not_expected "the plant did not apply"; exit 1; }
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
