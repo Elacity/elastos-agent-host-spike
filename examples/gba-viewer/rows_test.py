@@ -9,6 +9,7 @@ produced.
 import hashlib
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -217,6 +218,67 @@ class Rows(unittest.TestCase):
             result.stderr, f"derive_manifest_output_inside_repo: {inside}\n",
         )
         self.assertFalse(inside.exists())
+
+    def test_r6_a_symlinked_output_folder_is_refused(self):
+        """r6 a symlink at out/page is refused and nothing is written through it"""
+        with tempfile.TemporaryDirectory(prefix="gba-r6-") as temporary:
+            base = pathlib.Path(temporary).resolve()
+            victim = base / "victim"
+            victim.mkdir()
+            out = base / "out"
+            out.mkdir()
+            (out / "page").symlink_to(victim)
+            result = prepare(out)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr, f"prepare_bundles_output_symlink: {out / 'page'}\n",
+            )
+            self.assertEqual(list(victim.iterdir()), [])
+
+    def test_r7_a_symlinked_derived_manifest_is_refused(self):
+        """r7 a symlink at out/page/capsule.json is refused and its target kept"""
+        with tempfile.TemporaryDirectory(prefix="gba-r7-") as temporary:
+            base = pathlib.Path(temporary).resolve()
+            victim = base / "victim.txt"
+            victim.write_bytes(b"keep\n")
+            out = base / "out"
+            (out / "page").mkdir(parents=True)
+            (out / "page" / "capsule.json").symlink_to(victim)
+            result = prepare(out)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr,
+                f"derive_manifest_output_symlink: {out / 'page' / 'capsule.json'}\n",
+            )
+            self.assertEqual(victim.read_bytes(), b"keep\n")
+
+    def test_r8_a_symlinked_product_rom_is_refused(self):
+        """r8 a product ROM that is a symlink is refused before it is read"""
+        with tempfile.TemporaryDirectory(prefix="gba-r8-") as temporary:
+            base = pathlib.Path(temporary).resolve()
+            # A throwaway checkout: the two scripts and the product folders,
+            # with the ROM replaced by a symlink to the real ROM.
+            fake = base / "repo"
+            (fake / "examples" / "gba-viewer").mkdir(parents=True)
+            for script in ("derive_manifest.py", "prepare_bundles.py"):
+                shutil.copy(HERE / script, fake / "examples" / "gba-viewer" / script)
+            shutil.copytree(REPO_ROOT / "capsules" / "gba-emulator",
+                            fake / "capsules" / "gba-emulator", symlinks=True)
+            (fake / "capsules" / "gba-ucity").mkdir(parents=True)
+            shutil.copy(CONTENT_MANIFEST, fake / "capsules" / "gba-ucity" / "capsule.json")
+            rom = fake / "capsules" / "gba-ucity" / "ucity.gba"
+            rom.symlink_to(REPO_ROOT / "capsules" / "gba-ucity" / "ucity.gba")
+            out = base / "out"
+            result = run(
+                fake / "examples" / "gba-viewer" / "prepare_bundles.py",
+                "--out", str(out), "--core-cid", CORE_CID,
+                "--core-name", CORE_NAME, "--page-cid", PAGE_CID,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr, f"prepare_bundles_source_symlink: {rom}\n",
+            )
+            self.assertFalse((out / "content" / "ucity.gba").exists())
 
 
 if __name__ == "__main__":

@@ -118,6 +118,21 @@ def refuse_output_inside_repo(out):
         refuse(f"derive_manifest_output_inside_repo: {out}")
 
 
+def refuse_symlink_below(base, path, code):
+    """No component of `path` below `base`, nor `path` itself, is a symlink.
+
+    Checked by lstat before every read of a product file and every write under
+    the output folder. A same-user process racing the check is outside this
+    examples script's boundary (it could read the inputs directly).
+    """
+    base = pathlib.Path(base)
+    current = base
+    for part in pathlib.Path(path).relative_to(base).parts:
+        current = current / part
+        if current.is_symlink():
+            refuse(f"{code}: {current}")
+
+
 def derive(manifest, kind, cid, requires_name):
     if kind == "content":
         # The edge is the one the product manifest already states: the
@@ -161,6 +176,8 @@ def main(argv):
 
     refuse_output_inside_repo(args.out)
     source = pathlib.Path(args.capsule)
+    if source.is_symlink():
+        refuse(f"derive_manifest_manifest_symlink: {args.capsule}")
     try:
         manifest = json.loads(source.read_bytes())
     except (OSError, ValueError):
@@ -174,9 +191,13 @@ def main(argv):
     derived = derive(manifest, kind, args.cid, args.requires_name)
 
     out = pathlib.Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     target = out / "capsule.json"
-    target.write_text(json.dumps(derived, indent=2, sort_keys=True) + "\n")
+    if out.is_symlink() or target.is_symlink():
+        refuse(f"derive_manifest_output_symlink: {target}")
+    out.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    with os.fdopen(os.open(target, flags, 0o644), "w") as handle:
+        handle.write(json.dumps(derived, indent=2, sort_keys=True) + "\n")
     print(f"derive_manifest: {kind} {source} -> {target}")
 
 
