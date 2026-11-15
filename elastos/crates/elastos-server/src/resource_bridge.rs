@@ -4339,6 +4339,77 @@ mod tests {
         }
     }
 
+    /// S5-rem-f43-agent-id (rulings v4 R-B/R-C, route 4 fence part (b)): the
+    /// same direct drive of the attached bridge entry as F4.3, run once with a
+    /// stored agent's id. An agent's own root area takes the protected path, so
+    /// the request is refused by name; neither the agent's root nor the
+    /// location the id rule points at under `Users` is read, written or
+    /// returned. F4.3 keeps the `None` case: it is refused before a principal
+    /// is looked at, so an agent id adds nothing to it.
+    #[tokio::test]
+    async fn an_attached_bridge_serves_no_agent_root() {
+        let agent_id = crate::auth::valid_agent::ID;
+        // The id rule points at the same digest under `Users`; an agent's
+        // stored record points at its minted `UsersAI` root instead.
+        assert_eq!(
+            crate::auth::principal_localhost_root(agent_id),
+            crate::auth::valid_agent::USERS_ROOT
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let record = crate::auth::valid_agent::plant(temp.path());
+        assert_eq!(record.kind, crate::auth::PrincipalKind::Agent);
+        assert_eq!(record.localhost_root, crate::auth::valid_agent::ROOT);
+        let agent_uri = format!("{}/Documents/a.md", crate::auth::valid_agent::ROOT);
+        let id_rule_uri = format!("{}/Documents/a.md", crate::auth::valid_agent::USERS_ROOT);
+        let disk = rooted_localhost_fs_path(temp.path(), &agent_uri).unwrap();
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        std::fs::write(&disk, b"agent's real data").unwrap();
+        let id_rule_disk = rooted_localhost_fs_path(temp.path(), &id_rule_uri).unwrap();
+        std::fs::create_dir_all(id_rule_disk.parent().unwrap()).unwrap();
+        std::fs::write(&id_rule_disk, b"id-rule real data").unwrap();
+        let line = r#"{"id":14,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/Documents/a.md","operation":"read","token":"tok","body":{}}}"#;
+        let capabilities = any_action(vec![agent_uri]);
+        let response = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &capabilities,
+            Some(agent_id),
+            Some(temp.path()),
+        )
+        .await
+        // A dispatch error folds into the response so the code assertion, not
+        // an unwrap, is the row's observable failure.
+        .unwrap_or_else(|err| serde_json::json!({"dispatch_error": format!("{err:#}")}));
+        assert_eq!(
+            response["response"]["code"], "principal_context_required",
+            "{response}"
+        );
+        assert_eq!(
+            response["response"]["message"],
+            "principal-root storage requires an in-runtime protected storage bridge"
+        );
+
+        assert_eq!(
+            std::fs::read(&disk).unwrap(),
+            b"agent's real data",
+            "the agent's file is not written"
+        );
+        assert_eq!(
+            std::fs::read(&id_rule_disk).unwrap(),
+            b"id-rule real data",
+            "the file at the id rule's location is not written"
+        );
+        for bytes in [b"agent's real data", b"id-rule real data"] {
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert!(
+                !response.to_string().contains(text),
+                "nothing from either location is returned: {response}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn handle_request_rejects_raw_runtime_control_api() {
         let response = handle_request(
