@@ -1719,15 +1719,17 @@ mod tests {
     }
 
     /// S5 part 2 row E (blocker evidence, no production change): a stored
-    /// agent's own principal reaches no VM launch, and a manifest that
-    /// declares an agent starts no VM even for the person. This is why row 4
-    /// on route 3 has no agent actor to test. Like the rows above, it runs
-    /// only in a build that carries agents (in another, no agent exists), and
-    /// it does not name the cargo feature, which is read in one place only
-    /// (`agents::build_allows`).
+    /// agent's own principal reaches no VM launch. This is why row 4 on
+    /// route 3 has no agent actor to test. The capsule this row drives
+    /// declares no agent, so removing the principal refusal leaves a launch
+    /// that reaches the VM gates and the row fails at its own literal, not at
+    /// the manifest refusal (that rule has its own row below). Like the rows
+    /// above, it runs only in a build that carries agents (in another, no
+    /// agent exists), and it does not name the cargo feature, which is read
+    /// in one place only (`agents::build_allows`).
     #[tokio::test]
     async fn a_vm_launch_refuses_a_stored_agents_principal() {
-        let Some((home, agents)) =
+        let Some((_home, agents)) =
             crate::agents::tests::home_with_agents_if_built(1, "bafkreia5probe")
         else {
             assert!(!crate::agents::build_allows());
@@ -1736,19 +1738,18 @@ mod tests {
         let agent = agents.into_iter().next().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
-        let capsule_dir = data_dir.join("capsules/agent-vm-test");
+        let capsule_dir = data_dir.join("capsules/plain-vm-test");
         std::fs::create_dir_all(&capsule_dir).unwrap();
-        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-agent-vm-test\n").unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-plain-vm-test\n").unwrap();
         std::fs::write(
             capsule_dir.join("capsule.json"),
             serde_json::json!({
                 "schema": "elastos.capsule/v1",
-                "name": "agent-vm-test",
+                "name": "plain-vm-test",
                 "version": "0.1.0",
                 "role": "app",
                 "type": "microvm",
-                "entrypoint": "rootfs.ext4",
-                "agent": {"kind": "agent"}
+                "entrypoint": "rootfs.ext4"
             })
             .to_string(),
         )
@@ -1756,10 +1757,10 @@ mod tests {
 
         let mut capsules = std::collections::HashMap::new();
         capsules.insert(
-            "agent-vm-test".to_string(),
+            "plain-vm-test".to_string(),
             CapsuleEntry {
                 extra: Default::default(),
-                cid: "bafy-agent-vm-test".to_string(),
+                cid: "bafy-plain-vm-test".to_string(),
                 sha256: String::new(),
                 size: 0,
                 repository: None,
@@ -1780,28 +1781,14 @@ mod tests {
         );
 
         // The stored agent's own principal is refused before any manifest is
-        // read, even for a capsule that declares the agent kind.
+        // read, whatever the manifest declares.
         let error = supervisor
-            .launch_capsule("agent-vm-test", serde_json::json!({}), Some(agent.clone()))
+            .launch_capsule("plain-vm-test", serde_json::json!({}), Some(agent.clone()))
             .await
             .unwrap_err();
         assert_eq!(
             error.to_string(),
             format!("a stored agent's principal reaches only a launch that admitted it: {agent}")
-        );
-
-        // The person who owns the agent starts no VM for the same manifest.
-        let error = supervisor
-            .launch_capsule(
-                "agent-vm-test",
-                serde_json::json!({}),
-                Some(home.owner.principal_id.clone()),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "an agent-declaring manifest runs only a component launch that admitted it"
         );
         assert!(
             supervisor.running.read().await.is_empty(),

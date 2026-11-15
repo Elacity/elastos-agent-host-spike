@@ -1925,6 +1925,8 @@ pub(crate) mod tests {
     /// Row E (blocker evidence, no production change): a start that did not
     /// admit a stored agent refuses its principal by name before reading the
     /// folder. This is the attached start route that row 4's route 4 lacks.
+    /// The folder declares no agent, so this row stops at the principal rule
+    /// and not at the launcher rule.
     #[tokio::test]
     async fn an_attached_start_refuses_a_stored_agents_principal() {
         if crate::agents::require_build().is_err() {
@@ -1934,9 +1936,13 @@ pub(crate) mod tests {
         let [x] = home.agents.as_slice() else {
             panic!("one agent");
         };
+        let plain = crate::runtime::tests::write_fixture_capsule(
+            &home.fixture_root,
+            r#"{"schema":"elastos.capsule/v1","name":"attached-plain","version":"0.1.0","role":"app","type":"microvm","entrypoint":"rootfs.ext4"}"#,
+        );
         let error = home
             .runtime
-            .run_local_with_principal(&home.capsule_dir, Vec::new(), Some(x.clone()))
+            .run_local_with_principal(&plain, Vec::new(), Some(x.clone()))
             .await
             .unwrap_err()
             .to_string();
