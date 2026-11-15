@@ -11,11 +11,13 @@ No product byte is copied into the checkout; the output folder is named on the
 command line and must be outside it. Each staged byte is compared with the
 product byte it came from, and the sha256 of every staged file and of every
 product original is written to the receipt. This script does not run
-`elastos stage-bundle` and does not build the core: the core's CID and name,
-and the page's CID, are arguments.
+`elastos stage-bundle`. The core's CID and name, and the page's CID, are
+arguments. The core's bundle SOURCE folder is staged only when its built
+component is present; otherwise the output is unchanged and the run says so.
 """
 import argparse
 import hashlib
+import json
 import os
 import pathlib
 import subprocess
@@ -29,6 +31,7 @@ PAGE_SOURCE = pathlib.Path("capsules/gba-emulator/browser")
 PAGE_MANIFEST = pathlib.Path("capsules/gba-emulator/capsule.json")
 CONTENT_SOURCE = pathlib.Path("capsules/gba-ucity/ucity.gba")
 CONTENT_MANIFEST = pathlib.Path("capsules/gba-ucity/capsule.json")
+CORE_SOURCE = pathlib.Path("examples/gba-viewer/core")
 
 
 def refuse(message):
@@ -102,6 +105,49 @@ def derive(repo, manifest, out, cid, requires_name, receipt):
     receipt.append(f"{out.name}/capsule.json staged={sha256(derived)} product=derived")
 
 
+def stage_core(repo, out, core_name, receipt):
+    """The core's bundle SOURCE folder, when the component has been built.
+
+    The core manifest is its own, not derived: a program pins nothing and is
+    the page's one pin. The built component and that manifest are copied
+    byte-for-byte. Without the component the output is unchanged and the run
+    says so.
+    """
+    source_dir = repo / CORE_SOURCE
+    manifest_path = source_dir / "capsule.json"
+    mapping.refuse_symlink_below(repo, manifest_path, "prepare_bundles_source_symlink")
+    if not manifest_path.is_file():
+        print(f"prepare_bundles: core manifest absent at {CORE_SOURCE}; staging unchanged")
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_bytes())
+    except (OSError, ValueError):
+        refuse(f"prepare_bundles_core_manifest_unreadable: {CORE_SOURCE / 'capsule.json'}")
+    if not isinstance(manifest, dict):
+        refuse(f"prepare_bundles_core_manifest_unreadable: {CORE_SOURCE / 'capsule.json'}")
+    if manifest.get("name") != core_name:
+        refuse(f"prepare_bundles_core_name_differs: {manifest.get('name')}")
+    entrypoint = manifest.get("entrypoint")
+    if (
+        not isinstance(entrypoint, str)
+        or not entrypoint
+        or pathlib.PurePosixPath(entrypoint).is_absolute()
+        or ".." in pathlib.PurePosixPath(entrypoint).parts
+    ):
+        refuse(f"prepare_bundles_core_entrypoint_invalid: {entrypoint}")
+    component = source_dir / entrypoint
+    if not component.is_file():
+        print(
+            f"prepare_bundles: core not built ({CORE_SOURCE / entrypoint}); "
+            "staging unchanged"
+        )
+        return False
+    core_out = out / "core"
+    for source in (manifest_path, component):
+        stage_file(repo, source, out, core_out / source.name, f"core/{source.name}", receipt)
+    return True
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", required=True,
@@ -131,12 +177,15 @@ def main(argv):
                f"content/{CONTENT_SOURCE.name}", receipt)
     derive(repo, CONTENT_MANIFEST, content_out, args.page_cid, None, receipt)
 
+    core_staged = stage_core(repo, out, args.core_name, receipt)
+
     out.mkdir(parents=True, exist_ok=True)
     mapping.refuse_symlink_below(out, out / "receipt.txt", "prepare_bundles_output_symlink")
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
     with os.fdopen(os.open(out / "receipt.txt", flags, 0o644), "w") as handle:
         handle.write("\n".join(sorted(receipt)) + "\n")
-    print(f"prepare_bundles: page {page_count} files, content 1 file, "
+    core = "core staged" if core_staged else "core not built, staging unchanged"
+    print(f"prepare_bundles: page {page_count} files, content 1 file, {core}, "
           f"manifests derived, receipt {out / 'receipt.txt'}")
 
 

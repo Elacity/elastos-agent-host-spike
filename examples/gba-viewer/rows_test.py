@@ -23,6 +23,9 @@ PREPARE = HERE / "prepare_bundles.py"
 PAGE_MANIFEST = REPO_ROOT / "capsules" / "gba-emulator" / "capsule.json"
 CONTENT_MANIFEST = REPO_ROOT / "capsules" / "gba-ucity" / "capsule.json"
 PAGE_SOURCE = REPO_ROOT / "capsules" / "gba-emulator" / "browser"
+CORE_SOURCE = REPO_ROOT / "examples" / "gba-viewer" / "core"
+CORE_COMPONENT = CORE_SOURCE / "gba-viewer-core.component.wasm"
+CORE_FILES = {"capsule.json", "gba-viewer-core.component.wasm"}
 
 # CIDs of valid form (CIDv1, dag-pb, sha2-256, base32), made by hand for these
 # rows. They pin nothing in the store; slice 3 stages the real bundles.
@@ -179,6 +182,19 @@ class Rows(unittest.TestCase):
                     (PAGE_SOURCE / name[len("browser/"):]).read_bytes(), name,
                 )
 
+            # The core's SOURCE folder is staged only when it has been built.
+            core_built = CORE_COMPONENT.is_file()
+            if core_built:
+                staged_core = {path.name for path in (out / "core").iterdir()}
+                self.assertEqual(staged_core, CORE_FILES)
+                for name in CORE_FILES:
+                    self.assertEqual(
+                        (out / "core" / name).read_bytes(),
+                        (CORE_SOURCE / name).read_bytes(), name,
+                    )
+            else:
+                self.assertFalse((out / "core").exists())
+
             receipt = (out / "receipt.txt").read_text().splitlines()
             self.assertEqual(
                 f"content/ucity.gba staged={UCITY_SHA256} product={UCITY_SHA256}",
@@ -190,22 +206,27 @@ class Rows(unittest.TestCase):
             }
             products["content/ucity.gba"] = product_rom
             recorded = {}
+            expected = set(products) | {"page/capsule.json", "content/capsule.json"}
+            if core_built:
+                expected |= {f"core/{name}" for name in CORE_FILES}
             for line in receipt:
                 name, rest = line.split(" ", 1)
                 recorded[name] = dict(
                     part.split("=", 1) for part in rest.split(" ") if "=" in part
                 )
                 self.assertEqual(recorded[name]["staged"], sha256(out / name), name)
-                if name.endswith("capsule.json"):
+                if name.startswith("core/"):
+                    self.assertEqual(
+                        recorded[name]["product"],
+                        sha256(CORE_SOURCE / name[len("core/"):]), name,
+                    )
+                elif name.endswith("capsule.json"):
                     self.assertEqual(recorded[name]["product"], "derived", name)
                 else:
                     self.assertEqual(
                         recorded[name]["product"], sha256(products[name]), name,
                     )
-            self.assertEqual(
-                set(recorded),
-                set(products) | {"page/capsule.json", "content/capsule.json"},
-            )
+            self.assertEqual(set(recorded), expected)
 
             # One changed staged byte is caught before anything else is written.
             staged_rom.write_bytes(staged_rom.read_bytes()[:-1] + b"\x00")

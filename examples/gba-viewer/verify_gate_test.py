@@ -25,7 +25,11 @@ def walk(script, tools):
 
 
 def shim(root, rows_status):
-    """A python3 that answers the gate's calls; the row call gets rows_status."""
+    """A python3 that answers the gate's calls; the row call gets rows_status.
+
+    Cargo is shimmed too: this test is the gate's control flow, not the core's
+    rows, which the gate runs for real on its own.
+    """
     tools = root / "bin"
     tools.mkdir(parents=True)
     python3 = tools / "python3"
@@ -39,6 +43,9 @@ def shim(root, rows_status):
         "exit 0\n"
     )
     python3.chmod(0o755)
+    cargo = tools / "cargo"
+    cargo.write_text("#!/bin/sh\nexit 0\n")
+    cargo.chmod(0o755)
     return tools
 
 
