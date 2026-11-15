@@ -14,6 +14,13 @@ use crate::*;
 
 const A: &str = "localhost://Users/self/Pictures/a.png";
 const OUT: &str = "localhost://Users/self/.AppData/App/kit/out.json";
+/// A launch content file: the one scheme R3-1 answers a digest for
+/// (`elastos-server/src/provider_resource.rs:341-369` at cde4c8b1).
+const CONTENT: &str = "elastos://launch/content/ucity.gba";
+/// The bare content name, which asks for the listing.
+const CONTENT_LISTING: &str = "elastos://launch/content/";
+/// A launch output name: kept for the launch, and never digested.
+const LAUNCH_OUT: &str = "elastos://launch/output/out.json";
 const APP: App = App {
     name: "kit-test",
     input: "list",
@@ -193,14 +200,16 @@ fn k1_the_digest_body_is_exactly_the_path_and_the_operation_is_digest() {
 
 #[test]
 fn k2_the_digest_answer_names_path_size_algorithm_and_sha256() {
+    // A digest is a launch-content operation (R3-1
+    // `provider_resource.rs:341-369` at cde4c8b1); the fake answers no other.
     let mut bus = FakeBus::default()
-        .object(A, b"abc".to_vec())
-        .allow(A, "read");
-    let id = grant(&mut bus, A, "read", "").unwrap();
+        .object(CONTENT, b"abc".to_vec())
+        .allow(CONTENT, "read");
+    let id = grant(&mut bus, CONTENT, "read", "").unwrap();
     assert_eq!(
-        digest(&mut bus, A, &id).unwrap(),
+        digest(&mut bus, CONTENT, &id).unwrap(),
         Digest {
-            path: A.into(),
+            path: CONTENT.into(),
             size: 3,
             algorithm: "sha256".into(),
             sha256: SHA256_ABC.into(),
@@ -243,25 +252,89 @@ fn k4_a_digest_answer_without_data_or_with_a_string_size_is_refused() {
     }
 }
 
+/// A digest invoke on `resource` with `body`, answered as JSON.
+fn digest_reply(bus: &mut FakeBus, resource: &str, body: Value) -> Value {
+    let id = grant(bus, resource, "read", "").unwrap();
+    let reply = bus
+        .invoke(resource, "digest", body.to_string().as_bytes(), &id)
+        .unwrap();
+    serde_json::from_slice(&reply.body).unwrap()
+}
+
+/// R3-1 ignores `offset` and `length` on a digest and hashes the whole file
+/// (`elastos-server/src/resource_bridge.rs:206-218` at cde4c8b1).
 #[test]
-fn k5_a_digest_body_with_an_extra_field_is_refused() {
+fn k5a_a_digest_body_with_offset_and_length_is_answered_with_the_whole_file() {
     let mut bus = FakeBus::default()
-        .object(A, b"abc".to_vec())
-        .allow(A, "read");
-    let id = grant(&mut bus, A, "read", "").unwrap();
-    let good = json!({ "path": A });
-    let reply = bus
-        .invoke(A, "digest", good.to_string().as_bytes(), &id)
-        .unwrap();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&reply.body).unwrap()["status"],
-        "ok"
+        .object(CONTENT, b"abc".to_vec())
+        .allow(CONTENT, "read");
+    let answer = digest_reply(
+        &mut bus,
+        CONTENT,
+        json!({ "path": CONTENT, "offset": 1, "length": 1 }),
     );
-    let extra = json!({ "path": A, "offset": 0 });
-    let reply = bus
-        .invoke(A, "digest", extra.to_string().as_bytes(), &id)
-        .unwrap();
-    assert_eq!(reply.status, "error", "{extra}");
+    assert_eq!(answer["status"], "ok", "{answer}");
+    assert_eq!(answer["data"]["path"], CONTENT, "{answer}");
+    assert_eq!(answer["data"]["size"], 3, "{answer}");
+    assert_eq!(
+        answer["data"]["sha256"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "{answer}"
+    );
+}
+
+/// R3-1 refuses a digest of the launch output before the launch is
+/// consulted (`elastos-server/src/provider_resource.rs:347-355` at
+/// cde4c8b1); the bridge answers `invalid_resource_invoke`
+/// (`resource_bridge.rs:584-592`).
+#[test]
+fn k5b_a_digest_on_a_launch_output_name_is_refused() {
+    let mut bus = FakeBus::default()
+        .object(LAUNCH_OUT, b"abc".to_vec())
+        .allow(LAUNCH_OUT, "read");
+    let answer = digest_reply(&mut bus, LAUNCH_OUT, json!({ "path": LAUNCH_OUT }));
+    assert_eq!(answer["status"], "error", "{answer}");
+    assert_eq!(answer["code"], "invalid_resource_invoke", "{answer}");
+    assert_eq!(
+        answer["message"], "a digest names content, not the output",
+        "{answer}"
+    );
+}
+
+/// The bare content name asks for the listing, which has no digest
+/// (`elastos-server/src/provider_resource.rs:363-366` at cde4c8b1).
+#[test]
+fn k5c_a_digest_on_the_bare_content_listing_is_refused() {
+    let mut bus = FakeBus::default()
+        .object(CONTENT_LISTING, b"listing".to_vec())
+        .allow(CONTENT_LISTING, "read");
+    let answer = digest_reply(
+        &mut bus,
+        CONTENT_LISTING,
+        json!({ "path": CONTENT_LISTING }),
+    );
+    assert_eq!(answer["status"], "error", "{answer}");
+    assert_eq!(answer["code"], "invalid_resource_invoke", "{answer}");
+    assert_eq!(
+        answer["message"],
+        "a digest names one file of a launch's content, under elastos://launch/content/, not its listing",
+        "{answer}"
+    );
+}
+
+/// A content file the launch does not hold is `not_found`, as R3-1 answers
+/// (`elastos-server/src/resource_bridge.rs:212-217` at cde4c8b1).
+#[test]
+fn k5d_a_digest_of_a_missing_content_file_answers_not_found() {
+    let missing = "elastos://launch/content/missing.gba";
+    let mut bus = FakeBus::default().allow(missing, "read");
+    let answer = digest_reply(&mut bus, missing, json!({ "path": missing }));
+    assert_eq!(answer["status"], "error", "{answer}");
+    assert_eq!(answer["code"], "not_found", "{answer}");
+    assert_eq!(
+        answer["message"], "no content launch binds this name for this capsule",
+        "{answer}"
+    );
 }
 
 #[test]
