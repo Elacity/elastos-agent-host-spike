@@ -13,10 +13,10 @@ crate-type = ["cdylib", "rlib"]
 # WIT glue. The GBA core copies the photo core's layout.
 capsule-kit-guest = { path = "../../capsule-kit/guest", features = ["wit"] }
 serde_json = "1.0.151"
-sha2 = "0.10.9"
 
 [dev-dependencies]
 capsule-kit-guest = { path = "../../capsule-kit/guest", features = ["fake"] }
+sha2 = "0.10.9"
 
 [profile.release]
 opt-level = 3
