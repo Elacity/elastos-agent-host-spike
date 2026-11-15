@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
 
 use crate::{Bus, BusFailure, InvokeReply};
 
@@ -133,6 +134,7 @@ impl Bus for FakeBus {
         });
         let action = match operation {
             "read" => "read",
+            "digest" => "read",
             "write" => "write",
             other => {
                 return Err(BusFailure::Invalid(format!(
@@ -160,6 +162,24 @@ impl Bus for FakeBus {
             return Ok(reply(
                 json!({ "status": "error", "code": code, "message": message }),
             ));
+        }
+        if operation == "digest" {
+            let Some(bytes) = self.objects.get(resource) else {
+                return Ok(reply(json!({
+                    "status": "error",
+                    "code": "read_failed",
+                    "message": "object not found",
+                })));
+            };
+            return Ok(reply(json!({
+                "status": "ok",
+                "data": {
+                    "path": resource,
+                    "size": bytes.len(),
+                    "algorithm": "sha256",
+                    "sha256": format!("{:x}", Sha256::digest(bytes)),
+                },
+            })));
         }
         if operation == "read" {
             let Some(bytes) = self.objects.get(resource) else {
@@ -196,6 +216,7 @@ impl Bus for FakeBus {
 fn provider_body_problem(operation: &str, body: &Value) -> Option<String> {
     let allowed: &[&str] = match operation {
         "read" => &["path", "offset", "length", "encoding"],
+        "digest" => &["path"],
         _ => &["path", "content", "append"],
     };
     let object = body.as_object()?;
@@ -207,6 +228,7 @@ fn provider_body_problem(operation: &str, body: &Value) -> Option<String> {
         // underflows past the end (`main.rs:434`, `468`).
         "read" if !body["length"].is_u64() => Some("read must name a length".into()),
         "read" => None,
+        "digest" => None,
         _ => {
             if serde_json::from_value::<Vec<u8>>(body["content"].clone()).is_err() {
                 return Some("write content must be a byte array".into());

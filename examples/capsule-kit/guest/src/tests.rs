@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 
-use crate::bus::{read_window, write_body};
+use crate::bus::{digest, read_window, write_body, Digest};
 use crate::fake::{Call, FakeBus};
 use crate::list::{self, ListRules};
 use crate::text::{check_head, check_whole, TextError};
@@ -61,6 +61,50 @@ impl Bus for RefusesInvoke {
         Err(self.0.clone())
     }
 }
+
+/// A Runtime that grants, records every invoke, and answers `self.answer`.
+struct Records {
+    answer: Value,
+    calls: Vec<(String, String, Value)>,
+}
+
+impl Bus for Records {
+    fn request(&mut self, _: &str, _: &str, _: &str) -> Result<String, BusFailure> {
+        Ok("grant".into())
+    }
+
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        _: &str,
+    ) -> Result<InvokeReply, BusFailure> {
+        self.calls.push((
+            resource.to_string(),
+            operation.to_string(),
+            serde_json::from_slice(body).unwrap(),
+        ));
+        Ok(InvokeReply {
+            status: "ok".into(),
+            body: serde_json::to_vec(&self.answer).unwrap(),
+        })
+    }
+}
+
+fn digest_answer(path: &str, size: u64, algorithm: &str, sha256: &str) -> Value {
+    json!({
+        "status": "ok",
+        "data": {
+            "path": path,
+            "size": size,
+            "algorithm": algorithm,
+            "sha256": sha256,
+        },
+    })
+}
+
+const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
 fn readable(bytes: &[u8]) -> FakeBus {
     FakeBus::default()
@@ -129,6 +173,95 @@ fn a_read_answer_longer_than_asked_is_refused() {
     let answer = json!({ "status": "ok", "data": { "content": [1, 2, 3, 4] } });
     let err = read_window(&mut OddAnswers(answer), A, "grant", 0, 3).unwrap_err();
     assert!(matches!(err, CallError::Shape(_)), "{err:?}");
+}
+
+// --- The digest ------------------------------------------------------------------------
+
+#[test]
+fn k1_the_digest_body_is_exactly_the_path_and_the_operation_is_digest() {
+    let mut bus = Records {
+        answer: digest_answer(A, 3, "sha256", SHA256_ABC),
+        calls: Vec::new(),
+    };
+    let answer = digest(&mut bus, A, "grant").unwrap();
+    assert_eq!(
+        bus.calls,
+        [(A.to_string(), "digest".to_string(), json!({ "path": A }))]
+    );
+    assert_eq!(answer.path, A);
+}
+
+#[test]
+fn k2_the_digest_answer_names_path_size_algorithm_and_sha256() {
+    let mut bus = FakeBus::default()
+        .object(A, b"abc".to_vec())
+        .allow(A, "read");
+    let id = grant(&mut bus, A, "read", "").unwrap();
+    assert_eq!(
+        digest(&mut bus, A, &id).unwrap(),
+        Digest {
+            path: A.into(),
+            size: 3,
+            algorithm: "sha256".into(),
+            sha256: SHA256_ABC.into(),
+        }
+    );
+}
+
+#[test]
+fn k3_a_digest_answer_naming_another_path_is_refused() {
+    let mut bus = Records {
+        answer: digest_answer(OUT, 3, "sha256", SHA256_ABC),
+        calls: Vec::new(),
+    };
+    assert_eq!(
+        digest(&mut bus, A, "grant"),
+        Err(CallError::Shape(format!(
+            "digest answer names {OUT}, asked {A}"
+        )))
+    );
+}
+
+#[test]
+fn k4_a_digest_answer_without_data_or_with_a_string_size_is_refused() {
+    for answer in [
+        json!({ "status": "ok" }),
+        json!({
+            "status": "ok",
+            "data": { "path": A, "size": "3", "algorithm": "sha256", "sha256": SHA256_ABC },
+        }),
+    ] {
+        let mut bus = Records {
+            answer: answer.clone(),
+            calls: Vec::new(),
+        };
+        let result = digest(&mut bus, A, "grant");
+        assert!(
+            matches!(result, Err(CallError::Shape(_))),
+            "{answer}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn k5_a_digest_body_with_an_extra_field_is_refused() {
+    let mut bus = FakeBus::default()
+        .object(A, b"abc".to_vec())
+        .allow(A, "read");
+    let id = grant(&mut bus, A, "read", "").unwrap();
+    let good = json!({ "path": A });
+    let reply = bus
+        .invoke(A, "digest", good.to_string().as_bytes(), &id)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reply.body).unwrap()["status"],
+        "ok"
+    );
+    let extra = json!({ "path": A, "offset": 0 });
+    let reply = bus
+        .invoke(A, "digest", extra.to_string().as_bytes(), &id)
+        .unwrap();
+    assert_eq!(reply.status, "error", "{extra}");
 }
 
 #[test]

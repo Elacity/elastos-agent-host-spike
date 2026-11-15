@@ -15,7 +15,7 @@
 use std::fmt;
 
 use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// The `bus-error` variants of `elastos-bus-v1.wit`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +95,77 @@ pub fn read_window(
         )));
     }
     Ok(content)
+}
+
+/// The Runtime's digest of one launch content file. The core judges the
+/// size against its listing and the sha256 shape; this helper does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Digest {
+    pub path: String,
+    pub size: u64,
+    pub algorithm: String,
+    pub sha256: String,
+}
+
+/// Asks the Runtime for the digest of one launch content file.
+///
+/// The body is exactly `{"path": uri}`: the digest covers the whole file and
+/// ignores `offset`/`length` (ruling r3 §8 A4). The answer is parsed with
+/// `serde_json::Value`: it is about 200 bytes, so a typed visitor buys no
+/// fuel, and the one-pass `Reply`/`Data` visitors that carry read content
+/// stay byte-identical.
+pub fn digest(bus: &mut dyn Bus, uri: &str, grant: &str) -> Result<Digest, CallError> {
+    let body = json!({ "path": uri }).to_string();
+    let reply = bus
+        .invoke(uri, "digest", body.as_bytes(), grant)
+        .map_err(CallError::Bus)?;
+    let answer: Value = serde_json::from_slice(&reply.body)
+        .map_err(|err| CallError::Shape(format!("provider answer is malformed: {err}")))?;
+    match answer["status"].as_str() {
+        Some("ok") => {}
+        Some("error") => {
+            return Err(CallError::Provider {
+                code: answer["code"].as_str().unwrap_or("unknown").to_string(),
+                message: answer["message"].as_str().unwrap_or_default().to_string(),
+            })
+        }
+        _ => {
+            return Err(CallError::Shape(format!(
+                "provider answer has status {:?}",
+                answer["status"]
+            )))
+        }
+    }
+    let data = answer["data"]
+        .as_object()
+        .ok_or_else(|| CallError::Shape("digest answer has no data object".into()))?;
+    let field = |name: &str| {
+        data.get(name)
+            .ok_or_else(|| CallError::Shape(format!("digest answer has no {name}")))
+    };
+    let path = field("path")?
+        .as_str()
+        .ok_or_else(|| CallError::Shape("digest answer path must be a string".into()))?;
+    let size = field("size")?
+        .as_u64()
+        .ok_or_else(|| CallError::Shape("digest answer size must be a number".into()))?;
+    let algorithm = field("algorithm")?
+        .as_str()
+        .ok_or_else(|| CallError::Shape("digest answer algorithm must be a string".into()))?;
+    let sha256 = field("sha256")?
+        .as_str()
+        .ok_or_else(|| CallError::Shape("digest answer sha256 must be a string".into()))?;
+    if path != uri {
+        return Err(CallError::Shape(format!(
+            "digest answer names {path}, asked {uri}"
+        )));
+    }
+    Ok(Digest {
+        path: path.to_string(),
+        size,
+        algorithm: algorithm.to_string(),
+        sha256: sha256.to_string(),
+    })
 }
 
 /// Writes `content` as the whole object.
