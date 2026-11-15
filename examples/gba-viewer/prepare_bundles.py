@@ -18,6 +18,7 @@ component is present; otherwise the output is unchanged and the run says so.
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -42,12 +43,20 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def stage_file(source, destination, name, receipt):
-    """Copies a product file once; every later run verifies the staged bytes."""
+def stage_file(repo, source, out, destination, name, receipt):
+    """Copies a product file once; every later run verifies the staged bytes.
+
+    Neither the product path below the checkout nor the staged path below the
+    output folder may pass through a symlink (lstat on every component).
+    """
+    mapping.refuse_symlink_below(repo, source, "prepare_bundles_source_symlink")
+    mapping.refuse_symlink_below(out, destination, "prepare_bundles_output_symlink")
     product = source.read_bytes()
     if not destination.exists():
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(product)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        with os.fdopen(os.open(destination, flags, 0o644), "wb") as handle:
+            handle.write(product)
     staged = destination.read_bytes()
     staged_sha = hashlib.sha256(staged).hexdigest()
     product_sha = hashlib.sha256(product).hexdigest()
@@ -56,8 +65,9 @@ def stage_file(source, destination, name, receipt):
         refuse(f"prepare_bundles_sha256_differs: {name}")
 
 
-def stage_page_assets(repo, page_out, receipt):
+def stage_page_assets(repo, out, page_out, receipt):
     source_dir = repo / PAGE_SOURCE
+    mapping.refuse_symlink_below(repo, source_dir, "prepare_bundles_source_symlink")
     if not source_dir.is_dir():
         refuse(f"prepare_bundles_source_missing: {PAGE_SOURCE}")
     count = 0
@@ -72,12 +82,13 @@ def stage_page_assets(repo, page_out, receipt):
         # entrypoint, so the page folder mirrors `capsules/gba-emulator/`.
         relative = source.relative_to(source_dir.parent)
         name = f"page/{relative}"
-        stage_file(source, page_out / relative, name, receipt)
+        stage_file(repo, source, out, page_out / relative, name, receipt)
         count += 1
     return count
 
 
 def derive(repo, manifest, out, cid, requires_name, receipt):
+    mapping.refuse_symlink_below(repo, repo / manifest, "prepare_bundles_source_symlink")
     command = [
         sys.executable, "-I", str(HERE / "derive_manifest.py"),
         "--capsule", str(repo / manifest),
@@ -104,6 +115,7 @@ def stage_core(repo, out, core_name, receipt):
     """
     source_dir = repo / CORE_SOURCE
     manifest_path = source_dir / "capsule.json"
+    mapping.refuse_symlink_below(repo, manifest_path, "prepare_bundles_source_symlink")
     if not manifest_path.is_file():
         print(f"prepare_bundles: core manifest absent at {CORE_SOURCE}; staging unchanged")
         return False
@@ -132,7 +144,7 @@ def stage_core(repo, out, core_name, receipt):
         return False
     core_out = out / "core"
     for source in (manifest_path, component):
-        stage_file(source, core_out / source.name, f"core/{source.name}", receipt)
+        stage_file(repo, source, out, core_out / source.name, f"core/{source.name}", receipt)
     return True
 
 
@@ -156,17 +168,22 @@ def main(argv):
     content_out = out / "content"
     receipt = []
 
-    page_count = stage_page_assets(repo, page_out, receipt)
+    mapping.refuse_symlink_below(out, page_out, "prepare_bundles_output_symlink")
+    mapping.refuse_symlink_below(out, content_out, "prepare_bundles_output_symlink")
+    page_count = stage_page_assets(repo, out, page_out, receipt)
     derive(repo, PAGE_MANIFEST, page_out, args.core_cid, args.core_name, receipt)
 
-    stage_file(repo / CONTENT_SOURCE, content_out / CONTENT_SOURCE.name,
+    stage_file(repo, repo / CONTENT_SOURCE, out, content_out / CONTENT_SOURCE.name,
                f"content/{CONTENT_SOURCE.name}", receipt)
     derive(repo, CONTENT_MANIFEST, content_out, args.page_cid, None, receipt)
 
     core_staged = stage_core(repo, out, args.core_name, receipt)
 
     out.mkdir(parents=True, exist_ok=True)
-    (out / "receipt.txt").write_text("\n".join(sorted(receipt)) + "\n")
+    mapping.refuse_symlink_below(out, out / "receipt.txt", "prepare_bundles_output_symlink")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    with os.fdopen(os.open(out / "receipt.txt", flags, 0o644), "w") as handle:
+        handle.write("\n".join(sorted(receipt)) + "\n")
     core = "core staged" if core_staged else "core not built, staging unchanged"
     print(f"prepare_bundles: page {page_count} files, content 1 file, {core}, "
           f"manifests derived, receipt {out / 'receipt.txt'}")
