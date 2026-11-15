@@ -14,6 +14,7 @@ use elastos_common::CapsuleManifest;
 use elastos_compute::providers::ComponentProvider;
 use elastos_compute::ComputeProvider;
 use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
 
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
 pub mod stand_in;
@@ -146,6 +147,7 @@ impl Bridge {
         }
         let action = match operation {
             "read" => "read",
+            "digest" => "read",
             "write" => "write",
             _ => return error("invalid_resource_invoke", "unsupported operation"),
         };
@@ -156,7 +158,29 @@ impl Bridge {
         if body["path"].as_str() != Some(uri.as_str()) {
             return error("invalid_resource_invoke", "path must equal the resource");
         }
-        let result = if let Some(problem) = provider_body_problem(action, body) {
+        let result = if operation == "digest" {
+            let only_path = body
+                .as_object()
+                .is_some_and(|object| object.keys().all(|key| key == "path"));
+            if !only_path {
+                json!({ "status": "error", "code": "invalid_request", "message": "digest takes only path" })
+            } else {
+                match self.objects.get(&uri) {
+                    None => {
+                        json!({ "status": "error", "code": "read_failed", "message": "not found" })
+                    }
+                    Some(bytes) => json!({
+                        "status": "ok",
+                        "data": {
+                            "path": uri,
+                            "size": bytes.len(),
+                            "algorithm": "sha256",
+                            "sha256": format!("{:x}", Sha256::digest(bytes)),
+                        },
+                    }),
+                }
+            }
+        } else if let Some(problem) = provider_body_problem(action, body) {
             json!({ "status": "error", "code": "invalid_request", "message": problem })
         } else if let Some(message) = self.provider_errors.get(&uri) {
             json!({ "status": "error", "code": "read_failed", "message": message })

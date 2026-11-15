@@ -14,6 +14,8 @@ cargo clippy --locked --no-default-features -- -D warnings
 cargo clippy --locked --features wit --target wasm32-unknown-unknown -- -D warnings
 cargo test --locked
 cargo fmt --manifest-path "${KIT_DIR}/../v1-host-test/Cargo.toml" -- --check
+# The v1-host-test fuel test runs the built GBA core.
+"${KIT_DIR}/../../gba-viewer/core/build.sh"
 cargo test --locked --manifest-path "${KIT_DIR}/../v1-host-test/Cargo.toml"
 python3 -I "${KIT_DIR}/../v1-host-test/falsify.py"
 python3 -I "${KIT_DIR}/../falsify/test_falsify_kit.py"

@@ -2,10 +2,10 @@
 //!
 //! Runtime starts this core as the one program under the page a content pins.
 //! The core reads the launch's file listing, takes its one `.gba` file, refuses
-//! it by name when it is missing, empty or larger than 64 MiB, and writes one
-//! launch record under `elastos://launch/output/` naming that file's path, size
-//! and sha256. The page reads the record and fetches the ROM at the recorded
-//! path.
+//! it by name when it is missing, empty or larger than 64 MiB, and asks the
+//! Runtime for that file's digest. It writes one launch record under
+//! `elastos://launch/output/` naming that file's path, size and sha256. The
+//! page reads the record and fetches the ROM at the recorded path.
 //!
 //! The core's sourced duties are the size cap and the record (ruling r2
 //! section 3, L2). It reads no GBA header: L2 gives that check no repo source.
@@ -23,7 +23,6 @@ use std::fmt;
 
 use capsule_kit_guest::{bus, Bus, BusFailure, CallError, READ_CHUNK_BYTES};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 /// A game set the run was launched with by its CID. The Runtime answers these
 /// names itself, for this run only.
@@ -70,8 +69,12 @@ pub enum CoreError {
     RomEmpty { path: String },
     /// The ROM is larger than [`MAX_ROM_BYTES`].
     RomTooLarge { size: u64 },
-    /// The ROM ends before the size the listing named.
-    RomTruncated { path: String, size: u64, read: u64 },
+    /// The digest's size differs from the listing's.
+    DigestSizeMismatch { listing: u64, answer: u64 },
+    /// The digest's algorithm is not the one the record names.
+    DigestAlgorithm(String),
+    /// The digest's sha256 is not exactly 64 lowercase hex characters.
+    DigestMalformed,
     /// A read of the launch's content failed.
     Read { resource: String, error: CallError },
     /// The launch record could not be written.
@@ -93,7 +96,9 @@ impl CoreError {
             | CoreError::RomAmbiguous(_)
             | CoreError::RomEmpty { .. }
             | CoreError::RomTooLarge { .. }
-            | CoreError::RomTruncated { .. } => BusFailure::Invalid(self.to_string()),
+            | CoreError::DigestSizeMismatch { .. }
+            | CoreError::DigestAlgorithm(_)
+            | CoreError::DigestMalformed => BusFailure::Invalid(self.to_string()),
         }
     }
 }
@@ -122,12 +127,16 @@ impl fmt::Display for CoreError {
             CoreError::RomAmbiguous(count) => write!(formatter, "gba_core_rom_ambiguous: {count}"),
             CoreError::RomEmpty { path } => write!(formatter, "gba_core_rom_empty: {path}"),
             CoreError::RomTooLarge { size } => write!(formatter, "gba_core_rom_too_large: {size}"),
-            CoreError::RomTruncated { path, size, read } => {
+            CoreError::DigestSizeMismatch { listing, answer } => {
                 write!(
                     formatter,
-                    "gba_core_rom_truncated: {path}: {read} of {size} bytes"
+                    "gba_core_digest_size_mismatch: {listing} != {answer}"
                 )
             }
+            CoreError::DigestAlgorithm(algorithm) => {
+                write!(formatter, "gba_core_digest_algorithm: {algorithm}")
+            }
+            CoreError::DigestMalformed => write!(formatter, "gba_core_digest_malformed"),
             CoreError::Read { resource, error } => {
                 write!(
                     formatter,
@@ -171,7 +180,24 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, CoreError> {
     if rom.size == 0 {
         return Err(CoreError::RomEmpty { path: rom.path });
     }
-    let sha256 = read_rom(bus, &content, &rom)?;
+    let uri = format!("{LAUNCH_CONTENT}{}", rom.path);
+    let digest = bus::digest(bus, &uri, &content).map_err(|error| CoreError::Read {
+        resource: uri.clone(),
+        error,
+    })?;
+    if digest.size != rom.size {
+        return Err(CoreError::DigestSizeMismatch {
+            listing: rom.size,
+            answer: digest.size,
+        });
+    }
+    if digest.algorithm != "sha256" {
+        return Err(CoreError::DigestAlgorithm(digest.algorithm));
+    }
+    if !lowercase_hex64(&digest.sha256) {
+        return Err(CoreError::DigestMalformed);
+    }
+    let sha256 = digest.sha256;
     let record = record_json(&rom, &sha256);
     let output = bus
         .request(LAUNCH_OUTPUT_PATTERN, "write", "write the launch record")
@@ -270,31 +296,12 @@ fn plain_relative_path(path: &str) -> bool {
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
-/// Hashes the ROM in read windows, as the listing sized it. A short object is
-/// refused; the bytes are never held whole.
-fn read_rom(bus: &mut dyn Bus, grant: &str, rom: &Rom) -> Result<String, CoreError> {
-    let uri = format!("{LAUNCH_CONTENT}{}", rom.path);
-    let mut hasher = Sha256::new();
-    let mut read = 0u64;
-    while read < rom.size {
-        let ask = READ_CHUNK_BYTES.min(rom.size - read);
-        let chunk =
-            bus::read_window(bus, &uri, grant, read, ask).map_err(|error| CoreError::Read {
-                resource: uri.clone(),
-                error,
-            })?;
-        if chunk.is_empty() {
-            return Err(CoreError::RomTruncated {
-                path: rom.path.clone(),
-                size: rom.size,
-                read,
-            });
-        }
-        hasher.update(&chunk);
-        read += chunk.len() as u64;
-    }
-    // Lowercase hex, as the record's `sha256` key requires.
-    Ok(format!("{:x}", hasher.finalize()))
+/// Exactly 64 lowercase hex characters: the record's `sha256` shape.
+fn lowercase_hex64(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(target_arch = "wasm32")]

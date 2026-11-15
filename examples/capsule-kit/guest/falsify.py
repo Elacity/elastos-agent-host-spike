@@ -117,7 +117,8 @@ CASES = [
     ("the fake takes unknown fields", "fake.rs",
      "    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {",
      "    if let Some(key) = object.keys().find(|_| false) {",
-     ["the_fake_refuses_bodies_the_localhost_provider_refuses"]),
+     ["the_fake_refuses_bodies_the_localhost_provider_refuses",
+      "k5e_a_digest_body_with_a_key_other_than_path_offset_length_is_refused"]),
 ]
 
 

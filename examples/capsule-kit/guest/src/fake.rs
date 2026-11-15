@@ -10,13 +10,31 @@
 //!   (`elastos/capsules/localhost-provider/src/main.rs:25-48`, unknown fields
 //!   refused): `read` takes `path`, `offset`, `length`; `write` takes `path`,
 //!   `content` as a byte array, and `append`;
-//! - `write` stores the bytes and answers `bytes_written`.
+//! - `write` stores the bytes and answers `bytes_written`;
+//! - `digest` is the Runtime's launch operation only (R3-1 cde4c8b1,
+//!   `elastos-server/src/resource_bridge.rs:206-218`): it answers one file
+//!   under `elastos://launch/content/`, whole, so `offset` and `length` are
+//!   no part of it, and it answers `not_found` for a file the content does
+//!   not hold. The output name and the bare content listing are refused
+//!   before the launch is consulted (R3-1
+//!   `elastos-server/src/provider_resource.rs:341-369`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
 
 use crate::{Bus, BusFailure, InvokeReply};
+
+/// The launch content prefix, as R3-1 names it
+/// (`elastos-server/src/resource_bridge.rs:40` at cde4c8b1).
+const LAUNCH_CONTENT: &str = "elastos://launch/content/";
+/// The launch output prefix, as R3-1 names it
+/// (`elastos-server/src/resource_bridge.rs:53` at cde4c8b1).
+const LAUNCH_OUTPUT: &str = "elastos://launch/output/";
+/// R3-1's message for a name no live launch binds, which a digest of a file
+/// the content does not hold gets (`resource_bridge.rs:45,216` at cde4c8b1).
+const NO_LAUNCH: &str = "no content launch binds this name for this capsule";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {
@@ -133,6 +151,7 @@ impl Bus for FakeBus {
         });
         let action = match operation {
             "read" => "read",
+            "digest" => "read",
             "write" => "write",
             other => {
                 return Err(BusFailure::Invalid(format!(
@@ -160,6 +179,34 @@ impl Bus for FakeBus {
             return Ok(reply(
                 json!({ "status": "error", "code": code, "message": message }),
             ));
+        }
+        if operation == "digest" {
+            // R3-1 answers a digest for one file under the launch content
+            // only, and only whole: `offset` and `length` are no part of it
+            // (`resource_bridge.rs:206-218` at cde4c8b1). A name that is no
+            // content file of the launch is `not_found` (`:216`), not a read
+            // failure.
+            if let Some((code, message)) = digest_refusal(resource) {
+                return Ok(reply(json!({
+                    "status": "error", "code": code, "message": message,
+                })));
+            }
+            let Some(bytes) = self.objects.get(resource) else {
+                return Ok(reply(json!({
+                    "status": "error",
+                    "code": "not_found",
+                    "message": NO_LAUNCH,
+                })));
+            };
+            return Ok(reply(json!({
+                "status": "ok",
+                "data": {
+                    "path": resource,
+                    "size": bytes.len(),
+                    "algorithm": "sha256",
+                    "sha256": format!("{:x}", Sha256::digest(bytes)),
+                },
+            })));
         }
         if operation == "read" {
             let Some(bytes) = self.objects.get(resource) else {
@@ -192,10 +239,59 @@ impl Bus for FakeBus {
     }
 }
 
+/// R3-1's refusal for a digest name that is no file of a launch's content,
+/// as the caller meets it before the launch is consulted (cde4c8b1):
+/// - an output name: `provider_resource.rs:352`, "a digest names content,
+///   not the output"; the bare output name is refused at `:349-351`;
+/// - the bare content listing: `:363-366`;
+/// - another name under `elastos://launch/`: `:357-359`;
+/// - a name of another scheme: that scheme's operation check, e.g.
+///   `localhost_resource` at `:463-472`. The bridge answers each of these as
+///   `invalid_resource_invoke` (`resource_bridge.rs:584-592`).
+fn digest_refusal(resource: &str) -> Option<(String, String)> {
+    let code = "invalid_resource_invoke";
+    if let Some(path) = resource.strip_prefix(LAUNCH_OUTPUT) {
+        let message = if path.is_empty() {
+            format!("a launch's output is named by a name under {LAUNCH_OUTPUT}")
+        } else {
+            "a digest names content, not the output".to_string()
+        };
+        return Some((code.to_string(), message));
+    }
+    match resource.strip_prefix(LAUNCH_CONTENT) {
+        Some("") => Some((
+            code.to_string(),
+            format!(
+                "a digest names one file of a launch's content, under {LAUNCH_CONTENT}, not its listing"
+            ),
+        )),
+        Some(_) => None,
+        None if resource.starts_with("elastos://launch/") => Some((
+            code.to_string(),
+            format!(
+                "a launch name is {LAUNCH_CONTENT} or {LAUNCH_OUTPUT}, or a name under one of them"
+            ),
+        )),
+        None => {
+            let scheme = resource.split("://").next().unwrap_or_default();
+            Some((
+                code.to_string(),
+                format!("Unsupported {scheme} provider operation: digest"),
+            ))
+        }
+    }
+}
+
 /// What the localhost provider would refuse in this body, if anything.
 fn provider_body_problem(operation: &str, body: &Value) -> Option<String> {
     let allowed: &[&str] = match operation {
         "read" => &["path", "offset", "length", "encoding"],
+        // R3-1 reads only `path` on a digest and ignores every other field
+        // (`resource_bridge.rs:202,206-218` at cde4c8b1). The fake keeps a
+        // stricter allowlist: `offset` and `length` are the only keys the
+        // read window knows, so any other key is refused here, though R3-1
+        // would ignore it.
+        "digest" => &["path", "offset", "length"],
         _ => &["path", "content", "append"],
     };
     let object = body.as_object()?;
@@ -207,6 +303,7 @@ fn provider_body_problem(operation: &str, body: &Value) -> Option<String> {
         // underflows past the end (`main.rs:434`, `468`).
         "read" if !body["length"].is_u64() => Some("read must name a length".into()),
         "read" => None,
+        "digest" => None,
         _ => {
             if serde_json::from_value::<Vec<u8>>(body["content"].clone()).is_err() {
                 return Some("write content must be a byte array".into());
