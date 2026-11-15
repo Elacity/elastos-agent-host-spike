@@ -165,21 +165,28 @@ test("s3: bytes that differ from the record are refused by name and the emulator
   app.context.fetch = (...args) => store.fetch(...args);
   await assert.rejects(app.openGame(app.requestedGame()), (error) => {
     assert.equal(error.message,
-      `gba_launch_rom_hash_mismatch: record ${"0".repeat(64)}, fetched ${ROM_SHA256}`);
+      "gba_launch_rom_hash_mismatch: the ROM differs from the launch record");
     return true;
   });
   assert.deepEqual(app.game.loads, []);
   assert.equal(vm.runInContext("gameLoaded", app.context), false);
 });
 
-test("s4: launch mode makes no saved-game read", async () => {
+test("s4: launch mode makes the exact two launch requests and never enables state storage", async () => {
   const store = server({ record: { path: RECORDED_PATH, size: ROM_SIZE, sha256: ROM_SHA256 } });
   const app = page();
   app.context.fetch = (...args) => store.fetch(...args);
   await app.openGame(app.requestedGame());
-  assert.deepEqual(store.requests.filter((item) => item.url.includes("/save/")), []);
+  // Play-only: the record, then the recorded content. Nothing else at all.
+  assert.deepEqual(store.requests.map((item) => item.url), [RECORD_URL, RECORDED_CONTENT_URL]);
   assert.equal(vm.runInContext("saveSession.save", app.context), null);
-  assert.deepEqual(app.timers.size, 1);
+  assert.equal(app.timers.size, 0, "no save lifecycle timer starts for a launch");
+  for (const slot of [1, 2, 3]) {
+    assert.equal(app.context.document.getElementById(`btn-save${slot}`).disabled, true,
+      `state save ${slot} stays off`);
+    assert.equal(app.context.document.getElementById(`btn-load${slot}`).disabled, true,
+      `state load ${slot} stays off`);
+  }
 });
 
 test("s5: a missing or malformed record is refused by name before any ROM fetch", async () => {
@@ -209,4 +216,81 @@ test("s5: a missing or malformed record is refused by name before any ROM fetch"
     message: "gba_launch_record_invalid: path, size and sha256 are required",
   });
   assert.deepEqual(third.game.loads, []);
+});
+
+test("s6: an uppercase-hex launch id is the Runtime's launch address and reads the record", async () => {
+  // browser_capsules.rs:358 accepts 32 ASCII hex digits in either case.
+  const store = server({ record: { path: RECORDED_PATH, size: ROM_SIZE, sha256: ROM_SHA256 } });
+  const app = page({ pathname: "/launch/0123456789ABCDEF0123456789ABCDEF/page/browser/index.html" });
+  app.context.fetch = (...args) => store.fetch(...args);
+  assert.equal(app.requestedGame().launch, true);
+  await app.openGame(app.requestedGame());
+  assert.deepEqual(store.requests.map((item) => item.url), [RECORD_URL, RECORDED_CONTENT_URL]);
+  assert.equal(app.game.loads[0], `/data/games/${ROM_SHA256}.gba`);
+});
+
+test("s7: an empty entrypoint is the installed form, not a launch", () => {
+  const app = page({ pathname: "/launch/0123456789abcdef0123456789abcdef/page/", search: "?capsule=ucity" });
+  assert.equal(vm.runInContext("launchMode", app.context), false);
+  assert.equal(app.requestedGame().capsule, "ucity");
+});
+
+test("s8: an encoded slash in the entrypoint is the installed form, any case", () => {
+  for (const entry of ["browser%2Findex.html", "browser%2findex.html", "browser%5Cindex.html", "browser%5cindex.html"]) {
+    const app = page({
+      pathname: `/launch/0123456789abcdef0123456789abcdef/page/${entry}`,
+      search: "?capsule=ucity",
+    });
+    assert.equal(vm.runInContext("launchMode", app.context), false, entry);
+    assert.equal(app.requestedGame().capsule, "ucity", entry);
+  }
+});
+
+test("s9: only a plain multi-segment entrypoint is a launch address", () => {
+  const id = "0123456789abcdef0123456789abcdef";
+  const launch = page({ pathname: `/launch/${id}/page/browser/assets/index.html` });
+  assert.equal(launch.requestedGame().launch, true, "a plain multi-segment entrypoint is a launch");
+  for (const entry of ["browser/./index.html", "browser//index.html", "browser/", "browser/%2E/index.html"]) {
+    const app = page({ pathname: `/launch/${id}/page/${entry}`, search: "?capsule=ucity" });
+    assert.equal(vm.runInContext("launchMode", app.context), false, entry);
+    assert.equal(app.requestedGame().capsule, "ucity", entry);
+  }
+});
+
+test("s10: a C1 control character in the record path is refused by name before any fetch", async () => {
+  const store = server({ record: { path: "u\u0085city.gba", size: ROM_SIZE, sha256: ROM_SHA256 } });
+  const app = page();
+  app.context.fetch = (...args) => store.fetch(...args);
+  await assert.rejects(app.readLaunchGame(), (error) => {
+    assert.equal(error.message, "gba_launch_record_invalid: path, size and sha256 are required");
+    return true;
+  });
+  assert.equal(store.requests.some((item) => item.url.includes("/launch/content/")), false);
+  assert.equal(store.requests.length, 1);
+});
+
+test("s11: a lone surrogate in the record path is refused by name, not by a URIError", async () => {
+  const store = server({ record: { path: "u\ud800city.gba", size: ROM_SIZE, sha256: ROM_SHA256 } });
+  const app = page();
+  app.context.fetch = (...args) => store.fetch(...args);
+  await assert.rejects(app.readLaunchGame(), (error) => {
+    assert.equal(error.name, "Error");
+    assert.equal(error.message, "gba_launch_record_invalid: path, size and sha256 are required");
+    return true;
+  });
+  assert.equal(store.requests.some((item) => item.url.includes("/launch/content/")), false);
+});
+
+test("s12: the Runtime path rule has no byte bound, so a 1,024 and a 1,025 byte path stay plain", async () => {
+  // Census: page_launch.rs:118 tests empty, `\\`, control and parts only.
+  for (const length of [1024, 1025]) {
+    const path = "a".repeat(length);
+    const store = server({ record: { path, size: ROM_SIZE, sha256: ROM_SHA256 } });
+    const app = page();
+    app.context.fetch = (...args) => store.fetch(...args);
+    const { bytes } = await app.readLaunchGame();
+    assert.equal(bytes.length, ROM_SIZE, `${length} byte path`);
+    assert.deepEqual(store.requests.map((item) => item.url),
+      [RECORD_URL, `/api/viewers/gba-emulator/launch/content/${path}`]);
+  }
 });
