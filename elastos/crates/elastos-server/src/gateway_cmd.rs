@@ -226,7 +226,7 @@ where
                 &sup,
                 supervisor::SupervisorRequest::LaunchCapsule {
                     name: cap.clone(),
-                    config: serde_json::json!({}),
+                    guest_payload: serde_json::json!({}),
                     interactive: false,
                     capsule_args: Vec::new(),
                     principal_id: None,

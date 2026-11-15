@@ -43,8 +43,10 @@ pub struct EnsureCapsuleInput {
 #[serde(deny_unknown_fields)]
 pub struct LaunchCapsuleInput {
     pub name: String,
-    #[serde(default)]
-    pub config: serde_json::Value,
+    /// The guest payload, moved whole to the guest. The host does not read it;
+    /// the wire name stays `config`.
+    #[serde(default, rename = "config")]
+    pub guest_payload: serde_json::Value,
     /// Guest stdio: a shell-launched capsule that needs a terminal.
     #[serde(default)]
     pub interactive: bool,
@@ -194,7 +196,7 @@ fn supervisor_launch_request(
 ) -> SupervisorRequest {
     SupervisorRequest::LaunchCapsule {
         name: input.name,
-        config: input.config,
+        guest_payload: input.guest_payload,
         interactive: input.interactive,
         capsule_args: input.capsule_args,
         principal_id,
@@ -224,9 +226,9 @@ fn supervisor_launch_principal_from_input(
         ));
     }
 
-    if let Some(config) = input.config.as_object() {
+    if let Some(guest_payload) = input.guest_payload.as_object() {
         for key in SUPERVISOR_PRINCIPAL_AUTHORITY_KEYS {
-            if config.contains_key(*key) {
+            if guest_payload.contains_key(*key) {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     format!(
@@ -239,7 +241,10 @@ fn supervisor_launch_principal_from_input(
         // carries a top-level `_elastos_` key was written for the old host-key
         // spelling. The host keys are typed fields now, so an old sender fails
         // closed here instead of handing a host key to the guest (r5 §3 M6).
-        if let Some(key) = config.keys().find(|key| key.starts_with("_elastos_")) {
+        if let Some(key) = guest_payload
+            .keys()
+            .find(|key| key.starts_with("_elastos_"))
+        {
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
@@ -693,13 +698,13 @@ mod tests {
         match supervisor_launch_request(input, None) {
             SupervisorRequest::LaunchCapsule {
                 name,
-                config,
+                guest_payload,
                 interactive,
                 capsule_args,
                 principal_id,
             } => {
                 assert_eq!(name, "chat");
-                assert_eq!(config, serde_json::json!({"nick": "alice"}));
+                assert_eq!(guest_payload, serde_json::json!({"nick": "alice"}));
                 assert!(
                     interactive,
                     "the typed interactive field reaches the request"
@@ -779,5 +784,161 @@ mod tests {
                 "axum's JSON data error: {body}"
             );
         }
+    }
+
+    /// G3a-1 option (i) (r6 §0, r5 §2; facts §5): an agent-shaped guest payload
+    /// in a person's verified launch reaches the release's microVM gate as the
+    /// PERSON, not as the agent, and nothing at the stored agent's root is
+    /// read, written or returned. The row drives the real HTTP handler with a
+    /// real `Supervisor` and a stored agent whose root holds real bytes.
+    ///
+    /// Feature-on only: with the feature off the agent refusal is a no-op, so
+    /// the planted handler could not change this row's literal. It is skipped
+    /// by name in that build.
+    #[tokio::test]
+    async fn r6_2b_an_agent_shaped_payload_launches_as_the_person_and_touches_no_agent_root() {
+        let Some((home, agents)) =
+            crate::agents::tests::home_with_agents_if_built(1, "bafkreia5probe")
+        else {
+            assert!(!crate::agents::build_allows());
+            eprintln!(
+                "SKIP r6_2b_an_agent_shaped_payload_launches_as_the_person_and_touches_no_agent_root: \
+                 this build carries no agents (prototype-agents off)"
+            );
+            return;
+        };
+        let agent = agents.into_iter().next().unwrap();
+        let data_dir = home.path();
+
+        use crate::setup::{CapsuleEntry, ComponentsManifest};
+        let capsule_dir = data_dir.join("capsules/plain-vm-test");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(".elastos-cid"), "bafy-plain-vm-test\n").unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "plain-vm-test",
+                "version": "0.1.0",
+                "role": "app",
+                "type": "microvm",
+                "entrypoint": "rootfs.ext4"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "plain-vm-test".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-plain-vm-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let state = SupervisorState {
+            supervisor: Arc::new(supervisor),
+            data_dir: Some(data_dir.to_path_buf()),
+        };
+
+        use elastos_runtime::auth::AuthSessionGrantV1;
+        let now = crate::auth::now_ts();
+        let record = crate::auth::store_test_human_principal(data_dir, "person:local:r6-2b");
+        let session_grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:r6-2b".to_string(),
+            session_id: "auth:r6-2b".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec!["plain-vm-test".to_string()],
+        };
+        crate::auth::store_session_grant(data_dir, session_grant.clone()).unwrap();
+        let grant = crate::api::gateway::issue_home_launch_token_for_auth_grant(
+            data_dir,
+            "plain-vm-test",
+            &session_grant,
+        )
+        .unwrap();
+
+        // Real data where the agent's id rule points, and the agent file.
+        let root =
+            crate::auth::principal_kind_localhost_root(&agent, crate::auth::PrincipalKind::Agent);
+        let root_dir =
+            elastos_common::localhost::rooted_localhost_fs_path(data_dir, &root).unwrap();
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let secret = root_dir.join("secret.txt");
+        std::fs::write(&secret, b"agent-root-secret").unwrap();
+        let secret_before = std::fs::read(&secret).unwrap();
+        let secret_mtime = std::fs::metadata(&secret).unwrap().modified().unwrap();
+        let agent_file = crate::agents::agent_file_path(data_dir).unwrap();
+        let agent_before = std::fs::read(&agent_file).unwrap();
+
+        let error = launch_capsule(
+            State(state),
+            Json(launch_input(serde_json::json!({
+                "name": "plain-vm-test",
+                "launch_grant": grant,
+                "config": {
+                    "agent_id": agent,
+                    "agent": {"kind": "agent"},
+                    "principal": {"id": agent},
+                }
+            }))),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            error
+                .1
+                .starts_with("launch_capsule failed: microVM capsules are not available on "),
+            "the launch passed the agent gate as the person: {:?}",
+            error.1
+        );
+        assert!(
+            !error
+                .1
+                .contains(crate::agent_admission::UNADMITTED_AGENT_PRINCIPAL),
+            "the payload's agent id is not the principal: {:?}",
+            error.1
+        );
+        assert!(
+            !error.1.contains("agent-root-secret"),
+            "nothing from the agent root is returned: {:?}",
+            error.1
+        );
+        assert_eq!(
+            std::fs::read(&secret).unwrap(),
+            secret_before,
+            "the agent root is not written"
+        );
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().modified().unwrap(),
+            secret_mtime,
+            "the agent root file is untouched"
+        );
+        assert_eq!(
+            std::fs::read(&agent_file).unwrap(),
+            agent_before,
+            "the agent file is not rewritten"
+        );
     }
 }

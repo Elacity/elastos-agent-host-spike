@@ -2925,6 +2925,39 @@ mod tests {
         );
     }
 
+    /// G3b (r6 §3 M-c, r5 §4; A3): the guest payload is moved whole and read
+    /// once. Every production use of `guest_payload` under `elastos/crates` is
+    /// pinned by `(file, count)` with the same walker as the r3 row above: the
+    /// field, the request literal, the HTTP entrance's refusal read, the
+    /// gateway's in-process literal, the supervisor's destructure and moves,
+    /// and the one serialisation read. The
+    /// serialisation is also pinned once as an exact literal, so the read
+    /// cannot move or grow an inspection. A new use, a new file or a second
+    /// read turns this row red and forces a ruling. These are review triggers,
+    /// not proofs: a developer who adds one must also edit the pinned list.
+    ///
+    /// What this cannot show: a call split across lines, a struct-update
+    /// construction, and a workspace member outside `elastos/crates`.
+    #[test]
+    fn the_guest_payload_is_moved_whole_and_read_once() {
+        assert_eq!(
+            production_counts("guest_payload"),
+            expected_counts(&[
+                ("elastos-server/src/api/handlers/supervisor_api.rs", 7),
+                ("elastos-server/src/gateway_cmd.rs", 1),
+                ("elastos-server/src/supervisor.rs", 7),
+            ]),
+            "guest_payload uses"
+        );
+        assert_eq!(
+            production_text(include_str!("supervisor.rs"))
+                .matches("serde_json::to_vec(&guest_payload)")
+                .count(),
+            1,
+            "the one host read of the guest payload"
+        );
+    }
+
     /// Every place that fills a capsule's ceiling asks the one function that
     /// decides it, and none of those files reads a manifest's capability list
     /// or storage permissions itself. So a rule placed in that function (such

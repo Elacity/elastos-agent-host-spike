@@ -53,8 +53,10 @@ pub enum SupervisorRequest {
     #[serde(rename = "launch_capsule")]
     LaunchCapsule {
         name: String,
-        #[serde(default)]
-        config: serde_json::Value,
+        /// The guest payload, moved whole to the guest. The host reads none of
+        /// it; the wire name stays `config`.
+        #[serde(default, rename = "config")]
+        guest_payload: serde_json::Value,
         /// Guest stdio: a shell-launched capsule that needs a terminal.
         #[serde(default)]
         interactive: bool,
@@ -519,12 +521,18 @@ impl Supervisor {
             },
             SupervisorRequest::LaunchCapsule {
                 name,
-                config,
+                guest_payload,
                 interactive,
                 capsule_args,
                 principal_id,
             } => match self
-                .launch_capsule(&name, config, interactive, capsule_args, principal_id)
+                .launch_capsule(
+                    &name,
+                    guest_payload,
+                    interactive,
+                    capsule_args,
+                    principal_id,
+                )
                 .await
             {
                 Ok((handle, cid)) => SupervisorResponse::ok_with_handle(handle, cid),
@@ -1054,7 +1062,7 @@ impl Supervisor {
         let handle = Self::unique_handle(name, cid);
 
         // The guest payload is moved whole; the host reads none of it here.
-        let launch_config = config;
+        let guest_payload = config;
 
         // Create VM config from manifest, override vsock CID
         let mut vm_config =
@@ -1132,10 +1140,12 @@ impl Supervisor {
             }
         }
 
-        // Inject command payload as base64-encoded boot arg
-        if !launch_config.is_null() {
+        // Inject command payload as base64-encoded boot arg. This is the one
+        // host read of the guest payload (pair 7 of the eleven pass-through
+        // pairs); it serialises, it does not inspect.
+        if !guest_payload.is_null() {
             use base64::Engine as _;
-            let json_bytes = serde_json::to_vec(&launch_config)?;
+            let json_bytes = serde_json::to_vec(&guest_payload)?;
             let encoded = base64::engine::general_purpose::STANDARD.encode(&json_bytes);
             vm_config.boot_args = format!("{} elastos.command={}", vm_config.boot_args, encoded);
         }
@@ -1225,7 +1235,7 @@ impl Supervisor {
         // Register provider route using guest IP (TCP bridge over TAP)
         let provider_route =
             if let Some(guest_ip) = vm.config.network.as_ref().map(|n| n.guest_ip.clone()) {
-                self.register_provider_route(name, provides.as_deref(), &guest_ip, launch_config)
+                self.register_provider_route(name, provides.as_deref(), &guest_ip, guest_payload)
                     .await
             } else {
                 None
@@ -1992,6 +2002,93 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.to_string(), crate::agent_admission::NO_VM_AGENT);
+        assert!(
+            supervisor.running.read().await.is_empty(),
+            "no VM was recorded"
+        );
+    }
+
+    /// G3a-2 (r4 §2; facts §5.3): the supervisor's own pre-gate launch, driven
+    /// directly with a person principal and an agent-shaped guest payload,
+    /// reaches the release's microVM gate as the person. Nothing here needs
+    /// KVM: `microvm_unavailable` fires before the KVM check. The payload's
+    /// agent id is a valid stored-agent-shaped id, so the plant that takes the
+    /// principal from it (`prototype-agents` on) turns this row red at
+    /// `UNADMITTED_AGENT_PRINCIPAL`; with the feature off that refusal is a
+    /// no-op and the row still observes the gate.
+    #[tokio::test]
+    async fn r6_2b_a_person_launch_with_an_agent_shaped_payload_reaches_the_microvm_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let capsule_dir = data_dir.join("capsules/plain-vm-test");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-plain-vm-test\n").unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "plain-vm-test",
+                "version": "0.1.0",
+                "role": "app",
+                "type": "microvm",
+                "entrypoint": "rootfs.ext4"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "plain-vm-test".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-plain-vm-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        assert!(crate::auth::validate_agent_id(agent).is_ok());
+        let error = supervisor
+            .launch_capsule(
+                "plain-vm-test",
+                serde_json::json!({
+                    "agent_id": agent,
+                    "agent": {"kind": "agent"},
+                    "principal": {"id": agent}
+                }),
+                false,
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    "person:local:alice",
+                )),
+            )
+            .await
+            .unwrap_err();
+
+        let text = error.to_string();
+        assert!(
+            text.starts_with("microVM capsules are not available on "),
+            "the person passes the agent gate: {text}"
+        );
+        assert!(
+            text.contains(". Cannot launch capsule 'plain-vm-test'."),
+            "{text}"
+        );
         assert!(
             supervisor.running.read().await.is_empty(),
             "no VM was recorded"
