@@ -55,8 +55,10 @@ pub enum SupervisorRequest {
         name: String,
         #[serde(default)]
         config: serde_json::Value,
-        #[serde(default)]
-        principal_id: Option<String>,
+        /// Typed: a request that deserialises carries `None`, because the
+        /// wire cannot mint a `BridgePrincipal` (`#[serde(skip, default)]`).
+        #[serde(skip, default)]
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     },
 
     #[serde(rename = "stop_capsule")]
@@ -963,11 +965,15 @@ impl Supervisor {
         &self,
         name: &str,
         config: serde_json::Value,
-        principal_id: Option<String>,
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(String, u32)> {
         // An agent's own principal reaches no VM: a stored agent launches
         // through the component admission, never here.
-        crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())?;
+        crate::agent_admission::refuse_unadmitted_agent_principal(
+            principal_id
+                .as_ref()
+                .map(crate::resource_bridge::BridgePrincipal::principal_str),
+        )?;
         let (capsule_dir, manifest) = self.load_capsule_manifest(name).await?;
         // A manifest that declares an agent runs only through the component
         // admission. A VM launch would put its launcher's principal on the
@@ -1183,7 +1189,8 @@ impl Supervisor {
                     capability_manager: cap_mgr.clone(),
                     pending_store: pending.clone(),
                     capsule_id: format!("vm-{}", name),
-                    principal_id: principal_id.clone(),
+                    principal_id: principal_id
+                        .map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
                     manifest_capabilities: manifest.resource_authority_bounds(),
                     data_dir: Some(self.data_dir.clone()),
                     launch: None,
@@ -1678,6 +1685,31 @@ mod tests {
         }
     }
 
+    /// R6-1 row r2: a defensive TYPE pin, not a live HTTP test. Nothing in
+    /// production deserialises `SupervisorRequest`; the wire type is
+    /// `LaunchCapsuleInput`, which already refuses `principal_id` and
+    /// `home_token`. `BridgePrincipal` has no `Deserialize` and no `Default`
+    /// constructor, so the field must be skipped: a request that deserialises
+    /// carries no principal.
+    #[test]
+    fn r6_a_deserialised_launch_capsule_request_carries_no_principal() {
+        let req: SupervisorRequest = serde_json::from_value(serde_json::json!({
+            "op": "launch_capsule",
+            "name": "x",
+            "principal_id": "person:local:abc"
+        }))
+        .unwrap();
+        match req {
+            SupervisorRequest::LaunchCapsule { principal_id, .. } => {
+                assert!(
+                    principal_id.is_none(),
+                    "a deserialised request cannot mint a bridge principal"
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
     /// Amendment row S(b): a stored agent's principal sent straight to the
     /// supervisor is refused by name, before any manifest is read, so no
     /// bridge and no VM is made.
@@ -1703,7 +1735,7 @@ mod tests {
             .launch_capsule(
                 "not-installed",
                 serde_json::json!({}),
-                Some(agent.to_string()),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(agent)),
             )
             .await
             .unwrap_err();
@@ -1783,7 +1815,13 @@ mod tests {
         // The stored agent's own principal is refused before any manifest is
         // read, whatever the manifest declares.
         let error = supervisor
-            .launch_capsule("plain-vm-test", serde_json::json!({}), Some(agent.clone()))
+            .launch_capsule(
+                "plain-vm-test",
+                serde_json::json!({}),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    agent.as_str(),
+                )),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -1847,7 +1885,9 @@ mod tests {
             .launch_capsule(
                 "provider-test",
                 serde_json::json!({}),
-                Some("person:local:alice".to_string()),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    "person:local:alice",
+                )),
             )
             .await
             .unwrap_err();
@@ -1911,7 +1951,9 @@ mod tests {
             .launch_capsule(
                 "agent-vm-test",
                 serde_json::json!({}),
-                Some("person:local:alice".to_string()),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    "person:local:alice",
+                )),
             )
             .await
             .unwrap_err();

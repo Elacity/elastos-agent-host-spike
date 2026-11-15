@@ -64,9 +64,23 @@ pub(crate) fn require_home_runtime(data_dir: &Path, sign_in_store: &Path) -> any
 /// these bytes; it reads neither back from the folder.
 #[derive(Debug)]
 pub(crate) struct AdmissionContext {
-    pub(crate) actor: String,
-    pub(crate) manifest: CapsuleManifest,
-    pub(crate) entrypoint: Vec<u8>,
+    actor: String,
+    manifest: CapsuleManifest,
+    entrypoint: Vec<u8>,
+}
+
+impl AdmissionContext {
+    /// The stored agent id this launch was admitted as. Reading it gives no
+    /// authority: the seal is that only `admit_launch` builds this type.
+    pub(crate) fn actor(&self) -> &str {
+        &self.actor
+    }
+
+    /// The exact manifest and entrypoint bytes admission walked. The loader
+    /// compiles these and reads neither back from the folder.
+    pub(crate) fn into_parts(self) -> (CapsuleManifest, Vec<u8>) {
+        (self.manifest, self.entrypoint)
+    }
 }
 
 /// The refusal a launch gives when it names an agent and no launcher is.

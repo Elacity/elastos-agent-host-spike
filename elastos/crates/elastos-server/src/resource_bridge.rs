@@ -201,6 +201,42 @@ fn launch_response(
     provider_ok_result(serde_json::json!({"content": bytes, "size": bytes.len()}))
 }
 
+/// A bridge principal: who a capsule runs for, after verification.
+///
+/// The seal is the private field plus the `pub(crate)` constructors: a
+/// `BridgePrincipal` is minted only from a verified launch grant
+/// (`from_grant`) or from an agent admission context (`from_admission`), and
+/// no string constructor, `From`, `Deref`, `Default`, `FromStr`, `Serialize`
+/// or `Deserialize` exists. Reading the id (`principal_str`) gives no
+/// authority. The guarantee ends at the two named conversion sites that hand
+/// a `String` to `BridgeContext::principal_id` (supervisor.rs and runtime.rs),
+/// and inside the witness modules' single pinned construction literals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgePrincipal(String);
+
+impl BridgePrincipal {
+    pub(crate) fn from_grant(grant: &crate::api::gateway::VerifiedLaunchGrant) -> Self {
+        Self(grant.principal_id().to_string())
+    }
+
+    pub(crate) fn from_admission(admission: &crate::agent_admission::AdmissionContext) -> Self {
+        Self(admission.actor().to_string())
+    }
+
+    pub(crate) fn principal_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_bridge_principal_string(self) -> String {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(id: &str) -> Self {
+        Self(id.to_string())
+    }
+}
+
 /// Resources needed by the bridge to handle requests.
 #[derive(Clone)]
 pub struct BridgeContext {
@@ -2758,6 +2794,135 @@ mod tests {
                 found.push(path);
             }
         }
+    }
+
+    /// Production uses of `needle`, with the type/function DEFINITION and
+    /// `impl` lines excluded (a definition is not a construction or a call).
+    /// A use counts only where `needle` stands as its own identifier or ends
+    /// with punctuation: `principal_str` does not count inside
+    /// `into_bridge_principal_string`.
+    fn production_uses(text: &str, needle: &str) -> usize {
+        let fn_definition = format!("fn {needle}");
+        text.lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !(trimmed.starts_with("struct ")
+                    || trimmed.starts_with("pub struct ")
+                    || trimmed.starts_with("pub(crate) struct ")
+                    || trimmed.starts_with("pub(in crate::api) struct ")
+                    || trimmed.starts_with("impl ")
+                    || line.contains(&fn_definition))
+            })
+            .map(|line| ident_uses(line, needle))
+            .sum()
+    }
+
+    /// Occurrences of `needle` that begin and end on an identifier boundary.
+    fn ident_uses(line: &str, needle: &str) -> usize {
+        line.match_indices(needle)
+            .filter(|(start, _)| {
+                let before = line[..*start].chars().next_back();
+                let after = line[start + needle.len()..].chars().next();
+                !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+                    && !after.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+            })
+            .count()
+    }
+
+    /// The walker's tree-wide `(file, count)` list for one production literal.
+    fn production_counts(needle: &str) -> Vec<(String, usize)> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            let count = production_uses(&text, needle);
+            if count > 0 {
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((name, count));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    fn expected_counts(pairs: &[(&str, usize)]) -> Vec<(String, usize)> {
+        let mut expected: Vec<(String, usize)> = pairs
+            .iter()
+            .map(|(file, count)| (file.to_string(), *count))
+            .collect();
+        expected.sort();
+        expected
+    }
+
+    /// R6-1 row r3: source pins over the production text of `elastos/crates`,
+    /// same filters as `every_place_that_fills_a_ceiling_asks_the_one_bounds_function`
+    /// (comment lines dropped, test modules left out, paths whose name contains
+    /// "tests" skipped). These are REVIEW TRIGGERS, not proofs: a second
+    /// production literal or caller turns the walker's list red and forces a
+    /// ruling, and the type seal covers code outside the two minting modules.
+    ///
+    /// What this cannot show: a call split across lines, a construction written
+    /// as a struct-update (`..`), and a workspace member outside `elastos/crates`.
+    #[test]
+    fn r6_typed_principal_pins_hold_tree_wide() {
+        // The one production construction of each witness, the struct
+        // definition excluded (the definition is not a construction).
+        assert_eq!(
+            production_counts("VerifiedLaunchGrant {"),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
+            "VerifiedLaunchGrant construction literal"
+        );
+        assert_eq!(
+            production_counts("AdmissionContext {"),
+            expected_counts(&[("elastos-server/src/agent_admission.rs", 1)]),
+            "AdmissionContext construction literal"
+        );
+        // The one production caller of each constructor.
+        assert_eq!(
+            production_counts("BridgePrincipal::from_grant("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
+            "BridgePrincipal::from_grant callers"
+        );
+        assert_eq!(
+            production_counts("BridgePrincipal::from_admission("),
+            expected_counts(&[("elastos-server/src/runtime.rs", 1)]),
+            "BridgePrincipal::from_admission callers"
+        );
+        // The accessors: one read per agent refusal, one consuming conversion
+        // per route boundary. Definitions are excluded.
+        assert_eq!(
+            production_counts("principal_str"),
+            expected_counts(&[
+                ("elastos-server/src/api/routes.rs", 1),
+                ("elastos-server/src/runtime.rs", 1),
+                ("elastos-server/src/supervisor.rs", 1),
+            ]),
+            "principal_str uses"
+        );
+        assert_eq!(
+            production_counts("into_bridge_principal_string"),
+            expected_counts(&[
+                ("elastos-server/src/runtime.rs", 1),
+                ("elastos-server/src/supervisor.rs", 1),
+            ]),
+            "into_bridge_principal_string uses"
+        );
+        // The bridge field stays a String and is filled at exactly two
+        // production literals; `BridgeContext`'s definition is not one.
+        assert_eq!(
+            production_counts("BridgeContext {"),
+            expected_counts(&[
+                ("elastos-server/src/runtime.rs", 1),
+                ("elastos-server/src/supervisor.rs", 1),
+            ]),
+            "BridgeContext literals"
+        );
     }
 
     /// Every place that fills a capsule's ceiling asks the one function that

@@ -322,7 +322,7 @@ impl Runtime {
         &self,
         path: &Path,
         args: Vec<String>,
-        principal_id: Option<String>,
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<CapsuleHandle> {
         self.run_local_with_signer(path, args, principal_id)
             .await
@@ -336,7 +336,7 @@ impl Runtime {
         &self,
         path: &Path,
         args: Vec<String>,
-        principal_id: Option<String>,
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(CapsuleHandle, Signer)> {
         self.run_signer(path, args, principal_id, None).await
     }
@@ -351,11 +351,8 @@ impl Runtime {
         args: Vec<String>,
         admission: crate::agent_admission::AdmissionContext,
     ) -> Result<(CapsuleHandle, Signer)> {
-        let crate::agent_admission::AdmissionContext {
-            actor,
-            manifest,
-            entrypoint,
-        } = admission;
+        let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
+        let (manifest, entrypoint) = admission.into_parts();
         self.run_signer(path, args, Some(actor), Some((manifest, entrypoint)))
             .await
     }
@@ -368,13 +365,17 @@ impl Runtime {
         &self,
         path: &Path,
         args: Vec<String>,
-        principal_id: Option<String>,
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
         admitted: Option<(CapsuleManifest, Vec<u8>)>,
     ) -> Result<(CapsuleHandle, Signer)> {
         let admitted_launch = admitted.is_some();
         if !admitted_launch {
-            crate::agent_admission::refuse_unadmitted_agent_principal(principal_id.as_deref())
-                .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
+            crate::agent_admission::refuse_unadmitted_agent_principal(
+                principal_id
+                    .as_ref()
+                    .map(crate::resource_bridge::BridgePrincipal::principal_str),
+            )
+            .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
         }
         let (manifest, walked) = match admitted {
             Some((manifest, entrypoint)) => (Some(manifest), Some(entrypoint)),
@@ -492,8 +493,13 @@ impl Runtime {
             }
             (None, _) => provider.load(path, manifest).await?,
         };
-        self.start_loaded(provider, &mut handle, args, principal_id)
-            .await?;
+        self.start_loaded(
+            provider,
+            &mut handle,
+            args,
+            principal_id.map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
+        )
+        .await?;
 
         Ok((handle, signer))
     }
@@ -1564,7 +1570,11 @@ pub(crate) mod tests {
         let person = "person:local:bus-conformance";
 
         let ended = runtime
-            .run_local_with_principal(&fixture, Vec::new(), Some(person.to_string()))
+            .run_local_with_principal(
+                &fixture,
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(person)),
+            )
             .await;
 
         let none_left = || {
@@ -1625,7 +1635,11 @@ pub(crate) mod tests {
         let (runtime, temp) = test_runtime().await;
         let agent = "agent:v2:0123456789abcdef0123456789abcdef";
         let error = runtime
-            .run_local_with_signer(temp.path(), Vec::new(), Some(agent.to_string()))
+            .run_local_with_signer(
+                temp.path(),
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(agent)),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -2352,7 +2366,13 @@ pub(crate) mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host");
         tokio::spawn(async move {
             runtime
-                .run_local_with_principal(&dir, Vec::new(), Some(AGENT_HOST_PERSON.to_string()))
+                .run_local_with_principal(
+                    &dir,
+                    Vec::new(),
+                    Some(crate::resource_bridge::BridgePrincipal::for_test(
+                        AGENT_HOST_PERSON,
+                    )),
+                )
                 .await
         })
     }
@@ -2768,7 +2788,9 @@ pub(crate) mod tests {
                 .run_local_with_principal(
                     &launch_fixture,
                     Vec::new(),
-                    Some("person:local:bus-conformance".to_string()),
+                    Some(crate::resource_bridge::BridgePrincipal::for_test(
+                        "person:local:bus-conformance",
+                    )),
                 )
                 .await
         });
@@ -2853,7 +2875,9 @@ pub(crate) mod tests {
                 .run_local_with_principal(
                     &denied_fixture,
                     Vec::new(),
-                    Some("person:local:bus-conformance".to_string()),
+                    Some(crate::resource_bridge::BridgePrincipal::for_test(
+                        "person:local:bus-conformance",
+                    )),
                 )
                 .await
         });

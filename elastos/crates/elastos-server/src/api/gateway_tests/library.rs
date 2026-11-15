@@ -8768,6 +8768,7 @@ async fn r4_runtime_custody_buy_refuses_remote_context_at_root_lookup() {
             None,
             "r4-remote-grant".into(),
         ),
+        grant: crate::api::gateway::VerifiedLaunchGrant::for_test(REMOTE),
     };
     let authority = runtime_wallet_authority(dir.path(), &required).unwrap();
     assert_eq!(authority.root().localhost_root(), "");

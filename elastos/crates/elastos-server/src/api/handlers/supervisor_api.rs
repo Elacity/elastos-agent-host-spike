@@ -189,7 +189,7 @@ const SUPERVISOR_PRINCIPAL_AUTHORITY_KEYS: &[&str] =
 fn supervisor_launch_principal_from_input(
     data_dir: Option<&Path>,
     input: &LaunchCapsuleInput,
-) -> Result<Option<String>, (StatusCode, String)> {
+) -> Result<Option<crate::resource_bridge::BridgePrincipal>, (StatusCode, String)> {
     let has_top_level_authority = [
         input.principal_id.as_ref().map(|_| "principal_id"),
         input.home_token.as_ref().map(|_| "home_token"),
@@ -240,13 +240,13 @@ fn supervisor_launch_principal_from_input(
         )
     })?;
     headers.insert("x-elastos-home-token", header_value);
-    let context = crate::api::gateway::require_internal_shell_launch_grant_for_any_context(
+    let principal = crate::api::gateway::require_internal_shell_launch_grant_principal(
         data_dir,
         &headers,
         &[input.name.as_str()],
     )
     .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-    Ok(Some(context.principal_id().to_string()))
+    Ok(Some(principal))
 }
 
 /// POST /api/supervisor/stop-capsule — stop a running capsule VM.
@@ -372,7 +372,12 @@ mod tests {
 
         let principal = supervisor_launch_principal_from_input(Some(dir.path()), &input).unwrap();
 
-        assert_eq!(principal.as_deref(), Some(context.principal_id()));
+        assert_eq!(
+            principal
+                .as_ref()
+                .map(crate::resource_bridge::BridgePrincipal::principal_str),
+            Some(context.principal_id())
+        );
     }
 
     #[test]
@@ -394,5 +399,190 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("not authorized"));
+    }
+
+    /// R6-1 row r4: route 3 end to end through the HTTP handler
+    /// (`supervisor_api::launch_capsule`), with a real `Supervisor` and the
+    /// stored-human grant fixture. A valid person grant passes the agent
+    /// refusal and the shell-launchable check as that person and reaches the
+    /// release's microVM gate; a request with no grant passes it with no
+    /// principal. The provider-role half is what observes the person rather
+    /// than `None`: the typed principal reaches the role check, so the same
+    /// request with no grant takes the other branch (both literals below).
+    ///
+    /// No part of this row depends on the agents build switch: the stored
+    /// human grant path and the two refusals behave the same in both builds.
+    /// The agent refusal itself is covered by its own gated row.
+    #[tokio::test]
+    async fn r6_launch_capsule_reaches_the_microvm_gate_with_the_typed_person() {
+        use crate::setup::{CapsuleEntry, ComponentsManifest};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path();
+        for (name, cid, role) in [
+            ("plain-vm-test", "bafy-plain-vm-test", "app"),
+            ("provider-test", "bafy-provider-test", "provider"),
+        ] {
+            let capsule_dir = data_dir.join("capsules").join(name);
+            std::fs::create_dir_all(&capsule_dir).unwrap();
+            std::fs::write(capsule_dir.join(".elastos-cid"), format!("{cid}\n")).unwrap();
+            std::fs::write(
+                capsule_dir.join("capsule.json"),
+                serde_json::json!({
+                    "schema": "elastos.capsule/v1",
+                    "name": name,
+                    "version": "0.1.0",
+                    "role": role,
+                    "type": "microvm",
+                    "entrypoint": "rootfs.ext4"
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        let mut capsules = std::collections::HashMap::new();
+        for (name, cid) in [
+            ("plain-vm-test", "bafy-plain-vm-test"),
+            ("provider-test", "bafy-provider-test"),
+        ] {
+            capsules.insert(
+                name.to_string(),
+                CapsuleEntry {
+                    extra: Default::default(),
+                    cid: cid.to_string(),
+                    sha256: String::new(),
+                    size: 0,
+                    repository: None,
+                    platforms: vec![],
+                },
+            );
+        }
+
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let state = SupervisorState {
+            supervisor: Arc::new(supervisor),
+            data_dir: Some(data_dir.to_path_buf()),
+        };
+
+        use elastos_runtime::auth::AuthSessionGrantV1;
+        let now = crate::auth::now_ts();
+        let record =
+            crate::auth::store_test_human_principal(data_dir, "person:local:r6-supervisor");
+        let session_grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:r6-supervisor".to_string(),
+            session_id: "auth:r6-supervisor".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec!["plain-vm-test".to_string(), "provider-test".to_string()],
+        };
+        crate::auth::store_session_grant(data_dir, session_grant.clone()).unwrap();
+        let token_for = |app: &str| {
+            crate::api::gateway::issue_home_launch_token_for_auth_grant(
+                data_dir,
+                app,
+                &session_grant,
+            )
+            .unwrap()
+        };
+
+        let microvm_prefix = "launch_capsule failed: microVM capsules are not available on ";
+
+        let with_person = launch_capsule(
+            State(state.clone()),
+            Json(launch_input(serde_json::json!({
+                "name": "plain-vm-test",
+                "launch_grant": token_for("plain-vm-test")
+            }))),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(with_person.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            with_person.1.starts_with(microvm_prefix),
+            "person grant reaches the microVM gate: {:?}",
+            with_person.1
+        );
+        assert!(
+            with_person
+                .1
+                .contains(". Cannot launch capsule 'plain-vm-test'."),
+            "{:?}",
+            with_person.1
+        );
+
+        let without_grant = launch_capsule(
+            State(state.clone()),
+            Json(launch_input(serde_json::json!({
+                "name": "plain-vm-test"
+            }))),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(without_grant.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            without_grant.1.starts_with(microvm_prefix),
+            "a launch with no grant has no principal and reaches the same gate: {:?}",
+            without_grant.1
+        );
+        assert!(
+            without_grant
+                .1
+                .contains(". Cannot launch capsule 'plain-vm-test'."),
+            "{:?}",
+            without_grant.1
+        );
+
+        // The observable difference between the person and `None`: a
+        // non-shell-launchable capsule refuses a principal, and the same
+        // request without one falls through to the microVM gate.
+        let provider_with_person = launch_capsule(
+            State(state.clone()),
+            Json(launch_input(serde_json::json!({
+                "name": "provider-test",
+                "launch_grant": token_for("provider-test")
+            }))),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            provider_with_person.1,
+            "launch_capsule failed: principal launch grants are only valid for shell-launchable capsules",
+            "the typed person reaches the role check"
+        );
+
+        let provider_without_grant = launch_capsule(
+            State(state),
+            Json(launch_input(serde_json::json!({
+                "name": "provider-test"
+            }))),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            provider_without_grant.1.starts_with(microvm_prefix),
+            "no principal passes the role check: {:?}",
+            provider_without_grant.1
+        );
+        assert!(
+            provider_without_grant
+                .1
+                .contains(". Cannot launch capsule 'provider-test'."),
+            "{:?}",
+            provider_without_grant.1
+        );
     }
 }

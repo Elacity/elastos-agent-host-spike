@@ -123,8 +123,14 @@ pub async fn launch_capsule(
                 &walked.manifest.name,
                 req.launch_grant,
             )?;
-            let admission =
-                admit_agent_launch(Some(data_dir), walked, launcher.as_deref(), agent_id)?;
+            let admission = admit_agent_launch(
+                Some(data_dir),
+                walked,
+                launcher
+                    .as_ref()
+                    .map(crate::resource_bridge::BridgePrincipal::principal_str),
+                agent_id,
+            )?;
             (launcher, Some(admission))
         }
     };
@@ -207,7 +213,7 @@ fn principal_from_capsule_name(
     data_dir: Option<&std::path::Path>,
     capsule_name: &str,
     launch_grant: Option<String>,
-) -> Result<Option<String>, (StatusCode, String)> {
+) -> Result<Option<crate::resource_bridge::BridgePrincipal>, (StatusCode, String)> {
     let Some(grant) = launch_grant
         .map(|grant| grant.trim().to_string())
         .filter(|grant| !grant.is_empty())
@@ -226,13 +232,13 @@ fn principal_from_capsule_name(
         )
     })?;
     headers.insert("x-elastos-home-token", header_value);
-    let context = super::gateway::require_internal_shell_launch_grant_for_any_context(
+    let principal = super::gateway::require_internal_shell_launch_grant_principal(
         data_dir,
         &headers,
         &[capsule_name],
     )
     .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-    Ok(Some(context.principal_id().to_string()))
+    Ok(Some(principal))
 }
 
 fn principal_from_launch_request(
@@ -240,7 +246,7 @@ fn principal_from_launch_request(
     capsule_dir: &std::path::Path,
     principal_id: Option<String>,
     launch_grant: Option<String>,
-) -> Result<Option<String>, (StatusCode, String)> {
+) -> Result<Option<crate::resource_bridge::BridgePrincipal>, (StatusCode, String)> {
     reject_raw_launch_principal_id(principal_id.as_deref())?;
     let launch_grant = launch_grant
         .map(|grant| grant.trim().to_string())
@@ -406,7 +412,12 @@ pub(crate) mod tests {
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, Some(grant))
                 .unwrap();
 
-        assert_eq!(principal.as_deref(), Some(context.principal_id()));
+        assert_eq!(
+            principal
+                .as_ref()
+                .map(crate::resource_bridge::BridgePrincipal::principal_str),
+            Some(context.principal_id())
+        );
     }
 
     #[test]
@@ -1942,7 +1953,13 @@ pub(crate) mod tests {
         );
         let error = home
             .runtime
-            .run_local_with_principal(&plain, Vec::new(), Some(x.clone()))
+            .run_local_with_principal(
+                &plain,
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    x.as_str(),
+                )),
+            )
             .await
             .unwrap_err()
             .to_string();
