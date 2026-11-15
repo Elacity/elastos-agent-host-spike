@@ -2,7 +2,7 @@
   "schema": "elastos.capsule/v1",
   "name": "gba-viewer-core",
   "version": "0.1.0",
-  "description": "Read the ROM of the game this run was launched with, refuse a ROM over 64 MiB by name, and write one launch record naming its path, size and sha256. No display, no save and no GBA header check.",
+  "description": "Read the launch's file listing, take its one .gba file, refuse a ROM over 64 MiB by name from the listing's size, refuse a missing, empty or ambiguous ROM, ask the Runtime for that file's digest, and write one launch record naming its path, size and sha256. No display, no save and no GBA header check.",
   "author": "local-development",
   "role": "app",
   "type": "wasm",
