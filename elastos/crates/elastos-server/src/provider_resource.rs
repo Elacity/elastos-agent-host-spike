@@ -125,6 +125,7 @@ pub fn provider_operation_action(scheme: &str, op: &str) -> Option<Action> {
         "localhost" | "webspace" => localhost_op_required_action(op),
         "launch" => match op {
             "read" => Some(Action::Read),
+            "digest" => Some(Action::Read),
             "write" => Some(Action::Write),
             _ => None,
         },
@@ -335,9 +336,10 @@ fn validate_chain_network(network: &str) -> Result<(), String> {
 /// that name. The content's bare name, which asks for the listing, is judged
 /// as the pattern: the bridge's matching folds a trailing slash away, so the
 /// bare text would be covered by nothing, and it is the one request for all
-/// of it. The content is read only. No other text is a launch name.
+/// of it. The content is read only, and a digest names one of its files, whole.
+/// No other text is a launch name.
 fn launch_resource(op: &str, request: &Value) -> Result<String, String> {
-    ensure_supported_operation("launch", op, &["read", "write"])?;
+    ensure_supported_operation("launch", op, &["read", "write", "digest"])?;
     let name = request
         .get("path")
         .and_then(|value| value.as_str())
@@ -347,6 +349,7 @@ fn launch_resource(op: &str, request: &Value) -> Result<String, String> {
             "" => Err(format!(
                 "a launch's output is named by a name under {LAUNCH_OUTPUT}"
             )),
+            _ if op == "digest" => Err("a digest names content, not the output".to_string()),
             _ => Ok(name.to_string()),
         };
     }
@@ -354,7 +357,12 @@ fn launch_resource(op: &str, request: &Value) -> Result<String, String> {
         None => Err(format!(
             "a launch name is {LAUNCH_CONTENT} or {LAUNCH_OUTPUT}, or a name under one of them"
         )),
-        Some(_) if op != "read" => Err("a launch's content is read only".to_string()),
+        Some(_) if !matches!(op, "read" | "digest") => {
+            Err("a launch's content is read only".to_string())
+        }
+        Some("") if op == "digest" => Err(format!(
+            "a digest names one file of a launch's content, under {LAUNCH_CONTENT}, not its listing"
+        )),
         Some("") => Ok(LAUNCH_CONTENT_PATTERN.to_string()),
         Some(_) => Ok(name.to_string()),
     }
@@ -772,6 +780,54 @@ mod tests {
         ] {
             assert!(build_capability_resource("ipfs", op, &serde_json::json!({})).is_err());
             assert!(provider_operation_action("ipfs", op).is_none());
+        }
+    }
+
+    /// A digest on a launch name is the read action, on one file of the
+    /// content: `launch`/`digest` maps to `Read`, and a digest names a content
+    /// file name only. The launch operation set is exactly read, write, digest.
+    #[test]
+    fn a_launch_digest_is_a_read_of_one_content_file() {
+        let name = |path: &str| serde_json::json!({"path": path});
+        let file = format!("{LAUNCH_CONTENT}images/01.png");
+        assert_eq!(
+            provider_operation_action("launch", "digest"),
+            Some(Action::Read)
+        );
+        assert_eq!(
+            provider_operation_action("launch", "read"),
+            Some(Action::Read)
+        );
+        assert_eq!(
+            provider_operation_action("launch", "write"),
+            Some(Action::Write)
+        );
+        assert_eq!(
+            build_capability_resource("launch", "digest", &name(&file)).unwrap(),
+            file
+        );
+        assert_eq!(
+            build_capability_resource("launch", "read", &name(&file)).unwrap(),
+            file
+        );
+        // The bare content name is the listing, not a digestible file; an
+        // output name is not the content; any other text is no launch name.
+        assert!(build_capability_resource("launch", "digest", &name(LAUNCH_CONTENT)).is_err());
+        assert!(build_capability_resource(
+            "launch",
+            "digest",
+            &name(&format!("{LAUNCH_OUTPUT}playlist.json"))
+        )
+        .is_err());
+        assert!(
+            build_capability_resource("launch", "digest", &name("elastos://launch/store")).is_err()
+        );
+        for op in ["delete", "execute", "admin", "digestall"] {
+            assert!(provider_operation_action("launch", op).is_none(), "{op}");
+            assert!(
+                build_capability_resource("launch", op, &name(&file)).is_err(),
+                "{op}"
+            );
         }
     }
 

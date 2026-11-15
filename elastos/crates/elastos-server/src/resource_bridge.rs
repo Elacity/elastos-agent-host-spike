@@ -6,7 +6,7 @@
 //! Wire format: newline-delimited JSON matching `RequestEnvelope` / `ResponseEnvelope`
 //! from `elastos-guest::runtime`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +23,7 @@ use elastos_common::localhost::{
 };
 use elastos_common::AuthorityBound;
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use elastos_runtime::auth::RuntimeAuditEventV1;
@@ -69,6 +70,13 @@ pub struct LaunchContent {
     listing: Vec<u8>,
     /// What the program has written for the launch, by name.
     output: std::sync::Mutex<BTreeMap<String, Vec<u8>>>,
+    /// The sha256 of a content file, by its path: made once, on the first
+    /// digest asked for, and kept, so one launch hashes each file at most once.
+    digests: std::sync::Mutex<HashMap<String, String>>,
+    /// How many times this launch has hashed a file: a test's window onto
+    /// the memo. It is not part of the product.
+    #[cfg(test)]
+    hashes: std::sync::atomic::AtomicUsize,
 }
 
 /// One plain name of a launch's output: letters, digits, `.`, `_` and `-`,
@@ -102,6 +110,9 @@ impl LaunchContent {
                 files,
                 listing,
                 output: std::sync::Mutex::default(),
+                digests: std::sync::Mutex::default(),
+                #[cfg(test)]
+                hashes: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
@@ -123,6 +134,22 @@ impl LaunchContent {
             "" => Some(self.listing.clone()),
             path => self.files.get(path).cloned(),
         }
+    }
+
+    /// The size of the content file at `path` and its sha256, as 64 lowercase
+    /// hex digits, over the whole file: the bytes `read` serves, all of them.
+    /// The digest is made on the first ask and kept for this launch. A name
+    /// the content does not hold gets nothing.
+    pub(crate) fn digest(&self, path: &str) -> Option<(usize, String)> {
+        let bytes = self.files.get(path)?;
+        let mut digests = self.digests.lock().unwrap_or_else(|it| it.into_inner());
+        let sha256 = digests.entry(path.to_string()).or_insert_with(|| {
+            #[cfg(test)]
+            self.hashes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            format!("{:x}", Sha256::digest(bytes))
+        });
+        Some((bytes.len(), sha256.clone()))
     }
 
     /// Write `bytes` under `name` in the launch's output, in place of what
@@ -176,6 +203,19 @@ fn launch_response(
     let Some(launch) = launch else {
         return resource_error_response("not_found", NO_LAUNCH);
     };
+    // A digest names one file of the content, whole: `offset` and `length`
+    // are no part of it, and neither the listing nor the output has one.
+    if operation == "digest" {
+        let held = name
+            .strip_prefix(LAUNCH_CONTENT)
+            .filter(|path| !path.is_empty());
+        return match held.and_then(|path| launch.digest(path)) {
+            Some((size, sha256)) => provider_ok_result(serde_json::json!({
+                "path": name, "size": size, "algorithm": "sha256", "sha256": sha256
+            })),
+            None => resource_error_response("not_found", NO_LAUNCH),
+        };
+    }
     if operation == "write" {
         let bytes = match request_content_bytes(request) {
             Ok(bytes) => bytes,
@@ -2119,6 +2159,37 @@ mod tests {
         serde_json::json!({"id": 42, "request": request}).to_string()
     }
 
+    fn launch_digest(name: &str, token: &str, body: serde_json::Value) -> String {
+        let request = serde_json::json!({
+            "type": "resource_invoke", "uri": name, "operation": "digest", "token": token, "body": body
+        });
+        serde_json::json!({"id": 45, "request": request}).to_string()
+    }
+
+    /// The `data` a read or a digest answers, or the refusal's code.
+    async fn launch_data(
+        ctx: &BridgeContext,
+        line: &str,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let answer = handle_request(line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        let response = &answer["response"];
+        match response["result"]["status"].as_str() {
+            Some("ok") => Ok(response["result"]["data"].clone()),
+            _ => Err(response["code"].as_str().unwrap_or("?").to_string()),
+        }
+    }
+
+    /// This launch's count of content files it has hashed.
+    fn hashes(ctx: &BridgeContext) -> usize {
+        ctx.launch
+            .as_ref()
+            .unwrap()
+            .hashes
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The token of a granted request, or the refusal's code.
     async fn launch_grant(
         ctx: &BridgeContext,
@@ -2299,6 +2370,290 @@ mod tests {
                 .await
                 .unwrap_err(),
             "not_found"
+        );
+    }
+
+    /// A digest of a launch's content file is the sha256 of that whole file's
+    /// bytes, the path asked for, the file's size and the algorithm it was made
+    /// with: the known vector for `abc`, and nothing else in the answer.
+    #[tokio::test]
+    async fn a_digest_of_a_launch_file_is_the_sha256_of_its_whole_bytes() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[("notes/abc.txt", b"abc"), ("images/01.png", b"first set")],
+        );
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let name = "elastos://launch/content/notes/abc.txt";
+        assert_eq!(
+            launch_data(&one, &launch_digest(name, &token, serde_json::json!({})))
+                .await
+                .unwrap(),
+            serde_json::json!({
+                "path": name,
+                "size": 3,
+                "algorithm": "sha256",
+                "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            })
+        );
+    }
+
+    /// A digest is of the whole file, so `offset` and `length` in the request
+    /// change nothing: the answer that carries them is the answer that does not.
+    #[tokio::test]
+    async fn a_digest_answers_the_whole_file_whatever_window_the_request_carries() {
+        let base = bridge_context();
+        let one = launched(&base, "core-one", &[("notes/abc.txt", b"abc")]);
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let name = "elastos://launch/content/notes/abc.txt";
+        let whole = launch_data(&one, &launch_digest(name, &token, serde_json::json!({})))
+            .await
+            .unwrap();
+        let windowed = launch_data(
+            &one,
+            &launch_digest(name, &token, serde_json::json!({"offset": 1, "length": 2})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(windowed, whole);
+        assert_eq!(
+            windowed["sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(windowed["size"], 3);
+    }
+
+    /// Where the name is no file of the content, a digest is `not_found`: an
+    /// unknown name, or a launch that is over. The bare content name is the
+    /// listing: `launch_resource` refuses its digest before the branch, and the
+    /// branch refuses it as `not_found` too.
+    #[tokio::test]
+    async fn a_digest_answers_not_found_for_a_name_that_is_no_content_file() {
+        let base = bridge_context();
+        let one = launched(&base, "core-one", &[("notes/abc.txt", b"abc")]);
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let none = serde_json::json!({});
+        for missing in [
+            "elastos://launch/content/notes/def.txt",
+            "elastos://launch/content/notes",
+            "elastos://launch/content/Notes/abc.txt",
+        ] {
+            assert_eq!(
+                launch_data(&one, &launch_digest(missing, &token, none.clone()))
+                    .await
+                    .unwrap_err(),
+                "not_found",
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            launch_data(&one, &launch_digest(LAUNCH_CONTENT, &token, none.clone()))
+                .await
+                .unwrap_err(),
+            "invalid_resource_invoke"
+        );
+        let branch = launch_response(
+            one.launch.as_deref(),
+            "digest",
+            &serde_json::json!({"path": LAUNCH_CONTENT}),
+        );
+        assert_eq!(branch["code"], "not_found", "{branch}");
+        let mut over = one.clone();
+        over.launch = None;
+        assert_eq!(
+            launch_data(
+                &over,
+                &launch_digest(
+                    "elastos://launch/content/notes/abc.txt",
+                    &token,
+                    none.clone()
+                )
+            )
+            .await
+            .unwrap_err(),
+            "not_found"
+        );
+    }
+
+    /// A digest never answers a name of the launch's output. The caller holds
+    /// read on the output pattern, and the output name holds the same three
+    /// bytes as a content file, so the refusal is the digest's own:
+    /// `launch_resource` refuses the operation on an output name, and the
+    /// branch refuses it as `not_found` when it is asked directly.
+    #[tokio::test]
+    async fn a_digest_never_answers_a_launch_output_name() {
+        use elastos_common::AskAction::{Read, Write};
+        let base = bridge_context();
+        let mut one = launched(&base, "core-one", &[("notes/abc.txt", b"abc")]);
+        one.manifest_capabilities = vec![
+            AuthorityBound {
+                resource: LAUNCH_CONTENT_PATTERN.to_string(),
+                actions: Some(vec![Read]),
+            },
+            AuthorityBound {
+                resource: LAUNCH_OUTPUT_PATTERN.to_string(),
+                actions: Some(vec![Read, Write]),
+            },
+        ];
+        let write = launch_grant(&one, LAUNCH_OUTPUT_PATTERN, "write")
+            .await
+            .unwrap();
+        let read = launch_grant(&one, LAUNCH_OUTPUT_PATTERN, "read")
+            .await
+            .unwrap();
+        let playlist = "elastos://launch/output/playlist.json";
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"abc".to_vec()).await,
+            Ok(3)
+        );
+        assert_eq!(
+            launch_bytes(&one, &launch_read(playlist, &read, serde_json::json!({})))
+                .await
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            launch_data(&one, &launch_digest(playlist, &read, serde_json::json!({})))
+                .await
+                .unwrap_err(),
+            "invalid_resource_invoke"
+        );
+        assert_eq!(hashes(&one), 0);
+        let branch = launch_response(
+            one.launch.as_deref(),
+            "digest",
+            &serde_json::json!({"path": playlist}),
+        );
+        assert_eq!(branch["code"], "not_found", "{branch}");
+        assert_eq!(hashes(&one), 0);
+    }
+
+    /// A digest is judged by the read action on the content's names, exactly as
+    /// a read is: a token for another name opens neither, and a write-only token
+    /// opens neither.
+    #[tokio::test]
+    async fn a_digest_is_judged_by_the_read_action_exactly_as_a_read_is() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[("notes/abc.txt", b"abc"), ("images/01.png", b"first set")],
+        );
+        let none = serde_json::json!({});
+        let abc = "elastos://launch/content/notes/abc.txt";
+        let picture = "elastos://launch/content/images/01.png";
+        let read_abc = bridge_token(&one, abc, Action::Read);
+        assert!(
+            launch_data(&one, &launch_digest(abc, &read_abc, none.clone()))
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            launch_data(&one, &launch_digest(picture, &read_abc, none.clone()))
+                .await
+                .unwrap_err(),
+            "capability_denied"
+        );
+        assert_eq!(
+            launch_bytes(&one, &launch_read(picture, &read_abc, none.clone()))
+                .await
+                .unwrap_err(),
+            "capability_denied"
+        );
+        let write_content = bridge_token(&one, LAUNCH_CONTENT_PATTERN, Action::Write);
+        assert_eq!(
+            launch_data(&one, &launch_digest(abc, &write_content, none.clone()))
+                .await
+                .unwrap_err(),
+            "capability_denied"
+        );
+        assert_eq!(
+            launch_bytes(&one, &launch_read(abc, &write_content, none.clone()))
+                .await
+                .unwrap_err(),
+            "capability_denied"
+        );
+    }
+
+    /// One launch hashes each content file at most once: two digests of one file
+    /// compute one hash, and a second file is a second hash.
+    #[tokio::test]
+    async fn a_launch_hashes_each_content_file_once() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[("notes/abc.txt", b"abc"), ("images/01.png", b"first set")],
+        );
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let none = serde_json::json!({});
+        let abc = "elastos://launch/content/notes/abc.txt";
+        let picture = "elastos://launch/content/images/01.png";
+        assert_eq!(hashes(&one), 0);
+        let first = launch_data(&one, &launch_digest(abc, &token, none.clone()))
+            .await
+            .unwrap();
+        assert_eq!(hashes(&one), 1);
+        let again = launch_data(&one, &launch_digest(abc, &token, none.clone()))
+            .await
+            .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(hashes(&one), 1);
+        launch_data(&one, &launch_digest(picture, &token, none.clone()))
+            .await
+            .unwrap();
+        assert_eq!(hashes(&one), 2);
+        launch_data(&one, &launch_digest(picture, &token, none.clone()))
+            .await
+            .unwrap();
+        assert_eq!(hashes(&one), 2);
+    }
+
+    /// The listing and a read answer exactly as they did before the digest: the
+    /// listing is its own text, and a read is its bytes and its size.
+    #[tokio::test]
+    async fn the_listing_and_a_read_answer_as_they_did_before_the_digest() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[("notes/abc.txt", b"abc"), ("capsule.json", b"{}")],
+        );
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let listing = launch_bytes(
+            &one,
+            &launch_read(LAUNCH_CONTENT, &token, serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(listing).unwrap(),
+            r#"{"files":[{"path":"capsule.json","size":2},{"path":"notes/abc.txt","size":3}],"schema":"elastos.launch.content-listing/v1"}"#
+        );
+        assert_eq!(
+            launch_data(
+                &one,
+                &launch_read(
+                    "elastos://launch/content/notes/abc.txt",
+                    &token,
+                    serde_json::json!({})
+                )
+            )
+            .await
+            .unwrap()
+            .to_string(),
+            r#"{"content":[97,98,99],"size":3}"#
         );
     }
 
