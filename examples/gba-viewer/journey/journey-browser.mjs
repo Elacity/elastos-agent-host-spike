@@ -267,13 +267,15 @@ try {
       .catch((error) => console.error(`could not write canvas-sample-2.png: ${redact(String(error && error.message || error)).slice(0, 300)}`));
     const frames = (sample) => sample.byCallback.MainLoop_runner || 0;
     const delta = frames(second) - frames(first);
-    const elapsedMs = Math.round(second.at_ms - first.at_ms);
+    // Compare the raw measured window with the literal BEFORE any rounding: 2500.4 ms is an overrun.
+    const rawElapsedMs = second.at_ms - first.at_ms;
+    const elapsedMs = Math.round(rawElapsedMs);
     const callers = [...new Set([...Object.keys(first.byCallback), ...Object.keys(second.byCallback)])];
-    const withinWindow = elapsedMs <= 2500;
+    const withinWindow = rawElapsedMs <= 2500;
     check("frames advance (mGBA's MainLoop_runner renders at least 30 frames in 2 s)",
       delta >= 30 && withinWindow,
       { first, second, delta, elapsed_ms: elapsedMs, callers,
-        ...(withinWindow ? {} : { overran: `frame window overran: ${elapsedMs} ms` }) });
+        ...(withinWindow ? {} : { overran: `frame window overran: ${rawElapsedMs.toFixed(1)} ms` }) });
     results.samples = { first, second };
     results.frames = delta;
     results.elapsed_ms = elapsedMs;
