@@ -752,10 +752,24 @@ mod tests {
         assert_eq!(normalize_query_path("///a///b///c///").unwrap(), "a/b/c");
     }
     /// S5 row R4.9: the namespace route addresses the session owner's own
-    /// namespace key. X and Y ask for the same spelling
-    /// `localhost://UsersAI/agent-y-root/x` and each gets its own bytes; Y's
-    /// namespace listing and CID stay the same when X writes, and no `UsersAI`
-    /// area appears on disk.
+    /// namespace key, not the principal whose root the path names.
+    ///
+    /// Y is a stored Agent principal: `crate::auth::valid_agent` (auth.rs:12953)
+    /// holds the record whose root is
+    /// `localhost://UsersAI/ba287e12925d9408db0f24e3` (auth.rs:12958, the hand
+    /// literal pinned by `agent_record_root_is_the_hand_computed_literal`). The
+    /// Runtime reads that root from the stored record with
+    /// `principal_stored_localhost_root` (auth.rs:9100); an Agent root is
+    /// `UsersAI/` plus the first 12 bytes of SHA-256 of the principal id, hex
+    /// (`principal_kind_localhost_root`, auth.rs:9076).
+    ///
+    /// The path names that stored segment. Y's namespace owner is the route's
+    /// own fallback rule (`session_owner`, namespace.rs:539) applied to the
+    /// segment: `hex(SHA-256(segment))`. Y's own bytes are seeded in that
+    /// namespace at the stored spelling before X acts. A regression that derives
+    /// the owner from the request path with the same rule opens Y's valid,
+    /// seeded key instead of failing on an invalid owner, and the row's Y-bytes
+    /// assertions catch it.
     #[tokio::test]
     async fn the_namespace_route_addresses_the_session_owners_own_key() {
         use axum::body::Body;
@@ -763,13 +777,45 @@ mod tests {
         use tower::ServiceExt;
 
         const OWNER_X: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-        const OWNER_Y: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-        const SPELLING: &str = "localhost://UsersAI/agent-y-root/x";
+        // hex(SHA-256("ba287e12925d9408db0f24e3")), computed outside this file.
+        const OWNER_Y: &str = "c745ae90394847bcccfd5bb1962a633c9eac4edca1edbd3dcbcd5b641050e63d";
+        // Y's stored root segment, from `auth::valid_agent::ROOT` (auth.rs:12958).
+        const YSEGMENT: &str = "ba287e12925d9408db0f24e3";
+        const SPELLING: &str = "localhost://UsersAI/ba287e12925d9408db0f24e3/x";
         // `normalize_query_path` drops the empty segment of `//`, so the
         // intact `localhost://` prefix is gone before the store sees it.
-        const COLLAPSED: &str = "localhost:/UsersAI/agent-y-root/x";
+        const COLLAPSED: &str = "localhost:/UsersAI/ba287e12925d9408db0f24e3/x";
+        const Y_PAYLOAD: &[u8] = b"y-payload";
+
+        // Y is a stored principal and the path carries that record's own segment.
+        let auth_dir = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(auth_dir.path());
+        let stored_root = crate::auth::principal_stored_localhost_root(
+            Some(auth_dir.path()),
+            crate::auth::valid_agent::ID,
+        )
+        .unwrap();
+        assert_eq!(
+            stored_root,
+            format!("localhost://UsersAI/{YSEGMENT}"),
+            "the stored Agent record's root segment is the path segment"
+        );
+        assert_eq!(
+            crate::auth::principal_kind_localhost_root(
+                crate::auth::valid_agent::ID,
+                crate::auth::PrincipalKind::Agent,
+            ),
+            stored_root,
+            "the Runtime's Agent-kind rule derives that stored root"
+        );
 
         let (state, dir) = test_namespace_state();
+        // Y's own namespace is seeded through the store before X acts.
+        state
+            .namespace_store
+            .write_path(OWNER_Y, COLLAPSED, Y_PAYLOAD, None)
+            .await
+            .unwrap();
         let app = |session: Session| {
             axum::Router::new()
                 .route("/api/namespace/list", get(list_path))
@@ -831,10 +877,12 @@ mod tests {
                 .unwrap()
         };
 
-        // Y writes first, so its listing and CID are a real state to compare.
-        let (y_write_status, y_write_body) = send(y.clone(), write(b"y-payload")).await;
+        // Y's seeded listing and CID are the state X's write must not touch.
         let (_, y_listing_before) = send(y.clone(), listing()).await;
         let (_, y_status_before) = send(y.clone(), status()).await;
+        let y_status_before_json: serde_json::Value =
+            serde_json::from_slice(&y_status_before).unwrap();
+        assert_eq!(y_status_before_json["owner"], OWNER_Y, "Y's status names Y");
 
         let (x_write_status, x_write_body) = send(x.clone(), write(b"x-payload")).await;
         assert_eq!(
@@ -842,40 +890,34 @@ mod tests {
             StatusCode::OK,
             "X's own write at the spelling lands in X's own namespace key"
         );
-        assert_eq!(
-            y_write_status,
-            StatusCode::OK,
-            "Y's own write at the spelling lands in Y's own namespace key"
-        );
 
-        // Each write lands under its own owner key, at the collapsed spelling.
+        // X's write lands under X's owner key, at the collapsed spelling.
         let x_written: serde_json::Value = serde_json::from_slice(&x_write_body).unwrap();
-        let y_written: serde_json::Value = serde_json::from_slice(&y_write_body).unwrap();
         assert_eq!(
             x_written["path"], COLLAPSED,
             "X's write reports the collapsed spelling it stored"
         );
-        assert_eq!(
-            y_written["path"], COLLAPSED,
-            "Y's write reports the same collapsed spelling"
-        );
         assert_ne!(
-            x_written["namespace_cid"], y_written["namespace_cid"],
-            "the same spelling gives each owner its own namespace"
+            x_written["namespace_cid"], y_status_before_json["namespace_cid"],
+            "the same spelling gives X a namespace other than Y's seeded one"
         );
 
-        // X reads its own bytes, Y reads its own bytes, at the same spelling.
+        // Y still reads its own seeded bytes. With the owner taken from the
+        // path at write_content, X's write lands in Y's key and this fails here.
+        let (_, y_read) = send(y.clone(), read()).await;
+        assert_eq!(
+            y_read,
+            Y_PAYLOAD.to_vec(),
+            "Y reads its own seeded namespace key at the spelling"
+        );
+
+        // X reads its own bytes, not Y's seeded ones. With the owner taken from
+        // the path at read_content, X's read opens Y's key and this fails here.
         let (_, x_read) = send(x.clone(), read()).await;
         assert_eq!(
             x_read,
             b"x-payload".to_vec(),
-            "X reads its own namespace key"
-        );
-        let (_, y_read) = send(y.clone(), read()).await;
-        assert_eq!(
-            y_read,
-            b"y-payload".to_vec(),
-            "Y reads its own namespace key"
+            "X reads its own namespace key, not Y's seeded bytes"
         );
 
         // Resolve reports the collapsed spelling under X's owner key.
@@ -898,6 +940,24 @@ mod tests {
             "status names the CID the write minted"
         );
 
+        // No response to X carries Y's seeded bytes: a read as well as a write.
+        let (_, x_listing_body) = send(x.clone(), listing()).await;
+        let carries_y = |body: &[u8]| {
+            body.windows(Y_PAYLOAD.len())
+                .any(|window| window == Y_PAYLOAD)
+        };
+        let x_answers: Vec<&[u8]> = vec![
+            &x_write_body,
+            &x_read,
+            &x_resolve_body,
+            &x_listing_body,
+            &x_status_body,
+        ];
+        assert!(
+            x_answers.iter().all(|body| !carries_y(body)),
+            "no response to X carries Y's seeded bytes"
+        );
+
         // X's write left Y's namespace listing and CID exactly as they were.
         let (_, y_listing_after) = send(y.clone(), listing()).await;
         let (_, y_status_after) = send(y.clone(), status()).await;
@@ -909,8 +969,6 @@ mod tests {
             y_status_before, y_status_after,
             "X's write does not change Y's namespace CID"
         );
-        let y_status: serde_json::Value = serde_json::from_slice(&y_status_after).unwrap();
-        assert_eq!(y_status["owner"], OWNER_Y, "Y's status names Y");
 
         // The store holds one file per owner and no `UsersAI` area.
         let mut names: Vec<String> = std::fs::read_dir(dir.path())
