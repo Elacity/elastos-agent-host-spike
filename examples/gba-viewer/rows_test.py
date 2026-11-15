@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Rows for AP4 slice 1a: the by-CID mapping and the staging script.
+
+Every row drives the real script as a subprocess. Expected values are written
+here as literals: the product manifests' own keys, the uCity ROM's sha256, and
+two CIDs of valid form. Nothing is compared with a value the code under test
+produced.
+"""
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = pathlib.Path(__file__).resolve().parent
+REPO_ROOT = HERE.parent.parent
+DERIVE = HERE / "derive_manifest.py"
+PREPARE = HERE / "prepare_bundles.py"
+
+PAGE_MANIFEST = REPO_ROOT / "capsules" / "gba-emulator" / "capsule.json"
+CONTENT_MANIFEST = REPO_ROOT / "capsules" / "gba-ucity" / "capsule.json"
+PAGE_SOURCE = REPO_ROOT / "capsules" / "gba-emulator" / "browser"
+
+# CIDs of valid form (CIDv1, dag-pb, sha2-256, base32), made by hand for these
+# rows. They pin nothing in the store; slice 3 stages the real bundles.
+CORE_CID = "bafybeigijtnr7xsdt43yd6gmd32aut4zsnhypc4plrr3vz5wsnn5z2bdde"
+PAGE_CID = "bafybeigg4bqmwko7ft4lkehcd6hvuzi2wx3w4kix7xgvkoheyrvbcc4nry"
+CORE_NAME = "gba-viewer-core"
+
+# facts.md section 1.3, read back with `shasum -a 256` when these rows were written.
+UCITY_SHA256 = "069230a67939896c15cba86f0bffe31d12655597e2ac4cfed5b832e216b57bff"
+
+PAGE_KEYS = {
+    "schema", "name", "version", "description", "author", "role", "type",
+    "execution", "runtime_abi", "bus_contract", "entrypoint", "projections",
+    "window_policy", "icon", "resources", "requires",
+}
+CONTENT_KEYS = {
+    "schema", "name", "version", "description", "author", "role", "type",
+    "entrypoint", "icon", "requires",
+}
+PAGE_FILES = {
+    "browser/UPSTREAM.md",
+    "browser/assets/fonts/Inter-latin-var.woff2",
+    "browser/elastos-accent-picker.js",
+    "browser/elastos-theme.js",
+    "browser/elastos-ui.css",
+    "browser/emulator.js",
+    "browser/favicon.svg",
+    "browser/gba-input.js",
+    "browser/icons/icon-32.png",
+    "browser/icons/icon-64.png",
+    "browser/icons/icon-128.png",
+    "browser/icons/icon-256.png",
+    "browser/index.html",
+    "browser/mgba.js",
+    "browser/mgba.wasm",
+    "browser/style.css",
+}
+
+
+def run(script, *arguments):
+    return subprocess.run(
+        [sys.executable, "-I", str(script), *arguments],
+        capture_output=True, text=True, timeout=120,
+    )
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def derive(capsule, out, cid, name=None):
+    arguments = ["--capsule", str(capsule), "--out", str(out), "--cid", cid]
+    if name is not None:
+        arguments += ["--requires-name", name]
+    return run(DERIVE, *arguments)
+
+
+def prepare(out):
+    return run(
+        PREPARE,
+        "--out", str(out),
+        "--core-cid", CORE_CID,
+        "--core-name", CORE_NAME,
+        "--page-cid", PAGE_CID,
+    )
+
+
+class Rows(unittest.TestCase):
+    def test_r1_the_page_manifest_is_derived_by_the_mapping(self):
+        """r1 the derived page manifest has no interfaces or permissions"""
+        with tempfile.TemporaryDirectory(prefix="gba-r1-") as temporary:
+            out = pathlib.Path(temporary) / "page"
+            result = derive(PAGE_MANIFEST, out, CORE_CID, CORE_NAME)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            derived = json.loads((out / "capsule.json").read_text())
+            product = json.loads(PAGE_MANIFEST.read_text())
+
+            self.assertNotIn("interfaces", derived)
+            self.assertNotIn("permissions", derived)
+            self.assertEqual(set(derived), PAGE_KEYS)
+            self.assertEqual(derived["requires"], [
+                {"name": CORE_NAME, "kind": "capsule", "cid": CORE_CID},
+            ])
+            for key in PAGE_KEYS - {"requires"}:
+                self.assertEqual(derived[key], product[key], key)
+
+    def test_r2_the_content_manifest_is_derived_by_the_mapping(self):
+        """r2 the derived content manifest has no viewer interfaces or permissions"""
+        with tempfile.TemporaryDirectory(prefix="gba-r2-") as temporary:
+            out = pathlib.Path(temporary) / "content"
+            result = derive(CONTENT_MANIFEST, out, PAGE_CID)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            derived = json.loads((out / "capsule.json").read_text())
+            product = json.loads(CONTENT_MANIFEST.read_text())
+
+            for key in ("viewer", "interfaces", "permissions"):
+                self.assertNotIn(key, derived)
+            self.assertEqual(set(derived), CONTENT_KEYS)
+            self.assertEqual(derived["requires"], [
+                {"name": "gba-emulator", "kind": "capsule", "cid": PAGE_CID},
+            ])
+            for key in CONTENT_KEYS - {"requires"}:
+                self.assertEqual(derived[key], product[key], key)
+
+    def test_r3_an_unknown_key_is_refused_by_name(self):
+        """r3 an unknown key in a product manifest copy is refused"""
+        with tempfile.TemporaryDirectory(prefix="gba-r3-") as temporary:
+            root = pathlib.Path(temporary)
+            copy = root / "capsule.json"
+            manifest = json.loads(PAGE_MANIFEST.read_text())
+            manifest["agent"] = {"id": "nobody"}
+            manifest["capabilities"] = ["x"]
+            copy.write_text(json.dumps(manifest))
+            out = root / "page"
+            result = derive(copy, out, CORE_CID, CORE_NAME)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(result.stderr, "derive_manifest_unknown_key: agent\n")
+            self.assertFalse(out.exists())
+
+    def test_r4_staged_bytes_equal_the_product_files(self):
+        """r4 staged bytes hash to the product bytes, and a changed byte fails"""
+        with tempfile.TemporaryDirectory(prefix="gba-r4-") as temporary:
+            out = pathlib.Path(temporary) / "out"
+            result = prepare(out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            staged_rom = out / "content" / "ucity.gba"
+            product_rom = REPO_ROOT / "capsules" / "gba-ucity" / "ucity.gba"
+            self.assertEqual(sha256(staged_rom), UCITY_SHA256)
+            self.assertEqual(staged_rom.read_bytes(), product_rom.read_bytes())
+
+            staged_pages = {
+                str(path.relative_to(out / "page"))
+                for path in (out / "page").rglob("*") if path.is_file()
+            }
+            self.assertEqual(staged_pages, PAGE_FILES | {"capsule.json"})
+            for name in PAGE_FILES:
+                self.assertEqual(
+                    (out / "page" / name).read_bytes(),
+                    (PAGE_SOURCE / name[len("browser/"):]).read_bytes(), name,
+                )
+
+            receipt = (out / "receipt.txt").read_text().splitlines()
+            self.assertEqual(
+                f"content/ucity.gba staged={UCITY_SHA256} product={UCITY_SHA256}",
+                next(line for line in receipt if line.startswith("content/ucity.gba ")),
+            )
+            products = {
+                f"page/{name}": PAGE_SOURCE / name[len("browser/"):]
+                for name in PAGE_FILES
+            }
+            products["content/ucity.gba"] = product_rom
+            recorded = {}
+            for line in receipt:
+                name, rest = line.split(" ", 1)
+                recorded[name] = dict(
+                    part.split("=", 1) for part in rest.split(" ") if "=" in part
+                )
+                self.assertEqual(recorded[name]["staged"], sha256(out / name), name)
+                if name.endswith("capsule.json"):
+                    self.assertEqual(recorded[name]["product"], "derived", name)
+                else:
+                    self.assertEqual(
+                        recorded[name]["product"], sha256(products[name]), name,
+                    )
+            self.assertEqual(
+                set(recorded),
+                set(products) | {"page/capsule.json", "content/capsule.json"},
+            )
+
+            # One changed staged byte is caught before anything else is written.
+            staged_rom.write_bytes(staged_rom.read_bytes()[:-1] + b"\x00")
+            again = prepare(out)
+            self.assertEqual(again.returncode, 1, again.stdout)
+            self.assertEqual(
+                again.stderr, "prepare_bundles_sha256_differs: content/ucity.gba\n",
+            )
+
+    def test_r5_an_output_folder_inside_the_repo_is_refused(self):
+        """r5 an output folder inside the checkout is refused"""
+        inside = HERE / "probe-inside-repo"
+        self.assertFalse(inside.exists())
+        result = derive(PAGE_MANIFEST, inside, CORE_CID, CORE_NAME)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(
+            result.stderr, f"derive_manifest_output_inside_repo: {inside}\n",
+        )
+        self.assertFalse(inside.exists())
+
+        result = prepare(inside)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(
+            result.stderr, f"derive_manifest_output_inside_repo: {inside}\n",
+        )
+        self.assertFalse(inside.exists())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

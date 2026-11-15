@@ -1,4 +1,7 @@
 *
 !/.gitignore
+!/derive_manifest.py
+!/prepare_bundles.py
+!/rows_test.py
 !/verify.sh
-!/verify_empty_test.py
+!/verify_gate_test.py
