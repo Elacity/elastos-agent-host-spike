@@ -1919,16 +1919,16 @@ fn an_agent_launch_admits_each_agents_own_actor_and_root() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(first.actor, agents[0]);
-    assert_eq!(second.actor, agents[1]);
-    assert_ne!(first.actor, second.actor);
+    assert_eq!(first.actor(), agents[0]);
+    assert_eq!(second.actor(), agents[1]);
+    assert_ne!(first.actor(), second.actor());
     let root =
         |id: &str| crate::auth::principal_stored_localhost_root(Some(home.path()), id).unwrap();
     assert_ne!(root(&agents[0]), root(&agents[1]));
     for id in &agents {
         let own = root(id);
         assert!(own.starts_with("localhost://UsersAI/"), "{own}");
-        assert_eq!(root(&first.actor), root(&agents[0]));
+        assert_eq!(root(first.actor()), root(&agents[0]));
     }
     assert!(admit_walked(
         home.path(),
@@ -2066,7 +2066,7 @@ fn an_agent_launch_refuses_a_capsule_that_is_not_the_stored_host() {
     );
     // The stored host itself still admits the agent's actor.
     assert_eq!(
-        launch(stored_host.path()).unwrap().unwrap().actor,
+        launch(stored_host.path()).unwrap().unwrap().actor(),
         agents[0]
     );
 }

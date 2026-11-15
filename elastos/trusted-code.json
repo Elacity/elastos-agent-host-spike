@@ -24,6 +24,7 @@
     "elastos/crates/elastos-server/src/installed_release.rs",
     "elastos/crates/elastos-server/src/api/viewer_gateway.rs",
     "elastos/crates/elastos-server/src/api/handlers/capability.rs",
+    "elastos/crates/elastos-server/src/api/handlers/supervisor_api.rs",
     "elastos/crates/elastos-server/src/auth.rs",
     "elastos/crates/elastos-server/src/crypto.rs",
     "elastos/crates/elastos-server/src/auth/verified_launch_token_signer.rs",

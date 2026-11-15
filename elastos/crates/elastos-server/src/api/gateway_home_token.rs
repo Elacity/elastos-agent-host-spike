@@ -152,12 +152,43 @@ struct HomeLaunchTokenEnvelope {
     signer_did: String,
 }
 
+/// A launch grant this Runtime verified: the one witness a bridge principal
+/// may be minted from on the signed-grant path.
+///
+/// The seal is the private field plus the absence of any constructor other
+/// than the single literal at the end of `verify_home_launch_token_value` in
+/// this module. Reading the id gives no authority; the guarantee ends where a
+/// `BridgePrincipal` is converted back to a string (the two named conversion
+/// sites in supervisor.rs and runtime.rs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedLaunchGrant {
+    principal_id: String,
+}
+
+impl VerifiedLaunchGrant {
+    pub(crate) fn principal_id(&self) -> &str {
+        &self.principal_id
+    }
+}
+
+#[cfg(test)]
+impl VerifiedLaunchGrant {
+    /// Test-only: the one test literal of `RequiredHomeLaunchToken` builds
+    /// this instead of minting a second production literal.
+    pub(crate) fn for_test(principal_id: &str) -> Self {
+        Self {
+            principal_id: principal_id.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(in crate::api) struct RequiredHomeLaunchToken {
     pub(in crate::api) expires_at: u64,
     pub(in crate::api) launch_id: String,
     pub(in crate::api) launch_context: HomeLaunchContext,
     pub(in crate::api) context: HomeLaunchTokenContext,
+    pub(in crate::api) grant: VerifiedLaunchGrant,
 }
 
 /// Runtime-owned Wallet authority produced only after launch-token validation.
@@ -588,6 +619,26 @@ pub(crate) fn require_internal_shell_launch_grant_for_any_context(
         HomeLaunchOriginPolicy::InternalShell,
     )
     .map(|required| required.context)
+}
+
+/// The same signed grant check as its sibling, but it hands back the typed
+/// principal a bridge may run as. This is the only production caller of
+/// `BridgePrincipal::from_grant`.
+pub(crate) fn require_internal_shell_launch_grant_principal(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+    allowed_apps: &[&str],
+) -> anyhow::Result<crate::resource_bridge::BridgePrincipal> {
+    let required = require_home_launch_token_for_any_from_with_origin(
+        data_dir,
+        headers,
+        allowed_apps,
+        None,
+        HomeLaunchOriginPolicy::InternalShell,
+    )?;
+    Ok(crate::resource_bridge::BridgePrincipal::from_grant(
+        &required.grant,
+    ))
 }
 
 /// A page's launch token carried by the shell to the Runtime (no browser
@@ -1218,6 +1269,11 @@ fn verify_home_launch_token_value(
             }
         }
     };
+    // The verified principal is copied before the root moves into the
+    // context. This literal is the only production construction.
+    let grant = VerifiedLaunchGrant {
+        principal_id: root.principal_id().to_string(),
+    };
     Ok(RequiredHomeLaunchToken {
         expires_at: envelope.payload.exp,
         launch_id: envelope.payload.launch_id,
@@ -1228,6 +1284,7 @@ fn verify_home_launch_token_value(
             envelope.payload.proof_binding_id,
             envelope.payload.grant_id,
         ),
+        grant,
     })
 }
 
@@ -2768,5 +2825,46 @@ mod tests {
         headers.insert("origin", "http://localhost:61180".parse().unwrap());
         let err = require_home_token_context(dir.path(), &headers).unwrap_err();
         assert_eq!(err.to_string(), "Home launch principal root unresolved");
+    }
+
+    /// R6-1 row r1: the one production construction of `VerifiedLaunchGrant`
+    /// copies the principal the signed token names. A real signed token from
+    /// the stored-human fixture is verified through the same function route 3
+    /// and route 1 use, and the grant it carries names that literal person.
+    #[test]
+    fn r6_verified_launch_token_carries_its_grant_principal() {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_, did) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let now = now_ts();
+        let record = crate::auth::store_test_human_principal(dir.path(), "person:local:r6-grant");
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:r6-grant".to_string(),
+            session_id: "auth:r6-grant".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
+            apps: vec![HOME_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+        let token =
+            issue_home_launch_token_for_auth_grant(dir.path(), HOME_CAPSULE_ID, &grant).unwrap();
+        let required = require_home_launch_token_value_from_expected_did(
+            dir.path(),
+            &token,
+            &[HOME_CAPSULE_ID],
+            did,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(required.grant.principal_id(), "person:local:r6-grant");
+        assert_eq!(
+            required.grant.principal_id(),
+            required.context.principal_id(),
+            "the grant names the same verified principal the context holds"
+        );
     }
 }
