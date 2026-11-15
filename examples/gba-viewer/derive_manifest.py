@@ -192,9 +192,13 @@ def main(argv):
 
     derived = derive(manifest, kind, args.cid, args.requires_name)
 
-    out = pathlib.Path(args.out)
+    out = pathlib.Path(os.path.abspath(args.out))
     target = out / "capsule.json"
-    if out.is_symlink() or target.is_symlink():
+    # Every component of the output's absolute path, from the filesystem root
+    # down to the file, is lstat-checked before mkdir and the write (#1670
+    # Codex r3 Medium: a symlinked parent of --out).
+    refuse_symlink_below(out.anchor, out, "derive_manifest_output_symlink")
+    if target.is_symlink():
         refuse(f"derive_manifest_output_symlink: {target}")
     out.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
