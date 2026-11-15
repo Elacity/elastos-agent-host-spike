@@ -71,8 +71,9 @@ The receipt's `host_triple` reads `Linux aarch64`. The Runtime binary is that ma
    authority instead: a launch token signed by this Home's own device key for the device principal, with a
    `local:` session and a `grant:local:` grant — the authority `elastos home` uses for local tools
    (`elastos-server/src/api/gateway_home_token.rs`, the proofless-device arm of the verifier). The script makes
-   that token from the run's own `identity/device.key`, uses it once, and deletes it; it is never printed or
-   recorded.
+   that token from the run's own `identity/device.key`, uses it for this run's two opens (the good one and the changed
+   copy), and deletes it with every other credential file when the run ends, on success or failure; it is never
+   printed or recorded. The work folder is made owner-only and must lie outside the checkout.
 5. `results.json` is written in the run's folder. Exit 0 only when the good open answered `200` with a page named
    and the changed-byte open answered `400` with `bundle_cid_mismatch`.
 
@@ -126,5 +127,6 @@ Not proved here:
 
 Each must turn the receipt red at the check named, not at a build error: the changed-byte copy left alone (the
 run's own refusal check), one CID altered in a copy of the receipt (compare names `content_cid`), a required
-field removed from a copy (compare names `component_sha256`). The plants change no file in the checkout: one is an
+field removed from a copy (compare names `component_sha256`), and a reference receipt whose changed copy was not
+refused (compare names it `INVALID reference: changed_start_status 200 is not 400`). The plants change no file in the checkout: one is an
 environment variable and two work on copies under the work folder.

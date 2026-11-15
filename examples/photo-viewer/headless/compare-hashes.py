@@ -6,14 +6,51 @@ starts. The host triple and the Runtime binary's sha256 may differ: they say whi
 reference that is a recorded-hash list can only compare the component hash, so the comparison says that.
 
 Usage: compare-hashes.py <results.json> <reference: results.json | recorded-hashes.txt>
-Exit 0 when every comparable field matches and, for a receipt reference, both record a good start and the expected
-refusal; exit 1 naming each field that is missing or differs.
+Exit 0 when both files are well formed (schema, CIDs, sha256 values, a good start and the expected refusal, checked
+in the reference too when it is a receipt) and every comparable field matches; exit 1 naming each field that is
+missing, malformed or differs.
 """
 import json
+import re
 import sys
 
 REQUIRED = ("content_cid", "page_cid", "core_cid", "component_sha256")
 MAY_DIFFER = ("host_triple", "runtime_binary_sha256")
+SCHEMA = "elastos.photo-viewer.headless-receipt/v1"
+CID = re.compile(r"bafy[a-z2-7]{50,}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def form_errors(receipt):
+    """Every way this receipt is not a well-formed, passing headless receipt (missing fields are reported apart)."""
+    errors = []
+    if receipt.get("schema") != SCHEMA:
+        errors.append(f"schema {receipt.get('schema')!r} is not {SCHEMA}")
+    for field in ("content_cid", "page_cid", "core_cid"):
+        value = receipt.get(field)
+        if field in receipt and not (isinstance(value, str) and CID.fullmatch(value)):
+            errors.append(f"{field} {value!r} is not a CID")
+    for field in ("component_sha256", "runtime_binary_sha256"):
+        value = receipt.get(field)
+        if field in receipt and not (isinstance(value, str) and SHA256.fullmatch(value)):
+            errors.append(f"{field} {value!r} is not a sha256")
+    host = receipt.get("host_triple")
+    if not (isinstance(host, str) and host.strip()):
+        errors.append(f"host_triple {host!r} is empty")
+
+    def is_int(value, wanted):
+        return type(value) is int and value == wanted
+
+    if not is_int(receipt.get("start_status"), 200):
+        errors.append(f"start_status {receipt.get('start_status')!r} does not record a good start")
+    page = receipt.get("start_page")
+    if not (isinstance(page, str) and page.strip()):
+        errors.append(f"start_page {page!r} names no page")
+    if not is_int(receipt.get("changed_start_status"), 400):
+        errors.append(f"changed_start_status {receipt.get('changed_start_status')!r} is not 400")
+    if receipt.get("changed_start_refusal") != "bundle_cid_mismatch":
+        errors.append(f"changed_start_refusal {receipt.get('changed_start_refusal')!r} is not bundle_cid_mismatch")
+    return errors
 
 
 def read_json(path):
@@ -64,6 +101,12 @@ def main():
         print(f"MISMATCH {message}")
         failed = True
 
+    for message in form_errors(results):
+        mismatch(f"INVALID results: {message}")
+    if reference is not None:
+        for message in form_errors(reference):
+            mismatch(f"INVALID reference: {message}")
+
     for field in REQUIRED:
         if field not in results:
             mismatch(f"missing field: {field} (in {results_path})")
@@ -74,6 +117,8 @@ def main():
             recorded_value = recorded.get("photo-viewer")
             if recorded_value is None:
                 mismatch("missing field: photo-viewer (in the recorded hashes)")
+            elif not SHA256.fullmatch(recorded_value):
+                mismatch(f"INVALID reference: the recorded photo-viewer hash {recorded_value!r} is not a sha256")
             elif results[field] == recorded_value:
                 print(f"match    {field} {results[field]} (recorded photo-viewer line)")
             else:
@@ -96,18 +141,11 @@ def main():
                 print(f"same     {field} {left} (may differ across machines)")
             else:
                 print(f"differ   {field} {left} vs {right} (allowed)")
-        good = results.get("start_status") == 200 and bool(results.get("start_page"))
-        refused = results.get("changed_start_refusal") == "bundle_cid_mismatch"
-        if good:
-            print(f"match    start_status {results['start_status']} (with the page named)")
-        else:
-            mismatch(f"start_status {results.get('start_status')!r} does not record a good start")
-        if refused:
-            print("match    changed_start_refusal bundle_cid_mismatch")
-        else:
-            mismatch(f"changed_start_refusal {results.get('changed_start_refusal')!r} is not bundle_cid_mismatch")
+        if not form_errors(results) and not form_errors(reference):
+            print("match    both receipts record a good start (200, page named) and the changed copy refused (400 bundle_cid_mismatch)")
     else:
-        print("note     a recorded-hash reference compares only the component hash")
+        print("note     a recorded-hash reference compares only the component hash: it does not show the same bundle;")
+        print("note     PH5 needs two machines' receipts compared with each other")
 
     print("RECEIPTS MATCH" if not failed else "RECEIPTS DIFFER")
     return 1 if failed else 0

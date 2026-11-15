@@ -38,7 +38,9 @@ fi
 python3 -I - "$WORK/good/results.json" "$WORK/altered.json" <<'PYEOF'
 import json, sys
 receipt = json.load(open(sys.argv[1]))
-receipt["content_cid"] = "0" * len(receipt["content_cid"])
+# a well-formed CID that differs in its last character, so the plant is red at the comparison, not the form check
+cid = receipt["content_cid"]
+receipt["content_cid"] = cid[:-1] + ("a" if cid[-1] != "a" else "b")
 json.dump(receipt, open(sys.argv[2], "w"), indent=2, sort_keys=True)
 PYEOF
 python3 -I "$HERE/compare-hashes.py" "$WORK/altered.json" "$WORK/good/results.json" > "$WORK/altered.log" 2>&1
@@ -63,5 +65,20 @@ else
   not_red "missing-field (exit $code)"; cat "$WORK/missing.log"
 fi
 
-[ "$missed" = 0 ] && echo "all 3 headless plants red where expected" || echo "SOME HEADLESS PLANTS NOT AS EXPECTED"
+python3 -I - "$WORK/good/results.json" "$WORK/badref.json" <<'PYEOF'
+import json, sys
+receipt = json.load(open(sys.argv[1]))
+receipt["changed_start_status"] = 200
+receipt["changed_start_refusal"] = ""
+json.dump(receipt, open(sys.argv[2], "w"), indent=2, sort_keys=True)
+PYEOF
+python3 -I "$HERE/compare-hashes.py" "$WORK/good/results.json" "$WORK/badref.json" > "$WORK/badref.log" 2>&1
+code=$?
+if [ "$code" != 0 ] && grep -q "MISMATCH INVALID reference: changed_start_status 200 is not 400" "$WORK/badref.log"; then
+  red "reference-not-refused" "MISMATCH INVALID reference: changed_start_status 200 is not 400"
+else
+  not_red "reference-not-refused (exit $code)"; cat "$WORK/badref.log"
+fi
+
+[ "$missed" = 0 ] && echo "all 4 headless plants red where expected" || echo "SOME HEADLESS PLANTS NOT AS EXPECTED"
 exit $missed

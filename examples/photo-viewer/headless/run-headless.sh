@@ -16,6 +16,7 @@
 # Needs: the built binary and storage provider in the checkout's target (CARGO_TARGET_DIR, or elastos/target),
 # python3 and curl. HEADLESS_PLANT=changed-byte-not-refused plants one fault, for falsify-headless.sh only.
 set -u
+umask 077  # every file this run makes (keys, tokens, receipts) is owner-only
 PLANT="${HEADLESS_PLANT:-}"
 WT=$(cd "$1" && pwd); WORK="$2"; CORE_WASM="$3"
 TARGET="${CARGO_TARGET_DIR:-}"
@@ -30,6 +31,8 @@ STORAGE="$TARGET/debug/localhost-provider"
 [ -e "$WORK" ] && { echo "the work folder must be new: $WORK"; exit 2; }
 mkdir -p "$WORK/home" "$WORK/out" || exit 2
 WORK=$(cd "$WORK" && pwd)
+chmod 700 "$WORK" || exit 2
+case "$WORK/" in "$WT"/*) echo "the work folder must be outside the checkout: $WORK"; exit 2 ;; esac
 export HOME="$WORK/home"
 unset XDG_DATA_HOME
 case "$(uname)" in
@@ -41,7 +44,10 @@ chmod 700 "$HOME" "$DATA"  # owner-only, as an install makes them; Home refuses 
 step() { echo; echo "=== $*"; }
 failed=0
 pids=()
-cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; }
+# Credentials this run makes: removed on every exit path, success or failure.
+secrets_rm() { rm -f "$WORK/open.cfg" "$WORK/attach.json" "$WORK/attach-body.json" "$WORK/home-token" "$WORK/did-signing.key" \
+  "$WORK/token-payload.json" "$WORK/signed.json" "$WORK"/of-*.key; }
+cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; secrets_rm; }
 trap cleanup EXIT
 as_expected() { echo "AS EXPECTED ($1)"; }
 not_expected() { echo "NOT AS EXPECTED ($1)"; failed=1; }
@@ -191,11 +197,12 @@ ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1 ELASTOS_RUNTIME_COORDS_FILE="$DATA/home
   "$BIN" serve --addr "127.0.0.1:$RT_PORT" > "$WORK/runtime.log" 2>&1 & pids+=($!)
 for i in $(seq 1 60); do [ -s "$DATA/home-runtime-coords.json" ] && curl -fsS "http://127.0.0.1:$RT_PORT/api/health" > /dev/null 2>&1 && break; sleep 1; done
 [ -s "$DATA/home-runtime-coords.json" ] && as_expected "Home's Runtime answers and published its coordinates" || { not_expected "Home's Runtime did not start"; tail -20 "$WORK/runtime.log"; exit 1; }
+for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null || { not_expected "a process this run started has exited (pid $p): the port may answer for another program"; exit 1; }; done
 RT="http://127.0.0.1:$RT_PORT"
 
 step "the open by CID, and the changed-byte refusal"
 # The shell attach token and the launch token go into a curl config file (0600) so neither appears in a process
-# list; the file is removed before this run ends.
+# list; every credential file is removed when the run ends, on success or failure (secrets_rm, also in the EXIT trap).
 python3 -I - "$DATA/home-runtime-coords.json" "$WORK/attach-body.json" <<'PYEOF'
 import json, os, sys
 coords = json.load(open(sys.argv[1]))
@@ -219,7 +226,7 @@ GOOD_STATUS=$(curl -sS -o "$WORK/good.json" -w '%{http_code}' -X POST --config "
 echo "the open answered $GOOD_STATUS"
 CHANGED_STATUS=$(curl -sS -o "$WORK/changed.json" -w '%{http_code}' -X POST --config "$WORK/open.cfg" --data "{\"cid\": \"$CHANGED\"}" "$RT/api/launch/open")
 echo "the changed-byte open answered $CHANGED_STATUS"
-rm -f "$WORK/open.cfg" "$WORK/attach.json" "$WORK/home-token" "$WORK/did-signing.key" "$WORK/token-payload.json" "$WORK/signed.json"
+secrets_rm
 PAGE_NAME=$(python3 -I - "$WORK/good.json" <<'PYEOF'
 import json, sys
 try:
