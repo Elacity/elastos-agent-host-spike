@@ -1102,6 +1102,10 @@ pub(crate) mod tests {
         /// the manifest ceiling: no stored root is named, so the request is
         /// junk (definition:36) and carries none of Y's data.
         BareArea,
+        /// The same bare spelling driven as the operation itself, with X's
+        /// held grant: the answer names no part of Y and is refused at the
+        /// manifest ceiling before any provider or stored root is reached.
+        BareAreaOperation,
     }
 
     /// The outcome column of the guest's result line for plan entry `index`.
@@ -1546,7 +1550,9 @@ pub(crate) mod tests {
     /// the capturing provider show that nothing reached Y on a refused cell.
     /// The bare area and its slash form (B4, B5) are junk spellings
     /// (definition:36): the ceiling refuses each, it creates no pending
-    /// request, and it carries none of Y's data.
+    /// request, and it carries none of Y's data. Each bare spelling is also
+    /// sent as the operation itself with X's held grant, and that answer
+    /// carries none of Y's names, bytes or root segment either.
     #[tokio::test]
     async fn an_agents_guest_is_refused_every_other_spelling_of_another_agents_root() {
         if crate::agents::require_build().is_err() {
@@ -1659,6 +1665,24 @@ pub(crate) mod tests {
                 },
                 PlanExpect::HeldOperation,
             ));
+            // B4 and B5 also ask the operation itself, addressed at the bare
+            // spelling. The grant is X's own held notes, as in the S11 cells,
+            // so the operation reaches the dispatch path instead of stopping
+            // at the capability request. Like S8's, these lines are not cells.
+            for (id, spelling) in [
+                ("B4", "localhost://UsersAI"),
+                ("B5", "localhost://UsersAI/"),
+            ] {
+                lines.push((
+                    format!("{id} {operation} operation"),
+                    if operation == "write" {
+                        format!("write\t{own_notes}\t{spelling}\twrite\tbare-area write")
+                    } else {
+                        format!("invoke\t{own_notes}\t{spelling}\t{operation}\t{action}\t")
+                    },
+                    PlanExpect::BareAreaOperation,
+                ));
+            }
             for (id, uri, body) in [
                 (
                     "S10",
@@ -1710,6 +1734,19 @@ pub(crate) mod tests {
                     assert!(!outcome.contains(canary_text), "{label}: {outcome}");
                 }
                 PlanExpect::BareArea => {
+                    // The junk clause first: no Y name, byte or root segment.
+                    assert!(
+                        !outcome.contains(canary_name),
+                        "{label} reached Y: Y's canary name is in the answer: {outcome}"
+                    );
+                    assert!(
+                        !outcome.contains(canary_text),
+                        "{label} reached Y: Y's canary bytes are in the answer: {outcome}"
+                    );
+                    assert!(
+                        !outcome.contains(seg_y),
+                        "{label} reached Y: Y's root segment is in the answer: {outcome}"
+                    );
                     assert!(outcome.contains("Internal("), "{label}: {outcome}");
                     assert!(
                         outcome.contains(
@@ -1717,9 +1754,33 @@ pub(crate) mod tests {
                         ),
                         "{label}: {outcome}"
                     );
-                    // The junk clause: no Y name or byte in the answer.
-                    assert!(!outcome.contains(canary_name), "{label}: {outcome}");
-                    assert!(!outcome.contains(canary_text), "{label}: {outcome}");
+                }
+                PlanExpect::BareAreaOperation => {
+                    // The junk clause first: the operation at the bare spelling
+                    // carries none of Y's names, bytes or root segment.
+                    assert!(
+                        !outcome.contains(canary_name),
+                        "{label} reached Y: Y's canary name is in the answer: {outcome}"
+                    );
+                    assert!(
+                        !outcome.contains(canary_text),
+                        "{label} reached Y: Y's canary bytes are in the answer: {outcome}"
+                    );
+                    assert!(
+                        !outcome.contains(seg_y),
+                        "{label} reached Y: Y's root segment is in the answer: {outcome}"
+                    );
+                    // Then the refusal the census shows for the operation at
+                    // this spelling: the manifest ceiling (resource_bridge.rs
+                    // :636) with the sentence from manifest_denied_response
+                    // (:554), written here independently of the request arm.
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(
+                        outcome.contains(
+                            "capsule manifest does not declare authority for localhost://UsersAI"
+                        ),
+                        "{label}: {outcome}"
+                    );
                 }
             }
         }
@@ -1738,6 +1799,16 @@ pub(crate) mod tests {
                 "a capability request record exists for {resource}: {requested:?}"
             );
         }
+        // No capability-request record names Y's root. A record names it when
+        // it is that root or a path under it; the held encoded spellings under
+        // X's own root carry seg_y only inside a percent-encoded traversal, so
+        // they are not Y's root and cannot reach it.
+        assert!(
+            !requested
+                .iter()
+                .any(|recorded| recorded == &root_y || recorded.starts_with(&format!("{root_y}/"))),
+            "a capability request record names Y's root: {requested:?}"
+        );
         // The provider saw only the two held cells the protected path does not
         // serve: list and delete of the encoded path under X's own root.
         let requests = home.requests();
@@ -1766,7 +1837,9 @@ pub(crate) mod tests {
     /// precedes every invoke refuses a foreign root before that check runs.
     /// The bare area and its slash form (B4, B5) are junk spellings
     /// (definition:36): the ceiling refuses each, it creates no pending
-    /// request, and it carries none of Y's data.
+    /// request, and it carries none of Y's data. Each bare spelling is also
+    /// sent as the operation itself with X's held grant, and that answer
+    /// carries none of Y's names, bytes or root segment either.
     #[tokio::test]
     async fn an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path() {
         if crate::agents::require_build().is_err() {
@@ -1870,6 +1943,24 @@ pub(crate) mod tests {
                 },
                 PlanExpect::HeldOperation,
             ));
+            // B4 and B5 also ask the operation itself, addressed at the bare
+            // spelling. The grant is X's own held notes, as in the S11 cells,
+            // so the operation reaches the dispatch path instead of stopping
+            // at the capability request. Like S8's, these lines are not cells.
+            for (id, spelling) in [
+                ("B4", "localhost://UsersAI"),
+                ("B5", "localhost://UsersAI/"),
+            ] {
+                lines.push((
+                    format!("{id} {operation} operation"),
+                    if operation == "write" {
+                        format!("write\t{own_notes}\t{spelling}\t{operation}\tbare-area write")
+                    } else {
+                        format!("invoke\t{own_notes}\t{spelling}\t{operation}\t{operation}\t")
+                    },
+                    PlanExpect::BareAreaOperation,
+                ));
+            }
             for (id, uri, body) in [
                 (
                     "S10",
@@ -1927,6 +2018,19 @@ pub(crate) mod tests {
                     assert!(!outcome.contains(canary_text), "{label}: {outcome}");
                 }
                 PlanExpect::BareArea => {
+                    // The junk clause first: no Y name, byte or root segment.
+                    assert!(
+                        !outcome.contains(canary_name),
+                        "{label} reached Y: Y's canary name is in the answer: {outcome}"
+                    );
+                    assert!(
+                        !outcome.contains(canary_text),
+                        "{label} reached Y: Y's canary bytes are in the answer: {outcome}"
+                    );
+                    assert!(
+                        !outcome.contains(seg_y),
+                        "{label} reached Y: Y's root segment is in the answer: {outcome}"
+                    );
                     assert!(outcome.contains("Internal("), "{label}: {outcome}");
                     assert!(
                         outcome.contains(
@@ -1934,9 +2038,33 @@ pub(crate) mod tests {
                         ),
                         "{label}: {outcome}"
                     );
-                    // The junk clause: no Y name or byte in the answer.
-                    assert!(!outcome.contains(canary_name), "{label}: {outcome}");
-                    assert!(!outcome.contains(canary_text), "{label}: {outcome}");
+                }
+                PlanExpect::BareAreaOperation => {
+                    // The junk clause first: the operation at the bare spelling
+                    // carries none of Y's names, bytes or root segment.
+                    assert!(
+                        !outcome.contains(canary_name),
+                        "{label} reached Y: Y's canary name is in the answer: {outcome}"
+                    );
+                    assert!(
+                        !outcome.contains(canary_text),
+                        "{label} reached Y: Y's canary bytes are in the answer: {outcome}"
+                    );
+                    assert!(
+                        !outcome.contains(seg_y),
+                        "{label} reached Y: Y's root segment is in the answer: {outcome}"
+                    );
+                    // Then the refusal the census shows for the operation at
+                    // this spelling: the manifest ceiling (resource_bridge.rs
+                    // :636) with the sentence from manifest_denied_response
+                    // (:554), written here independently of the request arm.
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(
+                        outcome.contains(
+                            "capsule manifest does not declare authority for localhost://UsersAI"
+                        ),
+                        "{label}: {outcome}"
+                    );
                 }
             }
         }
@@ -1953,6 +2081,16 @@ pub(crate) mod tests {
                 "a capability request record exists for {resource}: {requested:?}"
             );
         }
+        // No capability-request record names Y's root. A record names it when
+        // it is that root or a path under it; the held encoded spellings under
+        // X's own root carry seg_y only inside a percent-encoded traversal, so
+        // they are not Y's root and cannot reach it.
+        assert!(
+            !requested
+                .iter()
+                .any(|recorded| recorded == &root_y || recorded.starts_with(&format!("{root_y}/"))),
+            "a capability request record names Y's root: {requested:?}"
+        );
         // Read and write both take the protected path, so no provider call is
         // made for any cell, held or refused.
         assert!(home.requests().is_empty(), "{:?}", home.requests());
