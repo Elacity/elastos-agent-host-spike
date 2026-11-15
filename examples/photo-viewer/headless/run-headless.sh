@@ -34,10 +34,26 @@ STORAGE="$TARGET/debug/localhost-provider"
 # Refuse a work folder inside the checkout BEFORE anything is made, comparing real paths (symlinks resolved).
 real_path() { python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 case "$(real_path "$WORK")/" in "$(real_path "$WT")"/*) echo "the work folder must be outside the checkout: $WORK"; exit 2 ;; esac
+# Cleanup is armed BEFORE the work folder is made, so every later exit runs it.
+pids=()
+HOME_REAL=""
+# Credentials this run makes: removed on every exit path, success or failure.
+secrets_rm() { [ -n "$HOME_REAL" ] || return 0; rm -f "$WORK/open.cfg" "$WORK/attach.json" "$WORK/attach-body.json" \
+  "$WORK/home-token" "$WORK/did-signing.key" "$WORK/token-payload.json" "$WORK/signed.json" "$WORK"/of-*.key; }
+# The throwaway Home holds the device key and, while serve runs, the attach secret: removed once its processes are
+# gone. Only the folder this run made is removed: its real path is recorded when it is made, and it is removed only
+# if that path still resolves to itself (no symlink put in its way since).
+home_rm() {
+  [ -n "$HOME_REAL" ] && [ -d "$HOME_REAL" ] || return 0
+  if [ "$(cd -P "$HOME_REAL" 2>/dev/null && pwd -P)" = "$HOME_REAL" ]; then rm -rf -- "$HOME_REAL"
+  else echo "NOT AS EXPECTED (the throwaway Home moved; not removed: $HOME_REAL)"; fi; }
+cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; secrets_rm; home_rm; }
+trap cleanup EXIT
 mkdir -p "$WORK/home" "$WORK/out" || exit 2
-WORK=$(cd "$WORK" && pwd)
+WORK=$(cd -P "$WORK" && pwd -P) || exit 2  # the real path from here on: no symlink in what cleanup removes
+HOME_REAL="$WORK/home"
 chmod 700 "$WORK" || exit 2
-export HOME="$WORK/home"
+export HOME="$HOME_REAL"
 unset XDG_DATA_HOME
 case "$(uname)" in
   Darwin) DATA="$HOME/Library/Application Support/elastos" ;;
@@ -47,15 +63,6 @@ mkdir -p "$DATA"
 chmod 700 "$HOME" "$DATA"  # owner-only, as an install makes them; Home refuses a person's root under a looser parent
 step() { echo; echo "=== $*"; }
 failed=0
-pids=()
-# Credentials this run makes: removed on every exit path, success or failure.
-secrets_rm() { rm -f "$WORK/open.cfg" "$WORK/attach.json" "$WORK/attach-body.json" "$WORK/home-token" "$WORK/did-signing.key" \
-  "$WORK/token-payload.json" "$WORK/signed.json" "$WORK"/of-*.key; }
-# The throwaway Home holds the device key and, while serve runs, the attach secret: removed once its processes are
-# gone. Only this run's own "$WORK/home", made above, is removed.
-home_rm() { [ -n "$WORK" ] && [ "$HOME" = "$WORK/home" ] && [ -d "$WORK/home" ] && rm -rf -- "$WORK/home"; }
-cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; secrets_rm; home_rm; }
-trap cleanup EXIT
 as_expected() { echo "AS EXPECTED ($1)"; }
 not_expected() { echo "NOT AS EXPECTED ($1)"; failed=1; }
 cid_of() { "$BIN" stage-bundle "$1" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["cid"])'; }
