@@ -31,8 +31,8 @@ outside the checkout: the bundle sources (`prepare_bundles.py`) are written ther
 4. In headless Chromium with a virtual passkey (`journey-browser.mjs`): a new person registers in Home; from
    Home's page, `POST /api/home/launch/content` with the content CID the content's manifest pinned the page CID
    into; the page loaded at the answered address with its token in the fragment; then the pass conditions:
-   `#status` hidden and empty, `#power-led` without `off`, and at least 30 more `MainLoop_runner` frames after a
-   second sample two seconds after the first.
+   `#status` hidden and empty, `#power-led` without `off`, and at least 30 more `MainLoop_runner` frames between
+   two samples, the second stamped by the page's own clock no more than 2500 ms after the first.
 
 The page token is a bearer credential. Every recorded text is redacted before it is printed or written (the
 fragment, any JSON `token` field, the raw and percent-encoded token); a refusal is recorded only by an allowlisted

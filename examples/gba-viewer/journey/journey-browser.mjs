@@ -3,8 +3,9 @@
 // passkey, a person registers in Home and is signed in; from Home's own page they open the game by its content
 // CID (`POST /api/home/launch/content`; the page CID is the one that content's manifest pins), load the page's
 // address with the page's token in its fragment, and pass only if the page boots the game (#status hidden and
-// empty, #power-led on) and the mGBA main loop renders at least 30 frames in two seconds. Prints one JSON line of
-// results; exit 0 only if every check holds.
+// empty, #power-led on) and the mGBA main loop renders at least 30 frames in a window measured from the page's
+// own clock (the second sample must land within 2500 ms of the first). Prints one JSON line of results; exit 0
+// only if every check holds.
 //
 // Frames are counted by a wrapper installed with page.addInitScript before the page's own scripts: the census of
 // this page found exactly two callers of window.requestAnimationFrame, mGBA's `MainLoop_runner` (the engine's
@@ -249,10 +250,13 @@ try {
       boot.status_hidden === true && boot.status_text === "" && boot.led_off === false, boot);
     results.boot = boot;
 
-    // The two samples, ~2 s apart. The canvas screenshots are information only, not a pass condition.
+    // The two samples, ~2 s apart, each stamped with the page's own clock. The window is a measured deadline:
+    // the check passes only if the second sample lands within 2500 ms of the first (the 2 s sleep plus the
+    // screenshots), so a late timer cannot let frames produced after two seconds pass. The canvas screenshots
+    // are information only, not a pass condition.
     const readRaf = () => viewer.evaluate(() => {
       const counts = window.__gbaRaf || { total: 0, byCallback: {} };
-      return { total: counts.total, byCallback: { ...counts.byCallback } };
+      return { at_ms: performance.now(), total: counts.total, byCallback: { ...counts.byCallback } };
     });
     const first = await readRaf();
     await viewer.locator("#canvas").screenshot({ path: join(EVIDENCE, "canvas-sample-1.png") })
@@ -263,11 +267,16 @@ try {
       .catch((error) => console.error(`could not write canvas-sample-2.png: ${redact(String(error && error.message || error)).slice(0, 300)}`));
     const frames = (sample) => sample.byCallback.MainLoop_runner || 0;
     const delta = frames(second) - frames(first);
+    const elapsedMs = Math.round(second.at_ms - first.at_ms);
     const callers = [...new Set([...Object.keys(first.byCallback), ...Object.keys(second.byCallback)])];
-    check("frames advance (mGBA's MainLoop_runner renders at least 30 frames in 2 s)", delta >= 30,
-      { first, second, delta, callers });
+    const withinWindow = elapsedMs <= 2500;
+    check("frames advance (mGBA's MainLoop_runner renders at least 30 frames in 2 s)",
+      delta >= 30 && withinWindow,
+      { first, second, delta, elapsed_ms: elapsedMs, callers,
+        ...(withinWindow ? {} : { overran: `frame window overran: ${elapsedMs} ms` }) });
     results.samples = { first, second };
     results.frames = delta;
+    results.elapsed_ms = elapsedMs;
     results.raf_callers = callers;
   }
 } catch (error) {
