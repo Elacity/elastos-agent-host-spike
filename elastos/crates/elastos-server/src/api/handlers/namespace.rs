@@ -751,4 +751,184 @@ mod tests {
         );
         assert_eq!(normalize_query_path("///a///b///c///").unwrap(), "a/b/c");
     }
+    /// S5 row R4.9: the namespace route addresses the session owner's own
+    /// namespace key. X and Y ask for the same spelling
+    /// `localhost://UsersAI/agent-y-root/x` and each gets its own bytes; Y's
+    /// namespace listing and CID stay the same when X writes, and no `UsersAI`
+    /// area appears on disk.
+    #[tokio::test]
+    async fn the_namespace_route_addresses_the_session_owners_own_key() {
+        use axum::body::Body;
+        use axum::routing::{get, post};
+        use tower::ServiceExt;
+
+        const OWNER_X: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        const OWNER_Y: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+        const SPELLING: &str = "localhost://UsersAI/agent-y-root/x";
+        // `normalize_query_path` drops the empty segment of `//`, so the
+        // intact `localhost://` prefix is gone before the store sees it.
+        const COLLAPSED: &str = "localhost:/UsersAI/agent-y-root/x";
+
+        let (state, dir) = test_namespace_state();
+        let app = |session: Session| {
+            axum::Router::new()
+                .route("/api/namespace/list", get(list_path))
+                .route("/api/namespace/resolve", get(resolve_path))
+                .route("/api/namespace/read", get(read_content))
+                .route("/api/namespace/write", post(write_content))
+                .route("/api/namespace/status", get(namespace_status))
+                .with_state(state.clone())
+                .layer(Extension(session))
+        };
+        let x = app(Session::with_owner(
+            SessionType::Shell,
+            None,
+            OWNER_X.to_string(),
+        ));
+        let y = app(Session::with_owner(
+            SessionType::Shell,
+            None,
+            OWNER_Y.to_string(),
+        ));
+
+        let send = |app: axum::Router, request: axum::http::Request<Body>| async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, bytes.to_vec())
+        };
+        let write = |payload: &'static [u8]| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/namespace/write?path={SPELLING}"))
+                .body(Body::from(payload))
+                .unwrap()
+        };
+        let read = || {
+            axum::http::Request::builder()
+                .uri(format!("/api/namespace/read?path={SPELLING}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let resolve = || {
+            axum::http::Request::builder()
+                .uri(format!("/api/namespace/resolve?path={SPELLING}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let listing = || {
+            axum::http::Request::builder()
+                .uri("/api/namespace/list?path=")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let status = || {
+            axum::http::Request::builder()
+                .uri("/api/namespace/status")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Y writes first, so its listing and CID are a real state to compare.
+        let (y_write_status, y_write_body) = send(y.clone(), write(b"y-payload")).await;
+        let (_, y_listing_before) = send(y.clone(), listing()).await;
+        let (_, y_status_before) = send(y.clone(), status()).await;
+
+        let (x_write_status, x_write_body) = send(x.clone(), write(b"x-payload")).await;
+        assert_eq!(
+            x_write_status,
+            StatusCode::OK,
+            "X's own write at the spelling lands in X's own namespace key"
+        );
+        assert_eq!(
+            y_write_status,
+            StatusCode::OK,
+            "Y's own write at the spelling lands in Y's own namespace key"
+        );
+
+        // Each write lands under its own owner key, at the collapsed spelling.
+        let x_written: serde_json::Value = serde_json::from_slice(&x_write_body).unwrap();
+        let y_written: serde_json::Value = serde_json::from_slice(&y_write_body).unwrap();
+        assert_eq!(
+            x_written["path"], COLLAPSED,
+            "X's write reports the collapsed spelling it stored"
+        );
+        assert_eq!(
+            y_written["path"], COLLAPSED,
+            "Y's write reports the same collapsed spelling"
+        );
+        assert_ne!(
+            x_written["namespace_cid"], y_written["namespace_cid"],
+            "the same spelling gives each owner its own namespace"
+        );
+
+        // X reads its own bytes, Y reads its own bytes, at the same spelling.
+        let (_, x_read) = send(x.clone(), read()).await;
+        assert_eq!(
+            x_read,
+            b"x-payload".to_vec(),
+            "X reads its own namespace key"
+        );
+        let (_, y_read) = send(y.clone(), read()).await;
+        assert_eq!(
+            y_read,
+            b"y-payload".to_vec(),
+            "Y reads its own namespace key"
+        );
+
+        // Resolve reports the collapsed spelling under X's owner key.
+        let (x_resolve_status, x_resolve_body) = send(x.clone(), resolve()).await;
+        assert_eq!(x_resolve_status, StatusCode::OK);
+        let resolved: serde_json::Value = serde_json::from_slice(&x_resolve_body).unwrap();
+        assert_eq!(
+            resolved["path"],
+            format!("elastos://namespace/{COLLAPSED}"),
+            "resolve names the collapsed spelling"
+        );
+        assert_eq!(resolved["size"], 9, "resolve sizes X's own bytes");
+
+        // Status names the session owner and X's own namespace CID.
+        let (_, x_status_body) = send(x.clone(), status()).await;
+        let x_status: serde_json::Value = serde_json::from_slice(&x_status_body).unwrap();
+        assert_eq!(x_status["owner"], OWNER_X, "status names the session owner");
+        assert_eq!(
+            x_status["namespace_cid"], x_written["namespace_cid"],
+            "status names the CID the write minted"
+        );
+
+        // X's write left Y's namespace listing and CID exactly as they were.
+        let (_, y_listing_after) = send(y.clone(), listing()).await;
+        let (_, y_status_after) = send(y.clone(), status()).await;
+        assert_eq!(
+            y_listing_before, y_listing_after,
+            "X's write does not change Y's listing"
+        );
+        assert_eq!(
+            y_status_before, y_status_after,
+            "X's write does not change Y's namespace CID"
+        );
+        let y_status: serde_json::Value = serde_json::from_slice(&y_status_after).unwrap();
+        assert_eq!(y_status["owner"], OWNER_Y, "Y's status names Y");
+
+        // The store holds one file per owner and no `UsersAI` area.
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                format!("{OWNER_X}.namespace.json"),
+                format!("{OWNER_Y}.namespace.json")
+            ],
+            "the store writes one file per owner key"
+        );
+        assert!(
+            !dir.path().join("UsersAI").exists(),
+            "the requested spelling creates no UsersAI area on disk"
+        );
+    }
 }
