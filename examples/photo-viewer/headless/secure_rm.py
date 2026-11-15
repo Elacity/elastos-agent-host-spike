@@ -10,7 +10,9 @@ checked), then its contents are removed through that descriptor, so a path chang
 the removal of its contents. The emptied folder is then removed by name (rmdir removes only an empty folder); if that
 fails, the run fails. Without --expect, a missing tree is not an error. Boundary: folders above the root are resolved
 normally (the root's identity check binds the removal), and a folder put at a tree's name between the check and the
-final rmdir is removed only if it is empty.
+final rmdir is removed only if it is empty. Below a checked tree, entries are removed as found: a same-user process
+that moves folders inside the tree during the walk can make it miss what it moved out or empty what it moved in;
+that process is outside this script's threat boundary (it could read the files directly).
 --credentials removes the run's credential files at the root (by name, through the root's descriptor).
 Exit 0 when everything named was removed; exit 1 naming what may remain otherwise.
 """
