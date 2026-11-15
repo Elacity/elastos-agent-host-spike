@@ -571,6 +571,139 @@ pub(crate) mod tests {
         assert_eq!(cid, None, "S1 records no CID");
     }
 
+    /// S5 row R6.1: a forged kind is refused through `POST /api/capsules`
+    /// before the launch entry, and nothing is minted. The control is the same
+    /// body without a kind, launched for real, so the refusals cannot pass
+    /// because the route refuses everything. Every violated check is reported
+    /// in one run, so a plant shows all of them.
+    #[tokio::test]
+    async fn a_forged_kind_is_refused_through_the_launch_route_and_mints_nothing() {
+        use crate::runtime::tests::test_runtime;
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::post;
+        use elastos_runtime::primitives::audit::AuditEvent;
+        use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+        use tower::ServiceExt;
+
+        let (runtime, temp) = test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp.path().join("signed-app");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        let entrypoint = b"microvm image";
+        std::fs::write(capsule_dir.join("rootfs.ext4"), entrypoint).unwrap();
+        let mut manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+            r#"{"schema":"elastos.capsule/v1","version":"0.1.0","name":"signed-app","role":"app","type":"microvm","entrypoint":"rootfs.ext4"}"#,
+        )
+        .unwrap();
+        sign_capsule(&key, &mut manifest, &hash_content(entrypoint)).unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let audit_log = Arc::new(AuditLog::new());
+        // The shell-only and auth layers sit in `api/server.rs:476-496`; this
+        // mount carries the handler's own three extensions.
+        let app = axum::Router::new()
+            .route("/api/capsules", post(launch_capsule))
+            .layer(Extension(Some(temp.path().to_path_buf())))
+            .layer(Extension(audit_log.clone()))
+            .layer(Extension(runtime.clone()));
+        let path = capsule_dir.to_string_lossy().into_owned();
+        let send = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/capsules")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (status, String::from_utf8(bytes.to_vec()).unwrap())
+            }
+        };
+
+        // Three forged shapes, each refused by the request's own field set.
+        let mut forged = Vec::new();
+        for (field, value) in [
+            ("kind", serde_json::json!("agent")),
+            ("agent", serde_json::json!({"kind": "agent"})),
+            ("principal_kind", serde_json::json!("Agent")),
+        ] {
+            let mut body = serde_json::json!({ "path": path.clone() });
+            body[field] = value;
+            let (status, text) = send(body).await;
+            let named = text.contains(&format!("unknown field `{field}`"));
+            forged.push((field, status, named));
+        }
+        let refused = forged
+            .iter()
+            .all(|(_, status, named)| *status == StatusCode::UNPROCESSABLE_ENTITY && *named);
+        let minted = audit_log.recent_events(4);
+        let started = runtime.list_capsules().await;
+        let mut failures = Vec::new();
+        if !refused {
+            failures.push(format!(
+                "a body carrying `kind` is refused before the launch entry: {forged:?}"
+            ));
+        }
+        if !minted.is_empty() {
+            failures.push(format!(
+                "no launch was minted from a forged body: {minted:?}"
+            ));
+        }
+        if !started.is_empty() {
+            failures.push(format!(
+                "no capsule started from a forged body: {started:?}"
+            ));
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+        // The control: the same body without a forged field really launches.
+        let (status, text) = send(serde_json::json!({ "path": path })).await;
+        assert_eq!(status, StatusCode::OK, "the control body launches: {text}");
+        let control: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            control["status"], "launched",
+            "the control names its status"
+        );
+        let id = control["id"].as_str().unwrap_or_default();
+        assert!(!id.is_empty(), "the control names its instance id");
+        let events = audit_log.recent_events(4);
+        assert_eq!(
+            events.len(),
+            1,
+            "the control emits one launch event: {events:?}"
+        );
+        let AuditEvent::CapsuleLaunch { capsule_id, .. } = &events[0] else {
+            unreachable!("the control launch emits a capsule_launch event")
+        };
+        assert_eq!(
+            capsule_id, id,
+            "the one launch event names the launched instance"
+        );
+    }
+
     /// A localhost double: it records every raw request the bridge routes to
     /// the `localhost` scheme and answers `ok`. Own-root reads and writes take
     /// the protected path and never reach it, so its record shows exactly
