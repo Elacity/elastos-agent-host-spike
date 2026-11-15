@@ -50,6 +50,13 @@ def form_errors(receipt):
         errors.append(f"changed_start_status {receipt.get('changed_start_status')!r} is not 400")
     if receipt.get("changed_start_refusal") != "bundle_cid_mismatch":
         errors.append(f"changed_start_refusal {receipt.get('changed_start_refusal')!r} is not bundle_cid_mismatch")
+    checks = receipt.get("checks")
+    if not isinstance(checks, dict):
+        errors.append(f"checks {checks!r} is not an object")
+    else:
+        for name in ("good_start_started", "changed_byte_refused"):
+            if checks.get(name) is not True:
+                errors.append(f"checks.{name} {checks.get(name)!r} is not true")
     return errors
 
 

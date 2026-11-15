@@ -6,7 +6,9 @@
 # not available without a browser, so the open carries the Runtime's local device authority, the same authority
 # `elastos home` uses for local tools: a launch token signed by this Home's own device key (`identity/device.key`,
 # derived as `elastos-identity` derives it) for the device principal, with a `local:` session and a `grant:local:`
-# grant. The token is written to this run's own folder, used once, and removed; it is never printed or recorded.
+# grant. The token is written to this run's own folder, serves the run's two opens, and is removed; it is never
+# printed or recorded. When the run ends, on success or failure, the throwaway Home (its device key and the Runtime's
+# attach secret) is removed too.
 #
 # Writes results.json in the run's folder: the host triple, the content, page and core CIDs, the component's
 # sha256, the Runtime binary's sha256, the open's answer status and page, and the changed-byte refusal name.
@@ -29,10 +31,12 @@ STORAGE="$TARGET/debug/localhost-provider"
 [ -x "$STORAGE" ] || { echo "no storage provider at $STORAGE (cargo build -p localhost-provider)"; exit 3; }
 [ -f "$CORE_WASM" ] || { echo "no photo core at $CORE_WASM"; exit 3; }
 [ -e "$WORK" ] && { echo "the work folder must be new: $WORK"; exit 2; }
+# Refuse a work folder inside the checkout BEFORE anything is made, comparing real paths (symlinks resolved).
+real_path() { python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+case "$(real_path "$WORK")/" in "$(real_path "$WT")"/*) echo "the work folder must be outside the checkout: $WORK"; exit 2 ;; esac
 mkdir -p "$WORK/home" "$WORK/out" || exit 2
 WORK=$(cd "$WORK" && pwd)
 chmod 700 "$WORK" || exit 2
-case "$WORK/" in "$WT"/*) echo "the work folder must be outside the checkout: $WORK"; exit 2 ;; esac
 export HOME="$WORK/home"
 unset XDG_DATA_HOME
 case "$(uname)" in
@@ -47,7 +51,10 @@ pids=()
 # Credentials this run makes: removed on every exit path, success or failure.
 secrets_rm() { rm -f "$WORK/open.cfg" "$WORK/attach.json" "$WORK/attach-body.json" "$WORK/home-token" "$WORK/did-signing.key" \
   "$WORK/token-payload.json" "$WORK/signed.json" "$WORK"/of-*.key; }
-cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; secrets_rm; }
+# The throwaway Home holds the device key and, while serve runs, the attach secret: removed once its processes are
+# gone. Only this run's own "$WORK/home", made above, is removed.
+home_rm() { [ -n "$WORK" ] && [ "$HOME" = "$WORK/home" ] && [ -d "$WORK/home" ] && rm -rf -- "$WORK/home"; }
+cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; secrets_rm; home_rm; }
 trap cleanup EXIT
 as_expected() { echo "AS EXPECTED ($1)"; }
 not_expected() { echo "NOT AS EXPECTED ($1)"; failed=1; }

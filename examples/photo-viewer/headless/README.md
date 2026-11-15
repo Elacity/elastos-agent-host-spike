@@ -73,7 +73,8 @@ The receipt's `host_triple` reads `Linux aarch64`. The Runtime binary is that ma
    (`elastos-server/src/api/gateway_home_token.rs`, the proofless-device arm of the verifier). The script makes
    that token from the run's own `identity/device.key`, uses it for this run's two opens (the good one and the changed
    copy), and deletes it with every other credential file when the run ends, on success or failure; it is never
-   printed or recorded. The work folder is made owner-only and must lie outside the checkout.
+   printed or recorded. The throwaway Home (its device key and the Runtime's attach secret) is removed when the run
+   ends, on success or failure. The work folder is made owner-only and must lie outside the checkout (real paths).
 5. `results.json` is written in the run's folder. Exit 0 only when the good open answered `200` with a page named
    and the changed-byte open answered `400` with `bundle_cid_mismatch`.
 
