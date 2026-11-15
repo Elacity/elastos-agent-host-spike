@@ -803,7 +803,7 @@ mod tests {
             assert!(!crate::agents::build_allows());
             eprintln!(
                 "SKIP r6_2b_an_agent_shaped_payload_launches_as_the_person_and_touches_no_agent_root: \
-                 this build carries no agents (prototype-agents off)"
+                 this build carries no agents (the agents feature off)"
             );
             return;
         };

@@ -2013,7 +2013,7 @@ mod tests {
     /// reaches the release's microVM gate as the person. Nothing here needs
     /// KVM: `microvm_unavailable` fires before the KVM check. The payload's
     /// agent id is a valid stored-agent-shaped id, so the plant that takes the
-    /// principal from it (`prototype-agents` on) turns this row red at
+    /// principal from it (the agents feature on) turns this row red at
     /// `UNADMITTED_AGENT_PRINCIPAL`; with the feature off that refusal is a
     /// no-op and the row still observes the gate.
     #[tokio::test]
