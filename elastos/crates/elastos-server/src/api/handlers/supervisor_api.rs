@@ -1291,4 +1291,133 @@ mod tests {
         }
     }
 
+    /// F3.5 (S5 row 4 on route 3, the microVM route): two people who each
+    /// launch their own capsule get two bridge principals, each that person's
+    /// own, and each guest's `Users/self` resource is scoped through its own
+    /// launch's principal root. The row drives the production entrance end to
+    /// end — `launch_capsule` (HTTP handler) -> `Supervisor::handle_request`
+    /// -> `Supervisor::launch_capsule` -> the resource bridge — because the
+    /// bridge accepts exactly one peer and crosvm is that peer, so the guest
+    /// is the only sender whose frame can reach the audit record. The
+    /// observable is the two `component.invoke.requested` records the bridge
+    /// persists before any authorization check.
+    ///
+    /// Needs /dev/kvm and the fixture host paths; without them it refuses by
+    /// name. The KVM receipt runs it with --ignored.
+    #[tokio::test]
+    #[ignore = "F3.5 needs /dev/kvm; run the KVM receipt with --ignored"]
+    async fn two_people_launching_a_vm_get_two_bridge_principals() {
+        // Independent literals, derived outside Rust:
+        // printf %s '<id>' | shasum -a 256 | cut -c1-24
+        const ALICE: &str = "person:local:f35-alice";
+        const ALICE_ROOT: &str = "localhost://Users/d39ecd35997871000394e959";
+        const BOB: &str = "person:local:f35-bob";
+        const BOB_ROOT: &str = "localhost://Users/421ecb983da498d062bc24fa";
+
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+        {
+            Ok(kvm) => drop(kvm),
+            Err(error) => f35_refuse(format!("/dev/kvm is not openable read+write: {error}")),
+        }
+
+        let fixture = f35_fixture();
+        for (name, grant) in [
+            ("f35-alice-vm", &fixture.alice_grant),
+            ("f35-bob-vm", &fixture.bob_grant),
+        ] {
+            let launched = launch_capsule(
+                State(fixture.state.clone()),
+                Json(launch_input(serde_json::json!({
+                    "name": name,
+                    "launch_grant": grant
+                }))),
+            )
+            .await;
+            if let Err((status, text)) = launched {
+                panic!("F3.5: launching {name} failed ({status}): {text}");
+            }
+        }
+
+        let requested = f35_requested_records(fixture.dir.path()).await;
+        let for_capsule = |capsule: &str| {
+            requested
+                .iter()
+                .filter(|event| event.capsule_id.as_deref() == Some(capsule))
+                .collect::<Vec<_>>()
+        };
+        let alice_records = for_capsule("vm-f35-alice-vm");
+        let bob_records = for_capsule("vm-f35-bob-vm");
+        let shown = |records: &[&elastos_runtime::auth::RuntimeAuditEventV1]| -> String {
+            records
+                .first()
+                .and_then(|event| event.principal_id.clone())
+                .unwrap_or_else(|| "<none>".to_string())
+        };
+        eprintln!(
+            "F3.5 RAN: alice={} bob={}",
+            shown(&alice_records),
+            shown(&bob_records)
+        );
+
+        assert_eq!(
+            requested.len(),
+            2,
+            "exactly two bridge records, got {}",
+            requested.len()
+        );
+        assert_eq!(
+            alice_records.len(),
+            1,
+            "exactly one record for alice's launch"
+        );
+        assert_eq!(bob_records.len(), 1, "exactly one record for bob's launch");
+        assert_eq!(
+            alice_records[0].principal_id.as_deref(),
+            Some(ALICE),
+            "alice's launch reaches the bridge as alice"
+        );
+        assert_eq!(
+            bob_records[0].principal_id.as_deref(),
+            Some(BOB),
+            "bob's launch reaches the bridge as bob"
+        );
+        assert_ne!(
+            alice_records[0].principal_id, bob_records[0].principal_id,
+            "the two bridge principals differ"
+        );
+        assert_eq!(
+            alice_records[0].reason,
+            format!("read {ALICE_ROOT}/f35.txt"),
+            "alice's resource is scoped to alice's root"
+        );
+        assert_eq!(
+            bob_records[0].reason,
+            format!("read {BOB_ROOT}/f35.txt"),
+            "bob's resource is scoped to bob's root"
+        );
+        assert!(
+            !alice_records[0].reason.contains(BOB_ROOT) && !alice_records[0].reason.contains(BOB),
+            "alice's record names no other person or root: {:?}",
+            alice_records[0].reason
+        );
+        assert!(
+            !bob_records[0].reason.contains(ALICE_ROOT) && !bob_records[0].reason.contains(ALICE),
+            "bob's record names no other person or root: {:?}",
+            bob_records[0].reason
+        );
+        assert_eq!(
+            alice_records[0].result, "pending",
+            "alice's record is the pre-authorization record"
+        );
+        assert_eq!(
+            bob_records[0].result, "pending",
+            "bob's record is the pre-authorization record"
+        );
+
+        // Drop the supervisor so RunningVm's Drop kills both crosvm children.
+        drop(fixture);
+    }
 }
