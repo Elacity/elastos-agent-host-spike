@@ -1159,11 +1159,40 @@ mod tests {
         .unwrap()
     }
 
+    /// Declared before `dir` on purpose: fields drop in declaration order, so
+    /// the supervisor (and its `RunningVm` drop) runs while the temp dir that
+    /// holds its data and capsule tree still exists.
     struct F35Fixture {
-        dir: tempfile::TempDir,
         state: SupervisorState,
+        dir: tempfile::TempDir,
         alice_grant: String,
         bob_grant: String,
+    }
+
+    /// Points `HOME` at a directory for the length of its scope and restores
+    /// the previous value on drop. `VmConfig::from_manifest` places the crosvm
+    /// pivot root at `$HOME/.local/share/elastos/crosvm-empty`
+    /// (`elastos-crosvm/src/config.rs:278`) and nothing on the launch path
+    /// overrides that field, so `HOME` is the only test-reachable lever.
+    struct F35HomeGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl F35HomeGuard {
+        fn inside(path: impl Into<std::path::PathBuf>) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path.into());
+            Self { previous }
+        }
+    }
+
+    impl Drop for F35HomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 
     fn f35_fixture() -> F35Fixture {
@@ -1248,8 +1277,8 @@ mod tests {
             data_dir: Some(data_dir.to_path_buf()),
         };
         F35Fixture {
-            dir,
             state,
+            dir,
             alice_grant,
             bob_grant,
         }
@@ -1304,6 +1333,13 @@ mod tests {
     ///
     /// Needs /dev/kvm and the fixture host paths; without them it refuses by
     /// name. The KVM receipt runs it with --ignored.
+    ///
+    /// While it runs, the row changes `HOME` for its own process so the crosvm
+    /// pivot root (`$HOME/.local/share/elastos/crosvm-empty`) lands inside the
+    /// fixture temp dir. That is why it must run alone: it is `#[ignore]` and
+    /// the receipt filters it by name. The crosvm, vmlinux and rootfs paths
+    /// still come from `ELASTOS_F35_*` (absolute), so `HOME` is not used to
+    /// find them.
     #[tokio::test]
     #[ignore = "F3.5 needs /dev/kvm; run the KVM receipt with --ignored"]
     async fn two_people_launching_a_vm_get_two_bridge_principals() {
@@ -1324,6 +1360,9 @@ mod tests {
         }
 
         let fixture = f35_fixture();
+        // Set before the first launch: the pivot root is resolved at launch
+        // time, not when the fixture is built.
+        let home = F35HomeGuard::inside(fixture.dir.path().join("home"));
         for (name, grant) in [
             ("f35-alice-vm", &fixture.alice_grant),
             ("f35-bob-vm", &fixture.bob_grant),
@@ -1340,6 +1379,16 @@ mod tests {
                 panic!("F3.5: launching {name} failed ({status}): {text}");
             }
         }
+
+        let pivot_root = fixture
+            .dir
+            .path()
+            .join("home/.local/share/elastos/crosvm-empty");
+        assert!(
+            pivot_root.is_dir(),
+            "the crosvm pivot root landed inside the fixture temp area: {}",
+            pivot_root.display()
+        );
 
         let requested = f35_requested_records(fixture.dir.path()).await;
         let for_capsule = |capsule: &str| {
@@ -1417,7 +1466,10 @@ mod tests {
             "bob's record is the pre-authorization record"
         );
 
-        // Drop the supervisor so RunningVm's Drop kills both crosvm children.
+        // Drop the supervisor first: `F35Fixture` declares `state` before
+        // `dir`, and `RunningVm`'s Drop kills both crosvm children while the
+        // temp dir still exists. Then restore `HOME`.
         drop(fixture);
+        drop(home);
     }
 }
