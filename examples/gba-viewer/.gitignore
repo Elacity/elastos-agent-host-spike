@@ -1,5 +1,13 @@
 *
 !/.gitignore
+!/core/
+!/core/build.sh
+!/core/Cargo.lock
+!/core/Cargo.toml
+!/core/capsule.json
+!/core/src/
+!/core/src/lib.rs
+!/core/src/tests.rs
 !/derive_manifest.py
 !/prepare_bundles.py
 !/rows_test.py
