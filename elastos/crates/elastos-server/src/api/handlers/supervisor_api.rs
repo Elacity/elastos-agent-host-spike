@@ -1047,4 +1047,429 @@ mod tests {
             "the capsule-name binding refusal"
         );
     }
+
+    // ── F3.5 fixture: two people, two capsules, one fixture rootfs ──
+    //
+    // Test support for the row below. It stages only what that row reads: two
+    // stored humans with real minted launch grants, two capsule trees carrying
+    // the fixture rootfs, and the two host artifacts the release gates verify
+    // (a crosvm binary and a guest kernel) under <data_dir>/bin with the
+    // on-disk checksums those gates compare against.
+
+    /// The named refusal the row uses instead of an early return: a run
+    /// without its host prerequisites is red with F3.5's id, never silently ok.
+    fn f35_refuse(what: impl std::fmt::Display) -> ! {
+        panic!("F3.5 BLOCKED: {what}")
+    }
+
+    fn f35_host_file(key: &str) -> PathBuf {
+        let value = match std::env::var(key) {
+            Ok(value) => value,
+            Err(_) => f35_refuse(format!("{key} is not set")),
+        };
+        let path = PathBuf::from(value);
+        if !path.is_file() {
+            f35_refuse(format!("{key} is not a regular file: {}", path.display()));
+        }
+        path
+    }
+
+    fn f35_sha256(path: &Path) -> String {
+        use sha2::Digest as _;
+        use std::io::Read as _;
+        let mut hasher = sha2::Sha256::new();
+        let mut file = std::fs::File::open(path).unwrap();
+        let mut buf = [0u8; 8192];
+        loop {
+            let read = file.read(&mut buf).unwrap();
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buf[..read]);
+        }
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Stage one verified host artifact at <data_dir>/bin/<name> and return
+    /// the on-disk platform entry that pins its bytes.
+    fn f35_stage_component(data_dir: &Path, name: &str, source: &Path) -> serde_json::Value {
+        let dest = data_dir.join("bin").join(name);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::copy(source, &dest).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest, perms).unwrap();
+        serde_json::json!({
+            "checksum": f35_sha256(&dest),
+            "size": std::fs::metadata(&dest).unwrap().len(),
+        })
+    }
+
+    fn f35_write_components_manifest(
+        data_dir: &Path,
+        crosvm: serde_json::Value,
+        vmlinux: serde_json::Value,
+    ) {
+        let platform = crate::setup::detect_platform();
+        let mut external = serde_json::Map::new();
+        for (name, entry) in [("crosvm", crosvm), ("vmlinux", vmlinux)] {
+            let mut platforms = serde_json::Map::new();
+            platforms.insert(platform.clone(), entry);
+            external.insert(
+                name.to_string(),
+                serde_json::json!({ "platforms": platforms }),
+            );
+        }
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::json!({"external": external, "profiles": {}}).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The in-memory manifest entry the release's microVM gate resolves for
+    /// this platform. The artifacts themselves are pinned on disk above.
+    fn f35_in_memory_component(platform: &str) -> crate::setup::Component {
+        let mut platforms = serde_json::Map::new();
+        platforms.insert(platform.to_string(), serde_json::json!({}));
+        serde_json::from_value(serde_json::json!({"platforms": platforms})).unwrap()
+    }
+
+    fn f35_person_grant(data_dir: &Path, person: &str, capsule: &str) -> String {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+        let now = crate::auth::now_ts();
+        let record = crate::auth::store_test_human_principal(data_dir, person);
+        let session_grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{capsule}"),
+            session_id: format!("auth:{capsule}"),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec![capsule.to_string()],
+        };
+        crate::auth::store_session_grant(data_dir, session_grant.clone()).unwrap();
+        crate::api::gateway::issue_home_launch_token_for_auth_grant(
+            data_dir,
+            capsule,
+            &session_grant,
+        )
+        .unwrap()
+    }
+
+    /// Declared before `dir` on purpose: fields drop in declaration order, so
+    /// the supervisor (and its `RunningVm` drop) runs while the temp dir that
+    /// holds its data and capsule tree still exists.
+    struct F35Fixture {
+        state: SupervisorState,
+        dir: tempfile::TempDir,
+        alice_grant: String,
+        bob_grant: String,
+    }
+
+    /// Points `HOME` at a directory for the length of its scope and restores
+    /// the previous value on drop. `VmConfig::from_manifest` places the crosvm
+    /// pivot root at `$HOME/.local/share/elastos/crosvm-empty`
+    /// (`elastos-crosvm/src/config.rs:278`) and nothing on the launch path
+    /// overrides that field, so `HOME` is the only test-reachable lever.
+    struct F35HomeGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl F35HomeGuard {
+        fn inside(path: impl Into<std::path::PathBuf>) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path.into());
+            Self { previous }
+        }
+    }
+
+    impl Drop for F35HomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn f35_fixture() -> F35Fixture {
+        use crate::setup::{CapsuleEntry, ComponentsManifest};
+        let crosvm = f35_host_file("ELASTOS_F35_CROSVM");
+        let vmlinux = f35_host_file("ELASTOS_F35_VMLINUX");
+        let rootfs = f35_host_file("ELASTOS_F35_ROOTFS");
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path();
+        f35_write_components_manifest(
+            data_dir,
+            f35_stage_component(data_dir, "crosvm", &crosvm),
+            f35_stage_component(data_dir, "vmlinux", &vmlinux),
+        );
+
+        let platform = crate::setup::detect_platform();
+        let mut capsules = std::collections::HashMap::new();
+        for name in ["f35-alice-vm", "f35-bob-vm"] {
+            let capsule_dir = data_dir.join("capsules").join(name);
+            std::fs::create_dir_all(&capsule_dir).unwrap();
+            std::fs::write(capsule_dir.join(".elastos-cid"), format!("bafy-{name}\n")).unwrap();
+            std::fs::write(
+                capsule_dir.join("capsule.json"),
+                serde_json::json!({
+                    "schema": "elastos.capsule/v1",
+                    "name": name,
+                    "version": "0.1.0",
+                    "role": "app",
+                    "type": "microvm",
+                    "entrypoint": "rootfs.ext4"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::copy(&rootfs, capsule_dir.join("rootfs.ext4")).unwrap();
+            capsules.insert(
+                name.to_string(),
+                CapsuleEntry {
+                    extra: Default::default(),
+                    cid: format!("bafy-{name}"),
+                    sha256: String::new(),
+                    size: 0,
+                    repository: None,
+                    platforms: vec![],
+                },
+            );
+        }
+
+        let mut supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::from([
+                    ("crosvm".to_string(), f35_in_memory_component(&platform)),
+                    ("vmlinux".to_string(), f35_in_memory_component(&platform)),
+                ]),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        supervisor
+            .set_provider_registry(Arc::new(elastos_runtime::provider::ProviderRegistry::new()));
+        let audit_log = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        supervisor.set_capability_manager(Arc::new(
+            elastos_runtime::capability::CapabilityManager::new(
+                Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+                audit_log.clone(),
+                Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+            ),
+        ));
+        supervisor.set_pending_store(Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log),
+        ));
+
+        let alice_grant = f35_person_grant(data_dir, "person:local:f35-alice", "f35-alice-vm");
+        let bob_grant = f35_person_grant(data_dir, "person:local:f35-bob", "f35-bob-vm");
+        let state = SupervisorState {
+            supervisor: Arc::new(supervisor),
+            data_dir: Some(data_dir.to_path_buf()),
+        };
+        F35Fixture {
+            state,
+            dir,
+            alice_grant,
+            bob_grant,
+        }
+    }
+
+    /// Poll the persisted audit until both frames' `requested` records exist or
+    /// the deadline passes. A read error is retried; the 250 ms interval is a
+    /// poll cadence, not the condition.
+    async fn f35_requested_records(
+        data_dir: &Path,
+    ) -> Vec<elastos_runtime::auth::RuntimeAuditEventV1> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut last_error = None;
+        loop {
+            let requested = match crate::auth::load_auth_state(data_dir) {
+                Ok(state) => state
+                    .audit
+                    .into_iter()
+                    .filter(|event| event.event_type == "component.invoke.requested")
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    Vec::new()
+                }
+            };
+            if requested.len() >= 2 {
+                return requested;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "F3.5: {} bridge audit record(s) appeared within 120 s{}",
+                    requested.len(),
+                    last_error
+                        .map(|error| format!(" (last read error: {error})"))
+                        .unwrap_or_default()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    /// F3.5 (S5 row 4 on route 3, the microVM route): two people who each
+    /// launch their own capsule get two bridge principals, each that person's
+    /// own, and each guest's `Users/self` resource is scoped through its own
+    /// launch's principal root. The row drives the production entrance end to
+    /// end — `launch_capsule` (HTTP handler) -> `Supervisor::handle_request`
+    /// -> `Supervisor::launch_capsule` -> the resource bridge — because the
+    /// bridge accepts exactly one peer and crosvm is that peer, so the guest
+    /// is the only sender whose frame can reach the audit record. The
+    /// observable is the two `component.invoke.requested` records the bridge
+    /// persists before any authorization check.
+    ///
+    /// Needs /dev/kvm and the fixture host paths; without them it refuses by
+    /// name. The KVM receipt runs it with --ignored.
+    ///
+    /// While it runs, the row changes `HOME` for its own process so the crosvm
+    /// pivot root (`$HOME/.local/share/elastos/crosvm-empty`) lands inside the
+    /// fixture temp dir. That is why it must run alone: it is `#[ignore]` and
+    /// the receipt filters it by name. The crosvm, vmlinux and rootfs paths
+    /// still come from `ELASTOS_F35_*` (absolute), so `HOME` is not used to
+    /// find them.
+    #[tokio::test]
+    #[ignore = "F3.5 needs /dev/kvm; run the KVM receipt with --ignored"]
+    async fn two_people_launching_a_vm_get_two_bridge_principals() {
+        // Independent literals, derived outside Rust:
+        // printf %s '<id>' | shasum -a 256 | cut -c1-24
+        const ALICE: &str = "person:local:f35-alice";
+        const ALICE_ROOT: &str = "localhost://Users/d39ecd35997871000394e959";
+        const BOB: &str = "person:local:f35-bob";
+        const BOB_ROOT: &str = "localhost://Users/421ecb983da498d062bc24fa";
+
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+        {
+            Ok(kvm) => drop(kvm),
+            Err(error) => f35_refuse(format!("/dev/kvm is not openable read+write: {error}")),
+        }
+
+        let fixture = f35_fixture();
+        // Set before the first launch: the pivot root is resolved at launch
+        // time, not when the fixture is built.
+        let home = F35HomeGuard::inside(fixture.dir.path().join("home"));
+        for (name, grant) in [
+            ("f35-alice-vm", &fixture.alice_grant),
+            ("f35-bob-vm", &fixture.bob_grant),
+        ] {
+            let launched = launch_capsule(
+                State(fixture.state.clone()),
+                Json(launch_input(serde_json::json!({
+                    "name": name,
+                    "launch_grant": grant
+                }))),
+            )
+            .await;
+            if let Err((status, text)) = launched {
+                panic!("F3.5: launching {name} failed ({status}): {text}");
+            }
+        }
+
+        let pivot_root = fixture
+            .dir
+            .path()
+            .join("home/.local/share/elastos/crosvm-empty");
+        assert!(
+            pivot_root.is_dir(),
+            "the crosvm pivot root landed inside the fixture temp area: {}",
+            pivot_root.display()
+        );
+
+        let requested = f35_requested_records(fixture.dir.path()).await;
+        let for_capsule = |capsule: &str| {
+            requested
+                .iter()
+                .filter(|event| event.capsule_id.as_deref() == Some(capsule))
+                .collect::<Vec<_>>()
+        };
+        let alice_records = for_capsule("vm-f35-alice-vm");
+        let bob_records = for_capsule("vm-f35-bob-vm");
+        let shown = |records: &[&elastos_runtime::auth::RuntimeAuditEventV1]| -> String {
+            records
+                .first()
+                .and_then(|event| event.principal_id.clone())
+                .unwrap_or_else(|| "<none>".to_string())
+        };
+        eprintln!(
+            "F3.5 RAN: alice={} bob={}",
+            shown(&alice_records),
+            shown(&bob_records)
+        );
+
+        assert_eq!(
+            requested.len(),
+            2,
+            "exactly two bridge records, got {}",
+            requested.len()
+        );
+        assert_eq!(
+            alice_records.len(),
+            1,
+            "exactly one record for alice's launch"
+        );
+        assert_eq!(bob_records.len(), 1, "exactly one record for bob's launch");
+        assert_eq!(
+            alice_records[0].principal_id.as_deref(),
+            Some(ALICE),
+            "alice's launch reaches the bridge as alice"
+        );
+        assert_eq!(
+            bob_records[0].principal_id.as_deref(),
+            Some(BOB),
+            "bob's launch reaches the bridge as bob"
+        );
+        assert_ne!(
+            alice_records[0].principal_id, bob_records[0].principal_id,
+            "the two bridge principals differ"
+        );
+        assert_eq!(
+            alice_records[0].reason,
+            format!("read {ALICE_ROOT}/f35.txt"),
+            "alice's resource is scoped to alice's root"
+        );
+        assert_eq!(
+            bob_records[0].reason,
+            format!("read {BOB_ROOT}/f35.txt"),
+            "bob's resource is scoped to bob's root"
+        );
+        assert!(
+            !alice_records[0].reason.contains(BOB_ROOT) && !alice_records[0].reason.contains(BOB),
+            "alice's record names no other person or root: {:?}",
+            alice_records[0].reason
+        );
+        assert!(
+            !bob_records[0].reason.contains(ALICE_ROOT) && !bob_records[0].reason.contains(ALICE),
+            "bob's record names no other person or root: {:?}",
+            bob_records[0].reason
+        );
+        assert_eq!(
+            alice_records[0].result, "pending",
+            "alice's record is the pre-authorization record"
+        );
+        assert_eq!(
+            bob_records[0].result, "pending",
+            "bob's record is the pre-authorization record"
+        );
+
+        // Drop the supervisor first: `F35Fixture` declares `state` before
+        // `dir`, and `RunningVm`'s Drop kills both crosvm children while the
+        // temp dir still exists. Then restore `HOME`.
+        drop(fixture);
+        drop(home);
+    }
 }
