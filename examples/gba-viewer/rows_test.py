@@ -108,7 +108,7 @@ class Rows(unittest.TestCase):
     def test_r1_the_page_manifest_is_derived_by_the_mapping(self):
         """r1 the derived page manifest has no interfaces or permissions"""
         with tempfile.TemporaryDirectory(prefix="gba-r1-") as temporary:
-            out = pathlib.Path(temporary) / "page"
+            out = pathlib.Path(temporary).resolve() / "page"
             result = derive(PAGE_MANIFEST, out, CORE_CID, CORE_NAME)
             self.assertEqual(result.returncode, 0, result.stderr)
             derived = json.loads((out / "capsule.json").read_text())
@@ -126,7 +126,7 @@ class Rows(unittest.TestCase):
     def test_r2_the_content_manifest_is_derived_by_the_mapping(self):
         """r2 the derived content manifest has no viewer interfaces or permissions"""
         with tempfile.TemporaryDirectory(prefix="gba-r2-") as temporary:
-            out = pathlib.Path(temporary) / "content"
+            out = pathlib.Path(temporary).resolve() / "content"
             result = derive(CONTENT_MANIFEST, out, PAGE_CID)
             self.assertEqual(result.returncode, 0, result.stderr)
             derived = json.loads((out / "capsule.json").read_text())
@@ -317,6 +317,21 @@ class Rows(unittest.TestCase):
                 result.stderr, f"derive_manifest_manifest_symlink: {base / 'linked'}\n",
             )
             self.assertFalse(out.exists())
+
+    def test_r10_an_output_under_a_symlinked_folder_is_refused(self):
+        """r10 derive_manifest refuses an output folder under a symlinked folder"""
+        with tempfile.TemporaryDirectory(prefix="gba-r10-") as temporary:
+            base = pathlib.Path(temporary).resolve()
+            victim = base / "victim"
+            victim.mkdir()
+            (base / "linked").symlink_to(victim)
+            out = base / "linked" / "page"
+            result = derive(PAGE_MANIFEST, out, CORE_CID, CORE_NAME)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(
+                result.stderr, f"derive_manifest_output_symlink: {base / 'linked'}\n",
+            )
+            self.assertEqual(list(victim.iterdir()), [])
 
 
 if __name__ == "__main__":
