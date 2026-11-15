@@ -941,4 +941,93 @@ mod tests {
             "the agent file is not rewritten"
         );
     }
+
+    /// F3.3 (r3, options §2.1): the supervisor launch entrance takes no raw
+    /// principal authority. A top-level `principal_id` and a config
+    /// `principal_id` each get 400 with the handler's full sentence, by exact
+    /// equality, and nothing is launched.
+    #[tokio::test]
+    async fn a_supervisor_launch_takes_no_raw_principal_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = launch_router(test_state(dir.path()));
+        for (body, sentence) in [
+            (
+                serde_json::json!({"name": "chat", "principal_id": "person:local:x"}),
+                "supervisor launches do not accept raw principal authority (principal_id); use signed launch_grant",
+            ),
+            (
+                serde_json::json!({"name": "chat", "config": {"principal_id": "person:local:x"}}),
+                "supervisor launch config must not carry principal_id; use the signed Home launch-grant path",
+            ),
+        ] {
+            let (status, text) = post_launch(app.clone(), body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+            assert_eq!(text, sentence, "the entrance's full refusal sentence");
+            assert!(
+                !text.contains("Cannot launch capsule"),
+                "nothing is launched: {text}"
+            );
+        }
+    }
+
+    /// F3.4 (r3, options §2.1): a supervisor launch's principal comes from a
+    /// verified person grant, and the grant is bound to the capsule name.
+    /// (i) The handler does not expose the principal string at this head, so
+    /// the string assertion drives the handler's own derivation
+    /// (`supervisor_launch_principal_from_input`), as its sibling row does.
+    /// (ii) A token minted for another capsule is refused through the real
+    /// HTTP handler.
+    #[tokio::test]
+    async fn a_supervisor_launch_principal_comes_from_a_person_grant() {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path();
+        let person = "person:local:r6-3-grant";
+        let now = crate::auth::now_ts();
+        let record = crate::auth::store_test_human_principal(data_dir, person);
+        let session_grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:r6-3".to_string(),
+            session_id: "auth:r6-3".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec!["chat".to_string(), "documents".to_string()],
+        };
+        crate::auth::store_session_grant(data_dir, session_grant.clone()).unwrap();
+        let token_for = |app: &str| {
+            crate::api::gateway::issue_home_launch_token_for_auth_grant(
+                data_dir,
+                app,
+                &session_grant,
+            )
+            .unwrap()
+        };
+
+        let input = launch_input(serde_json::json!({
+            "name": "chat",
+            "launch_grant": token_for("chat")
+        }));
+        let principal = supervisor_launch_principal_from_input(Some(data_dir), &input).unwrap();
+        assert_eq!(
+            principal
+                .as_ref()
+                .map(crate::resource_bridge::BridgePrincipal::principal_str),
+            Some(person),
+            "the principal is the stored person's id"
+        );
+
+        let app = launch_router(test_state(data_dir));
+        let (status, text) = post_launch(
+            app,
+            serde_json::json!({"name": "chat", "launch_grant": token_for("documents")}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert_eq!(
+            text, "home launch token is not authorized for this provider",
+            "the capsule-name binding refusal"
+        );
+    }
 }
