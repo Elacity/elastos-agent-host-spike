@@ -942,14 +942,29 @@ mod tests {
         );
     }
 
-    /// F3.3 (r3, options §2.1): the supervisor launch entrance takes no raw
-    /// principal authority. A top-level `principal_id` and a config
-    /// `principal_id` each get 400 with the handler's full sentence, by exact
-    /// equality, and nothing is launched.
+    /// F3.3 (r3, options §2.1; fix r1): the supervisor launch entrance takes
+    /// no raw principal authority. The control below sends a body with no
+    /// principal key through the same router and real supervisor; the
+    /// supervisor's own registry-miss error is the response, so this channel
+    /// can see a launch request reach `Supervisor::handle_request`. Each
+    /// refused body then draws only the handler's exact 400 sentence, and that
+    /// chain never appears: the refusal returns before the supervisor is
+    /// asked. The row claims that response, not the absence of every launch
+    /// side effect, which this state cannot observe.
     #[tokio::test]
     async fn a_supervisor_launch_takes_no_raw_principal_authority() {
+        // Control first: same name, router and temp-directory shape as the
+        // refused bodies, with no authority key. Only a reach can produce this
+        // exact supervisor answer.
         let dir = tempfile::tempdir().unwrap();
         let app = launch_router(test_state(dir.path()));
+        let (status, text) = post_launch(app, serde_json::json!({"name": "chat"})).await;
+        assert_eq!(
+            text, "launch_capsule failed: capsule 'chat' not in registry",
+            "the control body reaches the supervisor"
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{text}");
+
         for (body, sentence) in [
             (
                 serde_json::json!({"name": "chat", "principal_id": "person:local:x"}),
@@ -960,12 +975,14 @@ mod tests {
                 "supervisor launch config must not carry principal_id; use the signed Home launch-grant path",
             ),
         ] {
-            let (status, text) = post_launch(app.clone(), body).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+            let dir = tempfile::tempdir().unwrap();
+            let app = launch_router(test_state(dir.path()));
+            let (status, text) = post_launch(app, body).await;
             assert_eq!(text, sentence, "the entrance's full refusal sentence");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
             assert!(
-                !text.contains("Cannot launch capsule"),
-                "nothing is launched: {text}"
+                !text.contains("launch_capsule failed:"),
+                "the refusal returns before the supervisor's answer: {text}"
             );
         }
     }
