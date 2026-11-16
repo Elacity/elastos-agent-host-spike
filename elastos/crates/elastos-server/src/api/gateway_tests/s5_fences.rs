@@ -1299,6 +1299,105 @@ async fn route_20_two_people_get_two_locations_and_a_cross_principal_uri_is_refu
     );
 }
 
+/// Route 20's two download arguments are independent of the upload route's
+/// argument: the objects are seeded through the library runtime, so a plant at
+/// `gateway_provider_proxy.rs:442` leaves the single and selection downloads
+/// green while `:1007` and `:1015` redden them.
+#[tokio::test]
+async fn route_20_download_sites_read_seeded_objects_without_the_upload_route() {
+    let home = two_person_home().await;
+    let mut state = library_route_state(home.dir.path()).await;
+    let registry = state.provider_registry.clone().unwrap();
+    let uri_p = format!("{}/Documents/seeded-p.txt", home.people[0].root);
+    let uri_p2 = format!("{}/Documents/seeded-p2.txt", home.people[0].root);
+    let uri_q = format!("{}/Documents/seeded-q.txt", home.people[1].root);
+    let uri_q2 = format!("{}/Documents/seeded-q2.txt", home.people[1].root);
+    let seeded = [
+        (&home.people[0], &uri_p, "seeded person P"),
+        (&home.people[0], &uri_p2, "seeded person P two"),
+        (&home.people[1], &uri_q, "seeded person Q"),
+        (&home.people[1], &uri_q2, "seeded person Q two"),
+    ];
+    for (person, uri, marker) in seeded {
+        let upload = crate::library::handle_library_upload_bytes_runtime(
+            home.dir.path(),
+            registry.clone(),
+            person.context.principal_id(),
+            uri,
+            Some("text/plain"),
+            None,
+            marker.as_bytes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(upload["status"], "ok", "{upload}");
+    }
+    let app = gateway_router(state);
+    let token_p = app_token(&home, 0, LIBRARY_CAPSULE_ID);
+
+    let get = |uri: &str| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri(format!(
+                    "/api/provider/object/download/raw?uri={}",
+                    encoded_query_uri(uri)
+                ))
+                .header("x-elastos-home-token", token_p.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let own = get(&uri_p).await.unwrap();
+    assert_eq!(own.status(), StatusCode::OK);
+    let own_bytes = axum::body::to_bytes(own.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&own_bytes[..], b"seeded person P");
+
+    let selection = |uris: &[&str]| {
+        let query = uris
+            .iter()
+            .map(|uri| format!("uri={}", encoded_query_uri(uri)))
+            .collect::<Vec<_>>()
+            .join("&");
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri(format!("/api/provider/object/download/raw?{query}"))
+                .header("x-elastos-home-token", token_p.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let own_selection = selection(&[&uri_p, &uri_p2]).await.unwrap();
+    assert_eq!(own_selection.status(), StatusCode::OK);
+    let own_selection_bytes = axum::body::to_bytes(own_selection.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        !own_selection_bytes.is_empty(),
+        "the person's own seeded selection download returned bytes"
+    );
+
+    let cross = get(&uri_q).await.unwrap();
+    let cross_json = response_text_json(cross).await;
+    assert!(
+        cross_json
+            .to_string()
+            .contains("outside the active principal root"),
+        "{cross_json}"
+    );
+    let cross_selection = selection(&[&uri_q, &uri_q2]).await.unwrap();
+    let cross_selection_json = response_text_json(cross_selection).await;
+    assert!(
+        cross_selection_json
+            .to_string()
+            .contains("outside the active principal root"),
+        "{cross_selection_json}"
+    );
+}
+
 // Part (a) for the four gateway fence routes: the stored agent of the same
 // Home launches through the production `POST /api/capsules` handler and then
 // presents nothing to the route. The front door refuses it by name.
