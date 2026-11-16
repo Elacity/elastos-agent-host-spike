@@ -10793,6 +10793,630 @@ async fn test_runtime_custody_typed_publish_buy_open_read_segment_and_close() {
     assert!(!dir.path().join("protected-content/runtime-mint").exists());
 }
 
+/// Route 17 cells R3.17 and R4.17: two persons P and Q, each with a completed
+/// purchase. P's player launch opens and reads P's own mint (the control in
+/// `route_17_a_person_opens_and_reads_its_own_purchased_mint`), then presents
+/// Q's mint id and Q's viewer handle, both refused at the purchase-owner check
+/// with no bytes returned
+/// (`route_17_a_player_launch_cannot_present_another_persons_mint_or_viewer_handle`).
+///
+/// Fixture ordering: the mock content provider keeps one published protected
+/// object for `TEST_CIDV1`, so P's control read of mint A runs before mint B is
+/// published. Q's own open of B produces Q's viewer handle.
+#[cfg(unix)]
+mod route_17_two_person_purchases {
+    use super::*;
+
+    struct Route17Fixture {
+        dir: tempfile::TempDir,
+        _process_fixture:
+            crate::protected_content_runtime::tests::RuntimeCustodyProcessProviderFixture,
+        app: axum::Router,
+        p: TestPasskeyAuthority,
+        q: TestPasskeyAuthority,
+        p_player_token: String,
+        q_player_token: String,
+        mint_a: elastos_protected_content_contracts::Digest32,
+        mint_b: elastos_protected_content_contracts::Digest32,
+        mint_a_hex: String,
+        mint_b_hex: String,
+        p_open: serde_json::Value,
+        p_read_init: serde_json::Value,
+        p_read_segment: serde_json::Value,
+        clear_init: Vec<u8>,
+        clear_segments: Vec<Vec<u8>>,
+    }
+
+    fn parsed_mint(mint_hex: &str) -> elastos_protected_content_contracts::Digest32 {
+        elastos_protected_content_contracts::Digest32::new(
+            hex::decode(mint_hex).unwrap().try_into().unwrap(),
+        )
+    }
+
+    async fn write_library_bytes_for_principal(
+        app: &axum::Router,
+        token: &str,
+        principal_id: &str,
+        uri: &str,
+        bytes: &[u8],
+    ) {
+        let (status, payload) = post_library(
+            app.clone(),
+            token,
+            "write",
+            json!({
+                "uri": uri,
+                "principal_id": principal_id,
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "uri={uri} payload={payload}");
+        assert_eq!(payload["status"], "ok", "uri={uri} payload={payload}");
+    }
+
+    async fn publish_listing(
+        app: &axum::Router,
+        creator_token: &str,
+        wallet_provider: &Arc<RecordingWalletProvider>,
+        creator: &TestPasskeyAuthority,
+        creator_account_id: &str,
+        replacement_account_id: &str,
+        uri: &str,
+        pending_set_at: u64,
+        replacement_set_at: u64,
+    ) -> String {
+        set_mock_wallet_transaction_default(
+            &wallet_provider.provider,
+            &creator.principal_id,
+            "eip155:8453",
+            creator_account_id,
+            pending_set_at,
+        )
+        .await;
+        let publish_body = json!({
+            "uri": uri,
+            "principal_id": creator.principal_id.clone(),
+            "protection": {
+                "mode": "runtime_custody",
+                "copies": "0x2",
+                "price": MOCK_PROTECTED_CONTENT_LISTING_PRICE,
+            },
+        });
+        let (pending_status, pending) =
+            post_library(app.clone(), creator_token, "publish", publish_body.clone()).await;
+        assert_eq!(pending_status, StatusCode::OK);
+        assert_eq!(pending["status"], "error", "{pending}");
+        assert_eq!(
+            pending["message"],
+            "Runtime custody creator mint is pending exact Wallet or Chain settlement"
+        );
+        set_mock_wallet_transaction_default(
+            &wallet_provider.provider,
+            &creator.principal_id,
+            "eip155:8453",
+            replacement_account_id,
+            replacement_set_at,
+        )
+        .await;
+        let _ = wallet_provider
+            .provider
+            .complete_latest_transaction_approval()
+            .await;
+        let (ok_status, ok) =
+            post_library(app.clone(), creator_token, "publish", publish_body).await;
+        assert_eq!(ok_status, StatusCode::OK);
+        assert_eq!(ok["status"], "ok", "{ok}");
+        ok["data"]["content_security"]["mint_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn buy_listing(
+        app: &axum::Router,
+        buyer_token: &str,
+        wallet_provider: &Arc<RecordingWalletProvider>,
+        buyer: &TestPasskeyAuthority,
+        buyer_account_id: &str,
+        mint_hex: &str,
+    ) {
+        set_mock_wallet_transaction_default(
+            &wallet_provider.provider,
+            &buyer.principal_id,
+            "eip155:8453",
+            buyer_account_id,
+            10,
+        )
+        .await;
+        for _ in 0..2 {
+            let (pending_status, pending) = post_library(
+                app.clone(),
+                buyer_token,
+                "buy",
+                json!({ "mint_id": mint_hex, "principal_id": buyer.principal_id.clone() }),
+            )
+            .await;
+            assert_eq!(pending_status, StatusCode::OK);
+            assert_eq!(pending["status"], "error", "{pending}");
+            assert_eq!(
+                pending["message"],
+                crate::protected_content_runtime::RUNTIME_CUSTODY_PURCHASE_PENDING_MESSAGE
+            );
+            let _ = wallet_provider
+                .provider
+                .complete_latest_transaction_approval()
+                .await;
+        }
+        let (ok_status, ok) = post_library(
+            app.clone(),
+            buyer_token,
+            "buy",
+            json!({ "mint_id": mint_hex, "principal_id": buyer.principal_id.clone() }),
+        )
+        .await;
+        assert_eq!(ok_status, StatusCode::OK);
+        assert_eq!(ok["status"], "ok", "{ok}");
+        assert_eq!(ok["data"]["availability"]["status"], "buyer_owned");
+    }
+
+    async fn player_open(
+        app: &axum::Router,
+        player_token: &str,
+        mint_hex: &str,
+        body_principal_id: &str,
+    ) -> serde_json::Value {
+        let (status, payload) = post_library(
+            app.clone(),
+            player_token,
+            "open_viewer",
+            json!({
+                "mint_id": mint_hex,
+                "principal_id": body_principal_id,
+                "launch_id": "launch:ffffffffffffffffffffffffffffffff",
+                "proof_binding_id": "proof:substituted",
+                "session_id": "runtime-session:substituted",
+                "grant_id": "grant:substituted",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        payload
+    }
+
+    async fn player_read(
+        app: &axum::Router,
+        player_token: &str,
+        mint_hex: &str,
+        viewer_session_handle: &str,
+        body_principal_id: &str,
+        segment_index: Option<u32>,
+    ) -> serde_json::Value {
+        let mut body = json!({
+            "mint_id": mint_hex,
+            "viewer_session_handle": viewer_session_handle,
+            "principal_id": body_principal_id,
+            "proof_binding_id": "proof:substituted",
+            "session_id": "runtime-session:substituted",
+            "grant_id": "grant:substituted",
+        });
+        if let Some(index) = segment_index {
+            body["segment_index"] = json!(index);
+        }
+        let (status, payload) = post_library(app.clone(), player_token, "read_viewer", body).await;
+        assert_eq!(status, StatusCode::OK);
+        payload
+    }
+
+    fn decoded_payload_bytes(payload: &serde_json::Value) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(payload["data"]["data"].as_str().unwrap())
+            .unwrap()
+    }
+
+    async fn two_person_purchase_fixture() -> Route17Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        enable_protected_content(dir.path());
+        crate::protected_content_runtime::tests::write_device_key(dir.path(), 0x5a);
+        let (state, wallet_provider) = wallet_chain_test_state_with_observer(dir.path()).await;
+        let registry = state.provider_registry.as_ref().unwrap().clone();
+        reset_mock_content_publish_requests();
+        reset_mock_chain_raw_requests();
+        reset_mock_protected_content_chain_mode();
+        reset_mock_protected_content_purchase_fixture();
+        registry
+            .register_sub_provider("content", std::sync::Arc::new(MockContentProvider))
+            .await
+            .unwrap();
+        registry
+            .register_sub_provider(
+                "object",
+                std::sync::Arc::new(crate::library::ObjectProvider::new(
+                    dir.path().to_path_buf(),
+                    std::sync::Arc::downgrade(&registry),
+                )),
+            )
+            .await
+            .unwrap();
+        let process_fixture = crate::protected_content_runtime::tests::register_runtime_custody_process_providers_for_test_registry(
+            dir.path(),
+            &registry,
+        )
+        .await;
+        crate::protected_content_runtime::tests::register_runtime_custody_mock_media_provider_for_test_registry(
+            dir.path(),
+            &registry,
+        )
+        .await;
+
+        let creator = passkey_authority_with_profile_role_credential(
+            dir.path(),
+            "creator",
+            crate::auth::RuntimePrincipalRole::Admin,
+            "gateway-test-passkey-route-17-creator",
+        );
+        let p = passkey_authority_with_profile_role_credential(
+            dir.path(),
+            "person-p",
+            crate::auth::RuntimePrincipalRole::Admin,
+            "gateway-test-passkey-route-17-p",
+        );
+        let q = passkey_authority_with_profile_role_credential(
+            dir.path(),
+            "person-q",
+            crate::auth::RuntimePrincipalRole::Admin,
+            "gateway-test-passkey-route-17-q",
+        );
+        let creator_token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &creator);
+        let p_token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &p);
+        let q_token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &q);
+        let p_player_token = projection_launch_token_for_authority_context(
+            dir.path(),
+            ELACITY_PLAYER_CAPSULE_ID_FOR_TEST,
+            &p,
+        );
+        let q_player_token = projection_launch_token_for_authority_context(
+            dir.path(),
+            ELACITY_PLAYER_CAPSULE_ID_FOR_TEST,
+            &q,
+        );
+        let creator_account_id = wallet_provider
+            .provider
+            .seed_managed_evm_account_for_principal_with_index(&creator.principal_id, 1)
+            .await;
+        let replacement_creator_account_id = wallet_provider
+            .provider
+            .seed_managed_evm_account_for_principal_with_index(&creator.principal_id, 3)
+            .await;
+        let p_account_id = wallet_provider
+            .provider
+            .seed_managed_evm_account_for_principal_with_index(&p.principal_id, 2)
+            .await;
+        let q_account_id = wallet_provider
+            .provider
+            .seed_managed_evm_account_for_principal_with_index(&q.principal_id, 4)
+            .await;
+        let app = gateway_router(state.clone());
+
+        let creator_root = crate::auth::principal_localhost_root(&creator.principal_id);
+        let uri_a = format!("{creator_root}/Documents/route-17-a.mp4");
+        let uri_b = format!("{creator_root}/Documents/route-17-b.mp4");
+        let (clear_init, clear_segments) =
+            crate::protected_content_runtime::tests::runtime_custody_gateway_media_output_for_test(
+            );
+
+        write_library_bytes_for_principal(
+            &app,
+            &creator_token,
+            &creator.principal_id,
+            &uri_a,
+            b"media-a",
+        )
+        .await;
+        let mint_a_hex = publish_listing(
+            &app,
+            &creator_token,
+            &wallet_provider,
+            &creator,
+            &creator_account_id,
+            &replacement_creator_account_id,
+            &uri_a,
+            10,
+            20,
+        )
+        .await;
+        buy_listing(
+            &app,
+            &p_token,
+            &wallet_provider,
+            &p,
+            &p_account_id,
+            &mint_a_hex,
+        )
+        .await;
+
+        // P's control: open and read P's own purchased mint while mint A is the
+        // published protected object.
+        let p_open = player_open(&app, &p_player_token, &mint_a_hex, &p.principal_id).await;
+        assert_eq!(p_open["status"], "ok", "{p_open}");
+        let p_handle = p_open["data"]["viewer_session_handle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let p_read_init = player_read(
+            &app,
+            &p_player_token,
+            &mint_a_hex,
+            &p_handle,
+            &p.principal_id,
+            None,
+        )
+        .await;
+        let p_read_segment = player_read(
+            &app,
+            &p_player_token,
+            &mint_a_hex,
+            &p_handle,
+            &p.principal_id,
+            Some(0),
+        )
+        .await;
+
+        write_library_bytes_for_principal(
+            &app,
+            &creator_token,
+            &creator.principal_id,
+            &uri_b,
+            b"media-b",
+        )
+        .await;
+        let mint_b_hex = publish_listing(
+            &app,
+            &creator_token,
+            &wallet_provider,
+            &creator,
+            &creator_account_id,
+            &replacement_creator_account_id,
+            &uri_b,
+            30,
+            40,
+        )
+        .await;
+        assert_ne!(mint_a_hex, mint_b_hex);
+        buy_listing(
+            &app,
+            &q_token,
+            &wallet_provider,
+            &q,
+            &q_account_id,
+            &mint_b_hex,
+        )
+        .await;
+
+        Route17Fixture {
+            dir,
+            _process_fixture: process_fixture,
+            app,
+            p,
+            q,
+            p_player_token,
+            q_player_token,
+            mint_a: parsed_mint(&mint_a_hex),
+            mint_b: parsed_mint(&mint_b_hex),
+            mint_a_hex,
+            mint_b_hex,
+            p_open,
+            p_read_init,
+            p_read_segment,
+            clear_init,
+            clear_segments,
+        }
+    }
+
+    #[tokio::test]
+    async fn route_17_a_person_opens_and_reads_its_own_purchased_mint() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = two_person_purchase_fixture().await;
+
+        // P's own purchase exists for P's own mint.
+        let p_purchase = crate::protected_content_runtime::load_runtime_custody_purchase(
+            fixture.dir.path(),
+            &fixture.p.principal_id,
+            fixture.mint_a,
+        )
+        .unwrap()
+        .expect("P's completed purchase of P's mint");
+        assert_eq!(p_purchase.principal_id, fixture.p.principal_id);
+
+        // R3.17: P's player launch opens and reads P's own mint.
+        assert_eq!(fixture.p_open["status"], "ok", "{}", fixture.p_open);
+        assert_eq!(
+            fixture.p_open["data"]["mint_id"].as_str(),
+            Some(fixture.mint_a_hex.as_str())
+        );
+        assert_eq!(
+            fixture.p_open["data"]["segment_count"].as_u64(),
+            Some(fixture.clear_segments.len() as u64)
+        );
+        assert!(fixture.p_open["data"]["viewer_session_handle"].is_string());
+        assert_eq!(
+            fixture.p_read_init["status"], "ok",
+            "{}",
+            fixture.p_read_init
+        );
+        assert_eq!(
+            decoded_payload_bytes(&fixture.p_read_init),
+            fixture.clear_init
+        );
+        assert_eq!(
+            fixture.p_read_segment["status"], "ok",
+            "{}",
+            fixture.p_read_segment
+        );
+        assert_eq!(
+            decoded_payload_bytes(&fixture.p_read_segment),
+            fixture.clear_segments[0]
+        );
+
+        // Fixture half, not an R4 assertion: Q's own open of Q's mint yields
+        // Q's viewer handle.
+        let q_open = player_open(
+            &fixture.app,
+            &fixture.q_player_token,
+            &fixture.mint_b_hex,
+            &fixture.q.principal_id,
+        )
+        .await;
+        assert_eq!(q_open["status"], "ok", "{q_open}");
+        assert!(q_open["data"]["viewer_session_handle"].is_string());
+        let q_purchase = crate::protected_content_runtime::load_runtime_custody_purchase(
+            fixture.dir.path(),
+            &fixture.q.principal_id,
+            fixture.mint_b,
+        )
+        .unwrap()
+        .expect("Q's completed purchase of Q's mint");
+        assert_eq!(q_purchase.principal_id, fixture.q.principal_id);
+    }
+
+    #[tokio::test]
+    async fn route_17_a_player_launch_cannot_present_another_persons_mint_or_viewer_handle() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = two_person_purchase_fixture().await;
+
+        // R4.17 (A1): P's player launch presents Q's mint id; refused at the
+        // purchase-owner check, not by the pre-mint player-token gate.
+        let cross_open = player_open(
+            &fixture.app,
+            &fixture.p_player_token,
+            &fixture.mint_b_hex,
+            "person:substituted",
+        )
+        .await;
+        assert_eq!(cross_open["status"], "error", "{cross_open}");
+        assert_eq!(
+            cross_open["message"],
+            crate::protected_content_runtime::RUNTIME_CUSTODY_OPEN_DENIED_MESSAGE
+        );
+        assert!(cross_open.get("data").is_none(), "{cross_open}");
+        assert!(!runtime_custody_viewer_record_path_for_test(
+            fixture.dir.path(),
+            &fixture.p.principal_id,
+            fixture.mint_b
+        )
+        .exists());
+
+        // R4.17 (A2): the same request carrying Q's principal in the body still
+        // runs as P's launch, so the refusal stands.
+        let cross_open_with_q_body = player_open(
+            &fixture.app,
+            &fixture.p_player_token,
+            &fixture.mint_b_hex,
+            &fixture.q.principal_id,
+        )
+        .await;
+        assert_eq!(
+            cross_open_with_q_body["status"], "error",
+            "{cross_open_with_q_body}"
+        );
+        assert_eq!(
+            cross_open_with_q_body["message"],
+            crate::protected_content_runtime::RUNTIME_CUSTODY_OPEN_DENIED_MESSAGE
+        );
+        assert!(
+            cross_open_with_q_body.get("data").is_none(),
+            "{cross_open_with_q_body}"
+        );
+        assert!(!runtime_custody_viewer_record_path_for_test(
+            fixture.dir.path(),
+            &fixture.p.principal_id,
+            fixture.mint_b
+        )
+        .exists());
+
+        // Owner facts: P owns mint A only; Q owns mint B only.
+        assert!(
+            crate::protected_content_runtime::load_runtime_custody_purchase(
+                fixture.dir.path(),
+                &fixture.p.principal_id,
+                fixture.mint_b,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            crate::protected_content_runtime::load_runtime_custody_purchase(
+                fixture.dir.path(),
+                &fixture.q.principal_id,
+                fixture.mint_a,
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        // Q's own open runs after the cross-open requests so that no previous
+        // (Q, mint B) viewer record masks the A1/A2 outcome. It produces the
+        // Q handle the A3 requests present to P's launch.
+        let q_open = player_open(
+            &fixture.app,
+            &fixture.q_player_token,
+            &fixture.mint_b_hex,
+            &fixture.q.principal_id,
+        )
+        .await;
+        assert_eq!(q_open["status"], "ok", "{q_open}");
+        let q_handle = q_open["data"]["viewer_session_handle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // R4.17 (A3): P's player launch presents Q's mint id and Q's viewer
+        // handle; refused, no bytes returned.
+        let cross_read_q_mint = player_read(
+            &fixture.app,
+            &fixture.p_player_token,
+            &fixture.mint_b_hex,
+            &q_handle,
+            &fixture.p.principal_id,
+            None,
+        )
+        .await;
+        assert_eq!(cross_read_q_mint["status"], "error", "{cross_read_q_mint}");
+        assert_eq!(
+            cross_read_q_mint["message"],
+            "Runtime custody viewer session is unavailable"
+        );
+        assert!(
+            cross_read_q_mint.get("data").is_none(),
+            "{cross_read_q_mint}"
+        );
+
+        // R4.17 (A3): P's own mint id with Q's viewer handle is refused too;
+        // no bytes from either person reach the launch.
+        let cross_read_own_mint = player_read(
+            &fixture.app,
+            &fixture.p_player_token,
+            &fixture.mint_a_hex,
+            &q_handle,
+            &fixture.p.principal_id,
+            None,
+        )
+        .await;
+        assert_eq!(
+            cross_read_own_mint["status"], "error",
+            "{cross_read_own_mint}"
+        );
+        assert_eq!(
+            cross_read_own_mint["message"],
+            "Runtime custody viewer session is unavailable"
+        );
+        assert!(
+            cross_read_own_mint.get("data").is_none(),
+            "{cross_read_own_mint}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_runtime_custody_two_runtime_portable_listing_gateway_journey() {
