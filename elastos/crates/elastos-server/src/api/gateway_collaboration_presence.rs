@@ -1508,6 +1508,7 @@ mod tests {
             "session",
             Some("proof:no-stored-record".to_string()),
             "grant",
+            crate::auth::PrincipalKind::Human,
         );
         assert!(
             matches!(
@@ -1521,6 +1522,7 @@ mod tests {
             "session",
             Some(principal.proof_binding_id.clone()),
             "grant",
+            crate::auth::PrincipalKind::Human,
         );
         assert!(
             matches!(

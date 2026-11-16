@@ -58,6 +58,7 @@ async fn test_home_wallet_connector_bridge_rejects_invalid_authority_before_wall
         authority.session_id.clone(),
         Some(authority.proof_binding_id.clone()),
         authority.grant_id.clone(),
+        crate::auth::PrincipalKind::Human,
     );
     let valid_connector_token = projection_launch_token_for_authority_context(
         dir.path(),
@@ -87,7 +88,10 @@ async fn test_home_wallet_connector_bridge_rejects_invalid_authority_before_wall
         codec.encode(serde_json::to_vec(&envelope).unwrap())
     };
     let wrong_principal = token_for(HomeLaunchTokenContext {
-        root: crate::auth::ResolvedPrincipalRoot::for_test_principal("principal:wrong"),
+        root: crate::auth::ResolvedPrincipalRoot::for_test_principal(
+            "principal:wrong",
+            crate::auth::PrincipalKind::Human,
+        ),
         ..context.clone()
     });
     let wrong_session = token_for(HomeLaunchTokenContext {

@@ -3157,6 +3157,14 @@ mod tests {
     /// with punctuation: `principal_str` does not count inside
     /// `into_bridge_principal_string`.
     fn production_uses(text: &str, needle: &str) -> usize {
+        uses_outside_definitions(text, needle, false)
+    }
+
+    /// Uses of `needle` outside its definition and `impl` lines. A `call`
+    /// needle ends in an opening paren, so its first argument may start
+    /// immediately after it; only the left identifier boundary is checked
+    /// there, and an inline call with an identifier first argument counts.
+    fn uses_outside_definitions(text: &str, needle: &str, call: bool) -> usize {
         let fn_definition = format!("fn {needle}");
         text.lines()
             .filter(|line| {
@@ -3168,7 +3176,17 @@ mod tests {
                     || trimmed.starts_with("impl ")
                     || line.contains(&fn_definition))
             })
-            .map(|line| ident_uses(line, needle))
+            .map(|line| {
+                if !call {
+                    return ident_uses(line, needle);
+                }
+                line.match_indices(needle)
+                    .filter(|(start, _)| {
+                        let before = line[..*start].chars().next_back();
+                        !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+                    })
+                    .count()
+            })
             .sum()
     }
 
@@ -3193,6 +3211,232 @@ mod tests {
         for file in files {
             let text = production_text(&std::fs::read_to_string(&file).unwrap());
             let count = production_uses(&text, needle);
+            if count > 0 {
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((name, count));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// The end (exclusive) of the item a preceding `#[cfg(test)]` applies to.
+    /// Scans to the matching block end or to a statement-ending semicolon,
+    /// skipping string literals.
+    fn cfg_test_item_end(text: &str) -> usize {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if text[index + 1..].trim_start().starts_with(';') {
+                            return text[index + 1..].find(';').unwrap() + index + 2;
+                        }
+                        return index + 1;
+                    }
+                }
+                b';' if depth == 0 => return index + 1,
+                _ => {}
+            }
+        }
+        text.len()
+    }
+
+    /// The byte index just past the `}` that closes the block opening at
+    /// `open` (`open` indexes the `{`). Line and block comments, string
+    /// literals, raw strings, byte/char literals and lifetimes are skipped, so
+    /// braces in code text do not move the depth. Checked against a Rust token
+    /// stream for every non-test source file in `elastos/crates`.
+    fn block_end(text: &str, open: usize) -> usize {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut index = open;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    index = text[index..]
+                        .find('\n')
+                        .map_or(bytes.len(), |at| index + at + 1);
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    index = text[index..]
+                        .find("*/")
+                        .map_or(bytes.len(), |at| index + at + 2);
+                }
+                b'"' => index = string_end(text, index),
+                b'\'' => index = char_or_lifetime_end(bytes, index),
+                b'r' => match raw_string_end(text, index) {
+                    Some(end) => index = end,
+                    None => index += 1,
+                },
+                b'b' if matches!(bytes.get(index + 1), Some(b'"') | Some(b'\'')) => {
+                    index = if bytes[index + 1] == b'"' {
+                        string_end(text, index + 1)
+                    } else {
+                        char_or_lifetime_end(bytes, index + 1)
+                    };
+                }
+                b'{' => {
+                    depth += 1;
+                    index += 1;
+                }
+                b'}' => {
+                    depth -= 1;
+                    index += 1;
+                    if depth == 0 {
+                        return index;
+                    }
+                }
+                _ => index += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    /// One past the closing quote of the string opening at `open`.
+    fn string_end(text: &str, open: usize) -> usize {
+        let bytes = text.as_bytes();
+        let mut index = open + 1;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => index += 2,
+                b'"' => return index + 1,
+                _ => index += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    /// One past a char literal opening at `open`, or past the quote of a
+    /// lifetime (which does not close).
+    fn char_or_lifetime_end(bytes: &[u8], open: usize) -> usize {
+        let first = open + 1;
+        if bytes.get(first) == Some(&b'\\') {
+            let mut index = first + 1;
+            while index < bytes.len() && bytes[index] != b'\'' {
+                index += 1;
+            }
+            return (index + 1).min(bytes.len());
+        }
+        if bytes.get(first + 1) == Some(&b'\'') {
+            return first + 2;
+        }
+        open + 1
+    }
+
+    /// One past the closing delimiter of the raw string opening at `open`, if
+    /// one opens there (`r"`, `r#"`, `br##"`).
+    fn raw_string_end(text: &str, open: usize) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut index = open + 1;
+        let mut hashes = 0usize;
+        while bytes.get(index) == Some(&b'#') {
+            hashes += 1;
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'"') {
+            return None;
+        }
+        let close = format!("\"{}", "#".repeat(hashes));
+        text[index + 1..]
+            .find(&close)
+            .map(|at| index + 1 + at + close.len())
+    }
+
+    /// The byte range of the first `tests` module item in `text`, if any. The
+    /// module is dropped with the attribute lines above it, from the `mod`
+    /// keyword through its closing brace, so production code written after it
+    /// stays in the text and no dangling `#[cfg(test)]` is left to apply to the
+    /// next item.
+    fn test_module_range(text: &str) -> Option<std::ops::Range<usize>> {
+        const MARKERS: [&str; 3] = [
+            "\nmod tests {",
+            "\npub(crate) mod tests {",
+            "\npub mod tests {",
+        ];
+        let (start, marker) = MARKERS
+            .iter()
+            .filter_map(|marker| text.find(marker).map(|start| (start, *marker)))
+            .min_by_key(|(start, _)| *start)?;
+        let mut begin = start;
+        while begin > 0 {
+            let previous_end = begin - 1;
+            let previous_start = text[..previous_end].rfind('\n').map_or(0, |at| at + 1);
+            if text[previous_start..previous_end]
+                .trim_start()
+                .starts_with("#[")
+            {
+                begin = previous_start;
+            } else {
+                break;
+            }
+        }
+        let open = start + marker.len() - 1;
+        Some(begin..block_end(text, open))
+    }
+
+    /// The production text of a source file with each `tests` module dropped by
+    /// brace match, then `#[cfg(test)]` items and statement-level
+    /// `#[cfg(test)]` lines dropped, then comment lines dropped. This is
+    /// stricter than `production_text`, whose first-marker cut keeps a
+    /// `#[cfg(test)]` item written before the test module and drops all
+    /// production code written after one.
+    fn production_text_ignoring_cfg_test(source: &str) -> String {
+        let mut kept_source = String::new();
+        let mut rest = source;
+        while let Some(range) = test_module_range(rest) {
+            kept_source.push_str(&rest[..range.start]);
+            rest = &rest[range.end..];
+        }
+        kept_source.push_str(rest);
+        let source: &str = &kept_source;
+        let mut kept = String::new();
+        let mut rest = source;
+        while let Some(start) = rest.find("#[cfg(test)]") {
+            kept.push_str(&rest[..start]);
+            let after = &rest[start + "#[cfg(test)]".len()..];
+            let trimmed = after.trim_start();
+            let skipped = after.len() - trimmed.len();
+            let item_end = cfg_test_item_end(trimmed);
+            rest = &after[skipped + item_end..];
+        }
+        kept.push_str(rest);
+        kept.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The walker's tree-wide `(file, count)` list for one production literal,
+    /// with `#[cfg(test)]` items dropped.
+    fn production_counts_ignoring_cfg_test(needle: &str) -> Vec<(String, usize)> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text_ignoring_cfg_test(&std::fs::read_to_string(&file).unwrap());
+            let count = uses_outside_definitions(&text, needle, needle.ends_with('('));
             if count > 0 {
                 let name = file
                     .strip_prefix(crates)
@@ -6575,5 +6819,171 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("local runtime data directory"));
+    }
+
+    /// The gateway walker keeps production code written after a `tests`
+    /// module, counts an inline call whose first argument starts right after
+    /// the paren, and still drops the module body (including a brace inside a
+    /// char literal).
+    #[test]
+    fn production_text_ignoring_cfg_test_keeps_code_after_a_tests_module() {
+        let source = "\
+fn production_before() {
+    issue_home_launch_token_at(\"before\");
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_body() {
+        let brace = '{';
+        issue_home_launch_token_at(\"inside the module\");
+    }
+}
+
+pub async fn production_after() {
+    issue_home_launch_token_at(
+        \"after\",
+    );
+    issue_home_launch_token_at(\"after inline\");
+}
+";
+        let text = production_text_ignoring_cfg_test(source);
+        assert!(
+            !text.contains("inside the module"),
+            "the test module body is dropped: {text}"
+        );
+        assert!(
+            text.contains("production_after"),
+            "production code after the test module stays: {text}"
+        );
+        assert_eq!(
+            uses_outside_definitions(&text, "issue_home_launch_token_at(", true),
+            3,
+            "two production calls, one of them inline: {text}"
+        );
+    }
+
+    /// Shared detector 1 for the gateway fence cells: source pins over the
+    /// production text of `elastos/crates`. Each `tests` module is dropped by
+    /// brace match, `#[cfg(test)]` items and statement-level `#[cfg(test)]` are
+    /// dropped, and production code written after a test module stays in the
+    /// text. A call needle ending in `(` counts when it stands on a left
+    /// identifier boundary, including an inline call whose first argument
+    /// follows on the same line. These are REVIEW TRIGGERS, not proofs. A new
+    /// issuer or a new `HomeLaunchTokenContext::resolved` site turns this red
+    /// before it lands. A new accepting arm does not; the part (c) admission
+    /// row is that detector, and this pin is not an acceptance detector.
+    #[test]
+    fn gateway_launch_token_issuers_and_context_sites_hold_tree_wide() {
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_for_auth_grant("),
+            expected_counts(&[("elastos-server/src/api/auth_gateway.rs", 4)]),
+            "person Home launch issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_for_verified_grant("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 1),
+            ]),
+            "verified-grant issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_with_context("),
+            expected_counts(&[
+                ("elastos-server/src/api/gateway_home_token.rs", 1),
+                ("elastos-server/src/api/viewer_gateway.rs", 1),
+            ]),
+            "context issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_projection_launch_token_with_context("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 2),
+                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/api/gateway_home_runtime.rs", 3),
+            ]),
+            "projection issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_local_runtime_home_launch_token("),
+            expected_counts(&[
+                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/home_cmd.rs", 1),
+            ]),
+            "device authority issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_at("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 4)]),
+            "the one signing issuer's callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("HomeLaunchTokenContext::resolved("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 2),
+                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/api/gateway_home_system.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 4),
+                ("elastos-server/src/api/gateway_model_service.rs", 1),
+                ("elastos-server/src/api/gateway_transaction_effects.rs", 1),
+            ]),
+            "launch context construction sites"
+        );
+    }
+
+    /// Review-trigger pins for the gateway admission entrance. The front door's
+    /// one `require_gateway_launch_for` caller, the `require_home_token_context`
+    /// callers and the admission match arms are pinned, so a new entrance or a
+    /// new accepting arm is visible in review.
+    #[test]
+    fn gateway_admission_callers_and_match_arms_hold_tree_wide() {
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_gateway_launch_for("),
+            expected_counts(&[("elastos-server/src/api/gateway_frontdoor.rs", 1)]),
+            "front-door admission caller"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_home_token_context("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 3),
+                ("elastos-server/src/api/gateway_home_external_link.rs", 1),
+                ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
+                ("elastos-server/src/api/gateway_home_system.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 2),
+                ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
+                ("elastos-server/src/api/viewer_gateway.rs", 1),
+            ]),
+            "Home token context callers"
+        );
+        // Blast radius of the one helper: the direct callers and the front
+        // door's path through `require_gateway_launch_for`, which runs only
+        // when the request is not public, not sign-in, not a terminal ticket
+        // and not a runtime session.
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_gateway_launch("),
+            expected_counts(&[
+                ("elastos-server/src/api/gateway_home_token.rs", 1),
+                ("elastos-server/src/api/gateway_room.rs", 1),
+                ("elastos-server/src/api/gateway_site.rs", 1),
+            ]),
+            "direct require_gateway_launch callers (home token, room, site)"
+        );
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_frontdoor.rs"),
+        )
+        .unwrap();
+        assert!(
+            source.contains("if !public && !sign_in && !ticket && !runtime_session {"),
+            "the front-door match keeps its four exclusions"
+        );
+        let start = source
+            .find("match gateway_home_token::require_gateway_launch_for(")
+            .expect("the front-door admission match");
+        let body = &source[start..];
+        let open = body.find('{').expect("the match block opens");
+        let end = cfg_test_item_end(&body[open..]);
+        let arms = body[open..open + end].matches("=>").count();
+        assert_eq!(arms, 4, "gateway admission match arms");
     }
 }

@@ -1317,6 +1317,7 @@ async fn chat_online_expired_frame_is_refused_while_home_session_remains_valid()
         authority.session_id.clone(),
         Some(authority.proof_binding_id.clone()),
         authority.grant_id.clone(),
+        crate::auth::PrincipalKind::Human,
     );
     let live = gateway_home_token::issue_home_projection_launch_token_with_context(
         dir.path(),
@@ -1433,6 +1434,7 @@ async fn chat_online_configured_poll_does_not_renew_room_session() {
         authority.session_id.clone(),
         Some(authority.proof_binding_id.clone()),
         authority.grant_id.clone(),
+        crate::auth::PrincipalKind::Human,
     );
     let token = gateway_home_token::issue_home_projection_launch_token_with_context(
         dir.path(),

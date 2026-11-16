@@ -859,3 +859,640 @@ async fn route_16_home_state_refuses_an_agent_launch_and_two_people_get_two_loca
         .await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Gateway fence cells: routes 10, 11, 12 and 20 (R-E v6).
+//
+// Part (a): a production tokenless agent launch reaches the front door and is
+// refused by name. Part (b): two people each drive a real Home / viewer /
+// Library launch token through the same route and get two locations, and a
+// cross-principal URI is refused at the production root check.
+// ---------------------------------------------------------------------------
+
+async fn library_route_state(dir: &std::path::Path) -> GatewayState {
+    let mut state = test_state(dir);
+    let registry = Arc::new(ProviderRegistry::new());
+    registry
+        .register_sub_provider(
+            "object",
+            Arc::new(crate::library::ObjectProvider::new(
+                dir.to_path_buf(),
+                Arc::downgrade(&registry),
+            )),
+        )
+        .await
+        .unwrap();
+    state.provider_registry = Some(registry);
+    state
+}
+
+/// Stages an installed viewer capsule whose manifest declares `storage`.
+fn viewer_capsule_with_storage(dir: &std::path::Path, name: &str, storage: &str) {
+    write_test_browser_capsule(dir, name, "viewer", "S5 gateway fence viewer", None);
+    let path = dir.join("capsules").join(name).join("capsule.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["entrypoint"] = json!("browser/index.html");
+    manifest["permissions"] = json!({ "storage": [storage] });
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+async fn provider_post(
+    app: &axum::Router,
+    token: &str,
+    op: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri(format!("/api/provider/object/{op}"))
+                .header("x-elastos-home-token", token)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response_json(response).await)
+}
+
+fn encoded_query_uri(uri: &str) -> String {
+    url::form_urlencoded::byte_serialize(uri.as_bytes()).collect()
+}
+
+fn decoded_read_bytes(response: &Value) -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode(response["data"]["data"].as_str().unwrap())
+        .unwrap()
+}
+
+/// Route 10: gateway object provider proxy. Two people write and read their
+/// own `Documents` objects, and a cross-principal URI is refused at the
+/// library root check (`library.rs` "outside the active principal root").
+#[tokio::test]
+async fn route_10_two_people_get_two_locations_and_a_cross_principal_uri_is_refused() {
+    let home = two_person_home().await;
+    let app = gateway_router(library_route_state(home.dir.path()).await);
+    let token_p = app_token(&home, 0, LIBRARY_CAPSULE_ID);
+    let token_q = app_token(&home, 1, LIBRARY_CAPSULE_ID);
+    let root_p = home.people[0].root.clone();
+    let root_q = home.people[1].root.clone();
+    let uri_p = format!("{root_p}/Documents/route10-p.txt");
+    let uri_q = format!("{root_q}/Documents/route10-q.txt");
+    assert_ne!(uri_p, uri_q, "two launches, two locations");
+
+    for (token, uri, marker) in [
+        (&token_p, &uri_p, "route10 person P"),
+        (&token_q, &uri_q, "route10 person Q"),
+    ] {
+        let (status, write) = provider_post(
+            &app,
+            token,
+            "write",
+            json!({
+                "uri": uri,
+                "data": base64::engine::general_purpose::STANDARD.encode(marker.as_bytes()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{write}");
+        assert_eq!(write["status"], "ok", "{write}");
+    }
+
+    let (_, read_p) = provider_post(&app, &token_p, "read", json!({ "uri": uri_p })).await;
+    assert_eq!(read_p["status"], "ok", "{read_p}");
+    assert_eq!(decoded_read_bytes(&read_p), b"route10 person P");
+    let (_, read_q) = provider_post(&app, &token_q, "read", json!({ "uri": uri_q })).await;
+    assert_eq!(read_q["status"], "ok", "{read_q}");
+    assert_eq!(decoded_read_bytes(&read_q), b"route10 person Q");
+
+    let (cross_status, cross) =
+        provider_post(&app, &token_p, "read", json!({ "uri": uri_q })).await;
+    assert_eq!(cross_status, StatusCode::OK);
+    assert_eq!(cross["status"], "error", "{cross}");
+    assert!(
+        cross["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("outside the active principal root"),
+        "{cross}"
+    );
+}
+
+/// Route 11: viewer storage. Both people save and read the same viewer object
+/// under their own root, and an absolute grant for P's root is refused for Q
+/// at the viewer root check.
+#[tokio::test]
+async fn route_11_two_people_get_two_locations_and_a_cross_principal_grant_is_refused() {
+    let home = two_person_home().await;
+    let state = test_state(home.dir.path());
+    viewer_capsule_with_storage(
+        home.dir.path(),
+        "documents",
+        "localhost://Users/self/Documents/*",
+    );
+    let app = gateway_router(state);
+    let token_p = app_token(&home, 0, DOCUMENTS_CAPSULE_ID);
+    let token_q = app_token(&home, 1, DOCUMENTS_CAPSULE_ID);
+    let path_p = object_path(&home, &home.people[0].root, "Documents/route11-note.md");
+    let path_q = object_path(&home, &home.people[1].root, "Documents/route11-note.md");
+    assert_ne!(path_p, path_q, "two launches, two locations");
+
+    let store = |token: String, body: &'static [u8]| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("PUT")
+                .uri("/api/viewers/documents/storage/documents/save/route11-note.md")
+                .header("x-elastos-home-token", token)
+                .header("if-none-match", "*")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+    let put_p = store(token_p.clone(), b"route11 person P").await.unwrap();
+    assert_eq!(put_p.status(), StatusCode::NO_CONTENT);
+    let put_q = store(token_q.clone(), b"route11 person Q").await.unwrap();
+    assert_eq!(put_q.status(), StatusCode::NO_CONTENT);
+    assert!(path_p.is_file(), "the P save wrote its own location");
+    assert!(path_q.is_file(), "the Q save wrote its own location");
+
+    let get = |token: String| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri("/api/viewers/documents/storage/documents/save/route11-note.md")
+                .header("x-elastos-home-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let read_p = get(token_p.clone()).await.unwrap();
+    assert_eq!(read_p.status(), StatusCode::OK);
+    let bytes_p = axum::body::to_bytes(read_p.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes_p[..], b"route11 person P");
+    let read_q = get(token_q.clone()).await.unwrap();
+    assert_eq!(read_q.status(), StatusCode::OK);
+    let bytes_q = axum::body::to_bytes(read_q.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes_q[..], b"route11 person Q");
+
+    // The cross-principal grant: a second viewer whose storage grant is an
+    // absolute URI under P's root. P may write it; Q is refused at the root
+    // check because the grant does not sit under Q's resolved root.
+    let cross_grant = format!("{}/Documents/*", home.people[0].root);
+    viewer_capsule_with_storage(home.dir.path(), "gba-emulator", &cross_grant);
+    let token_cross_p = app_token(&home, 0, "gba-emulator");
+    let token_cross_q = app_token(&home, 1, "gba-emulator");
+    let cross_path = "/api/viewers/gba-emulator/storage/gba-emulator/save/cross.txt";
+    let write_cross = |token: String| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("PUT")
+                .uri(cross_path)
+                .header("x-elastos-home-token", token)
+                .header("if-none-match", "*")
+                .body(Body::from("cross grant"))
+                .unwrap(),
+        )
+    };
+    let accepted = write_cross(token_cross_p).await.unwrap();
+    assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+    let refused = write_cross(token_cross_q).await.unwrap();
+    let refused_text = response_text_json(refused).await;
+    assert!(
+        refused_text
+            .to_string()
+            .contains("viewer storage must be scoped to the launch principal root"),
+        "{refused_text}"
+    );
+    assert!(
+        !object_path(&home, &home.people[1].root, "Documents/cross.txt").exists(),
+        "the cross-grant write left no file under Q"
+    );
+}
+
+/// Route 12: viewer library object. Both people read their own object through
+/// the viewer route, and a cross-principal URI is refused at the library root
+/// check.
+#[tokio::test]
+async fn route_12_two_people_get_two_locations_and_a_cross_principal_uri_is_refused() {
+    let home = two_person_home().await;
+    let app = gateway_router(library_route_state(home.dir.path()).await);
+    viewer_capsule_with_storage(
+        home.dir.path(),
+        DOCUMENTS_CAPSULE_ID,
+        "localhost://Users/self/Documents/*",
+    );
+    let library_token_p = app_token(&home, 0, LIBRARY_CAPSULE_ID);
+    let library_token_q = app_token(&home, 1, LIBRARY_CAPSULE_ID);
+    let viewer_token_p = app_token(&home, 0, DOCUMENTS_CAPSULE_ID);
+    let viewer_token_q = app_token(&home, 1, DOCUMENTS_CAPSULE_ID);
+    let uri_p = format!("{}/Documents/route12-p.txt", home.people[0].root);
+    let uri_q = format!("{}/Documents/route12-q.txt", home.people[1].root);
+    assert_ne!(uri_p, uri_q, "two launches, two locations");
+
+    for (token, uri, marker) in [
+        (&library_token_p, &uri_p, "route12 person P"),
+        (&library_token_q, &uri_q, "route12 person Q"),
+    ] {
+        let (status, write) = provider_post(
+            &app,
+            token,
+            "write",
+            json!({
+                "uri": uri,
+                "data": base64::engine::general_purpose::STANDARD.encode(marker.as_bytes()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{write}");
+        assert_eq!(write["status"], "ok", "{write}");
+    }
+
+    let read = |token: String, uri: &str| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri(format!(
+                    "/api/viewers/documents/library-object?uri={}",
+                    encoded_query_uri(uri)
+                ))
+                .header("x-elastos-home-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let own_p = read(viewer_token_p.clone(), &uri_p).await.unwrap();
+    assert_eq!(own_p.status(), StatusCode::OK);
+    let own_p_json = response_json(own_p).await;
+    assert_eq!(decoded_read_bytes(&own_p_json), b"route12 person P");
+    let own_q = read(viewer_token_q.clone(), &uri_q).await.unwrap();
+    assert_eq!(own_q.status(), StatusCode::OK);
+    let own_q_json = response_json(own_q).await;
+    assert_eq!(decoded_read_bytes(&own_q_json), b"route12 person Q");
+
+    let cross = read(viewer_token_p, &uri_q).await.unwrap();
+    let cross_status = cross.status();
+    let cross_json = response_text_json(cross).await;
+    assert_ne!(cross_status, StatusCode::OK, "{cross_json}");
+    assert!(
+        cross_json
+            .to_string()
+            .contains("outside the active principal root"),
+        "{cross_json}"
+    );
+}
+
+/// Route 20: Library raw transfer. Each person uploads and downloads under
+/// their own root, and a cross-principal URI is refused at the library root
+/// check.
+#[tokio::test]
+async fn route_20_two_people_get_two_locations_and_a_cross_principal_uri_is_refused() {
+    let home = two_person_home().await;
+    let app = gateway_router(library_route_state(home.dir.path()).await);
+    let token_p = app_token(&home, 0, LIBRARY_CAPSULE_ID);
+    let token_q = app_token(&home, 1, LIBRARY_CAPSULE_ID);
+    let uri_p = format!("{}/Documents/route20-p.txt", home.people[0].root);
+    let uri_q = format!("{}/Documents/route20-q.txt", home.people[1].root);
+    assert_ne!(uri_p, uri_q, "two launches, two locations");
+
+    let upload = |token: String, uri: &str, body: &'static [u8]| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("PUT")
+                .uri(format!(
+                    "/api/provider/object/upload?uri={}",
+                    encoded_query_uri(uri)
+                ))
+                .header("x-elastos-home-token", token)
+                .header(CONTENT_TYPE, "text/plain")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+    let up_p = upload(token_p.clone(), &uri_p, b"route20 person P")
+        .await
+        .unwrap();
+    assert_eq!(up_p.status(), StatusCode::OK);
+    let up_p_json = response_json(up_p).await;
+    assert_eq!(up_p_json["status"], "ok", "{up_p_json}");
+    let up_q = upload(token_q.clone(), &uri_q, b"route20 person Q")
+        .await
+        .unwrap();
+    assert_eq!(up_q.status(), StatusCode::OK);
+    let up_q_json = response_json(up_q).await;
+    assert_eq!(up_q_json["status"], "ok", "{up_q_json}");
+    assert!(
+        object_path(&home, &home.people[0].root, "Documents/route20-p.txt").is_file(),
+        "the P upload wrote its own location"
+    );
+    assert!(
+        object_path(&home, &home.people[1].root, "Documents/route20-q.txt").is_file(),
+        "the Q upload wrote its own location"
+    );
+    let uri_p2 = format!("{}/Documents/route20-p2.txt", home.people[0].root);
+    let uri_q2 = format!("{}/Documents/route20-q2.txt", home.people[1].root);
+    for (token, uri, marker) in [
+        (&token_p, &uri_p2, "route20 person P two"),
+        (&token_q, &uri_q2, "route20 person Q two"),
+    ] {
+        let response = upload(token.to_string(), uri, marker.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = response_json(response).await;
+        assert_eq!(response["status"], "ok", "{response}");
+    }
+
+    let download = |token: String, uri: &str| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri(format!(
+                    "/api/provider/object/download/raw?uri={}",
+                    encoded_query_uri(uri)
+                ))
+                .header("x-elastos-home-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let down_p = download(token_p.clone(), &uri_p).await.unwrap();
+    assert_eq!(down_p.status(), StatusCode::OK);
+    let bytes_p = axum::body::to_bytes(down_p.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes_p[..], b"route20 person P");
+    let down_q = download(token_q.clone(), &uri_q).await.unwrap();
+    assert_eq!(down_q.status(), StatusCode::OK);
+    let bytes_q = axum::body::to_bytes(down_q.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes_q[..], b"route20 person Q");
+
+    // The selection download path passes the principal argument separately
+    // (`gateway_provider_proxy.rs:1015`); planting only the single-download
+    // argument leaves this green.
+    let selection = |token: String, uris: &[&str]| {
+        let query = uris
+            .iter()
+            .map(|uri| format!("uri={}", encoded_query_uri(uri)))
+            .collect::<Vec<_>>()
+            .join("&");
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri(format!("/api/provider/object/download/raw?{query}"))
+                .header("x-elastos-home-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let own_selection = selection(token_p.clone(), &[&uri_p, &uri_p2])
+        .await
+        .unwrap();
+    assert_eq!(own_selection.status(), StatusCode::OK);
+    let own_selection_bytes = axum::body::to_bytes(own_selection.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        !own_selection_bytes.is_empty(),
+        "the person's own selection download returned bytes"
+    );
+    let cross_selection = selection(token_p.clone(), &[&uri_q, &uri_q2])
+        .await
+        .unwrap();
+    let cross_selection_json = response_text_json(cross_selection).await;
+    assert!(
+        cross_selection_json
+            .to_string()
+            .contains("outside the active principal root"),
+        "{cross_selection_json}"
+    );
+
+    let cross = download(token_p.clone(), &uri_q).await.unwrap();
+    let cross_status = cross.status();
+    let cross_json = response_text_json(cross).await;
+    assert_ne!(cross_status, StatusCode::OK, "{cross_json}");
+    assert!(
+        cross_json
+            .to_string()
+            .contains("outside the active principal root"),
+        "{cross_json}"
+    );
+
+    // The upload path's principal argument, not only the download sites.
+    let cross_upload = upload(token_p, &uri_q, b"cross upload").await.unwrap();
+    let cross_upload_json = response_text_json(cross_upload).await;
+    assert_eq!(cross_upload_json["status"], "error", "{cross_upload_json}");
+    assert!(
+        cross_upload_json
+            .to_string()
+            .contains("outside the active principal root"),
+        "{cross_upload_json}"
+    );
+}
+
+/// Route 20's two download arguments are independent of the upload route's
+/// argument: the objects are seeded through the library runtime, so a plant at
+/// `gateway_provider_proxy.rs:442` leaves the single and selection downloads
+/// green while `:1007` and `:1015` redden them.
+#[tokio::test]
+async fn route_20_download_sites_read_seeded_objects_without_the_upload_route() {
+    let home = two_person_home().await;
+    let state = library_route_state(home.dir.path()).await;
+    let registry = state.provider_registry.clone().unwrap();
+    let uri_p = format!("{}/Documents/seeded-p.txt", home.people[0].root);
+    let uri_p2 = format!("{}/Documents/seeded-p2.txt", home.people[0].root);
+    let uri_q = format!("{}/Documents/seeded-q.txt", home.people[1].root);
+    let uri_q2 = format!("{}/Documents/seeded-q2.txt", home.people[1].root);
+    let seeded = [
+        (&home.people[0], &uri_p, "seeded person P"),
+        (&home.people[0], &uri_p2, "seeded person P two"),
+        (&home.people[1], &uri_q, "seeded person Q"),
+        (&home.people[1], &uri_q2, "seeded person Q two"),
+    ];
+    for (person, uri, marker) in seeded {
+        let upload = crate::library::handle_library_upload_bytes_runtime(
+            home.dir.path(),
+            registry.clone(),
+            person.context.principal_id(),
+            uri,
+            Some("text/plain"),
+            None,
+            marker.as_bytes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(upload["status"], "ok", "{upload}");
+    }
+    let app = gateway_router(state);
+    let token_p = app_token(&home, 0, LIBRARY_CAPSULE_ID);
+
+    let get = |uri: &str| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri(format!(
+                    "/api/provider/object/download/raw?uri={}",
+                    encoded_query_uri(uri)
+                ))
+                .header("x-elastos-home-token", token_p.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let own = get(&uri_p).await.unwrap();
+    assert_eq!(own.status(), StatusCode::OK);
+    let own_bytes = axum::body::to_bytes(own.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&own_bytes[..], b"seeded person P");
+
+    let selection = |uris: &[&str]| {
+        let query = uris
+            .iter()
+            .map(|uri| format!("uri={}", encoded_query_uri(uri)))
+            .collect::<Vec<_>>()
+            .join("&");
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("GET")
+                .uri(format!("/api/provider/object/download/raw?{query}"))
+                .header("x-elastos-home-token", token_p.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let own_selection = selection(&[&uri_p, &uri_p2]).await.unwrap();
+    assert_eq!(own_selection.status(), StatusCode::OK);
+    let own_selection_bytes = axum::body::to_bytes(own_selection.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        !own_selection_bytes.is_empty(),
+        "the person's own seeded selection download returned bytes"
+    );
+
+    let cross = get(&uri_q).await.unwrap();
+    let cross_json = response_text_json(cross).await;
+    assert!(
+        cross_json
+            .to_string()
+            .contains("outside the active principal root"),
+        "{cross_json}"
+    );
+    let cross_selection = selection(&[&uri_q, &uri_q2]).await.unwrap();
+    let cross_selection_json = response_text_json(cross_selection).await;
+    assert!(
+        cross_selection_json
+            .to_string()
+            .contains("outside the active principal root"),
+        "{cross_selection_json}"
+    );
+}
+
+// Part (a) for the four gateway fence routes: the stored agent of the same
+// Home launches through the production `POST /api/capsules` handler and then
+// presents nothing to the route. The front door refuses it by name.
+
+#[cfg(feature = "prototype-agents")]
+#[tokio::test]
+async fn route_10_refuses_a_tokenless_agent_launch_at_the_front_door() {
+    let home = two_person_home().await;
+    let app = gateway_router(library_route_state(home.dir.path()).await);
+    let agent_path = launch_stored_agent(&home, "Documents/route10-agent.txt").await;
+    assert_agent_launch_refused(
+        app.clone(),
+        "/api/provider/object/stat",
+        "POST",
+        json!({ "uri": "localhost://UsersAI/route10-agent.txt" }),
+        &agent_path,
+        "route 10",
+    )
+    .await;
+
+    // The same request shape on the same route, admitted with a person token:
+    // the refusal above belongs to the token gate, not to the host or origin
+    // check. Person P writes and stats a file under P's own root.
+    let token_p = app_token(&home, 0, LIBRARY_CAPSULE_ID);
+    let person_uri = format!("{}/Documents/route10-stat-control.txt", home.people[0].root);
+    let (write_status, write) = provider_post(
+        &app,
+        &token_p,
+        "write",
+        json!({
+            "uri": person_uri,
+            "data": base64::engine::general_purpose::STANDARD.encode(b"route10 stat control"),
+        }),
+    )
+    .await;
+    assert_eq!(write_status, StatusCode::OK, "{write}");
+    let (stat_status, stat) =
+        provider_post(&app, &token_p, "stat", json!({ "uri": person_uri })).await;
+    assert_eq!(stat_status, StatusCode::OK, "{stat}");
+    assert_ne!(
+        stat,
+        json!("Gateway request requires an admitted host and caller"),
+        "a person token is admitted on route 10"
+    );
+    assert_eq!(stat["data"]["object"]["uri"], person_uri, "{stat}");
+    assert_eq!(stat["data"]["object"]["kind"], "file", "{stat}");
+}
+
+#[cfg(feature = "prototype-agents")]
+#[tokio::test]
+async fn route_11_refuses_a_tokenless_agent_launch_at_the_front_door() {
+    let home = two_person_home().await;
+    let app = gateway_router(test_state(home.dir.path()));
+    let agent_path = launch_stored_agent(&home, "Documents/route11-agent.md").await;
+    assert_agent_launch_refused(
+        app,
+        "/api/viewers/documents/storage/documents/save/agent.md",
+        "PUT",
+        json!({}),
+        &agent_path,
+        "route 11",
+    )
+    .await;
+}
+
+#[cfg(feature = "prototype-agents")]
+#[tokio::test]
+async fn route_12_refuses_a_tokenless_agent_launch_at_the_front_door() {
+    let home = two_person_home().await;
+    let app = gateway_router(library_route_state(home.dir.path()).await);
+    let agent_path = launch_stored_agent(&home, "Documents/route12-agent.txt").await;
+    assert_agent_launch_refused(
+        app,
+        "/api/viewers/documents/library-object?uri=localhost%3A%2F%2FUsersAI%2Froute12-agent.txt",
+        "GET",
+        json!({}),
+        &agent_path,
+        "route 12",
+    )
+    .await;
+}
+
+#[cfg(feature = "prototype-agents")]
+#[tokio::test]
+async fn route_20_refuses_a_tokenless_agent_launch_at_the_front_door() {
+    let home = two_person_home().await;
+    let app = gateway_router(library_route_state(home.dir.path()).await);
+    let agent_path = launch_stored_agent(&home, "Documents/route20-agent.txt").await;
+    assert_agent_launch_refused(
+        app,
+        "/api/provider/object/upload?uri=localhost%3A%2F%2FUsersAI%2Froute20-agent.txt",
+        "PUT",
+        json!({}),
+        &agent_path,
+        "route 20",
+    )
+    .await;
+}

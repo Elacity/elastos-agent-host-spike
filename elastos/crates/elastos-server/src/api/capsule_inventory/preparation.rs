@@ -4584,6 +4584,7 @@ mod tests {
             "session-1",
             Some("proof-1".into()),
             "grant-1",
+            crate::auth::PrincipalKind::Human,
         )
     }
 
@@ -4593,6 +4594,7 @@ mod tests {
             "session-1",
             Some("proof-1".into()),
             "grant-1",
+            crate::auth::PrincipalKind::Human,
         )
     }
 
@@ -14159,6 +14161,7 @@ server.serve_forever()
                 context.session_id(),
                 context.proof_binding_id().map(|value| value.to_string()),
                 context.grant_id(),
+                crate::auth::PrincipalKind::Human,
             );
             assert!(reserve(root.path(), &caller(&context, &method("use")), "req", &cid).is_err());
         }
@@ -14196,6 +14199,7 @@ server.serve_forever()
             "session-2",
             initial.proof_binding_id().map(|value| value.to_string()),
             "grant-2",
+            crate::auth::PrincipalKind::Human,
         );
         assert_eq!(
             reserve(
@@ -14240,6 +14244,7 @@ server.serve_forever()
             newer.session_id(),
             newer.proof_binding_id().map(|value| value.to_string()),
             newer.grant_id(),
+            crate::auth::PrincipalKind::Human,
         );
         assert!(status(
             root.path(),
@@ -15461,6 +15466,7 @@ server.serve_forever()
             "preparation-session",
             Some("preparation-proof".into()),
             "preparation-grant",
+            crate::auth::PrincipalKind::Human,
         );
         let capsule = "marketplace";
         let request_id = fixture_request_id(root.path(), "prepare-fixture-1", now().unwrap());

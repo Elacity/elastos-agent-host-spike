@@ -615,6 +615,7 @@ fn launch_token_for_authority_context(
             authority.session_id.clone(),
             Some(authority.proof_binding_id.clone()),
             authority.grant_id.clone(),
+            crate::auth::PrincipalKind::Human,
         ),
     )
     .unwrap()
@@ -634,6 +635,7 @@ fn projection_launch_token_for_authority_context(
             authority.session_id.clone(),
             Some(authority.proof_binding_id.clone()),
             authority.grant_id.clone(),
+            crate::auth::PrincipalKind::Human,
         ),
     )
     .unwrap()

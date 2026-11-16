@@ -10862,6 +10862,7 @@ mod tests {
                 grant.session_id.clone(),
                 Some(grant.proof_binding_id.clone()),
                 grant.grant_id.clone(),
+                crate::auth::PrincipalKind::Human,
             ),
         )
         .unwrap();

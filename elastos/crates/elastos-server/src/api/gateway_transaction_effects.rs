@@ -3576,6 +3576,7 @@ mod approved_request_resume_tests {
                 launch_id,
             )
             .unwrap(),
+            crate::auth::PrincipalKind::Human,
         )
     }
 

@@ -1419,7 +1419,13 @@ mod consumer_path {
     }
 
     fn seed_context() -> HomeLaunchTokenContext {
-        HomeLaunchTokenContext::for_test(SEED_PRINCIPAL, "auth:seed", None, "grant:seed-launch")
+        HomeLaunchTokenContext::for_test(
+            SEED_PRINCIPAL,
+            "auth:seed",
+            None,
+            "grant:seed-launch",
+            crate::auth::PrincipalKind::Human,
+        )
     }
 
     impl TwoRuntimes {

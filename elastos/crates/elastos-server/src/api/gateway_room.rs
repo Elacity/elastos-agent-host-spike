@@ -2759,7 +2759,13 @@ mod stored_root_tests {
     fn an_unstored_room_principal_is_refused_instead_of_served_from_the_id_rule_root() {
         let temp = tempfile::tempdir().unwrap();
         let principal_id = "person:local:room-no-stored-record";
-        let context = HomeLaunchTokenContext::for_test(principal_id, "session", None, "grant");
+        let context = HomeLaunchTokenContext::for_test(
+            principal_id,
+            "session",
+            None,
+            "grant",
+            crate::auth::PrincipalKind::Human,
+        );
         assert!(
             crate::auth::principal_stored_localhost_root(Some(temp.path()), principal_id).is_err(),
             "the fixture principal has no stored record"
