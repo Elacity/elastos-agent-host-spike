@@ -1306,7 +1306,7 @@ async fn route_20_two_people_get_two_locations_and_a_cross_principal_uri_is_refu
 #[tokio::test]
 async fn route_20_download_sites_read_seeded_objects_without_the_upload_route() {
     let home = two_person_home().await;
-    let mut state = library_route_state(home.dir.path()).await;
+    let state = library_route_state(home.dir.path()).await;
     let registry = state.provider_registry.clone().unwrap();
     let uri_p = format!("{}/Documents/seeded-p.txt", home.people[0].root);
     let uri_p2 = format!("{}/Documents/seeded-p2.txt", home.people[0].root);
@@ -1409,7 +1409,7 @@ async fn route_10_refuses_a_tokenless_agent_launch_at_the_front_door() {
     let app = gateway_router(library_route_state(home.dir.path()).await);
     let agent_path = launch_stored_agent(&home, "Documents/route10-agent.txt").await;
     assert_agent_launch_refused(
-        app,
+        app.clone(),
         "/api/provider/object/stat",
         "POST",
         json!({ "uri": "localhost://UsersAI/route10-agent.txt" }),
@@ -1417,6 +1417,33 @@ async fn route_10_refuses_a_tokenless_agent_launch_at_the_front_door() {
         "route 10",
     )
     .await;
+
+    // The same request shape on the same route, admitted with a person token:
+    // the refusal above belongs to the token gate, not to the host or origin
+    // check. Person P writes and stats a file under P's own root.
+    let token_p = app_token(&home, 0, LIBRARY_CAPSULE_ID);
+    let person_uri = format!("{}/Documents/route10-stat-control.txt", home.people[0].root);
+    let (write_status, write) = provider_post(
+        &app,
+        &token_p,
+        "write",
+        json!({
+            "uri": person_uri,
+            "data": base64::engine::general_purpose::STANDARD.encode(b"route10 stat control"),
+        }),
+    )
+    .await;
+    assert_eq!(write_status, StatusCode::OK, "{write}");
+    let (stat_status, stat) =
+        provider_post(&app, &token_p, "stat", json!({ "uri": person_uri })).await;
+    assert_eq!(stat_status, StatusCode::OK, "{stat}");
+    assert_ne!(
+        stat,
+        json!("Gateway request requires an admitted host and caller"),
+        "a person token is admitted on route 10"
+    );
+    assert_eq!(stat["data"]["object"]["uri"], person_uri, "{stat}");
+    assert_eq!(stat["data"]["object"]["kind"], "file", "{stat}");
 }
 
 #[cfg(feature = "prototype-agents")]
