@@ -266,6 +266,7 @@ mod tests {
                 "launch:0123456789abcdef0123456789abcdef",
             )
             .unwrap(),
+            crate::auth::PrincipalKind::Human,
         )
     }
 

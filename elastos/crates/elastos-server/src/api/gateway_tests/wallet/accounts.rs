@@ -1239,6 +1239,7 @@ fn p1j_t1_token(dir: &std::path::Path, app: &str) -> (String, (String, String)) 
         grant.session_id.clone(),
         Some(grant.proof_binding_id),
         grant.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     let token = issue_home_launch_token_with_context(dir, app, &context).unwrap();
     (token, (ids.principal_id, ids.session_id))

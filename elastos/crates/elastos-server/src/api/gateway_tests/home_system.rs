@@ -1311,6 +1311,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),
@@ -1368,6 +1369,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),
@@ -1406,6 +1408,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),

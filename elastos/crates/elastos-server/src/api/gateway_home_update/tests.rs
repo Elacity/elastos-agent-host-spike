@@ -542,6 +542,7 @@ async fn system_offers_a_canary_home_its_signers_stable_release_and_binds_that_c
         owner.session_id,
         Some(owner.proof_binding_id),
         owner.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     configure_update_summary(dir.path());
     let mut sources = crate::sources::load_trusted_sources(dir.path()).unwrap();
@@ -622,6 +623,7 @@ async fn system_update_summary_explains_newer_test_install_without_offer() {
             owner.session_id,
             Some(owner.proof_binding_id),
             owner.grant_id,
+            crate::auth::PrincipalKind::Human,
         );
         configure_update_summary(dir.path());
         let mut sources = crate::sources::load_trusted_sources(dir.path()).unwrap();
@@ -669,6 +671,7 @@ async fn system_update_summary_refuses_invalid_installed_version_with_local_repa
         owner.session_id,
         Some(owner.proof_binding_id),
         owner.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     configure_update_summary(dir.path());
     let mut sources = crate::sources::load_trusted_sources(dir.path()).unwrap();
@@ -719,6 +722,7 @@ async fn system_update_summary_stays_fast_while_check_is_pending_and_keeps_queue
         owner.session_id,
         Some(owner.proof_binding_id),
         owner.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     let cache = tokio::sync::Mutex::new(UpdateCheckCache::default());
     assert!(
@@ -790,6 +794,7 @@ async fn system_update_summary_stays_fast_while_check_is_pending_and_keeps_queue
         member.session_id,
         Some(member.proof_binding_id),
         member.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     let member_summary =
         system_runtime_update_summary_with_cache(dir.path(), &member_context, &cache, |_, _, _| {
@@ -818,6 +823,7 @@ async fn system_update_summary_never_reoffers_a_refused_release_but_offers_a_new
         owner.session_id,
         Some(owner.proof_binding_id),
         owner.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     configure_update_summary(dir.path());
     let status_path = dir.path().join("update-controller/status.json");
@@ -900,6 +906,7 @@ async fn system_update_guest_summary_skips_discovery_and_keeps_owner_check_unsta
         member.session_id.clone(),
         Some(member.proof_binding_id.clone()),
         member.grant_id.clone(),
+        crate::auth::PrincipalKind::Human,
     );
     configure_update_summary(dir.path());
     let cache = tokio::sync::Mutex::new(UpdateCheckCache::default());
@@ -922,6 +929,7 @@ async fn system_update_guest_summary_skips_discovery_and_keeps_owner_check_unsta
         owner.session_id,
         Some(owner.proof_binding_id),
         owner.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     let (started, observed) = tokio::sync::oneshot::channel();
     let owner_summary = system_runtime_update_summary_with_cache(

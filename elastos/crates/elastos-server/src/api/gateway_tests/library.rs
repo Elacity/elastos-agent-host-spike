@@ -12065,6 +12065,7 @@ async fn test_library_provider_runtime_custody_viewer_ops_require_player_launch_
             authority.session_id.clone(),
             Some(authority.proof_binding_id.clone()),
             authority.grant_id.clone(),
+            crate::auth::PrincipalKind::Human,
         ),
     )
     .unwrap();

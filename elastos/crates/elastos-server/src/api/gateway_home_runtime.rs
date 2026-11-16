@@ -1943,6 +1943,7 @@ mod tests {
             "auth:alice",
             Some("proof:alice".into()),
             "grant:alice",
+            crate::auth::PrincipalKind::Human,
         );
         let mut grant = elastos_runtime::auth::AuthSessionGrantV1 {
             schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
@@ -2118,7 +2119,13 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let context = HomeLaunchTokenContext::for_test("fixture", "fixture", None, "fixture");
+        let context = HomeLaunchTokenContext::for_test(
+            "fixture",
+            "fixture",
+            None,
+            "fixture",
+            crate::auth::PrincipalKind::Human,
+        );
         // The cause, and not only the outcome: Home's reader finds no
         // manifest in the installed folder.
         let installed = data_dir.join("capsules/pinned-fixture");
@@ -2153,7 +2160,13 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let context = HomeLaunchTokenContext::for_test("fixture", "fixture", None, "fixture");
+        let context = HomeLaunchTokenContext::for_test(
+            "fixture",
+            "fixture",
+            None,
+            "fixture",
+            crate::auth::PrincipalKind::Human,
+        );
         let outcome = launch_runtime_backed_home_target(data_dir, "shell", &context)
             .await
             .unwrap();

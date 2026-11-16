@@ -2269,6 +2269,7 @@ mod discovery_summary_tests {
             "session".to_string(),
             Some("proof".to_string()),
             "grant".to_string(),
+            crate::auth::PrincipalKind::Human,
         );
         assert!(home_services_peer_contacts_state_from_snapshot(&context, Some(&read)).is_err());
     }
@@ -10156,7 +10157,13 @@ mod stored_root_tests {
     fn an_unstored_principal_is_refused_instead_of_served_from_the_id_rule_root() {
         let (_temp, data_dir) = state_dir();
         let principal_id = "person:local:no-stored-record";
-        let context = HomeLaunchTokenContext::for_test(principal_id, "session", None, "grant");
+        let context = HomeLaunchTokenContext::for_test(
+            principal_id,
+            "session",
+            None,
+            "grant",
+            crate::auth::PrincipalKind::Human,
+        );
         assert!(
             crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id)
                 .unwrap_err()

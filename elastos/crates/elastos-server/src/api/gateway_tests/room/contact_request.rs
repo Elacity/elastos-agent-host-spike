@@ -174,6 +174,7 @@ impl ContactRequestHome {
             authority.session_id.clone(),
             Some(authority.proof_binding_id.clone()),
             authority.grant_id.clone(),
+            crate::auth::PrincipalKind::Human,
         );
         let chat_token = issue_home_projection_launch_token_with_context(
             dir.path(),

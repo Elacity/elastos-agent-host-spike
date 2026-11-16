@@ -3206,6 +3206,96 @@ mod tests {
         found
     }
 
+    /// The end (exclusive) of the item a preceding `#[cfg(test)]` applies to.
+    /// Scans to the matching block end or to a statement-ending semicolon,
+    /// skipping string literals.
+    fn cfg_test_item_end(text: &str) -> usize {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if text[index + 1..].trim_start().starts_with(';') {
+                            return text[index + 1..].find(';').unwrap() + index + 2;
+                        }
+                        return index + 1;
+                    }
+                }
+                b';' if depth == 0 => return index + 1,
+                _ => {}
+            }
+        }
+        text.len()
+    }
+
+    /// The production text of a source file with test modules, `#[cfg(test)]`
+    /// items and statement-level `#[cfg(test)]` lines dropped by brace match,
+    /// then comment lines dropped. This is stricter than `production_text`,
+    /// whose first-marker cut keeps a `#[cfg(test)]` item written before the
+    /// test module.
+    fn production_text_ignoring_cfg_test(source: &str) -> String {
+        let markers = ["\nmod tests {", "\npub(crate) mod tests {"];
+        let end = markers
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min();
+        let source = &source[..end.unwrap_or(source.len())];
+        let mut kept = String::new();
+        let mut rest = source;
+        while let Some(start) = rest.find("#[cfg(test)]") {
+            kept.push_str(&rest[..start]);
+            let after = &rest[start + "#[cfg(test)]".len()..];
+            let trimmed = after.trim_start();
+            let skipped = after.len() - trimmed.len();
+            let item_end = cfg_test_item_end(trimmed);
+            rest = &after[skipped + item_end..];
+        }
+        kept.push_str(rest);
+        kept.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The walker's tree-wide `(file, count)` list for one production literal,
+    /// with `#[cfg(test)]` items dropped.
+    fn production_counts_ignoring_cfg_test(needle: &str) -> Vec<(String, usize)> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text_ignoring_cfg_test(&std::fs::read_to_string(&file).unwrap());
+            let count = production_uses(&text, needle);
+            if count > 0 {
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((name, count));
+            }
+        }
+        found.sort();
+        found
+    }
+
     fn expected_counts(pairs: &[(&str, usize)]) -> Vec<(String, usize)> {
         let mut expected: Vec<(String, usize)> = pairs
             .iter()
@@ -6575,5 +6665,116 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("local runtime data directory"));
+    }
+
+    /// Shared detector 1 for the gateway fence cells: source pins over the
+    /// production text of `elastos/crates`, with `#[cfg(test)]` items and
+    /// statement-level `#[cfg(test)]` dropped as well as test modules. These
+    /// are REVIEW TRIGGERS, not proofs. A new issuer or a new
+    /// `HomeLaunchTokenContext::resolved` site turns this red before it lands.
+    /// A new accepting arm does not; the part (c) admission row is that
+    /// detector. The walker counts a call only when the needle, including its
+    /// `(`, is the last token on its line; an inline call with an argument on
+    /// the same line is not counted.
+    #[test]
+    fn gateway_launch_token_issuers_and_context_sites_hold_tree_wide() {
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_for_auth_grant("),
+            expected_counts(&[("elastos-server/src/api/auth_gateway.rs", 4)]),
+            "person Home launch issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_for_verified_grant("),
+            expected_counts(&[("elastos-server/src/api/auth_gateway.rs", 2)]),
+            "verified-grant issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_with_context("),
+            expected_counts(&[]),
+            "context issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_projection_launch_token_with_context("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 2),
+                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/api/gateway_home_runtime.rs", 3),
+            ]),
+            "projection issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_local_runtime_home_launch_token("),
+            expected_counts(&[]),
+            "device authority issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_at("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 4)]),
+            "the one signing issuer's callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("HomeLaunchTokenContext::resolved("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 2),
+                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/api/gateway_home_system.rs", 1),
+                ("elastos-server/src/api/gateway_home_token.rs", 4),
+                ("elastos-server/src/api/gateway_model_service.rs", 1),
+                ("elastos-server/src/api/gateway_transaction_effects.rs", 1),
+            ]),
+            "launch context construction sites"
+        );
+    }
+
+    /// Review-trigger pins for the gateway admission entrance. The front door's
+    /// one `require_gateway_launch_for` caller, the `require_home_token_context`
+    /// callers and the admission match arms are pinned, so a new entrance or a
+    /// new accepting arm is visible in review.
+    #[test]
+    fn gateway_admission_callers_and_match_arms_hold_tree_wide() {
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_gateway_launch_for("),
+            expected_counts(&[("elastos-server/src/api/gateway_frontdoor.rs", 1)]),
+            "front-door admission caller"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_home_token_context("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 3),
+                ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
+                ("elastos-server/src/api/gateway_home_system.rs", 1),
+                ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
+                ("elastos-server/src/api/viewer_gateway.rs", 1),
+            ]),
+            "Home token context callers"
+        );
+        // Blast radius of the one helper: the direct callers and the front
+        // door's path through `require_gateway_launch_for`, which runs only
+        // when the request is not public, not sign-in, not a terminal ticket
+        // and not a runtime session.
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_gateway_launch("),
+            expected_counts(&[
+                ("elastos-server/src/api/gateway_room.rs", 1),
+                ("elastos-server/src/api/gateway_site.rs", 1),
+            ]),
+            "direct require_gateway_launch callers (room, site)"
+        );
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_frontdoor.rs"),
+        )
+        .unwrap();
+        assert!(
+            source.contains("if !public && !sign_in && !ticket && !runtime_session {"),
+            "the front-door match keeps its four exclusions"
+        );
+        let start = source
+            .find("match gateway_home_token::require_gateway_launch_for(")
+            .expect("the front-door admission match");
+        let body = &source[start..];
+        let open = body.find('{').expect("the match block opens");
+        let end = cfg_test_item_end(&body[open..]);
+        let arms = body[open..open + end].matches("=>").count();
+        assert_eq!(arms, 4, "gateway admission match arms");
     }
 }

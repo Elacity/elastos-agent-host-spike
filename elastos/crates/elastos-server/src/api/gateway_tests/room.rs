@@ -42,6 +42,7 @@ async fn room_session_bound_fixture(frame_lifetime: u64, outcome: &str, configur
         authority.session_id.clone(),
         Some(authority.proof_binding_id.clone()),
         authority.grant_id.clone(),
+        crate::auth::PrincipalKind::Human,
     );
     let mut grant = crate::auth::load_active_session_grant(
         dir.path(),

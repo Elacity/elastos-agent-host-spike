@@ -9129,6 +9129,10 @@ pub(crate) fn principal_stored_localhost_root(
 pub(crate) struct ResolvedPrincipalRoot {
     principal_id: String,
     arm: RootArm,
+    /// The kind of the principal that owns this root. `Some(Human)` and
+    /// `Some(Agent)` come from a stored record or verified recovery material;
+    /// `None` for a device, test or remote root, which has no stored kind.
+    kind: Option<PrincipalKind>,
     /// The auth store whose stored record gave this root. `None` for a
     /// device, recovery, test or remote root: those have no record kept
     /// elsewhere.
@@ -9156,16 +9160,18 @@ impl ResolvedPrincipalRoot {
             .into_iter()
             .find(|principal| principal.principal_id == principal_id)
         {
-            let root = match root.kind {
+            let kind = root.kind;
+            let root = match kind {
                 PrincipalKind::Human if root.localhost_root.starts_with("localhost://Users/") => {
                     root.localhost_root
                 }
                 PrincipalKind::Human => anyhow::bail!("stored human principal root is invalid"),
-                PrincipalKind::Agent => principal_kind_localhost_root(principal_id, root.kind),
+                PrincipalKind::Agent => principal_kind_localhost_root(principal_id, kind),
             };
             return Ok(Self {
                 principal_id: principal_id.to_string(),
                 arm: RootArm::Local(root),
+                kind: Some(kind),
                 record_store: Some(auth_data_dir.to_path_buf()),
             });
         }
@@ -9178,22 +9184,29 @@ impl ResolvedPrincipalRoot {
             return Ok(Self {
                 principal_id: principal_id.to_string(),
                 arm: RootArm::Local(verified_device_localhost_root(&did)),
+                kind: None,
                 record_store: None,
             });
         }
-        principal_stored_localhost_root(Some(auth_data_dir), principal_id)
-            .map(|root| Self {
-                principal_id: principal_id.to_string(),
-                arm: RootArm::Local(root),
-                record_store: Some(auth_data_dir.to_path_buf()),
-            })
-            .map_err(|err| anyhow!(err))
+        // The store above was already searched for this principal. A second
+        // lookup here could only answer from a store that changed after that
+        // search; admitting such a record would let a race choose a root the
+        // caller did not verify. Refuse instead.
+        Err(anyhow::anyhow!(
+            "principal '{principal_id}' has no stored record; its root cannot be chosen"
+        ))
     }
 
     /// The principal this root was resolved for. A launch context carries no
     /// separate id: the root is the one record of whose data it describes.
     pub(crate) fn principal_id(&self) -> &str {
         &self.principal_id
+    }
+
+    /// The kind that chose this root. `None` for a device, test or remote root,
+    /// which has no stored kind.
+    pub(crate) fn kind(&self) -> Option<PrincipalKind> {
+        self.kind
     }
 
     /// True only when this root came from a stored record in a folder other
@@ -9231,6 +9244,7 @@ impl ResolvedPrincipalRoot {
         Self {
             principal_id: PrincipalId::device_did(did).as_str().to_string(),
             arm: RootArm::Local(verified_device_localhost_root(did)),
+            kind: None,
             record_store: None,
         }
     }
@@ -9280,6 +9294,7 @@ impl ResolvedPrincipalRoot {
         Ok(Self {
             principal_id: principal_id.to_string(),
             arm: RootArm::Local(localhost_root.to_string()),
+            kind: Some(PrincipalKind::Human),
             record_store: None,
         })
     }
@@ -9296,6 +9311,7 @@ impl ResolvedPrincipalRoot {
         Ok(Self {
             principal_id: kit.principal_id.clone(),
             arm: RootArm::Local(kit.localhost_root.clone()),
+            kind: Some(record.kind),
             record_store: None,
         })
     }
@@ -9304,10 +9320,11 @@ impl ResolvedPrincipalRoot {
     /// `from_verified_context` test constructors). Production builds roots
     /// through `resolve` or verified recovery material.
     #[cfg(test)]
-    pub(crate) fn for_test_principal(principal_id: &str) -> Self {
+    pub(crate) fn for_test_principal(principal_id: &str, kind: PrincipalKind) -> Self {
         Self {
             principal_id: principal_id.to_string(),
             arm: RootArm::Local(format!("test-root/{principal_id}")),
+            kind: Some(kind),
             record_store: None,
         }
     }
@@ -9327,6 +9344,7 @@ impl ResolvedPrincipalRoot {
         Ok(Self {
             principal_id: remote_principal_id.to_string(),
             arm: RootArm::Remote,
+            kind: None,
             record_store: None,
         })
     }
@@ -19142,13 +19160,19 @@ pub(crate) mod tests {
 
     #[test]
     fn resolved_root_names_its_principal() {
-        let root = ResolvedPrincipalRoot::for_test_principal("person:local:root-names-its-person");
+        let root = ResolvedPrincipalRoot::for_test_principal(
+            "person:local:root-names-its-person",
+            PrincipalKind::Human,
+        );
         assert_eq!(root.principal_id(), "person:local:root-names-its-person");
     }
 
     #[test]
     fn resolved_root_refuses_another_principal() {
-        let root = ResolvedPrincipalRoot::for_test_principal("person:local:root-owner");
+        let root = ResolvedPrincipalRoot::for_test_principal(
+            "person:local:root-owner",
+            PrincipalKind::Human,
+        );
         root.require_for("person:local:root-owner").unwrap();
         let refused = root.require_for("person:local:someone-else").unwrap_err();
         assert_eq!(

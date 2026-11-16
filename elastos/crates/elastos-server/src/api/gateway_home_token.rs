@@ -72,10 +72,11 @@ impl HomeLaunchTokenContext {
         session_id: impl Into<String>,
         proof_binding_id: Option<String>,
         grant_id: impl Into<String>,
+        kind: crate::auth::PrincipalKind,
     ) -> Self {
         let principal_id = principal_id.into();
         Self {
-            root: crate::auth::ResolvedPrincipalRoot::for_test_principal(&principal_id),
+            root: crate::auth::ResolvedPrincipalRoot::for_test_principal(&principal_id, kind),
             session_id: session_id.into(),
             proof_binding_id,
             grant_id: grant_id.into(),
@@ -217,8 +218,12 @@ impl RuntimeWalletAuthority {
     }
 
     #[cfg(test)]
-    pub(super) fn from_verified_context(context: VerifiedWalletInvocationContext) -> Self {
-        let root = crate::auth::ResolvedPrincipalRoot::for_test_principal(context.principal_id());
+    pub(super) fn from_verified_context(
+        context: VerifiedWalletInvocationContext,
+        kind: crate::auth::PrincipalKind,
+    ) -> Self {
+        let root =
+            crate::auth::ResolvedPrincipalRoot::for_test_principal(context.principal_id(), kind);
         Self { context, root }
     }
 
@@ -800,7 +805,8 @@ pub(super) fn require_gateway_launch(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
 ) -> anyhow::Result<()> {
-    if require_home_token_context(data_dir, headers).is_ok() {
+    if let Ok(context) = require_home_token_context(data_dir, headers) {
+        refuse_agent_principal(&context)?;
         return Ok(());
     }
     let token = single_home_launch_token_header(headers)?
@@ -811,14 +817,26 @@ pub(super) fn require_gateway_launch(
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&token)?;
     let envelope: HomeLaunchTokenEnvelope = serde_json::from_slice(&bytes)?;
     let actor = &envelope.payload.launch_context.executable_actor;
-    require_home_launch_token_for_any_from_with_origin(
+    let required = require_home_launch_token_for_any_from_with_origin(
         data_dir,
         headers,
         &[actor],
         None,
         presented_launch_origin_policy(headers),
-    )
-    .map(|_| ())
+    )?;
+    refuse_agent_principal(&required.context)
+}
+
+/// Refuse a token whose resolved principal is an Agent. Both success paths of
+/// [`require_gateway_launch`] run this before they admit, so no gateway route
+/// can hand an Agent principal an admission. `Some(Human)` and `None` (the
+/// device arm) pass. The kind is the one the root resolved, never a re-read of
+/// the auth store and never a guess from the root string.
+fn refuse_agent_principal(context: &HomeLaunchTokenContext) -> anyhow::Result<()> {
+    if context.root().kind() == Some(crate::auth::PrincipalKind::Agent) {
+        anyhow::bail!("gateway admission refuses a Home launch token whose principal is an agent");
+    }
+    Ok(())
 }
 
 /// The page whose kept launch `path` reads, for the two page reads only, in
@@ -1517,6 +1535,7 @@ mod tests {
             "session:t",
             Some("proof:t".to_string()),
             "grant:t",
+            crate::auth::PrincipalKind::Human,
         );
         assert_eq!(context.principal_id(), "principal:t");
         assert_eq!(context.session_id(), "session:t");
@@ -1531,6 +1550,7 @@ mod tests {
             "session:root-person",
             Some("proof:root-person".to_string()),
             "grant:root-person",
+            crate::auth::PrincipalKind::Human,
         );
         assert_eq!(context.principal_id(), "person:local:context-root-person");
         assert_eq!(context.principal_id(), context.root().principal_id());
@@ -1552,8 +1572,10 @@ mod tests {
             expires_at: now + 600,
             apps: vec![HOME_CAPSULE_ID.to_string()],
         };
-        let root =
-            crate::auth::ResolvedPrincipalRoot::for_test_principal("person:local:other-person");
+        let root = crate::auth::ResolvedPrincipalRoot::for_test_principal(
+            "person:local:other-person",
+            crate::auth::PrincipalKind::Human,
+        );
         let refused =
             issue_home_launch_token_for_verified_grant(dir.path(), HOME_CAPSULE_ID, &grant, root)
                 .unwrap_err();
@@ -1962,6 +1984,7 @@ mod tests {
             "auth:alice",
             Some("proof:alice".into()),
             "grant:alice",
+            crate::auth::PrincipalKind::Human,
         );
         let mut grant = elastos_runtime::auth::AuthSessionGrantV1 {
             schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
@@ -2022,6 +2045,7 @@ mod tests {
             "auth:alice",
             Some("proof:passkey:alice".to_string()),
             "grant:alice",
+            crate::auth::PrincipalKind::Human,
         );
         crate::auth::store_test_human_principal(data_dir.path(), context.principal_id());
         crate::auth::store_session_grant(
@@ -2076,6 +2100,7 @@ mod tests {
             "auth:system",
             Some("proof:passkey:system".to_string()),
             "grant:system",
+            crate::auth::PrincipalKind::Human,
         );
         crate::auth::store_session_grant(
             data_dir.path(),
@@ -2128,6 +2153,7 @@ mod tests {
             grant.session_id.clone(),
             Some(grant.proof_binding_id.clone()),
             grant.grant_id.clone(),
+            crate::auth::PrincipalKind::Human,
         );
         // The grant issuer reads the principal's stored root; give the fixture one.
         crate::auth::store_test_human_principal(data.path(), &grant.principal_id);
@@ -2278,6 +2304,7 @@ mod tests {
             "auth:alice",
             Some("proof:passkey:alice".to_string()),
             "grant:alice",
+            crate::auth::PrincipalKind::Human,
         );
         crate::auth::store_test_human_principal(data_dir.path(), stored.principal_id());
         crate::auth::store_session_grant(
@@ -2299,6 +2326,7 @@ mod tests {
             stored.session_id().to_string(),
             stored.proof_binding_id().map(ToString::to_string),
             stored.grant_id().to_string(),
+            crate::auth::PrincipalKind::Human,
         );
         assert!(issue_home_launch_token_with_context(
             data_dir.path(),
@@ -2326,18 +2354,21 @@ mod tests {
                 "auth:other",
                 stored.proof_binding_id().map(ToString::to_string),
                 stored.grant_id().to_string(),
+                crate::auth::PrincipalKind::Human,
             ),
             HomeLaunchTokenContext::for_test(
                 stored.principal_id().to_string(),
                 stored.session_id().to_string(),
                 Some("proof:passkey:other".to_string()),
                 stored.grant_id().to_string(),
+                crate::auth::PrincipalKind::Human,
             ),
             HomeLaunchTokenContext::for_test(
                 stored.principal_id().to_string(),
                 stored.session_id().to_string(),
                 stored.proof_binding_id().map(ToString::to_string),
                 "grant:other",
+                crate::auth::PrincipalKind::Human,
             ),
         ] {
             assert!(issue_home_launch_token_with_context(
@@ -2378,6 +2409,7 @@ mod tests {
             stored.session_id().to_string(),
             None,
             stored.grant_id().to_string(),
+            crate::auth::PrincipalKind::Human,
         );
         let token =
             issue_home_launch_token_with_context(data_dir.path(), SYSTEM_CAPSULE_ID, &proofless)
@@ -2563,6 +2595,7 @@ mod tests {
             "auth:alice",
             Some("proof:passkey:alice".to_string()),
             "grant:alice",
+            crate::auth::PrincipalKind::Human,
         );
         crate::auth::store_test_human_principal(parent.path(), context.principal_id());
         crate::auth::store_session_grant(
@@ -2816,6 +2849,7 @@ mod tests {
             grant.session_id.clone(),
             Some(grant.proof_binding_id.clone()),
             grant.grant_id.clone(),
+            crate::auth::PrincipalKind::Human,
         );
         let token =
             issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context).unwrap();
@@ -2866,5 +2900,142 @@ mod tests {
             required.context.principal_id(),
             "the grant names the same verified principal the context holds"
         );
+    }
+
+    const FENCE_AGENT_REFUSAL: &str =
+        "gateway admission refuses a Home launch token whose principal is an agent";
+
+    /// The Home browser headers for one token. The cookie carrier carries a
+    /// single well-formed Home session cookie; the header carrier carries the
+    /// token header and two Cookie headers, so path 1 refuses at
+    /// `single_cookie_value` and path 2 verifies the header token.
+    fn fence_home_headers(token: &str, cookie_carrier: bool) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        if cookie_carrier {
+            let name = home_session_cookie_name(&headers).unwrap();
+            headers.insert("cookie", format!("{name}={token}").parse().unwrap());
+        } else {
+            headers.insert("x-elastos-home-token", token.parse().unwrap());
+            headers.append("cookie", "first=1".parse().unwrap());
+            headers.append("cookie", "second=2".parse().unwrap());
+        }
+        headers
+    }
+
+    fn fence_agent_token(home: &std::path::Path) -> String {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+
+        let agent = crate::auth::valid_agent::plant(home);
+        let now = now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:fence-agent".to_string(),
+            session_id: "session:fence-agent".to_string(),
+            principal_id: agent.principal_id.clone(),
+            proof_binding_id: agent.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
+            apps: vec![HOME_CAPSULE_ID.to_string()],
+        };
+        crate::auth::plant_session_grant(home, grant.clone());
+        issue_home_launch_token_for_auth_grant(home, HOME_CAPSULE_ID, &grant).unwrap()
+    }
+
+    fn fence_person_token(home: &std::path::Path) -> String {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+
+        let record = crate::auth::store_test_human_principal(home, "person:local:fence-person");
+        let now = now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:fence-person".to_string(),
+            session_id: "session:fence-person".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + HOME_LAUNCH_TOKEN_TTL_SECS,
+            apps: vec![HOME_CAPSULE_ID.to_string()],
+        };
+        crate::auth::plant_session_grant(home, grant.clone());
+        issue_home_launch_token_for_auth_grant(home, HOME_CAPSULE_ID, &grant).unwrap()
+    }
+
+    /// A valid Home launch token of the `:1710-1742` shape whose resolved
+    /// principal is a stored agent. The generic verifier accepts it, and
+    /// `require_gateway_launch` refuses it by the Agent literal for every
+    /// gateway fence route and in both carriers. The same shape with a person
+    /// principal is admitted.
+    #[test]
+    fn gateway_admission_refuses_a_valid_agent_token_on_every_fence_route_and_both_carriers() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_token = fence_agent_token(dir.path());
+        let person_token = fence_person_token(dir.path());
+
+        // The same agent token remains acceptable to the generic verifiers:
+        // the refusal is the admission guard, not an invalid token.
+        let cookie_context =
+            require_home_token_context(dir.path(), &fence_home_headers(&agent_token, true))
+                .expect("the cookie carrier verifies the agent token");
+        assert_eq!(
+            cookie_context.root().kind(),
+            Some(crate::auth::PrincipalKind::Agent),
+            "the verifier resolves the stored agent kind"
+        );
+        require_home_launch_grant(
+            dir.path(),
+            &fence_home_headers(&agent_token, false),
+            HOME_CAPSULE_ID,
+        )
+        .expect("the header carrier verifies the agent token");
+
+        let routes = [
+            "/api/provider/object/stat",
+            "/api/viewers/documents/storage/documents/save/note.md",
+            "/api/viewers/documents/library-object",
+            "/api/provider/object/upload",
+        ];
+        for route in routes {
+            for cookie_carrier in [true, false] {
+                let refused = require_gateway_launch_for(
+                    dir.path(),
+                    &fence_home_headers(&agent_token, cookie_carrier),
+                    route,
+                )
+                .expect_err("an agent principal is refused at the gateway admission");
+                assert_eq!(
+                    refused.to_string(),
+                    FENCE_AGENT_REFUSAL,
+                    "{route} cookie_carrier={cookie_carrier}"
+                );
+                require_gateway_launch_for(
+                    dir.path(),
+                    &fence_home_headers(&person_token, cookie_carrier),
+                    route,
+                )
+                .unwrap_or_else(|err| {
+                    panic!("a person token is admitted on {route} cookie_carrier={cookie_carrier}: {err:#}")
+                });
+            }
+        }
+    }
+
+    /// A production device token stays admitted after the guard. The same test
+    /// asserts an agent token is refused, so removing or widening the guard
+    /// reddens it at the Agent literal or at the device acceptance.
+    #[test]
+    fn gateway_admission_keeps_a_device_token_and_refuses_an_agent_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_token =
+            issue_local_runtime_home_launch_token(dir.path(), HOME_CAPSULE_ID).unwrap();
+        let headers = fence_home_headers(&device_token, false);
+        require_gateway_launch(dir.path(), &headers)
+            .expect("a production device token remains admissible");
+
+        let agent_token = fence_agent_token(dir.path());
+        let refused = require_gateway_launch(dir.path(), &fence_home_headers(&agent_token, false))
+            .expect_err("an agent principal is refused");
+        assert_eq!(refused.to_string(), FENCE_AGENT_REFUSAL);
     }
 }
