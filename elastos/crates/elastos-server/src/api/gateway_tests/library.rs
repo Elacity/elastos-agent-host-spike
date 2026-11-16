@@ -10855,6 +10855,10 @@ mod route_17_two_person_purchases {
         assert_eq!(payload["status"], "ok", "uri={uri} payload={payload}");
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "test helper binds every fixture fact explicitly"
+    )]
     async fn publish_listing(
         app: &axum::Router,
         creator_token: &str,
