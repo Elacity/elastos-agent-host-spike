@@ -3690,6 +3690,7 @@ mod approved_request_resume_tests {
             "wallet_intent": "transaction_intent",
             "method": "eth_sendTransaction"
         });
+        let now = now_ts();
         let approval_request_id = wallet_request_id(&effect_id, "approval");
         let mut effect = RuntimeTransactionEffect {
             schema: TRANSACTION_EFFECT_SCHEMA.to_string(),
@@ -3700,7 +3701,7 @@ mod approved_request_resume_tests {
             request_binding: transaction_request_binding(&request),
             approval_request_id,
             wallet_request_sha256: format!("request:sha256:{}", "f".repeat(64)),
-            approval_expires_at: now_ts().saturating_add(600),
+            approval_expires_at: now.saturating_add(600),
             approval_reason: request.approval_reason.clone(),
             account_id: request.account_id.clone(),
             address: request.address.clone(),
@@ -3718,8 +3719,8 @@ mod approved_request_resume_tests {
             projection_completed: false,
             completion_audit_completed: false,
             completion_error: None,
-            created_at: now_ts(),
-            updated_at: now_ts(),
+            created_at: now,
+            updated_at: now,
         };
         effect.wallet_request_sha256 = wallet_operation_request_sha256(
             authority,
@@ -3826,6 +3827,7 @@ mod approved_request_resume_tests {
             "method": "eth_sendTransaction"
         });
         bind_transaction_intent_runtime_context(&mut intent, &request, authority, true).unwrap();
+        let now = now_ts();
         let approval_request_id = wallet_request_id(&request.effect_id, "approval");
         let mut effect = RuntimeTransactionEffect {
             schema: TRANSACTION_EFFECT_SCHEMA.to_string(),
@@ -3836,7 +3838,7 @@ mod approved_request_resume_tests {
             request_binding,
             approval_request_id,
             wallet_request_sha256: String::new(),
-            approval_expires_at: now_ts().saturating_add(600),
+            approval_expires_at: now.saturating_add(600),
             approval_reason: request.approval_reason.clone(),
             account_id: request.account_id.clone(),
             address: request.address.clone(),
@@ -3854,8 +3856,8 @@ mod approved_request_resume_tests {
             projection_completed: false,
             completion_audit_completed: false,
             completion_error: None,
-            created_at: now_ts(),
-            updated_at: now_ts(),
+            created_at: now,
+            updated_at: now,
         };
         effect.wallet_request_sha256 = wallet_operation_request_sha256(
             authority,

@@ -578,7 +578,10 @@ admits the store's replace beside the declared list and nothing else: `rename`
 on x86-64, `renameat` on aarch64,
 `seccomp_wallet_program_adds_only_the_store_replace` checks that one difference
 and `seccomp_wallet_program_equals_its_golden_copy` holds each architecture's
-program to its golden. `CONFINEMENT-LINUX.md` records the replace and the hosts.
+program to its golden. The did program is the wallet program without that
+replace: `seccomp_did_program_equals_its_golden_copy` builds it from the lab's
+did rights and holds it to the did goldens the Runtime's B3 rows also read.
+`CONFINEMENT-LINUX.md` records the replace and the hosts.
 The row check reads each cited item as a Linux-gated `#[test]` bound by exact
 name to this provider, so a cell that cites another provider's journey, or a
 `storage` row that cites only the journey, is refused. This document adds no

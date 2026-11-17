@@ -34,7 +34,7 @@ const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 /// The later caller derives this id from the Runtime's `components.json` key,
 /// never from the package manifest's `name`.
 #[allow(dead_code)] // The spawn caller is added in a later slice.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum RuntimeProviderId {
     Did,
     Wallet,

@@ -12312,6 +12312,16 @@ fn wallet_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
     parse_seccomp_golden(text)
 }
 
+/// The checked-in golden copy of did's final program for `audit_arch`.
+fn did_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
+    let text = match audit_arch {
+        0xc000_003e => include_str!("did-seccomp-x86_64.golden"),
+        0xc000_00b7 => include_str!("did-seccomp-aarch64.golden"),
+        other => panic!("no golden did program for audit architecture {other:#x}"),
+    };
+    parse_seccomp_golden(text)
+}
+
 /// One checked-in golden program's lines, read as four plain integers and the
 /// comment: `code jt jf k  # comment`. A line that does not carry that shape is
 /// a panic, not a skipped line.
@@ -12437,6 +12447,27 @@ fn seccomp_wallet_program_equals_its_golden_copy() {
             &program,
             wallet_seccomp_golden(arch),
         );
+    }
+}
+
+/// Did's final program uses its own rights and the lab builder on both
+/// architectures. The wallet relation test checks that did omits only the
+/// wallet's store-replace call. The committed copies pin all four fields of
+/// every instruction independently of the Runtime renderer.
+#[test]
+fn seccomp_did_program_equals_its_golden_copy() {
+    let host = seccomp_probe_list(DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = seccomp_probe_list_for_arch(DID_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
+        if arch == host.audit_arch {
+            assert_eq!(
+                program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        assert_program_equals_golden(DID_PROVIDER, arch_name, &program, did_seccomp_golden(arch));
     }
 }
 
