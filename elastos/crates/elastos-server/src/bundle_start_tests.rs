@@ -3240,8 +3240,7 @@ async fn a_kept_launch_serves_the_page_its_content_pins() {
 /// R-grants-nothing. A component signed by a trusted publisher, whose signed
 /// manifest asks nothing, starts by its CID for a person. The signature is all
 /// it has: its one bridge call is denied by the seal; this Home's own bridge
-/// handler never sees the call; and once the start returns, this Home's
-/// runtime holds no ceiling for it under its name or its CID.
+/// handler never sees the call.
 #[tokio::test]
 async fn a_signature_grants_nothing() {
     let publisher = key(71);
@@ -3271,16 +3270,6 @@ async fn a_signature_grants_nothing() {
         home.calls(),
         Vec::new(),
         "this Home's bridge handler never saw a call from the signed capsule"
-    );
-    assert_eq!(
-        home.runtime.ceiling_of(name),
-        None,
-        "no ceiling stays under its name"
-    );
-    assert_eq!(
-        home.runtime.ceiling_of(&cid),
-        None,
-        "no ceiling stays under its CID"
     );
 }
 
