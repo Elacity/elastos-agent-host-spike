@@ -16,6 +16,7 @@ mod registry;
 mod rights;
 mod rights_table;
 mod seccomp_list;
+mod seccomp_program;
 
 pub use bridge::{CapsuleProvider, ProviderBridge, ProviderConfig as BridgeProviderConfig};
 pub use registry::{
