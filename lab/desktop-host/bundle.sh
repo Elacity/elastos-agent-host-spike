@@ -104,6 +104,7 @@ if [ "$platform" != aarch64-darwin ]; then
 	rm -rf "$root" "dist/elastos-lab-$platform.tar.gz"
 	mkdir -p "$root/bin" "$root/Resources"
 	cp target/release/elastos-desktop-host "$root/bin/elastos-desktop-host"
+	cp icons/elastos-512.png "$root/Resources/elastos.png"
 	copy_release "$root/Resources/release"
 	# Installed by the user as ~/.local/share/applications/elastos-lab.desktop;
 	# @APP@ is where the folder was unpacked.
@@ -112,6 +113,7 @@ if [ "$platform" != aarch64-darwin ]; then
 Type=Application
 Name=ElastOS Lab
 Exec=env ELASTOS_LAB_HOME=$LAB_HOME @APP@/bin/elastos-desktop-host
+Icon=@APP@/Resources/elastos.png
 Terminal=false
 Categories=Network;
 DESKTOP
@@ -122,8 +124,9 @@ fi
 
 app="dist/ElastOS Lab.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/elastos-desktop-host "$app/Contents/MacOS/elastos-desktop-host"
+cp icons/ElastOS.icns "$app/Contents/Resources/ElastOS.icns"
 
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -138,6 +141,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 	<string>org.elastos.lab.desktop-host</string>
 	<key>CFBundleExecutable</key>
 	<string>elastos-desktop-host</string>
+	<key>CFBundleIconFile</key>
+	<string>ElastOS</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

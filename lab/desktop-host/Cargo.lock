@@ -497,6 +497,7 @@ dependencies = [
  "base64 0.22.1",
  "fs4",
  "libc",
+ "png",
  "rfd",
  "serde_json",
  "sha2",

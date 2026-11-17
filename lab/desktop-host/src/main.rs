@@ -414,8 +414,10 @@ fn new_home_window(
     let window = WindowBuilder::new()
         .with_title("ElastOS")
         .with_inner_size(LogicalSize::new(1280.0, 820.0))
-        .with_min_inner_size(LogicalSize::new(720.0, 480.0))
-        .build(target)?;
+        .with_min_inner_size(LogicalSize::new(720.0, 480.0));
+    #[cfg(not(target_os = "macos"))]
+    let window = window.with_window_icon(window_icon());
+    let window = window.build(target)?;
     #[cfg(feature = "lab-diag")]
     let diag = runtime::lab_home().map(|home| home.join("window-diag.log"));
     #[cfg(not(feature = "lab-diag"))]
@@ -522,23 +524,32 @@ fn alert(message: &str) {
         .show();
 }
 
-/// A ring with a centre dot, drawn as a template so macOS tints it for light and dark menu bars.
+/// Home's icon. On macOS the mark alone, as a template that macOS tints for light and
+/// dark menu bars; Windows and Linux panels do not tint tray icons.
 fn icon() -> Icon {
-    const SIZE: u32 = 32;
-    let centre = (SIZE as f32 - 1.0) / 2.0;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let distance = ((x as f32 - centre).powi(2) + (y as f32 - centre).powi(2)).sqrt();
-            let alpha = if (10.0..=14.5).contains(&distance) || distance <= 4.5 {
-                255
-            } else {
-                0
-            };
-            // Linux panels are dark and do not tint tray icons.
-            let shade = if cfg!(target_os = "macos") { 0 } else { 255 };
-            rgba.extend_from_slice(&[shade, shade, shade, alpha]);
-        }
-    }
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("tray icon image")
+    #[cfg(target_os = "macos")]
+    let png = include_bytes!("../icons/tray-template.png");
+    #[cfg(not(target_os = "macos"))]
+    let png = include_bytes!("../icons/elastos-32.png");
+    let (rgba, width, height) = decode(png);
+    Icon::from_rgba(rgba, width, height).expect("tray icon image")
+}
+
+/// The Home window's icon, for the Windows taskbar and Linux docks.
+#[cfg(not(target_os = "macos"))]
+fn window_icon() -> Option<tao::window::Icon> {
+    let (rgba, width, height) = decode(include_bytes!("../icons/elastos-256.png"));
+    tao::window::Icon::from_rgba(rgba, width, height).ok()
+}
+
+/// RGBA pixels of a PNG built into the app.
+fn decode(png: &[u8]) -> (Vec<u8>, u32, u32) {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
+    let mut reader = decoder.read_info().expect("icon PNG");
+    let mut rgba = vec![0; reader.output_buffer_size().expect("icon size")];
+    let frame = reader.next_frame(&mut rgba).expect("icon PNG");
+    assert_eq!(frame.color_type, png::ColorType::Rgba, "icon PNG is not RGBA");
+    rgba.truncate(frame.buffer_size());
+    (rgba, frame.width, frame.height)
 }

@@ -12,6 +12,7 @@ publish = false
 base64 = "0.22"
 fs4 = "1.1.0"
 libc = "0.2"
+png = "0.18"
 rfd = "0.17.2"
 serde_json = "1"
 sha2 = "0.10"

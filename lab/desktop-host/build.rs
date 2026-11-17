@@ -9,7 +9,14 @@ fn xcrun(args: &[&str]) -> String {
 
 fn main() {
     println!("cargo:rerun-if-changed=src/enclave.swift");
-    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() != "macos" {
+    println!("cargo:rerun-if-changed=icons/elastos.res");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    // The exe's own icon, shown by Explorer and the Start menu.
+    if target_os == "windows" {
+        let res = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("icons/elastos.res");
+        println!("cargo:rustc-link-arg-bins={}", res.display());
+    }
+    if target_os != "macos" {
         return;
     }
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());

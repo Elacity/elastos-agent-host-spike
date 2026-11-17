@@ -64,6 +64,10 @@ LAB_RELEASE=~/elastos-lab-release/lab LAB_HOME=~/elastos-lab-user4 lab/desktop-h
 hdiutil create -volname "ElastOS Lab" -srcfolder DMG_SOURCE_FOLDER -format ULFO lab/desktop-host/dist/ElastOS-Lab.dmg
 ```
 
+The app's icons are made from Home's own icon,
+`capsules/home/browser/elastos-home-icon.svg`. After it changes, run
+`lab/desktop-host/icons/make.sh` on a Mac and commit what it writes in `icons/`.
+
 ## Build and run
 
 ```sh
