@@ -81,7 +81,7 @@ def main():
         if checked != [name]:
             raise SystemExit(f"{EXAMPLES / name / 'verify.sh'}: the gate checked "
                              f"{checked or 'no name'}, not {name}")
-    print(f"all {len(names)} recorded names are checked by a gate that ran")
+    print(f"all {len(names)} recorded names have a top-level hash check in their gate, and the checker confirms each")
     if args.falsify:
         falsify(args.record)
 
