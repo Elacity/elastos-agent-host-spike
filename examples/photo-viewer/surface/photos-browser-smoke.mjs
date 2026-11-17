@@ -56,7 +56,7 @@ const CONTENT = "/api/viewers/image-viewer/launch/content/";
 const { base, requests, close } = await standIn({
   app: "image-viewer",
   browserRoot,
-  files: ["index.html", "main.js", "photos.js", "photos.css"],
+  files: ["index.html", "main.js", "photos.js", "page-client.js", "docs-render.js", "photos.css"],
   routes(method, path) {
     if (method !== "GET") return null;
     if (path === OUTPUT) {
