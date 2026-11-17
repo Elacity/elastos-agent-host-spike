@@ -29,6 +29,11 @@ finish() { # <the line for a complete run>
     fi
 }
 
+# The recorded container hash against the reference artifact's bytes (the
+# container build the record names; a native build cannot match).
+HASH_ARTIFACT="${REPO_ROOT}/examples/capsule-kit/repro/reference/photo-viewer.component.wasm"
+hash_gate() { python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" "$@"; }
+
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" photo-viewer
 
 # Restore the gate falsifier before Bash reads the branch it changes.
@@ -40,6 +45,7 @@ python3 -I "${VIEWER_DIR}/repro/pins_test.py" --falsify
 
 python3 -I "${VIEWER_DIR}/repro/recorded_hash_test.py"
 python3 -I "${VIEWER_DIR}/repro/recorded_hash_test.py" --falsify
+hash_gate photo-viewer --artifact "${HASH_ARTIFACT}"
 
 GATE=0
 case "${GATE_LIST:-}" in
