@@ -3,7 +3,9 @@ use std::path::Path;
 use elastos_common::{CapsuleManifest, ElastosError, Result};
 use wasmparser::{ComponentTypeRef, Encoding, Parser, Payload};
 
-const ALLOWED_BUS_IMPORTS: &[&str] = &[
+/// The component imports this Runtime admits. Exported so the capsule kit's
+/// host tests read this table instead of keeping a copy (kit item A2).
+pub const ALLOWED_BUS_IMPORTS: &[&str] = &[
     "elastos:bus/types@1.0.0",
     "elastos:bus/runtime@1.0.0",
     "elastos:bus/identity@1.0.0",
@@ -71,7 +73,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
+/// The single component admission check: the imports a component may declare,
+/// and the parse caps on what the compiler is asked to do. Every capsule start
+/// and bundle start goes through it, and the capsule kit's host tests call this
+/// same function (kit item A2) instead of keeping a copy.
+pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
     let mut saw_root_header = false;
     let mut functions: u32 = 0;
     let mut canonical_functions: u32 = 0;
