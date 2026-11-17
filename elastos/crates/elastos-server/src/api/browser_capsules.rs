@@ -1344,12 +1344,65 @@ mod tests {
         panic!("stand-in `types` has no `{extension}` entry")
     }
 
+    /// An object the served header map is built from is written only where it is
+    /// declared. Anywhere in the stand-in, `name[...] =`, `name.x =`, a bare
+    /// `name =`, `delete name...` or `Object.assign(name` fails here by name, so
+    /// the pin cannot read one value while another is served.
+    fn stand_in_never_mutated(lines: &[&str], name: &str, context: &str) {
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+        let declaration = format!("const {name} =");
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let bytes = trimmed.as_bytes();
+            let mut from = 0;
+            while let Some(found) = trimmed[from..].find(name) {
+                let at = from + found;
+                from = at + name.len();
+                let before = at.checked_sub(1).map(|i| bytes[i]);
+                if matches!(before, Some(c) if word(c) || c == b'.') {
+                    continue;
+                }
+                if matches!(bytes.get(from), Some(&c) if word(c)) {
+                    continue;
+                }
+                let head = trimmed[..at].trim_end();
+                let mutated_by_prefix =
+                    head.ends_with("delete") || head.ends_with("Object.assign(");
+                // Skip one `[...]` or `.ident` after the name, then look for a lone `=`.
+                let mut rest = trimmed[from..].trim_start();
+                if let Some(after) = rest.strip_prefix('[') {
+                    rest = after
+                        .split_once(']')
+                        .map(|(_, tail)| tail)
+                        .unwrap_or("")
+                        .trim_start();
+                } else if let Some(after) = rest.strip_prefix('.') {
+                    let end = after.bytes().position(|c| !word(c)).unwrap_or(after.len());
+                    rest = after[end..].trim_start();
+                }
+                let assigned =
+                    rest.starts_with('=') && !rest.starts_with("==") && !rest.starts_with("=>");
+                let is_declaration = trimmed.starts_with(&declaration) && head == "const";
+                assert!(
+                    is_declaration || !(assigned || mutated_by_prefix),
+                    "{context}: stand-in line {} `{trimmed}` writes `{name}` after its declaration; \
+                     the pin reads the declared value",
+                    index + 1
+                );
+            }
+        }
+    }
+
     fn stand_in_spread(
         lines: &[&str],
         name: &str,
         entries: &mut Vec<(String, String)>,
         context: &str,
     ) {
+        stand_in_never_mutated(lines, name, context);
         let opener = format!("const {name} = {{");
         let start = lines
             .iter()
@@ -1397,6 +1450,7 @@ mod tests {
             let key = stand_in_string(key, &format!("stand-in map key `{key}`"));
             let context = format!("stand-in header `{key}`");
             let value = if value == "types[name.split(\".\").pop()]" {
+                stand_in_never_mutated(&lines, "types", &context);
                 stand_in_types_lookup(&lines, STAND_IN_DOCUMENT)
             } else if value.starts_with('`') {
                 stand_in_template(value, origin, host, &context)
