@@ -1,4 +1,4 @@
-# The did provider seccomp program on x86_64; B3 slice 5 golden.
+# The did provider seccomp program on x86_64; checked by seccomp_did_program_equals_its_golden_copy.
 0x0020  0  0 0x00000004  # load seccomp_data.arch
 0x0015  1  0 0xc000003e  # arch == AUDIT_ARCH_x86_64? skip the deny
 0x0006  0  0 0x0005000d  # deny: another audit architecture
@@ -81,4 +81,4 @@
 0x0006  0  0 0x7fff0000  # allow
 0x0015  0  1 0x00000014  # SYS_writev
 0x0006  0  0 0x7fff0000  # allow
-0x0006  0  0 0x0005000d  # deny: an x32 number
+0x0006  0  0 0x0005000d  # deny: any other call

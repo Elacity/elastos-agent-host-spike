@@ -18,7 +18,7 @@ const NUMBERS: &str = concat!(
     "clone:56:220 clone3:435:435",
 );
 
-// An absent cell is an intentional architecture-only call. An absent row is an error.
+// An absent cell excludes that call by policy on this architecture. An absent row is an error.
 pub(super) fn number(name: &str, arch: AuditArch) -> Option<u32> {
     let row = NUMBERS
         .split_whitespace()
