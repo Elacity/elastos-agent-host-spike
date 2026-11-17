@@ -16,6 +16,7 @@ use crate::provider_resource::{
     agents_area_refusal, build_capability_resource, ensure_generic_wallet_capability,
     in_agents_area, provider_operation_action,
 };
+use crate::resource_bridge::reject_localhost_user_area_path;
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::session::Session;
@@ -26,6 +27,10 @@ pub struct ProviderProxyState {
     pub registry: Arc<ProviderRegistry>,
     pub capability_manager: Option<Arc<CapabilityManager>>,
 }
+
+/// Error code for a session API call to the Runtime-owned IPFS provider.
+pub const IPFS_SESSION_PROXY_DENIED: &str = "ipfs_session_proxy_denied";
+pub const OBJECT_SESSION_PROXY_DENIED: &str = "object_session_proxy_denied";
 
 /// POST /api/provider/:scheme/:op
 ///
@@ -38,6 +43,22 @@ pub async fn provider_proxy(
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    // The Runtime owns IPFS and reaches the provider through its own registry
+    // calls. A session body must not select host paths for that provider. The
+    // registry lowercases schemes, so this gate ignores case too.
+    if scheme.eq_ignore_ascii_case("ipfs") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("{IPFS_SESSION_PROXY_DENIED}: Runtime owns IPFS access"),
+        ));
+    }
+    if scheme.eq_ignore_ascii_case("object") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("{OBJECT_SESSION_PROXY_DENIED}: Runtime owns object storage access"),
+        ));
+    }
+
     // Build request JSON first (need body for AI resource construction)
     let mut request: Value = if body.is_empty() {
         serde_json::json!({})
@@ -46,6 +67,13 @@ pub async fn provider_proxy(
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON body: {}", e)))?
     };
     request["op"] = Value::String(op.clone());
+
+    if scheme.eq_ignore_ascii_case("localhost") {
+        if let Some(path) = request.get("path").and_then(Value::as_str) {
+            reject_localhost_user_area_path(path)
+                .map_err(|message| (StatusCode::FORBIDDEN, message))?;
+        }
+    }
 
     // A launch name is the Runtime's own to answer, in its bridge, for the
     // program of a content launch. No provider serves it, from anyone.
@@ -225,10 +253,13 @@ fn shell_write_requires_token(resource: &str, required_action: Action) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
     use axum::extract::State;
-    use axum::http::HeaderMap;
     use axum::http::HeaderValue;
+    use axum::http::{HeaderMap, Request};
+    use axum::routing::post;
     use axum::Extension;
+    use axum::Router;
     use elastos_runtime::capability::{CapabilityManager, CapabilityStore, TokenConstraints};
     use elastos_runtime::primitives::{audit::AuditLog, metrics::MetricsManager};
     use elastos_runtime::provider::{
@@ -236,6 +267,120 @@ mod tests {
     };
     use elastos_runtime::session::SessionType;
     use tokio::sync::Mutex;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn session_proxy_http_refuses_object_before_body_parse_for_all_sessions() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("object"));
+        registry
+            .register_sub_provider("object", provider.clone())
+            .await
+            .unwrap();
+        for kind in [SessionType::Shell, SessionType::Capsule] {
+            let app = Router::new()
+                .route("/api/provider/:scheme/:op", post(provider_proxy))
+                .layer(Extension(Session::new(kind, None)))
+                .with_state(ProviderProxyState {
+                    registry: registry.clone(),
+                    capability_manager: None,
+                });
+            for op in ["read", "write", "list", "delete"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("/api/provider/object/{op}"))
+                            .body(Body::from("{invalid"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{op}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert!(
+                    String::from_utf8_lossy(&body).contains(OBJECT_SESSION_PROXY_DENIED),
+                    "{op}"
+                );
+            }
+        }
+        assert!(provider.requests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_proxy_http_refuses_ipfs_destination_operations() {
+        let app = Router::new()
+            .route("/api/provider/:scheme/:op", post(provider_proxy))
+            .layer(Extension(Session::new(SessionType::Shell, None)))
+            .with_state(ProviderProxyState {
+                registry: Arc::new(ProviderRegistry::new()),
+                capability_manager: None,
+            });
+        for op in ["cat_to_path", "download_directory"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/provider/ipfs/{op}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"cid":"fixture-cid", "dest":"/tmp/link/../file"})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{op}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(IPFS_SESSION_PROXY_DENIED),
+                "{op}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_proxy_http_refuses_entire_localhost_user_areas() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("localhost"));
+        registry.register(provider.clone()).await;
+        let app = Router::new()
+            .route("/api/provider/:scheme/:op", post(provider_proxy))
+            .layer(Extension(Session::new(SessionType::Shell, None)))
+            .with_state(ProviderProxyState {
+                registry,
+                capability_manager: None,
+            });
+        for path in [
+            "Users/self/Documents/a.md",
+            "UsersAI/agent/Documents/a.md",
+            " Users/self/Documents/a.md",
+            "Users/link/../Documents/a.md",
+            "Users/dangling",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/provider/localhost/read")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::json!({"path": path}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+        assert!(provider.requests.lock().await.is_empty());
+    }
 
     // These routes have no principal-bound provider entrance for a launched
     // agent. The same-root checks therefore assert closure on this route.
@@ -723,6 +868,99 @@ mod tests {
                 assert_eq!(provider.requests.lock().await.len(), usize::from(allowed));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn shell_bearer_cannot_reach_ipfs_provider() {
+        // The registry lowercases schemes, so every spelling of the scheme must
+        // reach the same refusal before dispatch.
+        for scheme in ["ipfs", "IPFS", "Ipfs"] {
+            for op in ["add_path", "cat_to_path"] {
+                let body = serde_json::json!({
+                    "path": "/UsersAI/agent-root/Documents/a.md",
+                    "dest": "/UsersAI/agent-root/Documents/a.md"
+                })
+                .to_string();
+                let (provider, result) = proxy_as_shell(scheme, op, HeaderMap::new(), &body).await;
+                let label = format!("{scheme}/{op}");
+                let err = result.expect_err(&label);
+                assert_eq!(err.0, StatusCode::FORBIDDEN, "{label}");
+                assert!(
+                    err.1.contains(IPFS_SESSION_PROXY_DENIED),
+                    "{label}: {}",
+                    err.1
+                );
+                assert!(provider.requests.lock().await.is_empty(), "{label}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn capsule_ipfs_token_cannot_reach_session_proxy() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("ipfs"));
+        registry
+            .register_sub_provider("ipfs", provider.clone())
+            .await
+            .unwrap();
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            Arc::new(AuditLog::new()),
+            Arc::new(MetricsManager::new()),
+        ));
+        let session = Session::new(SessionType::Capsule, None);
+        let token = capability_manager.grant(
+            session.id.as_str(),
+            ResourceId::new("elastos://ipfs/add_path"),
+            Action::Write,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Capability-Token",
+            HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
+        );
+        let state = ProviderProxyState {
+            registry,
+            capability_manager: Some(capability_manager),
+        };
+
+        let err = provider_proxy(
+            State(state),
+            Extension(session),
+            Path(("ipfs".to_string(), "add_path".to_string())),
+            headers,
+            serde_json::json!({"path": "/UsersAI/agent-root/Documents/a.md"}).to_string(),
+        )
+        .await
+        .expect_err("capsule IPFS token must not reach the provider");
+
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.contains(IPFS_SESSION_PROXY_DENIED), "{}", err.1);
+        assert!(provider.requests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_internal_ipfs_calls_still_work() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("ipfs"));
+        registry
+            .register_sub_provider("ipfs", provider.clone())
+            .await
+            .unwrap();
+        let request = serde_json::json!({
+            "op": "add_path",
+            "path": "/UsersAI/agent-root/Documents/a.md"
+        });
+
+        let response = registry
+            .send_raw("ipfs", &request)
+            .await
+            .expect("Runtime keeps its direct IPFS provider calls");
+
+        assert_eq!(response["status"], "ok");
+        assert_eq!(*provider.requests.lock().await, vec![request]);
     }
 
     #[test]

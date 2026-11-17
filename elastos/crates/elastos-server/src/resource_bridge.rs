@@ -430,19 +430,71 @@ struct ResourceInvokeDispatch {
     required_action: Action,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResourceInvokeError {
+    code: &'static str,
+    message: String,
+}
+
+impl ResourceInvokeError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for ResourceInvokeError {
+    fn from(message: String) -> Self {
+        Self::new("invalid_resource_invoke", message)
+    }
+}
+
+impl From<&str> for ResourceInvokeError {
+    fn from(message: &str) -> Self {
+        Self::new("invalid_resource_invoke", message)
+    }
+}
+
+impl std::fmt::Display for ResourceInvokeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::ops::Deref for ResourceInvokeError {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.message
+    }
+}
+
+impl PartialEq<&str> for ResourceInvokeError {
+    fn eq(&self, other: &&str) -> bool {
+        self.message == *other
+    }
+}
+
 fn resource_invoke_dispatch(
     request: &serde_json::Value,
     principal_id: Option<&str>,
     data_dir: Option<&Path>,
-) -> Result<ResourceInvokeDispatch, String> {
+) -> Result<ResourceInvokeDispatch, ResourceInvokeError> {
     let uri = request["uri"]
         .as_str()
         .ok_or_else(|| "resource_invoke missing uri".to_string())?;
     if !is_supported_resource_scheme(uri) {
-        return Err("resource URI must use elastos:// or localhost://".to_string());
+        return Err("resource URI must use elastos:// or localhost://"
+            .to_string()
+            .into());
     }
     if is_system_only_backend_resource(uri) {
-        return Err("system backends are not app capabilities; use elastos://content".to_string());
+        return Err(
+            "system backends are not app capabilities; use elastos://content"
+                .to_string()
+                .into(),
+        );
     }
     let uri = scope_current_user_alias(uri, principal_id, data_dir)?;
 
@@ -461,7 +513,7 @@ fn resource_invoke_dispatch(
         if uri != WALLET_STATUS_RESOURCE || operation != "status" {
             return Err(
                 "generic Wallet dispatch is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations"
-                    .to_string(),
+                    .into(),
             );
         }
         body = serde_json::json!({});
@@ -470,7 +522,26 @@ fn resource_invoke_dispatch(
         body = serde_json::json!({});
     }
     if !body.is_object() {
-        return Err("resource_invoke body must be a JSON object".to_string());
+        return Err("resource_invoke body must be a JSON object"
+            .to_string()
+            .into());
+    }
+    if scheme == "object" {
+        let Some(launch_principal) = principal_id else {
+            return Err(ResourceInvokeError::new(
+                "principal_context_required",
+                "object requests require a principal-scoped launch context",
+            ));
+        };
+        match body.get("principal_id") {
+            None | Some(serde_json::Value::Null) => {
+                body["principal_id"] = serde_json::Value::String(launch_principal.to_string());
+            }
+            Some(serde_json::Value::String(named)) if named == launch_principal => {}
+            Some(_) => {
+                return Err(ResourceInvokeError::new("object_principal_mismatch", "object request principal_id must match the principal this capsule was launched for"));
+            }
+        }
     }
     if scheme == "launch" {
         body["path"] = serde_json::Value::String(uri.to_string());
@@ -623,8 +694,8 @@ async fn authorize_and_dispatch_resource_invoke(
         bridge_ctx.data_dir.as_deref(),
     ) {
         Ok(dispatch) => dispatch,
-        Err(message) => {
-            return resource_error_response("invalid_resource_invoke", &message);
+        Err(err) => {
+            return resource_error_response(err.code, &err.message);
         }
     };
     let audit_id = format!(
@@ -1131,6 +1202,37 @@ fn serialize_bridge_response(response: serde_json::Value) -> Vec<u8> {
     bytes
 }
 
+/// Apply the same area-root refusal at the capsule bridge and session HTTP routes.
+/// Empty and current-directory segments do not change the provider's target;
+/// parent segments are refused before any capability or provider lookup.
+pub(crate) fn reject_localhost_user_area_root(path_or_uri: &str) -> Result<(), String> {
+    reject_localhost_user_area(path_or_uri, false)
+}
+
+pub(crate) fn reject_localhost_user_area_path(path_or_uri: &str) -> Result<(), String> {
+    reject_localhost_user_area(path_or_uri, true)
+}
+
+fn reject_localhost_user_area(path_or_uri: &str, include_children: bool) -> Result<(), String> {
+    let Some(rooted) = rooted_localhost_uri(path_or_uri) else {
+        return Ok(());
+    };
+    let mut segments = rooted.trim_start_matches("localhost://").split('/');
+    let root = segments.next().unwrap_or_default();
+    let mut has_child = false;
+    for segment in segments {
+        match segment {
+            "" | "." => {}
+            ".." => return Err("localhost paths cannot contain ..".to_string()),
+            _ => has_child = true,
+        }
+    }
+    if (include_children || !has_child) && matches!(root, "Users" | "UsersAI") {
+        return Err("Capsules cannot access a localhost user area root".to_string());
+    }
+    Ok(())
+}
+
 fn scope_current_user_alias(
     uri_or_resource: &str,
     principal_id: Option<&str>,
@@ -1139,6 +1241,8 @@ fn scope_current_user_alias(
     let Some(rooted) = rooted_localhost_uri(uri_or_resource) else {
         return Ok(uri_or_resource.to_string());
     };
+
+    reject_localhost_user_area_root(&rooted)?;
 
     // A5-S3a-2: the stored record's kind picks the one root area a principal may use.
     let Some(area) = ["Users", "UsersAI"]
@@ -1556,15 +1660,28 @@ pub async fn handle_remote_request_with_audit_dir(
 
     let response = match request_type {
         "resource_invoke" => {
+            if request["uri"]
+                .as_str()
+                .and_then(|uri| uri.strip_prefix("elastos://"))
+                .is_some_and(|rest| rest.split('/').next() == Some("object"))
+            {
+                return Ok(serde_json::json!({
+                    "id": id,
+                    "response": resource_error_response(
+                        "principal_context_required",
+                        "principal-root storage requires an in-runtime protected storage bridge",
+                    ),
+                }));
+            }
             let dispatch = match resource_invoke_dispatch(request, principal_id, audit_data_dir) {
                 Ok(dispatch) => dispatch,
-                Err(message) => {
+                Err(err) => {
                     return Ok(serde_json::json!({
                         "id": id,
                         "response": {
                             "type": "error",
-                            "code": "invalid_resource_invoke",
-                            "message": message,
+                            "code": err.code,
+                            "message": err.message,
                         }
                     }));
                 }
@@ -1954,7 +2071,6 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    #[cfg(feature = "prototype-agents")]
     #[tokio::test]
     async fn s5_p2_object_bridge_binds_every_operation_to_launched_x() {
         if crate::agents::require_build().is_err() {
@@ -4370,6 +4486,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_remote_request_refuses_foreign_object_at_protected_bridge_gate() {
+        let response = handle_remote_request(
+            r#"{"id":45,"request":{"type":"resource_invoke","uri":"elastos://object/read","operation":"read","token":"tok","body":{"principal_id":"person:local:object-other","uri":"localhost://Users/Users/other/Documents/secret.txt"}}}"#,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &["elastos://object/*".to_string().into()],
+            Some("person:local:object-owner"),
+        )
+        .await
+        .expect("attached bridge should refuse object before HTTP dispatch");
+
+        assert_eq!(response["id"], 45);
+        assert_eq!(response["response"]["type"], "error");
+        assert_eq!(response["response"]["code"], "principal_context_required");
+        assert_eq!(
+            response["response"]["message"],
+            "principal-root storage requires an in-runtime protected storage bridge"
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_bridge_refuses_object_before_http_dispatch() {
+        let response = handle_remote_request(
+            r#"{"id":46,"request":{"type":"resource_invoke","uri":"elastos://object/read","operation":"read","token":"tok","body":{"principal_id":"person:local:object-owner","uri":"localhost://Users/Users/owner/Documents/a.md"}}}"#,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &["elastos://object/*".to_string().into()],
+            Some("person:local:object-owner"),
+        )
+        .await
+        .expect("attached bridge should refuse object before HTTP dispatch");
+
+        assert_eq!(response["id"], 46);
+        assert_eq!(response["response"]["code"], "principal_context_required");
+        assert_eq!(
+            response["response"]["message"],
+            "principal-root storage requires an in-runtime protected storage bridge"
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_bridge_refuses_dot_spelled_user_area_roots_before_http() {
+        let root = "localhost://UsersAI/.";
+        for request in [
+            serde_json::json!({
+                "type": "resource_invoke", "uri": root, "operation": "list",
+                "token": "test-token", "body": {},
+            }),
+            serde_json::json!({
+                "type": "resource_invoke",
+                "uri": "localhost://Local/SharedByLocalUsersAndBots/Home/harmless",
+                "operation": "delete", "token": "test-token",
+                "body": {"path": "UsersAI/.", "recursive": true},
+            }),
+            serde_json::json!({
+                "type": "request_capability", "resource": root, "action": "read",
+            }),
+        ] {
+            let line = serde_json::json!({"id": 45, "request": request}).to_string();
+            let response = handle_remote_request(
+                &line,
+                "http://127.0.0.1:12345",
+                "client-token",
+                "test-capsule",
+                &["localhost://UsersAI".to_string().into()],
+                Some("person:local:active"),
+            )
+            .await
+            .expect("attached bridge should reject before HTTP dispatch");
+            assert_eq!(response["response"]["type"], "error");
+            assert_eq!(
+                response["response"]["message"],
+                "Capsules cannot access a localhost user area root"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn handle_remote_request_denies_users_self_before_runtime_prompt() {
         let response = handle_remote_request(
             r#"{"id":12,"request":{"type":"request_capability","resource":"localhost://Users/self/Documents/*","action":"read"}}"#,
@@ -6602,6 +6798,170 @@ mod tests {
             requests[0].get("token").is_none(),
             "localhost provider body token must be redacted before provider dispatch"
         );
+    }
+
+    #[tokio::test]
+    async fn resource_invoke_refuses_bare_user_area_roots_before_provider() {
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some("person:local:active".to_string());
+        ctx.manifest_capabilities = any_action(vec![
+            "localhost://Users".to_string(),
+            "localhost://UsersAI".to_string(),
+            "localhost://Users/self".to_string(),
+        ]);
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+
+        for area in ["Users", "UsersAI"] {
+            let root = format!("localhost://{area}");
+            let spellings = [
+                root.clone(),
+                format!("{root}/"),
+                format!("{root}/."),
+                format!("{root}/./"),
+                format!("{root}//."),
+                format!("{root}/./."),
+                format!("{root}/x/.."),
+                format!("{root}/self/.."),
+            ];
+            for (operation, action) in [("list", Action::Read), ("delete", Action::Delete)] {
+                let token = bridge_token(&ctx, &root, action);
+                for (uri, body, spelling) in spellings
+                    .iter()
+                    .flat_map(|spelling| {
+                        [
+                            (
+                                spelling.clone(),
+                                serde_json::json!({"recursive": true}),
+                                spelling.clone(),
+                            ),
+                            (
+                                "localhost://Local/SharedByLocalUsersAndBots/Home/harmless"
+                                    .to_string(),
+                                serde_json::json!({"path": spelling, "recursive": true}),
+                                spelling.clone(),
+                            ),
+                        ]
+                    })
+                    .chain([(
+                        "localhost://Local/SharedByLocalUsersAndBots/Home/harmless".to_string(),
+                        serde_json::json!({"path": format!("{area}/."), "recursive": true}),
+                        format!("{area}/."),
+                    )])
+                {
+                    let line = serde_json::json!({
+                        "id": 41,
+                        "request": {
+                            "type": "resource_invoke",
+                            "uri": uri,
+                            "operation": operation,
+                            "token": token.clone(),
+                            "body": body,
+                        }
+                    })
+                    .to_string();
+                    let response = handle_request(&line, &Some(ctx.clone()))
+                        .await
+                        .expect("bare area root refusal should produce a bridge response");
+
+                    assert_eq!(
+                        response["response"]["code"], "invalid_resource_invoke",
+                        "{spelling}"
+                    );
+                    assert_eq!(
+                        response["response"]["message"],
+                        if spelling.split('/').any(|segment| segment == "..") {
+                            "localhost paths cannot contain .."
+                        } else {
+                            "Capsules cannot access a localhost user area root"
+                        },
+                        "{spelling}"
+                    );
+                    assert!(
+                        provider.requests().await.is_empty(),
+                        "{spelling} must not reach the localhost provider"
+                    );
+                }
+            }
+        }
+
+        let own_root = "localhost://Users/self";
+        let principal_root = crate::auth::principal_localhost_root("person:local:active");
+        let line = serde_json::json!({
+            "id": 42,
+            "request": {
+                "type": "resource_invoke",
+                "uri": own_root,
+                "operation": "list",
+                "token": bridge_token(&ctx, &principal_root, Action::Read),
+                "body": {},
+            }
+        })
+        .to_string();
+        let response = handle_request(&line, &Some(ctx))
+            .await
+            .expect("own root listing should produce a bridge response");
+        assert_eq!(response["response"]["type"], "resource_result");
+        let requests = provider.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["path"], principal_root);
+    }
+
+    #[tokio::test]
+    async fn capability_request_refuses_bare_user_area_roots_before_pending() {
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some("person:local:active".to_string());
+        ctx.manifest_capabilities = any_action(vec![
+            "localhost://Users".to_string(),
+            "localhost://UsersAI".to_string(),
+        ]);
+        let pending_store = ctx.pending_store.clone();
+
+        for resource in [
+            "localhost://Users",
+            "localhost://Users/",
+            "localhost://Users/.",
+            "localhost://Users/./",
+            "localhost://Users//.",
+            "localhost://Users/./.",
+            "localhost://Users/x/..",
+            "localhost://Users/self/..",
+            "localhost://UsersAI",
+            "localhost://UsersAI/",
+            "localhost://UsersAI/.",
+            "localhost://UsersAI/./",
+            "localhost://UsersAI//.",
+            "localhost://UsersAI/./.",
+            "localhost://UsersAI/x/..",
+            "localhost://UsersAI/self/..",
+        ] {
+            let line = serde_json::json!({
+                "id": 43,
+                "request": {
+                    "type": "request_capability",
+                    "resource": resource,
+                    "action": "read",
+                }
+            })
+            .to_string();
+            let response = handle_request(&line, &Some(ctx.clone()))
+                .await
+                .expect("bare area root refusal should produce a bridge response");
+            assert_eq!(
+                response["response"]["code"], "principal_context_required",
+                "{resource}"
+            );
+            assert_eq!(
+                response["response"]["message"],
+                if resource.split('/').any(|segment| segment == "..") {
+                    "localhost paths cannot contain .."
+                } else {
+                    "Capsules cannot access a localhost user area root"
+                },
+                "{resource}"
+            );
+            assert!(pending_store.list_pending().await.is_empty());
+        }
     }
 
     #[tokio::test]
