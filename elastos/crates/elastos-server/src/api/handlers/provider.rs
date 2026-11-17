@@ -349,18 +349,51 @@ mod tests {
 
     #[tokio::test]
     async fn session_proxy_http_refuses_entire_localhost_user_areas() {
+        let shell_registry = Arc::new(ProviderRegistry::new());
+        let shell_provider = Arc::new(CapturingSchemeProvider::new("localhost"));
+        shell_registry.register(shell_provider.clone()).await;
+        let shell_app = Router::new()
+            .route("/api/provider/:scheme/:op", post(provider_proxy))
+            .layer(Extension(Session::new(SessionType::Shell, None)))
+            .with_state(ProviderProxyState {
+                registry: shell_registry,
+                capability_manager: None,
+            });
+        let own_path = "Users/self/Documents/a.md";
+        let response = shell_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/provider/localhost/read")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"path": own_path}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{own_path}");
+        assert_eq!(
+            shell_provider.requests.lock().await[0]["path"],
+            "localhost://Users/self/Documents/a.md"
+        );
+
         let registry = Arc::new(ProviderRegistry::new());
         let provider = Arc::new(CapturingSchemeProvider::new("localhost"));
         registry.register(provider.clone()).await;
         let app = Router::new()
             .route("/api/provider/:scheme/:op", post(provider_proxy))
-            .layer(Extension(Session::new(SessionType::Shell, None)))
+            .layer(Extension(Session::new(SessionType::Capsule, None)))
             .with_state(ProviderProxyState {
                 registry,
                 capability_manager: None,
             });
         for path in [
             "Users/self/Documents/a.md",
+            "Users/other/Documents/a.md",
+            "Users",
+            "UsersAI",
             "UsersAI/agent/Documents/a.md",
             " Users/self/Documents/a.md",
             "Users/link/../Documents/a.md",
