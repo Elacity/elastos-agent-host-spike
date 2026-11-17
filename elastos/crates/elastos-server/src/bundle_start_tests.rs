@@ -386,6 +386,33 @@ async fn a_slot_changed_after_staging_is_refused_as_a_mismatch() {
     assert_eq!(code(home.run(&cid, None).await), "bundle_cid_mismatch");
 }
 
+/// R-manifest. `capsule.json` itself changed after staging, by one trailing
+/// byte: the start refuses with the mismatch, because the manifest is one of
+/// the files the CID covers. The control is the same slot before the change.
+#[tokio::test]
+async fn a_manifest_changed_after_staging_is_refused_as_a_mismatch() {
+    let publisher = key(57);
+    let home = Home::trusting(&[&publisher]).await;
+    let text = manifest("manifest-changed");
+    let folder = home.bundle("manifest-changed", &text, &quiet_component());
+    let cid = home.stage(&folder, &publisher).await;
+    home.run(&cid, None).await.unwrap();
+
+    let changed = format!("{text}\n");
+    home.overwrite(&cid, "capsule.json", changed.as_bytes());
+    let elsewhere = home.bundle("manifest-changed-copy", &changed, &quiet_component());
+    let computed = bundle_cid(&elsewhere).unwrap();
+    assert_ne!(computed, cid);
+    assert_eq!(
+        home.run(&cid, None).await.unwrap_err(),
+        BundleRefusal::CidMismatch {
+            asked: cid.clone(),
+            computed
+        }
+    );
+    assert_eq!(code(home.run(&cid, None).await), "bundle_cid_mismatch");
+}
+
 /// R-swap. The slot's component is replaced right after the start's one walk
 /// of it. What runs is the component that was walked (it calls the bridge and
 /// ends with the seal's answer); the replacement on disk (which calls nothing
