@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 """Compare a headless by-CID receipt with another machine's receipt, or with the recorded core hash.
 
-The content, page and core CIDs and the component's sha256 must be the same everywhere the same signed bundle
-starts. The host triple and the Runtime binary's sha256 may differ: they say which machine ran the start. A
-reference that is a recorded-hash list can only compare the component hash, so the comparison says that.
+The content, page and core CIDs, the component's sha256, and the three bundles' signer public keys and signature
+file sha256 values must be the same everywhere the same signed bundle starts. The host triple and the Runtime
+binary's sha256 may differ: they say which machine ran the start. A reference that is a recorded-hash list can
+only compare the component hash, so the comparison says that.
 
 Usage: compare-hashes.py <results.json> <reference: results.json | recorded-hashes.txt>
-Exit 0 when both files are well formed (schema, CIDs, sha256 values, a good start and the expected refusal, checked
-in the reference too when it is a receipt) and every comparable field matches; exit 1 naming each field that is
-missing, malformed or differs.
+Exit 0 when both files are well formed (schema, CIDs, sha256 values, signer keys, a good start and the expected
+refusal, checked in the reference too when it is a receipt) and every comparable field matches; exit 1 naming each
+field that is missing, malformed or differs.
 """
 import json
 import re
 import sys
 
-REQUIRED = ("content_cid", "page_cid", "core_cid", "component_sha256")
+REQUIRED = ("content_cid", "page_cid", "core_cid", "component_sha256",
+            "core_signer_key", "page_signer_key", "set_signer_key",
+            "core_signature_sha256", "page_signature_sha256", "set_signature_sha256")
 MAY_DIFFER = ("host_triple", "runtime_binary_sha256")
 SCHEMA = "elastos.photo-viewer.headless-receipt/v1"
 CID = re.compile(r"bafy[a-z2-7]{50,}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+PUBLIC_KEY = re.compile(r"[0-9a-f]{64}")
 
 
 def form_errors(receipt):
@@ -30,10 +34,15 @@ def form_errors(receipt):
         value = receipt.get(field)
         if field in receipt and not (isinstance(value, str) and CID.fullmatch(value)):
             errors.append(f"{field} {value!r} is not a CID")
-    for field in ("component_sha256", "runtime_binary_sha256"):
+    for field in ("component_sha256", "runtime_binary_sha256",
+                  "core_signature_sha256", "page_signature_sha256", "set_signature_sha256"):
         value = receipt.get(field)
         if field in receipt and not (isinstance(value, str) and SHA256.fullmatch(value)):
             errors.append(f"{field} {value!r} is not a sha256")
+    for field in ("core_signer_key", "page_signer_key", "set_signer_key"):
+        value = receipt.get(field)
+        if field in receipt and not (isinstance(value, str) and PUBLIC_KEY.fullmatch(value)):
+            errors.append(f"{field} {value!r} is not a public key")
     host = receipt.get("host_triple")
     if not (isinstance(host, str) and host.strip()):
         errors.append(f"host_triple {host!r} is empty")

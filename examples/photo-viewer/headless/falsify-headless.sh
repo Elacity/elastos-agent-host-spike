@@ -3,9 +3,11 @@
 #   changed-byte-not-refused  the copy's byte is left alone, so run-headless.sh must fail naming the refusal of the
 #                             changed-byte start;
 #   altered-cid               one CID changed in a copy of a good receipt, so compare-hashes.py must fail naming it;
-#   missing-field             one required field removed from a copy, so compare-hashes.py must name it.
-# The plants change no file in the checkout: the first is an environment variable, the other two work on copies
-# under the work folder.
+#   missing-field             one required field removed from a copy, so compare-hashes.py must name it;
+#   given-signature-other-cid a signature file for a different CID in the fourth-argument folder, so run-headless.sh
+#                             must stop naming that bundle's signature and make no key.
+# The plants change no file in the checkout: some are environment variables and the others work on copies under
+# the work folder.
 # Usage: falsify-headless.sh <checkout> <work folder (new, empty)> <photo core .wasm, at its reference hash>
 set -u
 WT="$1"; WORK="$2"; CORE_WASM="$3"
@@ -34,6 +36,28 @@ if [ "$code" != 0 ] && grep -q "HEADLESS FAILED" "$WORK/plant.log" && grep -qF "
   red "changed-byte-not-refused" "$expect"
 else
   not_red "changed-byte-not-refused (exit $code)"; grep -E "^(AS|NOT AS) EXPECTED" "$WORK/plant.log"
+fi
+
+# A signature file made for a different CID, carried in the fourth-argument folder: the run must stop by name and
+# make no key. The baseline run saved its four signature files (signatures/), so they are the good folder here.
+cp -R "$WORK/good/signatures" "$WORK/given-sigs"
+python3 -I - "$WORK/given-sigs/core.sig.json" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+sig = json.load(open(path))
+cid = sig["cid"]
+sig["cid"] = cid[:-1] + ("a" if cid[-1] != "a" else "b")
+json.dump(sig, open(path, "w"))
+PYEOF
+bash "$HERE/run-headless.sh" "$WT" "$WORK/given-plant" "$CORE_WASM" "$WORK/given-sigs" > "$WORK/given-plant.log" 2>&1
+code=$?
+expect="NOT AS EXPECTED (the given core signature signs this run's core CID)"
+if [ "$code" != 0 ] && grep -qF "$expect" "$WORK/given-plant.log" \
+   && grep -qF "this run makes no key" "$WORK/given-plant.log" \
+   && ! grep -qF "three publishers for this run only" "$WORK/given-plant.log"; then
+  red "given-signature-other-cid" "$expect, on the carried-signature branch that makes no key"
+else
+  not_red "given-signature-other-cid (exit $code)"; tail -5 "$WORK/given-plant.log"
 fi
 
 python3 -I - "$WORK/good/results.json" "$WORK/altered.json" <<'PYEOF'
@@ -100,5 +124,5 @@ else
   echo "NOT AS EXPECTED: the plant recorded no folder identities; its moved Home may remain under $WORK/swapped"; missed=1
 fi
 
-[ "$missed" = 0 ] && echo "all 5 headless plants red where expected" || echo "SOME HEADLESS PLANTS NOT AS EXPECTED"
+[ "$missed" = 0 ] && echo "all 6 headless plants red where expected" || echo "SOME HEADLESS PLANTS NOT AS EXPECTED"
 exit $missed

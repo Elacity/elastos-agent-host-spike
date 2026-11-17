@@ -11,17 +11,27 @@
 # attach secret) is removed too, through the work folder opened as itself; if it is no longer the folder this run
 # made, nothing is removed there and the run fails (secure_cleanup).
 #
+# The bundle signatures are either made here or carried here. Without the fourth argument the run makes three
+# publisher keys for itself, signs the core, the page, the set and the changed copy, and saves the four signature
+# files in <work>/signatures/ for the other machines; the private keys are made only in this run's folder, are
+# never copied there, and are removed with the other credentials when the run ends. With the fourth argument, a
+# folder holding those four files from an earlier run, no key is made:
+# the four files are copied, each must name exactly the CID this run computed for its bundle (the run stops naming
+# the file that does not), and their signer keys become this run's trusted keys. So every machine runs ONE signed
+# bundle, not four bundles with the same content.
+#
 # Writes results.json in the run's folder: the host triple, the content, page and core CIDs, the component's
-# sha256, the Runtime binary's sha256, the open's answer status and page, and the changed-byte refusal name.
+# sha256, the Runtime binary's sha256, the open's answer status and page, the changed-byte refusal name, and for
+# the core, the page and the set the signer's public key and the sha256 of its signature file.
 # Exit 0 only when the good start answered 200 and the changed-byte start was refused as expected.
 #
-# Usage: run-headless.sh <checkout> <work folder (new, empty)> <photo core .wasm, at its reference hash>
+# Usage: run-headless.sh <checkout> <work folder (new, empty)> <photo core .wasm, at its reference hash> [signature folder]
 # Needs: the built binary and storage provider in the checkout's target (CARGO_TARGET_DIR, or elastos/target),
 # python3 and curl. HEADLESS_PLANT=changed-byte-not-refused or home-swapped plants one fault, for falsify-headless.sh only.
 set -u
 umask 077  # every file this run makes (keys, tokens, receipts) is owner-only
 PLANT="${HEADLESS_PLANT:-}"
-WT=$(cd "$1" && pwd); WORK="$2"; CORE_WASM="$3"
+WT=$(cd "$1" && pwd); WORK="$2"; CORE_WASM="$3"; SIGN_SRC="${4:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TARGET="${CARGO_TARGET_DIR:-}"
 [ -n "$TARGET" ] || TARGET="$WT/elastos/target"
@@ -32,6 +42,7 @@ STORAGE="$TARGET/debug/localhost-provider"
 [ -x "$BIN" ] || { echo "no binary at $BIN"; exit 3; }
 [ -x "$STORAGE" ] || { echo "no storage provider at $STORAGE (cargo build -p localhost-provider)"; exit 3; }
 [ -f "$CORE_WASM" ] || { echo "no photo core at $CORE_WASM"; exit 3; }
+[ -z "$SIGN_SRC" ] || [ -d "$SIGN_SRC" ] || { echo "no signature folder at $SIGN_SRC"; exit 3; }
 [ -e "$WORK" ] && { echo "the work folder must be new: $WORK"; exit 2; }
 # Refuse a work folder inside the checkout BEFORE anything is made, comparing real paths (symlinks resolved).
 real_path() { python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
@@ -54,7 +65,7 @@ secure_cleanup() { # <credentials | all>: "all" also removes the Home, once its 
 }
 secrets_rm() { secure_cleanup credentials || { failed=1; return 1; }; }
 cleanup() {
-  for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null
+  for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null; done; wait 2>/dev/null
   # falsify-headless.sh only: put another folder where the Home was, so cleanup must refuse rather than remove it
   # (it writes the folders' identities, not secrets, to plant-ids so the falsifier can remove the moved Home checked)
   [ "$PLANT" = home-swapped ] && [ -n "$HOME_ID" ] && mv "$WORK/home" "$WORK/home.moved" && mkdir "$WORK/home" \
@@ -89,6 +100,15 @@ import json, sys
 signed = json.load(sys.stdin)
 json.dump({"schema": "elastos.capsule.bundle-signature/v1", "cid": sys.argv[1],
            "signer_did": signed["signer_did"], "signature": signed["signature"]}, open(sys.argv[2], "w"))' "$1" "$3"; }
+sig_cid() { # <signature file>: the CID it names, or empty
+  python3 -I - "$1" <<'PYEOF'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("cid", ""))
+except (OSError, ValueError):
+    print("")
+PYEOF
+}
 pub_of() { python3 -I - "$1" <<'PYEOF'
 import json, sys
 did = json.load(open(sys.argv[1]))["signer_did"]
@@ -134,27 +154,49 @@ json.dump({"external": {"home": {"install_path": "capsules/home", "platforms": {
 print("platform", plat)
 PYEOF
 
-step "three publishers for this run only; the core, the page and two photo sets"
-for who in of-core of-page of-set; do python3 -I -c 'import os; print(os.urandom(32).hex())' > "$WORK/$who.key"; chmod 600 "$WORK/$who.key"; done
+step "the core, the page and two photo sets"
 mkdir -p "$WORK/core" "$WORK/page" "$WORK/set/images" "$WORK/changed/images"
 cp "$PV/capsule.json" "$WORK/core/capsule.json"; cp "$CORE_WASM" "$WORK/core/photo-viewer.component.wasm"
-CORE=$(cid_of "$WORK/core"); sign "$CORE" of-core "$WORK/core.sig.json"
+CORE=$(cid_of "$WORK/core")
 cp -R "$PV/surface/browser" "$WORK/page/browser"
 manifest "$WORK/page/capsule.json" "m['requires'] = [{'name': 'photo-viewer', 'kind': 'capsule', 'cid': '$CORE'}]" "$PV/surface/capsule.json"
-PAGE=$(cid_of "$WORK/page"); sign "$PAGE" of-page "$WORK/page.sig.json"
+PAGE=$(cid_of "$WORK/page")
 PICS="$PV/host-test/fixtures/stand-in-photo-set/images"
 for folder in set changed; do cp "$PICS/01.png" "$PICS/02.jpg" "$PICS/03.webp" "$WORK/$folder/images/"; done
 for folder in set changed; do
   manifest "$WORK/$folder/capsule.json" "m.update({'schema': 'elastos.capsule/v1', 'name': 'photos-$folder', 'version': '0.1.0', 'role': 'content', 'type': 'data', 'entrypoint': 'images/01.png', 'requires': [{'name': 'image-viewer', 'kind': 'capsule', 'cid': '$PAGE'}]})"
 done
-SET=$(cid_of "$WORK/set"); sign "$SET" of-set "$WORK/set.sig.json"
-CHANGED=$(cid_of "$WORK/changed"); sign "$CHANGED" of-set "$WORK/changed.sig.json"
+SET=$(cid_of "$WORK/set")
+CHANGED=$(cid_of "$WORK/changed")
+echo "core:    $CORE"; echo "page:    $PAGE"; echo "set:     $SET"; echo "changed: $CHANGED"
+if [ -n "$SIGN_SRC" ]; then
+  step "the signatures made once and carried here: this run makes no key"
+  for b in core page set changed; do
+    [ -f "$SIGN_SRC/$b.sig.json" ] || { echo "the signature folder has no $b.sig.json: $SIGN_SRC"; exit 3; }
+    cp "$SIGN_SRC/$b.sig.json" "$WORK/$b.sig.json" || exit 3
+    case "$b" in
+      core) want="$CORE" ;; page) want="$PAGE" ;; set) want="$SET" ;; changed) want="$CHANGED" ;;
+    esac
+    got=$(sig_cid "$WORK/$b.sig.json")
+    [ "$got" = "$want" ] || { echo "the given $b signature names ${got:-nothing}, not this run's $b CID $want"; not_expected "the given $b signature signs this run's $b CID"; exit 1; }
+    echo "the given $b signature names $got"
+  done
+else
+  step "three publishers for this run only; the four signatures, for the other machines"
+  for who in of-core of-page of-set; do python3 -I -c 'import os; print(os.urandom(32).hex())' > "$WORK/$who.key"; chmod 600 "$WORK/$who.key"; done
+  sign "$CORE" of-core "$WORK/core.sig.json"
+  sign "$PAGE" of-page "$WORK/page.sig.json"
+  sign "$SET" of-set "$WORK/set.sig.json"
+  sign "$CHANGED" of-set "$WORK/changed.sig.json"
+  mkdir -p "$WORK/signatures"
+  for b in core page set changed; do cp "$WORK/$b.sig.json" "$WORK/signatures/$b.sig.json"; done
+  echo "the four signatures are saved in $WORK/signatures; the private keys are made only in $WORK, are never copied there, and are removed when the run ends"
+fi
 K_CORE=$(pub_of "$WORK/core.sig.json"); K_PAGE=$(pub_of "$WORK/page.sig.json"); K_SET=$(pub_of "$WORK/set.sig.json")
 printf 'dev_mode = true\ntrusted_keys = ["%s", "%s", "%s"]\n' "$K_SET" "$K_PAGE" "$K_CORE" > "$DATA/config.toml"
 for b in core page set changed; do
   "$BIN" stage-bundle "$WORK/$b" --signature "$WORK/$b.sig.json" > /dev/null 2>> "$WORK/stage.err"; echo "staged $b, exit=$?"
 done
-echo "core:    $CORE"; echo "page:    $PAGE"; echo "set:     $SET"; echo "changed: $CHANGED"
 # One byte of one picture changed in the COPY of the set, where it is kept: its CID no longer names its bytes. The
 # source folder `$WORK/set` is never touched. PLANT=changed-byte-not-refused skips this, for the falsifier only.
 SLOT=$(find "$DATA/capsules/by-cid/$CHANGED" -name 02.jpg | head -1)
@@ -280,9 +322,13 @@ echo "good start page: ${PAGE_NAME:-none}"; echo "changed start refusal: ${REFUS
 [ "$CHANGED_STATUS" = 400 ] && [ "$REFUSAL" = bundle_cid_mismatch ] && as_expected "the changed-byte start is refused (bundle_cid_mismatch)" || not_expected "the changed-byte start is refused (bundle_cid_mismatch)"
 
 step "results"
-python3 -I - "$WORK/results.json" "$HOST" "$SET" "$PAGE" "$CORE" "$COMPONENT" "$(sha_of "$BIN")" "$GOOD_STATUS" "$PAGE_NAME" "$CHANGED_STATUS" "$REFUSAL" <<'PYEOF'
+python3 -I - "$WORK/results.json" "$HOST" "$SET" "$PAGE" "$CORE" "$COMPONENT" "$(sha_of "$BIN")" \
+  "$GOOD_STATUS" "$PAGE_NAME" "$CHANGED_STATUS" "$REFUSAL" \
+  "$K_CORE" "$(sha_of "$WORK/core.sig.json")" "$K_PAGE" "$(sha_of "$WORK/page.sig.json")" \
+  "$K_SET" "$(sha_of "$WORK/set.sig.json")" <<'PYEOF'
 import json, sys
-(out, host, content, page, core, component, binary, status, page_name, changed_status, refusal) = sys.argv[1:12]
+(out, host, content, page, core, component, binary, status, page_name, changed_status, refusal,
+ core_key, core_sig, page_key, page_sig, set_key, set_sig) = sys.argv[1:18]
 receipt = {
     "schema": "elastos.photo-viewer.headless-receipt/v1",
     "host_triple": host,
@@ -291,6 +337,12 @@ receipt = {
     "core_cid": core,
     "component_sha256": component,
     "runtime_binary_sha256": binary,
+    "core_signer_key": core_key,
+    "core_signature_sha256": core_sig,
+    "page_signer_key": page_key,
+    "page_signature_sha256": page_sig,
+    "set_signer_key": set_key,
+    "set_signature_sha256": set_sig,
     "start_status": int(status),
     "start_page": page_name,
     "changed_start_status": int(changed_status),

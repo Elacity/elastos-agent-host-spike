@@ -3,7 +3,7 @@
 A machine with a shell, `python3` and `curl` — no browser and no node — starts the photo viewer's signed bundle by
 its CID through the Runtime's own open route, and shows that a copy of the bundle whose bytes no longer match its
 CID is refused by name. `results.json` in the run's folder is the receipt; `compare-hashes.py` says whether two
-machines' receipts name the same bundles.
+machines' receipts name the same signed bundle: the same CIDs, and the same signer keys and signature files.
 
 This proves what PH5 counts: the same signed bundle starts on this machine. It does not show the page or its
 pictures; the browser journey shows those (`../journey/README.md`).
@@ -13,7 +13,7 @@ pictures; the browser journey shows those (`../journey/README.md`).
 ```bash
 cargo build --locked -p elastos-server --bin elastos   # in elastos/
 cargo build --locked -p localhost-provider             # its own command: --bin elastos would leave it unbuilt
-bash examples/photo-viewer/headless/run-headless.sh . <new work folder> <photo-viewer.component.wasm>
+bash examples/photo-viewer/headless/run-headless.sh . <new work folder> <photo-viewer.component.wasm> [signature folder]
 python3 examples/photo-viewer/headless/compare-hashes.py <work folder>/results.json <reference>
 bash examples/photo-viewer/headless/falsify-headless.sh . <new work folder> <photo-viewer.component.wasm>
 ```
@@ -25,6 +25,27 @@ core's reference artifact: the run checks it against the `photo-viewer` line of
 every machine and checked there; a fresh build on any machine is compared with that record
 (`examples/photo-viewer/repro/README.md` says how the reference is built).
 
+### One signature folder, made once
+
+The first machine makes the three publisher keys and the four signature files, and keeps the keys; the other
+machines carry only the signature files, so all of them start ONE signed bundle, not four bundles with the same
+content. The first run saves the folder to carry:
+
+```bash
+# first machine: makes the keys and signs, then saves the four signature files (the keys stay in the work folder)
+bash examples/photo-viewer/headless/run-headless.sh . /tmp/ph5-headless-mac /tmp/ph5-core.wasm
+cp -R /tmp/ph5-headless-mac/signatures /tmp/ph5-signatures
+
+# every other machine: no key is made; the same four signatures are copied and checked against this run's CIDs
+bash examples/photo-viewer/headless/run-headless.sh . /tmp/ph5-headless-spark4 /tmp/ph5-core.wasm /tmp/ph5-signatures
+```
+
+The fourth argument is a folder holding `core.sig.json`, `page.sig.json`, `set.sig.json` and `changed.sig.json`.
+With it the run makes no key, copies the four files, checks that each one signs exactly the CID this run computed
+for that bundle (it stops naming the file that does not), and trusts their signer keys. `signatures/` never holds a
+private key: the `.key` files are made only in the work folder of the machine that made them and are removed when
+its run ends.
+
 ### macOS (arm64 or x86_64)
 
 ```bash
@@ -35,8 +56,10 @@ The throwaway data folder is `~/Library/Application Support/elastos` under the r
 
 ### Linux x86_64
 
+Carrying the folder the first machine saved:
+
 ```bash
-bash examples/photo-viewer/headless/run-headless.sh . /tmp/ph5-headless-rog /tmp/ph5-core.wasm
+bash examples/photo-viewer/headless/run-headless.sh . /tmp/ph5-headless-rog /tmp/ph5-core.wasm /tmp/ph5-signatures
 ```
 
 The throwaway data folder is `~/.local/share/elastos` under the run's own HOME. The receipt's `host_triple` reads
@@ -47,21 +70,24 @@ The throwaway data folder is `~/.local/share/elastos` under the run's own HOME. 
 The same command on the aarch64 machine:
 
 ```bash
-bash examples/photo-viewer/headless/run-headless.sh . /tmp/ph5-headless-spark4 /tmp/ph5-core.wasm
+bash examples/photo-viewer/headless/run-headless.sh . /tmp/ph5-headless-spark4 /tmp/ph5-core.wasm /tmp/ph5-signatures
 ```
 
 The receipt's `host_triple` reads `Linux aarch64`. The Runtime binary is that machine's own build, so its
-`runtime_binary_sha256` differs from another arch's; the CIDs and the component hash are what must match.
+`runtime_binary_sha256` differs from another arch's; the CIDs, the component hash, the signer keys and the
+signature file hashes are what must match.
 
 ## What the run does
 
 1. A throwaway HOME and data folder, owner-only. Home's capsule and the storage provider installed in it as
    `elastos setup` lays them out, with this checkout's provider checksum in `components.json`; `dev_mode = true`
-   and this run's three publishers as trusted keys.
-2. Three publishers, a key each made for this run: the photo core (`examples/photo-viewer`, its reference `.wasm`),
-   the page (`examples/photo-viewer/surface`, pinning the core by CID) and the photo set (the three committed
-   pictures under `images/`, pinning the page). A second copy of the set is staged too, and then one byte of one
-   picture is changed where the store keeps it; the source folder is never touched.
+   and the three publishers whose signatures this run uses as trusted keys.
+2. The photo core (`examples/photo-viewer`, its reference `.wasm`), the page (`examples/photo-viewer/surface`,
+   pinning the core by CID) and the photo set (the three committed pictures under `images/`, pinning the page);
+   a second copy of the set is staged too. Without the fourth argument three publishers are made, a key each for
+   this run, and the four signature files are saved in `<work>/signatures/`; with it, no key is made and those
+   four files came from another machine, each checked to sign this run's CID for its bundle. Then one byte of one
+   picture is changed where the store keeps the copy; the source folder is never touched.
 3. `elastos gateway`, which holds the host lock, and `elastos serve` under it as Home's Runtime, writing its
    coordinates where a local caller reads them (`home-runtime-coords.json`).
 4. The open by CID, `POST /api/launch/open` on the Runtime with `{cid}` — the route the browser journey's gateway
@@ -102,6 +128,12 @@ The receipt's `host_triple` reads `Linux aarch64`. The Runtime binary is that ma
   "core_cid": "<the photo core's CID>",
   "component_sha256": "<the core .wasm's sha256>",
   "runtime_binary_sha256": "<the elastos binary's sha256>",
+  "core_signer_key": "<the core signature's public key, hex>",
+  "core_signature_sha256": "<sha256 of core.sig.json>",
+  "page_signer_key": "<the page signature's public key, hex>",
+  "page_signature_sha256": "<sha256 of page.sig.json>",
+  "set_signer_key": "<the set signature's public key, hex>",
+  "set_signature_sha256": "<sha256 of set.sig.json>",
   "start_status": 200,
   "start_page": "image-viewer",
   "changed_start_status": 400,
@@ -110,7 +142,8 @@ The receipt's `host_triple` reads `Linux aarch64`. The Runtime binary is that ma
 }
 ```
 
-No token, key or URL goes into it. The refusal is recorded by its name, never the server's text.
+No private key, token or URL goes into it: the signer public keys and the signature files' sha256 are recorded, and
+nothing else from the signatures. The refusal is recorded by its name, never the server's text.
 
 ## compare-hashes.py
 
@@ -119,16 +152,21 @@ python3 examples/photo-viewer/headless/compare-hashes.py mac/results.json spark4
 python3 examples/photo-viewer/headless/compare-hashes.py mac/results.json examples/capsule-kit/repro/recorded-hashes.txt
 ```
 
-`content_cid`, `page_cid`, `core_cid` and `component_sha256` must match. `host_triple` and
-`runtime_binary_sha256` may differ and are printed as such. A recorded-hash reference compares only the component
-hash and says so. Exit 1 names every field that is missing or differs; a receipt that does not record a good start
-and the expected refusal also fails.
+`content_cid`, `page_cid`, `core_cid` and `component_sha256` must match, and so must the three signer public keys
+(`core_signer_key`, `page_signer_key`, `set_signer_key`) and the three signature file hashes
+(`core_signature_sha256`, `page_signature_sha256`, `set_signature_sha256`): a receipt that matches on all of them
+names the same signed bundle, not merely the same content. `host_triple` and `runtime_binary_sha256` may differ and
+are printed as such. A recorded-hash reference compares only the component hash and says so — it does not show the
+same signed bundle. Exit 1 names every field that is missing or differs; a receipt that does not record a good
+start and the expected refusal also fails.
 
 ## What is and is not proved
 
 Proved by one green run on a machine: the photo viewer's signed bundle, with the page and core it pins, passes the
 Runtime's by-CID admission and the core runs to its end there; a copy whose one byte changed is refused as
-`bundle_cid_mismatch`; the artifact hashes and CIDs in the receipt name exactly that input.
+`bundle_cid_mismatch`; the artifact hashes and CIDs in the receipt name exactly that input. Comparing two receipts
+whose CIDs, signer keys and signature file hashes all match shows both machines ran ONE signed bundle, not two
+bundles with the same content.
 
 Not proved here:
 
@@ -140,8 +178,10 @@ Not proved here:
 ## Falsifiers (`falsify-headless.sh`)
 
 Each must turn the receipt red at the check named, not at a build error: the changed-byte copy left alone (the
-run's own refusal check), one CID altered in a copy of the receipt (compare names `content_cid`), a required
-field removed from a copy (compare names `component_sha256`), and a reference receipt whose changed copy was not
-refused (compare names it `INVALID reference: changed_start_status 200 is not 400`), and the Home swapped for another
-folder before cleanup (the run refuses to remove it and fails: `home is not the folder this run made; nothing removed there`). The plants change no file in the checkout: one is an
-environment variable and two work on copies under the work folder.
+run's own refusal check), a signature file made for a different CID in the fourth-argument folder (the run stops
+naming that bundle's signature and makes no key), one CID altered in a copy of the receipt (compare names
+`content_cid`), a required field removed from a copy (compare names `component_sha256`), a reference receipt whose
+changed copy was not refused (compare names it `INVALID reference: changed_start_status 200 is not 400`), and the
+Home swapped for another folder before cleanup (the run refuses to remove it and fails: `home is not the folder this
+run made; nothing removed there`). The plants change no file in the checkout: some are environment variables and
+the others work on copies under the work folder.
