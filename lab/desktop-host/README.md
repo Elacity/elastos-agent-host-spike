@@ -48,7 +48,10 @@ published release.
 `make-release-folder.py` fetches one release into a folder: head, release, sources,
 and every file for this Mac named by its CID, each checked against its SHA-256. With
 `--lab-runtime` it swaps in a lab Runtime and signs the release with a lab key.
-`bundle.sh` packs that folder into `Contents/Resources/release`. On first open the
+`bundle.sh` packs into `Contents/Resources/release` only the files the signed release
+names, found by `release-files.py` from the head, release and sources records, and
+stops if one is missing. Builds have no Web Inspector or `window-diag.log`; set
+`LAB_DIAG=1` for a lab test build that has them. On first open the
 window shows "Starting ElastOS…", the release's own Runtime runs `install --from` (the
 same publisher, signature, CID and SHA-256 checks as a download), then Home starts
 without a browser and loads in the window. Only `LAB_HOME` is ever written. Timings go

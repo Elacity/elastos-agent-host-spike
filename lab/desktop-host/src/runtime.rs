@@ -46,6 +46,12 @@ pub fn start_home(home: &Path) -> std::io::Result<()> {
         .open(home.join("home.log"))?;
     Command::new(home.join(".local/bin/elastos"))
         .args(["home", "--browser"])
+        // Install ran with none of these, so its data is under `home`; on Linux the
+        // Runtime would otherwise look for it under the user's XDG folders.
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("XDG_STATE_HOME")
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("ELASTOS_SERVICE", "1")

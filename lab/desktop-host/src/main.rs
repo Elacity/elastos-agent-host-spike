@@ -54,6 +54,9 @@ enum UserEvent {
     /// Page generation, request id, answer, and the id of a new passkey still pending.
     PasskeyAnswer(u64, String, String, Option<String>),
     PageStarted,
+    /// WebView2 fills only its own bounds for element fullscreen; the window follows it.
+    #[cfg(windows)]
+    Fullscreen(bool),
 }
 
 fn main() {
@@ -291,6 +294,12 @@ fn main() {
                     authenticator::cancel();
                 }
             }
+            #[cfg(windows)]
+            Event::UserEvent(UserEvent::Fullscreen(on)) => {
+                if let Some((window, _)) = &home {
+                    window.set_fullscreen(on.then_some(tao::window::Fullscreen::Borderless(None)));
+                }
+            }
             // Double-clicking the app, or clicking its Dock icon, while it runs.
             Event::Reopen { .. } => {
                 open_home(home_up, &mut home, &mut home_loaded, target, &passkey_proxy)
@@ -424,6 +433,8 @@ fn new_home_window(
     }
     let lab_downloads = runtime::lab_home().map(|home| home.join("Downloads"));
     let page_proxy = proxy.clone();
+    #[cfg(windows)]
+    let fullscreen_proxy = proxy.clone();
     let builder = builder
         .with_on_page_load_handler(move |event, _url| {
             if let wry::PageLoadEvent::Started = event {
@@ -479,6 +490,26 @@ fn new_home_window(
     };
     #[cfg(not(target_os = "linux"))]
     let webview = builder.build(&window)?;
+    #[cfg(windows)]
+    {
+        use webview2_com::ContainsFullScreenElementChangedEventHandler;
+        use wry::WebViewExtWindows;
+        let handler =
+            ContainsFullScreenElementChangedEventHandler::create(Box::new(move |webview, _| {
+                if let Some(webview) = webview {
+                    let mut on = Default::default();
+                    unsafe { webview.ContainsFullScreenElement(&mut on)? };
+                    let _ = fullscreen_proxy.send_event(UserEvent::Fullscreen(on.as_bool()));
+                }
+                Ok(())
+            }));
+        let mut token = 0;
+        unsafe {
+            webview
+                .webview()
+                .add_ContainsFullScreenElementChanged(&handler, &mut token)?
+        };
+    }
     Ok((window, webview))
 }
 

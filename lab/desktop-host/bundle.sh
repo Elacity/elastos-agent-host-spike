@@ -58,23 +58,44 @@ PY
 	ELASTOS_RELEASE_SOURCES_SHA256="$(printf '%s\n' "$pins" | sed -n 5p)"
 	export ELASTOS_RELEASE_HEAD ELASTOS_RELEASE_PUBLISHER ELASTOS_RELEASE_RUNTIME \
 		ELASTOS_RELEASE_RUNTIME_SHA256 ELASTOS_RELEASE_SOURCES_SHA256
+	release_files="$(python3 release-files.py "$LAB_RELEASE")"
+	left_out="$(python3 release-files.py --leftovers "$LAB_RELEASE" | wc -l | tr -d ' ')"
 fi
+
+# Copies only the files the signed release names, so files from other builds in
+# the folder never ship.
+copy_release() {
+	mkdir -p "$1"
+	printf '%s\n' "$release_files" | while IFS= read -r name; do
+		cp -p "$LAB_RELEASE/$name" "$1/$name"
+	done
+	echo "Packed $(printf '%s\n' "$release_files" | wc -l | tr -d ' ') release files; left out $left_out the release does not name"
+}
+# Packages are built without Web Inspector or window-diag.log; LAB_DIAG=1 adds
+# them for a lab test build.
+features=
+if [ "${LAB_DIAG:-}" = 1 ]; then
+	features="--features lab-diag"
+fi
+
 if [ -n "${LAB_WINDOWS_IMAGE:-}" ]; then
 	: "${LAB_RELEASE:?LAB_RELEASE is required with LAB_WINDOWS_IMAGE}"
 	ELASTOS_WSL_IMAGE_SHA256="$(shasum -a 256 "$LAB_WINDOWS_IMAGE" | cut -d' ' -f1)"
 	export ELASTOS_WSL_IMAGE_SHA256
-	cargo xwin build --release --locked --features lab-diag --target x86_64-pc-windows-msvc
+	# shellcheck disable=SC2086
+	cargo xwin build --release --locked $features --target x86_64-pc-windows-msvc
 	root="dist/ElastOS Lab"
 	rm -rf "$root" dist/elastos-lab-windows-x86_64.zip
 	mkdir -p "$root/bin" "$root/Resources/wsl"
 	cp target/x86_64-pc-windows-msvc/release/elastos-desktop-host.exe "$root/bin/ElastOS Lab.exe"
-	cp -Rp "$LAB_RELEASE" "$root/Resources/release"
+	copy_release "$root/Resources/release"
 	cp "$LAB_WINDOWS_IMAGE" "$root/Resources/wsl/ubuntu-22.04.tar.gz"
 	(cd dist && COPYFILE_DISABLE=1 zip -qrX elastos-lab-windows-x86_64.zip "ElastOS Lab")
 	echo "Built dist/elastos-lab-windows-x86_64.zip (WSL image $ELASTOS_WSL_IMAGE_SHA256)"
 	exit 0
 fi
-cargo build --release --locked --features lab-diag
+# shellcheck disable=SC2086
+cargo build --release --locked $features
 
 if [ "$platform" != aarch64-darwin ]; then
 	: "${LAB_RELEASE:?LAB_RELEASE is required on Linux}"
@@ -83,7 +104,7 @@ if [ "$platform" != aarch64-darwin ]; then
 	rm -rf "$root" "dist/elastos-lab-$platform.tar.gz"
 	mkdir -p "$root/bin" "$root/Resources"
 	cp target/release/elastos-desktop-host "$root/bin/elastos-desktop-host"
-	cp -Rp "$LAB_RELEASE" "$root/Resources/release"
+	copy_release "$root/Resources/release"
 	# Installed by the user as ~/.local/share/applications/elastos-lab.desktop;
 	# @APP@ is where the folder was unpacked.
 	cat > "$root/elastos-lab.desktop" <<DESKTOP
@@ -136,7 +157,7 @@ if [ -n "${LAB_RELEASE:-}" ]; then
 	: "${LAB_HOME:?LAB_HOME is required with LAB_RELEASE}"
 	res="$app/Contents/Resources"
 	mkdir -p "$res"
-	cp -cRp "$LAB_RELEASE" "$res/release"
+	copy_release "$res/release"
 	plutil -insert LSEnvironment -dictionary "$app/Contents/Info.plist"
 	plutil -insert LSEnvironment.ELASTOS_LAB_HOME -string "$LAB_HOME" "$app/Contents/Info.plist"
 fi

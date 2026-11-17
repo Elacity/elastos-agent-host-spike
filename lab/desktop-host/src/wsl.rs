@@ -187,7 +187,7 @@ pub fn install(release: &Path, lab: &Path) -> io::Result<()> {
         Some(true) => {}
         Some(false) => {
             return Err(io::Error::other(
-                "Another WSL system is already called ElastOS-Lab, and ElastOS Lab uses only the one it made. Remove it (wsl --unregister ElastOS-Lab) if it is a leftover, then open ElastOS Lab again.",
+                "Another WSL system is already called ElastOS-Lab. ElastOS Lab uses only the one it made, so it stopped and changed nothing. That system may hold someone's files, and removing a WSL system deletes everything in it, so ask for help before removing it.",
             ))
         }
         None => {
