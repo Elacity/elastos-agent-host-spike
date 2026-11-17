@@ -3236,3 +3236,151 @@ async fn a_kept_launch_serves_the_page_its_content_pins() {
         "a gone launch"
     );
 }
+
+/// R-grants-nothing. A signed bundle that asks nothing starts by its CID, and
+/// the signature that admitted it mints no grant. The all-sessions live view
+/// is empty, and the bridge, under the signed manifest's own empty ceiling,
+/// denies a resource call by its code; the denial mints no grant either.
+#[tokio::test]
+async fn a_signature_grants_nothing() {
+    use crate::api::handlers::capability::{list_capabilities, CapabilityState};
+    use axum::extract::{Query, State};
+    use axum::Extension;
+    let publisher = key(71);
+    let home = Home::trusting(&[&publisher]).await;
+    let cid = home.stage(&asks_nothing_bundle(), &publisher).await;
+    assert_eq!(
+        home.run(&cid, None).await.unwrap(),
+        ("asks-nothing".to_string(), did(&publisher.verifying_key()))
+    );
+
+    // The live-grant view, made as the Home makes it: the same store and
+    // manager the capability route reads, with nothing granted into them.
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let store = Arc::new(elastos_runtime::capability::CapabilityStore::new());
+    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        store.clone(),
+        audit.clone(),
+        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let state = CapabilityState {
+        pending_store: Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit.clone()),
+        ),
+        capability_manager: manager,
+        capability_store: store,
+        policy_evaluator: Arc::new(elastos_runtime::capability::PolicyEvaluator::new(
+            Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
+            audit,
+        )),
+    };
+    let uri = "http://runtime/api/capability/list?scope=all_sessions_live";
+    let query = Query::try_from_uri(&uri.parse().unwrap()).unwrap();
+    let live = list_capabilities(
+        State(state.clone()),
+        Extension(elastos_runtime::session::Session::new_shell(
+            "shell-vm".to_string(),
+        )),
+        query,
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(live.capabilities.is_empty(), "the live-grant view is empty");
+    assert!(state.pending_store.list_requests().await.is_empty());
+
+    // The signed manifest asks nothing, so the ceiling is empty, and a
+    // resource call under it is denied before any token or provider.
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+        &fs::read_to_string(asks_nothing_bundle().join("capsule.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(manifest.asks.is_empty());
+    let ctx = crate::resource_bridge::BridgeContext {
+        provider_registry: Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+        capability_manager: state.capability_manager.clone(),
+        pending_store: state.pending_store.clone(),
+        capsule_id: cid.clone(),
+        principal_id: Some(PERSON.to_string()),
+        manifest_capabilities: manifest.resource_authority_bounds(),
+        data_dir: Some(home.data()),
+        launch: None,
+    };
+    let line = serde_json::json!({
+        "id": 1,
+        "request": {
+            "type": "resource_invoke",
+            "uri": "elastos://did/mine",
+            "operation": "resolve",
+            "body": {}
+        }
+    })
+    .to_string();
+    let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
+        .await
+        .unwrap();
+    assert_eq!(answer["response"]["code"], "manifest_capability_denied");
+    assert!(
+        state.pending_store.list_requests().await.is_empty(),
+        "the denial minted no grant"
+    );
+}
+
+/// D1a-http-hash. `POST /api/launch/open` starts a signed content bundle by
+/// its CID for a Home token, and the same request on a slot whose entrypoint
+/// changed is refused by the mismatch code.
+#[tokio::test]
+async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tampered_one() {
+    use crate::api::routes::kept_launch_test_tokens as tokens;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use tower::ServiceExt;
+    let publisher = key(95);
+    let home = Home::trusting(&[&publisher]).await;
+    let picture = b"the bytes of a picture".to_vec();
+    let (cid, _) = staged_quiet_set(&home, &publisher, &picture).await;
+    let data = home.data();
+    let app = axum::Router::new()
+        .route("/api/launch/open", post(crate::api::routes::open_launch))
+        .layer(axum::Extension(Some(data.clone())))
+        .layer(axum::Extension(home.runtime.clone()));
+    let open = |cid: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/launch/open")
+            .header("content-type", "application/json")
+            .header("x-elastos-home-token", tokens::home(&data))
+            .body(Body::from(serde_json::json!({"cid": cid}).to_string()))
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let answer = app.oneshot(request).await.unwrap();
+            let status = answer.status();
+            let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body.to_vec())
+        }
+    };
+
+    let (status, body) = send(open(&cid)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let opened: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(opened["page"], "page");
+    assert_eq!(home.runtime.kept_launch_count(), 1);
+
+    let mut changed = picture.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    home.overwrite(&cid, ENTRYPOINT, &changed);
+    let (status, body) = send(open(&cid)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8_lossy(&body).starts_with("bundle_cid_mismatch: "),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(home.runtime.kept_launch_count(), 1, "nothing new kept");
+}
