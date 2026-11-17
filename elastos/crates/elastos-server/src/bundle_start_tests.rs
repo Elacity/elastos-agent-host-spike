@@ -3237,92 +3237,50 @@ async fn a_kept_launch_serves_the_page_its_content_pins() {
     );
 }
 
-/// R-grants-nothing. A signed bundle that asks nothing starts by its CID, and
-/// the signature that admitted it mints no grant. The all-sessions live view
-/// is empty, and the bridge, under the signed manifest's own empty ceiling,
-/// denies a resource call by its code; the denial mints no grant either.
+/// R-grants-nothing. A component signed by a trusted publisher, whose signed
+/// manifest asks nothing, starts by its CID for a person. The signature is all
+/// it has: its one bridge call is denied by the seal; this Home's own bridge
+/// handler never sees the call; and once the start returns, this Home's
+/// runtime holds no ceiling for it under its name or its CID.
 #[tokio::test]
 async fn a_signature_grants_nothing() {
-    use crate::api::handlers::capability::{list_capabilities, CapabilityState};
-    use axum::extract::{Query, State};
-    use axum::Extension;
     let publisher = key(71);
     let home = Home::trusting(&[&publisher]).await;
-    let cid = home.stage(&asks_nothing_bundle(), &publisher).await;
+    let name = "grants-nothing";
+    let manifest_json = manifest(name);
+    let asks: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_json).unwrap();
+    assert!(asks.asks.is_empty(), "the signed manifest asks nothing");
+    let cid = home
+        .staged(
+            "grants-nothing",
+            &manifest_json,
+            &calling_component(),
+            &publisher,
+        )
+        .await;
+
+    let refusal = home.run(&cid, Some(PERSON)).await.unwrap_err();
     assert_eq!(
-        home.run(&cid, None).await.unwrap(),
-        ("asks-nothing".to_string(), did(&publisher.verifying_key()))
-    );
-
-    // The live-grant view, made as the Home makes it: the same store and
-    // manager the capability route reads, with nothing granted into them.
-    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
-    let store = Arc::new(elastos_runtime::capability::CapabilityStore::new());
-    let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
-        store.clone(),
-        audit.clone(),
-        Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
-    ));
-    let state = CapabilityState {
-        pending_store: Arc::new(
-            elastos_runtime::capability::pending::PendingRequestStore::new(audit.clone()),
+        refusal.to_string(),
+        format!(
+            "bundle_start_failed: Compute error: Component capsule denied: BusError::Denied({SEALED_BRIDGE:?})"
         ),
-        capability_manager: manager,
-        capability_store: store,
-        policy_evaluator: Arc::new(elastos_runtime::capability::PolicyEvaluator::new(
-            Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
-            audit,
-        )),
-    };
-    let uri = "http://runtime/api/capability/list?scope=all_sessions_live";
-    let query = Query::try_from_uri(&uri.parse().unwrap()).unwrap();
-    let live = list_capabilities(
-        State(state.clone()),
-        Extension(elastos_runtime::session::Session::new_shell(
-            "shell-vm".to_string(),
-        )),
-        query,
-    )
-    .await
-    .unwrap()
-    .0;
-    assert!(live.capabilities.is_empty(), "the live-grant view is empty");
-    assert!(state.pending_store.list_requests().await.is_empty());
-
-    // The signed manifest asks nothing, so the ceiling is empty, and a
-    // resource call under it is denied before any token or provider.
-    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
-        &fs::read_to_string(asks_nothing_bundle().join("capsule.json")).unwrap(),
-    )
-    .unwrap();
-    assert!(manifest.asks.is_empty());
-    let ctx = crate::resource_bridge::BridgeContext {
-        provider_registry: Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
-        capability_manager: state.capability_manager.clone(),
-        pending_store: state.pending_store.clone(),
-        capsule_id: cid.clone(),
-        principal_id: Some(PERSON.to_string()),
-        manifest_capabilities: manifest.resource_authority_bounds(),
-        data_dir: Some(home.data()),
-        launch: None,
-    };
-    let line = serde_json::json!({
-        "id": 1,
-        "request": {
-            "type": "resource_invoke",
-            "uri": "elastos://did/mine",
-            "operation": "resolve",
-            "body": {}
-        }
-    })
-    .to_string();
-    let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
-        .await
-        .unwrap();
-    assert_eq!(answer["response"]["code"], "manifest_capability_denied");
-    assert!(
-        state.pending_store.list_requests().await.is_empty(),
-        "the denial minted no grant"
+        "the trusted signature admitted the start, and the seal denied its call"
+    );
+    assert_eq!(
+        home.calls(),
+        Vec::new(),
+        "this Home's bridge handler never saw a call from the signed capsule"
+    );
+    assert_eq!(
+        home.runtime.ceiling_of(name),
+        None,
+        "no ceiling stays under its name"
+    );
+    assert_eq!(
+        home.runtime.ceiling_of(&cid),
+        None,
+        "no ceiling stays under its CID"
     );
 }
 
