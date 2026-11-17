@@ -1434,7 +1434,45 @@ mod tests {
             }
         }
         entries.push(("content-security-policy".to_string(), csp));
+        stand_in_headers_written_once(&lines, start, assignment);
         entries
+    }
+
+    /// The map read above is the one served: from `const headers = {` to
+    /// `response.writeHead(200, headers);`, the stand-in names its `headers`
+    /// variable only in the literal, the one CSP assignment and that call. Any
+    /// other write to the map, or a different map handed to `writeHead`, fails
+    /// here by name, so the pin cannot miss a later change.
+    fn stand_in_headers_written_once(lines: &[&str], start: usize, assignment: &str) {
+        let served = "response.writeHead(200, headers);";
+        let end = start
+            + lines[start..]
+                .iter()
+                .position(|line| line.trim() == served)
+                .unwrap_or_else(|| panic!("stand-in: no `{served}` after its header map"));
+        for (offset, line) in lines[start..=end].iter().enumerate() {
+            let trimmed = line.trim();
+            if offset == 0 || trimmed == served || trimmed.starts_with(assignment) {
+                continue;
+            }
+            let bytes = trimmed.as_bytes();
+            let mut from = 0;
+            while let Some(found) = trimmed[from..].find("headers") {
+                let at = from + found;
+                let before = at.checked_sub(1).map(|i| bytes[i]);
+                let after = bytes.get(at + "headers".len()).copied();
+                let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+                let names_the_map = !matches!(before, Some(c) if word(c) || c == b'.')
+                    && !matches!(after, Some(c) if word(c));
+                assert!(
+                    !names_the_map,
+                    "stand-in line {}: `{trimmed}` names the served header map outside its \
+                     literal, its CSP assignment and `{served}`",
+                    start + offset + 1
+                );
+                from = at + "headers".len();
+            }
+        }
     }
 
     #[tokio::test]
