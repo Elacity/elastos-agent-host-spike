@@ -1956,6 +1956,10 @@ mod tests {
 
     #[test]
     fn v2_manifest_requires_the_v2_wit_hash() {
+        assert_eq!(
+            elastos_bus_v2_wit_sha256(),
+            "57984328b78a964d79d89e121a90bb6e1d775f9ec302a74fb27fb4695ee1c1a3"
+        );
         let mut value = serde_json::json!({
             "schema": SCHEMA_V1, "version": "0.1.0", "name": "v2-fixture",
             "role": "app", "type": "wasm", "runtime_abi": "elastos.component/v1",
@@ -1971,6 +1975,24 @@ mod tests {
         contract_only.runtime_abi = None;
         contract_only.execution = None;
         assert!(contract_only.is_component_capsule());
+        assert_eq!(
+            contract_only.validate().unwrap_err(),
+            "component capsules must declare runtime_abi=\"elastos.component/v1\""
+        );
+
+        let mut missing_hash = manifest.clone();
+        missing_hash.wit_world_sha256 = None;
+        assert!(missing_hash
+            .validate()
+            .unwrap_err()
+            .contains(ELASTOS_BUS_V2_WORLD));
+
+        let mut unknown_contract = manifest.clone();
+        unknown_contract.bus_contract = Some("elastos:bus@unknown".into());
+        assert_eq!(
+            unknown_contract.validate().unwrap_err(),
+            "component capsules must declare bus_contract=\"elastos:bus@v1\""
+        );
 
         value["wit_world_sha256"] = serde_json::json!(elastos_bus_v1_wit_sha256());
         let wrong_hash: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
