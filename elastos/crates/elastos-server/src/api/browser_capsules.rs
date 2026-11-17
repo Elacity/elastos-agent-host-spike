@@ -1450,6 +1450,15 @@ mod tests {
                 .iter()
                 .position(|line| line.trim() == served)
                 .unwrap_or_else(|| panic!("stand-in: no `{served}` after its header map"));
+        let assignments = lines[start..=end]
+            .iter()
+            .filter(|line| line.trim().starts_with(assignment))
+            .count();
+        assert_eq!(
+            assignments, 1,
+            "stand-in: `{assignment}` appears {assignments} times before `{served}`; the pin \
+             reads one, so it must be exactly one"
+        );
         for (offset, line) in lines[start..=end].iter().enumerate() {
             let trimmed = line.trim();
             if offset == 0 || trimmed == served || trimmed.starts_with(assignment) {
