@@ -596,6 +596,25 @@ impl CapabilityManager {
             && !expired
     }
 
+    /// Whether `token` would still validate for this caller, action and
+    /// resource: `can_still_validate`'s checks plus `validate`'s caller-,
+    /// action- and resource-bound checks (steps 4-6). Read-only: no use is
+    /// counted and nothing is audited. The all-sessions live view asks this of
+    /// each granted record, so a grant it lists is one the record's own caller
+    /// could still use.
+    pub async fn can_still_validate_for(
+        &self,
+        token: &CapabilityToken,
+        caller_capsule_id: &str,
+        requested_action: Action,
+        requested_resource: &ResourceId,
+    ) -> bool {
+        token.capsule == caller_capsule_id
+            && token.action == requested_action
+            && requested_resource.matches(&token.resource)
+            && self.can_still_validate(token).await
+    }
+
     /// Revoke a specific token
     pub async fn revoke(&self, token_id: TokenId, reason: &str) -> std::io::Result<()> {
         let result = self.store.revoke_token(token_id).await;

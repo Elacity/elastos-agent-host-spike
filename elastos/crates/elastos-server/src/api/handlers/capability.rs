@@ -485,11 +485,16 @@ fn capability_output(
     })
 }
 
-/// A granted record whose token can still validate, by the Runtime's one
-/// rule (`CapabilityManager::can_still_validate`).
+/// A granted record whose token would still validate for this record's own
+/// caller, action and resource, by the Runtime's read-only rule
+/// (`CapabilityManager::can_still_validate_for`).
 async fn is_live(manager: &CapabilityManager, r: &PendingCapabilityRequest) -> bool {
     match r.granted_token() {
-        Some(token) => manager.can_still_validate(token).await,
+        Some(token) => {
+            manager
+                .can_still_validate_for(token, r.session_id.as_str(), r.action, &r.resource)
+                .await
+        }
         None => false,
     }
 }
@@ -1215,6 +1220,134 @@ mod tests {
             body, expected,
             "the live view is exactly the two live grants"
         );
+    }
+
+    /// Files a granted record for `session` whose token was minted for another
+    /// caller, action or resource. Returns the record's id.
+    async fn grant_mismatched_in(
+        state: &CapabilityState,
+        session: &str,
+        token_capsule: &str,
+        token_action: Action,
+        token_resource: &str,
+    ) -> String {
+        let store = &state.pending_store;
+        let requested = ResourceId::new("elastos://content/publish");
+        let request = store
+            .create_request(
+                elastos_runtime::session::SessionId::from_string(session),
+                requested,
+                Action::Write,
+            )
+            .await;
+        let id = request.id.to_string();
+        let token = state.capability_manager.grant(
+            token_capsule,
+            ResourceId::new(token_resource),
+            token_action,
+            TokenConstraints::default(),
+            None,
+        );
+        store
+            .grant_request(&id, token, GrantDuration::Session)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn live_scope_omits_a_grant_whose_token_is_not_bound_to_its_record() {
+        let state = test_state();
+        let client = Session::new_capsule("vm-a".to_string());
+        let session = client.id.as_str().to_owned();
+        let (live, once) = grant_in(&state, &session, Some(1), None).await;
+        let publish = "elastos://content/publish";
+        let wrong_caller =
+            grant_mismatched_in(&state, &session, "another-caller", Action::Write, publish).await;
+        let wrong_action =
+            grant_mismatched_in(&state, &session, &session, Action::Read, publish).await;
+        let wrong_resource = grant_mismatched_in(
+            &state,
+            &session,
+            &session,
+            Action::Write,
+            "elastos://content/fetch",
+        )
+        .await;
+
+        let (_, ids) = live_view(&state).await;
+        assert!(
+            ids.contains(&live),
+            "F-bound: a grant bound to its session is present"
+        );
+        assert!(
+            !ids.contains(&wrong_caller),
+            "a token minted for another caller is absent"
+        );
+        assert!(
+            !ids.contains(&wrong_action),
+            "a token minted for another action is absent"
+        );
+        assert!(
+            !ids.contains(&wrong_resource),
+            "a token minted for another resource is absent"
+        );
+        assert_eq!(ids, vec![live.clone()], "only the bound grant is live");
+
+        let (_, ids) = live_view(&state).await;
+        assert!(ids.contains(&live), "asking twice counts no use");
+        let publish = ResourceId::new(publish);
+        state
+            .capability_manager
+            .validate(&once, &session, Action::Write, &publish, None)
+            .await
+            .expect("the live view counted no use");
+        let (_, ids) = live_view(&state).await;
+        assert!(
+            !ids.contains(&live),
+            "the once grant's one use moved it out"
+        );
+
+        let query = Query(ListCapabilitiesQuery { scope: None });
+        let body = serde_json::to_value(
+            list_capabilities(State(state.clone()), Extension(client), query)
+                .await
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        let mut listed: Vec<String> = body["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["request_id"].as_str().unwrap().to_owned())
+            .collect();
+        let mut expected = vec![
+            live.clone(),
+            wrong_caller.clone(),
+            wrong_action.clone(),
+            wrong_resource.clone(),
+        ];
+        listed.sort();
+        expected.sort();
+        assert_eq!(
+            listed, expected,
+            "the default view still lists every granted record of the caller's session"
+        );
+        assert!(
+            body.get("scope").is_none(),
+            "the default view carries no scope"
+        );
+        for entry in body["capabilities"].as_array().unwrap() {
+            assert!(
+                entry.get("session_id").is_none(),
+                "the default view names no session"
+            );
+            assert!(
+                entry.get("token").is_none(),
+                "the default view carries no token"
+            );
+        }
     }
 
     /// Waits on the clock (a condition with a deadline, no sleep) until every
