@@ -123,6 +123,10 @@ install_snapshot_traps
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
     "${VIEWER_DIR}/capsule.json" "${WIT}" archive-viewer
 
+# The recorded container hash: the whole record, and the check itself.
+python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" archive-viewer
+python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" archive-viewer --falsify
+
 cargo fmt --manifest-path "${VIEWER_DIR}/Cargo.toml" --all -- --check
 cargo clippy --locked --manifest-path "${VIEWER_DIR}/Cargo.toml" --all-targets -- -D warnings
 # The Bus v1 component glue: the same crate built for the guest's target.

@@ -32,6 +32,10 @@ finish() { # <the line for a complete run>
 
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" docs-viewer
 
+# The recorded container hash: the whole record, and the check itself.
+python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" docs-viewer
+python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" docs-viewer --falsify
+
 # Check and restore the gate falsifier before Bash reads the branch below.
 python3 -I "${VIEWER_DIR}/verify_gate_test.py"
 python3 -I "${VIEWER_DIR}/verify_gate_test.py" --falsify
