@@ -597,11 +597,15 @@ impl CapabilityManager {
     }
 
     /// Whether `token` would still validate for this caller, action and
-    /// resource: `can_still_validate`'s checks plus `validate`'s caller-,
-    /// action- and resource-bound checks (steps 4-6). Read-only: no use is
-    /// counted and nothing is audited. The all-sessions live view asks this of
-    /// each granted record, so a grant it lists is one the record's own caller
-    /// could still use.
+    /// resource, asking for a resource that carries no classification: every
+    /// check `validate` makes, read-only. Steps 1-3 (version, signature,
+    /// issuer), 4-6 (caller, action, resource, with the resource as the
+    /// pattern), 9 (future-dated) and 11 (classification, refused for any
+    /// ceiling because no classification is supplied) are compared here;
+    /// steps 7, 8, 10 and the read-only form of step 12's use check are
+    /// `can_still_validate`. No use is counted and nothing is audited. The
+    /// all-sessions live view asks this of each granted record, so a grant it
+    /// lists is one the record's own caller could still use.
     pub async fn can_still_validate_for(
         &self,
         token: &CapabilityToken,
@@ -609,9 +613,14 @@ impl CapabilityManager {
         requested_action: Action,
         requested_resource: &ResourceId,
     ) -> bool {
-        token.capsule == caller_capsule_id
+        token.version == CapabilityToken::CURRENT_VERSION
+            && token.verify_signature(&self.verifying_key)
+            && token.issuer == self.public_key_bytes()
+            && token.capsule == caller_capsule_id
             && token.action == requested_action
             && requested_resource.matches(&token.resource)
+            && !token.issued_at.is_future()
+            && token.constraints.max_classification.is_none()
             && self.can_still_validate(token).await
     }
 
@@ -1011,6 +1020,64 @@ mod tests {
             !manager.can_still_validate(&expired).await,
             "an expired token"
         );
+    }
+
+    #[tokio::test]
+    async fn can_still_validate_for_refuses_a_token_validate_would_refuse_first() {
+        let manager = create_test_manager();
+        let resource = ResourceId::new("localhost://Users/self/Documents/test.txt");
+        let mint = || {
+            manager.grant(
+                "test-capsule",
+                resource.clone(),
+                Action::Read,
+                TokenConstraints::default(),
+                None,
+            )
+        };
+        let live = mint();
+        assert!(
+            manager
+                .can_still_validate_for(&live, "test-capsule", Action::Read, &resource)
+                .await,
+            "a token this runtime minted for this caller is live"
+        );
+
+        // Each token differs from `live` in one step and is signed again
+        // afterwards, so only the step its message names can refuse it.
+        let mut future_version = mint();
+        future_version.version = CapabilityToken::CURRENT_VERSION + 1;
+        future_version.sign(&manager.signing_key);
+
+        let mut wrong_issuer = mint();
+        wrong_issuer.issuer = [9u8; 32];
+        wrong_issuer.sign(&manager.signing_key);
+
+        let mut future_dated = mint();
+        future_dated.issued_at = SecureTimestamp::after_secs(3600);
+        future_dated.sign(&manager.signing_key);
+
+        // Signed first, then changed: the signature no longer covers it.
+        let mut stale_signature = mint();
+        stale_signature.constraints.delegatable = true;
+
+        let cases = [
+            (future_version, "a token from another version is not live"),
+            (wrong_issuer, "a token from an untrusted issuer is not live"),
+            (future_dated, "a future-dated token is not live"),
+            (
+                stale_signature,
+                "a token whose signature does not verify is not live",
+            ),
+        ];
+        for (token, message) in cases {
+            assert!(
+                !manager
+                    .can_still_validate_for(&token, "test-capsule", Action::Read, &resource)
+                    .await,
+                "{message}"
+            );
+        }
     }
 
     #[tokio::test]

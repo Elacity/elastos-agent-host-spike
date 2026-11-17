@@ -515,23 +515,25 @@ pub async fn create_request_retiring(
     request.await
 }
 
-/// At capacity, settle each granted record whose token can no longer
-/// validate as denied by the Runtime, so the store's capacity cleanup can
-/// reclaim it. A grant that can still validate is left alone, and below
-/// capacity nothing changes. That cleanup drops only records older than
-/// one second, so a grant spent in the same second as the next request is
-/// retired but still holds its slot until the second turns.
+/// At capacity, settle each granted record whose token would no longer
+/// validate for the record's own caller, action and resource as denied by the
+/// Runtime, so the store's capacity cleanup can reclaim it. This is the live
+/// view's rule (`is_live`), so a record the view hides cannot keep a slot. A
+/// grant that can still validate is left alone, and below capacity nothing
+/// changes. That cleanup drops only records older than one second, so a grant
+/// spent in the same second as the next request is retired but still holds its
+/// slot until the second turns.
 async fn retire_dead_grants(store: &PendingRequestStore, manager: &CapabilityManager) {
     let held = store.list_requests().await;
     if held.len() < MAX_PENDING_REQUESTS {
         return;
     }
     for r in held {
-        let Some(token) = r.granted_token() else {
+        if is_live(manager, &r).await {
             continue;
-        };
-        if !manager.can_still_validate(token).await {
-            let reason = "grant can no longer validate";
+        }
+        if r.is_granted() {
+            let reason = "grant can no longer validate for its record";
             store
                 .revoke_request_by(r.id.as_str(), reason, Settler::Runtime)
                 .await;
@@ -1348,6 +1350,167 @@ mod tests {
                 "the default view carries no token"
             );
         }
+    }
+
+    /// Files a granted record for `record_resource` in `session` whose token
+    /// allows `token_resource`. Returns the record's id.
+    async fn grant_covering(
+        state: &CapabilityState,
+        session: &str,
+        record_resource: &str,
+        token_resource: &str,
+    ) -> String {
+        let store = &state.pending_store;
+        let request = store
+            .create_request(
+                elastos_runtime::session::SessionId::from_string(session),
+                ResourceId::new(record_resource),
+                Action::Write,
+            )
+            .await;
+        let id = request.id.to_string();
+        let token = state.capability_manager.grant(
+            session,
+            ResourceId::new(token_resource),
+            Action::Write,
+            TokenConstraints::default(),
+            None,
+        );
+        store
+            .grant_request(&id, token, GrantDuration::Session)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn live_scope_reads_the_token_resource_as_the_pattern() {
+        let state = test_state();
+        let session = Session::new_capsule("vm-a".to_string())
+            .id
+            .as_str()
+            .to_owned();
+        let wildcard = grant_covering(
+            &state,
+            &session,
+            "elastos://content/publish",
+            "elastos://content/*",
+        )
+        .await;
+        let one_path = grant_covering(
+            &state,
+            &session,
+            "elastos://content/*",
+            "elastos://content/publish",
+        )
+        .await;
+
+        let (_, ids) = live_view(&state).await;
+        assert!(
+            ids.contains(&wildcard),
+            "a token for a wildcard is live for a record for one path"
+        );
+        assert!(
+            !ids.contains(&one_path),
+            "a token for one path is not live for a record for a wildcard"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_scope_omits_a_grant_validate_refuses_for_want_of_a_classification() {
+        let state = test_state();
+        let session = Session::new_capsule("vm-a".to_string())
+            .id
+            .as_str()
+            .to_owned();
+        let resource = ResourceId::new("elastos://content/publish");
+        let store = &state.pending_store;
+        let request = store
+            .create_request(
+                elastos_runtime::session::SessionId::from_string(&session),
+                resource.clone(),
+                Action::Write,
+            )
+            .await;
+        let id = request.id.to_string();
+        let constraints = TokenConstraints::new(0, false, Some(2), None);
+        let token = state.capability_manager.grant(
+            &session,
+            resource.clone(),
+            Action::Write,
+            constraints,
+            None,
+        );
+        store
+            .grant_request(&id, token.clone(), GrantDuration::Session)
+            .await
+            .unwrap();
+
+        let refusal = state
+            .capability_manager
+            .validate(&token, &session, Action::Write, &resource, None)
+            .await;
+        assert!(
+            matches!(
+                refusal,
+                Err(elastos_runtime::capability::manager::ValidationError::ClassificationUnavailable { .. })
+            ),
+            "validate(..., None) refuses a token with a classification ceiling"
+        );
+
+        let (_, ids) = live_view(&state).await;
+        assert!(
+            !ids.contains(&id),
+            "the live view does not list a grant validate(..., None) refuses"
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_cleanup_retires_a_grant_bound_to_another_caller() {
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        use elastos_runtime::session::SessionId;
+        let state = test_state();
+        let store = state.pending_store.clone();
+        let mismatched = grant_mismatched_in(
+            &state,
+            "session-own",
+            "another-caller",
+            Action::Write,
+            "elastos://content/publish",
+        )
+        .await;
+        let resource = ResourceId::new("elastos://content/publish");
+        for n in 0..MAX_PENDING_REQUESTS - 1 {
+            let session = SessionId::from_string(format!("fill-{}", n / MAX_PENDING_PER_SESSION));
+            store
+                .create_request(session, resource.clone(), Action::Write)
+                .await;
+        }
+        assert_eq!(store.list_requests().await.len(), MAX_PENDING_REQUESTS);
+        age_past_capacity_retention(&store).await;
+
+        let input = RequestCapabilityInput {
+            resource: "elastos://content/publish".to_string(),
+            action: "write".to_string(),
+            reason: String::new(),
+        };
+        let client = Extension(Session::new_capsule("vm-new".to_string()));
+        let reply = request_capability(State(state.clone()), client, Json(input)).await;
+        let held: Vec<String> = store
+            .list_requests()
+            .await
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
+        assert!(
+            !held.contains(&mismatched),
+            "a grant bound to another caller is retired at capacity"
+        );
+        assert_eq!(
+            reply.unwrap().0.status,
+            "pending",
+            "the new request is admitted after the mismatched grant is retired"
+        );
     }
 
     /// Waits on the clock (a condition with a deadline, no sleep) until every
