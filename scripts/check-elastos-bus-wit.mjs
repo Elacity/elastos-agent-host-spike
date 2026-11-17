@@ -6,6 +6,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+assert.deepEqual(
+  readFileSync(resolve(repoRoot, "elastos/wit-bus-v2/elastos-bus-v2.wit")),
+  readFileSync(resolve(repoRoot, "examples/bus2-proof/wit/bus2.wit")),
+  "Bus v2 runtime WIT must match the proof WIT byte for byte",
+);
 const witPath = resolve(repoRoot, "elastos/wit/elastos-bus-v1.wit");
 const fixtureRoot = resolve(repoRoot, "elastos/tests/fixtures/components/bus-v1");
 const wit = readFileSync(witPath, "utf8");

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use elastos_common::{CapsuleManifest, ElastosError, Result};
+use elastos_common::{
+    CapsuleManifest, ElastosError, Result, ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V2_CONTRACT,
+};
 use wasmparser::{ComponentTypeRef, Encoding, Parser, Payload};
 
 /// The component imports this Runtime admits. Exported so the capsule kit's
@@ -11,6 +13,18 @@ pub const ALLOWED_BUS_IMPORTS: &[&str] = &[
     "elastos:bus/identity@1.0.0",
     "elastos:bus/capabilities@1.0.0",
     "elastos:bus/providers@1.0.0",
+];
+
+const ALLOWED_BUS_V2_IMPORTS: &[&str] = &[
+    "elastos:bus/types@2.0.0",
+    "elastos:bus/runtime@2.0.0",
+    "elastos:bus/identity@2.0.0",
+    "elastos:bus/capabilities@2.0.0",
+    "elastos:bus/providers@2.0.0",
+    "elastos:bus/clock@2.0.0",
+    "elastos:bus/random@2.0.0",
+    "elastos:bus/ui@2.0.0",
+    "elastos:bus/credentials@2.0.0",
 ];
 
 /// Parse caps: bounds on the work the compiler is asked to do, checked in the
@@ -73,11 +87,48 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The single component admission check: the imports a component may declare,
-/// and the parse caps on what the compiler is asked to do. Every capsule start
-/// and bundle start goes through it, and the capsule kit's host tests call this
-/// same function (kit item A2) instead of keeping a copy.
+/// The public v1 component admission check for capsule kit host tests (kit
+/// item A2). Capsule and bundle starts use the manifest-aware check below.
 pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
+    validate_component_imports_for_contract(bytes, ELASTOS_BUS_V1_CONTRACT)
+}
+
+pub(crate) fn validate_component_imports_for_manifest(
+    bytes: &[u8],
+    manifest: &CapsuleManifest,
+) -> std::result::Result<(), String> {
+    let contract = manifest
+        .bus_contract
+        .as_deref()
+        .unwrap_or(ELASTOS_BUS_V1_CONTRACT);
+    validate_component_imports_for_contract(bytes, contract)
+}
+
+pub(crate) fn validate_component_imports_for_contract(
+    bytes: &[u8],
+    contract: &str,
+) -> std::result::Result<(), String> {
+    let allowed = match contract {
+        ELASTOS_BUS_V1_CONTRACT => ALLOWED_BUS_IMPORTS,
+        ELASTOS_BUS_V2_CONTRACT => ALLOWED_BUS_V2_IMPORTS,
+        _ => return Err(format!("unsupported component bus contract {contract:?}")),
+    };
+    let (mut v1, mut v2) = (false, false);
+    for payload in Parser::new(0).parse_all(bytes) {
+        if let Ok(Payload::ComponentImportSection(section)) = payload {
+            for import in section.into_iter().flatten() {
+                let name = import.name.name;
+                if name.starts_with("elastos:bus/") {
+                    v1 |= name.ends_with("@1.0.0");
+                    v2 |= name.ends_with("@2.0.0");
+                }
+            }
+        }
+    }
+    if v1 && v2 {
+        return Err("component mixes Bus v1 and Bus v2 imports".to_string());
+    }
+
     let mut saw_root_header = false;
     let mut functions: u32 = 0;
     let mut canonical_functions: u32 = 0;
@@ -96,7 +147,7 @@ pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), Strin
                         format!("failed to parse component import section: {err}")
                     })?;
                     let name = import.name.name;
-                    if name.starts_with("import-type-") {
+                    if contract == ELASTOS_BUS_V1_CONTRACT && name.starts_with("import-type-") {
                         if !matches!(import.ty, ComponentTypeRef::Type(_)) {
                             return Err(format!(
                                 "component generated type import \"{}\" must be a type import",
@@ -105,18 +156,18 @@ pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), Strin
                         }
                         continue;
                     }
-                    if name == "import-func-run" {
+                    if contract == ELASTOS_BUS_V1_CONTRACT && name == "import-func-run" {
                         if !matches!(import.ty, ComponentTypeRef::Func(_)) {
                             return Err("component generated run import must be a function import"
                                 .to_string());
                         }
                         continue;
                     }
-                    if !ALLOWED_BUS_IMPORTS.contains(&name) {
+                    if !allowed.contains(&name) {
                         return Err(format!(
                             "component import \"{}\" is not allowed; allowed imports: {}",
                             name,
-                            ALLOWED_BUS_IMPORTS.join(", ")
+                            allowed.join(", ")
                         ));
                     }
                     if !matches!(import.ty, ComponentTypeRef::Instance(_)) {
@@ -172,7 +223,7 @@ pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), Strin
                     let import = import.map_err(|err| {
                         format!("failed to parse component core import section: {err}")
                     })?;
-                    validate_core_import(import.module, import.name)?;
+                    validate_core_import(import.module, import.name, allowed)?;
                 }
             }
             _ => {}
@@ -186,7 +237,11 @@ pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), Strin
     Ok(())
 }
 
-fn validate_core_import(module: &str, name: &str) -> std::result::Result<(), String> {
+fn validate_core_import(
+    module: &str,
+    name: &str,
+    allowed: &[&str],
+) -> std::result::Result<(), String> {
     let lower = format!("{module}::{name}").to_ascii_lowercase();
     if FORBIDDEN_AUTHORITY_MARKERS
         .iter()
@@ -197,7 +252,7 @@ fn validate_core_import(module: &str, name: &str) -> std::result::Result<(), Str
         ));
     }
 
-    if ALLOWED_BUS_IMPORTS.contains(&module) {
+    if allowed.contains(&module) {
         return Ok(());
     }
     if module.is_empty() && (name == "$imports" || name.bytes().all(|byte| byte.is_ascii_digit())) {
@@ -216,6 +271,68 @@ mod tests {
         Component, ComponentImportSection, ComponentTypeRef as EncodedComponentTypeRef,
         ComponentTypeSection, InstanceType, PrimitiveValType,
     };
+
+    fn wat_imports(names: &[&str]) -> Vec<u8> {
+        let imports = names
+            .iter()
+            .map(|name| format!("(import \"{name}\" (instance))"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        wat::parse_str(format!("(component {imports})")).unwrap()
+    }
+
+    #[test]
+    fn v2_refuses_a_mix_with_v1() {
+        let v2_imports = &[
+            "elastos:bus/types@2.0.0",
+            "elastos:bus/runtime@2.0.0",
+            "elastos:bus/identity@2.0.0",
+            "elastos:bus/capabilities@2.0.0",
+            "elastos:bus/providers@2.0.0",
+            "elastos:bus/clock@2.0.0",
+            "elastos:bus/random@2.0.0",
+            "elastos:bus/ui@2.0.0",
+            "elastos:bus/credentials@2.0.0",
+        ];
+        assert_eq!(ALLOWED_BUS_V2_IMPORTS, v2_imports);
+        validate_component_imports_for_contract(&wat_imports(v2_imports), ELASTOS_BUS_V2_CONTRACT)
+            .unwrap();
+        let err = validate_component_imports_for_contract(
+            &wat_imports(&["elastos:bus/runtime@1.0.0", "elastos:bus/ui@2.0.0"]),
+            ELASTOS_BUS_V2_CONTRACT,
+        )
+        .unwrap_err();
+        assert_eq!(err, "component mixes Bus v1 and Bus v2 imports");
+        let err = validate_component_imports_for_contract(
+            &wat_imports(&["elastos:bus/runtime@1.0.0"]),
+            ELASTOS_BUS_V2_CONTRACT,
+        )
+        .unwrap_err();
+        assert!(err.contains("runtime@1.0.0"), "{err}");
+    }
+
+    #[test]
+    fn v2_refuses_v1_generated_import_exceptions() {
+        for (name, ty) in [
+            (
+                "import-type-event",
+                EncodedComponentTypeRef::Type(wasm_encoder::TypeBounds::Eq(0)),
+            ),
+            ("import-func-run", EncodedComponentTypeRef::Func(0)),
+        ] {
+            let bytes = component_with_imports(&[(name, ty)]);
+            let err = validate_component_imports_for_contract(&bytes, ELASTOS_BUS_V2_CONTRACT)
+                .unwrap_err();
+            assert!(err.contains("not allowed") && err.contains(name), "{err}");
+        }
+    }
+
+    #[test]
+    fn v1_refuses_ui_v2() {
+        let err = validate_component_imports(&wat_imports(&["elastos:bus/ui@2.0.0"])).unwrap_err();
+        assert!(err.contains("not allowed"), "{err}");
+        assert!(err.contains("elastos:bus/ui@2.0.0"), "{err}");
+    }
 
     fn component_with_imports(imports: &[(&str, EncodedComponentTypeRef)]) -> Vec<u8> {
         let mut types = ComponentTypeSection::new();

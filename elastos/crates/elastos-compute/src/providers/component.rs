@@ -12,7 +12,8 @@ use wasmtime::{
 };
 
 use elastos_common::{
-    CapsuleId, CapsuleManifest, CapsuleRuntimeAbi, CapsuleStatus, CapsuleType, ElastosError, Result,
+    CapsuleId, CapsuleManifest, CapsuleRuntimeAbi, CapsuleStatus, CapsuleType, ElastosError,
+    Result, ELASTOS_BUS_V2_CONTRACT,
 };
 use elastos_guest::{
     bus as guest_bus,
@@ -311,6 +312,11 @@ impl ComponentProvider {
         if manifest.validate().is_err() || !Self::is_component_manifest(manifest) {
             return Err(ElastosError::Compute(
                 "ComponentProvider only accepts elastos.component/v1 manifests".into(),
+            ));
+        }
+        if manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
+            return Err(ElastosError::Compute(
+                "Bus v2 contract not yet runnable".into(),
             ));
         }
         Ok(())
@@ -825,6 +831,24 @@ mod tests {
         let manifest =
             serde_json::from_slice(&std::fs::read(path.join("capsule.json")).unwrap()).unwrap();
         (path, manifest)
+    }
+
+    #[tokio::test]
+    async fn provider_refuses_a_v2_contract_by_name() {
+        let provider = ComponentProvider::new();
+        let (_, mut manifest) = component_fixture();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        manifest.validate().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        for result in [
+            provider.load(empty.path(), manifest.clone()).await,
+            provider.load_admitted(Vec::new(), manifest).await,
+        ] {
+            assert!(matches!(result, Err(ElastosError::Compute(message))
+                if message == "Bus v2 contract not yet runnable"));
+        }
+        assert!(provider.instances.read().await.is_empty());
     }
 
     /// A file of `len` zero bytes named as the fixture manifest's entrypoint.
