@@ -12,6 +12,7 @@ pub mod dispatch;
 mod linux_model_seccomp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod local_model_broker;
+mod macos_profile;
 mod registry;
 mod rights;
 mod rights_table;
