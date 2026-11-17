@@ -454,7 +454,7 @@ impl Runtime {
             .verify_capsule_signature(&manifest, path, admitted_bytes.as_deref())
             .await?;
         if let Some(bytes) = &admitted_bytes {
-            crate::component::validate_component_imports(bytes)
+            crate::component::validate_component_imports_for_manifest(bytes, &manifest)
                 .map_err(ElastosError::InvalidManifest)?;
         }
 
@@ -835,8 +835,11 @@ impl Runtime {
         let accepted = bundle_admission::check_bundle_signature(&signature, asked, trust)?;
         let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
         if admitted.kind == BundleKind::Program {
-            crate::component::validate_component_imports(&admitted.component)
-                .map_err(BundleRefusal::NotAComponent)?;
+            crate::component::validate_component_imports_for_manifest(
+                &admitted.component,
+                &admitted.manifest,
+            )
+            .map_err(BundleRefusal::NotAComponent)?;
         }
         Ok((admitted, accepted))
     }

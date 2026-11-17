@@ -234,7 +234,9 @@ async fn v2_contract_is_refused_before_guest_runs_on_folder_and_cid_paths() {
     let mut json: serde_json::Value = serde_json::from_str(&manifest("v2-by-both-paths")).unwrap();
     json["bus_contract"] = serde_json::json!("elastos:bus@2.0.0");
     json["wit_world_sha256"] = serde_json::json!(elastos_common::elastos_bus_v2_wit_sha256());
-    let folder = home.bundle("v2", &json.to_string(), &quiet_component());
+    let v2_component =
+        wat::parse_str("(component (import \"elastos:bus/runtime@2.0.0\" (instance)))").unwrap();
+    let folder = home.bundle("v2", &json.to_string(), &v2_component);
     assert!(matches!(
         home.runtime.run_local(&folder, Vec::new()).await,
         Err(elastos_common::ElastosError::Compute(message))
@@ -1069,7 +1071,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         "bundle.cid() != *asked",
         "bundle_admission::check_bundle_signature(&signature, asked, trust)",
         "bundle_admission::admit_bundle_manifest(",
-        "validate_component_imports(",
+        "validate_component_imports_for_manifest(",
     ];
     let places: Vec<usize> = order
         .iter()
