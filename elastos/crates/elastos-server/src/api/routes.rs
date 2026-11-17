@@ -766,7 +766,7 @@ pub(crate) mod tests {
         pub(crate) data_dir: std::path::PathBuf,
         runtime: Arc<Runtime>,
         audit_log: Arc<AuditLog>,
-        pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        pub(crate) pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
         provider: Arc<CapturingLocalhostProvider>,
         capsule_dir: std::path::PathBuf,
@@ -1074,6 +1074,12 @@ pub(crate) mod tests {
             let launched = self.launch(agent_id).await;
             grants.abort();
             launched
+        }
+
+        pub(crate) async fn launched_instance_id(&self, agent_id: &str) -> String {
+            let launched = self.launch_with_grants(agent_id).await.unwrap().0;
+            assert_eq!(launched.status, "completed");
+            launched.id
         }
 
         /// The same launch from `dir`, which must walk to the bytes the agent's

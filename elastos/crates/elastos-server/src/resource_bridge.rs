@@ -1954,6 +1954,82 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    #[cfg(feature = "prototype-agents")]
+    #[tokio::test]
+    async fn s5_p2_object_bridge_binds_every_operation_to_launched_x() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = crate::api::routes::tests::ProbeLaunch::new(&["s5-x", "s5-y"]).await;
+        let x = home.agents[0].clone();
+        let y = home.agents[1].clone();
+        let _vm_id = home.launched_instance_id(&x).await;
+        let x_root = home.root(&x);
+        let y_root = home.root(&y);
+        let y_file = home
+            .data_dir
+            .join(y_root.trim_start_matches("localhost://"))
+            .join("memory/notes.md");
+        std::fs::create_dir_all(y_file.parent().unwrap()).unwrap();
+        std::fs::write(&y_file, b"Y private bytes").unwrap();
+        for op in [
+            "roots",
+            "list",
+            "stat",
+            "read",
+            "download",
+            "write",
+            "mkdir",
+            "rename",
+            "move",
+            "copy",
+            "trash",
+            "restore",
+            "delete_permanently",
+            "empty_trash",
+            "status",
+            "events",
+            "publish",
+            "unpublish",
+            "repair",
+            "share",
+            "list_runtime_custody",
+            "import_runtime_custody",
+            "buy",
+            "open_viewer",
+            "read_viewer",
+            "close_viewer",
+        ] {
+            let request = |principal: &str, root: &str| {
+                serde_json::json!({
+                    "uri": format!("elastos://object/{op}"), "operation": op,
+                    "body": {"principal_id": principal, "uri": format!("{root}/memory/notes.md"),
+                        "target_parent_uri": format!("{root}/memory"), "destination_uri": format!("{root}/memory")}
+                })
+            };
+            assert!(
+                resource_invoke_dispatch(&request(&x, &x_root), Some(&x), Some(&home.data_dir))
+                    .is_ok(),
+                "P2 own {op}"
+            );
+            let foreign =
+                resource_invoke_dispatch(&request(&y, &y_root), Some(&x), Some(&home.data_dir));
+            assert!(
+                foreign.is_err(),
+                "P2 {op}: X reached Y's object through the bridge"
+            );
+            assert_eq!(
+                std::fs::read(&y_file).unwrap(),
+                b"Y private bytes",
+                "P2 {op}"
+            );
+            assert!(
+                home.pending_store.list_pending().await.is_empty(),
+                "P2 {op}"
+            );
+        }
+    }
+
     #[derive(Default)]
     struct CapturingProvider {
         requests: Mutex<Vec<serde_json::Value>>,

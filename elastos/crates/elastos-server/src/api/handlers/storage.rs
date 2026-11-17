@@ -615,6 +615,47 @@ mod tests {
     use elastos_runtime::primitives::metrics::MetricsManager;
     use elastos_runtime::session::SessionType;
 
+    #[cfg(feature = "prototype-agents")]
+    #[tokio::test]
+    async fn s5_p7_storage_closes_both_launched_agent_roots() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = crate::api::routes::tests::ProbeLaunch::new(&["s5-x", "s5-y"]).await;
+        let x = home.agents[0].clone();
+        let y = home.agents[1].clone();
+        let _vm_id = home.launched_instance_id(&x).await;
+        let x_root = home.root(&x);
+        let y_root = home.root(&y);
+        let y_file = home
+            .data_dir
+            .join(y_root.trim_start_matches("localhost://"))
+            .join("memory/notes.md");
+        std::fs::create_dir_all(y_file.parent().unwrap()).unwrap();
+        std::fs::write(&y_file, b"Y private bytes").unwrap();
+        let y_segment = y_root.strip_prefix("localhost://UsersAI/").unwrap();
+        let x_segment = x_root.strip_prefix("localhost://UsersAI/").unwrap();
+        for raw in [
+            y_root.clone(),
+            format!("{y_root}/memory/notes.md"),
+            "UsersAI".to_owned(),
+            "UsersAI/".to_owned(),
+            format!("UsersAI/./{y_segment}/memory/notes.md"),
+            format!("UsersAI//{y_segment}/memory/notes.md"),
+            format!("UsersAI/{x_segment}/../{y_segment}/memory/notes.md"),
+            x_root.clone(),
+            format!("{x_root}/memory/notes.md"),
+        ] {
+            let path = normalize_path(&raw);
+            assert!(
+                reject_principal_root_storage_path(&path).is_err(),
+                "P7 X's storage route accepted {raw:?} -> {path:?}"
+            );
+            assert_eq!(std::fs::read(&y_file).unwrap(), b"Y private bytes");
+        }
+        assert!(home.pending_store.list_pending().await.is_empty());
+    }
+
     /// Every principal-root path is refused on this route, however it is
     /// spelled: the guard must see what the route will use, after trimming.
     #[test]

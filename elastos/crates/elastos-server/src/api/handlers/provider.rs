@@ -237,6 +237,214 @@ mod tests {
     use elastos_runtime::session::SessionType;
     use tokio::sync::Mutex;
 
+    // These routes have no principal-bound provider entrance for a launched
+    // agent. The same-root checks therefore assert closure on this route.
+    async fn s5_launched_agent() -> (
+        crate::api::routes::tests::ProbeLaunch,
+        String,
+        String,
+        String,
+    ) {
+        let home = crate::api::routes::tests::ProbeLaunch::new(&["s5-x", "s5-y"]).await;
+        let x = home.agents[0].clone();
+        let y = home.agents[1].clone();
+        let vm_id = home.launched_instance_id(&x).await;
+        let x_root = home.root(&x);
+        let y_root = home.root(&y);
+        let y_file = home
+            .data_dir
+            .join(y_root.trim_start_matches("localhost://"))
+            .join("memory/notes.md");
+        std::fs::create_dir_all(y_file.parent().unwrap()).unwrap();
+        std::fs::write(y_file, b"Y private bytes").unwrap();
+        (home, vm_id, x_root, y_root)
+    }
+
+    fn s5_y_file_unchanged(home: &crate::api::routes::tests::ProbeLaunch, y_root: &str) {
+        let y_file = home
+            .data_dir
+            .join(y_root.trim_start_matches("localhost://"))
+            .join("memory/notes.md");
+        assert_eq!(std::fs::read(y_file).unwrap(), b"Y private bytes");
+    }
+
+    async fn s5_proxy_request(
+        scheme: &'static str,
+        op: &str,
+        body: Value,
+        vm_id: &str,
+        owner: &str,
+    ) -> (
+        Arc<CapturingSchemeProvider>,
+        Result<Json<Value>, (StatusCode, String)>,
+    ) {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new(scheme));
+        if scheme == "localhost" {
+            registry.register(provider.clone()).await;
+        } else {
+            registry
+                .register_sub_provider(scheme, provider.clone())
+                .await
+                .unwrap();
+        }
+        let manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            Arc::new(AuditLog::new()),
+            Arc::new(MetricsManager::new()),
+        ));
+        let session = Session::with_owner(
+            SessionType::Capsule,
+            Some(vm_id.to_owned()),
+            owner.to_owned(),
+        );
+        let resource = build_capability_resource(scheme, op, &body).unwrap();
+        let action = provider_operation_action(scheme, op).unwrap();
+        let token = manager.grant(
+            session.id.as_str(),
+            ResourceId::new(resource),
+            action,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Capability-Token",
+            HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
+        );
+        let result = provider_proxy(
+            State(ProviderProxyState {
+                registry,
+                capability_manager: Some(manager),
+            }),
+            Extension(session),
+            Path((scheme.to_owned(), op.to_owned())),
+            headers,
+            body.to_string(),
+        )
+        .await;
+        (provider, result)
+    }
+
+    #[tokio::test]
+    async fn s5_p5_object_proxy_refuses_x_and_y_objects() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, vm, x_root, y_root) = s5_launched_agent().await;
+        let x = home.agents[0].clone();
+        let y = home.agents[1].clone();
+        for (principal, root) in [(&y, &y_root), (&x, &x_root)] {
+            for op in [
+                "roots",
+                "list",
+                "stat",
+                "read",
+                "download",
+                "write",
+                "mkdir",
+                "rename",
+                "move",
+                "copy",
+                "trash",
+                "restore",
+                "delete_permanently",
+                "empty_trash",
+                "status",
+                "events",
+                "publish",
+                "unpublish",
+                "repair",
+                "share",
+                "list_runtime_custody",
+                "import_runtime_custody",
+                "buy",
+                "open_viewer",
+                "read_viewer",
+                "close_viewer",
+            ] {
+                let body = serde_json::json!({"principal_id": principal, "uri": format!("{root}/memory/notes.md"), "target_parent_uri": format!("{root}/memory"), "destination_uri": format!("{root}/memory")});
+                // The route must refuse before a provider interprets an object body.
+                let (provider, result) = s5_proxy_request("object", op, body, &vm, &x).await;
+                assert_eq!(
+                    result.expect_err(op).0,
+                    StatusCode::FORBIDDEN,
+                    "P5 {op} {principal}"
+                );
+                assert!(
+                    provider.requests.lock().await.is_empty(),
+                    "P5 {op} {principal}"
+                );
+            }
+        }
+        assert!(home.pending_store.list_pending().await.is_empty());
+        s5_y_file_unchanged(&home, &y_root);
+    }
+
+    #[tokio::test]
+    async fn s5_p6_localhost_proxy_refuses_x_and_y_roots() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, vm, x_root, y_root) = s5_launched_agent().await;
+        let x = home.agents[0].clone();
+        let y_segment = y_root.strip_prefix("localhost://UsersAI/").unwrap();
+        let spellings = [
+            y_root.clone(),
+            format!("{y_root}/memory/notes.md"),
+            "localhost://UsersAI".to_owned(),
+            "localhost://UsersAI/".to_owned(),
+            format!("localhost://UsersAI/./{y_segment}/memory/notes.md"),
+            format!("localhost://UsersAI//{y_segment}/memory/notes.md"),
+            format!("{x_root}/../{y_segment}/memory/notes.md"),
+        ];
+        let own_file = format!("{x_root}/memory/notes.md");
+        for path in spellings
+            .iter()
+            .map(String::as_str)
+            .chain([x_root.as_str(), own_file.as_str()])
+        {
+            for op in [
+                "read", "list", "write", "delete", "stat", "mkdir", "exists", "resolve",
+            ] {
+                let body = serde_json::json!({"path": path, "data": "changed"});
+                let (provider, result) = s5_proxy_request("localhost", op, body, &vm, &x).await;
+                assert_eq!(
+                    result.expect_err(op).0,
+                    StatusCode::FORBIDDEN,
+                    "P6 {op} {path}"
+                );
+                assert!(provider.requests.lock().await.is_empty(), "P6 {op} {path}");
+            }
+        }
+        assert!(home.pending_store.list_pending().await.is_empty());
+        s5_y_file_unchanged(&home, &y_root);
+    }
+
+    #[tokio::test]
+    async fn s5_p8_ipfs_proxy_refuses_x_and_y_files() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, vm, x_root, y_root) = s5_launched_agent().await;
+        let x = home.agents[0].clone();
+        for root in [&y_root, &x_root] {
+            let path = home.data_dir.join(root.trim_start_matches("localhost://"));
+            for op in ["add_path", "cat_to_path", "download_directory"] {
+                let body = serde_json::json!({"path": path, "dest": path, "cid": "fixture"});
+                let (provider, result) = s5_proxy_request("ipfs", op, body, &vm, &x).await;
+                assert_eq!(
+                    result.expect_err(op).0,
+                    StatusCode::FORBIDDEN,
+                    "P8 {op} {root}"
+                );
+                assert!(provider.requests.lock().await.is_empty(), "P8 {op} {root}");
+            }
+        }
+        assert!(home.pending_store.list_pending().await.is_empty());
+        s5_y_file_unchanged(&home, &y_root);
+    }
+
     #[derive(Default)]
     struct CapturingWalletProvider {
         requests: Mutex<Vec<Value>>,
