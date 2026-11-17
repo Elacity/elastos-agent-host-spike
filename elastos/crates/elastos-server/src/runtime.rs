@@ -2742,6 +2742,208 @@ pub(crate) mod tests {
         assert_eq!(provider.requests.lock().await.len(), 1, "nothing more");
     }
 
+    /// A6-R. Two component capsules are two instances, so two sessions, each
+    /// with its own grant set. A's token is minted for A's session and filed
+    /// for A; B's own pending request is settled with that same token, as a
+    /// shell that mixed the two up would. B's guest presents it and the real
+    /// bridge refuses it at `validate`'s caller step with `capability_denied`
+    /// before the provider is reached; the audit names B as the caller of the
+    /// failed use and `wrong_capsule` as the reason. A's own invoke is the
+    /// control: the provider is called exactly once, for A.
+    #[tokio::test]
+    async fn sibling_token_refused() {
+        use crate::bundle_admission::tests::{key, signed};
+        use crate::stage_cmd::{bundle_cid, stage_bundle};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let publisher = key(107);
+        let trusted = [hex::encode(publisher.verifying_key().to_bytes())];
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &trusted, false)
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store = Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
+        );
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(BusConformanceProvider::default());
+        registry.register(provider.clone()).await;
+        runtime
+            .set_provider_registry(
+                registry,
+                capability_manager.clone(),
+                pending_store.clone(),
+                temp_dir.path().join("runtime-data"),
+            )
+            .await;
+
+        let component = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"),
+        )
+        .unwrap();
+        let probe = "elastos://test/bus/probe";
+        // Stage a bundle named `name` whose manifest asks to read the probe.
+        let staged = |name: &'static str| {
+            let (runtime, data_dir, component) = (runtime.clone(), data_dir.clone(), &component);
+            let folder = temp_dir.path().join("source").join(name);
+            let signature = temp_dir.path().join(format!("{name}.sig.json"));
+            let publisher = &publisher;
+            async move {
+                let mut manifest: serde_json::Value =
+                    serde_json::from_str(&component_manifest_json(name)).unwrap();
+                manifest["asks"] = serde_json::json!([{"resource": probe, "actions": ["read"]}]);
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("capsule.json"), manifest.to_string()).unwrap();
+                std::fs::write(folder.join("app.component.wasm"), component).unwrap();
+                let cid = bundle_cid(&folder).unwrap();
+                std::fs::write(&signature, signed(&cid, publisher)).unwrap();
+                stage_bundle(&runtime, &data_dir, &folder, &signature)
+                    .await
+                    .unwrap();
+                cid
+            }
+        };
+        let start = |cid: String| {
+            let (runtime, data_dir) = (runtime.clone(), data_dir.clone());
+            tokio::spawn(async move {
+                let person = Some("person:local:bus-conformance".to_string());
+                runtime
+                    .run_by_bundle(&data_dir, &cid, Vec::new(), person)
+                    .await
+                    .map(|(handle, _)| handle)
+            })
+        };
+
+        let launch_a = start(staged("agent-a").await);
+        let launch_b = start(staged("agent-b").await);
+
+        // Two instances, two sessions: the one probe is asked for twice.
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let held = pending_store.list_pending().await;
+                if held.len() == 2 {
+                    break held;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both instances ask the shell for the probe");
+        let (a_pending, b_pending) = (pending[0].clone(), pending[1].clone());
+        let a_session = a_pending.session_id.as_str().to_string();
+        let b_session = b_pending.session_id.as_str().to_string();
+        assert_ne!(a_session, b_session, "two instances are two sessions");
+
+        // A's token, minted for A's session. Filed for A, and also handed to
+        // B's own pending request: the sibling token.
+        let a_token = capability_manager.grant(
+            &a_session,
+            a_pending.resource.clone(),
+            a_pending.action,
+            TokenConstraints::default(),
+            None,
+        );
+        for request in [&a_pending, &b_pending] {
+            pending_store
+                .grant_request(request.id.as_str(), a_token.clone(), GrantDuration::Session)
+                .await
+                .unwrap();
+        }
+
+        let (left, right) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(launch_a, launch_b)
+        })
+        .await
+        .expect("both activations end");
+        let (left, right) = (
+            left.expect("the first launch task does not panic"),
+            right.expect("the second launch task does not panic"),
+        );
+        assert_eq!(
+            provider.requests.lock().await.len(),
+            1,
+            "the provider is called once, for A; B's call never reaches it"
+        );
+        let (ran, refused) = match (left, right) {
+            (Ok(handle), Err(refusal)) | (Err(refusal), Ok(handle)) => (handle, refusal),
+            _ => panic!("exactly one instance uses its own grant and completes"),
+        };
+        assert_eq!(ran.id.0, a_session, "A's own token runs A's own instance");
+        assert_eq!(refused.code(), "bundle_start_failed");
+        assert!(
+            refused.to_string().contains("Capability validation failed"),
+            "B's invoke is refused by the capability check: {refused}"
+        );
+
+        let events = audit_log.recent_events(2_000);
+        let token_id = a_token.id().to_string();
+        let uses: Vec<(String, bool)> = events
+            .iter()
+            .filter_map(|event| match event {
+                AuditEvent::CapabilityUse {
+                    token_id: used,
+                    capsule_id,
+                    success,
+                    ..
+                } if used == &token_id => Some((capsule_id.clone(), *success)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            uses.contains(&(a_session.clone(), true)),
+            "A's use of its own token is audited with A as the caller: {uses:?}"
+        );
+        assert!(
+            uses.contains(&(b_session.clone(), false)),
+            "B's use of A's token is audited with B as the caller: {uses:?}"
+        );
+        assert_eq!(uses.len(), 2, "one use each: {uses:?}");
+
+        let warnings: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AuditEvent::SecurityWarning {
+                    warning_type,
+                    details,
+                    ..
+                } if warning_type == "capability_validation_failed" => Some(details.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one failed validation: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("wrong_capsule"),
+            "the audit records wrong_capsule as the reason: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains(&b_session),
+            "the same record names B as the caller: {}",
+            warnings[0]
+        );
+    }
+
     /// B2-undeclared. The signed asks are the whole ceiling. A request for a
     /// resource the asks never named is refused by the real bridge in the
     /// sentence that names the action and the resource, though the capsule is
