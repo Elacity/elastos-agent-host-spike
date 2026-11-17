@@ -1495,8 +1495,8 @@ mod tests {
 
     /// `origin` feeds the served CSP: the stand-in declares it on exactly one line,
     /// as the template the pin substitutes, and never writes it again. The stand-in
-    /// never calls `setHeader`, which would add a header to the document that the
-    /// map does not show.
+    /// never calls `setHeader`, `appendHeader` or `setHeaders`, which would add a
+    /// header to the document that the map does not show.
     fn stand_in_origin_and_setters(lines: &[&str]) {
         let origin = "const origin = `http://${request.headers.host}`;";
         let declared = lines
@@ -1512,13 +1512,13 @@ mod tests {
             "stand-in: `origin` is not declared as `{origin}`"
         );
         stand_in_never_mutated(lines, "origin", "stand-in origin");
-        if let Some((index, line)) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.contains("setHeader"))
-        {
+        if let Some((index, line)) = lines.iter().enumerate().find(|(_, line)| {
+            ["setHeader", "appendHeader", "setHeaders"]
+                .iter()
+                .any(|setter| line.contains(setter))
+        }) {
             panic!(
-                "stand-in line {} `{}` calls setHeader; served headers go only through the map",
+                "stand-in line {} `{}` sets a header outside the map; served headers go only through it",
                 index + 1,
                 line.trim()
             );
