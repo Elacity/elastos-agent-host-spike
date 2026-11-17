@@ -68,13 +68,6 @@ pub async fn provider_proxy(
     };
     request["op"] = Value::String(op.clone());
 
-    if scheme.eq_ignore_ascii_case("localhost") {
-        if let Some(path) = request.get("path").and_then(Value::as_str) {
-            reject_localhost_user_area_path(path)
-                .map_err(|message| (StatusCode::FORBIDDEN, message))?;
-        }
-    }
-
     // A launch name is the Runtime's own to answer, in its bridge, for the
     // program of a content launch. No provider serves it, from anyone.
     if scheme == "launch" {
@@ -108,6 +101,14 @@ pub async fn provider_proxy(
                 StatusCode::FORBIDDEN,
                 "principal_context_required: Agent journals are reachable only through the in-Runtime protected storage bridge".to_string(),
             ));
+        }
+        // A shell can still use ordinary localhost documents. Capsule and
+        // attached-bridge sessions have no principal-bound provider route.
+        if !session.is_shell() || headers.contains_key("X-Elastos-Capsule-Id") {
+            if let Some(path) = request.get("path").and_then(Value::as_str) {
+                reject_localhost_user_area_path(path)
+                    .map_err(|message| (StatusCode::FORBIDDEN, message))?;
+            }
         }
         // Forward the path the rule checked, not the raw text.
         request["path"] = Value::String(resource.clone());

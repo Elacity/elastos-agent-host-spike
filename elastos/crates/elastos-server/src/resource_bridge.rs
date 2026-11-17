@@ -724,6 +724,18 @@ async fn authorize_and_dispatch_resource_invoke(
         );
     }
 
+    if let Err(message) = reject_localhost_user_area_root(&dispatch.resource)
+        .and_then(|_| reject_localhost_parent_segments(&dispatch.resource))
+    {
+        return finish_component_invoke(
+            bridge_ctx,
+            &audit_id,
+            &dispatch,
+            "denied",
+            resource_error_response("invalid_resource_invoke", &message),
+        );
+    }
+
     if token_b64.is_empty() {
         return finish_component_invoke(
             bridge_ctx,
@@ -1202,9 +1214,8 @@ fn serialize_bridge_response(response: serde_json::Value) -> Vec<u8> {
     bytes
 }
 
-/// Apply the same area-root refusal at the capsule bridge and session HTTP routes.
-/// Empty and current-directory segments do not change the provider's target;
-/// parent segments are refused before any capability or provider lookup.
+/// Refuse bare user areas at the bridge and unscoped user paths at session HTTP.
+/// Empty and current-directory segments do not change the provider's target.
 pub(crate) fn reject_localhost_user_area_root(path_or_uri: &str) -> Result<(), String> {
     reject_localhost_user_area(path_or_uri, false)
 }
@@ -1213,21 +1224,43 @@ pub(crate) fn reject_localhost_user_area_path(path_or_uri: &str) -> Result<(), S
     reject_localhost_user_area(path_or_uri, true)
 }
 
+fn reject_localhost_parent_segments(path_or_uri: &str) -> Result<(), String> {
+    if rooted_localhost_uri(path_or_uri).is_some_and(|rooted| {
+        rooted
+            .trim_start_matches("localhost://")
+            .split('/')
+            .any(|segment| segment == "..")
+    }) {
+        return Err("localhost paths cannot contain ..".to_string());
+    }
+    Ok(())
+}
+
 fn reject_localhost_user_area(path_or_uri: &str, include_children: bool) -> Result<(), String> {
     let Some(rooted) = rooted_localhost_uri(path_or_uri) else {
         return Ok(());
     };
     let mut segments = rooted.trim_start_matches("localhost://").split('/');
     let root = segments.next().unwrap_or_default();
-    let mut has_child = false;
+    let mut child_depth = 0;
+    let mut has_parent = false;
     for segment in segments {
         match segment {
             "" | "." => {}
-            ".." => return Err("localhost paths cannot contain ..".to_string()),
-            _ => has_child = true,
+            ".." => {
+                has_parent = true;
+                if child_depth == 0 {
+                    return Err("localhost paths cannot contain ..".to_string());
+                }
+                child_depth -= 1;
+            }
+            _ => child_depth += 1,
         }
     }
-    if (include_children || !has_child) && matches!(root, "Users" | "UsersAI") {
+    if has_parent && (include_children || child_depth == 0) {
+        return Err("localhost paths cannot contain ..".to_string());
+    }
+    if (include_children || child_depth == 0) && matches!(root, "Users" | "UsersAI") {
         return Err("Capsules cannot access a localhost user area root".to_string());
     }
     Ok(())
@@ -1242,7 +1275,20 @@ fn scope_current_user_alias(
         return Ok(uri_or_resource.to_string());
     };
 
-    reject_localhost_user_area_root(&rooted)?;
+    // A parent spelling that collapses to an area root is invalid here. A
+    // plain area root reaches the manifest ceiling first, so a launched agent
+    // receives the same refusal as any other name beyond its own grant.
+    if let Err(message) = reject_localhost_user_area_root(&rooted) {
+        if message == "localhost paths cannot contain .." {
+            return Err(message);
+        }
+        let area = rooted
+            .trim_start_matches("localhost://")
+            .split('/')
+            .next()
+            .unwrap_or_default();
+        return Ok(format!("localhost://{area}"));
+    }
 
     // A5-S3a-2: the stored record's kind picks the one root area a principal may use.
     let Some(area) = ["Users", "UsersAI"]
@@ -1415,6 +1461,14 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                             resource,
                             &action.to_string(),
                         ),
+                    }));
+                }
+                if let Err(message) = reject_localhost_user_area_root(resource)
+                    .and_then(|_| reject_localhost_parent_segments(resource))
+                {
+                    return Ok(serde_json::json!({
+                        "id": id,
+                        "response": resource_error_response("principal_context_required", &message),
                     }));
                 }
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
@@ -1741,6 +1795,10 @@ pub async fn handle_remote_request_with_audit_dir(
                     &dispatch.resource,
                     &dispatch.required_action.to_string(),
                 ))
+            } else if let Err(message) = reject_localhost_user_area_root(&dispatch.resource)
+                .and_then(|_| reject_localhost_parent_segments(&dispatch.resource))
+            {
+                Some(resource_error_response("invalid_resource_invoke", &message))
             } else if cap_token.is_empty() {
                 Some(resource_error_response(
                     "missing_token",
@@ -1896,6 +1954,14 @@ pub async fn handle_remote_request_with_audit_dir(
                 return Ok(serde_json::json!({
                     "id": id,
                     "response": manifest_denied_response(manifest_capabilities, resource, &asked),
+                }));
+            }
+            if let Err(message) = reject_localhost_user_area_root(resource)
+                .and_then(|_| reject_localhost_parent_segments(resource))
+            {
+                return Ok(serde_json::json!({
+                    "id": id,
+                    "response": resource_error_response("principal_context_required", &message),
                 }));
             }
 
@@ -6802,8 +6868,10 @@ mod tests {
 
     #[tokio::test]
     async fn resource_invoke_refuses_bare_user_area_roots_before_provider() {
+        let data = stored_human_dir("person:local:active");
         let mut ctx = bridge_context();
         ctx.principal_id = Some("person:local:active".to_string());
+        ctx.data_dir = Some(data.path().to_path_buf());
         ctx.manifest_capabilities = any_action(vec![
             "localhost://Users".to_string(),
             "localhost://UsersAI".to_string(),
