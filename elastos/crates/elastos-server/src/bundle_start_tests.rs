@@ -3263,3 +3263,98 @@ async fn a_kept_launch_serves_the_page_its_content_pins() {
         "a gone launch"
     );
 }
+
+/// R-grants-nothing. A component signed by a trusted publisher, whose signed
+/// manifest asks nothing, starts by its CID for a person. The signature is all
+/// it has: its one bridge call is denied by the seal; this Home's own bridge
+/// handler never sees the call.
+#[tokio::test]
+async fn a_signature_grants_nothing() {
+    let publisher = key(71);
+    let home = Home::trusting(&[&publisher]).await;
+    let name = "grants-nothing";
+    let manifest_json = manifest(name);
+    let asks: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_json).unwrap();
+    assert!(asks.asks.is_empty(), "the signed manifest asks nothing");
+    let cid = home
+        .staged(
+            "grants-nothing",
+            &manifest_json,
+            &calling_component(),
+            &publisher,
+        )
+        .await;
+
+    let refusal = home.run(&cid, Some(PERSON)).await.unwrap_err();
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "bundle_start_failed: Compute error: Component capsule denied: BusError::Denied({SEALED_BRIDGE:?})"
+        ),
+        "the trusted signature admitted the start, and the seal denied its call"
+    );
+    assert_eq!(
+        home.calls(),
+        Vec::new(),
+        "this Home's bridge handler never saw a call from the signed capsule"
+    );
+}
+
+/// D1a-http-hash. `POST /api/launch/open` starts a signed content bundle by
+/// its CID for a Home token, and the same request on a slot whose entrypoint
+/// changed is refused by the mismatch code.
+#[tokio::test]
+async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tampered_one() {
+    use crate::api::routes::kept_launch_test_tokens as tokens;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use tower::ServiceExt;
+    let publisher = key(95);
+    let home = Home::trusting(&[&publisher]).await;
+    let picture = b"the bytes of a picture".to_vec();
+    let (cid, _) = staged_quiet_set(&home, &publisher, &picture).await;
+    let data = home.data();
+    let app = axum::Router::new()
+        .route("/api/launch/open", post(crate::api::routes::open_launch))
+        .layer(axum::Extension(Some(data.clone())))
+        .layer(axum::Extension(home.runtime.clone()));
+    let open = |cid: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/launch/open")
+            .header("content-type", "application/json")
+            .header("x-elastos-home-token", tokens::home(&data))
+            .body(Body::from(serde_json::json!({"cid": cid}).to_string()))
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let answer = app.oneshot(request).await.unwrap();
+            let status = answer.status();
+            let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body.to_vec())
+        }
+    };
+
+    let (status, body) = send(open(&cid)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let opened: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(opened["page"], "page");
+    assert_eq!(home.runtime.kept_launch_count(), 1);
+
+    let mut changed = picture.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    home.overwrite(&cid, ENTRYPOINT, &changed);
+    let (status, body) = send(open(&cid)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8_lossy(&body).starts_with("bundle_cid_mismatch: "),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(home.runtime.kept_launch_count(), 1, "nothing new kept");
+}
