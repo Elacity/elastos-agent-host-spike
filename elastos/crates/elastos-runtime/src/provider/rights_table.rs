@@ -1,5 +1,6 @@
 //! Runtime-owned confinement rights for the three B3 providers.
 
+#[derive(Clone, Copy)]
 pub(super) struct RightRow {
     pub id: &'static str,
     pub rules: &'static [&'static str],
@@ -19,14 +20,47 @@ pub(super) const RIGHTS: &[RightRow] = &[
     },
 ];
 
-/// A v2 package without `rights` uses these Runtime-owned rows by name.
-/// Other providers remain outside B3 until they declare rights.
+const DID_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
+const WALLET_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
+const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
+
+/// The later caller derives this id from the Runtime's `components.json` key,
+/// never from the package manifest's `name`.
 #[allow(dead_code)] // The spawn caller is added in a later slice.
-pub(super) fn for_provider(name: &str) -> Option<&'static [RightRow]> {
-    match name {
-        "did-provider" | "wallet-provider" | "model-provider" => Some(RIGHTS),
-        _ => None,
+#[derive(Clone, Copy)]
+pub(super) enum RuntimeProviderId {
+    Did,
+    Wallet,
+    Model,
+}
+
+impl RuntimeProviderId {
+    fn rights(self) -> &'static [&'static str] {
+        match self {
+            Self::Did => DID_RIGHT_IDS,
+            Self::Wallet => WALLET_RIGHT_IDS,
+            Self::Model => MODEL_RIGHT_IDS,
+        }
     }
+}
+
+fn resolve(provider: RuntimeProviderId, dictionary: &[RightRow]) -> Vec<&RightRow> {
+    provider
+        .rights()
+        .iter()
+        .map(|id| {
+            dictionary
+                .iter()
+                .find(|row| row.id == *id)
+                .unwrap_or_else(|| panic!("Runtime right {id} is missing from the dictionary"))
+        })
+        .collect()
+}
+
+/// A v2 package without `rights` uses its Runtime-owned provider grant.
+#[allow(dead_code)] // The spawn caller is added in a later slice.
+pub(super) fn for_provider(provider: RuntimeProviderId) -> Vec<&'static RightRow> {
+    resolve(provider, RIGHTS)
 }
 
 #[cfg(test)]
@@ -37,7 +71,12 @@ mod tests {
     #[test]
     fn manifest_ids_and_rules_equal_runtime_table() {
         let table_ids: Vec<_> = RIGHTS.iter().map(|row| row.id).collect();
-        for name in ["did-provider", "wallet-provider", "model-provider"] {
+        for (name, provider) in [
+            ("did-provider", RuntimeProviderId::Did),
+            ("wallet-provider", RuntimeProviderId::Wallet),
+            ("model-provider", RuntimeProviderId::Model),
+        ] {
+            let granted = for_provider(provider);
             let path = format!(
                 "{}/../../../capsules/{name}/capsule.json",
                 env!("CARGO_MANIFEST_DIR")
@@ -50,20 +89,46 @@ mod tests {
                     .iter()
                     .map(|right| right.id.as_str())
                     .collect::<Vec<_>>(),
-                table_ids,
+                provider.rights(),
                 "{name} ids"
             );
-            for (right, row) in rights.iter().zip(RIGHTS) {
+            for (right, row) in rights.iter().zip(&granted) {
                 assert_eq!(right.rules, row.rules, "{name}: {} rules", row.id);
             }
             let mut v2: serde_json::Value = serde_json::from_str(&json).unwrap();
             v2["authority"].as_object_mut().unwrap().remove("rights");
             let v2: CapsuleManifest = serde_json::from_value(v2).unwrap();
             assert!(v2.authority.unwrap().rights.is_empty());
-            assert_eq!(for_provider(name).unwrap().len(), RIGHTS.len());
+            assert_eq!(
+                granted.iter().map(|row| row.id).collect::<Vec<_>>(),
+                provider.rights(),
+                "{name} omitted rights grant"
+            );
         }
         assert_eq!(APPROVED_RIGHT_IDS.as_slice(), table_ids);
-        assert!(for_provider("other-provider").is_none());
+    }
+
+    #[test]
+    fn new_dictionary_id_is_not_granted_by_default() {
+        let mut expanded = RIGHTS.to_vec();
+        expanded.push(RightRow {
+            id: "future-only",
+            rules: &["future rule"],
+        });
+        for provider in [
+            RuntimeProviderId::Did,
+            RuntimeProviderId::Wallet,
+            RuntimeProviderId::Model,
+        ] {
+            assert_eq!(
+                resolve(provider, &expanded)
+                    .iter()
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>(),
+                provider.rights(),
+                "new dictionary id must require a provider grant"
+            );
+        }
     }
 
     #[test]
@@ -72,13 +137,26 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../../capsules/wallet-provider/tests/common/profile_generator.rs"
         ));
-        let line = lab
+        let declarations: Vec<_> = lab
             .lines()
-            .find(|line| line.contains("const CONTRACT_RIGHTS:"))
-            .unwrap();
-        let ids: Vec<String> =
-            serde_json::from_str(line.split_once('=').unwrap().1.trim().trim_end_matches(';'))
-                .unwrap();
+            .filter(|line| {
+                line.trim_start()
+                    .starts_with("pub(crate) const CONTRACT_RIGHTS:")
+            })
+            .collect();
+        assert_eq!(
+            declarations.len(),
+            1,
+            "expected exactly one lab CONTRACT_RIGHTS declaration"
+        );
+        let line = declarations[0].trim();
+        let values = line
+            .strip_prefix("pub(crate) const CONTRACT_RIGHTS: [&str; ")
+            .and_then(|line| line.split_once("] = "))
+            .map(|(_, values)| values.trim_end_matches(';'))
+            .expect("lab CONTRACT_RIGHTS must be one complete array declaration line");
+        let ids: Vec<String> = serde_json::from_str(values)
+            .expect("lab CONTRACT_RIGHTS values must be a string array");
         assert_eq!(
             ids,
             RIGHTS

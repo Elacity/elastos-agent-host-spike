@@ -1206,8 +1206,9 @@ pub struct ProviderAuthority {
     /// Approved confinement rights (I-B3-5), in the declared-rights contract
     /// shape: an id, then the confinement rules that id grants.
     ///
-    /// Absent means no rights, and a Runtime refuses a confined start that has
-    /// none. This is a schema change: `deny_unknown_fields` makes an older
+    /// For a B3 provider, absence selects the confinement rights granted by
+    /// the Runtime table for its Runtime-owned provider id. This is a schema
+    /// change: `deny_unknown_fields` makes an older
     /// Runtime refuse a manifest that carries this field, which fails closed.
     #[serde(default)]
     pub rights: Vec<ProviderRight>,
