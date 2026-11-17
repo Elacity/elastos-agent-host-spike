@@ -48,8 +48,8 @@ pub struct CapsuleManifest {
 
     /// SHA-256 of the WIT world this capsule was built against.
     ///
-    /// For `elastos.component/v1`, this must match the checked-in
-    /// `elastos/wit/elastos-bus-v1.wit` contract.
+    /// For `elastos.component/v1`, this must match the checked-in WIT for
+    /// the declared Bus contract.
     #[serde(default)]
     pub wit_world_sha256: Option<String>,
 
@@ -424,12 +424,19 @@ pub enum AffordanceAuditMode {
 pub const SCHEMA_V1: &str = "elastos.capsule/v1";
 pub const ELASTOS_BUS_V1_CONTRACT: &str = "elastos:bus@v1";
 pub const ELASTOS_BUS_V1_WORLD: &str = "product-capsule-v1";
+pub const ELASTOS_BUS_V2_CONTRACT: &str = "elastos:bus@2.0.0";
+pub const ELASTOS_BUS_V2_WORLD: &str = "product-capsule-v2";
 pub const ELASTOS_RUNTIME_PROJECTION_V1_CONTRACT: &str = "elastos.runtime-projection/v1";
 
 const ELASTOS_BUS_V1_WIT: &[u8] = include_bytes!("../../../wit/elastos-bus-v1.wit");
+const ELASTOS_BUS_V2_WIT: &[u8] = include_bytes!("../../../wit-bus-v2/elastos-bus-v2.wit");
 
 pub fn elastos_bus_v1_wit_sha256() -> String {
     hex::encode(Sha256::digest(ELASTOS_BUS_V1_WIT))
+}
+
+pub fn elastos_bus_v2_wit_sha256() -> String {
+    hex::encode(Sha256::digest(ELASTOS_BUS_V2_WIT))
 }
 
 impl CapsuleManifest {
@@ -785,6 +792,7 @@ impl CapsuleManifest {
         self.runtime_abi.as_ref() == Some(&CapsuleRuntimeAbi::ElastosComponentV1)
             || self.execution.as_ref() == Some(&CapsuleExecution::Component)
             || self.bus_contract.as_deref() == Some(ELASTOS_BUS_V1_CONTRACT)
+            || self.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT)
     }
 
     pub fn is_runtime_projection(&self) -> bool {
@@ -895,17 +903,24 @@ impl CapsuleManifest {
             if self.execution.as_ref() != Some(&CapsuleExecution::Component) {
                 return Err("component capsules must declare execution=\"component\"".to_string());
             }
-            if self.bus_contract.as_deref() != Some(ELASTOS_BUS_V1_CONTRACT) {
-                return Err(format!(
-                    "component capsules must declare bus_contract=\"{}\"",
-                    ELASTOS_BUS_V1_CONTRACT
-                ));
-            }
-            let expected_hash = elastos_bus_v1_wit_sha256();
+            let (expected_hash, world) = match self.bus_contract.as_deref() {
+                Some(ELASTOS_BUS_V1_CONTRACT) => {
+                    (elastos_bus_v1_wit_sha256(), ELASTOS_BUS_V1_WORLD)
+                }
+                Some(ELASTOS_BUS_V2_CONTRACT) => {
+                    (elastos_bus_v2_wit_sha256(), ELASTOS_BUS_V2_WORLD)
+                }
+                _ => {
+                    return Err(format!(
+                        "component capsules must declare bus_contract=\"{}\"",
+                        ELASTOS_BUS_V1_CONTRACT
+                    ));
+                }
+            };
             if self.wit_world_sha256.as_deref() != Some(expected_hash.as_str()) {
                 return Err(format!(
                     "component capsules must declare wit_world_sha256=\"{}\" for {}",
-                    expected_hash, ELASTOS_BUS_V1_WORLD
+                    expected_hash, world
                 ));
             }
         }
@@ -1937,6 +1952,38 @@ mod tests {
             manifest.wit_world_sha256.as_deref(),
             Some(elastos_bus_v1_wit_sha256().as_str())
         );
+    }
+
+    #[test]
+    fn v2_manifest_requires_the_v2_wit_hash() {
+        let mut value = serde_json::json!({
+            "schema": SCHEMA_V1, "version": "0.1.0", "name": "v2-fixture",
+            "role": "app", "type": "wasm", "runtime_abi": "elastos.component/v1",
+            "execution": "component", "entrypoint": "main.component.wasm",
+            "bus_contract": ELASTOS_BUS_V2_CONTRACT,
+            "wit_world_sha256": elastos_bus_v2_wit_sha256()
+        });
+        assert_ne!(elastos_bus_v1_wit_sha256(), elastos_bus_v2_wit_sha256());
+        let manifest: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
+        assert!(manifest.is_component_capsule());
+        manifest.validate().unwrap();
+        let mut contract_only = manifest.clone();
+        contract_only.runtime_abi = None;
+        contract_only.execution = None;
+        assert!(contract_only.is_component_capsule());
+
+        value["wit_world_sha256"] = serde_json::json!(elastos_bus_v1_wit_sha256());
+        let wrong_hash: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
+        let error = wrong_hash.validate().unwrap_err();
+        assert!(error.contains(ELASTOS_BUS_V2_WORLD), "{error}");
+        assert!(error.contains(&elastos_bus_v2_wit_sha256()), "{error}");
+
+        value["bus_contract"] = serde_json::json!(ELASTOS_BUS_V1_CONTRACT);
+        value["wit_world_sha256"] = serde_json::json!(elastos_bus_v2_wit_sha256());
+        let wrong_contract: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let error = wrong_contract.validate().unwrap_err();
+        assert!(error.contains(ELASTOS_BUS_V1_WORLD), "{error}");
+        assert!(error.contains(&elastos_bus_v1_wit_sha256()), "{error}");
     }
 
     #[test]
