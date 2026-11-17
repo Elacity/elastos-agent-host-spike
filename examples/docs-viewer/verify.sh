@@ -30,11 +30,20 @@ finish() { # <the line for a complete run>
 }
 
 
+# The recorded container hash: the whole record, the check itself, and the
+# reference artifact's bytes (the container build the record names). A native
+# build cannot match: the record is the pinned-container route.
+HASH_ARTIFACT="${REPO_ROOT}/examples/capsule-kit/repro/reference/docs-viewer.component.wasm"
+hash_gate() { python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" "$@"; }
+if [[ "${ELASTOS_HASH_NAMES:-0}" == "1" ]]; then
+    hash_gate docs-viewer --artifact "${HASH_ARTIFACT}" --names
+    exit 0
+fi
+
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" docs-viewer
 
-# The recorded container hash: the whole record, and the check itself.
-python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" docs-viewer
-python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" docs-viewer --falsify
+hash_gate docs-viewer --artifact "${HASH_ARTIFACT}"
+hash_gate docs-viewer --artifact "${HASH_ARTIFACT}" --falsify
 
 # Check and restore the gate falsifier before Bash reads the branch below.
 python3 -I "${VIEWER_DIR}/verify_gate_test.py"

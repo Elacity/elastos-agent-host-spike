@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""One viewer's recorded container hash: the record entry and the check itself.
+"""One viewer's recorded container hash, checked against the artifact's bytes.
 
 Usage: recorded_hash_gate.py <viewer-name> [--artifact FILE] [--record FILE]
-       recorded_hash_gate.py <viewer-name> --falsify
+                             [--names] [--falsify]
 
-The whole record is read, so one changed value fails every gate by name. With
---artifact, check-recorded-hash.py also compares a built artifact with the
-record. ELASTOS_RECORDED_HASHES, else recorded-hashes.txt here.
+The whole record is read, so one changed value fails every gate by name. The
+artifact hashed is --artifact, else the reference artifact of that name under
+repro/reference/ (the container-built bytes the record names); check-recorded-hash.py
+compares its bytes with the record. --names prints the one name this run checked,
+for recorded_names_test.py. ELASTOS_RECORDED_HASHES, else recorded-hashes.txt here.
 """
 import argparse
 import hashlib
@@ -18,6 +20,7 @@ import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 CHECK = HERE / "check-recorded-hash.py"
+REFERENCE = HERE / "reference"
 
 
 def entries(record):
@@ -36,7 +39,8 @@ def check(name, artifact, record):
     result = subprocess.run([sys.executable, "-I", str(CHECK), name, str(artifact),
                              "--record", str(record)], capture_output=True, text=True)
     if result.returncode or result.stdout:
-        sys.exit(f"recorded hash gate {name}: {(result.stderr or result.stdout).strip()}")
+        detail = (result.stderr or result.stdout).strip()
+        sys.exit(f"recorded hash gate {name}: MISMATCH: {detail}")
 
 
 def self_test():
@@ -54,14 +58,20 @@ def self_test():
             sys.exit("the recorded hash check did not refuse changed bytes by name")
 
 
+def changed(value):
+    """A valid 64-character value that differs from the recorded one."""
+    return value[:-1] + ("0" if value[-1] != "0" else "1")
+
+
 def falsify(name, record):
     with tempfile.TemporaryDirectory() as temporary:
         copy = pathlib.Path(temporary) / "recorded-hashes.txt"
-        copy.write_text("".join(f"{n} {'0' if n == name else v}\n" for n, v in entries(record)))
+        copy.write_text("".join(f"{n} {changed(v) if n == name else v}\n"
+                                for n, v in entries(record)))
         result = subprocess.run([sys.executable, "-I", __file__, name], capture_output=True,
                                 text=True, env=dict(os.environ, ELASTOS_RECORDED_HASHES=str(copy)))
-        if result.returncode == 0 or name not in result.stderr:
-            sys.exit(f"a changed {name} value was not caught by name:\n{result.stderr}")
+        if result.returncode == 0 or name not in result.stderr or "MISMATCH" not in result.stderr:
+            sys.exit(f"a changed {name} value was not caught as a mismatch by name:\n{result.stderr}")
         print(f"caught: a changed {name} value in the record -> {name}")
 
 
@@ -72,17 +82,24 @@ def main():
     parser.add_argument("--record", type=pathlib.Path,
                         default=pathlib.Path(os.environ.get("ELASTOS_RECORDED_HASHES")
                                              or HERE / "recorded-hashes.txt"))
+    parser.add_argument("--names", action="store_true",
+                        help="print the one name this run checked, for the gate-listing test")
     parser.add_argument("--falsify", action="store_true")
     args = parser.parse_args()
     names = [name for name, _ in entries(args.record)]
     if args.name not in names:
         sys.exit(f"{args.record}: no recorded hash for {args.name}")
-    if args.artifact is not None:
-        check(args.name, args.artifact, args.record)
+    artifact = args.artifact or REFERENCE / f"{args.name}.component.wasm"
+    if not artifact.is_file():
+        sys.exit(f"recorded hash gate {args.name}: no artifact at {artifact}")
+    check(args.name, artifact, args.record)
     self_test()
     if args.falsify:
         falsify(args.name, args.record)
-    print(f"recorded hash gate {args.name}: OK, {len(names)} recorded names")
+    if args.names:
+        print(f"checked-name: {args.name}")
+    print(f"recorded hash gate {args.name}: OK, {len(names)} recorded names, "
+          f"artifact {artifact.name} matches")
 
 
 if __name__ == "__main__":

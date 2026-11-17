@@ -22,6 +22,8 @@ python3 -I "${KIT_DIR}/../falsify/test_falsify_kit.py"
 # Every name in the hash record is checked by some viewer gate.
 python3 -I "${KIT_DIR}/../repro/recorded_names_test.py"
 python3 -I "${KIT_DIR}/../repro/recorded_names_test.py" --falsify
+# The build entry point's container fallback gets the capsule folder.
+python3 -I "${KIT_DIR}/../repro/build_entry_test.py"
 # The runner's own rules, each broken in a temporary copy: its test must fail.
 python3 -I "${KIT_DIR}/../falsify/plant_falsify_kit.py"
 python3 -I "${KIT_DIR}/falsify.py"

@@ -21,7 +21,11 @@ CAPSULE="$(cd "${CAPSULE}" && pwd)"
 if [[ -x "${CAPSULE}/build.sh" ]]; then
     exec "${CAPSULE}/build.sh"
 fi
+# A capsule whose build is its container recipe: the kit's recipe takes the
+# capsule folder relative to the repository root, the path it uses inside the
+# mounted checkout.
 if [[ -x "${CAPSULE}/repro/build-in-container.sh" ]]; then
-    exec "${CAPSULE}/repro/build-in-container.sh"
+    CAPSULE_REL="${CAPSULE#"${REPO_ROOT}/"}"
+    exec "${CAPSULE}/repro/build-in-container.sh" "${CAPSULE_REL}"
 fi
 exec "${REPO_ROOT}/scripts/build-component-capsule.sh" "${CAPSULE}"

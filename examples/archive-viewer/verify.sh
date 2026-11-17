@@ -100,6 +100,17 @@ if [[ $GATE -eq 1 && $RUNTIME -ne 1 ]]; then
     exit 1
 fi
 
+# The recorded container hash: the whole record, the check itself, and the
+# reference artifact's bytes (the container build the record names). A native
+# build cannot match: the record is the pinned-container route. The listing
+# mode runs that same hash_gate call and stops, for recorded_names_test.py.
+HASH_ARTIFACT="${REPO_ROOT}/examples/capsule-kit/repro/reference/archive-viewer.component.wasm"
+hash_gate() { python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" "$@"; }
+if [[ "${ELASTOS_HASH_NAMES:-0}" == "1" ]]; then
+    hash_gate archive-viewer --artifact "${HASH_ARTIFACT}" --names
+    exit 0
+fi
+
 python3 -I "${VIEWER_DIR}/falsify_restore_test.py"
 python3 -I "${VIEWER_DIR}/falsify_restore_test.py" --falsify
 python3 -I - "$VIEWER_DIR" <<'PY'
@@ -123,9 +134,8 @@ install_snapshot_traps
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
     "${VIEWER_DIR}/capsule.json" "${WIT}" archive-viewer
 
-# The recorded container hash: the whole record, and the check itself.
-python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" archive-viewer
-python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" archive-viewer --falsify
+hash_gate archive-viewer --artifact "${HASH_ARTIFACT}"
+hash_gate archive-viewer --artifact "${HASH_ARTIFACT}" --falsify
 
 cargo fmt --manifest-path "${VIEWER_DIR}/Cargo.toml" --all -- --check
 cargo clippy --locked --manifest-path "${VIEWER_DIR}/Cargo.toml" --all-targets -- -D warnings
