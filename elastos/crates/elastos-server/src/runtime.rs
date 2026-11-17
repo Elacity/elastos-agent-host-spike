@@ -1172,8 +1172,8 @@ pub(crate) mod tests {
     }
 
     #[derive(Default)]
-    struct BusConformanceProvider {
-        requests: Mutex<Vec<serde_json::Value>>,
+    pub(crate) struct BusConformanceProvider {
+        pub(crate) requests: Mutex<Vec<serde_json::Value>>,
     }
 
     #[async_trait]
