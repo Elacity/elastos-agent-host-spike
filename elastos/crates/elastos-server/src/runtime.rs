@@ -2739,6 +2739,150 @@ pub(crate) mod tests {
         assert_eq!(provider.requests.lock().await.len(), 1, "nothing more");
     }
 
+    /// B2-undeclared. The signed asks are the whole ceiling. A request for a
+    /// resource the asks never named is refused by the real bridge in the
+    /// sentence that names the action and the resource, though the capsule is
+    /// loaded unsealed because it has asks: no prompt is made and the
+    /// provider is not reached. The control is the same component under an
+    /// ask on the resource it requests: it reaches the shell, and granted
+    /// there it reads once and ends well.
+    #[tokio::test]
+    async fn a_request_for_a_resource_the_signed_manifest_never_asked_for_is_refused() {
+        use crate::bundle_admission::tests::{key, signed};
+        use crate::stage_cmd::{bundle_cid, stage_bundle};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let publisher = key(103);
+        let trusted = [hex::encode(publisher.verifying_key().to_bytes())];
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &trusted, false)
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store = Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
+        );
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(BusConformanceProvider::default());
+        registry.register(provider.clone()).await;
+        runtime
+            .set_provider_registry(
+                registry,
+                capability_manager.clone(),
+                pending_store.clone(),
+                temp_dir.path().join("runtime-data"),
+            )
+            .await;
+
+        let component = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"),
+        )
+        .unwrap();
+        let probe = "elastos://test/bus/probe";
+        let elsewhere = "elastos://test/bus/elsewhere";
+        // Stage a bundle named `name` whose asks declare `actions` on `resource`.
+        let staged = |name: &'static str,
+                      resource: &'static str,
+                      actions: &'static [&'static str]| {
+            let (runtime, data_dir, component) = (runtime.clone(), data_dir.clone(), &component);
+            let folder = temp_dir.path().join("source").join(name);
+            let signature = temp_dir.path().join(format!("{name}.sig.json"));
+            let publisher = &publisher;
+            async move {
+                let mut manifest: serde_json::Value =
+                    serde_json::from_str(&component_manifest_json(name)).unwrap();
+                manifest["asks"] = serde_json::json!([{"resource": resource, "actions": actions}]);
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("capsule.json"), manifest.to_string()).unwrap();
+                std::fs::write(folder.join("app.component.wasm"), component).unwrap();
+                let cid = bundle_cid(&folder).unwrap();
+                std::fs::write(&signature, signed(&cid, publisher)).unwrap();
+                stage_bundle(&runtime, &data_dir, &folder, &signature)
+                    .await
+                    .unwrap();
+                cid
+            }
+        };
+        let start = |cid: String| {
+            let (runtime, data_dir) = (runtime.clone(), data_dir.clone());
+            tokio::spawn(async move {
+                let person = Some("person:local:bus-conformance".to_string());
+                let ran = runtime.run_by_bundle(&data_dir, &cid, Vec::new(), person);
+                ran.await.map(|(handle, _)| handle.manifest.name)
+            })
+        };
+
+        // The control: the ask names the resource the component requests.
+        let launch = start(staged("asks-probe", probe, &["read"]).await);
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = pending_store.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a request inside the asks reaches the shell");
+        assert_eq!(pending.resource.as_str(), probe);
+        assert_eq!(pending.action, elastos_runtime::capability::Action::Read);
+        let token = capability_manager.grant(
+            pending.session_id.as_str(),
+            pending.resource.clone(),
+            pending.action,
+            TokenConstraints::default(),
+            None,
+        );
+        pending_store
+            .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+            .await
+            .unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), launch)
+            .await
+            .expect("the run ends after the grant")
+            .expect("the launch task does not panic");
+        assert_eq!(ended.unwrap(), "asks-probe");
+
+        // Beyond the asks: the resource is not one the signed manifest asked
+        // for, though the same ask would admit it with one word changed.
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            start(staged("asks-elsewhere", elsewhere, &["read"]).await),
+        )
+        .await
+        .expect("a refused run ends at once")
+        .expect("the launch task does not panic")
+        .expect_err("the request for the probe is refused");
+        assert_eq!(refused.code(), "bundle_start_failed");
+        let sentence = format!("capsule manifest does not declare authority to read {probe}");
+        assert!(refused.to_string().contains(&sentence), "{refused}");
+        assert!(
+            pending_store.list_pending().await.is_empty(),
+            "no prompt was made"
+        );
+        assert_eq!(
+            provider.requests.lock().await.len(),
+            1,
+            "the provider saw only the granted read"
+        );
+    }
+
     #[tokio::test]
     async fn component_conformance_exercises_bus_authorization_dispatch_and_audit() {
         let temp_dir = tempfile::tempdir().unwrap();

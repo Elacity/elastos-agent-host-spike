@@ -3236,3 +3236,131 @@ async fn a_kept_launch_serves_the_page_its_content_pins() {
         "a gone launch"
     );
 }
+
+/// B2-edit. An ask is inside the bytes the CID names, so an edit to the asks
+/// is an edit to the signed bundle. One more action in the ask gives the
+/// folder another CID; the slot staged under the old CID holds that edited
+/// manifest, so the start recomputes and refuses, naming both CIDs, with the
+/// old bundle's signature file still beside it and still the signature that
+/// was made over the old CID. The edited folder, signed under its own CID,
+/// starts under its own asks. The control is the bundle as signed: it starts
+/// unsealed, and the ceiling recorded at its call is the ask it was signed
+/// with.
+#[tokio::test]
+async fn changing_an_ask_changes_the_cid_and_the_signed_launch_is_refused() {
+    let publisher = key(101);
+    let home = Home::trusting(&[&publisher]).await;
+    let read = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    let read_and_write = serde_json::json!([
+        {"resource": "elastos://test/bus/probe", "actions": ["read", "write"]}
+    ]);
+    let folder = home.bundle(
+        "asked",
+        &manifest_with("asked", "asks", read),
+        &calling_component(),
+    );
+    let cid = home.stage(&folder, &publisher).await;
+    let edited_manifest = manifest_with("asked", "asks", read_and_write);
+
+    // One more action in that ask: the folder is another bundle, because the
+    // ask is one of the bytes the CID names.
+    fs::write(folder.join("capsule.json"), &edited_manifest).unwrap();
+    let edited = bundle_cid(&folder).unwrap();
+    assert_ne!(edited, cid, "an ask is inside the signed bytes");
+
+    // The control: the slot staged before the edit still starts under the ask
+    // that was signed, unsealed, and the ceiling recorded at its call is that
+    // ask.
+    home.run(&cid, Some(PERSON)).await.unwrap_err();
+    let calls = home.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].2,
+        Some(vec!["elastos://test/bus/probe [read]".to_string()]),
+        "the ceiling at the call is the signed ask"
+    );
+
+    // The slot staged under the old CID now holds the edited manifest: the
+    // start recomputes the CID of the bytes and refuses the mismatch.
+    home.overwrite(&cid, "capsule.json", edited_manifest.as_bytes());
+    assert_eq!(
+        home.run(&cid, None).await.unwrap_err(),
+        BundleRefusal::CidMismatch {
+            asked: cid.clone(),
+            computed: edited.clone()
+        }
+    );
+    // Not a missing or a tampered signature: the file is where staging put
+    // it and holds exactly the signature the publisher made over the old CID.
+    let signature = bundle_signature_path(&home.data(), &cid.parse().unwrap());
+    assert_eq!(fs::read(&signature).unwrap(), signed(&cid, &publisher));
+
+    // The edited folder signed under its own CID starts under its own asks.
+    assert_eq!(home.stage(&folder, &publisher).await, edited);
+    home.run(&edited, Some(PERSON)).await.unwrap_err();
+    assert_eq!(
+        home.calls().last().unwrap().2,
+        Some(vec!["elastos://test/bus/probe [read, write]".to_string()]),
+        "the edited ask is the ceiling now"
+    );
+}
+
+/// B2-file. The lab's `asks.json` is bytes in the closure and never authority
+/// at a start by CID. A bundle whose `capsule.json` declares no asks starts
+/// sealed with that file beside its manifest: the admitted manifest's asks
+/// stay empty, its ceiling is empty, and no handler sees the component's
+/// call. And no file of the server reads a file by that name: the start has
+/// one source of asks, the `capsule.json` the walk checked.
+#[tokio::test]
+async fn a_lab_asks_json_beside_the_bundle_is_never_read_by_the_start() {
+    use crate::bundle_admission::admit_bundle_manifest;
+    use elastos_bundle_identity::checked_bundle_within as walk;
+    let publisher = key(102);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("lab-asks", &manifest("lab-asks"), &calling_component());
+    // An ask for the resource the component requests, in the file the lab's
+    // agent-host declares its asks in. The start must not take it.
+    let lab = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    fs::write(folder.join("asks.json"), lab.to_string()).unwrap();
+    let cid = home.stage(&folder, &publisher).await;
+
+    // The file is in the closure and adds nothing to the manifest.
+    let slot = bundle_slot(&home.data(), &cid.parse().unwrap());
+    let checked = walk(&slot, BUNDLE_WALK_BUDGET).unwrap();
+    assert!(checked.entry("asks.json").is_some(), "read as bytes");
+    let admitted = admit_bundle_manifest(&checked).unwrap();
+    assert!(admitted.manifest.asks.is_empty());
+    assert_eq!(
+        admitted.manifest.resource_authority_bounds(),
+        Vec::<String>::new()
+    );
+
+    // And the capsule runs sealed: its call never reaches a handler.
+    let refusal = home.run(&cid, Some(PERSON)).await.unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .ends_with(&format!("BusError::Denied({SEALED_BRIDGE:?})")),
+        "{refusal}"
+    );
+    assert_eq!(home.calls(), Vec::new(), "no handler saw the call");
+
+    // No file of the server reads that name; this test file is the only one
+    // that writes it, and only to prove it is ignored.
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut readers: Vec<String> = files
+        .iter()
+        .filter(|path| {
+            fs::read_to_string(path)
+                .expect("read")
+                .contains("\"asks.json\"")
+        })
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    readers.sort();
+    assert_eq!(readers, ["bundle_start_tests.rs"]);
+}
