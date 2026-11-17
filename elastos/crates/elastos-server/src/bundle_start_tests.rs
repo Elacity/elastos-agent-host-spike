@@ -19,11 +19,17 @@ use crate::bundle_admission::{
     BUNDLE_SIGNATURE_DOMAIN, BUNDLE_WALK_BUDGET,
 };
 use crate::runtime::tests::{
-    component_manifest_json, component_with_extra_import, quiet_component,
+    component_manifest_json, component_with_extra_import, quiet_component, BusConformanceProvider,
 };
 use crate::runtime::Runtime;
 use crate::stage_cmd::{bundle_cid, stage_bundle};
 use elastos_bundle_identity::Budget;
+use elastos_runtime::capability::pending::{GrantDuration, PendingRequestStore};
+use elastos_runtime::capability::{Action, CapabilityManager, CapabilityStore, TokenConstraints};
+use elastos_runtime::primitives::audit::AuditLog;
+use elastos_runtime::primitives::metrics::MetricsManager;
+use elastos_runtime::provider::ProviderRegistry;
+use std::time::Duration;
 
 /// One call a component made to the bridge: the capsule's id, the principal
 /// it ran for, and the ceiling recorded for it at that moment.
@@ -182,6 +188,204 @@ impl Home {
             .await
             .map(|(handle, _)| handle.manifest.name);
         (result, walked)
+    }
+}
+
+/// The resource the bus fixture component reads, and the one the asks of the
+/// rows below name.
+const PROBE: &str = "elastos://test/bus/probe";
+
+/// A Home whose bridge is the real resource bridge, not the recording handler
+/// above: the same Runtime, ComponentProvider and provider registry as
+/// `runtime::tests::a_request_for_a_resource_the_signed_manifest_never_asked_for_is_refused`.
+/// Its component is the bus fixture, which calls the bridge once when it runs
+/// for `PERSON` and reads its probe when the shell grants that read. A bundle
+/// whose asks include the read reaches the shell as a pending request, the
+/// ceiling the bridge holds its session to is the manifest's asks, and
+/// granted there the read reaches the provider and the run ends well: the
+/// positive controls of the B2 rows end here, not in a handler's error.
+struct RealBridge {
+    runtime: Arc<Runtime>,
+    dir: tempfile::TempDir,
+    pending: Arc<PendingRequestStore>,
+    capabilities: Arc<CapabilityManager>,
+    provider: Arc<BusConformanceProvider>,
+}
+
+impl RealBridge {
+    /// A Home trusting `keys`, never in dev mode, with the bus fixture
+    /// provider registered on the real bridge.
+    async fn trusting(keys: &[&SigningKey]) -> RealBridge {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let audit_log = Arc::new(AuditLog::new());
+        let capabilities = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit_log.clone()));
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(BusConformanceProvider::default());
+        registry.register(provider.clone()).await;
+        runtime
+            .set_provider_registry(
+                registry,
+                capabilities.clone(),
+                pending.clone(),
+                dir.path().join("runtime-data"),
+            )
+            .await;
+        let keys: Vec<String> = keys
+            .iter()
+            .map(|key| hex::encode(key.verifying_key().to_bytes()))
+            .collect();
+        runtime
+            .configure_capsule_admission(dir.path(), &keys, false)
+            .await
+            .unwrap();
+        RealBridge {
+            runtime,
+            dir,
+            pending,
+            capabilities,
+            provider,
+        }
+    }
+
+    fn data(&self) -> PathBuf {
+        self.dir.path().join("data")
+    }
+
+    /// A bundle folder holding `manifest` and the bus fixture as its
+    /// entrypoint.
+    fn bundle(&self, name: &str, manifest: &str) -> PathBuf {
+        let folder = self.dir.path().join("source").join(name);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("capsule.json"), manifest).unwrap();
+        fs::write(folder.join(ENTRYPOINT), calling_component()).unwrap();
+        folder
+    }
+
+    /// Stage `folder` signed by `key`; returns the bundle's CID.
+    async fn stage(&self, folder: &Path, key: &SigningKey) -> String {
+        let cid = bundle_cid(folder).unwrap();
+        let signature = self.dir.path().join(format!("{cid}.by-hand.sig.json"));
+        fs::write(&signature, signed(&cid, key)).unwrap();
+        let staged = stage_bundle(&self.runtime, &self.data(), folder, &signature)
+            .await
+            .unwrap();
+        assert_eq!(staged.cid, cid);
+        cid
+    }
+
+    /// Put `bytes` where staging put the signature of the bundle `cid`: the
+    /// file the start by CID checks. Its place is the slot's, its content
+    /// whatever is written here.
+    fn put_signature(&self, cid: &str, bytes: &[u8]) {
+        fs::write(
+            bundle_signature_path(&self.data(), &cid.parse().unwrap()),
+            bytes,
+        )
+        .unwrap();
+    }
+
+    fn signature(&self, cid: &str) -> Vec<u8> {
+        fs::read(bundle_signature_path(&self.data(), &cid.parse().unwrap())).unwrap()
+    }
+
+    /// Overwrite one of a slot's files, which staging wrote read-only.
+    fn overwrite(&self, cid: &str, file: &str, bytes: &[u8]) {
+        let path = bundle_slot(&self.data(), &cid.parse().unwrap()).join(file);
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
+        fs::write(&path, bytes).unwrap();
+    }
+
+    /// Start `cid` for nobody: the name that ran and its signer, or the
+    /// refusal. Every refusal a row asserts here comes before a capsule runs,
+    /// so the principal does not matter.
+    async fn run(&self, cid: &str) -> Result<(String, String), BundleRefusal> {
+        self.runtime
+            .run_by_bundle(&self.data(), cid, Vec::new(), None)
+            .await
+            .map(|(handle, accepted)| (handle.manifest.name, accepted.signer_did))
+    }
+
+    /// Start `cid` for `PERSON`, wait for its one pending request on the
+    /// probe, check the ceiling the bridge records for that session, grant
+    /// the read, and return the name that ran. The read reaches the provider,
+    /// and no ceiling is left behind.
+    async fn run_granted(&self, cid: &str, ceiling: &str) -> String {
+        let launch = {
+            let (runtime, data, cid) = (self.runtime.clone(), self.data(), cid.to_string());
+            tokio::spawn(async move {
+                runtime
+                    .run_by_bundle(&data, &cid, Vec::new(), Some(PERSON.to_string()))
+                    .await
+                    .map(|(handle, _)| handle.manifest.name)
+            })
+        };
+        let pending = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = self.pending.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a request inside the asks reaches the shell");
+        assert_eq!(pending.resource.as_str(), PROBE);
+        assert_eq!(pending.action, Action::Read);
+        assert!(
+            self.provider.requests.lock().await.is_empty(),
+            "no grant yet"
+        );
+        assert_eq!(
+            self.runtime.ceiling_of(pending.session_id.as_str()),
+            Some(vec![ceiling.to_string()]),
+            "while it runs, the ceiling the bridge holds it to is its asks"
+        );
+        let token = self.capabilities.grant(
+            pending.session_id.as_str(),
+            pending.resource.clone(),
+            pending.action,
+            TokenConstraints::default(),
+            None,
+        );
+        self.pending
+            .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+            .await
+            .unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), launch)
+            .await
+            .expect("the run ends after the grant")
+            .expect("the launch task does not panic");
+        let name = ended.unwrap_or_else(|refusal| panic!("the granted run ends well: {refusal}"));
+        assert_eq!(
+            self.provider.requests.lock().await.len(),
+            1,
+            "the granted read reached the provider once"
+        );
+        self.provider.requests.lock().await.clear();
+        assert_eq!(
+            self.runtime.ceiling_of(pending.session_id.as_str()),
+            None,
+            "none left after"
+        );
+        name
     }
 }
 
@@ -3288,6 +3492,173 @@ async fn a_kept_launch_serves_the_page_its_content_pins() {
         None,
         "a gone launch"
     );
+}
+
+/// B2-edit. An ask is inside the bytes the CID names, so an edit to the asks
+/// is an edit to the signed bundle. One more action in the ask gives the
+/// folder another CID; the slot staged under the old CID holds that edited
+/// manifest, so the start recomputes and refuses, naming both CIDs, with the
+/// old bundle's signature file still beside it and still the signature that
+/// was made over the old CID. Offered for the edited CID, that old signature
+/// is refused by its own name at the signature check, after the slot's files
+/// were found to recompute to the CID asked for. Both controls run through
+/// the real bridge: the bundle as signed starts unsealed under its signed ask
+/// as the ceiling the bridge records for its session, its read is granted
+/// there and it ends well; and the edited bundle, re-signed under its own
+/// CID, starts the same way under the edited ask.
+#[tokio::test]
+async fn changing_an_ask_changes_the_cid_and_the_signed_launch_is_refused() {
+    let publisher = key(101);
+    let bridge = RealBridge::trusting(&[&publisher]).await;
+    let read = serde_json::json!([{"resource": PROBE, "actions": ["read"]}]);
+    let read_and_write = serde_json::json!([
+        {"resource": PROBE, "actions": ["read", "write"]}
+    ]);
+    let folder = bridge.bundle("asked", &manifest_with("asked", "asks", read));
+    let cid = bridge.stage(&folder, &publisher).await;
+    let edited_manifest = manifest_with("asked", "asks", read_and_write);
+
+    // The control: the bundle as signed starts through the real bridge, the
+    // ask it was signed with is the ceiling the bridge records at its
+    // session, and granted the read it ends well.
+    assert_eq!(
+        bridge.run_granted(&cid, &format!("{PROBE} [read]")).await,
+        "asked"
+    );
+
+    // One more action in that ask: the folder is another bundle, because the
+    // ask is one of the bytes the CID names.
+    fs::write(folder.join("capsule.json"), &edited_manifest).unwrap();
+    let edited = bundle_cid(&folder).unwrap();
+    assert_ne!(edited, cid, "an ask is inside the signed bytes");
+
+    // The slot staged under the old CID now holds the edited manifest: the
+    // start recomputes the CID of the bytes and refuses the mismatch.
+    bridge.overwrite(&cid, "capsule.json", edited_manifest.as_bytes());
+    assert_eq!(
+        bridge.run(&cid).await.unwrap_err(),
+        BundleRefusal::CidMismatch {
+            asked: cid.clone(),
+            computed: edited.clone()
+        }
+    );
+    // Not a missing or a tampered signature: the file is where staging put
+    // it and holds exactly the signature the publisher made over the old CID.
+    assert_eq!(bridge.signature(&cid), signed(&cid, &publisher));
+
+    // The edited bundle staged under its own CID, with that OLD signature
+    // file beside it. The CID check passes, because the slot's files are the
+    // edited ones; the signature check then refuses the file by its name,
+    // because it is the signature of another bundle.
+    assert_eq!(
+        bridge.stage(&folder, &publisher).await,
+        edited,
+        "the edited folder's own CID"
+    );
+    bridge.put_signature(&edited, &signed(&cid, &publisher));
+    assert_eq!(
+        bridge.run(&edited).await.unwrap_err(),
+        BundleRefusal::SignatureNamesAnotherCid {
+            file: cid.clone(),
+            computed: edited.clone()
+        },
+        "the signature made over the old CID is refused for the edited one"
+    );
+
+    // The control: the same edited bundle re-signed for its new CID starts
+    // through the real bridge under the edited ask.
+    assert_eq!(bridge.stage(&folder, &publisher).await, edited);
+    assert_eq!(
+        bridge.signature(&edited),
+        signed(&edited, &publisher),
+        "re-signed for its own CID"
+    );
+    assert_eq!(
+        bridge
+            .run_granted(&edited, &format!("{PROBE} [read, write]"))
+            .await,
+        "asked",
+        "the edited ask is the ceiling now"
+    );
+}
+
+/// B2-file. The lab's `asks.json` is bytes in the closure and never authority
+/// at a start by CID. A bundle whose `capsule.json` declares no asks starts
+/// sealed with that file beside its manifest: the admitted manifest's asks
+/// stay empty, its ceiling is empty, and no handler sees the component's
+/// call. And no file of the server reads a file by that name: the start has
+/// one source of asks, the `capsule.json` the walk checked.
+#[tokio::test]
+async fn a_lab_asks_json_beside_the_bundle_is_never_read_by_the_start() {
+    use crate::bundle_admission::admit_bundle_manifest;
+    use elastos_bundle_identity::checked_bundle_within as walk;
+    let publisher = key(102);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("lab-asks", &manifest("lab-asks"), &calling_component());
+    // An ask for the resource the component requests, in the file the lab's
+    // agent-host declares its asks in. The start must not take it.
+    let lab = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    fs::write(folder.join("asks.json"), lab.to_string()).unwrap();
+    let cid = home.stage(&folder, &publisher).await;
+
+    // The file is in the closure and adds nothing to the manifest.
+    let slot = bundle_slot(&home.data(), &cid.parse().unwrap());
+    let checked = walk(&slot, BUNDLE_WALK_BUDGET).unwrap();
+    assert!(checked.entry("asks.json").is_some(), "read as bytes");
+    let admitted = admit_bundle_manifest(&checked).unwrap();
+    assert!(admitted.manifest.asks.is_empty());
+    assert_eq!(
+        admitted.manifest.resource_authority_bounds(),
+        Vec::<String>::new()
+    );
+
+    // And the capsule runs sealed: its call never reaches a handler.
+    let refusal = home.run(&cid, Some(PERSON)).await.unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .ends_with(&format!("BusError::Denied({SEALED_BRIDGE:?})")),
+        "{refusal}"
+    );
+    assert_eq!(home.calls(), Vec::new(), "no handler saw the call");
+
+    // The control, through the real bridge: the same bundle with the same
+    // `asks.json` beside its manifest, and the same ask declared in the
+    // `capsule.json` the walk checks, reaches the shell; granted there its
+    // read reaches the provider and it ends well. So the sealed run above is
+    // the start taking the manifest's asks and not the file's.
+    let bridge = RealBridge::trusting(&[&publisher]).await;
+    let control = bridge.bundle(
+        "lab-asks-declared",
+        &manifest_with("lab-asks", "asks", lab.clone()),
+    );
+    fs::write(control.join("asks.json"), lab.to_string()).unwrap();
+    let declared = bridge.stage(&control, &publisher).await;
+    assert_eq!(
+        bridge
+            .run_granted(&declared, &format!("{PROBE} [read]"))
+            .await,
+        "lab-asks"
+    );
+
+    // No file of the server reads that name; this test file is the only one
+    // that writes it, and only to prove it is ignored.
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut readers: Vec<String> = files
+        .iter()
+        .filter(|path| {
+            fs::read_to_string(path)
+                .expect("read")
+                .contains("\"asks.json\"")
+        })
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    readers.sort();
+    assert_eq!(readers, ["bundle_start_tests.rs"]);
 }
 
 /// R-grants-nothing. A component signed by a trusted publisher, whose signed
