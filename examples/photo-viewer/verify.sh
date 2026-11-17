@@ -33,10 +33,6 @@ finish() { # <the line for a complete run>
 # container build the record names; a native build cannot match).
 HASH_ARTIFACT="${REPO_ROOT}/examples/capsule-kit/repro/reference/photo-viewer.component.wasm"
 hash_gate() { python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" "$@"; }
-if [[ "${ELASTOS_HASH_NAMES:-0}" == "1" ]]; then
-    hash_gate photo-viewer --artifact "${HASH_ARTIFACT}" --names
-    exit 0
-fi
 
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" photo-viewer
 

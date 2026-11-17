@@ -3,14 +3,16 @@
 
 Usage: recorded_names_test.py [--record FILE] [--falsify]
 
-Each gate is the viewer's own verify.sh, executed with ELASTOS_HASH_NAMES=1:
-that mode runs the same hash_gate call the full gate runs and prints
-`checked-name: <name>`. Only a name that command actually checked counts, not a
-mention in the file. ELASTOS_RECORDED_HASHES, else the kit's record.
+Each gate is the viewer's own verify.sh. A name counts only when that file runs
+`hash_gate <name> --artifact "${HASH_ARTIFACT}"` as a top-level command (column 0,
+not commented, not inside a block), and the checker that line calls, run here on
+the same artifact with --names, reports that it checked the name. verify.sh has
+no mode that skips its other checks. ELASTOS_RECORDED_HASHES, else the kit's record.
 """
 import argparse
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,22 +27,29 @@ def recorded_names(record):
 
 
 def checked_by_gate(name, record):
-    """Run the gate's listing mode and return the name it says it checked."""
+    """The gate runs the hash check for this name at top level; the checker confirms the name."""
     verify = EXAMPLES / name / "verify.sh"
     if not verify.is_file():
         raise SystemExit(f"{EXAMPLES / name}: no verify.sh at {verify}")
-    env = dict(os.environ, ELASTOS_HASH_NAMES="1", ELASTOS_RECORDED_HASHES=str(record))
-    try:
-        result = subprocess.run(["bash", str(verify)], capture_output=True, text=True,
-                                env=env, timeout=120)
-    except subprocess.TimeoutExpired:
-        raise SystemExit(f"{verify}: ELASTOS_HASH_NAMES=1 did not stop the gate at its "
-                         f"hash check (no listing mode)")
+    lines = verify.read_text().splitlines()
+    call = f'hash_gate {name} --artifact "${{HASH_ARTIFACT}}"'
+    if call not in lines:
+        raise SystemExit(f"{verify}: no top-level `{call}` line; the gate does not run this name's hash check")
+    artifact = None
+    for line in lines:
+        found = re.fullmatch(r'HASH_ARTIFACT="\$\{REPO_ROOT\}/(.+)"', line)
+        if found:
+            artifact = EXAMPLES.parent / found.group(1)
+    if artifact is None:
+        raise SystemExit(f"{verify}: no top-level HASH_ARTIFACT=\"${{REPO_ROOT}}/...\" line")
+    env = dict(os.environ, ELASTOS_RECORDED_HASHES=str(record))
+    result = subprocess.run([sys.executable, "-I", str(HERE / "recorded_hash_gate.py"), name,
+                             "--artifact", str(artifact), "--names"],
+                            capture_output=True, text=True, env=env, timeout=120)
     if result.returncode != 0:
-        raise SystemExit(f"{verify}: the gate's listing mode failed:\n{result.stderr}")
-    checked = [line.split(":", 1)[1].strip() for line in result.stdout.splitlines()
-               if line.startswith("checked-name:")]
-    return checked
+        raise SystemExit(f"{verify}: the hash check for {name} failed:\n{result.stderr}")
+    return [line.split(":", 1)[1].strip() for line in result.stdout.splitlines()
+            if line.startswith("checked-name:")]
 
 
 def falsify(record):
