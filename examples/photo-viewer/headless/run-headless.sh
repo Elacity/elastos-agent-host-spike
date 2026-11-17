@@ -195,7 +195,10 @@ fi
 K_CORE=$(pub_of "$WORK/core.sig.json"); K_PAGE=$(pub_of "$WORK/page.sig.json"); K_SET=$(pub_of "$WORK/set.sig.json")
 printf 'dev_mode = true\ntrusted_keys = ["%s", "%s", "%s"]\n' "$K_SET" "$K_PAGE" "$K_CORE" > "$DATA/config.toml"
 for b in core page set changed; do
-  "$BIN" stage-bundle "$WORK/$b" --signature "$WORK/$b.sig.json" > /dev/null 2>> "$WORK/stage.err"; echo "staged $b, exit=$?"
+  "$BIN" stage-bundle "$WORK/$b" --signature "$WORK/$b.sig.json" > /dev/null 2>> "$WORK/stage.err"; code=$?
+  echo "staged $b, exit=$code"
+  # A signature whose bytes do not verify for this CID is refused by the Runtime at staging; stop there by name.
+  [ "$code" = 0 ] || { tail -3 "$WORK/stage.err"; not_expected "the $b bundle stages with its signature"; exit 1; }
 done
 # One byte of one picture changed in the COPY of the set, where it is kept: its CID no longer names its bytes. The
 # source folder `$WORK/set` is never touched. PLANT=changed-byte-not-refused skips this, for the falsifier only.
