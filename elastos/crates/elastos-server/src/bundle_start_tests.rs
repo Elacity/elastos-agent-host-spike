@@ -226,6 +226,30 @@ fn code(result: Result<(String, String), BundleRefusal>) -> &'static str {
     result.expect_err("refused").code()
 }
 
+#[tokio::test]
+async fn v2_contract_is_refused_before_guest_runs_on_folder_and_cid_paths() {
+    let publisher = key(42);
+    let home = Home::trusting(&[&publisher]).await;
+    home.admit(&[&publisher], true).await;
+    let mut json: serde_json::Value = serde_json::from_str(&manifest("v2-by-both-paths")).unwrap();
+    json["bus_contract"] = serde_json::json!("elastos:bus@2.0.0");
+    json["wit_world_sha256"] = serde_json::json!(elastos_common::elastos_bus_v2_wit_sha256());
+    let folder = home.bundle("v2", &json.to_string(), &quiet_component());
+    assert!(matches!(
+        home.runtime.run_local(&folder, Vec::new()).await,
+        Err(elastos_common::ElastosError::Compute(message))
+            if message == "Bus v2 contract not yet runnable"
+    ));
+
+    let cid = home.stage(&folder, &publisher).await;
+    assert!(matches!(
+        home.run(&cid, None).await,
+        Err(BundleRefusal::NotAComponent(why))
+            if why.contains("elastos:bus@2.0.0")
+    ));
+    assert!(home.calls().is_empty());
+}
+
 /// R-run, R-nogrant, R-presentation. A staged component starts by its CID and
 /// what runs is that component: the quiet one ends well; the calling one,
 /// run for its person, makes its one call to the bridge and gets the seal's
