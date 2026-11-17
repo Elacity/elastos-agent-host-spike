@@ -123,7 +123,7 @@ impl ComponentProvider {
         self.bridge_principals.write().await.remove(capsule_id);
     }
 
-    /// The one engine every component in this process compiles and runs on.
+    /// The one engine every v1 component in this process compiles and runs on.
     /// The v1 ABI uses none of these proposals, so they are off here as well as
     /// compiled out of the build (`threads`, `gc`, `stack-switching` in Cargo.toml).
     fn engine() -> Result<Engine> {
@@ -132,6 +132,9 @@ impl ComponentProvider {
             .get_or_init(|| {
                 let mut config = Config::new();
                 config.wasm_component_model(true);
+                // The Cargo feature makes async the Wasmtime default; v1 opts out.
+                config.wasm_component_model_async(false);
+                config.concurrency_support(false);
                 config.consume_fuel(true);
                 config.epoch_interruption(true);
                 config.wasm_features(
@@ -157,6 +160,44 @@ impl ComponentProvider {
             .clone()
             .map_err(|err| {
                 ElastosError::Compute(format!("Failed to configure component engine: {err}"))
+            })
+    }
+
+    /// Bus v2 has its own engine so its async ABI cannot change v1 admission.
+    /// Later slices will connect this engine to v2 loads and resident runs.
+    #[allow(dead_code)] // A later slice connects v2 admission and resident runs.
+    pub(crate) fn v2_engine() -> Result<Engine> {
+        static ENGINE: OnceLock<std::result::Result<Engine, String>> = OnceLock::new();
+        ENGINE
+            .get_or_init(|| {
+                let mut config = Config::new();
+                config
+                    .wasm_component_model(true)
+                    .wasm_component_model_async(true)
+                    .concurrency_support(true)
+                    .consume_fuel(true)
+                    .epoch_interruption(true)
+                    .wasm_features(
+                        WasmFeatures::THREADS
+                            | WasmFeatures::SHARED_EVERYTHING_THREADS
+                            | WasmFeatures::GC
+                            | WasmFeatures::STACK_SWITCHING,
+                        false,
+                    );
+                let engine = Engine::new(&config).map_err(|err| err.to_string())?;
+                let ticker = engine.clone();
+                std::thread::Builder::new()
+                    .name("component-v2-deadline-tick".into())
+                    .spawn(move || loop {
+                        std::thread::sleep(DEADLINE_TICK);
+                        ticker.increment_epoch();
+                    })
+                    .map_err(|err| format!("v2 deadline ticker: {err}"))?;
+                Ok(engine)
+            })
+            .clone()
+            .map_err(|err| {
+                ElastosError::Compute(format!("Failed to configure v2 component engine: {err}"))
             })
     }
 
@@ -699,6 +740,45 @@ mod tests {
         let err = Component::new(&engine, component_with_memory(true))
             .expect_err("a shared memory needs the threads proposal, which is off");
         assert!(format!("{err:?}").contains("threads"), "{err:?}");
+    }
+
+    #[test]
+    fn v1_engine_stays_synchronous_and_v2_engine_accepts_async() {
+        let bytes = wat::parse_str(
+            r#"(component
+                (type $body (stream u8))
+                (type $accept (func async (param "body" $body)))
+                (import "accept" (func (type $accept))))"#,
+        )
+        .expect("async component fixture");
+        let v1 = ComponentProvider::engine().expect("v1 engine");
+        let v2 = ComponentProvider::v2_engine().expect("v2 engine");
+        assert!(
+            !Engine::same(&v1, &v2),
+            "Bus versions need separate engines"
+        );
+        assert!(
+            Component::new(&v1, &bytes).is_err(),
+            "v1 must refuse component-model async"
+        );
+        Component::new(&v2, &bytes).expect("v2 accepts component-model async");
+        assert!(!v1.get_concurrency_support(), "v1 stays synchronous");
+        assert!(v2.get_concurrency_support(), "v2 supports concurrency");
+    }
+
+    #[test]
+    fn v2_engine_keeps_v1_limits() {
+        let v1 = ComponentProvider::engine().expect("v1 engine");
+        let v2 = ComponentProvider::v2_engine().expect("v2 engine");
+        assert!(v1.get_consume_fuel(), "v1 fuel stays on");
+        assert!(v2.get_consume_fuel(), "v2 fuel stays on");
+        assert!(v1.get_epoch_interruption(), "v1 epoch stays on");
+        assert!(v2.get_epoch_interruption(), "v2 epoch stays on");
+        assert_eq!(
+            v1.get_wasm_features() ^ v2.get_wasm_features(),
+            WasmFeatures::CM_ASYNC,
+            "only component-model async differs between engines"
+        );
     }
 
     /// A v1 component whose core module loops for ever: in `run`, or with
