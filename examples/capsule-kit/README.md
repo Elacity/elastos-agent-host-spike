@@ -19,8 +19,9 @@ Both take the capsule folder and refuse one with no `capsule.json` by name. They
 capsule's own `build.sh` (or its `repro/build-in-container.sh`, given the capsule folder, or the repository
 builder), and verify runs the capsule's `verify.sh`. The three viewers each hash the reference artifact of
 their name under `repro/reference/` and compare it with their line in `repro/recorded-hashes.txt` inside that
-gate; `repro/recorded_names_test.py` executes each gate in its listing mode and fails, naming the gate, if a
-recorded name is not checked by a command that ran.
+gate; `repro/recorded_names_test.py` fails, naming the gate, if a recorded name has no top-level
+`hash_gate <name> --artifact` line in that viewer's `verify.sh`, and it runs the same checker on the same
+artifact to confirm the name. It reads the gate's text; the receipts of each `verify.sh` run show the check ran.
 
 | Item | Where | How a capsule uses it |
 |---|---|---|

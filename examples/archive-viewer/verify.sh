@@ -102,7 +102,7 @@ fi
 
 # The recorded container hash: the whole record, the check itself, and the
 # reference artifact's bytes (the container build the record names). A native
-# build cannot match: the record is the pinned-container route. The listing
+# build cannot match: the record is the pinned-container route.
 HASH_ARTIFACT="${REPO_ROOT}/examples/capsule-kit/repro/reference/archive-viewer.component.wasm"
 hash_gate() { python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" "$@"; }
 
