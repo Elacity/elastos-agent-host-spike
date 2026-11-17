@@ -32,8 +32,8 @@ pub use manifest::{
     CapsuleInterfaceDescriptor, CapsuleManifest, CapsuleProjection, CapsuleRequirement,
     CapsuleRole, CapsuleRuntimeAbi, CapsuleType, CapsuleWindowPolicy, ManifestAsk, MicroVmConfig,
     ModelContentMetadata, Permissions, ProviderAuthority, ProviderCapabilitySchema,
-    RequirementKind, ResourceLimits, ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V1_WORLD,
-    ELASTOS_BUS_V2_CONTRACT, ELASTOS_BUS_V2_WORLD, SCHEMA_V1,
+    RequirementKind, ResourceLimits, APPROVED_RIGHT_IDS, ELASTOS_BUS_V1_CONTRACT,
+    ELASTOS_BUS_V1_WORLD, ELASTOS_BUS_V2_CONTRACT, ELASTOS_BUS_V2_WORLD, SCHEMA_V1,
 };
 pub use pinned_manifest::{
     PinnedManifest, PinnedManifestError, PIN_FORM_INVALID, REQUIREMENT_DUPLICATE,
