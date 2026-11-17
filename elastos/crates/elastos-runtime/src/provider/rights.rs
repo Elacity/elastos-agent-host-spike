@@ -18,26 +18,15 @@
 // with the wiring.
 #![allow(dead_code)]
 
+use super::rights_table;
 use elastos_common::ProviderAuthority;
-
-/// The Runtime's rules for `storage`, in order: the parent read rule, then the
-/// read/write subpath rule.
-const STORAGE_RULES: &[&str] = &[
-    r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
-    r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
-];
-
-/// The Runtime's rules for `bound-executable`: the provider binary only.
-const BOUND_EXECUTABLE_RULES: &[&str] =
-    &[r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#];
 
 /// The Runtime's approved rule text for one right id.
 pub(crate) fn approved_right_template(id: &str) -> Option<&'static [&'static str]> {
-    match id {
-        "storage" => Some(STORAGE_RULES),
-        "bound-executable" => Some(BOUND_EXECUTABLE_RULES),
-        _ => None,
-    }
+    rights_table::RIGHTS
+        .iter()
+        .find(|row| row.id == id)
+        .map(|row| row.rules)
 }
 
 /// Normalise a rule to its comparison form: whitespace runs collapse to one
