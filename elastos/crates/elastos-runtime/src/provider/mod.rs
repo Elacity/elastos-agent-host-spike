@@ -15,6 +15,7 @@ mod local_model_broker;
 mod registry;
 mod rights;
 mod rights_table;
+mod seccomp_list;
 
 pub use bridge::{CapsuleProvider, ProviderBridge, ProviderConfig as BridgeProviderConfig};
 pub use registry::{
