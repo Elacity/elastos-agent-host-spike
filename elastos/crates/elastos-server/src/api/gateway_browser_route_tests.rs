@@ -10211,6 +10211,74 @@ async fn test_browser_operator_admission_at_capacity_retires_spent_grants() {
     );
 }
 
+/// A production-shaped live admission record is kept at capacity: its token
+/// names `.../operator/{id}` while its record names the page's `input`.
+#[tokio::test]
+async fn test_browser_operator_admission_at_capacity_keeps_a_live_grant() {
+    use elastos_runtime::capability::pending::MAX_PENDING_REQUESTS;
+    use elastos_runtime::capability::{Action, RequestStatus, ResourceId, Settler};
+    use elastos_runtime::primitives::audit::AuditLog;
+    use elastos_runtime::session::{SessionRegistry, SessionType};
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = Arc::new(SessionRegistry::new(Arc::new(AuditLog::new())));
+    let service = register_browser_operator_sessions(dir.path(), sessions.clone());
+    let operator = sessions.create_session(SessionType::Capsule, None).await;
+    let (live, token) = service
+        .seed_live_grant_for_test(operator.id.as_str(), "page-1")
+        .await;
+    service
+        .seed_spent_grants_for_test(MAX_PENDING_REQUESTS - 1)
+        .await;
+    let seeded = elastos_common::SecureTimestamp::now().unix_secs;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while elastos_common::SecureTimestamp::now().unix_secs <= seeded {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the clock passed the seeded second"
+        );
+        tokio::task::yield_now().await;
+    }
+    let app = gateway_router(browser_engine_attached_test_state(dir.path()).await);
+    let uri = "/api/apps/browser/pages/page-1/operator-requests";
+    let request = json!({"schema":"elastos.browser.operator-request/v1","document_generation":"a".repeat(32),"actions":["click"],"duration_ms":30000,"max_actions":1,"reason":"Click control"});
+    let (status, body) = operator_request(app, "POST", uri, &operator.token, None, request).await;
+    assert_eq!(
+        (status, body["status"].clone()),
+        (StatusCode::OK, json!("pending")),
+        "the new admission is admitted after the spent grants are retired"
+    );
+
+    let record = service
+        .pending_for_test()
+        .get_request(&live)
+        .await
+        .expect("capacity cleanup keeps the live operator grant's record");
+    assert!(
+        record.is_granted(),
+        "the live operator grant is still granted at capacity"
+    );
+    let resource = ResourceId::new(format!("elastos://browser/pages/page-1/operator/{live}"));
+    let valid = service
+        .capabilities_for_test()
+        .validate(&token, operator.id.as_str(), Action::Write, &resource, None)
+        .await;
+    valid.expect("the live operator grant's token still validates");
+
+    service
+        .pending_for_test()
+        .revoke_request_by(&live, "Revoked by user", Settler::Shell)
+        .await;
+    let record = service
+        .pending_for_test()
+        .get_request(&live)
+        .await
+        .expect("revocation by request id still finds the record");
+    assert!(
+        matches!(record.status, RequestStatus::Denied { .. }),
+        "revocation by request id marks the record denied"
+    );
+}
+
 #[tokio::test]
 async fn test_browser_operator_late_input_cannot_publish_after_owner_close() {
     use elastos_runtime::{
