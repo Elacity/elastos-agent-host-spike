@@ -27,6 +27,7 @@ pub(super) fn render_macos_profile(provider: RuntimeProviderId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn forms(profile: &str) -> Vec<&str> {
         profile
@@ -36,8 +37,23 @@ mod tests {
             .collect()
     }
 
-    fn same_rules(actual: &[&str], expected: &[&str]) -> bool {
-        actual == expected
+    fn path_arguments(profile: &str) -> Vec<&str> {
+        let mut arguments = Vec::new();
+        for line in profile.lines() {
+            for (index, _) in line
+                .match_indices("(literal ")
+                .chain(line.match_indices("(subpath "))
+            {
+                let argument = line[index..].split_once(' ').unwrap().1;
+                let end = if argument.starts_with("(param ") {
+                    argument.find("))").unwrap() + 1
+                } else {
+                    argument.find(')').unwrap()
+                };
+                arguments.push(&argument[..end]);
+            }
+        }
+        arguments
     }
 
     #[test]
@@ -60,6 +76,25 @@ mod tests {
             ),
         ] {
             let rendered = render_macos_profile(provider);
+            let mut parameters = BTreeSet::new();
+            for argument in path_arguments(&rendered) {
+                if argument == "\"/\"" {
+                    continue;
+                }
+                let parameter = argument
+                    .strip_prefix("(param \"")
+                    .and_then(|value| value.strip_suffix("\")"));
+                assert!(
+                    parameter.is_some(),
+                    "{name} path argument: actual {argument}, expected a param or root literal"
+                );
+                parameters.insert(parameter.unwrap());
+            }
+            assert_eq!(
+                parameters,
+                BTreeSet::from(["PROVIDER_EXECUTABLE", "STORAGE_PARENT", "STORAGE_ROOT"]),
+                "{name} path parameters"
+            );
             let actual = forms(&rendered);
             let expected = forms(oracle);
             assert_eq!(
@@ -73,21 +108,7 @@ mod tests {
             actual_sorted.sort();
             expected_sorted.sort();
             assert_eq!(actual_sorted, expected_sorted, "{name} complete rule text");
-            assert_eq!(same_rules(&actual, &expected), true, "{name} rule order");
-            let changed = rendered.replace("STORAGE_PARENT", "STORAGE_ROOT");
-            assert_eq!(
-                same_rules(&forms(&changed), &expected),
-                false,
-                "{name} changed rule text must differ"
-            );
-            let mut reordered = actual.clone();
-            reordered.swap(3, 4);
-            assert_eq!(
-                same_rules(&reordered, &expected),
-                false,
-                "{name} changed rule order must differ"
-            );
-            assert!(!rendered.contains("/private/"), "{name} path binding");
+            assert_eq!(actual, expected, "{name} rule order");
         }
     }
 }
