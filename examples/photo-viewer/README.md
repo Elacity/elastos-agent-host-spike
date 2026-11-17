@@ -112,8 +112,9 @@ rustup target add wasm32-unknown-unknown
 It checks the manifest against the WIT hash, runs the guest tests against a
 fake Runtime (the kit's `fake`, `src/tests.rs`), builds the component, runs it
 inside the Runtime's own `ComponentProvider` with a fake bridge
-(`host-test/`), checks its imports with a copy of the Runtime admission check,
-gates the fuel of the worst albums, and runs every falsifier (`falsify.py`):
+(`host-test/`), checks its imports with the Runtime's own admission check
+(exported by `elastos-server`, kit item A2), gates the fuel of the worst albums,
+and runs every falsifier (`falsify.py`):
 each check is broken, the mutant must compile, its test must fail, and the
 file is restored.
 

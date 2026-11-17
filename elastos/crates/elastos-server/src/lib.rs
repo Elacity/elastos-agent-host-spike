@@ -45,6 +45,10 @@ pub mod collaboration_release_network;
 pub mod collaboration_startup;
 pub(crate) mod collaboration_transport;
 pub(crate) mod component;
+// The Runtime's component admission check and its import table, for callers
+// outside this crate: the capsule kit's host tests call them (kit item A2) so
+// there is one owner and no copy to drift.
+pub use component::{validate_component_imports, ALLOWED_BUS_IMPORTS};
 pub mod content;
 pub mod crypto;
 pub mod documents;
