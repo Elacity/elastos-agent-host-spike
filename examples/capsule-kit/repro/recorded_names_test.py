@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Every name in repro/recorded-hashes.txt is checked by a gate that runs it.
+"""Every name in repro/recorded-hashes.txt has a hash check in its viewer's gate.
 
 Usage: recorded_names_test.py [--record FILE] [--falsify]
 
-Each gate is the viewer's own verify.sh. A name counts only when that file runs
+Each gate is the viewer's own verify.sh. A name counts only when that file has
 `hash_gate <name> --artifact "${HASH_ARTIFACT}"` as a top-level command (column 0,
 not commented, not inside a block), and the checker that line calls, run here on
 the same artifact with --names, reports that it checked the name. verify.sh has
@@ -27,7 +27,9 @@ def recorded_names(record):
 
 
 def checked_by_gate(name, record):
-    """The gate runs the hash check for this name at top level; the checker confirms the name."""
+    """The gate has a top-level hash check line for this name; the checker confirms the name.
+
+    This reads the gate's text and does not watch verify.sh run; the verify.sh receipts show the run."""
     verify = EXAMPLES / name / "verify.sh"
     if not verify.is_file():
         raise SystemExit(f"{EXAMPLES / name}: no verify.sh at {verify}")
