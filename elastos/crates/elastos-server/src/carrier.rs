@@ -14666,13 +14666,14 @@ pub(crate) mod tests {
     }
 
     fn browser_exit_test_grant() -> BrowserExitGrant {
+        let now = crate::auth::now_ts();
         BrowserExitGrant {
             provider_principal_id: "person:provider".into(),
             requester_principal_id: "person:local:alice".into(),
             requester_endpoint: authenticated_test_source_endpoint(),
             grant_id: "operator-grant:server-exit:alice".into(),
-            revision: crate::auth::now_ts(),
-            expires_at: crate::auth::now_ts() + 60,
+            revision: now.saturating_sub(30),
+            expires_at: now.saturating_add(60),
             max_active_streams: 4,
             max_active_streams_per_principal: 2,
         }
