@@ -596,29 +596,31 @@ impl CapabilityManager {
             && !expired
     }
 
-    /// Whether `token` would still validate for this caller, action and
-    /// resource, asking for a resource that carries no classification: every
-    /// check `validate` makes, read-only. Steps 1-3 (version, signature,
-    /// issuer), 4-6 (caller, action, resource, with the resource as the
-    /// pattern), 9 (future-dated) and 11 (classification, refused for any
-    /// ceiling because no classification is supplied) are compared here;
-    /// steps 7, 8, 10 and the read-only form of step 12's use check are
-    /// `can_still_validate`. No use is counted and nothing is audited. The
-    /// all-sessions live view asks this of each granted record, so a grant it
-    /// lists is one the record's own caller could still use.
-    pub async fn can_still_validate_for(
+    /// Whether `token` could still validate, read-only, for `caller_capsule_id`:
+    /// every check `validate` makes that a read can make for the token's own
+    /// action and resource, plus the caller. Steps 1-3 (version, signature,
+    /// issuer), 4 (caller), 9 (future-dated) and 11 (classification, refused
+    /// for any ceiling because no classification is supplied) are compared
+    /// here; steps 7, 8, 10 and the read-only form of step 12's use check are
+    /// `can_still_validate`. Steps 5 and 6 (action and resource) are made
+    /// against the token's own values and so always pass: a path may mint a
+    /// token that names a narrower action or resource than its record. The
+    /// Browser operator does exactly that, filing its record for
+    /// `elastos://browser/pages/{page}/input` and minting the token for
+    /// `elastos://browser/pages/{page}/operator/{id}` with the same session.
+    /// The all-sessions live view asks this of each granted record, so a
+    /// grant it lists is one the record's session can still use the token
+    /// for; it is not one that covers the record's own action or resource. No
+    /// use is counted and nothing is audited.
+    pub async fn can_still_validate_for_caller(
         &self,
         token: &CapabilityToken,
         caller_capsule_id: &str,
-        requested_action: Action,
-        requested_resource: &ResourceId,
     ) -> bool {
         token.version == CapabilityToken::CURRENT_VERSION
             && token.verify_signature(&self.verifying_key)
             && token.issuer == self.public_key_bytes()
             && token.capsule == caller_capsule_id
-            && token.action == requested_action
-            && requested_resource.matches(&token.resource)
             && !token.issued_at.is_future()
             && token.constraints.max_classification.is_none()
             && self.can_still_validate(token).await
@@ -1038,7 +1040,7 @@ mod tests {
         let live = mint();
         assert!(
             manager
-                .can_still_validate_for(&live, "test-capsule", Action::Read, &resource)
+                .can_still_validate_for_caller(&live, "test-capsule")
                 .await,
             "a token this runtime minted for this caller is live"
         );
@@ -1061,6 +1063,14 @@ mod tests {
         let mut stale_signature = mint();
         stale_signature.constraints.delegatable = true;
 
+        let other_caller = manager.grant(
+            "other-capsule",
+            resource.clone(),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+
         let cases = [
             (future_version, "a token from another version is not live"),
             (wrong_issuer, "a token from an untrusted issuer is not live"),
@@ -1069,11 +1079,15 @@ mod tests {
                 stale_signature,
                 "a token whose signature does not verify is not live",
             ),
+            (
+                other_caller,
+                "a token minted for another caller is not live",
+            ),
         ];
         for (token, message) in cases {
             assert!(
                 !manager
-                    .can_still_validate_for(&token, "test-capsule", Action::Read, &resource)
+                    .can_still_validate_for_caller(&token, "test-capsule")
                     .await,
                 "{message}"
             );
