@@ -4,6 +4,7 @@
 pub(super) struct RightRow {
     pub id: &'static str,
     pub rules: &'static [&'static str],
+    pub linux_syscalls: &'static str,
 }
 
 pub(super) const RIGHTS: &[RightRow] = &[
@@ -13,10 +14,16 @@ pub(super) const RIGHTS: &[RightRow] = &[
             r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
             r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
         ],
+        linux_syscalls: concat!(
+            "faccessat fchmod fdatasync fstat fsync ftruncate getdents64 linkat lseek ",
+            "mkdir mkdirat newfstatat openat openat2 pread64 pwrite64 read readlinkat ",
+            "readv renameat2 statx unlink unlinkat write writev"
+        ),
     },
     RightRow {
         id: "bound-executable",
         rules: &[r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#],
+        linux_syscalls: "execve execveat",
     },
 ];
 
@@ -114,6 +121,7 @@ mod tests {
         expanded.push(RightRow {
             id: "future-only",
             rules: &["future rule"],
+            linux_syscalls: "",
         });
         for provider in [
             RuntimeProviderId::Did,
