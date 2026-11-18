@@ -11889,6 +11889,39 @@ pub(crate) mod tests {
         panic!("carrier test endpoint never published a direct address");
     }
 
+    /// A stall that ends when the same part is read again. The fixture holds
+    /// one read of a part here; the repeat that production sends after the
+    /// answer budget wakes it, so the hold lasts exactly as long as the
+    /// caller's budget and never races a wall-clock deadline.
+    #[derive(Default)]
+    pub(crate) struct StallGate {
+        released: StdMutex<std::collections::BTreeSet<u64>>,
+        notify: tokio::sync::Notify,
+    }
+
+    impl StallGate {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        /// Holds one read of the part at `start` until `release(start)`.
+        async fn hold(&self, start: u64) {
+            loop {
+                let notified = self.notify.notified();
+                if self.released.lock().unwrap().remove(&start) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        /// Ends the hold on the part at `start`.
+        fn release(&self, start: u64) {
+            self.released.lock().unwrap().insert(start);
+            self.notify.notify_waiters();
+        }
+    }
+
     /// How a fixture holder answers reads.
     #[derive(Default)]
     pub(crate) struct HolderBehavior {
@@ -11899,6 +11932,11 @@ pub(crate) mod tests {
         pub(crate) serialized: bool,
         /// Range starts whose first read stalls past the 5 s answer budget.
         pub(crate) stall_once: std::collections::BTreeSet<u64>,
+        /// Range starts whose first read waits for `gate` until the part is
+        /// read again, so a test decides when the stall ends.
+        pub(crate) gate_once: std::collections::BTreeSet<u64>,
+        /// The gate `gate_once` reads wait on.
+        pub(crate) gate: Option<Arc<StallGate>>,
         /// Range starts whose every read stalls past the answer budget.
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
         /// Range starts whose first read the holder refuses.
@@ -11917,6 +11955,8 @@ pub(crate) mod tests {
         pub(crate) delay: Duration,
         pub(crate) serial: Option<tokio::sync::Mutex<()>>,
         pub(crate) stall_once: StdMutex<std::collections::BTreeSet<u64>>,
+        pub(crate) gate_once: StdMutex<std::collections::BTreeSet<u64>>,
+        pub(crate) gate: Option<Arc<StallGate>>,
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
         pub(crate) refuse_once: StdMutex<std::collections::BTreeSet<u64>>,
         pub(crate) refuse_always: std::collections::BTreeSet<u64>,
@@ -11958,6 +11998,14 @@ pub(crate) mod tests {
             self.requests.lock().unwrap().push(logged);
             tokio::time::sleep(self.delay).await;
             let start = request["_runtime_invocation"]["range"]["start"].as_u64();
+            let gated = start.filter(|start| self.gate_once.lock().unwrap().remove(start));
+            if let (Some(start), Some(gate)) = (start, self.gate.as_ref()) {
+                match gated {
+                    // A repeat of a held part ends that hold.
+                    None => gate.release(start),
+                    Some(start) => gate.hold(start).await,
+                }
+            }
             let stalls = start.is_some_and(|start| {
                 self.stall_always.contains(&start) || self.stall_once.lock().unwrap().remove(&start)
             });
@@ -12188,6 +12236,8 @@ pub(crate) mod tests {
                     delay: behavior.delay,
                     serial: behavior.serialized.then(|| tokio::sync::Mutex::new(())),
                     stall_once: StdMutex::new(behavior.stall_once),
+                    gate_once: StdMutex::new(behavior.gate_once),
+                    gate: behavior.gate,
                     stall_always: behavior.stall_always,
                     refuse_once: StdMutex::new(behavior.refuse_once),
                     refuse_always: behavior.refuse_always,

@@ -12840,12 +12840,17 @@ server.serve_forever()
 
     #[tokio::test]
     async fn model_preparation_repeats_a_part_read_that_stalls_once() {
-        // Two weight parts each stall once past the 5 s holder answer budget.
+        // Each weight part's first read is held by the fixture until that
+        // part is read again, so the hold always outlives the 5 s holder
+        // answer budget and the repeat is the only way the part arrives.
+        // Neither the stall nor the repeat depends on how fast the machine
+        // settles a timer.
         let stalled = [3 * 65536, 20 * 65536];
         let fixture = SlowHolderPreparation::start(
             103,
             crate::carrier::tests::HolderBehavior {
-                stall_once: stalled.into(),
+                gate_once: stalled.into(),
+                gate: Some(crate::carrier::tests::StallGate::new()),
                 ..Default::default()
             },
             |_| {},
