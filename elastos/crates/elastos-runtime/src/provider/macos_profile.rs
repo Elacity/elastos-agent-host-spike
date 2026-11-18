@@ -67,6 +67,7 @@ mod tests {
         arguments
     }
 
+    #[rustfmt::skip]
     #[test]
     fn rendered_profiles_match_committed_oracles() {
         for (name, provider, oracle) in [
@@ -88,7 +89,7 @@ mod tests {
         ] {
             let rendered = render_macos_profile(
                 provider,
-                &super::super::rights::admit_runtime_grant(provider),
+                &super::super::rights::admit_committed(provider),
             );
             let mut parameters = BTreeSet::new();
             for argument in path_arguments(&rendered) {
@@ -123,6 +124,19 @@ mod tests {
             expected_sorted.sort();
             assert_eq!(actual_sorted, expected_sorted, "{name} complete rule text");
             assert_eq!(actual, expected, "{name} rule order");
+        }
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn macos_reference_files_match_pin_d0dd5693() {
+        // Head stays exact in rendered_profiles_match_committed_oracles. Only the tail is a sorted multiset.
+        for path in ["capsules/did-provider/confine.sb", "capsules/wallet-provider/confine.sb", "capsules/model-provider/confine.sb", "capsules/did-provider/tests/fixtures/confine/declared-rights.json", "capsules/wallet-provider/tests/fixtures/confine/declared-rights.json", "capsules/model-provider/tests/fixtures/confine/declared-rights.json", "capsules/wallet-provider/tests/common/profile_generator.rs"] {
+            let disk = std::fs::read(format!("{}/../../../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|err| panic!("{path}: {err}"));
+            let spec = format!("d0dd5693:{path}");
+            let out = super::super::rights::git_show(&spec);
+            assert!(out.status.success(), "pin {spec} missing: {}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(disk, out.stdout, "moved reference at pin {spec}");
         }
     }
 }
