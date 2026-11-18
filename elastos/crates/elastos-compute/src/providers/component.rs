@@ -75,6 +75,8 @@ const V2_TEST_EPOCH_TICKS: u64 = 30;
 const ENDING_EPOCH_DEADLINE: &str = "epoch-deadline";
 /// The named ending of a run that used up its fuel.
 const ENDING_FUEL_EXHAUSTED: &str = "fuel-exhausted";
+/// The named ending of a run that a stop request ended.
+const ENDING_STOPPED: &str = "stopped";
 
 struct ComponentActivation {
     engine: Engine,
@@ -83,14 +85,84 @@ struct ComponentActivation {
     manifest: CapsuleManifest,
     /// Loaded with no bridge: see [`ComponentProvider::load_admitted_sealed`].
     sealed: bool,
-    events: Option<mpsc::UnboundedSender<v2::elastos::bus::types::Event>>,
+    /// Set by [`ComputeProvider::stop`] for a running v1 activation and read
+    /// by the guest's epoch callback, which traps the guest as `stopped`.
     stop_requested: Arc<AtomicBool>,
+    /// This activation's own-code limits; the shipped values unless a test
+    /// sets them on the entry before start.
+    fuel: u64,
+    run_deadline: Duration,
+    events: Option<mpsc::UnboundedSender<v2::elastos::bus::types::Event>>,
     cancel_requested: Arc<AtomicBool>,
     task: Option<tokio::task::AbortHandle>,
     #[cfg(test)]
     test_max_ticks: u64,
     #[cfg(test)]
     pending_read: Arc<AtomicBool>,
+}
+
+/// Takes an activation's entry away when the run ends, including on unwind,
+/// so a panicked worker cannot leave a `Running` entry behind.
+struct ActivationEntryGuard {
+    instances: Arc<RwLock<HashMap<CapsuleId, ComponentActivation>>>,
+    id: CapsuleId,
+}
+
+impl Drop for ActivationEntryGuard {
+    fn drop(&mut self) {
+        self.instances.blocking_write().remove(&self.id);
+    }
+}
+
+/// How one resident activation ended, published by its worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivationOutcome {
+    /// The guest's `run` export returned success.
+    Returned,
+    /// The guest trapped; the message leads with its cause.
+    Trapped(String),
+    /// A stop request trapped the guest in its epoch callback.
+    Stopped,
+}
+
+impl std::fmt::Display for ActivationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Returned => write!(f, "returned"),
+            Self::Trapped(message) => write!(f, "Compute error: {message}"),
+            Self::Stopped => write!(f, "Compute error: stopped by request"),
+        }
+    }
+}
+
+/// A started, still-running v1 activation. The guest runs on a blocking
+/// thread; dropping this handle does not end it.
+pub struct ResidentActivation {
+    pub handle: CapsuleHandle,
+    outcome: tokio::sync::watch::Receiver<Option<ActivationOutcome>>,
+}
+
+impl ResidentActivation {
+    /// Waits for the worker to publish this activation's outcome.
+    pub async fn ended(&mut self) -> ActivationOutcome {
+        loop {
+            if let Some(outcome) = self.outcome.borrow_and_update().clone() {
+                return outcome;
+            }
+            if self.outcome.changed().await.is_err() {
+                // The worker is gone without an outcome (a panic or a dropped
+                // store); report it as a trap rather than waiting for ever.
+                return ActivationOutcome::Trapped(
+                    "Component run ended without publishing an outcome".into(),
+                );
+            }
+        }
+    }
+
+    /// The outcome if the worker has already published it.
+    pub fn outcome(&self) -> Option<ActivationOutcome> {
+        self.outcome.borrow().clone()
+    }
 }
 
 struct V2RunControl {
@@ -116,6 +188,12 @@ struct ComponentState {
     run_deadline: Duration,
     run_started: Instant,
     in_bus: Duration,
+    /// Shared with the activation entry; `stop` sets it and the epoch
+    /// callback traps the guest as `stopped`.
+    stop_requested: Arc<AtomicBool>,
+    /// Set by the epoch callback when it interrupts *because* of a stop
+    /// request, so a trap is named `stopped` only when the stop caused it.
+    ended_by_stop: bool,
 }
 
 /// Component compute provider.
@@ -280,12 +358,11 @@ impl ComponentProvider {
     /// to the bridge is refused by this provider, and no handler sees it,
     /// whichever handler is installed and whenever. The seal is a mark on
     /// this one activation's entry and on nothing else, so it can never seal
-    /// another capsule. A v1 entry is taken away when the start returns. A
-    /// resident v2 entry stays until its task ends or stop removes it. A
-    /// v1 start that is cancelled before it returns leaves its entry behind,
-    /// still sealed. If the start had not yet marked it running it is still
-    /// marked loading, and `stop` takes it away; once v1 is marked running,
-    /// `stop` refuses it.
+    /// another capsule. The entry is taken away when the run ends, by the
+    /// worker that ran it; a cancelled v1 start leaves that worker running
+    /// until its end. `stop` removes a loading entry or asks a running v1
+    /// guest to end at its next epoch check. A resident v2 entry stays until
+    /// its task ends or stop closes its events stream.
     pub async fn load_admitted_sealed(
         &self,
         bytes: Vec<u8>,
@@ -350,8 +427,10 @@ impl ComponentProvider {
                 status: CapsuleStatus::Loading,
                 manifest: manifest.clone(),
                 sealed,
-                events: None,
                 stop_requested: Arc::new(AtomicBool::new(false)),
+                fuel: COMPONENT_FUEL,
+                run_deadline: COMPONENT_RUN_DEADLINE,
+                events: None,
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 task: None,
                 #[cfg(test)]
@@ -366,6 +445,103 @@ impl ComponentProvider {
             manifest,
             args: Vec::new(),
         })
+    }
+
+    /// Starts a loaded v1 activation on a blocking thread and returns after
+    /// instantiation, just before the worker calls the guest's `run` export. The guest keeps
+    /// running on that thread; the worker publishes its outcome
+    /// ([`ActivationOutcome`]) and removes the activation entry when the run
+    /// ends. [`ComputeProvider::start`] awaits the outcome on top of this.
+    pub async fn start_resident(&self, handle: &CapsuleHandle) -> Result<ResidentActivation> {
+        let hostcall = self.bus_hostcall.read().unwrap().clone();
+        let principal_id = self
+            .bridge_principals
+            .read()
+            .await
+            .get(&handle.id)
+            .cloned()
+            .flatten();
+        let (engine, component, sealed, stop_requested, fuel, run_deadline) = {
+            let mut instances = self.instances.write().await;
+            let instance = instances
+                .get_mut(&handle.id)
+                .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
+            if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
+                return Err(ElastosError::Compute(
+                    "Bus v2 contract not yet runnable".into(),
+                ));
+            }
+            if instance.status != CapsuleStatus::Loading {
+                return Err(ElastosError::Compute(format!(
+                    "component {} is already running",
+                    handle.id.0
+                )));
+            }
+            instance.status = CapsuleStatus::Running;
+            (
+                instance.engine.clone(),
+                instance.component.clone(),
+                instance.sealed,
+                instance.stop_requested.clone(),
+                instance.fuel,
+                instance.run_deadline,
+            )
+        };
+
+        let state = ComponentState {
+            sealed,
+            fuel,
+            run_deadline,
+            stop_requested,
+            ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
+        };
+
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (outcome_tx, outcome_rx) = tokio::sync::watch::channel(None);
+        let id = handle.id.clone();
+        let instances = self.instances.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            // Keep the entry until the run ends, then take it away before the
+            // outcome is visible, so an observer of the outcome never sees a
+            // running entry.
+            let entry = ActivationEntryGuard { instances, id };
+            let outcome =
+                match Self::instantiate_component(&engine, &component, state, Some(started)) {
+                    Ok(()) => ActivationOutcome::Returned,
+                    Err(outcome) => outcome,
+                };
+            drop(entry);
+            let _ = outcome_tx.send(Some(outcome));
+        });
+
+        match started_rx.await {
+            Ok(()) => Ok(ResidentActivation {
+                handle: handle.clone(),
+                outcome: outcome_rx,
+            }),
+            Err(_) => {
+                // The worker ended before entering `run`: an instantiation
+                // error, an early trap, or a panic.
+                let joined = task.await;
+                let outcome = outcome_rx.borrow().clone();
+                match joined {
+                    Err(err) => Err(ElastosError::Compute(format!(
+                        "Component task join error: {err}"
+                    ))),
+                    Ok(()) => match outcome {
+                        Some(ActivationOutcome::Trapped(message)) => {
+                            Err(ElastosError::Compute(message))
+                        }
+                        Some(ActivationOutcome::Stopped) => Err(ElastosError::Compute(
+                            "component was stopped before its run began".into(),
+                        )),
+                        _ => Err(ElastosError::Compute(
+                            "component run ended before the guest started".into(),
+                        )),
+                    },
+                }
+            }
+        }
     }
 
     fn require_component_manifest(manifest: &CapsuleManifest) -> Result<()> {
@@ -395,31 +571,58 @@ impl ComponentProvider {
         engine: &Engine,
         component: &Component,
         mut state: ComponentState,
-    ) -> Result<()> {
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> std::result::Result<(), ActivationOutcome> {
         // The deadline is armed before instantiation: a start function is guest code.
         state.run_started = Instant::now();
-        let (fuel, first_ticks) = (state.fuel, deadline_ticks(state.run_deadline));
+        // One tick at a time: the callback is the only place a stop request is
+        // seen, so it must run every tick rather than only at the deadline.
         let mut store = Store::new(engine, state);
         store.limiter(|state| &mut state.limits);
-        // With the callback below the limit holds without this line too (an
-        // unset deadline calls the callback at the first tick check); setting
-        // it spares that first call.
-        store.set_epoch_deadline(first_ticks);
-        store.epoch_deadline_callback(|context| Ok(context.data().deadline_update()));
-        store
-            .set_fuel(fuel)
-            .map_err(|err| ElastosError::Compute(format!("Failed to set component fuel: {err}")))?;
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(|mut context| Ok(context.data_mut().deadline_update()));
+        store.set_fuel(store.data().fuel).map_err(|err| {
+            ActivationOutcome::Trapped(format!("Failed to set component fuel: {err}"))
+        })?;
 
         let mut linker = Linker::new(engine);
-        ProductCapsuleV1::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-            .map_err(|err| ElastosError::Compute(format!("Failed to link bus imports: {err}")))?;
-        let bindings = ProductCapsuleV1::instantiate(&mut store, component, &linker)
-            .map_err(|err| run_error("Failed to instantiate component capsule", err))?;
+        ProductCapsuleV1::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state).map_err(
+            |err| ActivationOutcome::Trapped(format!("Failed to link bus imports: {err}")),
+        )?;
+        let bindings =
+            ProductCapsuleV1::instantiate(&mut store, component, &linker).map_err(|err| {
+                let stopped = store.data().ended_by_stop;
+                if stopped && matches!(err.downcast_ref::<Trap>(), Some(Trap::Interrupt)) {
+                    ActivationOutcome::Stopped
+                } else {
+                    ActivationOutcome::Trapped(run_ending(
+                        "Failed to instantiate component capsule",
+                        err,
+                        stopped,
+                    ))
+                }
+            })?;
+        if let Some(started) = started {
+            let _ = started.send(());
+        }
         bindings
             .elastos_bus_lifecycle()
             .call_run(&mut store)
-            .map_err(|err| run_error("Component lifecycle run failed", err))?
-            .map_err(|err| ElastosError::Compute(format!("Component capsule denied: {err:?}")))?;
+            .map_err(|err| {
+                let stopped = store.data().ended_by_stop;
+                if stopped && matches!(err.downcast_ref::<Trap>(), Some(Trap::Interrupt)) {
+                    ActivationOutcome::Stopped
+                } else {
+                    ActivationOutcome::Trapped(run_ending(
+                        "Component lifecycle run failed",
+                        err,
+                        stopped,
+                    ))
+                }
+            })?
+            .map_err(|err| {
+                ActivationOutcome::Trapped(format!("Component capsule denied: {err:?}"))
+            })?;
 
         Ok(())
     }
@@ -532,16 +735,13 @@ impl<D> StreamProducer<D> for V2EventFeed {
     }
 }
 
-/// Whole ticks in `time`, and never zero: zero would trap before any guest code.
-fn deadline_ticks(time: Duration) -> u64 {
-    ((time.as_millis() / DEADLINE_TICK.as_millis()) as u64).max(1)
-}
-
-/// Leads with the cause Wasmtime gave (the root of its error chain: the outer
-/// error alone only says "error while executing"), names the ending of a run
-/// that a limit stopped, and keeps the outer text, the wasm backtrace, after it.
-fn run_error(stage: &str, err: wasmtime::Error) -> ElastosError {
+/// The message of a run that trapped: it leads with the cause Wasmtime gave
+/// (the root of its error chain: the outer error alone only says "error while
+/// executing"), names the ending of a run that a limit or a stop ended, and
+/// keeps the outer text, the wasm backtrace, after it.
+fn run_ending(stage: &str, err: wasmtime::Error, stopped: bool) -> String {
     let ending = match err.downcast_ref::<Trap>() {
+        Some(Trap::Interrupt) if stopped => format!(" (ending: {ENDING_STOPPED})"),
         Some(Trap::Interrupt) => format!(" (ending: {ENDING_EPOCH_DEADLINE})"),
         Some(Trap::OutOfFuel) => format!(" (ending: {ENDING_FUEL_EXHAUSTED})"),
         _ => String::new(),
@@ -549,7 +749,11 @@ fn run_error(stage: &str, err: wasmtime::Error) -> ElastosError {
     let mut chain: Vec<String> = err.chain().map(|link| link.to_string()).collect();
     let cause = chain.pop().unwrap_or_default();
     let context: String = chain.iter().map(|outer| format!("\n{outer}")).collect();
-    ElastosError::Compute(format!("{stage}: {cause}{ending}{context}"))
+    format!("{stage}: {cause}{ending}{context}")
+}
+
+fn run_error(stage: &str, err: wasmtime::Error) -> ElastosError {
+    ElastosError::Compute(run_ending(stage, err, false))
 }
 
 impl Default for ComponentProvider {
@@ -576,6 +780,8 @@ impl ComputeProvider for ComponentProvider {
         self.load_admitted(bytes, manifest).await
     }
 
+    /// Starts the guest and waits for it to end, as a bounded activation. A
+    /// resident caller uses [`ComponentProvider::start_resident`] instead.
     async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
         let is_v2 = self
             .instances
@@ -660,64 +866,28 @@ impl ComputeProvider for ComponentProvider {
                 )),
             };
         }
-        let (engine, component, sealed) = {
-            let instances = self.instances.read().await;
-            let instance = instances
-                .get(&handle.id)
-                .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
-            (
-                instance.engine.clone(),
-                instance.component.clone(),
-                instance.sealed,
-            )
-        };
-
-        {
-            let mut instances = self.instances.write().await;
-            if let Some(instance) = instances.get_mut(&handle.id) {
-                instance.status = CapsuleStatus::Running;
-            }
+        let mut resident = self.start_resident(handle).await?;
+        match resident.ended().await {
+            ActivationOutcome::Trapped(message) => Err(ElastosError::Compute(message)),
+            // A natural return and an intentional stop both end well.
+            ActivationOutcome::Returned | ActivationOutcome::Stopped => Ok(()),
         }
-
-        let hostcall = self.bus_hostcall.read().unwrap().clone();
-        let principal_id = self
-            .bridge_principals
-            .read()
-            .await
-            .get(&handle.id)
-            .cloned()
-            .flatten();
-        let capsule_id = handle.id.0.clone();
-        let state = ComponentState {
-            sealed,
-            ..ComponentState::new(hostcall, capsule_id, principal_id)
-        };
-        let result = tokio::task::spawn_blocking(move || {
-            Self::instantiate_component(&engine, &component, state)
-        })
-        .await;
-
-        // Drop the activation entry when the start returns, also after a
-        // failed or panicked host call. A start whose future is dropped
-        // before this line does not reach it, and its entry stays.
-        self.instances.write().await.remove(&handle.id);
-
-        result.map_err(|err| ElastosError::Compute(format!("Component task join error: {err}")))?
     }
 
     async fn stop(&self, handle: &CapsuleHandle) -> Result<()> {
-        // One lock for the look and the removal: a start cannot mark the
+        // One lock for the look and the action: a start cannot mark the
         // entry running between the two.
         let mut instances = self.instances.write().await;
-        let running = |instance: &ComponentActivation| {
-            instance.status == CapsuleStatus::Running
-                && instance.manifest.bus_contract.as_deref() != Some(ELASTOS_BUS_V2_CONTRACT)
+        let Some(instance) = instances.get(&handle.id) else {
+            return Ok(());
         };
-        if instances.get(&handle.id).is_some_and(running) {
-            return Err(ElastosError::Compute(
-                "component/v1 is a bounded activation contract and has no resident stop operation"
-                    .to_string(),
-            ));
+        let running = instance.status == CapsuleStatus::Running
+            && instance.manifest.bus_contract.as_deref() != Some(ELASTOS_BUS_V2_CONTRACT);
+        if running {
+            // A resident v1 activation is ended by its own epoch callback; the
+            // worker removes the entry when the run ends.
+            instance.stop_requested.store(true, Ordering::Release);
+            return Ok(());
         }
         // Dropping the sole sender closes the v2 events stream. The guest
         // receives no separate stop event.
@@ -835,15 +1005,22 @@ impl ComponentState {
             run_deadline: COMPONENT_RUN_DEADLINE,
             run_started: Instant::now(),
             in_bus: Duration::ZERO,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            ended_by_stop: false,
         }
     }
 
-    /// Called when the deadline is reached: go on for the time still left, or stop.
-    /// Time this run spent inside Bus calls does not count as its own running.
-    fn deadline_update(&self) -> UpdateDeadline {
+    /// Called every tick: stop when a stop was requested, or when this run's
+    /// own running time is used up; otherwise go on for one more tick. Time
+    /// this run spent inside Bus calls does not count as its own running.
+    fn deadline_update(&mut self) -> UpdateDeadline {
+        if self.stop_requested.load(Ordering::Acquire) {
+            self.ended_by_stop = true;
+            return UpdateDeadline::Interrupt;
+        }
         let ran = self.run_started.elapsed().saturating_sub(self.in_bus);
         match self.run_deadline.checked_sub(ran) {
-            Some(left) if left >= DEADLINE_TICK => UpdateDeadline::Continue(deadline_ticks(left)),
+            Some(left) if left >= DEADLINE_TICK => UpdateDeadline::Continue(1),
             _ => UpdateDeadline::Interrupt,
         }
     }
@@ -1809,10 +1986,12 @@ mod tests {
         assert_eq!(provider.compile_slot.available_permits(), 1);
     }
 
-    /// A v1 loading entry is taken away; a running v1 entry stays with its
-    /// exact refusal. A marked v2 resident entry stays until stop takes it.
+    /// A v1 loading entry is taken away. A running v1 entry is ended by its
+    /// stop flag, not by removing it here: its worker removes it when the run
+    /// ends (the resident row does that with a real guest). A marked v2
+    /// resident entry stays until stop takes it.
     #[tokio::test]
-    async fn stop_takes_away_a_loading_entry_and_refuses_a_running_one() {
+    async fn stop_takes_away_a_loading_entry_and_leaves_a_running_one_to_its_worker() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/components/bus-v1");
         let manifest: CapsuleManifest =
@@ -1827,18 +2006,18 @@ mod tests {
             let mut instances = provider.instances.write().await;
             instances.get_mut(&handle.id).unwrap().status = status;
         };
-        // As a start leaves it when it is cancelled after its first step.
+        // A running v1 entry takes the stop flag and stays for its worker.
         mark(CapsuleStatus::Running).await;
-        let refused = provider.stop(&handle).await.unwrap_err().to_string();
-        assert_eq!(
-            refused,
-            "Compute error: component/v1 is a bounded activation contract and has no resident stop operation"
-        );
+        provider.stop(&handle).await.unwrap();
         let left = provider.instances.read().await;
         let entry = left.get(&handle.id).expect("the running entry stays");
         assert!(entry.sealed);
+        assert!(
+            entry.stop_requested.load(Ordering::Acquire),
+            "stop must set the flag the epoch callback reads"
+        );
         drop(left);
-        // As a start leaves it when it is cancelled before that step.
+        // A loading entry is taken away.
         mark(CapsuleStatus::Loading).await;
         provider.stop(&handle).await.unwrap();
         assert!(!provider.instances.read().await.contains_key(&handle.id));
@@ -1918,6 +2097,239 @@ mod tests {
         }
     }
 
+    /// A resident start returns while the guest still runs: the conformance
+    /// guest is held in its first bridge call, the start has already returned,
+    /// and no outcome is published until the call is released.
+    #[tokio::test]
+    async fn resident_start_returns_while_the_guest_runs() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1");
+        let manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(fixture.join("capsule.json")).unwrap()).unwrap();
+        let bytes = std::fs::read(fixture.join("bus-v1-conformance.component.wasm")).unwrap();
+        let provider = ComponentProvider::new();
+        let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Arc::new(Mutex::new(released));
+        let first = Arc::new(AtomicBool::new(true));
+        provider.set_bus_hostcall(Arc::new(move |line, _capsule, _principal| {
+            if first.swap(false, Ordering::SeqCst) {
+                let _ = entered.send(());
+                let _ = released.lock().unwrap().recv();
+            }
+            let request: serde_json::Value = json_line(line);
+            match request["request"]["type"].as_str() {
+                Some("request_capability") => Ok(serde_json::json!({
+                    "id": 1,
+                    "response": { "type": "capability_token", "token": "grant-token" }
+                })
+                .to_string()),
+                Some("resource_invoke") => Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "resource_result",
+                        "result": { "status": "ok", "data": { "probe": true } },
+                        "audit": "runtime-audit-1"
+                    }
+                })
+                .to_string()),
+                other => Err(format!("unexpected bridge request: {other:?}")),
+            }
+        }));
+        let handle = provider
+            .load_admitted(bytes, manifest)
+            .await
+            .expect("the conformance guest loads");
+        provider
+            .set_bridge_principal(&handle.id, Some("person:local:bus-conformance".into()))
+            .await;
+
+        let started =
+            tokio::time::timeout(Duration::from_secs(2), provider.start_resident(&handle)).await;
+        let mut resident = match started {
+            Ok(start) => start.expect("the resident activation starts"),
+            Err(_) => {
+                // The plant made start wait for the guest: let it end so the
+                // runtime can shut down, then fail here.
+                let _ = release.send(());
+                panic!("start returned before the guest ended");
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), entered_rx.recv())
+            .await
+            .expect("the guest is inside its first bridge call")
+            .expect("the guest signal");
+        assert!(
+            resident.outcome().is_none(),
+            "start returned before the guest ended, so no outcome is published yet"
+        );
+
+        let _ = release.send(());
+        let outcome = tokio::time::timeout(Duration::from_secs(5), resident.ended())
+            .await
+            .expect("the released guest returns");
+        assert_eq!(outcome, ActivationOutcome::Returned);
+        assert!(
+            provider.instances.read().await.get(&handle.id).is_none(),
+            "the worker takes the activation entry away when the run ends"
+        );
+    }
+
+    /// A stop request is read in the epoch callback and traps the guest as
+    /// `stopped`, well before its own-code deadline would.
+    #[tokio::test]
+    async fn resident_stop_flag_ends_the_guest_as_stopped() {
+        let provider = ComponentProvider::new();
+        let (_, mut manifest) = component_fixture();
+        manifest.entrypoint = "spin.component.wasm".into();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(&manifest.entrypoint),
+            lifecycle_component_bytes(true, false),
+        )
+        .unwrap();
+        let handle = provider.load(dir.path(), manifest).await.unwrap();
+        // Only the stop may end this spin: the deadline is far off and the
+        // fuel is not exhausted.
+        {
+            let mut instances = provider.instances.write().await;
+            let entry = instances.get_mut(&handle.id).unwrap();
+            entry.fuel = u64::MAX;
+            entry.run_deadline = Duration::from_secs(3);
+        }
+
+        let mut resident = provider
+            .start_resident(&handle)
+            .await
+            .expect("the spinning guest starts");
+        provider.stop(&handle).await.expect("stop sets the flag");
+        let stopped_at = Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), resident.ended())
+            .await
+            .expect("the stop ends the guest, not its deadline");
+        assert_eq!(
+            outcome,
+            ActivationOutcome::Stopped,
+            "a stop request traps the guest as stopped"
+        );
+        assert!(
+            stopped_at.elapsed() < Duration::from_millis(500),
+            "the stop must be seen within a few epoch ticks, not at the deadline"
+        );
+        assert!(
+            provider.instances.read().await.get(&handle.id).is_none(),
+            "the worker takes the activation entry away when the run ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn resident_stop_during_instantiation_reports_stopped_before_run() {
+        let provider = Arc::new(ComponentProvider::new());
+        let (_, mut manifest) = component_fixture();
+        manifest.entrypoint = "spin-start.component.wasm".into();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(&manifest.entrypoint),
+            lifecycle_component_bytes(true, true),
+        )
+        .unwrap();
+        let handle = provider.load(dir.path(), manifest).await.unwrap();
+        {
+            let mut instances = provider.instances.write().await;
+            let entry = instances.get_mut(&handle.id).unwrap();
+            entry.fuel = u64::MAX;
+            entry.run_deadline = Duration::from_secs(3);
+        }
+        let start = tokio::spawn({
+            let provider = provider.clone();
+            let handle = handle.clone();
+            async move { provider.start_resident(&handle).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if provider.status(&handle).await.unwrap() == CapsuleStatus::Running {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("start marks the activation running");
+        provider.stop(&handle).await.expect("stop sets the flag");
+        let result = tokio::time::timeout(Duration::from_secs(2), start)
+            .await
+            .expect("the stopped start completes")
+            .unwrap();
+        let error = match result {
+            Ok(_) => panic!("a stopped start returned a resident handle"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("component was stopped before its run began"),
+            "{error}"
+        );
+        assert!(provider.instances.read().await.get(&handle.id).is_none());
+    }
+
+    #[test]
+    fn stop_during_start_function_publishes_stopped_outcome() {
+        let engine = ComponentProvider::engine().unwrap();
+        let component = Component::new(&engine, lifecycle_component_bytes(true, true)).unwrap();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let state = ComponentState {
+            fuel: u64::MAX,
+            run_deadline: Duration::from_secs(3),
+            stop_requested: stop_requested.clone(),
+            ..ComponentState::new(None, "spin-start".into(), None)
+        };
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(ComponentProvider::instantiate_component(
+                &engine, &component, state, None,
+            ));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        stop_requested.store(true, Ordering::Release);
+        let outcome = ended
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stop ends the start function");
+        assert_eq!(outcome, Err(ActivationOutcome::Stopped));
+    }
+
+    #[tokio::test]
+    async fn resident_start_waits_for_failed_instantiation() {
+        let provider = ComponentProvider::new();
+        let (_, mut manifest) = component_fixture();
+        manifest.entrypoint = "failing-start.component.wasm".into();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(&manifest.entrypoint),
+            lifecycle_component_bytes(true, true),
+        )
+        .unwrap();
+        let handle = provider.load(dir.path(), manifest).await.unwrap();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .fuel = 1;
+        let error = match provider.start_resident(&handle).await {
+            Ok(_) => panic!("a failed start function returned a resident handle"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to instantiate component capsule"),
+            "{error}"
+        );
+        assert!(provider.instances.read().await.get(&handle.id).is_none());
+    }
+
     fn state_with_deadline(run_deadline: Duration) -> ComponentState {
         ComponentState {
             fuel: u64::MAX,
@@ -1928,12 +2340,15 @@ mod tests {
 
     /// Runs the production activation on its own thread and gives up after
     /// 20 s, so a run that no deadline stops fails here instead of hanging.
-    fn run_to_its_end(component: Component, state: ComponentState) -> (Result<()>, Duration) {
+    fn run_to_its_end(
+        component: Component,
+        state: ComponentState,
+    ) -> (std::result::Result<(), ActivationOutcome>, Duration) {
         let engine = ComponentProvider::engine().expect("component engine");
         let (done, ended) = std::sync::mpsc::channel();
         let began = Instant::now();
         std::thread::spawn(move || {
-            let result = ComponentProvider::instantiate_component(&engine, &component, state);
+            let result = ComponentProvider::instantiate_component(&engine, &component, state, None);
             let _ = done.send(result);
         });
         let result = ended
@@ -1942,7 +2357,7 @@ mod tests {
         (result, began.elapsed())
     }
 
-    fn assert_ended_by_the_deadline(result: Result<()>) {
+    fn assert_ended_by_the_deadline(result: std::result::Result<(), ActivationOutcome>) {
         let err = result.expect_err("a loop that never ends must not finish");
         let text = err.to_string();
         let first_line = text.lines().next().unwrap_or_default();
@@ -2091,25 +2506,17 @@ mod tests {
 
     #[test]
     fn a_failure_that_is_no_limit_keeps_its_cause_and_gets_no_ending() {
-        let err = run_error(
+        let err = ActivationOutcome::Trapped(run_ending(
             "Component lifecycle run failed",
             wasmtime::Error::from(Trap::UnreachableCodeReached).context("outer"),
-        )
+            false,
+        ))
         .to_string();
         assert_eq!(
             err,
             "Compute error: Component lifecycle run failed: \
              wasm trap: wasm `unreachable` instruction executed\nouter"
         );
-    }
-
-    #[test]
-    fn deadline_ticks_are_whole_ten_millisecond_ticks_and_never_zero() {
-        assert_eq!(deadline_ticks(Duration::from_secs(10)), 1000);
-        assert_eq!(deadline_ticks(Duration::from_millis(200)), 20);
-        assert_eq!(deadline_ticks(Duration::from_millis(19)), 1);
-        assert_eq!(deadline_ticks(Duration::from_millis(1)), 1);
-        assert_eq!(deadline_ticks(Duration::ZERO), 1);
     }
 
     #[test]
