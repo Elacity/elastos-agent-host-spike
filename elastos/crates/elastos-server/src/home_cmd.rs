@@ -2724,6 +2724,12 @@ async fn list_runtime_capsules(
     let mut capsules = Vec::new();
     if let Some(items) = body.get("capsules").and_then(|v| v.as_array()) {
         for item in items {
+            if matches!(
+                item.get("status").and_then(|v| v.as_str()),
+                Some("stopped" | "failed")
+            ) {
+                continue;
+            }
             if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                 let rendered = if let Some(state) = item.get("status").and_then(|v| v.as_str()) {
                     format!("{} ({})", name, state)

@@ -16,6 +16,23 @@ use elastos_storage::StorageProvider;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
 
+/// The status of an activation that answered `starting` and whose worker has
+/// not yet reported that the guest entered `run`.
+pub const CAPSULE_STARTING: &str = "starting";
+/// The status of an activation whose guest entered `run`.
+pub const CAPSULE_RUNNING: &str = "running";
+/// The status of an activation that ended.
+pub const CAPSULE_STOPPED: &str = "stopped";
+/// The status of an activation that trapped.
+pub const CAPSULE_FAILED: &str = "failed";
+/// The cause of an activation whose guest's `run` returned success.
+pub const CAUSE_COMPLETED: &str = "completed";
+
+/// How long an ended activation stays listed, so its session, status and cause
+/// can still be read after the response that started it has long gone. The
+/// entry leaves on the first listing after this, not on a timer.
+pub const ENDED_CAPSULE_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Information about a running capsule (for API responses and lifecycle management)
 #[derive(Debug, Clone)]
 pub struct RunningCapsuleInfo {
@@ -23,12 +40,23 @@ pub struct RunningCapsuleInfo {
     pub id: String,
     /// Capsule name from manifest
     pub name: String,
-    /// Current status (running, stopped, etc.)
+    /// Current status (`starting`, `running`, `stopped` or `failed`)
     pub status: String,
     /// Capsule type (WASM, MicroVM)
     pub capsule_type: CapsuleType,
     /// Handle for stopping the capsule (optional, not all capsules have handles)
     pub handle: Option<CapsuleHandle>,
+    /// The session this instance runs in: the capsule id the bridge and the
+    /// pending store use for it, which is also the instance id.
+    pub session_id: String,
+    /// The principal admission bound the instance to, for an agent launch or
+    /// a launch grant.
+    pub principal: Option<String>,
+    /// Why the activation ended, once it has: `completed` for a natural
+    /// return, or the trap's message.
+    pub cause: Option<String>,
+    /// When the activation ended; `None` while it is starting or running.
+    pub ended_at: Option<std::time::Instant>,
 }
 
 /// Which unsigned local capsules the Runtime admits.
@@ -52,6 +80,16 @@ pub(crate) enum Signer {
     UnsignedDev,
 }
 
+/// Whether a start waits for the activation to end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchMode {
+    /// Wait for the guest's `run` to end: a CLI run, a bundle start, a test.
+    Bounded,
+    /// A component returns once its guest entered `run`, and stays in the
+    /// registry until it ends. Other capsule types stay bounded.
+    Detached,
+}
+
 /// The main ElastOS runtime
 pub struct Runtime {
     // Keep the storage provider alive for runtime/lifecycle ownership even
@@ -65,8 +103,10 @@ pub struct Runtime {
     unsigned_capsules: RwLock<UnsignedCapsules>,
     /// Provider registry (optional, set when server mode is active)
     provider_registry: RwLock<Option<Arc<ProviderRegistry>>>,
-    /// Registry of running capsules (for API queries)
-    running_capsules: RwLock<HashMap<String, RunningCapsuleInfo>>,
+    /// Registry of running capsules (for API queries). Shared with each
+    /// activation's ending watcher so the entry it wrote at admission can be
+    /// ended without the Runtime handle.
+    running_capsules: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
@@ -122,6 +162,77 @@ impl Drop for LaunchHeld {
     }
 }
 
+/// Owns a detached component's admission context until its watcher has
+/// removed it. Dropping a route or a watcher still cleans up the loaded
+/// component, its bridge context and its registry entry.
+struct ActivationContextHeld {
+    id: elastos_common::CapsuleId,
+    handle: CapsuleHandle,
+    component: Arc<ComponentProvider>,
+    registry: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
+    manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
+    armed: bool,
+}
+
+impl ActivationContextHeld {
+    fn new(runtime: &Runtime, handle: &CapsuleHandle, component: Arc<ComponentProvider>) -> Self {
+        Self {
+            id: handle.id.clone(),
+            handle: handle.clone(),
+            component,
+            registry: runtime.running_capsules.clone(),
+            manifest_capabilities: runtime.bridge_manifest_capabilities.clone(),
+            model_token_ceilings: runtime.bridge_model_token_ceilings.clone(),
+            armed: true,
+        }
+    }
+
+    async fn release(&mut self) {
+        self.component.clear_bridge_principal(&self.id).await;
+        if let Ok(mut bounds) = self.manifest_capabilities.write() {
+            bounds.remove(&self.id.0);
+        }
+        self.model_token_ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id.0);
+        self.armed = false;
+    }
+}
+
+impl Drop for ActivationContextHeld {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let id = self.id.clone();
+        let handle = self.handle.clone();
+        let component = self.component.clone();
+        let registry = self.registry.clone();
+        let manifest_capabilities = self.manifest_capabilities.clone();
+        let model_token_ceilings = self.model_token_ceilings.clone();
+        tokio::spawn(async move {
+            let _ = component.stop(&handle).await;
+            component.clear_bridge_principal(&id).await;
+            if let Ok(mut bounds) = manifest_capabilities.write() {
+                bounds.remove(&id.0);
+            }
+            model_token_ceilings
+                .write()
+                .unwrap_or_else(|err| err.into_inner())
+                .remove(&id.0);
+            if let Some(info) = registry.write().await.get_mut(&id.0) {
+                if info.ended_at.is_none() {
+                    info.status = CAPSULE_FAILED.to_string();
+                    info.cause = Some("activation task ended before its outcome".to_string());
+                    info.ended_at = Some(std::time::Instant::now());
+                }
+            }
+        });
+    }
+}
+
 impl Runtime {
     /// Create a new runtime with a single compute provider (backward compatible)
     pub fn new(storage: Arc<dyn StorageProvider>, compute: Arc<dyn ComputeProvider>) -> Self {
@@ -131,7 +242,7 @@ impl Runtime {
             signature_verifier: RwLock::new(SignatureVerifier::new()),
             unsigned_capsules: RwLock::new(UnsignedCapsules::Refused),
             provider_registry: RwLock::new(None),
-            running_capsules: RwLock::new(HashMap::new()),
+            running_capsules: Arc::new(RwLock::new(HashMap::new())),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -151,7 +262,7 @@ impl Runtime {
             signature_verifier: RwLock::new(SignatureVerifier::new()),
             unsigned_capsules: RwLock::new(UnsignedCapsules::Refused),
             provider_registry: RwLock::new(None),
-            running_capsules: RwLock::new(HashMap::new()),
+            running_capsules: Arc::new(RwLock::new(HashMap::new())),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -352,18 +463,62 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(CapsuleHandle, Signer)> {
-        self.run_signer(path, args, principal_id, None).await
+        self.run_signer(path, args, principal_id, None, LaunchMode::Bounded)
+            .await
+    }
+
+    /// Start a capsule and return after admission, while its component worker
+    /// starts. A component activation stays in the registry (session, status,
+    /// cause) until it ends; a non-component start is still bounded and has
+    /// nothing to register. This is the launch route's entry.
+    pub(crate) async fn start_local_with_signer(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_signer(path, args, principal_id, None, LaunchMode::Detached)
+            .await
     }
 
     /// The same start for a launch that admitted its principal. `actor` is the
     /// admission context's stored agent id, and it is the only way an agent's
     /// id reaches a bridge principal. The manifest and the entrypoint are the
     /// exact bytes admission walked; this reads neither back from `path`.
+    /// The bounded admitted start: waits for the guest's `run` to end. Kept
+    /// beside [`Self::start_local_admitted`] because it is the call the launch
+    /// route's F-sync falsifier restores, and the agent rows that assert a
+    /// whole run use it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn run_local_admitted(
         &self,
         path: &Path,
         args: Vec<String>,
         admission: crate::agent_admission::AdmissionContext,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_local_admitted_mode(path, args, admission, LaunchMode::Bounded)
+            .await
+    }
+
+    /// The launch route's admitted start: see [`Self::start_local_with_signer`].
+    pub(crate) async fn start_local_admitted(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        admission: crate::agent_admission::AdmissionContext,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_local_admitted_mode(path, args, admission, LaunchMode::Detached)
+            .await
+    }
+
+    /// Both admitted entries derive the same actor and ceiling from the
+    /// stored admission context before it is consumed.
+    async fn run_local_admitted_mode(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        admission: crate::agent_admission::AdmissionContext,
+        mode: LaunchMode,
     ) -> Result<(CapsuleHandle, Signer)> {
         let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
         let ceiling = admission.model_token_ceiling();
@@ -373,6 +528,7 @@ impl Runtime {
             args,
             Some(actor),
             Some((manifest, entrypoint, ceiling)),
+            mode,
         )
         .await
     }
@@ -387,6 +543,7 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
         admitted: Option<(CapsuleManifest, Vec<u8>, u64)>,
+        mode: LaunchMode,
     ) -> Result<(CapsuleHandle, Signer)> {
         let admitted_launch = admitted.is_some();
         if !admitted_launch {
@@ -536,6 +693,7 @@ impl Runtime {
             args,
             principal_id.map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
             admitted_ceiling,
+            mode,
         )
         .await?;
 
@@ -809,7 +967,14 @@ impl Runtime {
         let held = launch
             .clone()
             .map(|launch| LaunchHeld::new(&self.launch_contents, &handle.id.0, launch));
-        let started = self.start_loaded(component, &mut handle, args, principal_id, None);
+        let started = self.start_loaded(
+            component,
+            &mut handle,
+            args,
+            principal_id,
+            None,
+            LaunchMode::Bounded,
+        );
         let started = started.await;
         drop(held);
         started.map_err(failed)?;
@@ -924,11 +1089,16 @@ impl Runtime {
 
     /// The end of every start, and the one place in this file that fills a
     /// capsule's ceiling: from the one bounds function, for a start from a
-    /// folder and for a start by CID alike. While `provider` starts the
-    /// loaded capsule, that ceiling is what the bridge holds it to and, for a
-    /// component, `principal_id` is who it runs for; `args` go on its handle
-    /// first. Ceiling and principal are taken away again when the start
-    /// returns, well or badly.
+    /// folder and for a start by CID alike. While the activation runs, that
+    /// ceiling is what the bridge holds it to and, for a component,
+    /// `principal_id` is who it runs for; `args` go on its handle first.
+    ///
+    /// Bounded: this returns when the start has ended, well or badly, and the
+    /// ceiling and principal go with it. Detached: a component returns after
+    /// admission with `starting`; the worker's `started` changes the entry to
+    /// `running`, and the ending watcher takes the ceiling
+    /// and principal away and records the status and cause when the guest
+    /// ends. The entry stays listed for [`ENDED_CAPSULE_RETENTION`].
     async fn start_loaded(
         &self,
         provider: Arc<dyn ComputeProvider>,
@@ -936,16 +1106,69 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<String>,
         model_token_ceiling: Option<u64>,
+        mode: LaunchMode,
     ) -> Result<()> {
+        let detached_component =
+            if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
+                Some(self.component_provider.clone().ok_or_else(|| {
+                    ElastosError::Compute("No component compute provider is configured".to_string())
+                })?)
+            } else {
+                None
+            };
+        let held = detached_component
+            .as_ref()
+            .map(|component| ActivationContextHeld::new(self, handle, component.clone()));
+        self.hold_launch_context(handle, principal_id.clone(), model_token_ceiling)
+            .await;
+
+        // Set args on handle before starting
+        handle.args = args;
+
+        if let Some(component) = detached_component {
+            let id = handle.id.clone();
+            self.register_capsule(RunningCapsuleInfo {
+                id: id.0.clone(),
+                name: handle.manifest.name.clone(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.0.clone(),
+                principal: principal_id,
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+            self.watch_activation(
+                id,
+                handle.clone(),
+                component,
+                held.expect("detached context"),
+            );
+            return Ok(());
+        }
+
+        // Start capsule
+        let start = provider.start(handle).await;
+        self.release_launch_context(&handle.id).await;
+        start
+    }
+
+    /// The ceiling and, for a component, the principal the bridge holds this
+    /// activation to while it runs. `Some` is the ceiling admission recorded;
+    /// a start that was not admitted gets no token entry.
+    async fn hold_launch_context(
+        &self,
+        handle: &CapsuleHandle,
+        principal_id: Option<String>,
+        model_token_ceiling: Option<u64>,
+    ) {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.insert(
                 handle.id.0.clone(),
                 handle.manifest.resource_authority_bounds(),
             );
         }
-        // `Some` is the ceiling admission recorded for this start. A start
-        // that was not admitted passes `None` and gets no entry. The manifest
-        // is not read again for the number.
         if let Some(ceiling) = model_token_ceiling {
             self.bridge_model_token_ceilings
                 .write()
@@ -953,31 +1176,101 @@ impl Runtime {
                 .insert(handle.id.0.clone(), ceiling);
         }
         if handle.manifest.is_component_capsule() {
-            if let Some(ref component) = self.component_provider {
+            if let Some(component) = &self.component_provider {
                 component
                     .set_bridge_principal(&handle.id, principal_id)
                     .await;
             }
         }
+    }
 
-        // Set args on handle before starting
-        handle.args = args;
-
-        // Start capsule
-        let start = provider.start(handle).await;
-        if handle.manifest.is_component_capsule() {
-            if let Some(ref component) = self.component_provider {
-                component.clear_bridge_principal(&handle.id).await;
-            }
+    /// Takes away what [`Self::hold_launch_context`] put in place, at the end
+    /// of the activation however it ended.
+    async fn release_launch_context(&self, id: &elastos_common::CapsuleId) {
+        if let Some(component) = &self.component_provider {
+            component.clear_bridge_principal(id).await;
         }
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
-            bounds.remove(&handle.id.0);
+            bounds.remove(&id.0);
         }
         self.bridge_model_token_ceilings
             .write()
             .unwrap_or_else(|err| err.into_inner())
-            .remove(&handle.id.0);
-        start
+            .remove(&id.0);
+    }
+
+    /// Remove a loaded component before the watcher can start its guest. This
+    /// exercises the real provider's pre-start error through the registry.
+    #[cfg(test)]
+    pub(crate) async fn remove_loaded_component_for_test(&self, id: &str) {
+        let handle = self
+            .get_capsule(id)
+            .await
+            .and_then(|entry| entry.handle)
+            .expect("the admitted component has a handle");
+        let component = self
+            .component_provider
+            .as_ref()
+            .expect("component provider");
+        component
+            .stop(&handle)
+            .await
+            .expect("remove the loaded component");
+    }
+
+    /// Hold registration so a route can be cancelled after it has installed
+    /// its admission context and before its watcher owns that context.
+    #[cfg(test)]
+    pub(crate) async fn hold_capsule_registry_for_test(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<String, RunningCapsuleInfo>> {
+        self.running_capsules.write().await
+    }
+
+    /// Starts this activation and waits for its worker to publish its outcome, then takes
+    /// the ceiling and principal away and leaves the entry `stopped` with
+    /// cause `completed`, or `failed` with the trap's cause. The entry keeps
+    /// its `ended_at` for [`ENDED_CAPSULE_RETENTION`].
+    fn watch_activation(
+        &self,
+        id: elastos_common::CapsuleId,
+        handle: CapsuleHandle,
+        component: Arc<ComponentProvider>,
+        mut held: ActivationContextHeld,
+    ) {
+        use elastos_compute::providers::ActivationOutcome;
+
+        let registry = self.running_capsules.clone();
+        tokio::spawn(async move {
+            let (status, cause) = match component.start_resident(&handle).await {
+                Ok(mut activation) => {
+                    // Only the compute worker's `started` moves the entry from
+                    // admission's `starting` to `running`.
+                    if let Some(info) = registry.write().await.get_mut(&id.0) {
+                        info.status = CAPSULE_RUNNING.to_string();
+                    }
+                    match activation.ended().await {
+                        ActivationOutcome::Returned => {
+                            (CAPSULE_STOPPED, CAUSE_COMPLETED.to_string())
+                        }
+                        ActivationOutcome::Trapped(message) => (CAPSULE_FAILED, message),
+                        ActivationOutcome::Stopped => {
+                            (CAPSULE_STOPPED, "stopped by request".to_string())
+                        }
+                    }
+                }
+                Err(err) => (CAPSULE_FAILED, err.to_string()),
+            };
+            held.release().await;
+            // The entry ends after the context is gone, so a reader that sees
+            // `ended_at` also sees that nothing of the activation is left.
+            let mut capsules = registry.write().await;
+            if let Some(info) = capsules.get_mut(&id.0) {
+                info.status = status.to_string();
+                info.cause = Some(cause);
+                info.ended_at = Some(std::time::Instant::now());
+            }
+        });
     }
 
     /// Check that all providers required by a capsule are registered
@@ -1102,6 +1395,7 @@ impl Runtime {
     /// register capsules that weren't started through Runtime's run_* methods.
     pub async fn register_capsule(&self, info: RunningCapsuleInfo) {
         let mut capsules = self.running_capsules.write().await;
+        prune_ended(&mut capsules, std::time::Instant::now());
         tracing::info!("Registered capsule '{}' with ID: {}", info.name, info.id);
         capsules.insert(info.id.clone(), info);
     }
@@ -1114,15 +1408,34 @@ impl Runtime {
         }
     }
 
-    /// List all registered capsules
+    /// List all registered capsules, sorted by id. An entry that ended more
+    /// than [`ENDED_CAPSULE_RETENTION`] ago leaves the listing here.
     pub async fn list_capsules(&self) -> Vec<RunningCapsuleInfo> {
-        let capsules = self.running_capsules.read().await;
-        capsules.values().cloned().collect()
+        self.list_capsules_pruning_at(std::time::Instant::now())
+            .await
+    }
+
+    /// Test the retention boundary without waiting for the clock.
+    #[cfg(test)]
+    pub(crate) async fn list_capsules_at(
+        &self,
+        now: std::time::Instant,
+    ) -> Vec<RunningCapsuleInfo> {
+        self.list_capsules_pruning_at(now).await
+    }
+
+    async fn list_capsules_pruning_at(&self, now: std::time::Instant) -> Vec<RunningCapsuleInfo> {
+        let mut capsules = self.running_capsules.write().await;
+        prune_ended(&mut capsules, now);
+        let mut listed: Vec<RunningCapsuleInfo> = capsules.values().cloned().collect();
+        listed.sort_by(|left, right| left.id.cmp(&right.id));
+        listed
     }
 
     /// Get a specific capsule by ID
     pub async fn get_capsule(&self, id: &str) -> Option<RunningCapsuleInfo> {
-        let capsules = self.running_capsules.read().await;
+        let mut capsules = self.running_capsules.write().await;
+        prune_ended(&mut capsules, std::time::Instant::now());
         capsules.get(id).cloned()
     }
 
@@ -1138,7 +1451,9 @@ impl Runtime {
     /// Stop a capsule by its ID
     ///
     /// This looks up the capsule in the registry and attempts to stop it.
-    /// Returns Ok(true) if stopped, Ok(false) if not found, Err on failure.
+    /// Returns Ok(true) if stopped, Ok(false) if not found or if the entry
+    /// records an activation that has already ended: an ended entry is kept
+    /// for its session, status and cause, and there is nothing left to stop.
     pub async fn stop_capsule_by_id(&self, id: &str) -> Result<bool> {
         // Get capsule info and handle
         let capsule_info = {
@@ -1149,6 +1464,9 @@ impl Runtime {
         let Some(info) = capsule_info else {
             return Ok(false); // Not found
         };
+        if info.ended_at.is_some() {
+            return Ok(false);
+        }
 
         // If we have a handle, try to stop via compute provider
         if let Some(handle) = &info.handle {
@@ -1172,6 +1490,17 @@ impl Runtime {
 
         Ok(true)
     }
+}
+
+/// Removes the entries whose activation ended at least
+/// [`ENDED_CAPSULE_RETENTION`] before `now`. The registry has no timer: an
+/// ended entry lives until a reader prunes it, so no sleeping task is needed
+/// and a test can ask for a later `now`.
+fn prune_ended(capsules: &mut HashMap<String, RunningCapsuleInfo>, now: std::time::Instant) {
+    capsules.retain(|_, info| match info.ended_at {
+        Some(ended_at) => now.duration_since(ended_at) < ENDED_CAPSULE_RETENTION,
+        None => true,
+    });
 }
 
 #[cfg(test)]

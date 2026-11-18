@@ -163,6 +163,10 @@ pub async fn run_serve(
                     status: "running".to_string(),
                     capsule_type: handle.manifest.capsule_type.clone(),
                     handle: Some(handle.clone()),
+                    session_id: handle.id.0.clone(),
+                    principal: None,
+                    cause: None,
+                    ended_at: None,
                 };
                 runtime_arc.register_capsule(capsule_info).await;
 

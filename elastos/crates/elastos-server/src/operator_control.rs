@@ -319,6 +319,7 @@ struct CapsulesResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct CapsuleInfo {
     name: String,
+    status: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1018,6 +1019,7 @@ async fn list_runtime_capsules(
     let mut names: Vec<String> = response
         .capsules
         .into_iter()
+        .filter(|capsule| !matches!(capsule.status.as_deref(), Some("stopped" | "failed")))
         .map(|capsule| capsule.name)
         .collect();
     names.sort();

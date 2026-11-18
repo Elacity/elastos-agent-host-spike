@@ -3644,9 +3644,10 @@ mod tests {
             ),
             ("start_loaded", &[("elastos-server/src/runtime.rs", 2)][..]),
             (
-                "run_local_admitted",
+                "start_local_admitted",
                 &[("elastos-server/src/api/routes.rs", 1)][..],
             ),
+            ("run_local_admitted", &[][..]),
             (
                 "spawn_resource_bridge",
                 &[("elastos-server/src/supervisor.rs", 1)][..],

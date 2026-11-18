@@ -83,6 +83,8 @@ pub mod shares;
 pub mod sources;
 pub mod stage_cmd;
 pub mod supervisor;
+#[cfg(test)]
+mod test_clock;
 #[cfg(all(test, unix))]
 mod test_support;
 pub mod update;
