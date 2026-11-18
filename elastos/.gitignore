@@ -32,7 +32,6 @@ Thumbs.db
 !tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm
 !tests/fixtures/components/asks-nothing/bundle/asks-nothing.component.wasm
 !tests/fixtures/components/a5-launch-probe/a5-launch-probe.component.wasm
-!tests/fixtures/components/v2-invoke-body.component.wasm
 .last-published-cid
 
 

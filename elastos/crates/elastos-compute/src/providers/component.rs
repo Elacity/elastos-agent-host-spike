@@ -564,9 +564,9 @@ impl ComputeProvider for ComponentProvider {
                     Err(error) => error.to_string(),
                 };
                 tracing::info!(capsule_id = %id, %ending, "component v2 run ended");
+                instances.write().await.remove(&id);
                 #[cfg(test)]
                 endings.write().await.insert(id.clone(), ending);
-                instances.write().await.remove(&id);
             });
             return match ready_rx.await {
                 Ok(result) => result,
@@ -1164,12 +1164,11 @@ mod tests {
         let (_, mut manifest) = component_fixture();
         manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
         manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
-        let bytes =
-            include_bytes!("../../../../tests/fixtures/components/v2-invoke-body.component.wasm");
-        let handle = provider
-            .load_admitted(bytes.to_vec(), manifest)
-            .await
-            .unwrap();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-invoke-body.wat"
+        ))
+        .unwrap();
+        let handle = provider.load_admitted(bytes, manifest).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), provider.start(&handle))
             .await
             .expect("guest start completes")
