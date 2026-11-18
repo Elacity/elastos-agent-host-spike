@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use elastos_common::collaboration_protocol::{
@@ -50,6 +50,11 @@ pub(crate) const DEFAULT_CONVERSATION_SEND_METHOD: &str = "message.send";
 const MAX_CORE_STATE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_UNRESOLVED_OUTGOING: usize = 64;
 const MAX_OUTGOING_RECORDS: usize = 4_096;
+/// Anchors exist only for the sends the window governs, and only while those
+/// sends are inside the window. The window admits at most
+/// `COMMUNITY_SENDS_PER_WINDOW` messages per profile, so the live set is a
+/// handful; the cap bounds a test or a future policy that raises that limit.
+const MAX_SEND_ANCHORS: usize = 32;
 const MAX_PENDING_INCOMING: usize = 32;
 pub(crate) const MAX_PENDING_INCOMING_PER_SENDER: usize = 8;
 pub(crate) const MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING: usize = 32;
@@ -64,6 +69,41 @@ pub(crate) const MAX_CONVERSATION_HISTORY_MESSAGES: usize = 200;
 pub(crate) const MAX_CONVERSATION_HISTORY_BYTES: usize = 1024 * 1024;
 pub(crate) const CONVERSATION_HISTORY_RETENTION_SECS: u64 = 24 * 60 * 60;
 
+/// The monotonic age floor of one governed outgoing message. The send window
+/// measures elapsed time on this alone.
+#[derive(Clone, Copy, Debug)]
+struct SendAnchor {
+    /// The instant this process started its own clock for this message.
+    since: Instant,
+    /// Age already elapsed when the anchor was made: zero for a message this
+    /// process admitted, the stored wall age once for a restored record.
+    prior: Duration,
+}
+
+impl SendAnchor {
+    fn admitted() -> Self {
+        Self {
+            since: Instant::now(),
+            prior: Duration::ZERO,
+        }
+    }
+
+    fn restored(prior: Duration) -> Self {
+        Self {
+            since: Instant::now(),
+            prior,
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.prior.saturating_add(self.since.elapsed())
+    }
+
+    fn elapsed_secs(&self) -> u64 {
+        self.elapsed().as_secs()
+    }
+}
+
 pub(crate) struct CollaborationCore {
     authority: DefaultConversationDeviceAuthority,
     operation_capsule: String,
@@ -73,11 +113,14 @@ pub(crate) struct CollaborationCore {
     mutation_mutex: Mutex<()>,
     /// Counted from stored outgoing messages, so only a saved message counts.
     sends_per_window: usize,
-    /// The monotonic instant this process admitted each outgoing message,
-    /// keyed by request id. The send window measures elapsed `Instant` time,
-    /// so a wall-clock step back cannot reopen it; a message restored from
-    /// disk has no anchor and keeps its stored wall stamp as before.
-    send_instants: Mutex<HashMap<String, Instant>>,
+    /// The monotonic age floor of each outgoing Community message the send
+    /// window governs, keyed by request id. The window's elapsed time is
+    /// `prior + since.elapsed()` and nothing else: a wall-clock step cannot
+    /// shorten or lengthen it once the anchor exists. `prior` is zero for a
+    /// message this process admitted; for a record restored from disk (which
+    /// has no monotonic history) it is the stored wall age at the moment the
+    /// anchor is made, and the wall stamp is never read for that record again.
+    send_anchors: Mutex<HashMap<String, SendAnchor>>,
     receive_rate: ProfileRateLimiter,
     presence_receive_rate: ProfileRateLimiter,
     /// Serializes receive-rate admission through its durable commit and count.
@@ -467,7 +510,7 @@ impl CollaborationCore {
             community_membership,
             mutation_mutex: Mutex::new(()),
             sends_per_window: COMMUNITY_SENDS_PER_WINDOW,
-            send_instants: Mutex::new(HashMap::new()),
+            send_anchors: Mutex::new(HashMap::new()),
             receive_rate: ProfileRateLimiter::new(
                 COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW,
                 COMMUNITY_RATE_WINDOW_SECS,
@@ -1533,10 +1576,9 @@ impl CollaborationCore {
             let value = self.outgoing_handle(&record, prepared.verified_message().clone());
             state.outgoing.push(record);
             ensure_state_fits(state)?;
-            self.send_instants
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(operation.request_id.clone(), Instant::now());
+            if payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                self.record_send_anchor(&operation.request_id);
+            }
             Ok(Mutation {
                 value,
                 changed: true,
@@ -1546,33 +1588,41 @@ impl CollaborationCore {
 
     /// Whether this Profile may send one more Community message now, without
     /// sending: work that must not be lost to a refused send checks first.
+    ///
+    /// The stored state and the window are read and updated under the same
+    /// process and file locks a send commits under, so a precheck racing a
+    /// send cannot prune that send's anchor from an older state snapshot.
     pub(crate) fn check_community_send_allowed(
         &self,
         sender_profile_did: &str,
         now: u64,
     ) -> anyhow::Result<()> {
-        let state = self.load_state()?.unwrap_or_else(|| self.empty_state());
-        self.check_community_send_window(&state, sender_profile_did, now)?;
-        Ok(())
+        self.with_mutation(None, |state| {
+            self.check_community_send_window(state, sender_profile_did, now)?;
+            Ok(Mutation {
+                value: (),
+                changed: false,
+            })
+        })
     }
 
-    /// Counts this Profile's stored Community messages created in the last
+    /// Counts this Profile's stored Community messages still inside the
     /// window. Stored state is the count, so an unsaved send never counts and
     /// a saved one always does, across restarts too.
     ///
-    /// Recent means less than one window of *elapsed* time, measured as the
-    /// larger of the wall-clock difference and the monotonic time since this
-    /// process admitted the message. A backward wall step can therefore never
-    /// reopen the window; a message restored from disk has no monotonic anchor
-    /// and keeps the stored wall stamp as before.
+    /// Elapsed time is the anchor's monotonic age and nothing else, so a wall
+    /// step neither shortens nor lengthens the window. A record this process
+    /// did not admit has no monotonic history: its stored wall stamp seeds an
+    /// anchor exactly once, at the first check that sees it, and no decision
+    /// after that reads the wall clock.
     fn check_community_send_window(
         &self,
         state: &CoreState,
         sender_profile_did: &str,
         now: u64,
     ) -> Result<(), CommunitySendRateLimited> {
-        let mut instants = self
-            .send_instants
+        let mut anchors = self
+            .send_anchors
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let mut recent_ids = HashSet::new();
@@ -1588,23 +1638,33 @@ impl CollaborationCore {
             if message.payload.payload_type != COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
                 continue;
             }
-            let wall_elapsed = now.saturating_sub(message.payload.created_at);
-            let elapsed = instants
-                .get(&entry.operation.request_id)
-                .map_or(wall_elapsed, |admitted| {
-                    wall_elapsed.max(admitted.elapsed().as_secs())
-                });
+            let request_id = &entry.operation.request_id;
+            let elapsed = match anchors.get(request_id) {
+                Some(anchor) => anchor.elapsed_secs(),
+                None => {
+                    let wall_elapsed = now.saturating_sub(message.payload.created_at);
+                    if wall_elapsed >= COMMUNITY_RATE_WINDOW_SECS {
+                        continue;
+                    }
+                    Self::remember_anchor(
+                        &mut anchors,
+                        request_id,
+                        SendAnchor::restored(Duration::from_secs(wall_elapsed)),
+                    );
+                    wall_elapsed
+                }
+            };
             if elapsed >= COMMUNITY_RATE_WINDOW_SECS {
                 continue;
             }
-            recent_ids.insert(entry.operation.request_id.clone());
+            recent_ids.insert(request_id.clone());
             if message.payload.sender_profile_did != sender_profile_did {
                 continue;
             }
             count += 1;
             oldest_elapsed = oldest_elapsed.max(elapsed);
         }
-        instants.retain(|request_id, _| recent_ids.contains(request_id));
+        anchors.retain(|request_id, _| recent_ids.contains(request_id));
         if count < self.sends_per_window {
             return Ok(());
         }
@@ -1615,16 +1675,62 @@ impl CollaborationCore {
         })
     }
 
+    /// Anchors one admitted governed send, pruning what has left the window.
+    fn record_send_anchor(&self, request_id: &str) {
+        let mut anchors = self
+            .send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self::remember_anchor(&mut anchors, request_id, SendAnchor::admitted());
+    }
+
+    /// Inserts one anchor after evicting anchors older than the window and,
+    /// at the hard cap, the oldest one still inside it.
+    fn remember_anchor(
+        anchors: &mut HashMap<String, SendAnchor>,
+        request_id: &str,
+        anchor: SendAnchor,
+    ) {
+        anchors.retain(|_, anchor| anchor.elapsed_secs() < COMMUNITY_RATE_WINDOW_SECS);
+        while anchors.len() >= MAX_SEND_ANCHORS {
+            let Some(oldest) = anchors
+                .iter()
+                .max_by_key(|(_, anchor)| anchor.elapsed())
+                .map(|(request_id, _)| request_id.clone())
+            else {
+                break;
+            };
+            anchors.remove(&oldest);
+        }
+        anchors.insert(request_id.to_string(), anchor);
+    }
+
     /// Treat `by` as elapsed monotonic send-window time, as a real wait would.
     #[cfg(test)]
     pub(crate) fn advance_send_window(&self, by: std::time::Duration) {
-        let mut instants = self
-            .send_instants
+        let mut anchors = self
+            .send_anchors
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        for admitted in instants.values_mut() {
-            *admitted = admitted.checked_sub(by).unwrap_or(*admitted);
+        for anchor in anchors.values_mut() {
+            anchor.prior = anchor.prior.saturating_add(by);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn send_anchor_count(&self) -> usize {
+        self.send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_send_anchor(&self, request_id: &str) -> bool {
+        self.send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(request_id)
     }
 
     #[cfg(test)]
@@ -6080,6 +6186,10 @@ mod tests {
             .unwrap();
         }
         let before = fs::read(core.state_path()).unwrap();
+        // The wall readings here stand for elapsed real time, and the window
+        // measures real time on its monotonic anchors, so the anchors advance
+        // with them.
+        core.advance_send_window(std::time::Duration::from_secs(1));
         let error = prepare(
             &core,
             "burst-over",
@@ -6106,6 +6216,7 @@ mod tests {
         )
         .unwrap();
         // The window slides.
+        core.advance_send_window(std::time::Duration::from_secs(COMMUNITY_RATE_WINDOW_SECS));
         prepare(
             &core,
             "burst-over",
@@ -6117,7 +6228,7 @@ mod tests {
     }
 
     #[test]
-    fn community_send_window_measures_elapsed_monotonic_time_across_a_backward_wall_step() {
+    fn community_send_window_measures_elapsed_monotonic_time_across_wall_steps() {
         let fixture = Fixture::new();
         let core = fixture.core();
         for index in 0..COMMUNITY_SENDS_PER_WINDOW {
@@ -6144,6 +6255,21 @@ mod tests {
             refused.downcast_ref::<CommunitySendRateLimited>().is_some(),
             "a backward wall step must not reopen the send window"
         );
+        // The wall clock steps 30 s forward instead. The messages are still
+        // inside their monotonic window, so the send is refused: a forward
+        // step must not shorten the window either.
+        let refused = prepare(
+            &core,
+            "window-after-forward-step",
+            serde_json::json!({"body":"after forward step"}),
+            NOW + 30,
+            TTL,
+        )
+        .unwrap_err();
+        assert!(
+            refused.downcast_ref::<CommunitySendRateLimited>().is_some(),
+            "a forward wall step must not shorten the send window"
+        );
         // The retry shape the Linux build hits: the wall reading is still 30 s
         // behind the sends, but a full window of monotonic time has elapsed.
         // Elapsed monotonic time governs, so the send is admitted.
@@ -6158,6 +6284,222 @@ mod tests {
             TTL,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn community_send_anchors_are_bounded_and_govern_only_chat() {
+        let fixture = Fixture::new();
+        let mut core = fixture.core();
+        core.sends_per_window = usize::MAX;
+        // Presence is prepared through the same outgoing path but the send
+        // window does not govern it, so it is never anchored.
+        let presence = serde_json::json!({});
+        core.prepare_outgoing(
+            operation(
+                &core,
+                "presence-anchor",
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                &presence,
+                TTL,
+            ),
+            SERVICE,
+            crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+            presence,
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        assert_eq!(
+            core.send_anchor_count(),
+            0,
+            "a presence send must not be anchored"
+        );
+        // Two governed sends are anchored; once a full window of monotonic
+        // time has passed, the next insert prunes them.
+        for index in 0..2 {
+            prepare(
+                &core,
+                &format!("bounded-{index}"),
+                serde_json::json!({"body":format!("bounded {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        assert_eq!(core.send_anchor_count(), 2);
+        core.advance_send_window(std::time::Duration::from_secs(
+            COMMUNITY_RATE_WINDOW_SECS + 1,
+        ));
+        prepare(
+            &core,
+            "bounded-after",
+            serde_json::json!({"body":"after"}),
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        assert_eq!(
+            core.send_anchor_count(),
+            1,
+            "anchors older than the window must be evicted on insert"
+        );
+
+        // The hard cap holds however many governed sends arrive inside one
+        // window, even with the per-window limit raised out of the way.
+        let cap_fixture = Fixture::new();
+        let mut cap_core = cap_fixture.core();
+        cap_core.sends_per_window = usize::MAX;
+        for index in 0..MAX_SEND_ANCHORS + 4 {
+            prepare(
+                &cap_core,
+                &format!("cap-{index}"),
+                serde_json::json!({"body":format!("cap {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        assert_eq!(cap_core.send_anchor_count(), MAX_SEND_ANCHORS);
+    }
+
+    #[test]
+    fn community_send_window_precheck_shares_the_send_lock() {
+        let fixture = Fixture::new();
+        let core = Arc::new(fixture.core());
+        for index in 0..COMMUNITY_SENDS_PER_WINDOW - 1 {
+            prepare(
+                &core,
+                &format!("precheck-{index}"),
+                serde_json::json!({"body":format!("message {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        let profile_did = core
+            .authority
+            .sender_profile_for_test()
+            .unwrap()
+            .document()
+            .profile_did
+            .clone();
+        // A precheck reads the stored state and updates the window under the
+        // same locks a send commits under. The file lock is held here, so the
+        // worker can only reach its state read after taking the mutation
+        // mutex: observing it there proves the precheck takes that lock.
+        let file_guard = lock_owner_only_file(&core.lock_path()).unwrap();
+        let checking = core.clone();
+        let did = profile_did.clone();
+        let worker = std::thread::spawn(move || checking.check_community_send_allowed(&did, NOW));
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while core.mutation_mutex.try_lock().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "the send-window precheck ran without the send lock"
+            );
+            std::thread::yield_now();
+        }
+        drop(file_guard);
+        worker.join().unwrap().unwrap();
+
+        // Two concurrent sends for one profile: the window admits one and
+        // refuses the other, and the admitted send keeps its anchor.
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let sends = ["race-a", "race-b"]
+            .into_iter()
+            .map(|request_id| {
+                let core = core.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    let result = prepare(
+                        &core,
+                        request_id,
+                        serde_json::json!({"body":request_id}),
+                        NOW,
+                        TTL,
+                    );
+                    (request_id, result)
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        let results = sends
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        let admitted = results
+            .iter()
+            .filter(|(_, result)| result.is_ok())
+            .map(|(request_id, _)| *request_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            admitted.len(),
+            1,
+            "exactly one of two concurrent sends is admitted"
+        );
+        let refused = results
+            .iter()
+            .find(|(_, result)| result.is_err())
+            .expect("the other concurrent send is refused");
+        assert!(
+            refused
+                .1
+                .as_ref()
+                .unwrap_err()
+                .downcast_ref::<CommunitySendRateLimited>()
+                .is_some(),
+            "the refused send must be the rate limit"
+        );
+        assert!(
+            core.has_send_anchor(admitted[0]),
+            "the admitted send's anchor must survive the concurrent race"
+        );
+        assert!(
+            prepare(
+                &core,
+                "race-over",
+                serde_json::json!({"body":"over"}),
+                NOW,
+                TTL
+            )
+            .unwrap_err()
+            .downcast_ref::<CommunitySendRateLimited>()
+            .is_some(),
+            "the window must still be full after the race"
+        );
+    }
+
+    #[test]
+    fn community_send_window_counts_restored_messages_from_their_stored_stamp() {
+        let fixture = Fixture::new();
+        let sender = fixture.core();
+        for index in 0..COMMUNITY_SENDS_PER_WINDOW {
+            prepare(
+                &sender,
+                &format!("restored-{index}"),
+                serde_json::json!({"body":format!("message {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        // A new process has no anchors; the stored wall stamp seeds one per
+        // governed record once, so the window still counts the sends.
+        let restarted = fixture.core();
+        let refused = prepare(
+            &restarted,
+            "restored-over",
+            serde_json::json!({"body":"over"}),
+            NOW,
+            TTL,
+        )
+        .unwrap_err();
+        assert!(
+            refused.downcast_ref::<CommunitySendRateLimited>().is_some(),
+            "messages restored from disk must still count inside their window"
+        );
+        assert_eq!(restarted.send_anchor_count(), COMMUNITY_SENDS_PER_WINDOW);
     }
 
     #[test]

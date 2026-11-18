@@ -981,7 +981,7 @@ async fn read_authority(
     let requester_principal_id = requester_principal_id.to_string();
     match tokio::time::timeout(
         AUTHORITY_DEADLINE,
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(crate::operation_clock::inherit_readings(move || {
             super::gateway_home_system::authorize_home_service_model(
                 &data_dir,
                 &network,
@@ -990,7 +990,7 @@ async fn read_authority(
                 &requester_principal_id,
                 now,
             )
-        }),
+        })),
     )
     .await
     {

@@ -2580,6 +2580,37 @@ fn exit_admission_now() -> u64 {
     crate::operation_clock::now_ts()
 }
 
+/// One Exit admission: the authority read, the relay-path validation and the
+/// post-admission recheck. The admission takes one reading; the recheck is a
+/// distinct decision after asynchronous work and takes its own fresh one.
+async fn admit_browser_carrier_exit<R: browser_exit::ExitGrantReader>(
+    registry: &ProviderRegistry,
+    data: &serde_json::Value,
+    source: &iroh::PublicKey,
+    reservations: &browser_exit::BrowserExitReservations,
+    reader: &R,
+) -> Result<(
+    BrowserExitGrant,
+    browser_exit::BrowserExitReservation,
+    (PathBuf, String),
+)> {
+    let now = exit_admission_now();
+    let grant = reader.read_grant_at(now).await?;
+    let reservation = reservations.reserve(
+        &grant,
+        data["stream_id"]
+            .as_str()
+            .context("Exit stream id required")?,
+    )?;
+    let relay = browser_carrier_exit_relay_path(registry, data, &grant, source, now).await?;
+    let recheck = exit_admission_now();
+    anyhow::ensure!(
+        reader.read_grant_at(recheck).await? == grant,
+        "Exit authority changed during admission"
+    );
+    Ok((grant, reservation, relay))
+}
+
 async fn handle_browser_carrier_exit_stream(
     send: &mut iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
@@ -2601,19 +2632,8 @@ async fn handle_browser_carrier_exit_stream(
             source,
             request: data.clone(),
         };
-        let now = exit_admission_now();
-        let grant = authority.read_at(now).await?;
-        let reservation = reservations.reserve(
-            &grant,
-            data["stream_id"]
-                .as_str()
-                .context("Exit stream id required")?,
-        )?;
-        let relay = browser_carrier_exit_relay_path(&registry, data, &grant, &source, now).await?;
-        anyhow::ensure!(
-            authority.read_at(now).await? == grant,
-            "Exit authority changed during admission"
-        );
+        let (grant, reservation, relay) =
+            admit_browser_carrier_exit(&registry, data, &source, &reservations, &authority).await?;
         Ok::<_, anyhow::Error>((authority, grant, reservation, relay))
     };
     let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), admitted).await;
@@ -14779,8 +14799,28 @@ pub(crate) mod tests {
         );
     }
 
+    /// The Exit admission's grant read, scripted by reading: the grant valid
+    /// at the admission reading, and a different one at any later reading.
+    struct ScriptedExitGrant {
+        admission: u64,
+        admitted_grant: BrowserExitGrant,
+        changed_grant: BrowserExitGrant,
+        readings: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl browser_exit::ExitGrantReader for ScriptedExitGrant {
+        async fn read_grant_at(&self, now: u64) -> Result<BrowserExitGrant> {
+            self.readings.lock().unwrap().push(now);
+            Ok(if now == self.admission {
+                self.admitted_grant.clone()
+            } else {
+                self.changed_grant.clone()
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn test_browser_carrier_exit_admission_takes_one_reading_under_a_backward_step() {
+    async fn test_browser_carrier_exit_admission_recheck_takes_its_own_reading() {
         let registry = ProviderRegistry::new();
         registry
             .register_sub_provider(
@@ -14803,6 +14843,8 @@ pub(crate) mod tests {
             max_active_streams: 4,
             max_active_streams_per_principal: 2,
         };
+        let mut changed = grant.clone();
+        changed.revision = now.saturating_add(1);
         let request = serde_json::json!({
             "schema": BROWSER_CARRIER_STREAM_SCHEMA,
             "carrier_service": "elastos://exit/open_stream",
@@ -14811,19 +14853,31 @@ pub(crate) mod tests {
             "target": "tls://example.com:443",
             "principal_id": "person:local:alice",
         });
-        // The wall reading served after the first one is 120 s behind it: a
-        // second reading inside the admission would reject the grant.
-        let _armed = crate::operation_clock::arm(now, now.saturating_sub(120));
-        let admission_now = crate::operation_clock::now_ts();
-        let relay =
-            browser_carrier_exit_relay_path(&registry, &request, &grant, &source, admission_now)
-                .await
-                .unwrap();
-        assert_eq!(relay.0, PathBuf::from("/tmp/clockprod2-exit.sock"));
+        let reader = ScriptedExitGrant {
+            admission: now,
+            admitted_grant: grant,
+            changed_grant: changed,
+            readings: std::sync::Mutex::new(Vec::new()),
+        };
+        // The recheck's own fresh reading is 60 s after admission, where the
+        // authority hands out a changed grant.
+        let _armed = crate::operation_clock::arm(now, now.saturating_add(60));
+        let reservations = browser_exit::BrowserExitReservations::default();
+        let Err(error) =
+            admit_browser_carrier_exit(&registry, &request, &source, &reservations, &reader).await
+        else {
+            panic!("the post-admission recheck must read the grant again");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Exit authority changed during admission"),
+            "{error}"
+        );
         assert_eq!(
-            crate::operation_clock::reads(),
-            1,
-            "one Exit admission must take one clock reading"
+            *reader.readings.lock().unwrap(),
+            vec![now, now.saturating_add(60)],
+            "the admission takes one reading and the recheck takes its own"
         );
     }
 
