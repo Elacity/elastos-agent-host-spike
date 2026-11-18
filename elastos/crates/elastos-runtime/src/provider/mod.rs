@@ -8,6 +8,7 @@
 
 pub mod bridge;
 pub mod dispatch;
+mod landlock_plan;
 #[cfg(target_os = "linux")]
 mod linux_model_seccomp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
