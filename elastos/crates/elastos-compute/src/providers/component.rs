@@ -420,6 +420,11 @@ impl ComputeProvider for ComponentProvider {
             let instance = instances
                 .get(&handle.id)
                 .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
+            if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
+                return Err(ElastosError::Compute(
+                    "Bus v2 contract not yet runnable".into(),
+                ));
+            }
             (
                 instance.engine.clone(),
                 instance.component.clone(),
@@ -464,7 +469,10 @@ impl ComputeProvider for ComponentProvider {
         // One lock for the look and the removal: a start cannot mark the
         // entry running between the two.
         let mut instances = self.instances.write().await;
-        let running = |instance: &ComponentActivation| instance.status == CapsuleStatus::Running;
+        let running = |instance: &ComponentActivation| {
+            instance.status == CapsuleStatus::Running
+                && instance.manifest.bus_contract.as_deref() != Some(ELASTOS_BUS_V2_CONTRACT)
+        };
         if instances.get(&handle.id).is_some_and(running) {
             return Err(ElastosError::Compute(
                 "component/v1 is a bounded activation contract and has no resident stop operation"
@@ -1189,9 +1197,8 @@ mod tests {
         assert_eq!(provider.compile_slot.available_permits(), 1);
     }
 
-    /// What `stop` does with an entry a cancelled start left behind: one
-    /// still marked loading is taken away; one already marked running is
-    /// refused and stays, sealed as it was.
+    /// A v1 loading entry is taken away; a running v1 entry stays with its
+    /// exact refusal. A marked v2 resident entry stays until stop takes it.
     #[tokio::test]
     async fn stop_takes_away_a_loading_entry_and_refuses_a_running_one() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1211,7 +1218,10 @@ mod tests {
         // As a start leaves it when it is cancelled after its first step.
         mark(CapsuleStatus::Running).await;
         let refused = provider.stop(&handle).await.unwrap_err().to_string();
-        assert!(refused.contains("no resident stop operation"), "{refused}");
+        assert_eq!(
+            refused,
+            "Compute error: component/v1 is a bounded activation contract and has no resident stop operation"
+        );
         let left = provider.instances.read().await;
         let entry = left.get(&handle.id).expect("the running entry stays");
         assert!(entry.sealed);
@@ -1220,6 +1230,30 @@ mod tests {
         mark(CapsuleStatus::Loading).await;
         provider.stop(&handle).await.unwrap();
         assert!(!provider.instances.read().await.contains_key(&handle.id));
+
+        // Model the resident entry before the v2 loader exists. No v2 guest runs.
+        let (bytes, manifest) = admitted_fixture();
+        let mut v2_handle = provider
+            .load_admitted_sealed(bytes, manifest)
+            .await
+            .unwrap();
+        v2_handle.manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        v2_handle.manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        v2_handle.manifest.validate().unwrap();
+        {
+            let mut instances = provider.instances.write().await;
+            let entry = instances.get_mut(&v2_handle.id).unwrap();
+            entry.manifest = v2_handle.manifest.clone();
+            entry.status = CapsuleStatus::Running;
+        }
+        let refused = provider.start(&v2_handle).await.unwrap_err().to_string();
+        assert_eq!(refused, "Compute error: Bus v2 contract not yet runnable");
+        assert_eq!(
+            provider.status(&v2_handle).await.unwrap(),
+            CapsuleStatus::Running
+        );
+        provider.stop(&v2_handle).await.unwrap();
+        assert!(!provider.instances.read().await.contains_key(&v2_handle.id));
     }
 
     /// A sealed activation has no bridge. Its call is refused by the provider
