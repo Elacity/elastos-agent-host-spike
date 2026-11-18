@@ -1,15 +1,23 @@
 //! Seatbelt text for Runtime-owned provider grants. The launcher binds paths with -D.
 
-use super::rights_table::{RightRow, RuntimeProviderId};
+use super::rights::AdmittedRights;
+use super::rights_table::RuntimeProviderId;
 
 const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 
 /// Render `rows` and the macOS process-start baseline in profile order.
 #[allow(dead_code)] // The macOS arm renders this profile and then refuses.
-pub(super) fn render_macos_profile(provider: RuntimeProviderId, rows: &[&RightRow]) -> String {
+pub(super) fn render_macos_profile(
+    provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
+) -> String {
     let mut forms = HEAD.to_vec();
     // The executable rule precedes the baseline; storage follows it in all three oracles.
-    for row in rows.iter().filter(|row| row.id == "bound-executable") {
+    for row in admitted
+        .rows()
+        .iter()
+        .filter(|row| row.id == "bound-executable")
+    {
         forms.extend_from_slice(row.rules);
     }
     forms.push(match provider {
@@ -17,7 +25,11 @@ pub(super) fn render_macos_profile(provider: RuntimeProviderId, rows: &[&RightRo
         RuntimeProviderId::Did | RuntimeProviderId::Wallet => "(allow file-read* (literal \"/\"))",
     });
     forms.push("(allow sysctl-read)");
-    for row in rows.iter().filter(|row| row.id != "bound-executable") {
+    for row in admitted
+        .rows()
+        .iter()
+        .filter(|row| row.id != "bound-executable")
+    {
         forms.extend_from_slice(row.rules);
     }
     forms.join("\n") + "\n"
@@ -76,7 +88,7 @@ mod tests {
         ] {
             let rendered = render_macos_profile(
                 provider,
-                &super::super::rights_table::for_provider(provider),
+                &super::super::rights::admit_runtime_grant(provider),
             );
             let mut parameters = BTreeSet::new();
             for argument in path_arguments(&rendered) {

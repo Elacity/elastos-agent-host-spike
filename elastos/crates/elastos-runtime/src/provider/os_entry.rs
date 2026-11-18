@@ -3,30 +3,51 @@
 //! `start_provider` is that entry. It resolves rights first. Linux (x86_64 or
 //! aarch64) installs the admitted rows through the failure-record launcher.
 //! macOS renders those rows as a Seatbelt profile and stops without spawning.
-//! Every other OS refuses before creating a process. The launcher is a private
-//! child of this module. The server does not call this entry. The child path
-//! between fork and exec stays in `failure_record` and is unchanged here.
+//! Every other OS refuses before creating a process. The launcher and the
+//! Linux installer are private children of this module. The server does not
+//! call this entry. The child path between fork and exec stays in
+//! `failure_record` and is unchanged here.
 
-// No server caller yet, so the entry is unused outside tests. The rights gate
-// is called from here, so rights.rs does not carry this allow.
-#![allow(dead_code)]
-
-use super::rights_table::{self, RightRow, RuntimeProviderId};
+use super::rights::AdmittedRights;
+use super::rights_table::{self, RuntimeProviderId};
 use elastos_common::ProviderAuthority;
 use std::path::Path;
 
 #[cfg(all(
+    not(elastos_unsupported_os_check),
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[path = "failure_record.rs"]
 mod failure_record;
 
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[path = "preexec_installer.rs"]
+mod preexec_installer;
+
+#[cfg(any(
+    test,
+    elastos_unsupported_os_check,
+    not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))
+))]
 const UNSUPPORTED_OS: &str = "provider start is refused: this operating system has no confinement, so the provider binary does not start";
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
 const MACOS_NO_SPAWN: &str =
     "provider start on macos is refused: the Seatbelt profile has no spawn path yet";
 
 /// Admit `authority` for `provider`, then hand the process to this OS.
+#[allow(dead_code)] // The server does not call this entry yet.
 pub(super) fn start_provider(
     provider: RuntimeProviderId,
     authority: &ProviderAuthority,
@@ -41,35 +62,31 @@ pub(super) fn start_provider(
     dispatch(provider, &admitted, executable, storage_root)
 }
 
-fn require_grant(admitted: &[&RightRow]) -> Result<(), String> {
-    if admitted.is_empty() {
+#[allow(dead_code)] // Only the OS arms call this, and those arms have no server caller yet.
+fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
+    if admitted.rows().is_empty() {
         return Err("provider start is refused: the Runtime grant has no rights".to_string());
     }
     Ok(())
 }
 
-/// The rows an OS arm installs. Both arms pass this to their plan builder.
-fn applied_rows<'a>(provider: RuntimeProviderId, admitted: &[&'a RightRow]) -> Vec<&'a RightRow> {
-    let _ = provider;
-    admitted.to_vec()
-}
-
 #[cfg(all(
+    not(elastos_unsupported_os_check),
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
+#[allow(dead_code)] // The server does not call this entry yet.
 fn dispatch(
     provider: RuntimeProviderId,
-    admitted: &[&RightRow],
+    admitted: &AdmittedRights,
     executable: &Path,
     storage_root: &Path,
 ) -> Result<i32, String> {
     require_grant(admitted)?;
-    let rows = applied_rows(provider, admitted);
-    // `start` builds the plan from `rows`, then forks. Allocation finishes
+    // `start` builds the plan from `admitted`, then forks. Allocation finishes
     // before the fork. This function adds nothing between fork and exec.
     let args: &[&std::ffi::CStr] = &[];
-    failure_record::start(provider, &rows, storage_root, executable, args).map_err(|error| {
+    failure_record::start(provider, admitted, storage_root, executable, args).map_err(|error| {
         match error {
             failure_record::LaunchError::BeforeFork(reason) => reason,
             failure_record::LaunchError::ChildFailed { reason, .. } => reason,
@@ -77,16 +94,16 @@ fn dispatch(
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+#[allow(dead_code)] // The server does not call this entry yet.
 fn dispatch(
     provider: RuntimeProviderId,
-    admitted: &[&RightRow],
+    admitted: &AdmittedRights,
     executable: &Path,
     storage_root: &Path,
 ) -> Result<i32, String> {
     require_grant(admitted)?;
-    let rows = applied_rows(provider, admitted);
-    let profile = super::macos_profile::render_macos_profile(provider, &rows);
+    let profile = super::macos_profile::render_macos_profile(provider, admitted);
     if !profile.starts_with("(version 1)\n(deny default)\n(deny network*)\n") {
         return Err(
             "provider start on macos is refused: the Seatbelt profile is missing its deny-default head"
@@ -98,9 +115,12 @@ fn dispatch(
 }
 
 /// The unsupported-OS arm. Real `dispatch` on an unsupported target calls this
-/// and returns it. Tests call this same function.
+/// and returns it. Tests call this same function. `elastos_unsupported_os_check`
+/// compiles that dispatch on a supported host: a FreeBSD target check cannot,
+/// because `ring`'s C build has no FreeBSD headers on this machine.
 #[cfg(any(
     test,
+    elastos_unsupported_os_check,
     not(any(
         target_os = "macos",
         all(
@@ -109,9 +129,10 @@ fn dispatch(
         )
     ))
 ))]
+#[allow(dead_code)] // A supported host's library build does not compile this arm.
 fn refuse_unsupported_os(
     provider: RuntimeProviderId,
-    admitted: &[&RightRow],
+    admitted: &AdmittedRights,
     executable: &Path,
     storage_root: &Path,
 ) -> Result<i32, String> {
@@ -120,16 +141,20 @@ fn refuse_unsupported_os(
     Err(UNSUPPORTED_OS.to_string())
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )
-)))]
+#[cfg(any(
+    elastos_unsupported_os_check,
+    not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))
+))]
+#[allow(dead_code)] // A supported host's library build does not compile this arm.
 fn dispatch(
     provider: RuntimeProviderId,
-    admitted: &[&RightRow],
+    admitted: &AdmittedRights,
     executable: &Path,
     storage_root: &Path,
 ) -> Result<i32, String> {
@@ -183,7 +208,7 @@ mod tests {
     fn unsupported_os_refuses_before_the_binary_runs() {
         let dir = tempfile::tempdir().unwrap();
         let (program, marker) = marker_program(dir.path());
-        let admitted: Vec<_> = rights_table::RIGHTS.iter().collect();
+        let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Did);
         let error = refuse_unsupported_os(RuntimeProviderId::Did, &admitted, &program, dir.path())
             .unwrap_err();
         assert_eq!(
@@ -248,17 +273,51 @@ mod tests {
     }
 
     #[test]
-    fn os_arms_install_the_applied_rows() {
-        let production = production_source();
-        assert_eq!(
-            production
-                .matches("applied_rows(provider, admitted)")
-                .count(),
-            2
+    fn installer_is_reached_only_through_the_entry() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut named = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                if text.contains("preexec_installer::prepare")
+                    || text.contains("preexec_installer::install")
+                {
+                    named.push(path);
+                }
+            }
+        }
+        named.sort();
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider/os_entry.rs");
+        let launcher =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider/failure_record.rs");
+        assert_eq!(named, vec![launcher, entry]);
+        let module =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/provider/mod.rs"))
+                .unwrap();
+        assert!(
+            !module.contains("preexec_installer"),
+            "the installer stays a child of the OS entry"
         );
+        let production = production_source();
+        assert!(production.contains("mod preexec_installer;"));
+    }
+
+    #[test]
+    fn os_arms_install_the_admitted_rows() {
+        let production = production_source();
+        assert!(!production.contains("applied_rows"));
         assert!(production
-            .contains("failure_record::start(provider, &rows, storage_root, executable, args)"));
-        assert!(production.contains("render_macos_profile(provider, &rows)"));
+            .contains("failure_record::start(provider, admitted, storage_root, executable, args)"));
+        assert!(production.contains("render_macos_profile(provider, admitted)"));
         assert!(
             !production.contains("for_provider"),
             "the arms build from the admitted rows"
@@ -271,7 +330,7 @@ mod tests {
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        assert!(start_body.contains("preexec_installer::prepare(provider,rows,"));
+        assert!(start_body.contains("preexec_installer::prepare(provider,admitted,"));
         assert!(!start_body.contains("for_provider"));
         let installer = std::fs::read_to_string(root.join("preexec_installer.rs")).unwrap();
         let prepare = installer.find("pub(super) fn prepare(").unwrap();
@@ -280,8 +339,8 @@ mod tests {
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        assert!(prepare_body.contains("landlock_plan::build(provider,rows,"));
-        assert!(prepare_body.contains("seccomp_program::program(provider,rows,"));
+        assert!(prepare_body.contains("landlock_plan::build(provider,admitted,"));
+        assert!(prepare_body.contains("seccomp_program::program(provider,admitted,"));
         assert!(!prepare_body.contains("for_provider"));
     }
 
@@ -297,17 +356,21 @@ mod tests {
             rights_table::RIGHTS,
         )
         .unwrap();
-        let applied = applied_rows(RuntimeProviderId::Did, &admitted);
-        let full_rows = super::super::rights_table::for_provider(RuntimeProviderId::Did);
+        let full_rights = super::super::rights::check_rights_against_runtime_templates(
+            RuntimeProviderId::Did,
+            &committed_authority("did"),
+            rights_table::RIGHTS,
+        )
+        .unwrap();
         let bindings = super::super::landlock_plan::Bindings {
             storage_root: PathBuf::from("/provider/did"),
             provider_executable: PathBuf::from("/bin/did"),
         };
         let narrow =
-            super::super::landlock_plan::build(RuntimeProviderId::Did, &applied, &bindings, 5)
+            super::super::landlock_plan::build(RuntimeProviderId::Did, &admitted, &bindings, 5)
                 .unwrap();
         let full =
-            super::super::landlock_plan::build(RuntimeProviderId::Did, &full_rows, &bindings, 5)
+            super::super::landlock_plan::build(RuntimeProviderId::Did, &full_rights, &bindings, 5)
                 .unwrap();
         assert_eq!(
             full.rules.len(),
@@ -322,19 +385,20 @@ mod tests {
         assert!(full.rules.iter().any(|rule| rule.0 == "STORAGE_ROOT"));
         let arch = super::super::seccomp_list::AuditArch::Aarch64;
         let narrow_names =
-            super::super::seccomp_list::linux_seccomp_list(RuntimeProviderId::Did, &applied, arch);
+            super::super::seccomp_list::linux_seccomp_list(RuntimeProviderId::Did, &admitted, arch);
         let full_names = super::super::seccomp_list::linux_seccomp_list(
             RuntimeProviderId::Did,
-            &full_rows,
+            &full_rights,
             arch,
         );
-        assert!(full_names.contains(&"write"));
-        assert!(!narrow_names.contains(&"write"));
+        assert!(narrow_names.contains(&"write") && narrow_names.contains(&"writev"));
+        assert!(!narrow_names.contains(&"pwrite64"));
+        assert!(full_names.contains(&"write") && full_names.contains(&"pwrite64"));
         assert!(narrow_names.len() < full_names.len());
         let narrow_profile =
-            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Did, &applied);
+            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Did, &admitted);
         let full_profile =
-            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Did, &full_rows);
+            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Did, &full_rights);
         assert!(!narrow_profile.contains("STORAGE_ROOT"));
         assert!(full_profile.contains("STORAGE_ROOT"));
         assert!(narrow_profile.len() < full_profile.len());

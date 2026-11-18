@@ -7,7 +7,7 @@ pub(super) struct RightRow {
     pub linux_syscalls: &'static str,
 }
 
-pub(super) const RIGHTS: &[RightRow] = &[
+pub(super) static RIGHTS: &[RightRow] = &[
     RightRow {
         id: "storage",
         rules: &[
@@ -17,7 +17,7 @@ pub(super) const RIGHTS: &[RightRow] = &[
         linux_syscalls: concat!(
             "faccessat fchmod fdatasync fstat fsync ftruncate getdents64 linkat lseek ",
             "mkdir mkdirat newfstatat openat openat2 pread64 pwrite64 read readlinkat ",
-            "readv renameat2 statx unlink unlinkat write writev"
+            "readv renameat2 statx unlink unlinkat"
         ),
     },
     RightRow {
@@ -51,7 +51,7 @@ impl RuntimeProviderId {
     }
 }
 
-fn resolve(provider: RuntimeProviderId, dictionary: &[RightRow]) -> Vec<&RightRow> {
+pub(super) fn resolve(provider: RuntimeProviderId, dictionary: &[RightRow]) -> Vec<&RightRow> {
     provider
         .rights()
         .iter()

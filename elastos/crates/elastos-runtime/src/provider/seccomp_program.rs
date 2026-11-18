@@ -1,5 +1,6 @@
 //! B3 provider filter programs, rendered without a kernel dependency.
-use super::rights_table::{RightRow, RuntimeProviderId};
+use super::rights::AdmittedRights;
+use super::rights_table::RuntimeProviderId;
 use super::seccomp_list::{linux_seccomp_list, AuditArch};
 
 type Instruction = [u32; 4]; // classic BPF: code, true jump, false jump, operand
@@ -59,7 +60,7 @@ const MODEL_RULES: &str = concat!(
 #[rustfmt::skip]
 pub(super) fn program(
     provider: RuntimeProviderId,
-    rows: &[&RightRow],
+    admitted: &AdmittedRights,
     arch: AuditArch,
 ) -> Vec<Instruction> {
     let audit: u32 = match arch { AuditArch::X86_64 => 0xc000_003e, AuditArch::Aarch64 => 0xc000_00b7 };
@@ -67,7 +68,7 @@ pub(super) fn program(
         stmt(0x20, 4), jump(0x15, audit, 1, 0), stmt(6, DENY),
         stmt(0x20, 0), jump(0x35, 0x4000_0000, 0, 1), stmt(6, DENY),
     ];
-    for name in linux_seccomp_list(provider, rows, arch) {
+    for name in linux_seccomp_list(provider, admitted, arch) {
         let nr = number(name, arch).expect("listed syscall needs an architecture number");
         code.extend([jump(0x15, nr, 0, 1), stmt(6, ALLOW)]);
     }
@@ -92,7 +93,7 @@ pub(super) fn program(
 #[rustfmt::skip]
 mod tests {
     use super::*;
-    use super::super::rights_table::for_provider;
+    use super::super::rights::admit_runtime_grant;
 
     fn golden(text: &str) -> Vec<Instruction> {
         text.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).map(|line| {
@@ -111,7 +112,7 @@ mod tests {
         macro_rules! check {
             ($file:literal, $arch:ident, $provider:ident) => {
                 assert_eq!(program(RuntimeProviderId::$provider,
-                    &for_provider(RuntimeProviderId::$provider), AuditArch::$arch),
+                    &admit_runtime_grant(RuntimeProviderId::$provider), AuditArch::$arch),
                     golden(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
                         "/../../../capsules/wallet-provider/tests/", $file))), $file);
             };

@@ -1,10 +1,8 @@
 //! Fixed child install report. All allocation and path preparation finish before fork.
 #![allow(dead_code)] // The server does not call this launcher yet.
 
-use super::super::{
-    landlock_plan, preexec_installer,
-    rights_table::{RightRow, RuntimeProviderId},
-};
+use super::super::{landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId};
+use super::preexec_installer;
 use std::{
     ffi::{CStr, CString},
     os::unix::ffi::OsStrExt,
@@ -43,7 +41,7 @@ pub(super) enum LaunchError {
 /// The successful PID belongs to the caller. Failed children belong to this function.
 pub(super) fn start(
     provider: RuntimeProviderId,
-    rows: &[&RightRow],
+    admitted: &AdmittedRights,
     storage_root: &Path,
     executable: &Path,
     args: &[&CStr],
@@ -55,7 +53,7 @@ pub(super) fn start(
     })?;
     let prepared = preexec_installer::prepare(
         provider,
-        rows,
+        admitted,
         &landlock_plan::Bindings {
             storage_root: storage_root.to_path_buf(),
             provider_executable: executable.to_path_buf(),
@@ -326,12 +324,11 @@ fn decode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::rights_table;
     use super::*;
     use std::os::unix::ffi::OsStrExt;
 
-    fn did_rows() -> Vec<&'static rights_table::RightRow> {
-        rights_table::for_provider(RuntimeProviderId::Did)
+    fn did_rows() -> super::super::super::rights::AdmittedRights {
+        super::super::super::rights::admit_runtime_grant(RuntimeProviderId::Did)
     }
 
     #[test]

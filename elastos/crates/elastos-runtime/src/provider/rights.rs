@@ -8,11 +8,13 @@
 //! text has exactly one owner.
 //!
 //! `check_rights_against_runtime_templates` is the spawn gate. Empty declared
-//! rights resolve to the Runtime grant for that Runtime provider id. A
-//! non-empty list must be that grant or a subset of it, and each declared
-//! right's rules must equal the template. An id that the dictionary knows but
-//! this provider's grant does not is refused. `os_entry::start_provider` is
-//! the caller. The server does not call it yet.
+//! rights resolve to the Runtime grant for that Runtime provider id, read from
+//! `rights_table::RIGHTS`. A non-empty list must be that grant or a subset of
+//! it. Each declared right's rules must equal the template, and the dictionary
+//! row must equal that same template in rule text and `linux_syscalls`. The
+//! value returned is `AdmittedRights`: its rows are the Runtime table's rows,
+//! and only this module can construct it. `os_entry::start_provider` is the
+//! caller. The server does not call it yet.
 //!
 //! The templates are byte-for-byte the rules in the committed provider
 //! manifests. Comparison normalises whitespace only; rule order and rule count
@@ -43,12 +45,12 @@ fn normalised(rule: &str) -> Vec<String> {
         .collect()
 }
 
-fn rules_match(declared: &[String], template: &[&str]) -> bool {
+fn rules_match(declared: &[impl AsRef<str>], template: &[&str]) -> bool {
     declared.len() == template.len()
         && declared
             .iter()
             .zip(template)
-            .all(|(rule, approved)| normalised(rule) == normalised(approved))
+            .all(|(rule, approved)| normalised(rule.as_ref()) == normalised(approved))
 }
 
 fn provider_label(provider: RuntimeProviderId) -> &'static str {
@@ -59,27 +61,56 @@ fn provider_label(provider: RuntimeProviderId) -> &'static str {
     }
 }
 
+/// Rows the gate admitted from `rights_table::RIGHTS`.
+///
+/// The list is private. `from_table` is the only constructor, and it is private
+/// to this module, so a sibling can receive the value and cannot build one.
+pub(super) struct AdmittedRights {
+    rows: Vec<&'static rights_table::RightRow>,
+}
+
+impl AdmittedRights {
+    fn from_table(rows: Vec<&'static rights_table::RightRow>) -> Self {
+        AdmittedRights { rows }
+    }
+
+    pub(super) fn rows(&self) -> &[&'static rights_table::RightRow] {
+        &self.rows
+    }
+}
+
+/// The provider's Runtime grant. Tests that build a plan use this path.
+#[cfg(test)]
+pub(super) fn admit_runtime_grant(provider: RuntimeProviderId) -> AdmittedRights {
+    let authority: ProviderAuthority = serde_json::from_value(serde_json::json!({
+        "reason": "runtime grant",
+        "capabilities": [],
+        "audit_events": [],
+        "rights": []
+    }))
+    .expect("empty authority");
+    check_rights_against_runtime_templates(provider, &authority, rights_table::RIGHTS)
+        .expect("the Runtime grant admits")
+}
+
 /// Resolve declared rights to the rows the OS entry installs.
 ///
-/// Empty rights select `provider`'s Runtime grant from `dictionary`. Any other
-/// list must be that grant or a subset, with each right's rules equal to its
-/// template. The Linux plan and the macOS profile are built from the returned
-/// rows. The check finishes before a process is created.
-pub(super) fn check_rights_against_runtime_templates<'a>(
+/// Empty rights select `provider`'s grant through `rights_table::resolve` on
+/// `rights_table::RIGHTS`. Any other list must be that grant or a subset. The
+/// declared rules and the dictionary row's rules must equal the template, and
+/// the dictionary row's `linux_syscalls` must equal the template's. The
+/// returned rows are those template rows. The check finishes before a process
+/// is created.
+pub(super) fn check_rights_against_runtime_templates(
     provider: RuntimeProviderId,
     authority: &ProviderAuthority,
-    dictionary: &'a [rights_table::RightRow],
-) -> Result<Vec<&'a rights_table::RightRow>, String> {
+    dictionary: &[rights_table::RightRow],
+) -> Result<AdmittedRights, String> {
     if authority.rights.is_empty() {
-        let mut rows = Vec::with_capacity(provider.rights().len());
-        for id in provider.rights() {
-            let row = dictionary
-                .iter()
-                .find(|row| row.id == *id)
-                .unwrap_or_else(|| panic!("Runtime right {id} is missing from the dictionary"));
-            rows.push(row);
-        }
-        return Ok(rows);
+        return Ok(AdmittedRights::from_table(rights_table::resolve(
+            provider,
+            rights_table::RIGHTS,
+        )));
     }
     let mut admitted = Vec::with_capacity(authority.rights.len());
     for (index, right) in authority.rights.iter().enumerate() {
@@ -105,16 +136,37 @@ pub(super) fn check_rights_against_runtime_templates<'a>(
                 provider_label(provider)
             ));
         }
-        let template = approved_right_template(&right.id).unwrap_or(row.rules);
-        if !rules_match(&right.rules, template) {
+        let Some(template_rules) = approved_right_template(&right.id) else {
+            return Err(format!(
+                "provider authority right \"{}\" is not an approved right id",
+                right.id
+            ));
+        };
+        let template = rights_table::RIGHTS
+            .iter()
+            .find(|item| item.id == right.id)
+            .expect("approved template text is a Runtime table row");
+        if !rules_match(&right.rules, template_rules) {
             return Err(format!(
                 "provider right \"{}\" rule text differs from the Runtime template",
                 right.id
             ));
         }
-        admitted.push(row);
+        if !rules_match(row.rules, template.rules) {
+            return Err(format!(
+                "provider right \"{}\" is not the Runtime table row",
+                right.id
+            ));
+        }
+        if row.linux_syscalls != template.linux_syscalls {
+            return Err(format!(
+                "provider right \"{}\" linux syscalls differ from the Runtime template",
+                right.id
+            ));
+        }
+        admitted.push(template);
     }
-    Ok(admitted)
+    Ok(AdmittedRights::from_table(admitted))
 }
 
 #[cfg(test)]
@@ -266,13 +318,13 @@ mod tests {
         );
     }
 
-    fn row_ids<'a>(
+    fn row_ids(
         provider: RuntimeProviderId,
         authority: &ProviderAuthority,
-        dictionary: &'a [rights_table::RightRow],
-    ) -> Result<Vec<&'a str>, String> {
+        dictionary: &[rights_table::RightRow],
+    ) -> Result<Vec<&'static str>, String> {
         check_rights_against_runtime_templates(provider, authority, dictionary)
-            .map(|rows| rows.iter().map(|row| row.id).collect())
+            .map(|admitted| admitted.rows().iter().map(|row| row.id).collect())
     }
 
     fn with_extra_dictionary_id() -> Vec<rights_table::RightRow> {
@@ -362,6 +414,106 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn admitted_rows_are_the_runtime_table_rows() {
+        let dictionary = rights_table::RIGHTS.to_vec();
+        let admitted = check_rights_against_runtime_templates(
+            RuntimeProviderId::Did,
+            &did_authority(),
+            &dictionary,
+        )
+        .unwrap();
+        for row in admitted.rows() {
+            assert!(
+                rights_table::RIGHTS
+                    .iter()
+                    .any(|template| std::ptr::eq(*row, template)),
+                "admitted {} must be the Runtime table row, not the caller's copy",
+                row.id
+            );
+        }
+        let mut empty = did_authority();
+        empty.rights.clear();
+        let granted =
+            check_rights_against_runtime_templates(RuntimeProviderId::Did, &empty, &dictionary)
+                .unwrap();
+        for row in granted.rows() {
+            assert!(
+                rights_table::RIGHTS
+                    .iter()
+                    .any(|template| std::ptr::eq(*row, template)),
+                "empty rights must resolve the Runtime table"
+            );
+        }
+    }
+
+    #[test]
+    fn widened_linux_syscalls_are_refused() {
+        let mut dictionary = rights_table::RIGHTS.to_vec();
+        let storage = dictionary
+            .iter_mut()
+            .find(|row| row.id == "storage")
+            .unwrap();
+        storage.linux_syscalls = "socket";
+        assert_eq!(
+            check_rights_against_runtime_templates(
+                RuntimeProviderId::Did,
+                &did_authority(),
+                &dictionary
+            )
+            .map(|_| ()),
+            Err(
+                "provider right \"storage\" linux syscalls differ from the Runtime template"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn only_rights_constructs_admitted_rights() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut struct_literals = Vec::new();
+        let mut constructors = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                if text.contains("AdmittedRights { rows") {
+                    struct_literals.push(path.clone());
+                }
+                if text.contains("fn from_table") {
+                    constructors.push(path);
+                }
+            }
+        }
+        let rights =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider/rights.rs");
+        struct_literals.sort();
+        constructors.sort();
+        assert_eq!(struct_literals, vec![rights.clone()]);
+        assert_eq!(constructors, vec![rights.clone()]);
+        let source = std::fs::read_to_string(&rights).unwrap();
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(production.matches("AdmittedRights { rows").count(), 1);
+        assert_eq!(production.matches("fn from_table").count(), 1);
+        assert!(!production.contains("pub fn from_table"));
+        assert!(!production.contains("pub(super) fn from_table"));
+        assert!(!production.contains("pub(crate) fn from_table"));
+        let start = production.find("struct AdmittedRights").unwrap();
+        let open = production[start..].find('{').unwrap() + start;
+        let close = production[open..].find('}').unwrap() + open;
+        let body = &production[open + 1..close];
+        assert!(!body.contains("pub"), "AdmittedRights fields stay private");
     }
 
     #[test]

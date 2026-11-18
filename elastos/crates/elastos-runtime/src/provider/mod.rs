@@ -15,11 +15,6 @@ mod linux_model_seccomp;
 mod local_model_broker;
 mod macos_profile;
 mod os_entry;
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-mod preexec_installer;
 mod registry;
 mod rights;
 mod rights_table;
