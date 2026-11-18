@@ -1,7 +1,8 @@
 //! Fixed child install report. All allocation and path preparation finish before fork.
-#![allow(dead_code)] // The provider spawn binding arrives in a later B3 slice.
+#![allow(dead_code)] // The server does not call this launcher yet.
 
-use super::{landlock_plan, preexec_installer, rights_table::RuntimeProviderId};
+use super::super::{landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId};
+use super::preexec_installer;
 use std::{
     ffi::{CStr, CString},
     os::unix::ffi::OsStrExt,
@@ -32,14 +33,15 @@ const NORMAL_TEST_HOOK: TestHook = TestReport::Normal;
 const NORMAL_TEST_HOOK: TestHook = ();
 
 #[derive(Debug)]
-enum LaunchError {
+pub(super) enum LaunchError {
     BeforeFork(String),
     ChildFailed { pid: libc::pid_t, reason: String },
 }
 
 /// The successful PID belongs to the caller. Failed children belong to this function.
-fn start(
+pub(super) fn start(
     provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
     storage_root: &Path,
     executable: &Path,
     args: &[&CStr],
@@ -51,6 +53,7 @@ fn start(
     })?;
     let prepared = preexec_installer::prepare(
         provider,
+        admitted,
         &landlock_plan::Bindings {
             storage_root: storage_root.to_path_buf(),
             provider_executable: executable.to_path_buf(),
@@ -324,10 +327,15 @@ mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
 
+    fn did_rows() -> super::super::super::rights::AdmittedRights {
+        super::super::super::rights::admit_runtime_grant(RuntimeProviderId::Did)
+    }
+
     #[test]
     fn refused_before_fork_names_reason() {
         let bad = Path::new(std::ffi::OsStr::from_bytes(b"bad\0path"));
-        let result = start(RuntimeProviderId::Did, Path::new("/"), bad, &[]);
+        let rows = did_rows();
+        let result = start(RuntimeProviderId::Did, &rows, Path::new("/"), bad, &[]);
         assert!(
             matches!(result, Err(LaunchError::BeforeFork(ref reason)) if reason == "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL")
         );
@@ -359,8 +367,10 @@ mod tests {
             storage_root: root.path().to_path_buf(),
             provider_executable: "/bin/true".into(),
         };
+        let rows = did_rows();
         let expected_rule = landlock_plan::build(
             RuntimeProviderId::Did,
+            &rows,
             &bindings,
             landlock_plan::kernel_abi().unwrap(),
         )
@@ -369,7 +379,8 @@ mod tests {
         .iter()
         .position(|rule| rule.0 == "STORAGE_ROOT")
         .expect("storage rule");
-        let prepared = preexec_installer::prepare(RuntimeProviderId::Did, &bindings).unwrap();
+        let prepared =
+            preexec_installer::prepare(RuntimeProviderId::Did, &rows, &bindings).unwrap();
         std::fs::remove_dir(root.path()).unwrap();
         let (pid, reason) = match launch(&prepared, &path, &[], TestReport::Normal, None, None) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
@@ -402,15 +413,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("not-executable");
         std::fs::write(&executable, b"not an executable").unwrap();
-        let (pid, reason) = match start(RuntimeProviderId::Did, root.path(), &executable, &[]) {
-            Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
-            Ok(pid) => {
-                let mut status = 0;
-                unsafe { libc::waitpid(pid, &mut status, 0) };
-                panic!("execve failure must refuse the launch");
-            }
-            other => panic!("execve failure must refuse the launch: {other:?}"),
-        };
+        let rows = did_rows();
+        let (pid, reason) =
+            match start(RuntimeProviderId::Did, &rows, root.path(), &executable, &[]) {
+                Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
+                Ok(pid) => {
+                    let mut status = 0;
+                    unsafe { libc::waitpid(pid, &mut status, 0) };
+                    panic!("execve failure must refuse the launch");
+                }
+                other => panic!("execve failure must refuse the launch: {other:?}"),
+            };
         assert_eq!(
             reason, "provider exec refused: execve failed with errno 13",
             "execve failure must cross the report pipe"
@@ -431,8 +444,10 @@ mod tests {
     fn child_exits_without_record_is_refused_and_reaped() {
         let root = tempfile::tempdir().unwrap();
         let path = CString::new("/bin/true").unwrap();
+        let rows = did_rows();
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
+            &rows,
             &landlock_plan::Bindings {
                 storage_root: root.path().to_path_buf(),
                 provider_executable: "/bin/true".into(),
@@ -475,8 +490,10 @@ mod tests {
     fn short_child_record_is_refused_and_reaped() {
         let root = tempfile::tempdir().unwrap();
         let path = CString::new("/bin/true").unwrap();
+        let rows = did_rows();
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
+            &rows,
             &landlock_plan::Bindings {
                 storage_root: root.path().to_path_buf(),
                 provider_executable: "/bin/true".into(),
@@ -512,8 +529,10 @@ mod tests {
             unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&marker), libc::F_SETFD, 0) },
             0
         );
+        let rows = did_rows();
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
+            &rows,
             &landlock_plan::Bindings {
                 storage_root: root.path().to_path_buf(),
                 provider_executable: "/bin/cat".into(),

@@ -1,7 +1,8 @@
 //! Landlock file decisions for one provider launch; attachment comes later.
 #![allow(dead_code)] // The spawn caller is added in a later slice.
 
-use super::rights_table::{for_provider, RuntimeProviderId};
+use super::rights::AdmittedRights;
+use super::rights_table::RuntimeProviderId;
 use std::{io, path::PathBuf};
 
 // The lab's STORAGE_ROOT, executable, and ABI-5 handled masks (confine.rs:8560-8582, 8685).
@@ -98,21 +99,24 @@ pub(super) fn kernel_abi() -> Result<u32, String> {
 
 pub(super) fn build(
     provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
     bindings: &Bindings,
     abi: u32,
 ) -> Result<Plan, String> {
-    build_for_arch(provider, bindings, LoaderArch::host(), abi)
+    build_for_arch(provider, admitted, bindings, LoaderArch::host(), abi)
 }
 
 fn build_for_arch(
     provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
     bindings: &Bindings,
     arch: LoaderArch,
     abi: u32,
 ) -> Result<Plan, String> {
     let abi = require_abi(Ok(abi))?;
     let mut rules = Vec::new();
-    for row in for_provider(provider) {
+    // Path rules come from the admitted rows. Loader paths stay with the provider.
+    for row in admitted.rows() {
         for form in row.rules {
             match *form {
                 r#"(allow file-read* (literal (param "STORAGE_PARENT")))"# => {}
@@ -290,8 +294,9 @@ mod tests {
                 storage_root: format!("/provider/{provider:?}").into(),
                 provider_executable: format!("/bin/{provider:?}").into(),
             };
+            let admitted = super::super::rights::admit_runtime_grant(provider);
             for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
-                let plan = build_for_arch(provider, &bindings, arch, 5).unwrap();
+                let plan = build_for_arch(provider, &admitted, &bindings, arch, 5).unwrap();
                 assert_eq!((plan.abi, plan.handled), (5, handled));
                 let mut expected = Vec::new();
                 for claim in declared["rights"].as_array().unwrap() {
@@ -317,7 +322,10 @@ mod tests {
                 }
                 assert_eq!(plan.rules, expected, "{name} {arch:?}");
                 if std::mem::discriminant(&arch) == std::mem::discriminant(&LoaderArch::host()) {
-                    assert_eq!(build(provider, &bindings, 5).unwrap().rules, expected);
+                    assert_eq!(
+                        build(provider, &admitted, &bindings, 5).unwrap().rules,
+                        expected
+                    );
                 }
             }
         }

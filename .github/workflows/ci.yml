@@ -404,6 +404,12 @@ jobs:
       - name: cargo clippy
         working-directory: elastos
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # ring's C build has no FreeBSD headers here, so the unsupported dispatch
+      # is compiled on the host with this cfg. The workflow's RUSTFLAGS already
+      # deny warnings; this step adds the cfg and keeps that denial.
+      - name: unsupported operating system arm
+        working-directory: elastos
+        run: RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo check -p elastos-runtime --lib
       - name: Rust compile cache statistics
         if: always() && env.RUSTC_WRAPPER == 'sccache'
         run: sccache --show-stats
