@@ -3796,11 +3796,16 @@ mod tests {
         let child_stdin = std::fs::read_link(format!("/proc/{pid}/fd/0")).unwrap();
         let child_stdout = std::fs::read_link(format!("/proc/{pid}/fd/1")).unwrap();
         let parent_stdin = std::fs::read_link("/proc/self/fd/0").unwrap();
+        let parent_stdout = std::fs::read_link("/proc/self/fd/1").unwrap();
         assert!(child_stdin.to_string_lossy().starts_with("pipe:"));
         assert!(child_stdout.to_string_lossy().starts_with("pipe:"));
         assert_ne!(
             child_stdin, parent_stdin,
             "the child inherited the parent's stdin"
+        );
+        assert_ne!(
+            child_stdout, parent_stdout,
+            "the child inherited the parent's stdout"
         );
         // Row 1: Shutdown is answered, the child exits, and the pid is reaped.
         confined.bridge().shutdown().await.unwrap();
@@ -3931,11 +3936,12 @@ mod tests {
     #[tokio::test]
     async fn each_start_uses_its_own_root_and_plan() {
         let temp = tempfile::tempdir().unwrap();
-        let binary = build_confined_probe(temp.path(), Path::new(""), "ok");
         let root_a = temp.path().join("root-a");
         let root_b = temp.path().join("root-b");
         let mut pids = Vec::new();
         for root in [&root_a, &root_b, &root_a] {
+            let pid_file = root.join("child.pid");
+            let binary = build_confined_probe(temp.path(), &pid_file, "ok");
             let confined = ProviderBridge::spawn_confined(
                 "did-provider",
                 &committed_authority("did"),
@@ -3946,6 +3952,16 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("start under {}: {error}", root.display()));
             let pid = fork_pid(confined.bridge());
+            // The child writes under its own root, so a plan inherited from the
+            // previous start would leave this file absent.
+            let recorded: libc::pid_t = std::fs::read_to_string(&pid_file)
+                .unwrap_or_else(|error| {
+                    panic!("the child writes under {}: {error}", root.display())
+                })
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(recorded, pid, "the recorded pid is the launched child");
             let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
             assert!(
                 status.lines().any(|line| line == "Seccomp:\t2"),
