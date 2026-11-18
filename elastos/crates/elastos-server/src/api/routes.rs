@@ -2463,6 +2463,102 @@ pub(crate) mod tests {
         assert_eq!(entry.cause.as_deref(), Some("stopped: user"));
     }
 
+    /// A10-R's mid-wait proof (S5). A's guest is inside its first bridge call,
+    /// holding a capability request no shell answers. `DELETE` with a reason
+    /// returns while that call is still waiting: the bridge's wait loop leaves
+    /// it with `cancelled`, the activation ends `stopped` with the reason as
+    /// its cause, and the request it was waiting on is denied by the Runtime
+    /// with that cause. B, held in its own first call throughout, is
+    /// untouched and then completes.
+    #[tokio::test]
+    async fn cancel_mid_wait() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents")
+        };
+
+        // Both agents launch and are held inside their own first bridge call:
+        // the pending store is the observable edge of that.
+        let run_a = home.launch(a).await.unwrap().0;
+        assert_eq!(run_a.status, "starting");
+        let a_pending = home.wait_pending(&run_a.id).await;
+        let run_b = home.launch(b).await.unwrap().0;
+        assert_eq!(run_b.status, "starting");
+        let b_pending = home.wait_pending(&run_b.id).await;
+
+        // DELETE while A's guest is inside that call. Its bridge wait is 30 s;
+        // a stop that has to wait the call out has not interrupted it
+        // (F-waitblind).
+        let (status, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_route(&home, &run_a.id, Some("waiting too long")),
+        )
+        .await
+        .expect("the stop must complete while the guest is inside its call: the request is still pending");
+        assert_eq!(status, StatusCode::OK);
+
+        let entry = home
+            .runtime
+            .get_capsule(&run_a.id)
+            .await
+            .expect("the ended entry is kept");
+        assert_eq!(entry.status, "stopped");
+        assert_eq!(entry.cause.as_deref(), Some("stopped: waiting too long"));
+
+        // The request A's guest was waiting on is denied by the Runtime, with
+        // the stop's cause.
+        let settled = "instance ended: stopped: waiting too long";
+        let after = home
+            .pending_store
+            .get_request(a_pending.id.as_str())
+            .await
+            .expect("the held request is still recorded");
+        let elastos_runtime::capability::RequestStatus::Denied { reason, settled_by } =
+            &after.status
+        else {
+            panic!(
+                "the request the stopped guest was waiting on is not settled: {:?}",
+                after.status
+            );
+        };
+        assert_eq!(reason, settled);
+        assert_eq!(*settled_by, elastos_runtime::capability::Settler::Runtime);
+
+        // B's request was not settled by A's stop, and B still runs.
+        assert!(
+            home.pending_store
+                .list_pending()
+                .await
+                .iter()
+                .any(|request| request.id.as_str() == b_pending.id.as_str()),
+            "A's stop settled no request of B's session"
+        );
+        assert_eq!(
+            home.runtime
+                .get_capsule(&run_b.id)
+                .await
+                .expect("B is still registered")
+                .status,
+            "running"
+        );
+
+        // B completes on its own calls.
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run_b.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let b_end = home.wait_ended(&run_b.id).await;
+        grants.abort();
+        assert_eq!(b_end.status, "stopped");
+        assert_eq!(b_end.cause.as_deref(), Some("completed"));
+    }
+
     /// An ended entry is listed for the 60 s retention and is gone after it,
     /// read at a caller's instant rather than waited for.
     #[tokio::test]
@@ -3380,6 +3476,7 @@ pub(crate) mod tests {
             data_dir: Some(home.data_dir.clone()),
             launch: None,
             model_token_ceiling: None,
+            stop: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
         let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(

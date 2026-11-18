@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
@@ -183,11 +183,13 @@ struct InstanceAuthority {
 /// the guest's outcome was known.
 const CAUSE_TASK_LOST: &str = "activation task ended before its outcome";
 
-/// One detached activation's stop request (M1-R A10-R): the flag the stop
-/// raises and the reason its one end records. The cause is written before the
-/// flag is raised, so an end that sees the flag always sees its reason.
+/// One detached activation's stop request (M1-R A10-R). `requested` is the
+/// flag the bridge's wait loop reads, so a guest held inside a call leaves it
+/// within one poll; `cause` is the reason the activation's one end records.
+/// The cause is written before the flag is raised, so an end that sees the
+/// flag always sees its reason.
 struct ActivationStop {
-    requested: Arc<AtomicBool>,
+    flag: Arc<crate::resource_bridge::ActivationStopFlag>,
     cause: StdMutex<Option<String>>,
 }
 
@@ -196,7 +198,7 @@ impl ActivationStop {
     fn request(&self, reason: &str) {
         let cause = format!("{CAPSULE_STOPPED}: {reason}");
         *self.cause.lock().unwrap_or_else(|err| err.into_inner()) = Some(cause);
-        self.requested.store(true, Ordering::Release);
+        self.flag.requested.store(true, Ordering::Release);
     }
 
     /// The reason this stop was requested with, if any.
@@ -205,6 +207,12 @@ impl ActivationStop {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    /// Whether the bridge's wait loop left the guest's call because of this
+    /// stop: then the stop, not the call, is what ended the guest.
+    fn cancelled(&self) -> bool {
+        self.flag.cancelled.load(Ordering::Acquire)
     }
 }
 
@@ -239,7 +247,7 @@ impl ActivationContextHeld {
         // The stop request lives as long as the activation: the bridge looks
         // it up by capsule id on every call, and the stop route by instance id.
         let stop = Arc::new(ActivationStop {
-            requested: Arc::new(AtomicBool::new(false)),
+            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
             cause: StdMutex::new(None),
         });
         runtime
@@ -264,6 +272,11 @@ impl ActivationContextHeld {
     /// The reason a stop was requested with, if it was.
     fn requested_stop(&self) -> Option<String> {
         self.stop.cause()
+    }
+
+    /// Whether the bridge left the guest's call because of its stop.
+    fn stop_cancelled_guest(&self) -> bool {
+        self.stop.cancelled()
     }
 
     /// Takes away what the start put in place: the bridge principal, the
@@ -425,6 +438,7 @@ impl Runtime {
             let host_data_dir = data_dir.clone();
             let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
             let host_model_token_ceilings = self.bridge_model_token_ceilings.clone();
+            let host_activation_stops = self.activation_stops.clone();
             let host_launch_contents = self.launch_contents.clone();
             let host_handle = tokio::runtime::Handle::current();
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
@@ -446,6 +460,13 @@ impl Runtime {
                     .unwrap_or_else(|it| it.into_inner())
                     .get(capsule_id)
                     .copied();
+                // The stop this activation was asked for, if any: the bridge's
+                // wait loop leaves a long capability wait through it.
+                let stop = host_activation_stops
+                    .read()
+                    .unwrap_or_else(|it| it.into_inner())
+                    .get(capsule_id)
+                    .map(|stop| stop.flag.clone());
                 let ctx = crate::resource_bridge::BridgeContext {
                     provider_registry: host_reg.clone(),
                     capability_manager: host_cap_mgr.clone(),
@@ -456,6 +477,7 @@ impl Runtime {
                     data_dir: Some(host_data_dir.clone()),
                     launch,
                     model_token_ceiling,
+                    stop,
                 };
                 let response = host_handle
                     .block_on(crate::resource_bridge::handle_component_resource_request(
@@ -1401,10 +1423,17 @@ impl Runtime {
                         info.status = CAPSULE_RUNNING.to_string();
                     }
                     match activation.ended().await {
-                        ActivationOutcome::Returned => {
-                            (CAPSULE_STOPPED, CAUSE_COMPLETED.to_string())
-                        }
-                        ActivationOutcome::Trapped(message) => (CAPSULE_FAILED, message),
+                        ActivationOutcome::Returned => match held.requested_stop() {
+                            Some(cause) => (CAPSULE_STOPPED, cause),
+                            None => (CAPSULE_STOPPED, CAUSE_COMPLETED.to_string()),
+                        },
+                        // A trap is the guest's own ending unless the stop is
+                        // what ended it: the worker's epoch interrupt, or the
+                        // bridge leaving the guest's call for the stop.
+                        ActivationOutcome::Trapped(message) => match held.requested_stop() {
+                            Some(cause) if held.stop_cancelled_guest() => (CAPSULE_STOPPED, cause),
+                            _ => (CAPSULE_FAILED, message),
+                        },
                         ActivationOutcome::Stopped => (
                             CAPSULE_STOPPED,
                             held.requested_stop()
@@ -1607,13 +1636,13 @@ impl Runtime {
     /// ends: this records the reason, raises the flag the bridge's wait loop
     /// reads, gives the compute provider the stop its epoch callback reads,
     /// and waits for that end. The entry is then `stopped` with cause
-    /// `stopped: <reason>` and is kept for [`ENDED_CAPSULE_RETENTION`].
+    /// `stopped: <reason>` and is kept for [`ENDED_CAPSULE_RETENTION`], unless
+    /// the guest ended for its own reason first: then the entry says so.
     ///
-    /// Returns Ok(false) if the id is not registered, its activation already
-    /// ended, or it ended for a cause that is not this stop.
-    ///
-    /// An activation with no stop request (a capsule registered with a handle
-    /// by its launcher) is stopped and unregistered as before.
+    /// Returns Ok(false) if the id is not registered, or its activation had
+    /// already ended when the stop arrived. An activation with no stop
+    /// request (a capsule registered with a handle by its launcher) is stopped
+    /// and unregistered as before.
     pub async fn stop_capsule_with_reason(&self, id: &str, reason: &str) -> Result<bool> {
         // Get capsule info and handle
         let capsule_info = {
@@ -1657,7 +1686,6 @@ impl Runtime {
         // The reason is recorded before the flag is raised, so the end that
         // sees the flag records this cause.
         stop.request(reason);
-        let cause = stop.cause();
 
         // A guest in guest code is trapped by its epoch callback, which reads
         // this provider's stop flag. A guest inside a bridge call leaves that
@@ -1675,18 +1703,19 @@ impl Runtime {
         }
 
         self.wait_ended(id).await;
-        let ended = self.get_capsule(id).await;
-        Ok(matches!(
-            (ended, cause),
-            (Some(info), Some(cause))
-                if info.status == CAPSULE_STOPPED && info.cause.as_deref() == Some(cause.as_str())
-        ))
+        // The end happened, whatever its recorded status and cause: the
+        // entry the list serves says which, and a stop whose guest ran to its
+        // own ending is still a stop that left nothing running.
+        Ok(self
+            .get_capsule(id)
+            .await
+            .map(|info| info.ended_at.is_some())
+            .unwrap_or(false))
     }
 
     /// Waits until the registry records this activation's end, or until the
     /// wait bound passes. The worker's own deadline is 10 s; the bridge's
-    /// longest wait is 30 s; an end that has not happened by the bound is
-    /// reported by the caller's own cause check.
+    /// longest wait is 30 s.
     async fn wait_ended(&self, id: &str) {
         let bound = std::time::Duration::from_secs(40);
         let deadline = std::time::Instant::now() + bound;
@@ -3639,6 +3668,7 @@ pub(crate) mod tests {
             data_dir: Some(data_dir.clone()),
             launch: None,
             model_token_ceiling: None,
+            stop: None,
         };
         let line = serde_json::json!({
             "id": 99,
