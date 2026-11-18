@@ -395,8 +395,8 @@ impl Runtime {
             .await
     }
 
-    /// Start a capsule and return as soon as a component's guest has entered
-    /// `run`. A component activation stays in the registry (session, status,
+    /// Start a capsule and return after admission, while its component worker
+    /// starts. A component activation stays in the registry (session, status,
     /// cause) until it ends; a non-component start is still bounded and has
     /// nothing to register. This is the launch route's entry.
     pub(crate) async fn start_local_with_signer(
@@ -424,17 +424,8 @@ impl Runtime {
         args: Vec<String>,
         admission: crate::agent_admission::AdmissionContext,
     ) -> Result<(CapsuleHandle, Signer)> {
-        let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
-        let ceiling = admission.model_token_ceiling();
-        let (manifest, entrypoint) = admission.into_parts();
-        self.run_signer(
-            path,
-            args,
-            Some(actor),
-            Some((manifest, entrypoint, ceiling)),
-            LaunchMode::Bounded,
-        )
-        .await
+        self.run_local_admitted_mode(path, args, admission, LaunchMode::Bounded)
+            .await
     }
 
     /// The launch route's admitted start: see [`Self::start_local_with_signer`].
@@ -444,6 +435,19 @@ impl Runtime {
         args: Vec<String>,
         admission: crate::agent_admission::AdmissionContext,
     ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_local_admitted_mode(path, args, admission, LaunchMode::Detached)
+            .await
+    }
+
+    /// Both admitted entries derive the same actor and ceiling from the
+    /// stored admission context before it is consumed.
+    async fn run_local_admitted_mode(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        admission: crate::agent_admission::AdmissionContext,
+        mode: LaunchMode,
+    ) -> Result<(CapsuleHandle, Signer)> {
         let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
         let ceiling = admission.model_token_ceiling();
         let (manifest, entrypoint) = admission.into_parts();
@@ -452,7 +456,7 @@ impl Runtime {
             args,
             Some(actor),
             Some((manifest, entrypoint, ceiling)),
-            LaunchMode::Detached,
+            mode,
         )
         .await
     }
@@ -1018,9 +1022,9 @@ impl Runtime {
     /// `principal_id` is who it runs for; `args` go on its handle first.
     ///
     /// Bounded: this returns when the start has ended, well or badly, and the
-    /// ceiling and principal go with it. Detached: a component returns once
-    /// the worker reports that its guest entered `run`, its entry answers
-    /// `starting` and then `running`, and an ending watcher takes the ceiling
+    /// ceiling and principal go with it. Detached: a component returns after
+    /// admission with `starting`; the worker's `started` changes the entry to
+    /// `running`, and the ending watcher takes the ceiling
     /// and principal away and records the status and cause when the guest
     /// ends. The entry stays listed for [`ENDED_CAPSULE_RETENTION`].
     async fn start_loaded(
@@ -1032,16 +1036,21 @@ impl Runtime {
         model_token_ceiling: Option<u64>,
         mode: LaunchMode,
     ) -> Result<()> {
+        let detached_component =
+            if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
+                Some(self.component_provider.clone().ok_or_else(|| {
+                    ElastosError::Compute("No component compute provider is configured".to_string())
+                })?)
+            } else {
+                None
+            };
         self.hold_launch_context(handle, principal_id.clone(), model_token_ceiling)
             .await;
 
         // Set args on handle before starting
         handle.args = args;
 
-        if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
-            let component = self.component_provider.clone().ok_or_else(|| {
-                ElastosError::Compute("No component compute provider is configured".to_string())
-            })?;
+        if let Some(component) = detached_component {
             let id = handle.id.clone();
             self.register_capsule(RunningCapsuleInfo {
                 id: id.0.clone(),
@@ -1055,20 +1064,8 @@ impl Runtime {
                 ended_at: None,
             })
             .await;
-            return match component.start_resident(handle).await {
-                Ok(activation) => {
-                    // The worker reported `started`: the guest is in `run`.
-                    self.update_capsule_status(&id.0, CAPSULE_RUNNING).await;
-                    self.watch_activation_end(id, activation);
-                    Ok(())
-                }
-                Err(err) => {
-                    // No activation ran: no entry, no ceiling, no principal.
-                    self.unregister_capsule(&id.0).await;
-                    self.release_launch_context(&id).await;
-                    Err(err)
-                }
-            };
+            self.watch_activation(id, handle.clone(), component);
+            return Ok(());
         }
 
         // Start capsule
@@ -1122,30 +1119,42 @@ impl Runtime {
             .remove(&id.0);
     }
 
-    /// Waits for this activation's worker to publish its outcome, then takes
+    /// Starts this activation and waits for its worker to publish its outcome, then takes
     /// the ceiling and principal away and leaves the entry `stopped` with
     /// cause `completed`, or `failed` with the trap's cause. The entry keeps
     /// its `ended_at` for [`ENDED_CAPSULE_RETENTION`].
-    fn watch_activation_end(
+    fn watch_activation(
         &self,
         id: elastos_common::CapsuleId,
-        mut activation: elastos_compute::providers::ResidentActivation,
+        handle: CapsuleHandle,
+        component: Arc<ComponentProvider>,
     ) {
         use elastos_compute::providers::ActivationOutcome;
 
         let registry = self.running_capsules.clone();
-        let component = self.component_provider.clone();
         let manifest_capabilities = self.bridge_manifest_capabilities.clone();
         let model_token_ceilings = self.bridge_model_token_ceilings.clone();
         tokio::spawn(async move {
-            let (status, cause) = match activation.ended().await {
-                ActivationOutcome::Returned => (CAPSULE_STOPPED, CAUSE_COMPLETED.to_string()),
-                ActivationOutcome::Trapped(message) => (CAPSULE_FAILED, message),
-                ActivationOutcome::Stopped => (CAPSULE_STOPPED, "stopped by request".to_string()),
+            let (status, cause) = match component.start_resident(&handle).await {
+                Ok(mut activation) => {
+                    // Only the compute worker's `started` moves the entry from
+                    // admission's `starting` to `running`.
+                    if let Some(info) = registry.write().await.get_mut(&id.0) {
+                        info.status = CAPSULE_RUNNING.to_string();
+                    }
+                    match activation.ended().await {
+                        ActivationOutcome::Returned => {
+                            (CAPSULE_STOPPED, CAUSE_COMPLETED.to_string())
+                        }
+                        ActivationOutcome::Trapped(message) => (CAPSULE_FAILED, message),
+                        ActivationOutcome::Stopped => {
+                            (CAPSULE_STOPPED, "stopped by request".to_string())
+                        }
+                    }
+                }
+                Err(err) => (CAPSULE_FAILED, err.to_string()),
             };
-            if let Some(component) = component {
-                component.clear_bridge_principal(&id).await;
-            }
+            component.clear_bridge_principal(&id).await;
             if let Ok(mut bounds) = manifest_capabilities.write() {
                 bounds.remove(&id.0);
             }

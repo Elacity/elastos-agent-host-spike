@@ -149,9 +149,9 @@ pub async fn launch_capsule(
     // bridge an agent's own id, and from the bytes admission walked. Every
     // other launch is exactly as it was.
     //
-    // A component start returns once its guest has entered `run`; the entry it
-    // leaves in the registry carries the session, and a watcher records the
-    // status and cause when the guest ends. The route does not wait for that.
+    // A component answers at admission with a `starting` entry and its
+    // session. The worker changes it to `running` on `started`, and records
+    // the status and cause when the guest ends.
     let started = match admission {
         Some(admission) => runtime.start_local_admitted(path, vec![], admission).await,
         None => {
@@ -1572,40 +1572,56 @@ pub(crate) mod tests {
         if crate::agents::require_build().is_err() {
             return;
         }
-        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let home = Arc::new(ProbeLaunch::new(&["a", "b"]).await);
         let [a, b] = home.agents.as_slice() else {
             panic!("two agents");
         };
 
-        // A returns at admission and is then held in its own first bridge call.
-        let a_launch = tokio::time::timeout(std::time::Duration::from_secs(5), home.launch(a))
+        // Start A's real route request and wait for its first bridge call.
+        // Keeping that request in a task makes the F-sync plant fail at B's
+        // return edge, even when the planted route blocks A's own response.
+        let a_home = home.clone();
+        let a_name = a.clone();
+        let a_task = tokio::spawn(async move { a_home.launch(&a_name).await });
+        let a_pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(request) = home.pending_store.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("A is held in its own first bridge call");
+        let a_id = a_pending.session_id.0.clone();
+
+        // B's launch returns while A's guest is still inside that call.
+        let b_home = home.clone();
+        let b_name = b.clone();
+        let b_task = tokio::spawn(async move { b_home.launch(&b_name).await });
+        let b_launch = tokio::time::timeout(std::time::Duration::from_secs(5), b_task)
+            .await
+            .expect("the second launch returns while the first runs")
+            .expect("B's route task stays alive")
+            .unwrap()
+            .0;
+        let a_launch = tokio::time::timeout(std::time::Duration::from_secs(5), a_task)
             .await
             .expect("A's launch returns while its guest runs")
+            .expect("A's route task stays alive")
             .unwrap()
             .0;
         assert_eq!(a_launch.status, "starting");
         assert_eq!(a_launch.session_id, a_launch.id);
-        let a_pending = home.wait_pending(&a_launch.id).await;
-        let a_running = home
-            .runtime
-            .get_capsule(&a_launch.id)
-            .await
-            .expect("A is registered");
-        assert_eq!(a_running.status, "running");
-        assert_eq!(a_running.session_id, a_launch.id);
-
-        // B's launch returns while A's guest is still inside that call.
-        let b_launch = tokio::time::timeout(std::time::Duration::from_secs(5), home.launch(b))
-            .await
-            .expect("the second launch returns while the first runs")
-            .unwrap()
-            .0;
+        assert_eq!(a_launch.id, a_id);
         assert_eq!(b_launch.status, "starting");
         assert_eq!(b_launch.session_id, b_launch.id);
         assert_ne!(a_launch.id, b_launch.id, "two instances, two ids");
+        home.wait_pending(&b_launch.id).await;
 
         let a_now = home.runtime.get_capsule(&a_launch.id).await.unwrap();
         assert_eq!(a_now.status, "running", "A still runs after B's launch");
+        assert_eq!(a_now.session_id, a_id);
         let held = home.pending_store.list_pending().await;
         assert!(
             held.iter()
