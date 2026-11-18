@@ -637,8 +637,17 @@ pub(crate) mod tests {
             .split_once("fn start_server_with_sessions(")
             .unwrap();
         let serve = serve.1.split_once("\n}\n").unwrap().0;
-        assert_eq!(serve.matches("build_router(config)?").count(), 1);
-        for never in "Router::new( .route( .merge( .layer( .nest .fallback".split(' ') {
+        for once in [
+            "let app = build_router(config)?;",
+            ".serve(app.into_make_service())",
+            "axum::serve(listener, app)",
+        ] {
+            assert_eq!(serve.matches(once).count(), 1, "serve has {once} once");
+        }
+        let words = serve.split(|c: char| !c.is_alphanumeric() && c != '_');
+        let app_uses = words.filter(|word| *word == "app").count();
+        assert_eq!(app_uses, 3, "serve uses the built router only to serve it");
+        for never in "Router .route .merge .layer .nest .fallback .with_state".split(' ') {
             assert!(
                 !serve.contains(never),
                 "serve adds {never} after the builder"
@@ -676,14 +685,29 @@ pub(crate) mod tests {
         let pending = Arc::new(PendingRequestStore::new(audit));
         let app = test_server(Arc::new(runtime), sessions, manager, store, pending, None);
         let pending_route = "/api/capability/pending";
-        let debug_only = [StatusCode::NOT_FOUND, StatusCode::OK][cfg!(debug_assertions) as usize];
+        // Without the debug-build route, a request falls to the fallback that the
+        // last merged group wraps in auth and shell-only: 401, then 404 for the shell.
+        let test_route = |release| [release, StatusCode::OK][cfg!(debug_assertions) as usize];
+        let create_session = "/api/test/create-session";
+        let mut wrong = Vec::new();
         for (method, uri, who, want) in [
             ("GET", "/api/health", "nobody", StatusCode::OK),
             ("GET", pending_route, "nobody", StatusCode::UNAUTHORIZED),
             ("GET", pending_route, "client", StatusCode::FORBIDDEN),
             ("GET", pending_route, "shell", StatusCode::OK),
             ("GET", "/api/capsules", "shell", StatusCode::OK),
-            ("POST", "/api/test/create-session", "nobody", debug_only),
+            (
+                "POST",
+                create_session,
+                "nobody",
+                test_route(StatusCode::UNAUTHORIZED),
+            ),
+            (
+                "POST",
+                create_session,
+                "shell",
+                test_route(StatusCode::NOT_FOUND),
+            ),
         ] {
             let mut request = Request::builder().method(method).uri(uri);
             let token = [("shell", &shell.token), ("client", &client.token)];
@@ -692,12 +716,12 @@ pub(crate) mod tests {
             }
             let request = request.header("content-type", "application/json");
             let response = app.clone().oneshot(request.body(Body::from("{}")).unwrap());
-            assert_eq!(
-                response.await.unwrap().status(),
-                want,
-                "{method} {uri} as {who}"
-            );
+            let got = response.await.unwrap().status();
+            if got != want {
+                wrong.push(format!("{method} {uri} as {who}: {got}, expected {want}"));
+            }
         }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
