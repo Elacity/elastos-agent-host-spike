@@ -718,6 +718,7 @@ impl CapsuleManifest {
 
         self.validate_interfaces()?;
         self.validate_asks()?;
+        self.resources.validate()?;
 
         for storage in &self.permissions.storage {
             if !is_allowed_uri_scheme(storage) {
@@ -1482,6 +1483,9 @@ impl CapsuleRole {
     }
 }
 
+/// The most model tokens a signed manifest may name. An absent ask is none.
+pub const MAX_MODEL_TOKENS: u64 = 1_000_000_000_000;
+
 /// Resource limits for a capsule
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLimits {
@@ -1493,6 +1497,24 @@ pub struct ResourceLimits {
 
     #[serde(default)]
     pub gpu: bool,
+
+    /// Model-token ceiling. Absent asks for none, and the bytes are signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tokens: Option<u64>,
+}
+
+impl ResourceLimits {
+    /// The model-token ceiling this manifest asks for. Absent asks for none.
+    pub fn model_token_ceiling(&self) -> u64 {
+        self.model_tokens.unwrap_or(0)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.model_token_ceiling() > MAX_MODEL_TOKENS {
+            return Err(format!("model_tokens exceeds {MAX_MODEL_TOKENS}"));
+        }
+        Ok(())
+    }
 }
 
 impl Default for ResourceLimits {
@@ -1501,6 +1523,7 @@ impl Default for ResourceLimits {
             memory_mb: default_memory(),
             cpu_shares: default_cpu(),
             gpu: false,
+            model_tokens: None,
         }
     }
 }
@@ -1831,7 +1854,55 @@ mod tests {
         assert_eq!(manifest.name, "test-capsule");
         assert_eq!(manifest.capsule_type, CapsuleType::Wasm);
         assert_eq!(manifest.resources.memory_mb, 64);
+        assert_eq!(manifest.resources.model_token_ceiling(), 0);
         assert!(manifest.is_v1());
+    }
+
+    #[test]
+    fn model_tokens_absent_is_zero_and_out_of_range_is_refused() {
+        let mut value: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": "component-capsule",
+            "role": "app",
+            "type": "wasm",
+            "runtime_abi": "elastos.component/v1",
+            "bus_contract": "{}",
+            "wit_world_sha256": "{}",
+            "execution": "component",
+            "projections": ["cli"],
+            "entrypoint": "main.component.wasm"
+        }}"#,
+            ELASTOS_BUS_V1_CONTRACT,
+            elastos_bus_v1_wit_sha256()
+        ))
+        .unwrap();
+        let absent: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(absent.resources.model_token_ceiling(), 0);
+        assert!(serde_json::to_value(&absent).unwrap()["resources"]
+            .get("model_tokens")
+            .is_none());
+        absent.validate().unwrap();
+
+        value["resources"] = serde_json::json!({"model_tokens": 0});
+        let zero: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(zero.resources.model_tokens, Some(0));
+        assert_eq!(zero.resources.model_token_ceiling(), 0);
+        zero.validate().unwrap();
+
+        value["resources"]["model_tokens"] = serde_json::json!(MAX_MODEL_TOKENS);
+        serde_json::from_value::<CapsuleManifest>(value.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        value["resources"]["model_tokens"] = serde_json::json!(MAX_MODEL_TOKENS + 1);
+        let over = serde_json::from_value::<CapsuleManifest>(value.clone()).unwrap();
+        assert!(over.validate().unwrap_err().contains("model_tokens"));
+
+        value["resources"]["model_tokens"] = serde_json::json!(-1);
+        assert!(serde_json::from_value::<CapsuleManifest>(value).is_err());
     }
 
     #[test]
