@@ -36,11 +36,12 @@ impl fmt::Display for Failure {
 fn sequence(count: usize, mut run: impl FnMut(Step) -> Result<(), i32>) -> Result<(), Failure> {
     let mut apply = |step| run(step).map_err(|errno| Failure(step, errno));
     apply(Step::CloseRange)?;
-    apply(Step::NoNewPrivileges)?;
     apply(Step::Create)?;
     for index in 0..count {
         apply(Step::Add(index))?;
     }
+    // Match the lab's Landlock installer: confine.rs:9057-9062.
+    apply(Step::NoNewPrivileges)?;
     apply(Step::Restrict)?;
     apply(Step::Seccomp)
 }
@@ -87,7 +88,10 @@ pub(super) fn prepare(
             jf: jf as u8,
             k,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if filters.len() > 256 {
+        return Err("seccomp install refused: the filter is too long".into());
+    }
     Ok(Prepared {
         plan,
         paths,
@@ -96,15 +100,32 @@ pub(super) fn prepare(
 }
 
 /// # Safety
-/// Call only in a forked child before exec. The caller owns fds 0–2 and must
-/// arrange any failure record before this closes every other descriptor.
-pub(super) unsafe fn install(prepared: &Prepared) -> Result<(), Failure> {
+/// Call only in a forked child before exec. The caller owns fds 0–2, passes
+/// its open failure-record write descriptor (at least 3), and writes any
+/// returned failure to that descriptor before exiting the child.
+pub(super) unsafe fn install(prepared: &Prepared, keep: i32) -> Result<(), Failure> {
     let mut ruleset = -1;
     let result = sequence(prepared.plan.rules.len(), |step| {
         let answer = match step {
-            Step::CloseRange => unsafe {
-                libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32)
-            },
+            Step::CloseRange => {
+                if keep < 3 {
+                    return Err(libc::EINVAL);
+                }
+                if keep > 3
+                    && unsafe {
+                        libc::syscall(libc::SYS_close_range, 3u32, (keep as u32) - 1, 0u32)
+                    } < 0
+                {
+                    return Err(unsafe { *libc::__errno_location() });
+                }
+                if unsafe {
+                    libc::syscall(libc::SYS_close_range, (keep as u32) + 1, u32::MAX, 0u32)
+                } < 0
+                {
+                    return Err(unsafe { *libc::__errno_location() });
+                }
+                0
+            }
             Step::NoNewPrivileges => unsafe {
                 libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) as libc::c_long
             },
@@ -126,17 +147,18 @@ pub(super) unsafe fn install(prepared: &Prepared) -> Result<(), Failure> {
                 fd
             }
             Step::Add(index) => {
-                let fd = unsafe {
-                    libc::open(
-                        prepared.paths[index].as_ptr(),
-                        libc::O_PATH | libc::O_CLOEXEC,
-                    )
+                let Some(path) = prepared.paths.get(index) else {
+                    return Err(libc::EINVAL);
                 };
+                let Some(rule) = prepared.plan.rules.get(index) else {
+                    return Err(libc::EINVAL);
+                };
+                let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
                 if fd < 0 {
                     return Err(unsafe { *libc::__errno_location() });
                 }
                 let attr = PathAttr {
-                    allowed_access: prepared.plan.rules[index].2,
+                    allowed_access: rule.2,
                     parent_fd: fd,
                 };
                 let answer = unsafe {
@@ -183,15 +205,14 @@ mod tests {
 
     #[test]
     fn installed_child_closes_fds_and_denies_outside_file_and_socket() {
-        if landlock_plan::kernel_abi().is_err() {
-            eprintln!("Landlock ABI 5 is unavailable on this Linux host");
-            return;
-        }
+        landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
         let root = tempfile::tempdir().unwrap();
         let allowed_path = root.path().join("allowed");
         std::fs::write(&allowed_path, b"ok").unwrap();
         let allowed_path = CString::new(allowed_path.as_os_str().as_bytes()).unwrap();
         let marker = std::fs::File::open("/dev/null").unwrap();
+        let report = std::fs::File::open("/dev/null").unwrap();
+        assert!(report.as_raw_fd() > 3);
         let prepared = prepare(
             RuntimeProviderId::Did,
             &landlock_plan::Bindings {
@@ -203,9 +224,10 @@ mod tests {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0);
         if pid == 0 {
-            if unsafe { install(&prepared) }.is_err() {
+            if unsafe { install(&prepared, report.as_raw_fd()) }.is_err() {
                 unsafe { libc::_exit(80) };
             }
+            let kept_open = unsafe { libc::close(report.as_raw_fd()) } == 0;
             let fd_closed = unsafe { libc::close(marker.as_raw_fd()) } == -1
                 && unsafe { *libc::__errno_location() } == libc::EBADF;
             let allowed = unsafe {
@@ -235,7 +257,7 @@ mod tests {
                 socket == -1 && unsafe { *libc::__errno_location() } == libc::EACCES;
             unsafe {
                 libc::_exit(
-                    if fd_closed && file_allowed && file_denied && socket_denied {
+                    if kept_open && fd_closed && file_allowed && file_denied && socket_denied {
                         0
                     } else {
                         81
@@ -254,10 +276,10 @@ mod tests {
     fn order() -> [Step; 7] {
         [
             Step::CloseRange,
-            Step::NoNewPrivileges,
             Step::Create,
             Step::Add(0),
             Step::Add(1),
+            Step::NoNewPrivileges,
             Step::Restrict,
             Step::Seccomp,
         ]
