@@ -176,6 +176,9 @@ struct V2RunControl {
 /// What a sealed component gets for any call to the bridge.
 pub const SEALED_BRIDGE: &str = "this capsule was started with no authority: it has no bridge";
 
+/// The start error of an activation whose stop interrupted its start function.
+pub const STOPPED_BEFORE_RUN: &str = "component was stopped before its run began";
+
 struct ComponentState {
     /// A sealed activation's call to the bridge is refused here, before any
     /// handler is looked at.
@@ -539,9 +542,9 @@ impl ComponentProvider {
                         Some(ActivationOutcome::Trapped(message)) => {
                             Err(ElastosError::Compute(message))
                         }
-                        Some(ActivationOutcome::Stopped) => Err(ElastosError::Compute(
-                            "component was stopped before its run began".into(),
-                        )),
+                        Some(ActivationOutcome::Stopped) => {
+                            Err(ElastosError::Compute(STOPPED_BEFORE_RUN.into()))
+                        }
                         _ => Err(ElastosError::Compute(
                             "component run ended before the guest started".into(),
                         )),

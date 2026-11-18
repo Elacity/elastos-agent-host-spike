@@ -308,17 +308,71 @@ fn launch_capsule_name(capsule_dir: &std::path::Path) -> Result<String, (StatusC
     Ok(manifest.name)
 }
 
+/// The body of `DELETE /api/capsules/:id`: an optional reason (M1-R A10-R).
+/// A missing body, or a body naming no reason, keeps the earlier behaviour and
+/// records the reason `user`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopRequest {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Stops a running activation. A detached agent is ended by its watcher with
+/// `stopped: <reason>` as its cause, its pending requests denied by the
+/// Runtime, and its entry kept for 60 s. `provider.stop` ends a guest in guest
+/// code; the bridge's wait loop ends a guest inside a call.
+///
+/// An empty body is a stop with the reason `user`. Any other body is a
+/// [`StopRequest`] or the stop is refused with `400 invalid_stop_request`,
+/// and nothing is stopped. The answer is the entry as the stop left it: `200`
+/// with the status and cause its one end recorded, the same answer for every
+/// stop of that activation, or `202` if it has not ended within the stop's
+/// wait.
 pub async fn stop_capsule(
     Extension(runtime): Extension<Arc<Runtime>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    match runtime.stop_capsule_by_id(&id).await {
-        Ok(true) => (StatusCode::OK, format!("Capsule {} stopped", id)),
-        Ok(false) => (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)),
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let parsed = if body.is_empty() {
+        Ok(StopRequest::default())
+    } else {
+        serde_json::from_slice::<StopRequest>(&body)
+    };
+    let request = match parsed {
+        Ok(request) => request,
+        Err(error) => {
+            let refusal =
+                serde_json::json!({"error": "invalid_stop_request", "detail": error.to_string()});
+            return (StatusCode::BAD_REQUEST, Json(refusal)).into_response();
+        }
+    };
+    let reason = request
+        .reason
+        .map(|reason| reason.trim().to_string())
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or_else(|| "user".to_string());
+    match runtime.stop_capsule_with_reason(&id, &reason).await {
+        Ok(Some(info)) => {
+            let status = match info.ended_at {
+                Some(_) => StatusCode::OK,
+                None => StatusCode::ACCEPTED,
+            };
+            let answer = CapsuleInfoResponse {
+                id: info.id,
+                name: info.name,
+                status: info.status,
+                session_id: info.session_id,
+                cause: info.cause,
+            };
+            (status, Json(answer)).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to stop capsule: {}", e),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -883,6 +937,59 @@ pub(crate) mod tests {
     /// The package CID the install records; the launch compares the Runtime's own walk.
     const PROBE_REGISTRY_CID: &str = "bafkreia5probe";
 
+    /// An Agent Host of the probe's world that asks the bridge for nothing and
+    /// spins in `run`. The mid-compute stop row needs a guest in guest code,
+    /// where only the epoch callback can end it.
+    const SPIN_COMPONENT: &str = r#"(component
+      (import "elastos:bus/types@1.0.0" (instance $types
+        (type $error (variant
+          (case "denied" string) (case "not-found" string) (case "invalid" string)
+          (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+        (export "bus-error" (type (eq $error)))))
+      (alias export $types "bus-error" (type $bus-error))
+      (core module $m
+        (memory (export "memory") 1)
+        ;; A loop-carried division: each iteration's fuel buys a division's
+        ;; latency, so the spinner keeps computing long enough for a stop
+        ;; request (with the flag ignored, it ends when its fuel does).
+        (func $spin (local $x f64)
+          (local.set $x (f64.const 1.0000001))
+          (loop $again
+            (local.set $x (f64.div (local.get $x) (f64.const 1.0000001)))
+            (local.set $x (f64.mul (local.get $x) (f64.const 1.0000001)))
+            (br $again)))
+        (func (export "run") (result i32) (call $spin) (i32.const 0)))
+      (core instance $i (instantiate $m))
+      (func $run (result (result (error $bus-error)))
+        (canon lift (core func $i "run") (memory $i "memory")))
+      (instance $lifecycle (export "run" (func $run)))
+      (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#;
+
+    /// The same world, but the guest spins in its start function, so it is
+    /// in guest code while the registry still says `starting`. Each turn asks
+    /// the runtime for the memory's size, which makes its fuel last about a
+    /// second: left alone, the start ends on its own fuel, `failed`.
+    const SPIN_START_COMPONENT: &str = r#"(component
+      (import "elastos:bus/types@1.0.0" (instance $types
+        (type $error (variant
+          (case "denied" string) (case "not-found" string) (case "invalid" string)
+          (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+        (export "bus-error" (type (eq $error)))))
+      (alias export $types "bus-error" (type $bus-error))
+      (core module $m
+        (memory (export "memory") 1)
+        (func $spin
+          (loop $again
+            (drop (memory.grow (i32.const 0)))
+            (br $again)))
+        (start $spin)
+        (func (export "run") (result i32) (i32.const 0)))
+      (core instance $i (instantiate $m))
+      (func $run (result (result (error $bus-error)))
+        (canon lift (core func $i "run") (memory $i "memory")))
+      (instance $lifecycle (export "run" (func $run)))
+      (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#;
+
     impl ProbeLaunch {
         pub(crate) async fn new(names: &[&str]) -> Self {
             Self::new_with(tempfile::tempdir().unwrap(), names, None).await
@@ -1226,6 +1333,40 @@ pub(crate) mod tests {
             )
             .unwrap()
             .agent_id
+        }
+
+        /// Writes a signed copy of the probe whose guest spins in `run` and
+        /// asks the bridge for nothing. The manifest keeps the stored host's
+        /// name (the launch grant names it) and the agent kind; only the
+        /// entrypoint and its bytes differ. Returns the folder and the CID the
+        /// Runtime's walk gives it.
+        fn spin_host(&self) -> (std::path::PathBuf, String) {
+            self.host_of("a5-spin-host", SPIN_COMPONENT)
+        }
+
+        /// [`Self::spin_host`] for the guest `wat`, in the folder `name`.
+        fn host_of(&self, name: &str, wat: &str) -> (std::path::PathBuf, String) {
+            use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+
+            let key = SigningKey::from_bytes(&[0x44; 32]);
+            let dir = self.fixture_root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/a5-launch-probe");
+            std::fs::copy(fixture.join("capsule.json"), dir.join("capsule.json")).unwrap();
+            let wasm = wat::parse_str(wat).expect("the spin component compiles");
+            std::fs::write(dir.join("spin.component.wasm"), &wasm).unwrap();
+            let mut manifest: elastos_common::CapsuleManifest =
+                serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
+            manifest.entrypoint = "spin.component.wasm".into();
+            sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let cid = crate::stage_cmd::bundle_cid(&dir).expect("the spin host is walkable");
+            (dir, cid)
         }
 
         pub(crate) fn root(&self, agent_id: &str) -> String {
@@ -1672,10 +1813,17 @@ pub(crate) mod tests {
         assert_eq!(home.invoked(b), expected_b);
 
         // The activation has ended: its entry is kept for its session, status
-        // and cause, and a stop finds nothing left to stop. A new launch takes
-        // the same principal and root, and its guest reads back both files the
-        // earlier launch wrote.
-        assert!(!home.runtime.stop_capsule_by_id(&first.id).await.unwrap());
+        // and cause, and a stop finds nothing left to stop: it answers the
+        // recorded end and changes nothing. A new launch takes the same
+        // principal and root, and its guest reads back both files the earlier
+        // launch wrote.
+        let ended = home.runtime.get_capsule(&first.id).await.expect("kept");
+        let answer = home.runtime.stop_capsule_by_id(&first.id).await.unwrap();
+        let answer = answer.expect("the ended entry answers");
+        assert_eq!(
+            (answer.status, answer.cause, answer.ended_at),
+            (ended.status, ended.cause, ended.ended_at)
+        );
         let again = home.launch(a).await.unwrap().0;
         assert_ne!(again.id, first.id);
         assert_eq!(home.root(a), root_a);
@@ -2438,11 +2586,10 @@ pub(crate) mod tests {
 
     /// A3-R S3 fix 1 row: a stop and A's trap race, in both orders.
     /// First the stop reads A's entry while A's end waits to record the trap;
-    /// the stop then finds A already ended and answers so, and A's record is
-    /// the trap's. Then a second run is stopped while its guest is held in
-    /// its first call; the stop leaves the entry to the run's own end. Each
-    /// run ends exactly once, with one cause and one `capsule_stop` that
-    /// carries it.
+    /// the stop then answers the trap's end, and A's record is the trap's.
+    /// Then a second run is stopped while its guest is held in its first
+    /// call; the stop leaves the entry to the run's own end. Each run ends
+    /// exactly once, with one cause and one `capsule_stop` that carries it.
     #[tokio::test]
     async fn a_stop_racing_a_trap_ends_once() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -2496,7 +2643,12 @@ pub(crate) mod tests {
         let cause = end.cause.clone().expect("a trap records its cause");
         assert!(cause.contains(SCOPE_REFUSAL), "{cause}");
         assert!(cause.contains(&peer), "{cause}");
-        assert!(!stopped, "the stop found A already ended");
+        let stopped = stopped.expect("the stop answers A's entry");
+        assert_eq!(
+            (stopped.status.as_str(), stopped.cause.as_deref()),
+            ("failed", Some(cause.as_str())),
+            "the stop answers the trap's end"
+        );
         let stops = stops_of(&home, &run.id);
         assert!(
             matches!(stops.as_slice(), [StopReason::Error(detail)] if detail == &cause),
@@ -2507,7 +2659,11 @@ pub(crate) mod tests {
         home.wait_pending(&second.id).await;
         home.wait_running(&second.id).await;
         assert!(
-            home.runtime.stop_capsule_by_id(&second.id).await.unwrap(),
+            home.runtime
+                .stop_capsule_by_id(&second.id)
+                .await
+                .unwrap()
+                .is_some(),
             "a live run is asked to stop"
         );
         assert!(
@@ -2526,7 +2682,7 @@ pub(crate) mod tests {
         let cause = end.cause.clone().expect("an end records its cause");
         let stops = stops_of(&home, &second.id);
         let agrees = match (end.status.as_str(), stops.as_slice()) {
-            ("stopped", [StopReason::Requested]) => cause == "stopped by request",
+            ("stopped", [StopReason::Requested]) => cause == "stopped: user",
             ("failed", [StopReason::Error(detail)]) => detail == &cause,
             _ => false,
         };
@@ -2535,6 +2691,546 @@ pub(crate) mod tests {
             "one end, one cause, one stop audit: {end:?} {stops:?}"
         );
         assert_eq!(home.listed().await.len(), 2, "two runs, each ended once");
+    }
+
+    /// The stop route as the API exposes it: `None` is the bodyless request.
+    pub(crate) async fn stop_route(
+        home: &ProbeLaunch,
+        id: &str,
+        reason: Option<&str>,
+    ) -> (StatusCode, String) {
+        let body = reason
+            .map(|reason| serde_json::to_vec(&serde_json::json!({ "reason": reason })).unwrap())
+            .unwrap_or_default();
+        stop_route_with(home, id, body).await
+    }
+
+    /// The stop route with these exact body bytes.
+    async fn stop_route_with(home: &ProbeLaunch, id: &str, body: Vec<u8>) -> (StatusCode, String) {
+        let response = stop_capsule(
+            Extension(home.runtime.clone()),
+            Path(id.to_string()),
+            body.into(),
+        )
+        .await;
+        answer_of(response).await
+    }
+
+    /// A response's status and body text.
+    async fn answer_of(response: axum::response::Response) -> (StatusCode, String) {
+        use axum::body::to_bytes;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// The stop route's answer for an activation that has ended: its status
+    /// and cause, as the list names them.
+    fn stop_answer(body: &str) -> (String, Option<String>) {
+        let answer: serde_json::Value = serde_json::from_str(body).expect("a JSON answer");
+        (
+            answer["status"].as_str().expect("a status").to_string(),
+            answer["cause"].as_str().map(str::to_string),
+        )
+    }
+
+    /// A10-R's mid-compute proof (S4). A spinning guest is resident beside a
+    /// second agent. `DELETE` with a reason ends the spinning guest well
+    /// before its own 10 s deadline: the entry is `stopped` with
+    /// `stopped: <reason>` as its cause, one `Requested` stop is audited, and
+    /// the entry is kept for its session. The other agent is untouched and
+    /// completes.
+    #[tokio::test]
+    async fn cancel_mid_compute() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let other_agent = home.agents[1].clone();
+        let (spin_dir, spin_cid) = home.spin_host();
+        let spinning = home.create_agent_for_host("spinning", &spin_cid);
+
+        // The other agent launches first and is held in its own first call,
+        // so its run spans the spinning guest's stop.
+        let other = home.launch(&other_agent).await.unwrap().0;
+        assert_eq!(other.status, "starting");
+        home.wait_pending(&other.id).await;
+
+        let run = home.launch_from(&spin_dir, &spinning).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+        assert_eq!(run.session_id, run.id);
+        let running = home.wait_running(&run.id).await;
+        assert_eq!(running.status, "running");
+        assert_eq!(running.principal.as_deref(), Some(spinning.as_str()));
+        // `started` is published just before `run`, so the guest is spinning.
+        let now = home.runtime.get_capsule(&run.id).await.expect("registered");
+        assert_eq!(
+            now.status, "running",
+            "the spinning guest is still computing: cause={:?}",
+            now.cause
+        );
+
+        // The stop's own bound: the guest's deadline is 10 s, so a stop that
+        // takes five is a stop that did not interrupt the guest (F-notick).
+        let asked = std::time::Instant::now();
+        let (status, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_route(&home, &run.id, Some("spinning too long")),
+        )
+        .await
+        .expect("the stop must end the spinning guest before its own deadline");
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            asked.elapsed() < std::time::Duration::from_secs(5),
+            "the stop took {:?}: the guest is still computing",
+            asked.elapsed()
+        );
+
+        // The entry: stopped with the reason as its cause, its session kept.
+        let entry = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the ended entry is kept");
+        assert_eq!(entry.status, "stopped");
+        assert_eq!(entry.cause.as_deref(), Some("stopped: spinning too long"));
+        assert!(entry.ended_at.is_some());
+        assert_eq!(entry.session_id, run.id);
+        let listed = home.listed().await;
+        assert!(
+            listed.iter().any(|entry| {
+                entry["id"] == run.id
+                    && entry["status"] == "stopped"
+                    && entry["cause"] == "stopped: spinning too long"
+            }),
+            "the stopped entry is listed with its cause: {listed:?}"
+        );
+
+        // One stop audit, and it is the requested one, not an error.
+        let stops: Vec<_> = home
+            .audit_log
+            .recent_events(usize::MAX)
+            .into_iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::CapsuleStop {
+                    capsule_id,
+                    reason,
+                    ..
+                } if capsule_id == run.id => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops.len(), 1, "exactly one stop audit: {stops:?}");
+        assert!(
+            matches!(
+                stops[0],
+                elastos_runtime::primitives::audit::StopReason::Requested
+            ),
+            "{stops:?}"
+        );
+
+        // Nothing of the activation is left to stop: a later stop answers
+        // the recorded end.
+        let (status, body) = stop_route(&home, &run.id, Some("again")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            stop_answer(&body),
+            ("stopped".into(), Some("stopped: spinning too long".into()))
+        );
+
+        // The other agent completes on its own calls.
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![other.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let end = home.wait_ended(&other.id).await;
+        grants.abort();
+        assert_eq!(end.status, "stopped");
+        assert_eq!(end.cause.as_deref(), Some("completed"));
+    }
+
+    /// The route's optional body: a bodyless `DELETE` records the reason
+    /// `user`, as the API's earlier stop did.
+    #[tokio::test]
+    async fn a_bodyless_stop_records_the_user_reason() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let (spin_dir, spin_cid) = home.spin_host();
+        let spinning = home.create_agent_for_host("no-reason", &spin_cid);
+        let run = home.launch_from(&spin_dir, &spinning).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+        home.wait_running(&run.id).await;
+
+        let (status, _) = stop_route(&home, &run.id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = home.wait_ended(&run.id).await;
+        assert_eq!(entry.status, "stopped");
+        assert_eq!(entry.cause.as_deref(), Some("stopped: user"));
+    }
+
+    /// A10-R's mid-wait proof (S5). A's guest is inside its first bridge call,
+    /// holding a capability request no shell answers. `DELETE` with a reason
+    /// returns while that call is still waiting: the bridge's wait loop leaves
+    /// it with `cancelled`, the activation ends `stopped` with the reason as
+    /// its cause, and the request it was waiting on is denied by the Runtime
+    /// with that cause. B, held in its own first call throughout, is
+    /// untouched and then completes.
+    #[tokio::test]
+    async fn cancel_mid_wait() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents")
+        };
+
+        // Both agents launch and are held inside their own first bridge call:
+        // the pending store is the observable edge of that.
+        let run_a = home.launch(a).await.unwrap().0;
+        assert_eq!(run_a.status, "starting");
+        let a_pending = home.wait_pending(&run_a.id).await;
+        let run_b = home.launch(b).await.unwrap().0;
+        assert_eq!(run_b.status, "starting");
+        let b_pending = home.wait_pending(&run_b.id).await;
+
+        // DELETE while A's guest is inside that call. Its bridge wait is 30 s;
+        // a stop that has to wait the call out has not interrupted it
+        // (F-waitblind).
+        let (status, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_route(&home, &run_a.id, Some("waiting too long")),
+        )
+        .await
+        .expect("the stop must complete while the guest is inside its call: the request is still pending");
+        assert_eq!(status, StatusCode::OK);
+
+        let entry = home
+            .runtime
+            .get_capsule(&run_a.id)
+            .await
+            .expect("the ended entry is kept");
+        assert_eq!(entry.status, "stopped");
+        assert_eq!(entry.cause.as_deref(), Some("stopped: waiting too long"));
+
+        // The request A's guest was waiting on is denied by the Runtime, with
+        // the stop's cause.
+        let settled = "instance ended: stopped: waiting too long";
+        let after = home
+            .pending_store
+            .get_request(a_pending.id.as_str())
+            .await
+            .expect("the held request is still recorded");
+        let elastos_runtime::capability::RequestStatus::Denied { reason, settled_by } =
+            &after.status
+        else {
+            panic!(
+                "the request the stopped guest was waiting on is not settled: {:?}",
+                after.status
+            );
+        };
+        assert_eq!(reason, settled);
+        assert_eq!(*settled_by, elastos_runtime::capability::Settler::Runtime);
+
+        // B's request was not settled by A's stop, and B still runs.
+        assert!(
+            home.pending_store
+                .list_pending()
+                .await
+                .iter()
+                .any(|request| request.id.as_str() == b_pending.id.as_str()),
+            "A's stop settled no request of B's session"
+        );
+        assert_eq!(
+            home.runtime
+                .get_capsule(&run_b.id)
+                .await
+                .expect("B is still registered")
+                .status,
+            "running"
+        );
+
+        // B completes on its own calls.
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run_b.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let b_end = home.wait_ended(&run_b.id).await;
+        grants.abort();
+        assert_eq!(b_end.status, "stopped");
+        assert_eq!(b_end.cause.as_deref(), Some("completed"));
+    }
+
+    /// A3-R S4+S5 fix 1 row. The guest spins in its start function: it is in
+    /// guest code while the registry still says `starting`. `DELETE` with a
+    /// reason ends it well before its own 10 s deadline and before its `run`:
+    /// the entry is `stopped` with `stopped: <reason>`, kept, and one
+    /// `Requested` stop is audited. A stop given to the provider only once
+    /// the entry is `running` (F-startskip) leaves the start function to run
+    /// to its own ending, which is then the entry's.
+    #[tokio::test]
+    async fn a_stop_during_start_ends_it_before_run() {
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let (dir, cid) = home.host_of("a5-spin-start-host", SPIN_START_COMPONENT);
+        let agent = home.create_agent_for_host("spin-start", &cid);
+        let run = home.launch_from(&dir, &agent).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+
+        // The worker has taken the activation to run its start function: the
+        // provider says `Running` while the registry still says `starting`.
+        let started = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while home.runtime.component_status_for_test(&run.id).await
+                != Some(elastos_common::CapsuleStatus::Running)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            started.is_ok(),
+            "the worker starts the guest: {:?} {:?}",
+            home.runtime.component_status_for_test(&run.id).await,
+            home.runtime.get_capsule(&run.id).await
+        );
+        let entry = home.runtime.get_capsule(&run.id).await.expect("registered");
+        assert_eq!(entry.status, "starting", "{entry:?}");
+
+        let asked = std::time::Instant::now();
+        let (status, body) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_route(&home, &run.id, Some("stuck starting")),
+        )
+        .await
+        .expect("the stop must end the start function before its own deadline");
+        let took = asked.elapsed();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            stop_answer(&body),
+            ("stopped".into(), Some("stopped: stuck starting".into()))
+        );
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+
+        let entry = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the ended entry is kept");
+        assert_eq!(entry.status, "stopped");
+        assert_eq!(entry.cause.as_deref(), Some("stopped: stuck starting"));
+        assert!(entry.ended_at.is_some());
+        let stops = stops_of(&home, &run.id);
+        assert!(
+            matches!(stops.as_slice(), [StopReason::Requested]),
+            "{stops:?}"
+        );
+    }
+
+    /// A3-R S4+S5 fix 2 row. A `DELETE` reads A's entry while A's end, which
+    /// has settled and audited its trap, waits to record it. The activation's
+    /// stop request is held until that end is recorded, so the stop leaves the
+    /// entry to that end and answers it: `failed`, with the trap's cause. The
+    /// entry is kept once, with that one cause, for the 60 s retention, and a
+    /// later `DELETE` with another reason answers the same and removes
+    /// nothing. A request taken away before the end is recorded (F-earlydrop)
+    /// sends the stop down the launcher's path, which removes the entry.
+    #[tokio::test]
+    async fn a_stop_racing_an_end_keeps_its_record_for_60_s() {
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let peer = point_at_peer(&home, a, b);
+        let run = home.launch(a).await.unwrap().0;
+        home.wait_pending(&run.id).await;
+        home.wait_running(&run.id).await;
+
+        // The registry is held: the stop's read of the entry waits first in
+        // line, and A's end, which records last, waits behind it.
+        let registry = home.runtime.hold_capsule_registry_for_test().await;
+        let stopper = tokio::spawn(stop_capsule(
+            Extension(home.runtime.clone()),
+            Path(run.id.clone()),
+            axum::body::Bytes::from_static(br#"{"reason":"racing the trap"}"#),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while stops_of(&home, &run.id).is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("A traps and its end audits the stop");
+        drop(registry);
+        let (status, body) = answer_of(stopper.await.unwrap()).await;
+        grants.abort();
+
+        let end = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the trap's record survives the racing stop");
+        assert_eq!(end.status, "failed", "{end:?}");
+        let cause = end.cause.clone().expect("a trap records its cause");
+        assert!(cause.contains(SCOPE_REFUSAL), "{cause}");
+        assert!(cause.contains(&peer), "{cause}");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(stop_answer(&body), ("failed".into(), Some(cause.clone())));
+        let stops = stops_of(&home, &run.id);
+        assert!(
+            matches!(stops.as_slice(), [StopReason::Error(detail)] if detail == &cause),
+            "one stop audit, the trap's: {stops:?}"
+        );
+
+        // A later stop answers the same end and removes nothing.
+        let (status, again) = stop_route(&home, &run.id, Some("a later stop")).await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(stop_answer(&again), stop_answer(&body));
+        let after = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("a later stop removes nothing");
+        assert_eq!(
+            (&after.status, &after.cause, after.ended_at),
+            (&end.status, &end.cause, end.ended_at)
+        );
+        assert_eq!(stops_of(&home, &run.id).len(), 1, "still one stop audit");
+
+        // One entry, with its one cause, for the 60 s retention.
+        let ended_at = end.ended_at.expect("the entry records its end");
+        let within = home
+            .runtime
+            .list_capsules_at(ended_at + std::time::Duration::from_secs(59))
+            .await;
+        let kept: Vec<_> = within.iter().filter(|info| info.id == run.id).collect();
+        assert_eq!(kept.len(), 1, "{within:?}");
+        assert_eq!(kept[0].cause.as_deref(), Some(cause.as_str()));
+        let past = home
+            .runtime
+            .list_capsules_at(ended_at + std::time::Duration::from_secs(60))
+            .await;
+        assert!(past.iter().all(|info| info.id != run.id), "{past:?}");
+    }
+
+    /// A3-R S4+S5 fix 3 row. A `DELETE` body that is not a stop request is
+    /// refused with `400 invalid_stop_request`, and nothing is stopped:
+    /// malformed JSON, an unknown field, a reason that is not a string, and
+    /// text. The activation runs on with no stop recorded or audited. An
+    /// empty body is still the stop with the reason `user`. A refused body
+    /// read as no body (F-lenient) makes the first refusal a stop.
+    #[tokio::test]
+    async fn a_malformed_stop_body_is_refused() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents[0].clone();
+        let run = home.launch(&agent).await.unwrap().0;
+        home.wait_pending(&run.id).await;
+
+        let refused: [&[u8]; 4] = [
+            br#"{"reason":"#,
+            br#"{"why":"too long"}"#,
+            br#"{"reason":5}"#,
+            b"stop now",
+        ];
+        for body in refused {
+            let (status, answer) = stop_route_with(&home, &run.id, body.to_vec()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+            let answer: serde_json::Value = serde_json::from_str(&answer).expect("a JSON refusal");
+            assert_eq!(answer["error"], "invalid_stop_request", "{answer}");
+        }
+        let entry = home.runtime.get_capsule(&run.id).await.expect("registered");
+        assert!(entry.ended_at.is_none(), "nothing is stopped: {entry:?}");
+        assert_eq!(home.runtime.requested_stop_for_test(&run.id), None);
+        assert!(stops_of(&home, &run.id).is_empty());
+
+        let (status, body) = stop_route_with(&home, &run.id, Vec::new()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            stop_answer(&body),
+            ("stopped".into(), Some("stopped: user".into()))
+        );
+    }
+
+    /// A3-R S4+S5 fix 4 row. A second stop arrives while the first is ending
+    /// the activation: the first recorded cause is the one the end records,
+    /// and both stops, and a third after the end, answer that one outcome.
+    /// One stop is audited. (`runtime::tests::a_later_stop_keeps_the_first_cause`
+    /// holds the rule itself.)
+    #[tokio::test]
+    async fn concurrent_stops_answer_the_first_recorded_cause() {
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents[0].clone();
+        let run = home.launch(&agent).await.unwrap().0;
+        home.wait_pending(&run.id).await;
+
+        let first = tokio::spawn(stop_capsule(
+            Extension(home.runtime.clone()),
+            Path(run.id.clone()),
+            axum::body::Bytes::from_static(br#"{"reason":"first"}"#),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let ended = home
+                    .runtime
+                    .get_capsule(&run.id)
+                    .await
+                    .is_some_and(|info| info.ended_at.is_some());
+                if ended || home.runtime.requested_stop_for_test(&run.id).is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the first stop records its cause");
+        let second = stop_route(&home, &run.id, Some("second")).await;
+        let first = answer_of(first.await.unwrap()).await;
+        let third = stop_route(&home, &run.id, Some("third")).await;
+
+        let outcome = ("stopped".to_string(), Some("stopped: first".to_string()));
+        for (status, body) in [&first, &second, &third] {
+            assert_eq!(*status, StatusCode::OK, "{body}");
+            assert_eq!(stop_answer(body), outcome);
+        }
+        let entry = home.runtime.get_capsule(&run.id).await.expect("kept");
+        assert_eq!((entry.status, entry.cause), outcome);
+        let stops = stops_of(&home, &run.id);
+        assert!(
+            matches!(stops.as_slice(), [StopReason::Requested]),
+            "{stops:?}"
+        );
     }
 
     /// An ended entry is listed for the 60 s retention and is gone after it,
@@ -3454,6 +4150,7 @@ pub(crate) mod tests {
             data_dir: Some(home.data_dir.clone()),
             launch: None,
             model_token_ceiling: None,
+            stop: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
         let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(
