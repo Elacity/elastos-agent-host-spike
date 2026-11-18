@@ -27,6 +27,57 @@ const ALLOWED_BUS_V2_IMPORTS: &[&str] = &[
     "elastos:bus/credentials@2.0.0",
 ];
 
+/// The exact core builtins a generated Bus v2 async guest imports, by module
+/// and name. The `$root` names are the block wit-component 0.254.2 emits in
+/// `src/dummy.rs:423-437` (`push_root_async_intrinsics`); `[task-cancel]`
+/// comes from the same block under `[export]$root`. The lifecycle names are
+/// the `run` export's task and stream builtins, fixed by
+/// `elastos/wit-bus-v2/elastos-bus-v2.wit:35` and observed in the encoded
+/// `bus2_photo_guest`. Exact names only: never a whole module.
+const ALLOWED_V2_CORE_BUILTINS: &[(&str, &str)] = &[
+    ("$root", "[backpressure-inc]"),
+    ("$root", "[backpressure-dec]"),
+    ("$root", "[waitable-set-new]"),
+    ("$root", "[waitable-set-wait]"),
+    ("$root", "[waitable-set-poll]"),
+    ("$root", "[waitable-set-drop]"),
+    ("$root", "[waitable-join]"),
+    ("$root", "[thread-yield]"),
+    ("$root", "[subtask-drop]"),
+    ("$root", "[subtask-cancel]"),
+    ("$root", "[context-get-0]"),
+    ("$root", "[context-set-0]"),
+    ("[export]$root", "[task-cancel]"),
+    ("[export]elastos:bus/lifecycle@2.0.0", "[task-return]run"),
+    ("[export]elastos:bus/lifecycle@2.0.0", "[stream-new-0]run"),
+    ("[export]elastos:bus/lifecycle@2.0.0", "[stream-read-0]run"),
+    ("[export]elastos:bus/lifecycle@2.0.0", "[stream-write-0]run"),
+    (
+        "[export]elastos:bus/lifecycle@2.0.0",
+        "[stream-cancel-read-0]run",
+    ),
+    (
+        "[export]elastos:bus/lifecycle@2.0.0",
+        "[stream-cancel-write-0]run",
+    ),
+    (
+        "[export]elastos:bus/lifecycle@2.0.0",
+        "[stream-drop-readable-0]run",
+    ),
+    (
+        "[export]elastos:bus/lifecycle@2.0.0",
+        "[stream-drop-writable-0]run",
+    ),
+    (
+        "[export]elastos:bus/lifecycle@2.0.0",
+        "[async-lower][stream-read-0]run",
+    ),
+    (
+        "[export]elastos:bus/lifecycle@2.0.0",
+        "[async-lower][stream-write-0]run",
+    ),
+];
+
 /// Parse caps: bounds on the work the compiler is asked to do, checked in the
 /// same pass as the imports. The largest component in this repository
 /// (agent-host) has 896 functions and a largest body of 88,523 bytes.
@@ -34,7 +85,8 @@ const MAX_COMPONENT_FUNCTIONS: u32 = 20_000;
 const MAX_FUNCTION_BODY_BYTES: usize = 512 * 1024;
 /// The same component's largest function declares 35 locals, and it has 5
 /// canonical functions (the lifts and lowers between the component and its
-/// core module, each of which the engine compiles a trampoline for).
+/// core module, each of which the engine compiles a trampoline for). The
+/// generated Bus v2 async shape has 36.
 const MAX_FUNCTION_LOCALS: u32 = 1_000;
 const MAX_CANONICAL_FUNCTIONS: u32 = 64;
 
@@ -147,7 +199,9 @@ pub(crate) fn validate_component_imports_for_contract(
                         format!("failed to parse component import section: {err}")
                     })?;
                     let name = import.name.name;
-                    if contract == ELASTOS_BUS_V1_CONTRACT && name.starts_with("import-type-") {
+                    let generated =
+                        contract == ELASTOS_BUS_V1_CONTRACT || contract == ELASTOS_BUS_V2_CONTRACT;
+                    if generated && name.starts_with("import-type-") {
                         if !matches!(import.ty, ComponentTypeRef::Type(_)) {
                             return Err(format!(
                                 "component generated type import \"{}\" must be a type import",
@@ -156,7 +210,7 @@ pub(crate) fn validate_component_imports_for_contract(
                         }
                         continue;
                     }
-                    if contract == ELASTOS_BUS_V1_CONTRACT && name == "import-func-run" {
+                    if generated && name == "import-func-run" {
                         if !matches!(import.ty, ComponentTypeRef::Func(_)) {
                             return Err("component generated run import must be a function import"
                                 .to_string());
@@ -223,7 +277,12 @@ pub(crate) fn validate_component_imports_for_contract(
                     let import = import.map_err(|err| {
                         format!("failed to parse component core import section: {err}")
                     })?;
-                    validate_core_import(import.module, import.name, allowed)?;
+                    let builtins: &[(&str, &str)] = if contract == ELASTOS_BUS_V2_CONTRACT {
+                        ALLOWED_V2_CORE_BUILTINS
+                    } else {
+                        &[]
+                    };
+                    validate_core_import(import.module, import.name, allowed, builtins)?;
                 }
             }
             _ => {}
@@ -241,6 +300,7 @@ fn validate_core_import(
     module: &str,
     name: &str,
     allowed: &[&str],
+    builtins: &[(&str, &str)],
 ) -> std::result::Result<(), String> {
     let lower = format!("{module}::{name}").to_ascii_lowercase();
     if FORBIDDEN_AUTHORITY_MARKERS
@@ -252,6 +312,12 @@ fn validate_core_import(
         ));
     }
 
+    if builtins
+        .iter()
+        .any(|(builtin_module, builtin_name)| *builtin_module == module && *builtin_name == name)
+    {
+        return Ok(());
+    }
     if allowed.contains(&module) {
         return Ok(());
     }
@@ -311,20 +377,202 @@ mod tests {
         assert!(err.contains("runtime@1.0.0"), "{err}");
     }
 
-    #[test]
-    fn v2_refuses_v1_generated_import_exceptions() {
-        for (name, ty) in [
-            (
-                "import-type-event",
-                EncodedComponentTypeRef::Type(wasm_encoder::TypeBounds::Eq(0)),
-            ),
-            ("import-func-run", EncodedComponentTypeRef::Func(0)),
+    /// The core imports of the generated Bus v2 async shape, as encoded by
+    /// wit-component 0.254.2 from a wit-bindgen 0.60 async guest. The `$root`
+    /// set is the twelve names in `push_root_async_intrinsics`
+    /// (`wit-component src/dummy.rs:423-437`).
+    const V2_GENERATED_CORE_IMPORTS: &[(&str, &str)] = &[
+        ("$root", "[backpressure-inc]"),
+        ("$root", "[backpressure-dec]"),
+        ("$root", "[waitable-set-new]"),
+        ("$root", "[waitable-set-wait]"),
+        ("$root", "[waitable-set-poll]"),
+        ("$root", "[waitable-set-drop]"),
+        ("$root", "[waitable-join]"),
+        ("$root", "[thread-yield]"),
+        ("$root", "[subtask-drop]"),
+        ("$root", "[subtask-cancel]"),
+        ("$root", "[context-get-0]"),
+        ("$root", "[context-set-0]"),
+        ("[export]$root", "[task-cancel]"),
+        ("[export]elastos:bus/lifecycle@2.0.0", "[task-return]run"),
+        ("[export]elastos:bus/lifecycle@2.0.0", "[stream-new-0]run"),
+        ("[export]elastos:bus/lifecycle@2.0.0", "[stream-read-0]run"),
+        ("[export]elastos:bus/lifecycle@2.0.0", "[stream-write-0]run"),
+        (
+            "[export]elastos:bus/lifecycle@2.0.0",
+            "[stream-cancel-read-0]run",
+        ),
+        (
+            "[export]elastos:bus/lifecycle@2.0.0",
+            "[stream-cancel-write-0]run",
+        ),
+        (
+            "[export]elastos:bus/lifecycle@2.0.0",
+            "[stream-drop-readable-0]run",
+        ),
+        (
+            "[export]elastos:bus/lifecycle@2.0.0",
+            "[stream-drop-writable-0]run",
+        ),
+        (
+            "[export]elastos:bus/lifecycle@2.0.0",
+            "[async-lower][stream-read-0]run",
+        ),
+        (
+            "[export]elastos:bus/lifecycle@2.0.0",
+            "[async-lower][stream-write-0]run",
+        ),
+        ("elastos:bus/providers@2.0.0", "[async-lower]invoke"),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[stream-drop-readable-0]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[async-lower][future-write-2]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[async-lower][future-read-2]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[future-cancel-write-2]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[future-cancel-read-2]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[future-drop-writable-2]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[future-drop-readable-2]invoke",
+        ),
+        ("elastos:bus/providers@2.0.0", "[future-new-2]invoke"),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[async-lower][stream-write-0]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[async-lower][stream-read-0]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[stream-cancel-write-0]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[stream-cancel-read-0]invoke",
+        ),
+        (
+            "elastos:bus/providers@2.0.0",
+            "[stream-drop-writable-0]invoke",
+        ),
+        ("elastos:bus/providers@2.0.0", "[stream-new-0]invoke"),
+        ("elastos:bus/capabilities@2.0.0", "[async-lower]request"),
+        ("elastos:bus/ui@2.0.0", "[async-lower]present"),
+        ("elastos:bus/credentials@2.0.0", "presented"),
+        ("", "0"),
+        ("", "1"),
+        ("", "2"),
+        ("", "3"),
+        ("", "4"),
+        ("", "5"),
+        ("", "6"),
+        ("", "7"),
+        ("", "8"),
+        ("", "9"),
+        ("", "10"),
+        ("", "11"),
+        ("", "$imports"),
+    ];
+
+    /// The generated shape as a WAT component: the bus instances, the nested
+    /// generated `import-type-*` / `import-func-run` imports, the core builtins
+    /// and `canonical` canonical functions.
+    fn v2_generated_shape(canonical: usize, extra_core: &[(&str, &str)]) -> Vec<u8> {
+        let mut wat = String::from("(component\n  (type $inst (instance))\n");
+        for name in [
+            "elastos:bus/types@2.0.0",
+            "elastos:bus/capabilities@2.0.0",
+            "elastos:bus/providers@2.0.0",
+            "elastos:bus/ui@2.0.0",
+            "elastos:bus/credentials@2.0.0",
         ] {
-            let bytes = component_with_imports(&[(name, ty)]);
-            let err = validate_component_imports_for_contract(&bytes, ELASTOS_BUS_V2_CONTRACT)
-                .unwrap_err();
-            assert!(err.contains("not allowed") && err.contains(name), "{err}");
+            wat.push_str(&format!("  (import \"{name}\" (instance))\n"));
         }
+        for name in [
+            "import-type-grant-id",
+            "import-type-event",
+            "import-type-bus-error",
+            "import-type-event0",
+            "import-type-bus-error0",
+        ] {
+            wat.push_str(&format!("  (import \"{name}\" (type (eq $inst)))\n"));
+        }
+        wat.push_str("  (import \"import-func-run\" (func))\n");
+        wat.push_str("  (core module $guest\n");
+        for (module, name) in V2_GENERATED_CORE_IMPORTS.iter().chain(extra_core) {
+            wat.push_str(&format!("    (import \"{module}\" \"{name}\" (func))\n"));
+        }
+        wat.push_str("    (func (export \"run\")))\n");
+        for index in 0..canonical {
+            wat.push_str(&format!(
+                "  (core func $f{index} (canon waitable-set.new))\n"
+            ));
+        }
+        wat.push(')');
+        wat::parse_str(&wat).unwrap()
+    }
+
+    #[test]
+    fn v2_admits_generated_imports_with_kind_checks() {
+        // The names are admitted for v2 now, but the kind checks stay: a type
+        // import must be a type and the run import must be a function.
+        let type_import = component_with_imports(&[(
+            "import-type-event",
+            EncodedComponentTypeRef::Type(wasm_encoder::TypeBounds::Eq(0)),
+        )]);
+        validate_component_imports_for_contract(&type_import, ELASTOS_BUS_V2_CONTRACT).unwrap();
+
+        let wrong_kind =
+            component_with_imports(&[("import-type-event", EncodedComponentTypeRef::Func(0))]);
+        let err = validate_component_imports_for_contract(&wrong_kind, ELASTOS_BUS_V2_CONTRACT)
+            .unwrap_err();
+        assert!(err.contains("must be a type import"), "{err}");
+
+        let run_import =
+            component_with_imports(&[("import-func-run", EncodedComponentTypeRef::Func(0))]);
+        validate_component_imports_for_contract(&run_import, ELASTOS_BUS_V2_CONTRACT).unwrap();
+    }
+
+    #[test]
+    fn v2_admits_the_generated_async_shape_and_nothing_more() {
+        let shape = v2_generated_shape(36, &[]);
+        validate_component_imports_for_contract(&shape, ELASTOS_BUS_V2_CONTRACT).unwrap();
+
+        // One non-builtin name under `$root` is refused by name, even though
+        // every other part of the generated shape is admitted.
+        let err = validate_component_imports_for_contract(
+            &v2_generated_shape(36, &[("$root", "[not-a-builtin]")]),
+            ELASTOS_BUS_V2_CONTRACT,
+        )
+        .unwrap_err();
+        assert!(err.contains("$root::[not-a-builtin]"), "{err}");
+        assert!(err.contains("not allowed"), "{err}");
+
+        // The generated shape's 36 canonical functions fit; 65 do not.
+        let err = validate_component_imports_for_contract(
+            &v2_generated_shape(65, &[]),
+            ELASTOS_BUS_V2_CONTRACT,
+        )
+        .unwrap_err();
+        assert_eq!(err, "component has more than 64 canonical functions");
     }
 
     #[test]
