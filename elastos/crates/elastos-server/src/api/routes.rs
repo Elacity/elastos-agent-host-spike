@@ -308,11 +308,31 @@ fn launch_capsule_name(capsule_dir: &std::path::Path) -> Result<String, (StatusC
     Ok(manifest.name)
 }
 
+/// The body of `DELETE /api/capsules/:id`: an optional reason (M1-R A10-R).
+/// A missing body, or a body naming no reason, keeps the earlier behaviour and
+/// records the reason `user`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopRequest {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Stops a running activation. A detached agent is ended by its watcher with
+/// `stopped: <reason>` as its cause, its pending requests denied by the
+/// Runtime, and its entry kept for 60 s. `provider.stop` ends a guest in guest
+/// code; the bridge's wait loop ends a guest inside a call.
 pub async fn stop_capsule(
     Extension(runtime): Extension<Arc<Runtime>>,
     Path(id): Path<String>,
+    body: Option<Json<StopRequest>>,
 ) -> impl IntoResponse {
-    match runtime.stop_capsule_by_id(&id).await {
+    let reason = body
+        .and_then(|Json(request)| request.reason)
+        .map(|reason| reason.trim().to_string())
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or_else(|| "user".to_string());
+    match runtime.stop_capsule_with_reason(&id, &reason).await {
         Ok(true) => (StatusCode::OK, format!("Capsule {} stopped", id)),
         Ok(false) => (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)),
         Err(e) => (
@@ -861,6 +881,34 @@ pub(crate) mod tests {
     /// The package CID the install records; the launch compares the Runtime's own walk.
     const PROBE_REGISTRY_CID: &str = "bafkreia5probe";
 
+    /// An Agent Host of the probe's world that asks the bridge for nothing and
+    /// spins in `run`. The mid-compute stop row needs a guest in guest code,
+    /// where only the epoch callback can end it.
+    const SPIN_COMPONENT: &str = r#"(component
+      (import "elastos:bus/types@1.0.0" (instance $types
+        (type $error (variant
+          (case "denied" string) (case "not-found" string) (case "invalid" string)
+          (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+        (export "bus-error" (type (eq $error)))))
+      (alias export $types "bus-error" (type $bus-error))
+      (core module $m
+        (memory (export "memory") 1)
+        ;; A loop-carried division: each iteration's fuel buys a division's
+        ;; latency, so the spinner keeps computing long enough for a stop
+        ;; request (with the flag ignored, it ends when its fuel does).
+        (func $spin (local $x f64)
+          (local.set $x (f64.const 1.0000001))
+          (loop $again
+            (local.set $x (f64.div (local.get $x) (f64.const 1.0000001)))
+            (local.set $x (f64.mul (local.get $x) (f64.const 1.0000001)))
+            (br $again)))
+        (func (export "run") (result i32) (call $spin) (i32.const 0)))
+      (core instance $i (instantiate $m))
+      (func $run (result (result (error $bus-error)))
+        (canon lift (core func $i "run") (memory $i "memory")))
+      (instance $lifecycle (export "run" (func $run)))
+      (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#;
+
     impl ProbeLaunch {
         pub(crate) async fn new(names: &[&str]) -> Self {
             let temp = tempfile::tempdir().unwrap();
@@ -1156,6 +1204,35 @@ pub(crate) mod tests {
             )
             .unwrap()
             .agent_id
+        }
+
+        /// Writes a signed copy of the probe whose guest spins in `run` and
+        /// asks the bridge for nothing. The manifest keeps the stored host's
+        /// name (the launch grant names it) and the agent kind; only the
+        /// entrypoint and its bytes differ. Returns the folder and the CID the
+        /// Runtime's walk gives it.
+        fn spin_host(&self) -> (std::path::PathBuf, String) {
+            use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+
+            let key = SigningKey::from_bytes(&[0x44; 32]);
+            let dir = self.fixture_root.join("a5-spin-host");
+            std::fs::create_dir_all(&dir).unwrap();
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/a5-launch-probe");
+            std::fs::copy(fixture.join("capsule.json"), dir.join("capsule.json")).unwrap();
+            let wasm = wat::parse_str(SPIN_COMPONENT).expect("the spin component compiles");
+            std::fs::write(dir.join("spin.component.wasm"), &wasm).unwrap();
+            let mut manifest: elastos_common::CapsuleManifest =
+                serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
+            manifest.entrypoint = "spin.component.wasm".into();
+            sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let cid = crate::stage_cmd::bundle_cid(&dir).expect("the spin host is walkable");
+            (dir, cid)
         }
 
         pub(crate) fn root(&self, agent_id: &str) -> String {
@@ -2231,6 +2308,159 @@ pub(crate) mod tests {
         b_grants.abort();
         assert_eq!(b_end.status, "stopped");
         assert_eq!(b_end.cause.as_deref(), Some("completed"));
+    }
+
+    /// The stop route as the API exposes it: `None` is the bodyless request.
+    pub(crate) async fn stop_route(
+        home: &ProbeLaunch,
+        id: &str,
+        reason: Option<&str>,
+    ) -> (StatusCode, String) {
+        use axum::body::to_bytes;
+        let body = reason.map(|reason| {
+            Json(StopRequest {
+                reason: Some(reason.to_string()),
+            })
+        });
+        let response = stop_capsule(Extension(home.runtime.clone()), Path(id.to_string()), body)
+            .await
+            .into_response();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// A10-R's mid-compute proof (S4). A spinning guest is resident beside a
+    /// second agent. `DELETE` with a reason ends the spinning guest well
+    /// before its own 10 s deadline: the entry is `stopped` with
+    /// `stopped: <reason>` as its cause, one `Requested` stop is audited, and
+    /// the entry is kept for its session. The other agent is untouched and
+    /// completes.
+    #[tokio::test]
+    async fn cancel_mid_compute() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let other_agent = home.agents[1].clone();
+        let (spin_dir, spin_cid) = home.spin_host();
+        let spinning = home.create_agent_for_host("spinning", &spin_cid);
+
+        // The other agent launches first and is held in its own first call,
+        // so its run spans the spinning guest's stop.
+        let other = home.launch(&other_agent).await.unwrap().0;
+        assert_eq!(other.status, "starting");
+        home.wait_pending(&other.id).await;
+
+        let run = home.launch_from(&spin_dir, &spinning).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+        assert_eq!(run.session_id, run.id);
+        let running = home.wait_running(&run.id).await;
+        assert_eq!(running.status, "running");
+        assert_eq!(running.principal.as_deref(), Some(spinning.as_str()));
+        // `started` is published just before `run`, so the guest is spinning.
+        let now = home.runtime.get_capsule(&run.id).await.expect("registered");
+        assert_eq!(
+            now.status, "running",
+            "the spinning guest is still computing: cause={:?}",
+            now.cause
+        );
+
+        // The stop's own bound: the guest's deadline is 10 s, so a stop that
+        // takes five is a stop that did not interrupt the guest (F-notick).
+        let asked = std::time::Instant::now();
+        let (status, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_route(&home, &run.id, Some("spinning too long")),
+        )
+        .await
+        .expect("the stop must end the spinning guest before its own deadline");
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            asked.elapsed() < std::time::Duration::from_secs(5),
+            "the stop took {:?}: the guest is still computing",
+            asked.elapsed()
+        );
+
+        // The entry: stopped with the reason as its cause, its session kept.
+        let entry = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the ended entry is kept");
+        assert_eq!(entry.status, "stopped");
+        assert_eq!(entry.cause.as_deref(), Some("stopped: spinning too long"));
+        assert!(entry.ended_at.is_some());
+        assert_eq!(entry.session_id, run.id);
+        let listed = home.listed().await;
+        assert!(
+            listed.iter().any(|entry| {
+                entry["id"] == run.id
+                    && entry["status"] == "stopped"
+                    && entry["cause"] == "stopped: spinning too long"
+            }),
+            "the stopped entry is listed with its cause: {listed:?}"
+        );
+
+        // One stop audit, and it is the requested one, not an error.
+        let stops: Vec<_> = home
+            .audit_log
+            .recent_events(usize::MAX)
+            .into_iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::CapsuleStop {
+                    capsule_id,
+                    reason,
+                    ..
+                } if capsule_id == run.id => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops.len(), 1, "exactly one stop audit: {stops:?}");
+        assert!(
+            matches!(
+                stops[0],
+                elastos_runtime::primitives::audit::StopReason::Requested
+            ),
+            "{stops:?}"
+        );
+
+        // Nothing of the activation is left to stop.
+        assert!(!home.runtime.stop_capsule_by_id(&run.id).await.unwrap());
+
+        // The other agent completes on its own calls.
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![other.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let end = home.wait_ended(&other.id).await;
+        grants.abort();
+        assert_eq!(end.status, "stopped");
+        assert_eq!(end.cause.as_deref(), Some("completed"));
+    }
+
+    /// The route's optional body: a bodyless `DELETE` records the reason
+    /// `user`, as the API's earlier stop did.
+    #[tokio::test]
+    async fn a_bodyless_stop_records_the_user_reason() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let (spin_dir, spin_cid) = home.spin_host();
+        let spinning = home.create_agent_for_host("no-reason", &spin_cid);
+        let run = home.launch_from(&spin_dir, &spinning).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+        home.wait_running(&run.id).await;
+
+        let (status, _) = stop_route(&home, &run.id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = home.wait_ended(&run.id).await;
+        assert_eq!(entry.status, "stopped");
+        assert_eq!(entry.cause.as_deref(), Some("stopped: user"));
     }
 
     /// An ended entry is listed for the 60 s retention and is gone after it,
