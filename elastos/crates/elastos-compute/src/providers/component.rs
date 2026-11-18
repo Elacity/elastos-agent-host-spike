@@ -447,12 +447,20 @@ impl ComponentProvider {
         })
     }
 
-    /// Starts a loaded v1 activation on a blocking thread and returns as soon
-    /// as the worker has entered the guest's `run` export. The guest keeps
+    /// Starts a loaded v1 activation on a blocking thread and returns after
+    /// instantiation, just before the worker calls the guest's `run` export. The guest keeps
     /// running on that thread; the worker publishes its outcome
     /// ([`ActivationOutcome`]) and removes the activation entry when the run
     /// ends. [`ComputeProvider::start`] awaits the outcome on top of this.
     pub async fn start_resident(&self, handle: &CapsuleHandle) -> Result<ResidentActivation> {
+        let hostcall = self.bus_hostcall.read().unwrap().clone();
+        let principal_id = self
+            .bridge_principals
+            .read()
+            .await
+            .get(&handle.id)
+            .cloned()
+            .flatten();
         let (engine, component, sealed, stop_requested, fuel, run_deadline) = {
             let mut instances = self.instances.write().await;
             let instance = instances
@@ -480,14 +488,6 @@ impl ComponentProvider {
             )
         };
 
-        let hostcall = self.bus_hostcall.read().unwrap().clone();
-        let principal_id = self
-            .bridge_principals
-            .read()
-            .await
-            .get(&handle.id)
-            .cloned()
-            .flatten();
         let state = ComponentState {
             sealed,
             fuel,
@@ -592,11 +592,15 @@ impl ComponentProvider {
         let bindings =
             ProductCapsuleV1::instantiate(&mut store, component, &linker).map_err(|err| {
                 let stopped = store.data().ended_by_stop;
-                ActivationOutcome::Trapped(run_ending(
-                    "Failed to instantiate component capsule",
-                    err,
-                    stopped,
-                ))
+                if stopped && matches!(err.downcast_ref::<Trap>(), Some(Trap::Interrupt)) {
+                    ActivationOutcome::Stopped
+                } else {
+                    ActivationOutcome::Trapped(run_ending(
+                        "Failed to instantiate component capsule",
+                        err,
+                        stopped,
+                    ))
+                }
             })?;
         if let Some(started) = started {
             let _ = started.send(());
@@ -2199,6 +2203,7 @@ mod tests {
             .await
             .expect("the spinning guest starts");
         provider.stop(&handle).await.expect("stop sets the flag");
+        let stopped_at = Instant::now();
         let outcome = tokio::time::timeout(Duration::from_secs(5), resident.ended())
             .await
             .expect("the stop ends the guest, not its deadline");
@@ -2208,9 +2213,121 @@ mod tests {
             "a stop request traps the guest as stopped"
         );
         assert!(
+            stopped_at.elapsed() < Duration::from_millis(500),
+            "the stop must be seen within a few epoch ticks, not at the deadline"
+        );
+        assert!(
             provider.instances.read().await.get(&handle.id).is_none(),
             "the worker takes the activation entry away when the run ends"
         );
+    }
+
+    #[tokio::test]
+    async fn resident_stop_during_instantiation_reports_stopped_before_run() {
+        let provider = Arc::new(ComponentProvider::new());
+        let (_, mut manifest) = component_fixture();
+        manifest.entrypoint = "spin-start.component.wasm".into();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(&manifest.entrypoint),
+            lifecycle_component_bytes(true, true),
+        )
+        .unwrap();
+        let handle = provider.load(dir.path(), manifest).await.unwrap();
+        {
+            let mut instances = provider.instances.write().await;
+            let entry = instances.get_mut(&handle.id).unwrap();
+            entry.fuel = u64::MAX;
+            entry.run_deadline = Duration::from_secs(3);
+        }
+        let start = tokio::spawn({
+            let provider = provider.clone();
+            let handle = handle.clone();
+            async move { provider.start_resident(&handle).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if provider.status(&handle).await.unwrap() == CapsuleStatus::Running {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("start marks the activation running");
+        provider.stop(&handle).await.expect("stop sets the flag");
+        let result = tokio::time::timeout(Duration::from_secs(2), start)
+            .await
+            .expect("the stopped start completes")
+            .unwrap();
+        let error = match result {
+            Ok(_) => panic!("a stopped start returned a resident handle"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("component was stopped before its run began"),
+            "{error}"
+        );
+        assert!(provider.instances.read().await.get(&handle.id).is_none());
+    }
+
+    #[test]
+    fn stop_during_start_function_publishes_stopped_outcome() {
+        let engine = ComponentProvider::engine().unwrap();
+        let component = Component::new(&engine, lifecycle_component_bytes(true, true)).unwrap();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let state = ComponentState {
+            fuel: u64::MAX,
+            run_deadline: Duration::from_secs(3),
+            stop_requested: stop_requested.clone(),
+            ..ComponentState::new(None, "spin-start".into(), None)
+        };
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(ComponentProvider::instantiate_component(
+                &engine, &component, state, None,
+            ));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        stop_requested.store(true, Ordering::Release);
+        let outcome = ended
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stop ends the start function");
+        assert_eq!(outcome, Err(ActivationOutcome::Stopped));
+    }
+
+    #[tokio::test]
+    async fn resident_start_waits_for_failed_instantiation() {
+        let provider = ComponentProvider::new();
+        let (_, mut manifest) = component_fixture();
+        manifest.entrypoint = "failing-start.component.wasm".into();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(&manifest.entrypoint),
+            lifecycle_component_bytes(true, true),
+        )
+        .unwrap();
+        let handle = provider.load(dir.path(), manifest).await.unwrap();
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .fuel = 1;
+        let error = match provider.start_resident(&handle).await {
+            Ok(_) => panic!("a failed start function returned a resident handle"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to instantiate component capsule"),
+            "{error}"
+        );
+        assert!(provider.instances.read().await.get(&handle.id).is_none());
     }
 
     fn state_with_deadline(run_deadline: Duration) -> ComponentState {
