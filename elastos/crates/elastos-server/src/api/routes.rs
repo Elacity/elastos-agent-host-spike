@@ -915,18 +915,18 @@ pub(crate) mod tests {
             .await
         }
 
-        /// A probe whose revoke list is saved under [`Self::tokens_dir`] and
+        /// A probe whose capability store is opened in its Home's data
+        /// folder as a Home's start opens it, at [`Self::tokens_dir`], and
         /// whose tokens are signed with a fixed key, so
         /// [`Self::restarted_tokens`] is this Home's token plane after a
         /// restart.
         pub(crate) async fn with_saved_revokes(names: &[&str]) -> Self {
+            use crate::api::handlers::settle;
             let temp = tempfile::tempdir().unwrap();
-            let tokens = temp.path().join("tokens");
-            let store = elastos_runtime::capability::CapabilityStore::with_persistence(&tokens)
-                .await
-                .unwrap();
+            let data_dir = temp.path().join("data");
+            let store = settle::open_capability_store(&data_dir).await.unwrap();
             let mut probe = Self::new_with(temp, names, Some(store)).await;
-            probe.tokens = Some(tokens);
+            probe.tokens = Some(settle::capability_store_dir(&data_dir));
             probe
         }
 
@@ -934,8 +934,20 @@ pub(crate) mod tests {
             self.tokens.clone().expect("a probe with saved revokes")
         }
 
-        /// A new token plane over the saved revoke list and the same key.
+        /// A new token plane over this Home's capability store, opened as
+        /// its start opens it, and the same key.
         pub(crate) async fn restarted_tokens(
+            &self,
+        ) -> elastos_runtime::capability::CapabilityManager {
+            let store = crate::api::handlers::settle::open_capability_store(&self.data_dir)
+                .await
+                .unwrap();
+            probe_token_manager(Some(store), self.audit_log.clone())
+        }
+
+        /// A new token plane over the saved store alone, without the pending
+        /// revocation list, and the same key.
+        pub(crate) async fn saved_store_tokens(
             &self,
         ) -> elastos_runtime::capability::CapabilityManager {
             let store =
@@ -2337,12 +2349,14 @@ pub(crate) mod tests {
     const SCOPE_REFUSAL: &str =
         "localhost://UsersAI roots must use UsersAI/self or the active principal root";
 
-    /// A3-R S3 fix 1 row. The Home's saved revoke list cannot be replaced
-    /// while two activations end: A traps and B returns. Each grant is
-    /// refused in this process at once. The saved list lacks them, so a Home
-    /// restarted from it would accept them again; each end is therefore
-    /// recorded `failed`, with a cause that names the revoke it could not
-    /// save, and its one `capsule_stop` carries that cause.
+    /// A3-R S3 fix 1 row, and fix 2 row 1. The Home's saved revoke list
+    /// cannot be replaced while two activations end: A traps and B returns.
+    /// Each grant is refused in this process at once. The saved list lacks
+    /// them, so each end is recorded `failed`, with a cause that names the
+    /// revoke it could not save and the pending revocation list that kept it,
+    /// and its one `capsule_stop` carries that cause. The Home restarted from
+    /// its store and that list refuses every grant; the store alone would
+    /// accept them.
     #[tokio::test]
     async fn an_unsaved_revoke_ends_the_activation_unsettled() {
         use elastos_runtime::capability::manager::ValidationError;
@@ -2381,6 +2395,10 @@ pub(crate) mod tests {
                 cause.contains("; revocation not saved: "),
                 "the end names the revoke it could not save: {cause}"
             );
+            assert!(
+                cause.ends_with("; kept in pending revocations"),
+                "the end names the list that kept it: {cause}"
+            );
             let stops = stops_of(&home, &end.id);
             assert!(
                 matches!(stops.as_slice(), [StopReason::Error(detail)] if detail == &cause),
@@ -2394,8 +2412,8 @@ pub(crate) mod tests {
 
         let made = made.lock().unwrap().clone();
         assert!(!made.is_empty(), "both sessions were granted");
+        let saved_alone = home.saved_store_tokens().await;
         let restarted = home.restarted_tokens().await;
-        let mut accepted_after_restart = 0;
         for token in &made {
             let session = token.capsule().to_string();
             let here = home
@@ -2403,18 +2421,19 @@ pub(crate) mod tests {
                 .validate(token, &session, token.action(), token.resource(), None)
                 .await;
             assert_eq!(here, Err(ValidationError::TokenRevoked), "in this process");
+            let alone = saved_alone
+                .validate(token, &session, token.action(), token.resource(), None)
+                .await;
+            assert_eq!(alone, Ok(()), "the saved store alone lacks the revoke");
             let after = restarted
                 .validate(token, &session, token.action(), token.resource(), None)
                 .await;
-            if after.is_ok() {
-                accepted_after_restart += 1;
-            }
+            assert_eq!(
+                after,
+                Err(ValidationError::TokenRevoked),
+                "refused after a restart"
+            );
         }
-        assert_eq!(
-            accepted_after_restart,
-            made.len(),
-            "the saved list lacks every revoke, which the ends record"
-        );
     }
 
     /// A3-R S3 fix 1 row: a stop and A's trap race, in both orders.

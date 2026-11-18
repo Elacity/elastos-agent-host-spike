@@ -167,11 +167,14 @@ impl Drop for LaunchHeld {
 }
 
 /// The capability store and manager a detached activation's end settles and
-/// revokes through: the same pair the bridge asked a grant from.
+/// revokes through: the same pair the bridge asked a grant from. A revoke
+/// that store cannot save is kept in the pending revocation list of the Home
+/// at `data_dir`.
 #[derive(Clone)]
 struct InstanceAuthority {
     pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+    data_dir: std::path::PathBuf,
 }
 
 /// The cause an activation records when the task watching it went away before
@@ -267,6 +270,7 @@ impl ActivationContextHeld {
                         crate::api::handlers::settle::settle_and_revoke(
                             &authority.pending_store,
                             &authority.capability_manager,
+                            &authority.data_dir,
                             &self.id.0,
                             cause,
                         )
@@ -434,6 +438,7 @@ impl Runtime {
             .unwrap_or_else(|err| err.into_inner()) = Some(InstanceAuthority {
             pending_store: pending_store.clone(),
             capability_manager: capability_manager.clone(),
+            data_dir: data_dir.clone(),
         });
         if let Some(ref component) = self.component_provider {
             let host_reg = registry.clone();
