@@ -3,12 +3,20 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::pin::Pin;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Semaphore};
-use wasmtime::component::{bindgen, Component, HasSelf, Linker};
+use tokio::sync::{mpsc, RwLock, Semaphore};
+use wasmtime::component::{
+    bindgen, Component, Destination, HasSelf, Linker, StreamProducer, StreamReader, StreamResult,
+};
 use wasmtime::{
-    Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline, WasmFeatures,
+    Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline,
+    WasmFeatures,
 };
 
 use elastos_common::{
@@ -28,6 +36,10 @@ bindgen!({
     path: "../../wit",
     world: "product-capsule-v1",
 });
+
+mod v2 {
+    wasmtime::component::bindgen!({ path: "../../wit-bus-v2", world: "product-capsule-v2" });
+}
 
 const COMPONENT_FUEL: u64 = 100_000_000;
 const COMPONENT_MEMORY_SIZE: usize = 128 * 1024 * 1024;
@@ -59,6 +71,8 @@ struct ComponentActivation {
     manifest: CapsuleManifest,
     /// Loaded with no bridge: see [`ComponentProvider::load_admitted_sealed`].
     sealed: bool,
+    events: Option<mpsc::UnboundedSender<v2::elastos::bus::types::Event>>,
+    stop_requested: Arc<AtomicBool>,
 }
 
 /// What a sealed component gets for any call to the bridge.
@@ -85,6 +99,8 @@ struct ComponentState {
 /// hostcall configured by Runtime.
 pub struct ComponentProvider {
     instances: Arc<RwLock<HashMap<CapsuleId, ComponentActivation>>>,
+    #[cfg(test)]
+    endings: Arc<RwLock<HashMap<CapsuleId, String>>>,
     bus_hostcall: std::sync::RwLock<Option<BridgeHostcall>>,
     bridge_principals: Arc<RwLock<HashMap<CapsuleId, Option<String>>>>,
     compile_slot: Arc<Semaphore>,
@@ -98,6 +114,8 @@ impl ComponentProvider {
     pub fn new() -> Self {
         Self {
             instances: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            endings: Arc::new(RwLock::new(HashMap::new())),
             bus_hostcall: std::sync::RwLock::new(None),
             bridge_principals: Arc::new(RwLock::new(HashMap::new())),
             // One compile at a time: a burst of loads queues instead of
@@ -164,8 +182,6 @@ impl ComponentProvider {
     }
 
     /// Bus v2 has its own engine so its async ABI cannot change v1 admission.
-    /// Later slices will connect this engine to v2 loads and resident runs.
-    #[allow(dead_code)] // A later slice connects v2 admission and resident runs.
     pub(crate) fn v2_engine() -> Result<Engine> {
         static ENGINE: OnceLock<std::result::Result<Engine, String>> = OnceLock::new();
         ENGINE
@@ -174,6 +190,8 @@ impl ComponentProvider {
                 config
                     .wasm_component_model(true)
                     .wasm_component_model_async(true)
+                    .wasm_component_model_more_async_builtins(true)
+                    .wasm_component_model_async_stackful(true)
                     .concurrency_support(true)
                     .consume_fuel(true)
                     .epoch_interruption(true)
@@ -271,6 +289,7 @@ impl ComponentProvider {
         .map_err(|_| ElastosError::Compute("Component compiler is unavailable".into()))?;
         #[cfg(test)]
         let worker_gate = self.worker_gate.lock().unwrap().take();
+        let is_v2 = manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT);
         let (engine, component) =
             tokio::task::spawn_blocking(move || -> Result<(Engine, Component)> {
                 let _compile_permit = compile_permit;
@@ -278,7 +297,11 @@ impl ComponentProvider {
                 if let Some(gate) = worker_gate {
                     gate.hold();
                 }
-                let engine = Self::engine()?;
+                let engine = if is_v2 {
+                    Self::v2_engine()?
+                } else {
+                    Self::engine()?
+                };
                 let component = Component::from_binary(&engine, &bytes).map_err(|err| {
                     ElastosError::Compute(format!("Failed to compile component capsule: {err}"))
                 })?;
@@ -298,6 +321,8 @@ impl ComponentProvider {
                 status: CapsuleStatus::Loading,
                 manifest: manifest.clone(),
                 sealed,
+                events: None,
+                stop_requested: Arc::new(AtomicBool::new(false)),
             },
         );
 
@@ -312,11 +337,6 @@ impl ComponentProvider {
         if manifest.validate().is_err() || !Self::is_component_manifest(manifest) {
             return Err(ElastosError::Compute(
                 "ComponentProvider only accepts elastos.component/v1 manifests".into(),
-            ));
-        }
-        if manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
-            return Err(ElastosError::Compute(
-                "Bus v2 contract not yet runnable".into(),
             ));
         }
         Ok(())
@@ -368,6 +388,82 @@ impl ComponentProvider {
 
         Ok(())
     }
+
+    async fn run_v2(
+        engine: Engine,
+        component: Component,
+        state: ComponentState,
+        receiver: mpsc::UnboundedReceiver<v2::elastos::bus::types::Event>,
+        stop_requested: Arc<AtomicBool>,
+        ready: tokio::sync::oneshot::Sender<Result<()>>,
+    ) -> Result<&'static str> {
+        let mut store = Store::new(&engine, state);
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(COMPONENT_FUEL)
+            .map_err(|err| run_error("v2 fuel", err))?;
+        store
+            .fuel_async_yield_interval(Some(10_000_000))
+            .map_err(|err| run_error("v2 fuel yield", err))?;
+        store.set_epoch_deadline(deadline_ticks(COMPONENT_RUN_DEADLINE));
+        store.epoch_deadline_callback(|_| Ok(UpdateDeadline::Interrupt));
+        let mut linker = Linker::new(&engine);
+        v2::ProductCapsuleV2::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(|err| run_error("Failed to link v2 bus imports", err))?;
+        let bindings =
+            match v2::ProductCapsuleV2::instantiate_async(&mut store, &component, &linker).await {
+                Ok(bindings) => bindings,
+                Err(err) => {
+                    let error = run_error("Failed to instantiate v2 component", err);
+                    let _ = ready.send(Err(ElastosError::Compute(error.to_string())));
+                    return Err(error);
+                }
+            };
+        let events = StreamReader::new(&mut store, V2EventFeed(receiver))
+            .map_err(|err| run_error("Failed to open v2 events", err))?;
+        let _ = ready.send(Ok(()));
+        store
+            .run_concurrent(async move |accessor| {
+                bindings
+                    .elastos_bus_lifecycle()
+                    .call_run(accessor, events)
+                    .await
+            })
+            .await
+            .map_err(|err| run_error("V2 lifecycle run failed", err))?
+            .map_err(|err| run_error("V2 lifecycle run failed", err))?
+            .map_err(|err| ElastosError::Compute(format!("V2 lifecycle denied: {err:?}")))?;
+        Ok(if stop_requested.load(Ordering::Acquire) {
+            "stopped"
+        } else {
+            "returned"
+        })
+    }
+}
+
+struct V2EventFeed(mpsc::UnboundedReceiver<v2::elastos::bus::types::Event>);
+
+impl<D> StreamProducer<D> for V2EventFeed {
+    type Item = v2::elastos::bus::types::Event;
+    type Buffer = Option<Self::Item>;
+
+    fn poll_produce<'a>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        _store: StoreContextMut<'a, D>,
+        mut destination: Destination<'a, Self::Item, Self::Buffer>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        match self.0.poll_recv(cx) {
+            Poll::Ready(Some(event)) => {
+                destination.set_buffer(Some(event));
+                Poll::Ready(Ok(StreamResult::Completed))
+            }
+            Poll::Ready(None) => Poll::Ready(Ok(StreamResult::Dropped)),
+            Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// Whole ticks in `time`, and never zero: zero would trap before any guest code.
@@ -415,16 +511,79 @@ impl ComputeProvider for ComponentProvider {
     }
 
     async fn start(&self, handle: &CapsuleHandle) -> Result<()> {
+        let is_v2 = self
+            .instances
+            .read()
+            .await
+            .get(&handle.id)
+            .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?
+            .manifest
+            .bus_contract
+            .as_deref()
+            == Some(ELASTOS_BUS_V2_CONTRACT);
+        if is_v2 {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            let (engine, component, sealed, stop_requested) = {
+                let mut instances = self.instances.write().await;
+                let instance = instances
+                    .get_mut(&handle.id)
+                    .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
+                if instance.status != CapsuleStatus::Loading {
+                    return Err(ElastosError::Compute(
+                        "v2 component is already running".into(),
+                    ));
+                }
+                instance.status = CapsuleStatus::Running;
+                instance.events = Some(sender);
+                (
+                    instance.engine.clone(),
+                    instance.component.clone(),
+                    instance.sealed,
+                    instance.stop_requested.clone(),
+                )
+            };
+            let hostcall = self.bus_hostcall.read().unwrap().clone();
+            let principal_id = self
+                .bridge_principals
+                .read()
+                .await
+                .get(&handle.id)
+                .cloned()
+                .flatten();
+            let state = ComponentState {
+                sealed,
+                ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
+            };
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let instances = self.instances.clone();
+            #[cfg(test)]
+            let endings = self.endings.clone();
+            let id = handle.id.clone();
+            tokio::spawn(async move {
+                let result =
+                    Self::run_v2(engine, component, state, receiver, stop_requested, ready_tx)
+                        .await;
+                let ending = match result {
+                    Ok(ending) => ending.to_string(),
+                    Err(error) => error.to_string(),
+                };
+                tracing::info!(capsule_id = %id, %ending, "component v2 run ended");
+                #[cfg(test)]
+                endings.write().await.insert(id.clone(), ending);
+                instances.write().await.remove(&id);
+            });
+            return match ready_rx.await {
+                Ok(result) => result,
+                Err(_) => Err(ElastosError::Compute(
+                    "v2 resident task ended during start".into(),
+                )),
+            };
+        }
         let (engine, component, sealed) = {
             let instances = self.instances.read().await;
             let instance = instances
                 .get(&handle.id)
                 .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
-            if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
-                return Err(ElastosError::Compute(
-                    "Bus v2 contract not yet runnable".into(),
-                ));
-            }
             (
                 instance.engine.clone(),
                 instance.component.clone(),
@@ -478,6 +637,13 @@ impl ComputeProvider for ComponentProvider {
                 "component/v1 is a bounded activation contract and has no resident stop operation"
                     .to_string(),
             ));
+        }
+        // Dropping the sole sender closes the v2 events stream. The guest
+        // receives no separate stop event.
+        if let Some(instance) = instances.get(&handle.id) {
+            if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
+                instance.stop_requested.store(true, Ordering::Release);
+            }
         }
         instances.remove(&handle.id);
         Ok(())
@@ -709,6 +875,101 @@ impl elastos::bus::providers::Host for ComponentState {
     }
 }
 
+impl v2::elastos::bus::types::Host for ComponentState {}
+
+impl v2::elastos::bus::runtime::Host for ComponentState {
+    fn info(&mut self) -> v2::elastos::bus::runtime::RuntimeInfo {
+        v2::elastos::bus::runtime::RuntimeInfo {
+            abi: ELASTOS_BUS_V2_CONTRACT.into(),
+            runtime_version: env!("CARGO_PKG_VERSION").into(),
+            capsule_cid: None,
+        }
+    }
+}
+
+impl v2::elastos::bus::identity::Host for ComponentState {
+    fn context(&mut self) -> v2::elastos::bus::identity::IdentityContext {
+        v2::elastos::bus::identity::IdentityContext {
+            principal: self.principal_id.clone(),
+            capsule: self.capsule_id.clone(),
+            session: self.capsule_id.clone(),
+            device: None,
+        }
+    }
+}
+
+impl v2::elastos::bus::clock::Host for ComponentState {
+    fn now_ms(&mut self) -> u64 {
+        0
+    }
+}
+
+impl v2::elastos::bus::clock::HostWithStore<ComponentState> for HasSelf<ComponentState> {
+    async fn sleep_until_ms(_: &wasmtime::component::Accessor<ComponentState, Self>, _: u64) {}
+}
+
+impl v2::elastos::bus::random::Host for ComponentState {
+    fn fill(&mut self, _: u32) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
+impl v2::elastos::bus::credentials::Host for ComponentState {
+    fn presented(&mut self) -> Vec<v2::elastos::bus::types::Credential> {
+        Vec::new()
+    }
+}
+
+impl v2::elastos::bus::capabilities::Host for ComponentState {}
+impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<ComponentState> {
+    async fn request(
+        _: &wasmtime::component::Accessor<ComponentState, Self>,
+        _: String,
+        _: Vec<String>,
+        _: String,
+    ) -> std::result::Result<v2::elastos::bus::types::Grant, v2::elastos::bus::types::BusError>
+    {
+        Err(v2::elastos::bus::types::BusError::Unavailable(
+            "capabilities are not available in this slice".into(),
+        ))
+    }
+}
+
+impl v2::elastos::bus::providers::Host for ComponentState {}
+impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<ComponentState> {
+    async fn invoke(
+        _: &wasmtime::component::Accessor<ComponentState, Self>,
+        _: v2::elastos::bus::types::InvokeRequest,
+        _: Option<StreamReader<u8>>,
+    ) -> std::result::Result<
+        (
+            v2::elastos::bus::types::InvokeStatus,
+            StreamReader<u8>,
+            wasmtime::component::FutureReader<
+                std::result::Result<(), v2::elastos::bus::types::BusError>,
+            >,
+        ),
+        v2::elastos::bus::types::BusError,
+    > {
+        Err(v2::elastos::bus::types::BusError::Unavailable(
+            "providers are not available in this slice".into(),
+        ))
+    }
+}
+
+impl v2::elastos::bus::ui::Host for ComponentState {}
+impl v2::elastos::bus::ui::HostWithStore<ComponentState> for HasSelf<ComponentState> {
+    async fn present(
+        _: &wasmtime::component::Accessor<ComponentState, Self>,
+        _: String,
+        _: Vec<u8>,
+    ) -> std::result::Result<(), v2::elastos::bus::types::BusError> {
+        Err(v2::elastos::bus::types::BusError::Unavailable(
+            "ui is not available in this slice".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,8 +1045,10 @@ mod tests {
         assert!(v2.get_epoch_interruption(), "v2 epoch stays on");
         assert_eq!(
             v1.get_wasm_features() ^ v2.get_wasm_features(),
-            WasmFeatures::CM_ASYNC,
-            "only component-model async differs between engines"
+            WasmFeatures::CM_ASYNC
+                | WasmFeatures::CM_MORE_ASYNC_BUILTINS
+                | WasmFeatures::CM_ASYNC_STACKFUL,
+            "v2 enables only its component-model async features beyond v1"
         );
     }
 
@@ -842,21 +1105,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_refuses_a_v2_contract_by_name() {
+    async fn provider_accepts_a_v2_contract_with_the_v2_engine() {
         let provider = ComponentProvider::new();
         let (_, mut manifest) = component_fixture();
         manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
         manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
         manifest.validate().unwrap();
-        let empty = tempfile::tempdir().unwrap();
-        for result in [
-            provider.load(empty.path(), manifest.clone()).await,
-            provider.load_admitted(Vec::new(), manifest).await,
-        ] {
-            assert!(matches!(result, Err(ElastosError::Compute(message))
-                if message == "Bus v2 contract not yet runnable"));
-        }
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = provider.load_admitted(bytes, manifest).await.unwrap();
+        let instances = provider.instances.read().await;
+        assert!(Engine::same(
+            &instances[&handle.id].engine,
+            &ComponentProvider::v2_engine().unwrap()
+        ));
+        drop(instances);
+        provider.stop(&handle).await.unwrap();
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_guest_returns_stopped_when_the_events_stream_closes() {
+        let provider = ComponentProvider::new();
+        let (_, mut manifest) = component_fixture();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = provider.load_admitted(bytes, manifest).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), provider.start(&handle))
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            provider.status(&handle).await.unwrap(),
+            CapsuleStatus::Running
+        );
+        assert!(!provider.endings.read().await.contains_key(&handle.id));
+        provider.stop(&handle).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
+                    assert_eq!(ending, "stopped");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("closing the events stream must record stopped");
     }
 
     /// A file of `len` zero bytes named as the fixture manifest's entrypoint.
@@ -1231,7 +1533,7 @@ mod tests {
         provider.stop(&handle).await.unwrap();
         assert!(!provider.instances.read().await.contains_key(&handle.id));
 
-        // Model the resident entry before the v2 loader exists. No v2 guest runs.
+        // The v2 start now runs guests; this marked entry is already running.
         let (bytes, manifest) = admitted_fixture();
         let mut v2_handle = provider
             .load_admitted_sealed(bytes, manifest)
@@ -1247,7 +1549,7 @@ mod tests {
             entry.status = CapsuleStatus::Running;
         }
         let refused = provider.start(&v2_handle).await.unwrap_err().to_string();
-        assert_eq!(refused, "Compute error: Bus v2 contract not yet runnable");
+        assert_eq!(refused, "Compute error: v2 component is already running");
         assert_eq!(
             provider.status(&v2_handle).await.unwrap(),
             CapsuleStatus::Running

@@ -431,21 +431,20 @@ fn code(result: Result<(String, String), BundleRefusal>) -> &'static str {
 }
 
 #[tokio::test]
-async fn v2_contract_is_refused_before_guest_runs_on_folder_and_cid_paths() {
+async fn v2_resident_starts_from_folder_while_cid_admission_stays_closed() {
     let publisher = key(42);
     let home = Home::trusting(&[&publisher]).await;
     home.admit(&[&publisher], true).await;
     let mut json: serde_json::Value = serde_json::from_str(&manifest("v2-by-both-paths")).unwrap();
     json["bus_contract"] = serde_json::json!("elastos:bus@2.0.0");
     json["wit_world_sha256"] = serde_json::json!(elastos_common::elastos_bus_v2_wit_sha256());
-    let v2_component =
-        wat::parse_str("(component (import \"elastos:bus/runtime@2.0.0\" (instance)))").unwrap();
+    let v2_component = wat::parse_str(include_str!(
+        "../../../tests/fixtures/components/v2-resident.wat"
+    ))
+    .unwrap();
     let folder = home.bundle("v2", &json.to_string(), &v2_component);
-    assert!(matches!(
-        home.runtime.run_local(&folder, Vec::new()).await,
-        Err(elastos_common::ElastosError::Compute(message))
-            if message == "Bus v2 contract not yet runnable"
-    ));
+    let folder_handle = home.runtime.run_local(&folder, Vec::new()).await.unwrap();
+    home.runtime.stop(&folder_handle).await.unwrap();
 
     let cid = home.stage(&folder, &publisher).await;
     assert!(matches!(
