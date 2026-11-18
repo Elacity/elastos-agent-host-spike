@@ -535,6 +535,18 @@ pub(in crate::api::gateway) fn system_wallet_approval_summary(
     })
 }
 
+/// The single wall-clock reading of the account-access grant review. A test
+/// may script it so the review can be shown to consume one value.
+fn wallet_approval_review_now() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(value) = crate::test_clock::next() {
+            return value;
+        }
+    }
+    now_ts()
+}
+
 fn wallet_account_access_review(value: &serde_json::Value) -> Option<serde_json::Value> {
     if value.get("intent")?.as_str()? != "browser_account_access" {
         return None;
@@ -590,7 +602,8 @@ fn wallet_account_access_review(value: &serde_json::Value) -> Option<serde_json:
         return None;
     }
     let grant_expires_at = payload.get("grant_expires_at")?.as_u64()?;
-    if grant_expires_at <= now_ts() || grant_expires_at > now_ts().saturating_add(12 * 60 * 60) {
+    let now = wallet_approval_review_now();
+    if grant_expires_at <= now || grant_expires_at > now.saturating_add(12 * 60 * 60) {
         return None;
     }
     Some(serde_json::json!({
@@ -604,4 +617,56 @@ fn wallet_account_access_review(value: &serde_json::Value) -> Option<serde_json:
         "address": text("address")?,
         "grant_expires_at": grant_expires_at,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn account_access_approval(grant_expires_at: u64) -> serde_json::Value {
+        let account_id = "wallet:eip155:20:0x1111111111111111111111111111111111111111";
+        let address = "0x1111111111111111111111111111111111111111";
+        serde_json::json!({
+            "intent": "browser_account_access",
+            "requested_by_actor": BROWSER_CAPSULE_ID,
+            "principal_id": "person:test",
+            "session_id": "session:test",
+            "launch_id": "launch:test",
+            "account_id": account_id,
+            "chain_namespace": "eip155:20",
+            "address": address,
+            "payload": {
+                "schema": "elastos.browser.account-access-request/v1",
+                "permission": "eth_accounts",
+                "principal_id": "person:test",
+                "session_id": "session:test",
+                "launch_id": "launch:test",
+                "account_id": account_id,
+                "requested_chain_namespace": "eip155:20",
+                "address": address,
+                "proof_binding_id": "proof:test",
+                "requires_wallet_approval": true,
+                "chain_namespaces": ["eip155:20", "eip155:8453"],
+                "origin": "https://dapp.example",
+                "page_url": "https://dapp.example/connect",
+                "grant_expires_at": grant_expires_at,
+            },
+        })
+    }
+
+    #[test]
+    fn account_access_review_reads_the_clock_once_under_a_backward_step() {
+        let first = 1_800_000_000u64;
+        // Ten seconds inside the 12 h ceiling at `first`: a second read 30 s
+        // earlier would lower the ceiling below the grant.
+        let grant_expires_at = first + 12 * 60 * 60 - 10;
+        let value = account_access_approval(grant_expires_at);
+        let clock = crate::test_clock::arm(first, first.saturating_sub(30));
+        let review = wallet_account_access_review(&value);
+        let reads = crate::test_clock::reads();
+        drop(clock);
+        assert_eq!(reads, 1, "the review must read the clock once");
+        let review = review.expect("a grant inside the 12 h ceiling stays valid");
+        assert_eq!(review["grant_expires_at"].as_u64(), Some(grant_expires_at));
+    }
 }
