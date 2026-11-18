@@ -31,21 +31,120 @@ pub const CAUSE_COMPLETED: &str = "completed";
 
 /// How long an ended activation stays listed, so its session, status and cause
 /// can still be read after the response that started it has long gone. The end
-/// schedules its own removal at this instant; a listing also prunes an entry
-/// this old, so an entry cannot outlive its retention even if the runtime the
-/// end armed its timer on has gone.
+/// hands the entry's removal at this instant to the [`RETENTION_SWEEPER`]; a
+/// listing also prunes an entry this old.
 pub const ENDED_CAPSULE_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// How long the removal thread of an end whose start runtime has shut down
-/// waits before it takes the entry. Production waits
-/// [`ENDED_CAPSULE_RETENTION`]; the unit row that exercises that thread sleeps
-/// in real time rather than on a paused clock, so it waits a short period
-/// instead of a minute. The timer a live runtime runs, and the pruner a reader
-/// runs, both use [`ENDED_CAPSULE_RETENTION`].
-#[cfg(not(test))]
-const LOST_END_RETENTION: std::time::Duration = ENDED_CAPSULE_RETENTION;
-#[cfg(test)]
-const LOST_END_RETENTION: std::time::Duration = std::time::Duration::from_millis(500);
+/// The registry map the Runtime and every activation's end share.
+type CapsuleRegistry = RwLock<HashMap<String, RunningCapsuleInfo>>;
+
+/// One ended entry the sweeper removes at its deadline, if the entry still
+/// records this end. The registry is held weakly: a Runtime that has gone
+/// takes its registry with it, and its removals are then nothing.
+struct DueRemoval {
+    registry: std::sync::Weak<CapsuleRegistry>,
+    id: String,
+    ended_at: std::time::Instant,
+}
+
+/// The sweeper's deadline queue, ordered by deadline and then by arrival.
+struct RetentionQueue {
+    due: std::collections::BTreeMap<(std::time::Instant, u64), DueRemoval>,
+    arrivals: u64,
+    /// Whether the sweeper thread runs. It is started by the first end that
+    /// schedules a removal, and by a later one if that start failed.
+    sweeping: bool,
+}
+
+/// The one retention sweeper of the process: a plain thread, outside every
+/// tokio runtime, so no runtime's shutdown can cancel a removal. It waits on
+/// [`RetentionSweeper::wake`] until the earliest deadline, with the queue's
+/// lock released while it waits, and takes the registry lock only after the
+/// deadline has come.
+struct RetentionSweeper {
+    queue: StdMutex<RetentionQueue>,
+    wake: std::sync::Condvar,
+}
+
+static RETENTION_SWEEPER: RetentionSweeper = RetentionSweeper {
+    queue: StdMutex::new(RetentionQueue {
+        due: std::collections::BTreeMap::new(),
+        arrivals: 0,
+        sweeping: false,
+    }),
+    wake: std::sync::Condvar::new(),
+};
+
+impl RetentionSweeper {
+    /// Removes `id` from `registry` at `deadline` if the entry still records
+    /// the end at `ended_at`. A thread that cannot be started is logged; a
+    /// listing still prunes the entry, and the next end tries the start again.
+    fn schedule(
+        &'static self,
+        registry: &Arc<CapsuleRegistry>,
+        id: &str,
+        ended_at: std::time::Instant,
+        deadline: std::time::Instant,
+    ) {
+        let mut queue = self.queue.lock().unwrap_or_else(|err| err.into_inner());
+        let arrival = queue.arrivals;
+        queue.arrivals += 1;
+        queue.due.insert(
+            (deadline, arrival),
+            DueRemoval {
+                registry: Arc::downgrade(registry),
+                id: id.to_string(),
+                ended_at,
+            },
+        );
+        if !queue.sweeping {
+            let started = std::thread::Builder::new()
+                .name("ended-capsule-retention".into())
+                .spawn(move || self.sweep());
+            match started {
+                Ok(_) => queue.sweeping = true,
+                Err(error) => {
+                    tracing::error!(%error, "activation {id}: no thread for its retention")
+                }
+            }
+        }
+        drop(queue);
+        self.wake.notify_one();
+    }
+
+    /// The sweeper thread: one removal at a time, each at its deadline.
+    fn sweep(&'static self) {
+        loop {
+            let due = self.next_due();
+            if let Some(registry) = due.registry.upgrade() {
+                let mut capsules = registry.blocking_write();
+                remove_ended_entry(&mut capsules, &due.id, due.ended_at);
+            }
+        }
+    }
+
+    /// Waits until the earliest deadline has come and takes that removal.
+    fn next_due(&self) -> DueRemoval {
+        let mut queue = self.queue.lock().unwrap_or_else(|err| err.into_inner());
+        loop {
+            let now = std::time::Instant::now();
+            let wait = match queue.due.first_entry() {
+                Some(first) if first.key().0 <= now => return first.remove(),
+                Some(first) => Some(first.key().0.saturating_duration_since(now)),
+                None => None,
+            };
+            queue = match wait {
+                Some(wait) => {
+                    self.wake
+                        .wait_timeout(queue, wait)
+                        .unwrap_or_else(|err| err.into_inner())
+                        .0
+                }
+                None => self.wake.wait(queue).unwrap_or_else(|err| err.into_inner()),
+            };
+        }
+    }
+}
 
 /// Information about a running capsule (for API responses and lifecycle management)
 #[derive(Debug, Clone)]
@@ -269,11 +368,9 @@ struct ActivationContextHeld {
     /// route hold.
     stop: Arc<ActivationStop>,
     authority: Option<InstanceAuthority>,
-    /// The runtime the activation started on. The retention timer is spawned
-    /// here, not on whichever runtime runs the end: the fallback end runs on a
-    /// throwaway current-thread runtime that closes when it returns, and a
-    /// timer on that runtime would close with it.
-    end_runtime: tokio::runtime::Handle,
+    /// How long the ended entry stays before the sweeper removes it:
+    /// [`ENDED_CAPSULE_RETENTION`], which only a unit row shortens.
+    retention: std::time::Duration,
     /// The end is owed until the registry entry records it.
     armed: bool,
     owed: OwedEnd,
@@ -306,7 +403,7 @@ impl ActivationContextHeld {
             handle: handle.clone(),
             component,
             registry: runtime.running_capsules.clone(),
-            end_runtime: tokio::runtime::Handle::current(),
+            retention: ENDED_CAPSULE_RETENTION,
             manifest_capabilities: runtime.bridge_manifest_capabilities.clone(),
             model_token_ceilings: runtime.bridge_model_token_ceilings.clone(),
             activation_stops: runtime.activation_stops.clone(),
@@ -361,8 +458,9 @@ impl ActivationContextHeld {
     /// entry `failed`, with a cause that names it. The stop request is taken
     /// away only after the entry records the end, so a stop that finds the
     /// entry not ended also finds its request. Its retention is timed from
-    /// that write: the entry's removal is scheduled here, so it happens at
-    /// its 60 s even if nothing lists or registers again.
+    /// that write: the entry's removal goes to the [`RETENTION_SWEEPER`]
+    /// here, so it happens at its 60 s even if nothing lists or registers
+    /// again and every tokio runtime has shut down.
     async fn end_instance(mut self, status: &str, cause: &str) {
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
@@ -427,48 +525,17 @@ impl ActivationContextHeld {
             .remove(&self.id.0);
         self.armed = false;
 
-        // Retention is a timer, not a reader's courtesy: one sleep per ended
-        // entry, spawned on the runtime the activation started on, removes the
-        // entry at its [`ENDED_CAPSULE_RETENTION`]. A reader that pruned it
-        // first, or an entry a later start replaced, leaves this a no-op: only
-        // this end's own `ended_at` is removed.
+        // The sweeper removes the entry at its retention, whichever runtime
+        // ran the end and whether or not the start runtime still lives. A
+        // reader that pruned it first, or an entry a later start replaced,
+        // leaves the removal a no-op: only this end's own `ended_at` goes.
         if recorded {
-            let registry = self.registry.clone();
-            let id = self.id.0.clone();
-            let timer = self.end_runtime.spawn(async move {
-                tokio::time::sleep(ENDED_CAPSULE_RETENTION).await;
-                let mut capsules = registry.write().await;
-                remove_ended_entry(&mut capsules, &id, ended_at);
-            });
-            // A runtime that has itself shut down binds nothing: tokio shuts
-            // the spawned task down before it is ever polled, so this handle is
-            // already finished when `spawn` returns. A live runtime cannot
-            // finish a sleep at once, so a finished handle here means the
-            // timer will never run. The S3 lost-task end is this case: the
-            // runtime the activation started on went away before the end ran,
-            // and the fallback thread runs the end on a runtime of its own.
-            // The removal gets a thread instead: it sleeps before it takes the
-            // registry lock, so no lock is held across the sleep, and the
-            // registry it holds is the map's own `Arc`, not the Runtime, so a
-            // gone Runtime does not matter.
-            if timer.is_finished() {
-                let registry = self.registry.clone();
-                let id = self.id.0.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("ended-capsule-retention".into())
-                    .spawn(move || {
-                        std::thread::sleep(LOST_END_RETENTION);
-                        let mut capsules = registry.blocking_write();
-                        remove_ended_entry(&mut capsules, &id, ended_at);
-                    });
-                if let Err(error) = spawned {
-                    tracing::error!(
-                        %error,
-                        "activation {}: no thread for its retention",
-                        self.id.0
-                    );
-                }
-            }
+            RETENTION_SWEEPER.schedule(
+                &self.registry,
+                &self.id.0,
+                ended_at,
+                ended_at + self.retention,
+            );
         }
     }
 
@@ -481,7 +548,7 @@ impl ActivationContextHeld {
             handle: self.handle.clone(),
             component: self.component.clone(),
             registry: self.registry.clone(),
-            end_runtime: self.end_runtime.clone(),
+            retention: self.retention,
             manifest_capabilities: self.manifest_capabilities.clone(),
             model_token_ceilings: self.model_token_ceilings.clone(),
             activation_stops: self.activation_stops.clone(),
@@ -493,6 +560,14 @@ impl ActivationContextHeld {
             settled: self.settled.take(),
             audited: self.audited,
         }
+    }
+
+    /// Test only: a retention short enough for a row to wait out in real
+    /// time, since the sweeper runs on the real clock.
+    #[cfg(test)]
+    fn retained_for(mut self, retention: std::time::Duration) -> Self {
+        self.retention = retention;
+        self
     }
 }
 
@@ -2055,7 +2130,7 @@ fn remove_ended_entry(
 
 /// Removes the entries whose activation ended at least
 /// [`ENDED_CAPSULE_RETENTION`] before `now`. The end schedules its own
-/// removal (see [`ActivationContextHeld::end_instance`]); a reader still
+/// removal with the [`RETENTION_SWEEPER`]; a reader still
 /// prunes, so the boundary can be read at an injected instant and an entry
 /// registered already ended cannot outlive its retention either.
 fn prune_ended(capsules: &mut HashMap<String, RunningCapsuleInfo>, now: std::time::Instant) {
@@ -2649,16 +2724,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// A12-R retention with no reader after the end: the entry the end leaves
-    /// is removed by the timer the end itself arms, so an entry nothing lists
-    /// or registers again cannot sit in the registry past its 60 s. The clock
-    /// is paused: the row moves it to the retention instant instead of waiting
-    /// for it, and the only reads below are at the real instant, which is
-    /// millimetres from the end and cannot prune. F-notimer (no scheduled
-    /// removal) leaves the entry there and reddens the last row.
-    #[tokio::test(start_paused = true)]
-    async fn an_ended_entry_is_removed_at_its_retention_without_a_reader() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    /// The retention the sweeper rows give their activation. The sweeper runs
+    /// on the real clock, so each row waits this out in real time.
+    const ROW_RETENTION: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// A Runtime with a component provider and no compute providers, for the
+    /// sweeper rows.
+    async fn retention_runtime(temp_dir: &tempfile::TempDir) -> (Runtime, Arc<ComponentProvider>) {
         let storage = Arc::new(
             LocalFSProvider::new(temp_dir.path().to_path_buf())
                 .await
@@ -2667,10 +2739,21 @@ pub(crate) mod tests {
         let component = Arc::new(ComponentProvider::new());
         let runtime =
             Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
-        let manifest: CapsuleManifest = serde_json::from_str(&component_manifest_json("retained"))
-            .expect("the component manifest");
+        (runtime, component)
+    }
+
+    /// Registers an entry as a start does and makes its context, with
+    /// [`ROW_RETENTION`], on the runtime this is awaited on: the activation's
+    /// start runtime.
+    async fn retained_activation(
+        runtime: &Runtime,
+        component: Arc<ComponentProvider>,
+        name: &str,
+    ) -> (ActivationContextHeld, String) {
+        let manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).expect("the component manifest");
         let handle = CapsuleHandle {
-            id: CapsuleId::new("component-retained"),
+            id: CapsuleId::new(format!("component-{name}")),
             manifest,
             args: Vec::new(),
         };
@@ -2678,7 +2761,7 @@ pub(crate) mod tests {
         runtime
             .register_capsule(RunningCapsuleInfo {
                 id: id.clone(),
-                name: "retained".to_string(),
+                name: name.to_string(),
                 status: CAPSULE_STARTING.to_string(),
                 capsule_type: handle.manifest.capsule_type.clone(),
                 handle: Some(handle.clone()),
@@ -2688,77 +2771,79 @@ pub(crate) mod tests {
                 ended_at: None,
             })
             .await;
+        let held =
+            ActivationContextHeld::new(runtime, &handle, component).retained_for(ROW_RETENTION);
+        (held, id)
+    }
 
-        let held = ActivationContextHeld::new(&runtime, &handle, component);
-        held.end_instance(CAPSULE_FAILED, "test end").await;
-        // Let the removal task take its sleep before the clock moves.
-        tokio::task::yield_now().await;
-        assert!(
-            runtime.get_capsule(&id).await.is_some(),
-            "the ended entry is kept at its end"
-        );
+    /// The instant the end recorded, read from the registry map itself: a
+    /// listing would prune.
+    async fn recorded_end(runtime: &Runtime, id: &str) -> std::time::Instant {
+        runtime
+            .running_capsules
+            .read()
+            .await
+            .get(id)
+            .and_then(|info| info.ended_at)
+            .expect("the ended entry is kept at its end")
+    }
 
-        let before = ENDED_CAPSULE_RETENTION - std::time::Duration::from_secs(1);
-        tokio::time::advance(before).await;
-        tokio::task::yield_now().await;
-        assert!(
-            runtime.get_capsule(&id).await.is_some(),
-            "the ended entry is kept 59 s after its end"
-        );
+    /// Reads the registry map itself, never a listing that would prune, until
+    /// the entry is gone, and answers the instant it saw that; `None` if the
+    /// entry is still there well after its retention. It polls with
+    /// `tokio::time::sleep`, so the runtime it is awaited on stays free.
+    async fn swept_at(runtime: &Runtime, id: &str) -> Option<std::time::Instant> {
+        let cap = std::time::Instant::now() + ROW_RETENTION + std::time::Duration::from_secs(5);
+        loop {
+            if !runtime.running_capsules.read().await.contains_key(id) {
+                return Some(std::time::Instant::now());
+            }
+            if std::time::Instant::now() >= cap {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
 
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
+    /// The entry went at its retention and not before it.
+    fn assert_swept(swept: Option<std::time::Instant>, ended_at: std::time::Instant, row: &str) {
+        let swept = swept.unwrap_or_else(|| {
+            panic!("{row}: the ended entry is gone at its retention, with nothing reading it")
+        });
         assert!(
-            runtime.get_capsule(&id).await.is_none(),
-            "the ended entry is gone at its retention, with nothing reading it"
+            swept >= ended_at + ROW_RETENTION,
+            "{row}: the ended entry is kept until its retention"
         );
     }
 
-    /// A12-R fix 2: the fallback end still removes its entry at retention. The
-    /// end runs on a throwaway current-thread runtime, the way `Drop` hands a
-    /// lost end to a thread, and that runtime closes when the end returns. The
-    /// timer is spawned on the runtime the activation started on, so it
-    /// survives; the clock here is that runtime's, paused, and the entry is
-    /// read from the map, not through a listing that would prune it.
-    /// F-fallbacktimer spawns the timer on the throwaway runtime instead, and
-    /// the entry is still there after the retention, reddening the last row.
-    #[tokio::test(start_paused = true)]
+    /// A3-R S6 fix 4, row (a): the start runtime lives throughout. The end
+    /// runs on it and the row waits on it, so a removal that needed that
+    /// runtime could run; the sweeper takes the entry at its retention with
+    /// nothing listing or registering again. F-nosweep (the sweeper skips the
+    /// removal) leaves the entry there and reddens the row.
+    #[tokio::test]
+    async fn an_ended_entry_is_removed_at_its_retention_without_a_reader() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (runtime, component) = retention_runtime(&temp_dir).await;
+        let (held, id) = retained_activation(&runtime, component, "retained").await;
+        held.end_instance(CAPSULE_FAILED, "test end").await;
+        let ended_at = recorded_end(&runtime, &id).await;
+        assert_swept(
+            swept_at(&runtime, &id).await,
+            ended_at,
+            "live start runtime",
+        );
+    }
+
+    /// A3-R S6 fix 4, row (a) through the fallback: the start runtime lives,
+    /// and the end runs on a throwaway current-thread runtime, the way `Drop`
+    /// hands a lost end to a thread, which closes when the end returns. The
+    /// sweeper belongs to neither runtime. F-nosweep reddens the row.
+    #[tokio::test]
     async fn a_fallback_end_removes_its_entry_at_retention_without_a_registry_read() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(
-            LocalFSProvider::new(temp_dir.path().to_path_buf())
-                .await
-                .unwrap(),
-        );
-        let component = Arc::new(ComponentProvider::new());
-        let runtime =
-            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
-        let manifest: CapsuleManifest =
-            serde_json::from_str(&component_manifest_json("fallback-retained"))
-                .expect("the component manifest");
-        let handle = CapsuleHandle {
-            id: CapsuleId::new("component-fallback-retained"),
-            manifest,
-            args: Vec::new(),
-        };
-        let id = handle.id.0.clone();
-        runtime
-            .register_capsule(RunningCapsuleInfo {
-                id: id.clone(),
-                name: "fallback-retained".to_string(),
-                status: CAPSULE_STARTING.to_string(),
-                capsule_type: handle.manifest.capsule_type.clone(),
-                handle: Some(handle.clone()),
-                session_id: id.clone(),
-                principal: None,
-                cause: None,
-                ended_at: None,
-            })
-            .await;
-
-        let held = ActivationContextHeld::new(&runtime, &handle, component);
-        // The fallback: end_instance on a runtime of its own that goes away
-        // when the end returns, exactly as the lost-task thread builds one.
+        let (runtime, component) = retention_runtime(&temp_dir).await;
+        let (held, id) = retained_activation(&runtime, component, "fallback-retained").await;
         std::thread::spawn(move || {
             let end_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2768,33 +2853,15 @@ pub(crate) mod tests {
         })
         .join()
         .expect("the fallback end runs");
-
-        // Let the removal task take its sleep on this runtime before the clock
-        // moves.
-        tokio::task::yield_now().await;
-        assert!(
-            runtime.running_capsules.read().await.contains_key(&id),
-            "the ended entry is kept at its end"
-        );
-
-        tokio::time::advance(ENDED_CAPSULE_RETENTION).await;
-        tokio::task::yield_now().await;
-        assert!(
-            !runtime.running_capsules.read().await.contains_key(&id),
-            "the fallback end's entry is gone at its retention, with nothing reading it"
-        );
+        let ended_at = recorded_end(&runtime, &id).await;
+        assert_swept(swept_at(&runtime, &id).await, ended_at, "fallback end");
     }
 
-    /// A3-R S6 fix 3: an end whose start runtime has itself shut down still
-    /// removes its entry at retention. The S3 lost-task shape: the runtime the
-    /// activation started on goes away before the fallback end runs, so the
-    /// timer cannot be spawned on it; the end gives the removal a thread that
-    /// waits the retention and takes the entry under the same `ended_at`
-    /// match. The entry is read from the map, not through a listing that would
-    /// prune it, so only that removal can take it away. The thread sleeps in
-    /// real time, on [`LOST_END_RETENTION`], which the unit build shortens.
-    /// F-losttimer removes the thread fallback: the entry stays, reddening the
-    /// last row.
+    /// A3-R S6 fix 4, row (b): the start runtime is dropped before the end.
+    /// The S3 lost-task shape: the runtime the activation started on goes
+    /// away, and the end then runs from a thread on a runtime of its own,
+    /// which closes when the end returns. The row waits on a third runtime.
+    /// F-nosweep reddens the row.
     #[test]
     fn a_lost_end_removes_its_entry_at_retention_without_a_registry_read() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2803,42 +2870,10 @@ pub(crate) mod tests {
             .build()
             .expect("the runtime the activation starts on");
         let (runtime, held, id) = start.block_on(async {
-            let storage = Arc::new(
-                LocalFSProvider::new(temp_dir.path().to_path_buf())
-                    .await
-                    .unwrap(),
-            );
-            let component = Arc::new(ComponentProvider::new());
-            let runtime =
-                Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
-            let manifest: CapsuleManifest =
-                serde_json::from_str(&component_manifest_json("lost-retained"))
-                    .expect("the component manifest");
-            let handle = CapsuleHandle {
-                id: CapsuleId::new("component-lost-retained"),
-                manifest,
-                args: Vec::new(),
-            };
-            let id = handle.id.0.clone();
-            runtime
-                .register_capsule(RunningCapsuleInfo {
-                    id: id.clone(),
-                    name: "lost-retained".to_string(),
-                    status: CAPSULE_STARTING.to_string(),
-                    capsule_type: handle.manifest.capsule_type.clone(),
-                    handle: Some(handle.clone()),
-                    session_id: id.clone(),
-                    principal: None,
-                    cause: None,
-                    ended_at: None,
-                })
-                .await;
-            let held = ActivationContextHeld::new(&runtime, &handle, component);
+            let (runtime, component) = retention_runtime(&temp_dir).await;
+            let (held, id) = retained_activation(&runtime, component, "lost-retained").await;
             (runtime, held, id)
         });
-        // The start runtime goes away before the end runs, as it does in the
-        // lost-task case; the end then runs from a thread on a runtime of its
-        // own, just as `Drop` hands a lost end over.
         drop(start);
         std::thread::spawn(move || {
             let end_runtime = tokio::runtime::Builder::new_current_thread()
@@ -2855,22 +2890,45 @@ pub(crate) mod tests {
             .build()
             .expect("the runtime the row reads on");
         after.block_on(async {
-            assert!(
-                runtime.running_capsules.read().await.contains_key(&id),
-                "the ended entry is kept at its end"
-            );
-            let removed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                loop {
-                    if !runtime.running_capsules.read().await.contains_key(&id) {
-                        return;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await;
-            assert!(
-                removed.is_ok(),
-                "the lost end's entry is gone at its retention, with nothing reading it"
+            let ended_at = recorded_end(&runtime, &id).await;
+            assert_swept(swept_at(&runtime, &id).await, ended_at, "lost end");
+        });
+    }
+
+    /// A3-R S6 fix 4, row (c), the round-4 sequence: the end runs on the
+    /// start runtime while it lives, and that runtime is dropped after the
+    /// end but before the entry's deadline. A removal that runtime ran would
+    /// be cancelled with it; the sweeper's is not. The row waits on another
+    /// runtime. F-nosweep reddens the row.
+    #[test]
+    fn an_end_whose_start_runtime_shuts_down_before_the_deadline_removes_its_entry() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the activation starts and ends on");
+        let (runtime, id, ended_at) = start.block_on(async {
+            let (runtime, component) = retention_runtime(&temp_dir).await;
+            let (held, id) = retained_activation(&runtime, component, "shutdown-retained").await;
+            held.end_instance(CAPSULE_FAILED, "test end").await;
+            let ended_at = recorded_end(&runtime, &id).await;
+            (runtime, id, ended_at)
+        });
+        drop(start);
+        assert!(
+            std::time::Instant::now() < ended_at + ROW_RETENTION,
+            "the start runtime is gone before the entry's deadline"
+        );
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the row reads on");
+        after.block_on(async {
+            assert_swept(
+                swept_at(&runtime, &id).await,
+                ended_at,
+                "start runtime shut down after the end",
             );
         });
     }
