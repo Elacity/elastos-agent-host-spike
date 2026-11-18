@@ -1012,6 +1012,7 @@ fn browser_account_access_request_payload<'a>(
     authority: &RuntimeWalletAuthority,
     page_url: Option<&str>,
     origin: Option<&str>,
+    now: u64,
 ) -> Result<&'a serde_json::Value, (StatusCode, String)> {
     let context = authority.verified_context();
     let page_url = page_url.ok_or_else(|| {
@@ -1116,7 +1117,6 @@ fn browser_account_access_request_payload<'a>(
             "has an invalid account-access network set",
         ));
     }
-    let now = now_ts();
     if !payload
         .get("grant_expires_at")
         .and_then(|value| value.as_u64())
@@ -1137,6 +1137,7 @@ fn validate_completed_browser_account_access_result(
     request_payload: &serde_json::Value,
     result: &serde_json::Value,
     authority: &RuntimeWalletAuthority,
+    now: u64,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let context = authority.verified_context();
     if completed_browser_wallet_result_string(result, "schema")?
@@ -1229,7 +1230,7 @@ fn validate_completed_browser_account_access_result(
         .get("grant_expires_at")
         .and_then(|value| value.as_u64())
         != Some(grant_expires_at)
-        || grant_expires_at <= now_ts()
+        || grant_expires_at <= now
     {
         return Err(completed_browser_wallet_result_error(
             "has an invalid or expired account-access grant",
@@ -1247,6 +1248,19 @@ fn validate_completed_browser_account_access_result(
         "address": completed_browser_wallet_result_string(result, "address")?,
         "grant_expires_at": grant_expires_at,
     }))
+}
+
+/// The single wall-clock reading of one approval-status response. A test may
+/// script it so the completion can be shown to consume one value for both the
+/// request grant check and the completed-result grant check.
+fn browser_wallet_status_now() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(value) = crate::test_clock::next() {
+            return value;
+        }
+    }
+    now_ts()
 }
 
 async fn browser_wallet_approval_status(
@@ -1296,9 +1310,10 @@ async fn browser_wallet_approval_status(
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
     let intent = request.get("intent").and_then(|value| value.as_str());
+    let now = browser_wallet_status_now();
     let account_access_payload = if intent == Some("browser_account_access") {
         Some(browser_account_access_request_payload(
-            request, authority, page_url, origin,
+            request, authority, page_url, origin, now,
         )?)
     } else {
         None
@@ -1322,6 +1337,7 @@ async fn browser_wallet_approval_status(
                 account_access_payload.expect("account access payload validated above"),
                 result,
                 authority,
+                now,
             )?;
         } else if matches!(
             intent,

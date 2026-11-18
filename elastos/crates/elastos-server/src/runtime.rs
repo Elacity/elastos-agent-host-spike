@@ -10,7 +10,7 @@ use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleKin
 use crate::resource_bridge::LaunchContent;
 use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
-use elastos_compute::providers::{BridgeHostcall, ComponentProvider};
+use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
@@ -172,11 +172,14 @@ impl Drop for LaunchHeld {
 }
 
 /// The capability store and manager a detached activation's end settles and
-/// revokes through: the same pair the bridge asked a grant from.
+/// revokes through: the same pair the bridge asked a grant from. A revoke
+/// that store cannot save is kept in the pending revocation list of the Home
+/// at `data_dir`.
 #[derive(Clone)]
 struct InstanceAuthority {
     pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+    data_dir: std::path::PathBuf,
 }
 
 /// The cause an activation records when the task watching it went away before
@@ -195,9 +198,13 @@ struct ActivationStop {
 
 impl ActivationStop {
     /// Records this stop's reason (`stopped: <reason>`) and raises the flag.
+    /// The first reason recorded is the one the end records: a later stop
+    /// keeps it.
     fn request(&self, reason: &str) {
-        let cause = format!("{CAPSULE_STOPPED}: {reason}");
-        *self.cause.lock().unwrap_or_else(|err| err.into_inner()) = Some(cause);
+        self.cause
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
         self.flag.requested.store(true, Ordering::Release);
     }
 
@@ -214,6 +221,18 @@ impl ActivationStop {
     fn cancelled(&self) -> bool {
         self.flag.cancelled.load(Ordering::Acquire)
     }
+}
+
+/// Where an end that is still owed runs when its guard is dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwedEnd {
+    /// In a task of the current runtime.
+    Task,
+    /// On a thread of its own: the task was dropped before the end finished,
+    /// as a runtime shutting down drops the tasks it has not run.
+    Thread,
+    /// Nowhere: the thread could not finish it either.
+    Lost,
 }
 
 /// Owns a detached component's admission context until its watcher has
@@ -237,7 +256,13 @@ struct ActivationContextHeld {
     /// route hold.
     stop: Arc<ActivationStop>,
     authority: Option<InstanceAuthority>,
+    /// The end is owed until the registry entry records it.
     armed: bool,
+    owed: OwedEnd,
+    /// The status and cause the session was settled with, so an end run
+    /// again after a lost task records and audits the same ones.
+    settled: Option<(String, String)>,
+    audited: bool,
 }
 
 impl ActivationContextHeld {
@@ -270,6 +295,9 @@ impl ActivationContextHeld {
             stop,
             authority,
             armed: true,
+            owed: OwedEnd::Task,
+            settled: None,
+            audited: false,
         }
     }
 
@@ -285,9 +313,11 @@ impl ActivationContextHeld {
 
     /// Takes away what the start put in place: the provider's activation
     /// entry and the principal the guest ran for, the manifest ceiling, the
-    /// model-token ceiling, the launch content and the stop request. It is
-    /// called at the one end of every detached activation, so nothing of the
-    /// instance is left for a reader or a late bridge call.
+    /// model-token ceiling and the launch content. It is called at the one
+    /// end of every detached activation, before the entry records the end,
+    /// so nothing of the instance is left for a reader or a late bridge call.
+    /// The stop request is not this method's: the entry's end takes it away
+    /// after the write, so a racing stop still finds it.
     async fn release(&mut self) {
         self.component.forget_instance(&self.id).await;
         if let Ok(mut bounds) = self.manifest_capabilities.write() {
@@ -301,11 +331,6 @@ impl ActivationContextHeld {
             .write()
             .unwrap_or_else(|err| err.into_inner())
             .remove(&self.id.0);
-        self.activation_stops
-            .write()
-            .unwrap_or_else(|err| err.into_inner())
-            .remove(&self.id.0);
-        self.armed = false;
     }
 
     /// The one ending of a detached activation (M1-R A11-R). `status` is
@@ -313,40 +338,75 @@ impl ActivationContextHeld {
     /// pending requests are denied by the Runtime and its grants revoked
     /// before the context goes; the stop is audited once; and the entry is
     /// written last, so a reader that sees `ended_at` also sees that nothing
-    /// of the activation is left. Its retention is timed from that write: the
-    /// entry's removal is scheduled here, so it happens at its 60 s even if
-    /// nothing lists or registers again.
+    /// of the activation is left. A revoke the store could not save ends the
+    /// entry `failed`, with a cause that names it. The stop request is taken
+    /// away only after the entry records the end, so a stop that finds the
+    /// entry not ended also finds its request. Its retention is timed from
+    /// that write: the entry's removal is scheduled here, so it happens at
+    /// its 60 s even if nothing lists or registers again.
     async fn end_instance(mut self, status: &str, cause: &str) {
-        // An activation that already ended has no entry to stop; an ending
-        // one keeps it until its worker sees the stop flag.
-        let _ = self.component.stop(&self.handle).await;
-        if let Some(authority) = &self.authority {
-            crate::api::handlers::settle::settle_and_revoke(
-                &authority.pending_store,
-                &authority.capability_manager,
-                &self.id.0,
-                cause,
-            )
-            .await;
-        }
+        let (status, cause) = match self.settled.clone() {
+            Some(settled) => settled,
+            None => {
+                // An activation that already ended has no entry to stop; an
+                // ending one keeps it until its worker sees the stop flag.
+                let _ = self.component.stop(&self.handle).await;
+                let settled = match &self.authority {
+                    Some(authority) => {
+                        crate::api::handlers::settle::settle_and_revoke(
+                            &authority.pending_store,
+                            &authority.capability_manager,
+                            &authority.data_dir,
+                            &self.id.0,
+                            cause,
+                        )
+                        .await
+                    }
+                    None => Ok(()),
+                };
+                let ended = match settled {
+                    Ok(()) => (status.to_string(), cause.to_string()),
+                    Err(error) => (
+                        CAPSULE_FAILED.to_string(),
+                        format!("{cause}; revocation not saved: {error}"),
+                    ),
+                };
+                self.settled = Some(ended.clone());
+                ended
+            }
+        };
         self.release().await;
-        if let Some(authority) = &self.authority {
+        if let (Some(authority), false) = (&self.authority, self.audited) {
             authority
                 .capability_manager
                 .audit_log()
-                .capsule_stop(&self.id.0, stop_reason(status, cause));
+                .capsule_stop(&self.id.0, stop_reason(&status, &cause));
+            self.audited = true;
         }
         let ended_at = std::time::Instant::now();
         let mut capsules = self.registry.write().await;
         let recorded = if let Some(info) = capsules.get_mut(&self.id.0) {
-            info.status = status.to_string();
-            info.cause = Some(cause.to_string());
-            info.ended_at = Some(ended_at);
-            true
+            if info.ended_at.is_none() {
+                info.status = status.to_string();
+                info.cause = Some(cause.to_string());
+                info.ended_at = Some(ended_at);
+                true
+            } else {
+                false
+            }
         } else {
             false
         };
         drop(capsules);
+
+        // The stop request is taken away only after the entry records the
+        // end, so a stop that finds the entry not ended also finds its
+        // request.
+        self.activation_stops
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id.0);
+        self.armed = false;
 
         // Retention is a timer, not a reader's courtesy: one sleep per ended
         // entry, on the runtime that ended it, removes the entry at its
@@ -368,6 +428,28 @@ impl ActivationContextHeld {
             });
         }
     }
+
+    /// This guard's owed end, moved into a new guard; this one is left
+    /// disarmed.
+    fn take_owed(&mut self) -> Self {
+        self.armed = false;
+        ActivationContextHeld {
+            id: self.id.clone(),
+            handle: self.handle.clone(),
+            component: self.component.clone(),
+            registry: self.registry.clone(),
+            manifest_capabilities: self.manifest_capabilities.clone(),
+            model_token_ceilings: self.model_token_ceilings.clone(),
+            activation_stops: self.activation_stops.clone(),
+            launch_contents: self.launch_contents.clone(),
+            stop: self.stop.clone(),
+            authority: self.authority.clone(),
+            armed: true,
+            owed: self.owed,
+            settled: self.settled.take(),
+            audited: self.audited,
+        }
+    }
 }
 
 /// The audit reason one ending carries. A trap is the activation's error; a
@@ -381,29 +463,53 @@ fn stop_reason(status: &str, cause: &str) -> elastos_runtime::primitives::audit:
     }
 }
 
+/// Whether a start that failed is the stop's doing: the stop took the loading
+/// component away, or the epoch callback interrupted its start function. Any
+/// other failed start is the guest's own.
+fn start_ended_by_stop(err: &ElastosError) -> bool {
+    match err {
+        ElastosError::CapsuleNotFound(_) => true,
+        ElastosError::Compute(message) => message == STOPPED_BEFORE_RUN,
+        _ => false,
+    }
+}
+
 impl Drop for ActivationContextHeld {
     fn drop(&mut self) {
         if !self.armed {
             return;
         }
-        // The watcher went away before it could end the activation: its end
-        // still happens, once, in a task of its own. The clone is not armed:
-        // a task the runtime never runs is dropped without ending a second
-        // time, which a shutting-down runtime does to the task it is given.
-        let end = ActivationContextHeld {
-            id: self.id.clone(),
-            handle: self.handle.clone(),
-            component: self.component.clone(),
-            registry: self.registry.clone(),
-            manifest_capabilities: self.manifest_capabilities.clone(),
-            model_token_ceilings: self.model_token_ceilings.clone(),
-            activation_stops: self.activation_stops.clone(),
-            launch_contents: self.launch_contents.clone(),
-            stop: self.stop.clone(),
-            authority: self.authority.clone(),
-            armed: false,
-        };
-        tokio::spawn(async move { end.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST).await });
+        if self.owed == OwedEnd::Lost {
+            self.armed = false;
+            tracing::error!("activation {}: its end could not run", self.id.0);
+            return;
+        }
+        // The watcher, or the task running the end, went away before the end
+        // was recorded. The end still runs, once, from where it got to: in a
+        // task first, and on a thread of its own if that task is dropped too.
+        // The new guard stays armed until its end is recorded.
+        let mut end = self.take_owed();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) if end.owed == OwedEnd::Task => {
+                end.owed = OwedEnd::Thread;
+                runtime.spawn(end.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+            }
+            _ => {
+                end.owed = OwedEnd::Lost;
+                let thread = std::thread::Builder::new().name("activation-end".into());
+                let spawned = thread.spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    if let Ok(runtime) = runtime {
+                        runtime.block_on(end.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+                    }
+                });
+                if let Err(error) = spawned {
+                    tracing::error!(%error, "activation {}: no thread for its end", self.id.0);
+                }
+            }
+        }
     }
 }
 
@@ -479,6 +585,7 @@ impl Runtime {
             .unwrap_or_else(|err| err.into_inner()) = Some(InstanceAuthority {
             pending_store: pending_store.clone(),
             capability_manager: capability_manager.clone(),
+            data_dir: data_dir.clone(),
         });
         if let Some(ref component) = self.component_provider {
             let host_reg = registry.clone();
@@ -1510,14 +1617,38 @@ impl Runtime {
         self.running_capsules.write().await
     }
 
+    /// The compute provider's own status of a registered component: it is
+    /// `Running` from the moment its start runs guest code.
+    #[cfg(test)]
+    pub(crate) async fn component_status_for_test(
+        &self,
+        id: &str,
+    ) -> Option<elastos_common::CapsuleStatus> {
+        let handle = self.get_capsule(id).await?.handle?;
+        let component = self.component_provider.as_ref()?;
+        component.status(&handle).await.ok()
+    }
+
+    /// The cause a stop of `id` has recorded so far, read from its stop
+    /// request.
+    #[cfg(test)]
+    pub(crate) fn requested_stop_for_test(&self, id: &str) -> Option<String> {
+        let stops = self
+            .activation_stops
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        stops.get(id)?.cause()
+    }
+
     /// Starts this activation and waits for its worker to publish its outcome, then ends it
     /// through [`ActivationContextHeld::end_instance`]: the entry is `stopped`
     /// with cause `completed` on a natural return, or `failed` with the
     /// trap's cause, and it keeps its `ended_at` for
     /// [`ENDED_CAPSULE_RETENTION`]. A stop requested before the outcome ends
-    /// the activation as `stopped` with the reason it was requested with: the
-    /// worker's ending is that stop's doing, whether it returns, traps or
-    /// reports `stopped`.
+    /// the activation as `stopped` with the reason it was requested with when
+    /// the worker's ending is that stop's doing: a return or a `stopped`
+    /// after the request, a trap after the bridge left the guest's call for
+    /// it, or a start the stop took away or interrupted.
     fn watch_activation(
         &self,
         id: elastos_common::CapsuleId,
@@ -1537,12 +1668,6 @@ impl Runtime {
             }
             let (status, cause) = match component.start_resident(&handle).await {
                 Ok(mut activation) => {
-                    // A stop that arrived while the worker was starting the
-                    // guest: now that the activation is running, give it the
-                    // flag the epoch callback reads.
-                    if held.requested_stop().is_some() {
-                        let _ = component.stop(&handle).await;
-                    }
                     // Only the compute worker's `started` moves the entry from
                     // admission's `starting` to `running`.
                     if let Some(info) = registry.write().await.get_mut(&id.0) {
@@ -1568,8 +1693,8 @@ impl Runtime {
                     }
                 }
                 Err(err) => match held.requested_stop() {
-                    Some(cause) => (CAPSULE_STOPPED, cause),
-                    None => (CAPSULE_FAILED, err.to_string()),
+                    Some(cause) if start_ended_by_stop(&err) => (CAPSULE_STOPPED, cause),
+                    _ => (CAPSULE_FAILED, err.to_string()),
                 },
             };
             held.end_instance(status, &cause).await;
@@ -1753,7 +1878,7 @@ impl Runtime {
 
     /// Stop a capsule by its ID, with the reason `user`: the route without a
     /// body. See [`Self::stop_capsule_with_reason`].
-    pub async fn stop_capsule_by_id(&self, id: &str) -> Result<bool> {
+    pub async fn stop_capsule_by_id(&self, id: &str) -> Result<Option<RunningCapsuleInfo>> {
         self.stop_capsule_with_reason(id, "user").await
     }
 
@@ -1763,80 +1888,75 @@ impl Runtime {
     /// reads, gives the compute provider the stop its epoch callback reads,
     /// and waits for that end. The entry is then `stopped` with cause
     /// `stopped: <reason>` and is kept for [`ENDED_CAPSULE_RETENTION`], unless
-    /// the guest ended for its own reason first: then the entry says so.
+    /// the guest ended for its own reason first, or an earlier stop's reason
+    /// was recorded first: then the entry says so.
     ///
-    /// Returns Ok(false) if the id is not registered, or its activation had
-    /// already ended when the stop arrived. An activation with no stop
-    /// request (a capsule registered with a handle by its launcher) is stopped
-    /// and unregistered as before.
-    pub async fn stop_capsule_with_reason(&self, id: &str, reason: &str) -> Result<bool> {
-        // Get capsule info and handle
-        let capsule_info = {
+    /// Returns the entry as the stop leaves it, or `None` if the id is not
+    /// registered. A stop of an ending or ended activation changes nothing
+    /// and returns the outcome its one end recorded. An activation with no
+    /// stop request (a capsule registered with a handle by its launcher) is
+    /// stopped and unregistered as before.
+    pub async fn stop_capsule_with_reason(
+        &self,
+        id: &str,
+        reason: &str,
+    ) -> Result<Option<RunningCapsuleInfo>> {
+        // The entry and its stop request are read under one lock: the end
+        // takes the request away only after the entry records `ended_at`, so
+        // an entry not ended here still has its request if a watcher ends it.
+        let (info, stop) = {
             let capsules = self.running_capsules.read().await;
-            capsules.get(id).cloned()
-        };
-
-        let Some(info) = capsule_info else {
-            return Ok(false); // Not found
+            let Some(info) = capsules.get(id).cloned() else {
+                return Ok(None);
+            };
+            let stops = self
+                .activation_stops
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
+            (info, stops.get(id).cloned())
         };
         if info.ended_at.is_some() {
-            return Ok(false);
+            return Ok(Some(info));
         }
 
-        let stop = self
-            .activation_stops
-            .read()
-            .unwrap_or_else(|err| err.into_inner())
-            .get(id)
-            .cloned();
+        // A guest in guest code, its start function included, is trapped by
+        // its epoch callback, which reads this provider's stop flag; a
+        // component not yet started is taken away, so its start ends as
+        // stopped before it runs. A guest inside a bridge call leaves that
+        // call through the stop's own flag, which the bridge checks.
+        let provider = info
+            .handle
+            .as_ref()
+            .and_then(|handle| Some((handle, self.get_provider_for_manifest(&handle.manifest)?)));
 
         let Some(stop) = stop else {
             // No watcher holds this activation: stop it through its provider
             // and take its entry away, as before.
-            if let Some(handle) = &info.handle {
-                if let Some(provider) = self.get_provider_for_manifest(&handle.manifest) {
-                    tracing::info!("Stopping capsule '{}' ({})", info.name, id);
-                    provider.stop(handle).await?;
-                }
-            }
-            {
-                let mut capsules = self.running_capsules.write().await;
-                if let Some(info) = capsules.get_mut(id) {
-                    info.status = "stopped".to_string();
-                }
+            if let Some((handle, provider)) = provider {
+                tracing::info!("Stopping capsule '{}' ({})", info.name, id);
+                provider.stop(handle).await?;
             }
             self.unregister_capsule(id).await;
-            return Ok(true);
+            return Ok(Some(RunningCapsuleInfo {
+                status: CAPSULE_STOPPED.to_string(),
+                ended_at: Some(std::time::Instant::now()),
+                ..info
+            }));
         };
 
         // The reason is recorded before the flag is raised, so the end that
         // sees the flag records this cause.
         stop.request(reason);
-
-        // A guest in guest code is trapped by its epoch callback, which reads
-        // this provider's stop flag. A guest inside a bridge call leaves that
-        // call through the stop's own flag, which the bridge checks. While the
-        // activation is still `starting`, its watcher sets the provider flag
-        // once the worker's guest runs, so a stop never removes a loading
-        // component.
-        if info.status == CAPSULE_RUNNING {
-            if let Some(handle) = &info.handle {
-                if let Some(provider) = self.get_provider_for_manifest(&handle.manifest) {
-                    tracing::info!("Stopping capsule '{}' ({})", info.name, id);
-                    provider.stop(handle).await?;
-                }
-            }
+        if let Some((handle, provider)) = provider {
+            tracing::info!("Stopping capsule '{}' ({})", info.name, id);
+            provider.stop(handle).await?;
         }
 
         self.wait_ended(id).await;
         // The end happened, whatever its recorded status and cause: the
         // entry the list serves says which, and a stop whose guest ran to its
         // own ending is still a stop that left nothing running.
-        Ok(self
-            .get_capsule(id)
-            .await
-            .map(|info| info.ended_at.is_some())
-            .unwrap_or(false))
+        Ok(self.get_capsule(id).await)
     }
 
     /// Waits until the registry records this activation's end, or until the
@@ -4286,5 +4406,205 @@ pub(crate) mod tests {
             component_provider.status(&handle).await,
             Err(ElastosError::CapsuleNotFound(_))
         ));
+    }
+
+    /// A3-R S4+S5 fix 4. The first stop's reason is the cause the end
+    /// records; a later stop raises the same flag and changes nothing else.
+    #[test]
+    fn a_later_stop_keeps_the_first_cause() {
+        let stop = ActivationStop {
+            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
+            cause: StdMutex::new(None),
+        };
+        assert_eq!(stop.cause(), None);
+        stop.request("first");
+        assert!(stop.flag.requested.load(Ordering::Acquire));
+        stop.request("second");
+        assert_eq!(stop.cause().as_deref(), Some("stopped: first"));
+        assert!(stop.flag.requested.load(Ordering::Acquire));
+    }
+
+    /// A3-R S4+S5 fix 1. A stop given to the provider while the component is
+    /// still loading takes it away, and the start that follows fails as the
+    /// stop's doing. A start interrupted by the stop is the stop's doing too;
+    /// a start that ends on its own fuel is the guest's failure.
+    #[tokio::test]
+    async fn a_start_the_stop_took_away_is_the_stops_doing() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("app.component.wasm"), quiet_component()).unwrap();
+        let manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("taken-away")).unwrap();
+        let component = ComponentProvider::new();
+        let handle = component.load(temp.path(), manifest).await.unwrap();
+        component.stop(&handle).await.unwrap();
+        let err = match component.start_resident(&handle).await {
+            Ok(_) => panic!("a component the stop took away started"),
+            Err(err) => err,
+        };
+        assert!(start_ended_by_stop(&err), "{err}");
+        assert!(start_ended_by_stop(&ElastosError::Compute(
+            STOPPED_BEFORE_RUN.to_string()
+        )));
+        let own = "Failed to instantiate component capsule: all fuel consumed by WebAssembly";
+        assert!(!start_ended_by_stop(&ElastosError::Compute(
+            own.to_string()
+        )));
+    }
+
+    /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
+    /// task, and the runtime shuts down before it runs that task, as a
+    /// runtime does with the tasks it has not run. The end still happens
+    /// once: the entry ends `failed` with the lost-task cause, the session's
+    /// pending request is denied and its grant revoked, and one
+    /// `capsule_stop` is audited.
+    #[test]
+    fn a_lost_end_task_still_ends_the_activation_once() {
+        use elastos_runtime::capability::manager::ValidationError;
+        use elastos_runtime::capability::{Action, RequestStatus, ResourceId};
+        use elastos_runtime::primitives::audit::StopReason;
+        use elastos_runtime::session::SessionId;
+
+        const ID: &str = "lost-end";
+        let resource = ResourceId::new("elastos://content/publish");
+        let shutting_down = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (runtime, audit_log, pending_store, manager, pending, token, _temp) = shutting_down
+            .block_on(async {
+                let temp = tempfile::tempdir().unwrap();
+                let storage = LocalFSProvider::new(temp.path().join("storage"))
+                    .await
+                    .unwrap();
+                let component = Arc::new(ComponentProvider::new());
+                let runtime = Runtime::with_providers_and_component(
+                    Arc::new(storage),
+                    Vec::new(),
+                    Some(component.clone()),
+                );
+                let audit_log = Arc::new(AuditLog::new());
+                let manager = Arc::new(CapabilityManager::new(
+                    Arc::new(CapabilityStore::new()),
+                    audit_log.clone(),
+                    Arc::new(MetricsManager::new()),
+                ));
+                let pending_store = Arc::new(
+                    elastos_runtime::capability::pending::PendingRequestStore::new(
+                        audit_log.clone(),
+                    ),
+                );
+                let data_dir = temp.path().join("data");
+                std::fs::create_dir_all(&data_dir).unwrap();
+                runtime
+                    .set_provider_registry(
+                        Arc::new(ProviderRegistry::new()),
+                        manager.clone(),
+                        pending_store.clone(),
+                        data_dir,
+                    )
+                    .await;
+
+                let handle = CapsuleHandle {
+                    id: CapsuleId::new(ID),
+                    manifest: serde_json::from_str(&component_manifest_json(ID)).unwrap(),
+                    args: Vec::new(),
+                };
+                runtime
+                    .register_capsule(RunningCapsuleInfo {
+                        id: ID.to_string(),
+                        name: ID.to_string(),
+                        status: CAPSULE_RUNNING.to_string(),
+                        capsule_type: CapsuleType::Wasm,
+                        handle: Some(handle.clone()),
+                        session_id: ID.to_string(),
+                        principal: None,
+                        cause: None,
+                        ended_at: None,
+                    })
+                    .await;
+                let session = || SessionId::from_string(ID);
+                let pending = pending_store
+                    .create_request(session(), resource.clone(), Action::Read)
+                    .await
+                    .id
+                    .to_string();
+                let granted = pending_store
+                    .create_request(session(), resource.clone(), Action::Write)
+                    .await
+                    .id
+                    .to_string();
+                let constraints = TokenConstraints::default();
+                let token = manager.grant(ID, resource.clone(), Action::Write, constraints, None);
+                pending_store
+                    .grant_request(&granted, token.clone(), GrantDuration::Session)
+                    .await
+                    .unwrap();
+
+                drop(ActivationContextHeld::new(&runtime, &handle, component));
+                (
+                    runtime,
+                    audit_log,
+                    pending_store,
+                    manager,
+                    pending,
+                    token,
+                    temp,
+                )
+            });
+        let entry = runtime.running_capsules.try_read().unwrap()[ID].clone();
+        assert!(entry.ended_at.is_none(), "the end's task has not run");
+        drop(shutting_down);
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        after.block_on(async {
+            let entry = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(entry) = runtime.get_capsule(ID).await {
+                        if entry.ended_at.is_some() {
+                            break entry;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the end still runs after its task was dropped");
+            assert_eq!(entry.status, CAPSULE_FAILED);
+            assert_eq!(entry.cause.as_deref(), Some(CAUSE_TASK_LOST));
+
+            let RequestStatus::Denied { reason, settled_by } =
+                pending_store.get_request(&pending).await.unwrap().status
+            else {
+                panic!("the pending request is not settled");
+            };
+            assert_eq!(reason, format!("instance ended: {CAUSE_TASK_LOST}"));
+            assert_eq!(settled_by, Settler::Runtime);
+            assert_eq!(
+                manager
+                    .validate(&token, ID, Action::Write, &resource, None)
+                    .await,
+                Err(ValidationError::TokenRevoked)
+            );
+
+            // Exactly once, also after the end had time to run again.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let stops: Vec<_> = audit_log
+                .recent_events(usize::MAX)
+                .into_iter()
+                .filter_map(|event| match event {
+                    AuditEvent::CapsuleStop {
+                        capsule_id, reason, ..
+                    } if capsule_id == ID => Some(reason),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                matches!(stops.as_slice(), [StopReason::Error(cause)] if cause == CAUSE_TASK_LOST),
+                "{stops:?}"
+            );
+        });
     }
 }

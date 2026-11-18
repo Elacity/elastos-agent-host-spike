@@ -322,23 +322,57 @@ pub struct StopRequest {
 /// `stopped: <reason>` as its cause, its pending requests denied by the
 /// Runtime, and its entry kept for 60 s. `provider.stop` ends a guest in guest
 /// code; the bridge's wait loop ends a guest inside a call.
+///
+/// An empty body is a stop with the reason `user`. Any other body is a
+/// [`StopRequest`] or the stop is refused with `400 invalid_stop_request`,
+/// and nothing is stopped. The answer is the entry as the stop left it: `200`
+/// with the status and cause its one end recorded, the same answer for every
+/// stop of that activation, or `202` if it has not ended within the stop's
+/// wait.
 pub async fn stop_capsule(
     Extension(runtime): Extension<Arc<Runtime>>,
     Path(id): Path<String>,
-    body: Option<Json<StopRequest>>,
-) -> impl IntoResponse {
-    let reason = body
-        .and_then(|Json(request)| request.reason)
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let parsed = if body.is_empty() {
+        Ok(StopRequest::default())
+    } else {
+        serde_json::from_slice::<StopRequest>(&body)
+    };
+    let request = match parsed {
+        Ok(request) => request,
+        Err(error) => {
+            let refusal =
+                serde_json::json!({"error": "invalid_stop_request", "detail": error.to_string()});
+            return (StatusCode::BAD_REQUEST, Json(refusal)).into_response();
+        }
+    };
+    let reason = request
+        .reason
         .map(|reason| reason.trim().to_string())
         .filter(|reason| !reason.is_empty())
         .unwrap_or_else(|| "user".to_string());
     match runtime.stop_capsule_with_reason(&id, &reason).await {
-        Ok(true) => (StatusCode::OK, format!("Capsule {} stopped", id)),
-        Ok(false) => (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)),
+        Ok(Some(info)) => {
+            let status = match info.ended_at {
+                Some(_) => StatusCode::OK,
+                None => StatusCode::ACCEPTED,
+            };
+            let answer = CapsuleInfoResponse {
+                id: info.id,
+                name: info.name,
+                status: info.status,
+                session_id: info.session_id,
+                cause: info.cause,
+            };
+            (status, Json(answer)).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, format!("Capsule {} not found", id)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to stop capsule: {}", e),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -880,6 +914,48 @@ pub(crate) mod tests {
         /// The stored person every agent here belongs to. It is the person
         /// `agents::create` records in each agent's `owner`.
         owner: String,
+        /// Where the revoke list is saved, for a probe that saves it.
+        tokens: Option<std::path::PathBuf>,
+    }
+
+    /// The probe's token plane: an unsaved store under a fresh key, or `store`
+    /// under the fixed key a restarted plane is made with again.
+    fn probe_token_manager(
+        store: Option<elastos_runtime::capability::CapabilityStore>,
+        audit_log: Arc<AuditLog>,
+    ) -> elastos_runtime::capability::CapabilityManager {
+        probe_token_plane(store, audit_log).1
+    }
+
+    /// [`probe_token_manager`], and the same store the manager holds, so a
+    /// row's shell view reads exactly the grants the manager minted.
+    fn probe_token_plane(
+        store: Option<elastos_runtime::capability::CapabilityStore>,
+        audit_log: Arc<AuditLog>,
+    ) -> (
+        Arc<elastos_runtime::capability::CapabilityStore>,
+        elastos_runtime::capability::CapabilityManager,
+    ) {
+        use elastos_runtime::capability::{CapabilityManager, CapabilityStore};
+        use elastos_runtime::primitives::metrics::MetricsManager;
+        let metrics = Arc::new(MetricsManager::new());
+        match store {
+            None => {
+                let store = Arc::new(CapabilityStore::new());
+                let manager = CapabilityManager::new(store.clone(), audit_log, metrics);
+                (store, manager)
+            }
+            Some(store) => {
+                let store = Arc::new(store);
+                let manager = CapabilityManager::with_key(
+                    elastos_runtime::signature::SigningKey::from_bytes(&[0x52; 32]),
+                    store.clone(),
+                    audit_log,
+                    metrics,
+                );
+                (store, manager)
+            }
+        }
     }
 
     const PROBE_HOST: &str = "a5-launch-probe";
@@ -918,9 +994,41 @@ pub(crate) mod tests {
       (instance $lifecycle (export "run" (func $run)))
       (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#;
 
+    /// The same world, but the guest spins in its start function, so it is
+    /// in guest code while the registry still says `starting`. Each turn asks
+    /// the runtime for the memory's size, which makes its fuel last about a
+    /// second: left alone, the start ends on its own fuel, `failed`.
+    const SPIN_START_COMPONENT: &str = r#"(component
+      (import "elastos:bus/types@1.0.0" (instance $types
+        (type $error (variant
+          (case "denied" string) (case "not-found" string) (case "invalid" string)
+          (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+        (export "bus-error" (type (eq $error)))))
+      (alias export $types "bus-error" (type $bus-error))
+      (core module $m
+        (memory (export "memory") 1)
+        (func $spin
+          (loop $again
+            (drop (memory.grow (i32.const 0)))
+            (br $again)))
+        (start $spin)
+        (func (export "run") (result i32) (i32.const 0)))
+      (core instance $i (instantiate $m))
+      (func $run (result (result (error $bus-error)))
+        (canon lift (core func $i "run") (memory $i "memory")))
+      (instance $lifecycle (export "run" (func $run)))
+      (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#;
+
     impl ProbeLaunch {
         pub(crate) async fn new(names: &[&str]) -> Self {
-            let temp = tempfile::tempdir().unwrap();
+            Self::new_with(tempfile::tempdir().unwrap(), names, None).await
+        }
+
+        async fn new_with(
+            temp: tempfile::TempDir,
+            names: &[&str],
+            tokens: Option<elastos_runtime::capability::CapabilityStore>,
+        ) -> Self {
             let data_dir = temp.path().join("data");
             std::fs::create_dir_all(&data_dir).unwrap();
             let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
@@ -938,8 +1046,51 @@ pub(crate) mod tests {
                 "session:a5-launch",
                 &context,
                 names,
+                tokens,
             )
             .await
+        }
+
+        /// A probe whose capability store is opened in its Home's data
+        /// folder as a Home's start opens it, at [`Self::tokens_dir`], and
+        /// whose tokens are signed with a fixed key, so
+        /// [`Self::restarted_tokens`] is this Home's token plane after a
+        /// restart.
+        pub(crate) async fn with_saved_revokes(names: &[&str]) -> Self {
+            use crate::api::handlers::settle;
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path().join("data");
+            let store = settle::open_capability_store(&data_dir).await.unwrap();
+            let mut probe = Self::new_with(temp, names, Some(store)).await;
+            probe.tokens = Some(settle::capability_store_dir(&data_dir));
+            probe
+        }
+
+        pub(crate) fn tokens_dir(&self) -> std::path::PathBuf {
+            self.tokens.clone().expect("a probe with saved revokes")
+        }
+
+        /// A new token plane over this Home's capability store, opened as
+        /// its start opens it, and the same key.
+        pub(crate) async fn restarted_tokens(
+            &self,
+        ) -> elastos_runtime::capability::CapabilityManager {
+            let store = crate::api::handlers::settle::open_capability_store(&self.data_dir)
+                .await
+                .unwrap();
+            probe_token_manager(Some(store), self.audit_log.clone())
+        }
+
+        /// A new token plane over the saved store alone, without the pending
+        /// revocation list, and the same key.
+        pub(crate) async fn saved_store_tokens(
+            &self,
+        ) -> elastos_runtime::capability::CapabilityManager {
+            let store =
+                elastos_runtime::capability::CapabilityStore::with_persistence(self.tokens_dir())
+                    .await
+                    .unwrap();
+            probe_token_manager(Some(store), self.audit_log.clone())
         }
 
         /// A probe over an existing Home. The stored agents belong to
@@ -962,10 +1113,12 @@ pub(crate) mod tests {
                 session_id,
                 context,
                 names,
+                None,
             )
             .await
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn build(
             temp: Option<tempfile::TempDir>,
             data_dir: std::path::PathBuf,
@@ -974,11 +1127,10 @@ pub(crate) mod tests {
             session_id: &str,
             context: &gateway::HomeLaunchTokenContext,
             names: &[&str],
+            tokens: Option<elastos_runtime::capability::CapabilityStore>,
         ) -> Self {
             use crate::agents;
             use elastos_compute::providers::ComponentProvider;
-            use elastos_runtime::capability::{CapabilityManager, CapabilityStore};
-            use elastos_runtime::primitives::metrics::MetricsManager;
             use elastos_runtime::provider::ProviderRegistry;
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
             use elastos_storage::providers::LocalFSProvider;
@@ -1007,12 +1159,9 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let audit_log = Arc::new(AuditLog::new());
-            let capability_store = Arc::new(CapabilityStore::new());
-            let capability_manager = Arc::new(CapabilityManager::new(
-                capability_store.clone(),
-                audit_log.clone(),
-                Arc::new(MetricsManager::new()),
-            ));
+            let (capability_store, capability_manager) =
+                probe_token_plane(tokens, audit_log.clone());
+            let capability_manager = Arc::new(capability_manager);
             let pending_store = Arc::new(
                 elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
             );
@@ -1123,6 +1272,7 @@ pub(crate) mod tests {
                 grant,
                 agents,
                 owner: owner.to_string(),
+                tokens: None,
             }
         }
 
@@ -1224,15 +1374,20 @@ pub(crate) mod tests {
         /// entrypoint and its bytes differ. Returns the folder and the CID the
         /// Runtime's walk gives it.
         fn spin_host(&self) -> (std::path::PathBuf, String) {
+            self.host_of("a5-spin-host", SPIN_COMPONENT)
+        }
+
+        /// [`Self::spin_host`] for the guest `wat`, in the folder `name`.
+        fn host_of(&self, name: &str, wat: &str) -> (std::path::PathBuf, String) {
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
 
             let key = SigningKey::from_bytes(&[0x44; 32]);
-            let dir = self.fixture_root.join("a5-spin-host");
+            let dir = self.fixture_root.join(name);
             std::fs::create_dir_all(&dir).unwrap();
             let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../tests/fixtures/components/a5-launch-probe");
             std::fs::copy(fixture.join("capsule.json"), dir.join("capsule.json")).unwrap();
-            let wasm = wat::parse_str(SPIN_COMPONENT).expect("the spin component compiles");
+            let wasm = wat::parse_str(wat).expect("the spin component compiles");
             std::fs::write(dir.join("spin.component.wasm"), &wasm).unwrap();
             let mut manifest: elastos_common::CapsuleManifest =
                 serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
@@ -1654,8 +1809,8 @@ pub(crate) mod tests {
 
     /// Grants every pending request the named sessions make, as the shell
     /// would, and keeps doing it until the test stops the task. A request for
-    /// a resource in `held` is left pending. Every grant it makes is pushed to
-    /// `made`, so a row can check a token it made afterwards.
+    /// a resource in `held` is left pending. Every grant the store accepts is
+    /// pushed to `made`, so a row can check a token it made afterwards.
     pub(crate) fn grant_requests_of(
         store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         manager: Arc<elastos_runtime::capability::CapabilityManager>,
@@ -1687,10 +1842,12 @@ pub(crate) mod tests {
                         TokenConstraints::default(),
                         None,
                     );
-                    made.lock().unwrap().push(token.clone());
-                    let _ = store
-                        .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+                    let granted = store
+                        .grant_request(pending.id.as_str(), token.clone(), GrantDuration::Session)
                         .await;
+                    if granted.is_ok() {
+                        made.lock().unwrap().push(token);
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -1795,10 +1952,17 @@ pub(crate) mod tests {
         assert_eq!(home.invoked(b), expected_b);
 
         // The activation has ended: its entry is kept for its session, status
-        // and cause, and a stop finds nothing left to stop. A new launch takes
-        // the same principal and root, and its guest reads back both files the
-        // earlier launch wrote.
-        assert!(!home.runtime.stop_capsule_by_id(&first.id).await.unwrap());
+        // and cause, and a stop finds nothing left to stop: it answers the
+        // recorded end and changes nothing. A new launch takes the same
+        // principal and root, and its guest reads back both files the earlier
+        // launch wrote.
+        let ended = home.runtime.get_capsule(&first.id).await.expect("kept");
+        let answer = home.runtime.stop_capsule_by_id(&first.id).await.unwrap();
+        let answer = answer.expect("the ended entry answers");
+        assert_eq!(
+            (answer.status, answer.cause, answer.ended_at),
+            (ended.status, ended.cause, ended.ended_at)
+        );
         let again = home.launch(a).await.unwrap().0;
         assert_ne!(again.id, first.id);
         assert_eq!(home.root(a), root_a);
@@ -2428,24 +2592,285 @@ pub(crate) mod tests {
         assert_eq!(b_end.cause.as_deref(), Some("completed"));
     }
 
+    /// Writes the pointer `agent`'s guest reads under its own root: it names
+    /// `peer`'s notes, which the bridge refuses at the principal scope, so
+    /// the guest traps with that refusal. Returns the peer's file.
+    fn point_at_peer(home: &ProbeLaunch, agent: &str, peer: &str) -> String {
+        let (root, peer_root) = (home.root(agent), home.root(peer));
+        let peer_file = format!("{peer_root}/memory/notes.md");
+        let pointer_uri = format!("{root}/memory/peer");
+        let pointer_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &pointer_uri)
+                .unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            agent,
+            &root,
+            &pointer_uri,
+            &pointer_path,
+            peer_file.as_bytes(),
+        )
+        .unwrap();
+        peer_file
+    }
+
+    /// Every `capsule_stop` the Home audited for instance `id`, in order.
+    fn stops_of(
+        home: &ProbeLaunch,
+        id: &str,
+    ) -> Vec<elastos_runtime::primitives::audit::StopReason> {
+        home.audit_log
+            .recent_events(usize::MAX)
+            .into_iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::CapsuleStop {
+                    capsule_id,
+                    reason,
+                    ..
+                } if capsule_id == id => Some(reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SCOPE_REFUSAL: &str =
+        "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+
+    /// A3-R S3 fix 1 row, and fix 2 row 1. The Home's saved revoke list
+    /// cannot be replaced while two activations end: A traps and B returns.
+    /// Each grant is refused in this process at once. The saved list lacks
+    /// them, so each end is recorded `failed`, with a cause that names the
+    /// revoke it could not save and the pending revocation list that kept it,
+    /// and its one `capsule_stop` carries that cause. The Home restarted from
+    /// its store and that list refuses every grant; the store alone would
+    /// accept them.
+    #[tokio::test]
+    async fn an_unsaved_revoke_ends_the_activation_unsettled() {
+        use elastos_runtime::capability::manager::ValidationError;
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::with_saved_revokes(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let peer = point_at_peer(&home, a, b);
+        // The replacement of the saved list cannot be renamed over a folder.
+        std::fs::create_dir(home.tokens_dir().join("revoked_tokens")).unwrap();
+
+        let run_a = home.launch(a).await.unwrap().0;
+        let run_b = home.launch(b).await.unwrap().0;
+        let made = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run_a.id.clone(), run_b.id.clone()],
+            Vec::new(),
+            made.clone(),
+        );
+        let end_a = home.wait_ended(&run_a.id).await;
+        let end_b = home.wait_ended(&run_b.id).await;
+        grants.abort();
+
+        for (end, outcome) in [(&end_a, peer.as_str()), (&end_b, "completed")] {
+            assert_eq!(end.status, "failed", "{end:?}");
+            let cause = end.cause.clone().expect("an end records its cause");
+            assert!(cause.contains(outcome), "{cause}");
+            assert!(
+                cause.contains("; revocation not saved: "),
+                "the end names the revoke it could not save: {cause}"
+            );
+            assert!(
+                cause.ends_with("; kept in pending revocations"),
+                "the end names the list that kept it: {cause}"
+            );
+            let stops = stops_of(&home, &end.id);
+            assert!(
+                matches!(stops.as_slice(), [StopReason::Error(detail)] if detail == &cause),
+                "one stop audit with the recorded cause: {stops:?}"
+            );
+        }
+        assert!(
+            end_a.cause.as_deref().unwrap().contains(SCOPE_REFUSAL),
+            "{end_a:?}"
+        );
+
+        let made = made.lock().unwrap().clone();
+        assert!(!made.is_empty(), "both sessions were granted");
+        let saved_alone = home.saved_store_tokens().await;
+        let restarted = home.restarted_tokens().await;
+        for token in &made {
+            let session = token.capsule().to_string();
+            let here = home
+                .capability_manager
+                .validate(token, &session, token.action(), token.resource(), None)
+                .await;
+            assert_eq!(here, Err(ValidationError::TokenRevoked), "in this process");
+            let alone = saved_alone
+                .validate(token, &session, token.action(), token.resource(), None)
+                .await;
+            assert_eq!(alone, Ok(()), "the saved store alone lacks the revoke");
+            let after = restarted
+                .validate(token, &session, token.action(), token.resource(), None)
+                .await;
+            assert_eq!(
+                after,
+                Err(ValidationError::TokenRevoked),
+                "refused after a restart"
+            );
+        }
+    }
+
+    /// A3-R S3 fix 1 row: a stop and A's trap race, in both orders.
+    /// First the stop reads A's entry while A's end waits to record the trap;
+    /// the stop then answers the trap's end, and A's record is the trap's.
+    /// Then a second run is stopped while its guest is held in its first
+    /// call; the stop leaves the entry to the run's own end. Each run ends
+    /// exactly once, with one cause and one `capsule_stop` that carries it.
+    #[tokio::test]
+    async fn a_stop_racing_a_trap_ends_once() {
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let peer = point_at_peer(&home, a, b);
+
+        let run = home.launch(a).await.unwrap().0;
+        home.wait_pending(&run.id).await;
+        home.wait_running(&run.id).await;
+        // The registry is held: the stop's read of the entry waits first in
+        // line, and A's end, which records last, waits behind it.
+        let registry = home.runtime.hold_capsule_registry_for_test().await;
+        let stopper = {
+            let runtime = home.runtime.clone();
+            let id = run.id.clone();
+            tokio::spawn(async move { runtime.stop_capsule_by_id(&id).await.unwrap() })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while stops_of(&home, &run.id).is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("A traps and its end audits the stop");
+        drop(registry);
+        let stopped = stopper.await.unwrap();
+        grants.abort();
+
+        let end = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the trap's record survives the racing stop");
+        assert!(end.ended_at.is_some(), "{end:?}");
+        assert_eq!(end.status, "failed", "{end:?}");
+        let cause = end.cause.clone().expect("a trap records its cause");
+        assert!(cause.contains(SCOPE_REFUSAL), "{cause}");
+        assert!(cause.contains(&peer), "{cause}");
+        let stopped = stopped.expect("the stop answers A's entry");
+        assert_eq!(
+            (stopped.status.as_str(), stopped.cause.as_deref()),
+            ("failed", Some(cause.as_str())),
+            "the stop answers the trap's end"
+        );
+        let stops = stops_of(&home, &run.id);
+        assert!(
+            matches!(stops.as_slice(), [StopReason::Error(detail)] if detail == &cause),
+            "one stop audit, the trap's: {stops:?}"
+        );
+
+        let second = home.launch(a).await.unwrap().0;
+        home.wait_pending(&second.id).await;
+        home.wait_running(&second.id).await;
+        assert!(
+            home.runtime
+                .stop_capsule_by_id(&second.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "a live run is asked to stop"
+        );
+        assert!(
+            home.runtime.get_capsule(&second.id).await.is_some(),
+            "the stop leaves the entry to the run's own end"
+        );
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![second.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let end = home.wait_ended(&second.id).await;
+        grants.abort();
+        let cause = end.cause.clone().expect("an end records its cause");
+        let stops = stops_of(&home, &second.id);
+        let agrees = match (end.status.as_str(), stops.as_slice()) {
+            ("stopped", [StopReason::Requested]) => cause == "stopped: user",
+            ("failed", [StopReason::Error(detail)]) => detail == &cause,
+            _ => false,
+        };
+        assert!(
+            agrees,
+            "one end, one cause, one stop audit: {end:?} {stops:?}"
+        );
+        assert_eq!(home.listed().await.len(), 2, "two runs, each ended once");
+    }
+
     /// The stop route as the API exposes it: `None` is the bodyless request.
     pub(crate) async fn stop_route(
         home: &ProbeLaunch,
         id: &str,
         reason: Option<&str>,
     ) -> (StatusCode, String) {
+        let body = reason
+            .map(|reason| serde_json::to_vec(&serde_json::json!({ "reason": reason })).unwrap())
+            .unwrap_or_default();
+        stop_route_with(home, id, body).await
+    }
+
+    /// The stop route with these exact body bytes.
+    async fn stop_route_with(home: &ProbeLaunch, id: &str, body: Vec<u8>) -> (StatusCode, String) {
+        let response = stop_capsule(
+            Extension(home.runtime.clone()),
+            Path(id.to_string()),
+            body.into(),
+        )
+        .await;
+        answer_of(response).await
+    }
+
+    /// A response's status and body text.
+    async fn answer_of(response: axum::response::Response) -> (StatusCode, String) {
         use axum::body::to_bytes;
-        let body = reason.map(|reason| {
-            Json(StopRequest {
-                reason: Some(reason.to_string()),
-            })
-        });
-        let response = stop_capsule(Extension(home.runtime.clone()), Path(id.to_string()), body)
-            .await
-            .into_response();
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// The stop route's answer for an activation that has ended: its status
+    /// and cause, as the list names them.
+    fn stop_answer(body: &str) -> (String, Option<String>) {
+        let answer: serde_json::Value = serde_json::from_str(body).expect("a JSON answer");
+        (
+            answer["status"].as_str().expect("a status").to_string(),
+            answer["cause"].as_str().map(str::to_string),
+        )
     }
 
     /// A10-R's mid-compute proof (S4). A spinning guest is resident beside a
@@ -2543,8 +2968,14 @@ pub(crate) mod tests {
             "{stops:?}"
         );
 
-        // Nothing of the activation is left to stop.
-        assert!(!home.runtime.stop_capsule_by_id(&run.id).await.unwrap());
+        // Nothing of the activation is left to stop: a later stop answers
+        // the recorded end.
+        let (status, body) = stop_route(&home, &run.id, Some("again")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            stop_answer(&body),
+            ("stopped".into(), Some("stopped: spinning too long".into()))
+        );
 
         // The other agent completes on its own calls.
         let grants = grant_requests_of(
@@ -2675,6 +3106,270 @@ pub(crate) mod tests {
         grants.abort();
         assert_eq!(b_end.status, "stopped");
         assert_eq!(b_end.cause.as_deref(), Some("completed"));
+    }
+
+    /// A3-R S4+S5 fix 1 row. The guest spins in its start function: it is in
+    /// guest code while the registry still says `starting`. `DELETE` with a
+    /// reason ends it well before its own 10 s deadline and before its `run`:
+    /// the entry is `stopped` with `stopped: <reason>`, kept, and one
+    /// `Requested` stop is audited. A stop given to the provider only once
+    /// the entry is `running` (F-startskip) leaves the start function to run
+    /// to its own ending, which is then the entry's.
+    #[tokio::test]
+    async fn a_stop_during_start_ends_it_before_run() {
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let (dir, cid) = home.host_of("a5-spin-start-host", SPIN_START_COMPONENT);
+        let agent = home.create_agent_for_host("spin-start", &cid);
+        let run = home.launch_from(&dir, &agent).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+
+        // The worker has taken the activation to run its start function: the
+        // provider says `Running` while the registry still says `starting`.
+        let started = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while home.runtime.component_status_for_test(&run.id).await
+                != Some(elastos_common::CapsuleStatus::Running)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            started.is_ok(),
+            "the worker starts the guest: {:?} {:?}",
+            home.runtime.component_status_for_test(&run.id).await,
+            home.runtime.get_capsule(&run.id).await
+        );
+        let entry = home.runtime.get_capsule(&run.id).await.expect("registered");
+        assert_eq!(entry.status, "starting", "{entry:?}");
+
+        let asked = std::time::Instant::now();
+        let (status, body) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_route(&home, &run.id, Some("stuck starting")),
+        )
+        .await
+        .expect("the stop must end the start function before its own deadline");
+        let took = asked.elapsed();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            stop_answer(&body),
+            ("stopped".into(), Some("stopped: stuck starting".into()))
+        );
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+
+        let entry = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the ended entry is kept");
+        assert_eq!(entry.status, "stopped");
+        assert_eq!(entry.cause.as_deref(), Some("stopped: stuck starting"));
+        assert!(entry.ended_at.is_some());
+        let stops = stops_of(&home, &run.id);
+        assert!(
+            matches!(stops.as_slice(), [StopReason::Requested]),
+            "{stops:?}"
+        );
+    }
+
+    /// A3-R S4+S5 fix 2 row. A `DELETE` reads A's entry while A's end, which
+    /// has settled and audited its trap, waits to record it. The activation's
+    /// stop request is held until that end is recorded, so the stop leaves the
+    /// entry to that end and answers it: `failed`, with the trap's cause. The
+    /// entry is kept once, with that one cause, for the 60 s retention, and a
+    /// later `DELETE` with another reason answers the same and removes
+    /// nothing. A request taken away before the end is recorded (F-earlydrop)
+    /// sends the stop down the launcher's path, which removes the entry.
+    #[tokio::test]
+    async fn a_stop_racing_an_end_keeps_its_record_for_60_s() {
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let peer = point_at_peer(&home, a, b);
+        let run = home.launch(a).await.unwrap().0;
+        home.wait_pending(&run.id).await;
+        home.wait_running(&run.id).await;
+
+        // The registry is held: the stop's read of the entry waits first in
+        // line, and A's end, which records last, waits behind it.
+        let registry = home.runtime.hold_capsule_registry_for_test().await;
+        let stopper = tokio::spawn(stop_capsule(
+            Extension(home.runtime.clone()),
+            Path(run.id.clone()),
+            axum::body::Bytes::from_static(br#"{"reason":"racing the trap"}"#),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while stops_of(&home, &run.id).is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("A traps and its end audits the stop");
+        drop(registry);
+        let (status, body) = answer_of(stopper.await.unwrap()).await;
+        grants.abort();
+
+        let end = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the trap's record survives the racing stop");
+        assert_eq!(end.status, "failed", "{end:?}");
+        let cause = end.cause.clone().expect("a trap records its cause");
+        assert!(cause.contains(SCOPE_REFUSAL), "{cause}");
+        assert!(cause.contains(&peer), "{cause}");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(stop_answer(&body), ("failed".into(), Some(cause.clone())));
+        let stops = stops_of(&home, &run.id);
+        assert!(
+            matches!(stops.as_slice(), [StopReason::Error(detail)] if detail == &cause),
+            "one stop audit, the trap's: {stops:?}"
+        );
+
+        // A later stop answers the same end and removes nothing.
+        let (status, again) = stop_route(&home, &run.id, Some("a later stop")).await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(stop_answer(&again), stop_answer(&body));
+        let after = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("a later stop removes nothing");
+        assert_eq!(
+            (&after.status, &after.cause, after.ended_at),
+            (&end.status, &end.cause, end.ended_at)
+        );
+        assert_eq!(stops_of(&home, &run.id).len(), 1, "still one stop audit");
+
+        // One entry, with its one cause, for the 60 s retention.
+        let ended_at = end.ended_at.expect("the entry records its end");
+        let within = home
+            .runtime
+            .list_capsules_at(ended_at + std::time::Duration::from_secs(59))
+            .await;
+        let kept: Vec<_> = within.iter().filter(|info| info.id == run.id).collect();
+        assert_eq!(kept.len(), 1, "{within:?}");
+        assert_eq!(kept[0].cause.as_deref(), Some(cause.as_str()));
+        let past = home
+            .runtime
+            .list_capsules_at(ended_at + std::time::Duration::from_secs(60))
+            .await;
+        assert!(past.iter().all(|info| info.id != run.id), "{past:?}");
+    }
+
+    /// A3-R S4+S5 fix 3 row. A `DELETE` body that is not a stop request is
+    /// refused with `400 invalid_stop_request`, and nothing is stopped:
+    /// malformed JSON, an unknown field, a reason that is not a string, and
+    /// text. The activation runs on with no stop recorded or audited. An
+    /// empty body is still the stop with the reason `user`. A refused body
+    /// read as no body (F-lenient) makes the first refusal a stop.
+    #[tokio::test]
+    async fn a_malformed_stop_body_is_refused() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents[0].clone();
+        let run = home.launch(&agent).await.unwrap().0;
+        home.wait_pending(&run.id).await;
+
+        let refused: [&[u8]; 4] = [
+            br#"{"reason":"#,
+            br#"{"why":"too long"}"#,
+            br#"{"reason":5}"#,
+            b"stop now",
+        ];
+        for body in refused {
+            let (status, answer) = stop_route_with(&home, &run.id, body.to_vec()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+            let answer: serde_json::Value = serde_json::from_str(&answer).expect("a JSON refusal");
+            assert_eq!(answer["error"], "invalid_stop_request", "{answer}");
+        }
+        let entry = home.runtime.get_capsule(&run.id).await.expect("registered");
+        assert!(entry.ended_at.is_none(), "nothing is stopped: {entry:?}");
+        assert_eq!(home.runtime.requested_stop_for_test(&run.id), None);
+        assert!(stops_of(&home, &run.id).is_empty());
+
+        let (status, body) = stop_route_with(&home, &run.id, Vec::new()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            stop_answer(&body),
+            ("stopped".into(), Some("stopped: user".into()))
+        );
+    }
+
+    /// A3-R S4+S5 fix 4 row. A second stop arrives while the first is ending
+    /// the activation: the first recorded cause is the one the end records,
+    /// and both stops, and a third after the end, answer that one outcome.
+    /// One stop is audited. (`runtime::tests::a_later_stop_keeps_the_first_cause`
+    /// holds the rule itself.)
+    #[tokio::test]
+    async fn concurrent_stops_answer_the_first_recorded_cause() {
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents[0].clone();
+        let run = home.launch(&agent).await.unwrap().0;
+        home.wait_pending(&run.id).await;
+
+        let first = tokio::spawn(stop_capsule(
+            Extension(home.runtime.clone()),
+            Path(run.id.clone()),
+            axum::body::Bytes::from_static(br#"{"reason":"first"}"#),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let ended = home
+                    .runtime
+                    .get_capsule(&run.id)
+                    .await
+                    .is_some_and(|info| info.ended_at.is_some());
+                if ended || home.runtime.requested_stop_for_test(&run.id).is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the first stop records its cause");
+        let second = stop_route(&home, &run.id, Some("second")).await;
+        let first = answer_of(first.await.unwrap()).await;
+        let third = stop_route(&home, &run.id, Some("third")).await;
+
+        let outcome = ("stopped".to_string(), Some("stopped: first".to_string()));
+        for (status, body) in [&first, &second, &third] {
+            assert_eq!(*status, StatusCode::OK, "{body}");
+            assert_eq!(stop_answer(body), outcome);
+        }
+        let entry = home.runtime.get_capsule(&run.id).await.expect("kept");
+        assert_eq!((entry.status, entry.cause), outcome);
+        let stops = stops_of(&home, &run.id);
+        assert!(
+            matches!(stops.as_slice(), [StopReason::Requested]),
+            "{stops:?}"
+        );
     }
 
     /// An ended entry is listed for the 60 s retention and is gone after it,
