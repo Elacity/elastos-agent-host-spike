@@ -27,13 +27,12 @@ const ALLOWED_BUS_V2_IMPORTS: &[&str] = &[
     "elastos:bus/credentials@2.0.0",
 ];
 
-/// The exact core builtins a generated Bus v2 async guest imports, by module
-/// and name. The `$root` names are the block wit-component 0.254.2 emits in
-/// `src/dummy.rs:423-437` (`push_root_async_intrinsics`); `[task-cancel]`
-/// comes from the same block under `[export]$root`. The lifecycle names are
-/// the `run` export's task and stream builtins, fixed by
-/// `elastos/wit-bus-v2/elastos-bus-v2.wit:35` and observed in the encoded
-/// `bus2_photo_guest`. Exact names only: never a whole module.
+/// Exact core builtins for the generated Bus v2 async guest, by module and name.
+/// wit-component 0.254.2 `src/dummy.rs:423-438` supplies the root names;
+/// wit-bindgen 0.60 `src/interface.rs:732-745` supplies the lifecycle stream
+/// names. wit-component `src/dummy.rs:262-274` defers synchronous stream
+/// read/write. Unit-stream imports require wit-bindgen's inter-task-wakeup
+/// feature, which this guest does not enable.
 const ALLOWED_V2_CORE_BUILTINS: &[(&str, &str)] = &[
     ("$root", "[backpressure-inc]"),
     ("$root", "[backpressure-dec]"),
@@ -50,8 +49,6 @@ const ALLOWED_V2_CORE_BUILTINS: &[(&str, &str)] = &[
     ("[export]$root", "[task-cancel]"),
     ("[export]elastos:bus/lifecycle@2.0.0", "[task-return]run"),
     ("[export]elastos:bus/lifecycle@2.0.0", "[stream-new-0]run"),
-    ("[export]elastos:bus/lifecycle@2.0.0", "[stream-read-0]run"),
-    ("[export]elastos:bus/lifecycle@2.0.0", "[stream-write-0]run"),
     (
         "[export]elastos:bus/lifecycle@2.0.0",
         "[stream-cancel-read-0]run",
@@ -377,52 +374,9 @@ mod tests {
         assert!(err.contains("runtime@1.0.0"), "{err}");
     }
 
-    /// The core imports of the generated Bus v2 async shape, as encoded by
-    /// wit-component 0.254.2 from a wit-bindgen 0.60 async guest. The `$root`
-    /// set is the twelve names in `push_root_async_intrinsics`
-    /// (`wit-component src/dummy.rs:423-437`).
-    const V2_GENERATED_CORE_IMPORTS: &[(&str, &str)] = &[
-        ("$root", "[backpressure-inc]"),
-        ("$root", "[backpressure-dec]"),
-        ("$root", "[waitable-set-new]"),
-        ("$root", "[waitable-set-wait]"),
-        ("$root", "[waitable-set-poll]"),
-        ("$root", "[waitable-set-drop]"),
-        ("$root", "[waitable-join]"),
-        ("$root", "[thread-yield]"),
-        ("$root", "[subtask-drop]"),
-        ("$root", "[subtask-cancel]"),
-        ("$root", "[context-get-0]"),
-        ("$root", "[context-set-0]"),
-        ("[export]$root", "[task-cancel]"),
-        ("[export]elastos:bus/lifecycle@2.0.0", "[task-return]run"),
-        ("[export]elastos:bus/lifecycle@2.0.0", "[stream-new-0]run"),
-        ("[export]elastos:bus/lifecycle@2.0.0", "[stream-read-0]run"),
-        ("[export]elastos:bus/lifecycle@2.0.0", "[stream-write-0]run"),
-        (
-            "[export]elastos:bus/lifecycle@2.0.0",
-            "[stream-cancel-read-0]run",
-        ),
-        (
-            "[export]elastos:bus/lifecycle@2.0.0",
-            "[stream-cancel-write-0]run",
-        ),
-        (
-            "[export]elastos:bus/lifecycle@2.0.0",
-            "[stream-drop-readable-0]run",
-        ),
-        (
-            "[export]elastos:bus/lifecycle@2.0.0",
-            "[stream-drop-writable-0]run",
-        ),
-        (
-            "[export]elastos:bus/lifecycle@2.0.0",
-            "[async-lower][stream-read-0]run",
-        ),
-        (
-            "[export]elastos:bus/lifecycle@2.0.0",
-            "[async-lower][stream-write-0]run",
-        ),
+    /// Interface-instance and fixup imports observed in the generated guest.
+    /// The exact builtin list is independently pinned in the test below.
+    const V2_GENERATED_OTHER_CORE_IMPORTS: &[(&str, &str)] = &[
         ("elastos:bus/providers@2.0.0", "[async-lower]invoke"),
         (
             "elastos:bus/providers@2.0.0",
@@ -517,7 +471,11 @@ mod tests {
         }
         wat.push_str("  (import \"import-func-run\" (func))\n");
         wat.push_str("  (core module $guest\n");
-        for (module, name) in V2_GENERATED_CORE_IMPORTS.iter().chain(extra_core) {
+        for (module, name) in ALLOWED_V2_CORE_BUILTINS
+            .iter()
+            .chain(V2_GENERATED_OTHER_CORE_IMPORTS)
+            .chain(extra_core)
+        {
             wat.push_str(&format!("    (import \"{module}\" \"{name}\" (func))\n"));
         }
         wat.push_str("    (func (export \"run\")))\n");
@@ -549,6 +507,65 @@ mod tests {
         let run_import =
             component_with_imports(&[("import-func-run", EncodedComponentTypeRef::Func(0))]);
         validate_component_imports_for_contract(&run_import, ELASTOS_BUS_V2_CONTRACT).unwrap();
+        let wrong_run = component_with_imports(&[(
+            "import-func-run",
+            EncodedComponentTypeRef::Type(wasm_encoder::TypeBounds::Eq(0)),
+        )]);
+        for contract in [ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V2_CONTRACT] {
+            let err = validate_component_imports_for_contract(&wrong_run, contract).unwrap_err();
+            assert_eq!(
+                err,
+                "component generated run import must be a function import"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_builtin_pairs_are_exactly_the_toolchain_set() {
+        assert_eq!(
+            ALLOWED_V2_CORE_BUILTINS,
+            &[
+                ("$root", "[backpressure-inc]"),
+                ("$root", "[backpressure-dec]"),
+                ("$root", "[waitable-set-new]"),
+                ("$root", "[waitable-set-wait]"),
+                ("$root", "[waitable-set-poll]"),
+                ("$root", "[waitable-set-drop]"),
+                ("$root", "[waitable-join]"),
+                ("$root", "[thread-yield]"),
+                ("$root", "[subtask-drop]"),
+                ("$root", "[subtask-cancel]"),
+                ("$root", "[context-get-0]"),
+                ("$root", "[context-set-0]"),
+                ("[export]$root", "[task-cancel]"),
+                ("[export]elastos:bus/lifecycle@2.0.0", "[task-return]run"),
+                ("[export]elastos:bus/lifecycle@2.0.0", "[stream-new-0]run"),
+                (
+                    "[export]elastos:bus/lifecycle@2.0.0",
+                    "[stream-cancel-read-0]run"
+                ),
+                (
+                    "[export]elastos:bus/lifecycle@2.0.0",
+                    "[stream-cancel-write-0]run"
+                ),
+                (
+                    "[export]elastos:bus/lifecycle@2.0.0",
+                    "[stream-drop-readable-0]run"
+                ),
+                (
+                    "[export]elastos:bus/lifecycle@2.0.0",
+                    "[stream-drop-writable-0]run"
+                ),
+                (
+                    "[export]elastos:bus/lifecycle@2.0.0",
+                    "[async-lower][stream-read-0]run"
+                ),
+                (
+                    "[export]elastos:bus/lifecycle@2.0.0",
+                    "[async-lower][stream-write-0]run"
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -556,15 +573,23 @@ mod tests {
         let shape = v2_generated_shape(36, &[]);
         validate_component_imports_for_contract(&shape, ELASTOS_BUS_V2_CONTRACT).unwrap();
 
-        // One non-builtin name under `$root` is refused by name, even though
-        // every other part of the generated shape is admitted.
-        let err = validate_component_imports_for_contract(
-            &v2_generated_shape(36, &[("$root", "[not-a-builtin]")]),
-            ELASTOS_BUS_V2_CONTRACT,
-        )
-        .unwrap_err();
-        assert!(err.contains("$root::[not-a-builtin]"), "{err}");
-        assert!(err.contains("not allowed"), "{err}");
+        for (module, name) in [
+            ("$root", "[not-a-builtin]"),
+            ("[export]$root", "[not-a-builtin]"),
+            ("[export]elastos:bus/lifecycle@2.0.0", "[not-a-builtin]"),
+            ("[export]elastos:bus/lifecycle@2.0.0", "[stream-read-0]run"),
+            ("[export]elastos:bus/lifecycle@2.0.0", "[stream-write-0]run"),
+            ("evil", "[waitable-set-new]"),
+            ("[export]elastos:bus/lifecycle@2.0.1", "[task-return]run"),
+        ] {
+            let err = validate_component_imports_for_contract(
+                &v2_generated_shape(36, &[(module, name)]),
+                ELASTOS_BUS_V2_CONTRACT,
+            )
+            .unwrap_err();
+            assert!(err.contains(&format!("{module}::{name}")), "{err}");
+            assert!(err.contains("not allowed"), "{err}");
+        }
 
         // The generated shape's 36 canonical functions fit; 65 do not.
         let err = validate_component_imports_for_contract(
@@ -580,6 +605,18 @@ mod tests {
         let err = validate_component_imports(&wat_imports(&["elastos:bus/ui@2.0.0"])).unwrap_err();
         assert!(err.contains("not allowed"), "{err}");
         assert!(err.contains("elastos:bus/ui@2.0.0"), "{err}");
+    }
+
+    #[test]
+    fn v1_refuses_v2_root_builtin() {
+        // A single v2 builtin checks the v1 contract without mixed bus imports.
+        let component = wat::parse_str(
+            "(component (core module (import \"$root\" \"[waitable-set-new]\" (func))))",
+        )
+        .unwrap();
+        let err = validate_component_imports(&component).unwrap_err();
+        assert!(err.contains("$root::[waitable-set-new]"), "{err}");
+        assert!(err.contains("not allowed"), "{err}");
     }
 
     fn component_with_imports(imports: &[(&str, EncodedComponentTypeRef)]) -> Vec<u8> {
