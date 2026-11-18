@@ -1457,6 +1457,51 @@ pub(crate) mod tests {
         })
     }
 
+    /// Grants every pending request the named sessions make, as the shell
+    /// would, and keeps doing it until the test stops the task. A request for
+    /// a resource in `held` is left pending. Every grant it makes is pushed to
+    /// `made`, so a row can check a token it made afterwards.
+    pub(crate) fn grant_requests_of(
+        store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        manager: Arc<elastos_runtime::capability::CapabilityManager>,
+        sessions: Vec<String>,
+        held: Vec<String>,
+        made: Arc<std::sync::Mutex<Vec<elastos_runtime::capability::CapabilityToken>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        use elastos_runtime::capability::pending::GrantDuration;
+        use elastos_runtime::capability::token::TokenConstraints;
+        tokio::spawn(async move {
+            loop {
+                for pending in store.list_pending().await {
+                    if !sessions
+                        .iter()
+                        .any(|session| session == &pending.session_id.0)
+                    {
+                        continue;
+                    }
+                    if held
+                        .iter()
+                        .any(|held| held == &pending.resource.to_string())
+                    {
+                        continue;
+                    }
+                    let token = manager.grant(
+                        &pending.session_id.0,
+                        pending.resource.clone(),
+                        pending.action,
+                        TokenConstraints::default(),
+                        None,
+                    );
+                    made.lock().unwrap().push(token.clone());
+                    let _ = store
+                        .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+                        .await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+    }
+
     /// A5 admission row 1, at the launch entry with the feature on: two stored
     /// agents of one owner launch through `launch_capsule` with dev mode off.
     /// Each agent's own guest writes a format-2 journal entry and
@@ -1893,6 +1938,299 @@ pub(crate) mod tests {
         assert_eq!(listed.len(), 1, "{listed:?}");
         assert_eq!(listed[0]["status"], "failed");
         assert_eq!(listed[0]["cause"], cause);
+    }
+
+    /// A11-R's proof row. A's guest traps after a granted invoke (the pointer
+    /// under its own root names B's file, and the bridge refuses the ask at
+    /// the principal scope). A ends `failed` with that refusal as its cause:
+    /// exactly one `capsule_stop` error audit names it, its grants are
+    /// revoked, its guest ran once (five calls in one session), and it is
+    /// never launched again. B, held in its own first call the whole time, is
+    /// untouched and then completes.
+    #[tokio::test]
+    async fn trap_recorded_once() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let (root_a, root_b) = (home.root(a), home.root(b));
+        let peer = format!("{root_b}/memory/notes.md");
+        let pointer_uri = format!("{root_a}/memory/peer");
+        let pointer_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &pointer_uri)
+                .unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            a,
+            &root_a,
+            &pointer_uri,
+            &pointer_path,
+            peer.as_bytes(),
+        )
+        .unwrap();
+
+        // Both agents launch. B is held in its own first call from here to the
+        // end of the row: only A's session is granted.
+        let run_a = home.launch(a).await.unwrap().0;
+        assert_eq!(run_a.status, "starting");
+        let run_b = home.launch(b).await.unwrap().0;
+        assert_eq!(run_b.status, "starting");
+        home.wait_pending(&run_a.id).await;
+        home.wait_pending(&run_b.id).await;
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run_a.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let end = home.wait_ended(&run_a.id).await;
+        grants.abort();
+
+        assert_eq!(end.status, "failed");
+        assert_eq!(end.session_id, run_a.id);
+        let cause = end.cause.clone().expect("a trap records its cause");
+        assert!(
+            cause.contains(
+                "localhost://UsersAI roots must use UsersAI/self or the active principal root"
+            ),
+            "{cause}"
+        );
+        assert!(cause.contains(&peer), "{cause}");
+
+        // A ran once. Its one session holds its five calls: four under its own
+        // root and the read of the pointer. A relaunch would add a second
+        // session and five more calls.
+        let invoked_a = home.invoked(a);
+        let sessions: std::collections::BTreeSet<Option<String>> = invoked_a
+            .iter()
+            .map(|(session, _, _)| session.clone())
+            .collect();
+        assert_eq!(
+            sessions,
+            std::collections::BTreeSet::from([Some(run_a.id.clone())]),
+            "one launch for A: {sessions:?}"
+        );
+        assert_eq!(invoked_a.len(), 5, "{invoked_a:?}");
+
+        // Its grants are revoked: every request of its session is denied by
+        // the Runtime, with a reason that names the cause.
+        let settled = format!("instance ended: {cause}");
+        let a_requests: Vec<_> = home
+            .pending_store
+            .list_requests()
+            .await
+            .into_iter()
+            .filter(|request| request.session_id.0 == run_a.id)
+            .collect();
+        assert!(!a_requests.is_empty(), "A asked for its own root");
+        for request in &a_requests {
+            let elastos_runtime::capability::RequestStatus::Denied { reason, settled_by } =
+                &request.status
+            else {
+                panic!(
+                    "a request of A's session is not denied: {:?}",
+                    request.status
+                );
+            };
+            assert_eq!(reason, &settled);
+            assert_eq!(*settled_by, elastos_runtime::capability::Settler::Runtime);
+        }
+
+        // Exactly one `capsule_stop`, and it carries the error.
+        let stops: Vec<_> = home
+            .audit_log
+            .recent_events(usize::MAX)
+            .into_iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::CapsuleStop {
+                    capsule_id,
+                    reason,
+                    ..
+                } if capsule_id == run_a.id => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops.len(), 1, "exactly one stop audit: {stops:?}");
+        assert!(
+            matches!(
+                &stops[0],
+                elastos_runtime::primitives::audit::StopReason::Error(detail) if detail == &cause
+            ),
+            "{stops:?}"
+        );
+
+        // B is unaffected: its first call is still pending, its entry still
+        // running.
+        assert!(
+            home.pending_store
+                .list_pending()
+                .await
+                .iter()
+                .any(|request| request.session_id.0 == run_b.id),
+            "A's end settled no request of B's session"
+        );
+        assert_eq!(
+            home.runtime
+                .get_capsule(&run_b.id)
+                .await
+                .expect("B is still registered")
+                .status,
+            "running"
+        );
+
+        // A is not launched again. For two seconds after its end the registry
+        // holds exactly A's one end and B's one run: a relaunch of the failed
+        // activation would register a third instance (F-relaunch).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let listed = home.listed().await;
+            assert_eq!(listed.len(), 2, "A was launched again: {listed:?}");
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // B completes when its own calls are granted.
+        let b_grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run_b.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let b_end = home.wait_ended(&run_b.id).await;
+        b_grants.abort();
+        assert_eq!(b_end.status, "stopped");
+        assert_eq!(b_end.cause.as_deref(), Some("completed"));
+        assert_eq!(home.invoked(b).len(), 6, "{:?}", home.invoked(b));
+    }
+
+    /// A failed activation's end settles its session: a request still pending
+    /// when the guest traps is denied by the Runtime with a reason that names
+    /// the cause, and the grant it made before the trap no longer validates.
+    /// A pending request of another session is left pending.
+    #[tokio::test]
+    async fn failure_settles_and_revokes() {
+        use elastos_runtime::capability::manager::ValidationError;
+        use elastos_runtime::capability::{Action, ResourceId};
+        use elastos_runtime::session::SessionId;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let (root_a, root_b) = (home.root(a), home.root(b));
+        let peer = format!("{root_b}/memory/notes.md");
+        let pointer_uri = format!("{root_a}/memory/peer");
+        let pointer_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &pointer_uri)
+                .unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            a,
+            &root_a,
+            &pointer_uri,
+            &pointer_path,
+            peer.as_bytes(),
+        )
+        .unwrap();
+
+        // A launches and stays held in its first call, so its session exists
+        // and this row can put a request of that session in the store with the
+        // call the bridge itself makes when a guest asks.
+        let run = home.launch(a).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+        home.wait_pending(&run.id).await;
+        let reserved = ResourceId::new("elastos://content/publish");
+        let reserved_id = home
+            .pending_store
+            .create_request(
+                SessionId::from_string(run.id.clone()),
+                reserved.clone(),
+                Action::Read,
+            )
+            .await
+            .id
+            .to_string();
+
+        // B's own request is pending too, and stays so across A's end.
+        let run_b = home.launch(b).await.unwrap().0;
+        let b_pending = home.wait_pending(&run_b.id).await;
+
+        // A's calls are granted, except the reserved request, which A never
+        // asked for and which stays pending until A ends.
+        let made = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run.id.clone()],
+            vec![reserved.to_string()],
+            made.clone(),
+        );
+        let end = home.wait_ended(&run.id).await;
+        grants.abort();
+        assert_eq!(end.status, "failed");
+        let cause = end.cause.clone().expect("a trap records its cause");
+
+        // The request pending at the end is denied by the Runtime, and its
+        // reason names the cause.
+        let settled = format!("instance ended: {cause}");
+        let after = home
+            .pending_store
+            .get_request(&reserved_id)
+            .await
+            .expect("the reserved request is still held");
+        let elastos_runtime::capability::RequestStatus::Denied { reason, settled_by } =
+            &after.status
+        else {
+            panic!("the pending request is not settled: {:?}", after.status);
+        };
+        assert_eq!(reason, &settled);
+        assert_eq!(*settled_by, elastos_runtime::capability::Settler::Runtime);
+
+        // B's request was not settled by A's end.
+        assert!(
+            home.pending_store
+                .list_pending()
+                .await
+                .iter()
+                .any(|request| request.id.as_str() == b_pending.id.as_str()),
+            "A's end left B's request pending"
+        );
+
+        // Every grant A held before the trap is revoked in the token store.
+        let made = made.lock().unwrap().clone();
+        assert!(!made.is_empty(), "A's own-root calls were granted");
+        for token in &made {
+            assert_eq!(
+                home.capability_manager
+                    .validate(token, &run.id, token.action(), token.resource(), None)
+                    .await,
+                Err(ValidationError::TokenRevoked),
+                "a grant of A's session survives its end"
+            );
+        }
+
+        // B finishes on its own calls, so the Home is quiet.
+        let b_grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run_b.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let b_end = home.wait_ended(&run_b.id).await;
+        b_grants.abort();
+        assert_eq!(b_end.status, "stopped");
+        assert_eq!(b_end.cause.as_deref(), Some("completed"));
     }
 
     /// An ended entry is listed for the 60 s retention and is gone after it,
