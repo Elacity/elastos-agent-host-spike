@@ -6,9 +6,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
-use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal};
+use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
 use crate::resource_bridge::LaunchContent;
-use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
+use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
@@ -467,99 +467,98 @@ impl Drop for ActivationContextHeld {
     }
 }
 
-/// A bundle the by-CID start has checked. The walked CID is the one asked
-/// for, a publisher this Home trusts signed it, and the manifest was admitted.
-/// [`VerifiedBundle::check`] is the only maker. A program loads from
-/// [`VerifiedBundle::into_component`].
-pub(crate) struct VerifiedBundle {
-    cid: LabCid,
-    signer_did: String,
-    admitted: AdmittedBundle,
-}
+/// The only place a by-CID start can build a [`VerifiedBundle`].
+///
+/// The struct's fields are private to this module. A struct literal written
+/// outside it, including one shaped `Ok(VerifiedBundle { ... })`, does not
+/// compile. [`VerifiedBundle::check`] is the function here that builds one.
+mod verified_bundle {
+    use std::path::Path;
 
-impl VerifiedBundle {
-    /// The only maker. The walked CID equals `asked`, the signature verifies
-    /// under `trust`, the manifest is admitted, and a program's imports pass.
-    pub(crate) fn check(
-        bundle: &CheckedBundle,
-        asked: &LabCid,
-        signature: &Path,
-        trust: &SignatureVerifier,
-    ) -> std::result::Result<(Self, AcceptedSignature), BundleRefusal> {
-        if bundle.cid() != *asked {
-            return Err(BundleRefusal::CidMismatch {
-                asked: asked.to_string(),
-                computed: bundle.cid().to_string(),
-            });
-        }
-        let accepted = bundle_admission::check_bundle_signature(signature, asked, trust)?;
-        let admitted = bundle_admission::admit_bundle_manifest(bundle)?;
-        if admitted.kind == BundleKind::Program {
-            crate::component::validate_component_imports_for_manifest(
-                &admitted.component,
-                &admitted.manifest,
-            )
-            .map_err(BundleRefusal::NotAComponent)?;
-        }
-        Ok((
-            VerifiedBundle {
-                cid: *asked,
-                signer_did: accepted.signer_did.clone(),
-                admitted,
-            },
-            accepted,
-        ))
-    }
+    use elastos_bundle_identity::{CheckedBundle, LabCid};
+    use elastos_common::CapsuleManifest;
+    use elastos_runtime::signature::SignatureVerifier;
 
-    pub(crate) fn cid(&self) -> &LabCid {
-        &self.cid
-    }
+    use crate::bundle_admission::{
+        self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal,
+    };
 
-    pub(crate) fn signer_did(&self) -> &str {
-        &self.signer_did
-    }
-
-    pub(crate) fn kind(&self) -> BundleKind {
-        self.admitted.kind
-    }
-
-    pub(crate) fn manifest(&self) -> &CapsuleManifest {
-        &self.admitted.manifest
-    }
-
-    pub(crate) fn pins(&self) -> &[(String, String)] {
-        &self.admitted.pins
-    }
-
-    pub(crate) fn take_pins(&mut self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.admitted.pins)
-    }
-
-    pub(crate) fn take_files(&mut self) -> std::collections::BTreeMap<String, Vec<u8>> {
-        std::mem::take(&mut self.admitted.files)
-    }
-
-    /// The manifest and the entrypoint bytes the loader compiles.
-    pub(crate) fn into_component(self) -> (CapsuleManifest, Vec<u8>) {
-        (self.admitted.manifest, self.admitted.component)
-    }
-}
-
-#[cfg(test)]
-impl VerifiedBundle {
-    /// A bundle no check has passed, for tests of what follows the check.
-    pub(crate) fn unchecked_for_test(
+    /// A bundle the by-CID start has checked. The walked CID is the one asked
+    /// for, a publisher this Home trusts signed it, and the manifest was
+    /// admitted. A program loads from [`VerifiedBundle::into_component`].
+    /// The signature this start reports is the [`AcceptedSignature`] returned
+    /// beside the bundle, not a field of the bundle.
+    pub(crate) struct VerifiedBundle {
         cid: LabCid,
-        signer_did: &str,
         admitted: AdmittedBundle,
-    ) -> Self {
-        Self {
-            cid,
-            signer_did: signer_did.to_string(),
-            admitted,
+    }
+
+    impl VerifiedBundle {
+        /// Builds the bundle the start keeps. The walked CID equals `asked`,
+        /// the signature verifies under `trust`, the manifest is admitted,
+        /// and a program's imports pass.
+        pub(crate) fn check(
+            bundle: &CheckedBundle,
+            asked: &LabCid,
+            signature: &Path,
+            trust: &SignatureVerifier,
+        ) -> std::result::Result<(Self, AcceptedSignature), BundleRefusal> {
+            if bundle.cid() != *asked {
+                return Err(BundleRefusal::CidMismatch {
+                    asked: asked.to_string(),
+                    computed: bundle.cid().to_string(),
+                });
+            }
+            let accepted = bundle_admission::check_bundle_signature(signature, asked, trust)?;
+            let admitted = bundle_admission::admit_bundle_manifest(bundle)?;
+            if admitted.kind == BundleKind::Program {
+                crate::component::validate_component_imports_for_manifest(
+                    &admitted.component,
+                    &admitted.manifest,
+                )
+                .map_err(BundleRefusal::NotAComponent)?;
+            }
+            Ok((
+                VerifiedBundle {
+                    cid: *asked,
+                    admitted,
+                },
+                accepted,
+            ))
+        }
+
+        pub(crate) fn cid(&self) -> &LabCid {
+            &self.cid
+        }
+
+        pub(crate) fn kind(&self) -> BundleKind {
+            self.admitted.kind
+        }
+
+        pub(crate) fn manifest(&self) -> &CapsuleManifest {
+            &self.admitted.manifest
+        }
+
+        pub(crate) fn pins(&self) -> &[(String, String)] {
+            &self.admitted.pins
+        }
+
+        pub(crate) fn take_pins(&mut self) -> Vec<(String, String)> {
+            std::mem::take(&mut self.admitted.pins)
+        }
+
+        pub(crate) fn take_files(&mut self) -> std::collections::BTreeMap<String, Vec<u8>> {
+            std::mem::take(&mut self.admitted.files)
+        }
+
+        /// The manifest and the entrypoint bytes the loader compiles.
+        pub(crate) fn into_component(self) -> (CapsuleManifest, Vec<u8>) {
+            (self.admitted.manifest, self.admitted.component)
         }
     }
 }
+
+use verified_bundle::VerifiedBundle;
 
 impl Runtime {
     /// Create a new runtime with a single compute provider (backward compatible)
@@ -1153,11 +1152,9 @@ impl Runtime {
         // until the last of them is judged: trust cannot change between two
         // bundles of one start. It is let go before anything is loaded.
         let trust = self.signature_verifier.read().await;
-        let (mut admitted, mut accepted): (VerifiedBundle, AcceptedSignature) = self
+        let (mut admitted, accepted): (VerifiedBundle, AcceptedSignature) = self
             .admit_closure_member(data_dir, &asked, &trust, &mut left, &mut after_walk)
             .await?;
-        // The signer this start reports is the one on the verified bundle.
-        accepted.signer_did = admitted.signer_did().to_string();
         // What may sit below the bundle asked for follows from what it is. A
         // program pins programs. Content pins exactly one bundle, its
         // viewer, which must be a page. A page is reached through the
@@ -1342,11 +1339,12 @@ impl Runtime {
     /// The checks every bundle of a start by CID passes, the one asked for
     /// and each pinned one alike, in this order: the store has a slot for
     /// `cid`; one walk of it, inside what is `left` of the closure's budget;
-    /// and then [`VerifiedBundle::check`], the only maker. That maker requires
-    /// the files to recompute to `cid`, accepts the signature beside the slot
-    /// under `trust` (the start's one reading of who is trusted), and only
-    /// then judges the manifest and a program's imports. What the walk took
-    /// in comes off `left`.
+    /// and then [`VerifiedBundle::check`], which builds the value this start
+    /// keeps. That function requires the files to recompute to `cid`, accepts
+    /// the signature beside the slot under `trust` (the start's one reading
+    /// of who is trusted), and only then judges the manifest and a program's
+    /// imports. Its fields are private to the module that defines the struct.
+    /// What the walk took in comes off `left`.
     ///
     /// The walk is not blind to the manifest: to name a bundle it parses
     /// and validates `capsule.json` with the Runtime's reader, before the
