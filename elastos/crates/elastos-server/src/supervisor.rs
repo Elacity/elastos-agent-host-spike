@@ -1206,6 +1206,7 @@ impl Supervisor {
                     manifest_capabilities: manifest.resource_authority_bounds(),
                     data_dir: Some(self.data_dir.clone()),
                     launch: None,
+                    model_token_ceiling: None,
                 }),
                 _ => None,
             };

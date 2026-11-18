@@ -3907,6 +3907,7 @@ fn browser_vm_manifest(memory_mib: u32, vcpu_count: u8) -> CapsuleManifest {
             memory_mb: memory_mib,
             cpu_shares: 100,
             gpu: false,
+            model_tokens: None,
         },
         permissions: Permissions::default(),
         microvm: Some(MicroVmConfig {

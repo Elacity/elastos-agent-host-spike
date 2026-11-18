@@ -755,6 +755,66 @@ pub(crate) mod tests {
         }
     }
 
+    /// Records every raw request the bridge routes to the model provider.
+    /// When `watch` is set, each call also records the ceilings the Runtime
+    /// map holds at that moment.
+    #[derive(Default)]
+    struct CapturingModelProvider {
+        requests: std::sync::Mutex<Vec<serde_json::Value>>,
+        ceilings_at_call: std::sync::Mutex<Vec<Vec<(String, u64)>>>,
+        runtime: std::sync::Mutex<Option<Arc<Runtime>>>,
+    }
+
+    impl CapturingModelProvider {
+        fn requests(&self) -> Vec<serde_json::Value> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        fn watch(&self, runtime: Arc<Runtime>) {
+            *self.runtime.lock().unwrap() = Some(runtime);
+        }
+
+        fn ceilings_at_call(&self) -> Vec<Vec<(String, u64)>> {
+            self.ceilings_at_call.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl elastos_runtime::provider::Provider for CapturingModelProvider {
+        async fn handle(
+            &self,
+            _request: elastos_runtime::provider::ResourceRequest,
+        ) -> Result<
+            elastos_runtime::provider::ResourceResponse,
+            elastos_runtime::provider::ProviderError,
+        > {
+            Err(elastos_runtime::provider::ProviderError::Provider(
+                "raw provider fixture does not implement ResourceRequest".to_string(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["model"]
+        }
+
+        fn name(&self) -> &'static str {
+            "capturing-model"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, elastos_runtime::provider::ProviderError> {
+            let runtime = self.runtime.lock().unwrap().clone();
+            if let Some(runtime) = runtime {
+                let held = runtime.model_token_ceilings_held();
+                self.ceilings_at_call.lock().unwrap().push(held);
+            }
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(serde_json::json!({"status": "ok", "data": {"ok": true}}))
+        }
+    }
+
     /// A Home whose stored agents are the probe package: the probe's manifest
     /// name and the CID its capsule directory records, signed by a key the
     /// runtime trusts. Two agents, or as many as asked for, share the Home.
@@ -1013,6 +1073,33 @@ pub(crate) mod tests {
             )
             .unwrap();
             let cid = crate::stage_cmd::bundle_cid(&dir).expect("the claimed host is walkable");
+            (dir, cid)
+        }
+
+        /// A signed copy of the probe whose manifest asks for `tokens` model
+        /// tokens (`None` asks for none) and may call the model.
+        fn model_host(&self, name: &str, tokens: Option<u64>) -> (std::path::PathBuf, String) {
+            use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+            let key = SigningKey::from_bytes(&[0x44; 32]);
+            let dir = self.fixture_root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/a5-launch-probe");
+            for file in ["capsule.json", "a5-launch-probe.component.wasm"] {
+                std::fs::copy(fixture.join(file), dir.join(file)).unwrap();
+            }
+            let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
+            let mut manifest: elastos_common::CapsuleManifest =
+                serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
+            manifest.capabilities.push("elastos://model/*".to_string());
+            manifest.resources.model_tokens = tokens;
+            sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let cid = crate::stage_cmd::bundle_cid(&dir).expect("the model host is walkable");
             (dir, cid)
         }
 
@@ -2247,6 +2334,7 @@ pub(crate) mod tests {
             manifest_capabilities: Vec::new(),
             data_dir: Some(home.data_dir.clone()),
             launch: None,
+            model_token_ceiling: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
         let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(
@@ -3383,6 +3471,242 @@ pub(crate) mod tests {
             "the absent peer pointer and the absent plan are the only failed calls: {events:?}"
         );
         grants.abort();
+    }
+
+    async fn admitted_model_agent(
+        tokens: Option<u64>,
+    ) -> (
+        ProbeLaunch,
+        std::path::PathBuf,
+        String,
+        Arc<CapturingModelProvider>,
+    ) {
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.model_host("model-host", tokens);
+        let agent = home.create_agent_for_host("model", &cid);
+        let model = Arc::new(CapturingModelProvider::default());
+        let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+        registry.register(model.clone()).await;
+        registry.register(home.provider.clone()).await;
+        home.runtime
+            .set_provider_registry(
+                registry,
+                home.capability_manager.clone(),
+                home.pending_store.clone(),
+                home.data_dir.clone(),
+            )
+            .await;
+        model.watch(home.runtime.clone());
+        (home, dir, agent, model)
+    }
+
+    async fn ask_model(
+        home: &ProbeLaunch,
+        dir: &std::path::Path,
+        agent: &str,
+        asked: Option<u64>,
+    ) -> String {
+        let body = match asked {
+            None => String::new(),
+            Some(tokens) => format!("\",\"model_tokens\":{tokens},\"pad\":\""),
+        };
+        home.plan(
+            agent,
+            &[format!(
+                "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t{body}"
+            )],
+        );
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let launched = home.launch_from(dir, agent).await.unwrap().0;
+        grants.abort();
+        assert_eq!(launched.status, "completed");
+        home.results(agent).join("\n")
+    }
+
+    /// An admitted agent whose signed manifest asks for no model tokens cannot
+    /// reach the model. The provider records no call.
+    #[tokio::test]
+    async fn no_ask_no_model() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(None).await;
+        let outcome = ask_model(&home, &dir, &agent, None).await;
+        assert!(
+            outcome.contains("model_budget_exceeded: signed ceiling is 0"),
+            "{outcome}"
+        );
+        assert!(model.requests().is_empty(), "{:?}", model.requests());
+    }
+
+    /// The ceiling the bridge holds for this instance is the signed one, after
+    /// the guest sends a body that names a different ceiling. This row was
+    /// `guest_cannot_raise_cap`. That name no longer fits: N9 does not refuse
+    /// a larger ask. The body here names 0, which would refuse the call if the
+    /// decision read it. The call still reaches the provider, and the Runtime
+    /// map still holds the signed ceiling.
+    #[tokio::test]
+    async fn bridge_holds_signed_ceiling() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let signed = 16;
+        let (home, dir, agent, model) = admitted_model_agent(Some(signed)).await;
+        let outcome = ask_model(&home, &dir, &agent, Some(0)).await;
+        assert!(
+            !outcome.contains("model_budget_exceeded"),
+            "a guest field is not the ceiling: {outcome}"
+        );
+        assert_eq!(model.requests().len(), 1, "{:?}", model.requests());
+        assert_eq!(
+            model.requests()[0]["model_tokens"],
+            serde_json::json!(0),
+            "the guest body reached the provider: {:?}",
+            model.requests()
+        );
+        let held = model.ceilings_at_call();
+        assert_eq!(
+            held.len(),
+            1,
+            "the model call ran while the instance was up: {held:?}"
+        );
+        assert_eq!(
+            held[0]
+                .iter()
+                .map(|(_, ceiling)| *ceiling)
+                .collect::<Vec<_>>(),
+            vec![signed],
+            "the bridge holds the signed ceiling: {held:?}"
+        );
+        assert!(
+            home.runtime.model_token_ceilings_held().is_empty(),
+            "the held value was read during the call"
+        );
+    }
+
+    /// An admitted agent with a positive signed ceiling reaches the model.
+    /// The provider records one call.
+    #[tokio::test]
+    async fn positive_ceiling_reaches_model() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(16)).await;
+        let outcome = ask_model(&home, &dir, &agent, None).await;
+        assert!(!outcome.contains("model_budget_exceeded"), "{outcome}");
+        assert_eq!(model.requests().len(), 1, "{:?}", model.requests());
+        assert_eq!(model.requests()[0]["op"], "offers_list");
+    }
+
+    /// A signed component that declares no agent has no ceiling entry, and
+    /// its model invoke still reaches the provider. One call is recorded.
+    #[tokio::test]
+    async fn non_agent_reaches_model() {
+        use elastos_compute::providers::ComponentProvider;
+        use elastos_runtime::capability::{CapabilityManager, CapabilityStore};
+        use elastos_runtime::primitives::metrics::MetricsManager;
+        use elastos_runtime::provider::ProviderRegistry;
+        use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+        use elastos_storage::providers::LocalFSProvider;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let key = SigningKey::from_bytes(&[0x45; 32]);
+        runtime
+            .configure_capsule_admission(
+                &data_dir,
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store =
+            Arc::new(elastos_runtime::capability::pending::PendingRequestStore::new(audit_log));
+        let model = Arc::new(CapturingModelProvider::default());
+        model.watch(runtime.clone());
+        let registry = Arc::new(ProviderRegistry::new());
+        registry.register(model.clone()).await;
+        runtime
+            .set_provider_registry(
+                registry,
+                capability_manager.clone(),
+                pending_store.clone(),
+                data_dir.clone(),
+            )
+            .await;
+
+        let wasm = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/non-agent-model.wat"
+        ))
+        .expect("non-agent model guest");
+        let dir = temp.path().join("capsule");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.component.wasm"), &wasm).unwrap();
+        let mut manifest: elastos_common::CapsuleManifest = serde_json::from_str(&format!(
+            r#"{{
+                "schema": "elastos.capsule/v1",
+                "version": "0.1.0",
+                "name": "non-agent-model",
+                "role": "app",
+                "type": "wasm",
+                "runtime_abi": "elastos.component/v1",
+                "bus_contract": "{contract}",
+                "wit_world_sha256": "{wit}",
+                "execution": "component",
+                "projections": ["cli"],
+                "entrypoint": "app.component.wasm",
+                "capabilities": ["elastos://model/*"]
+            }}"#,
+            contract = elastos_common::ELASTOS_BUS_V1_CONTRACT,
+            wit = elastos_common::elastos_bus_v1_wit_sha256(),
+        ))
+        .unwrap();
+        assert!(manifest.agent.is_none(), "this capsule declares no agent");
+        assert_eq!(manifest.resources.model_token_ceiling(), 0);
+        manifest.validate().unwrap();
+        sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
+        std::fs::write(
+            dir.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let grants = grant_probe_requests(pending_store, capability_manager);
+        let launched = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            runtime.run_local(&dir, Vec::new()),
+        )
+        .await
+        .expect("the non-agent launch finishes")
+        .map_err(|err| format!("{err:#}"))
+        .expect("the non-agent reaches the model");
+        grants.abort();
+        assert!(launched.manifest.agent.is_none());
+        assert_eq!(model.requests().len(), 1, "{:?}", model.requests());
+        assert_eq!(model.requests()[0]["op"], "offers_list");
+        assert_eq!(
+            model.ceilings_at_call(),
+            vec![Vec::<(String, u64)>::new()],
+            "a non-agent has no ceiling entry while the model call runs"
+        );
     }
 }
 

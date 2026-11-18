@@ -64,6 +64,7 @@ pub mod ipfs;
 pub(crate) mod jev_approval_lens;
 pub mod library;
 pub mod local_http;
+pub(crate) mod model_budget;
 pub mod notifications;
 pub mod operator_control;
 pub mod ownership;
