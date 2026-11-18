@@ -1402,7 +1402,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     // is started, the one asked for.
     assert_eq!(
         start
-            .matches("self.start_loaded(component, &mut handle, args, principal_id)")
+            .matches("self.start_loaded(component, &mut handle, args, principal_id, None)")
             .count(),
         1
     );

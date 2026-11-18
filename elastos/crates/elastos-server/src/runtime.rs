@@ -73,7 +73,8 @@ pub struct Runtime {
     bridge_manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
     /// Model-token ceiling for an admitted agent, by capsule id. A missing
     /// entry is not an admitted agent. Present, including 0, is the ceiling
-    /// admission recorded from the signed manifest.
+    /// admission recorded and passed into the start. The manifest is not
+    /// read again for this number.
     bridge_model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
     /// For each program a content launch is running, by its capsule id: the
     /// content it was launched with. Kept like the ceilings, beside them.
@@ -534,6 +535,7 @@ impl Runtime {
             &mut handle,
             args,
             principal_id.map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
+            admitted_ceiling,
         )
         .await?;
 
@@ -807,7 +809,7 @@ impl Runtime {
         let held = launch
             .clone()
             .map(|launch| LaunchHeld::new(&self.launch_contents, &handle.id.0, launch));
-        let started = self.start_loaded(component, &mut handle, args, principal_id);
+        let started = self.start_loaded(component, &mut handle, args, principal_id, None);
         let started = started.await;
         drop(held);
         started.map_err(failed)?;
@@ -895,6 +897,22 @@ impl Runtime {
         launches.get(id).map(|launch| launch.paths())
     }
 
+    /// Test only: the model-token ceilings the bridge holds right now, one
+    /// entry per admitted instance. A missing id is not an admitted agent.
+    #[cfg(test)]
+    pub(crate) fn model_token_ceilings_held(&self) -> Vec<(String, u64)> {
+        let ceilings = self
+            .bridge_model_token_ceilings
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut held: Vec<_> = ceilings
+            .iter()
+            .map(|(id, ceiling)| (id.clone(), *ceiling))
+            .collect();
+        held.sort();
+        held
+    }
+
     /// Test only: the ceiling the bridge holds the capsule `id` to right now,
     /// each entry as it prints.
     #[cfg(test)]
@@ -917,6 +935,7 @@ impl Runtime {
         handle: &mut CapsuleHandle,
         args: Vec<String>,
         principal_id: Option<String>,
+        model_token_ceiling: Option<u64>,
     ) -> Result<()> {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.insert(
@@ -924,16 +943,14 @@ impl Runtime {
                 handle.manifest.resource_authority_bounds(),
             );
         }
-        // An admitted agent manifest reaches here only after admission recorded
-        // this ceiling. Other capsules get no entry, so the rule does not apply.
-        if handle.manifest.agent.is_some() {
+        // `Some` is the ceiling admission recorded for this start. A start
+        // that was not admitted passes `None` and gets no entry. The manifest
+        // is not read again for the number.
+        if let Some(ceiling) = model_token_ceiling {
             self.bridge_model_token_ceilings
                 .write()
                 .unwrap_or_else(|err| err.into_inner())
-                .insert(
-                    handle.id.0.clone(),
-                    handle.manifest.resources.model_token_ceiling(),
-                );
+                .insert(handle.id.0.clone(), ceiling);
         }
         if handle.manifest.is_component_capsule() {
             if let Some(ref component) = self.component_provider {

@@ -732,7 +732,7 @@ async fn authorize_and_dispatch_resource_invoke(
     }
 
     if dispatch.scheme == "model" {
-        if let Some(refusal) = model_budget_refusal(bridge_ctx, &dispatch.request) {
+        if let Some(refusal) = model_budget_refusal(bridge_ctx) {
             return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
         }
     }
@@ -1097,7 +1097,8 @@ fn provider_error_result(code: &str, message: &str) -> serde_json::Value {
 }
 
 /// Why an admitted agent's model invoke is refused. One reason: the signed
-/// ceiling does not allow it. The request body is not a source of the ceiling.
+/// ceiling is 0. The request body is not a source of the ceiling, and it is
+/// not compared with the ceiling. A spend bound is a later slice.
 enum ModelBudgetRefusal {
     SignedCeiling(u64),
 }
@@ -1105,24 +1106,20 @@ enum ModelBudgetRefusal {
 impl ModelBudgetRefusal {
     fn response(self) -> serde_json::Value {
         let Self::SignedCeiling(held) = self;
+        // The wire code is the existing `denied`. The sentence names the reason.
         resource_error_response(
-            "model_budget_exceeded",
+            "denied",
             &format!("model_budget_exceeded: signed ceiling is {held}"),
         )
     }
 }
 
-/// Refuse a model invoke that the signed ceiling does not allow. `None` means
-/// this capsule is not an admitted agent, or the ceiling allows the invoke.
-fn model_budget_refusal(
-    ctx: &BridgeContext,
-    request: &serde_json::Value,
-) -> Option<serde_json::Value> {
-    // The ceiling is the one admission stored. The body is not read for it.
+/// Refuse a model invoke when the admitted agent's signed ceiling is 0.
+/// `None` means this capsule is not an admitted agent: there is no ceiling
+/// entry, and the model rule does not apply. The request is not an argument.
+fn model_budget_refusal(ctx: &BridgeContext) -> Option<serde_json::Value> {
     let held = ctx.model_token_ceiling?;
-    let named = request.get("model_tokens").filter(|value| !value.is_null());
-    let over = named.is_some_and(|value| value.as_u64().is_none_or(|asked| asked > held));
-    (held == 0 || over).then(|| ModelBudgetRefusal::SignedCeiling(held).response())
+    (held == 0).then(|| ModelBudgetRefusal::SignedCeiling(held).response())
 }
 
 fn resource_error_response(code: &str, message: &str) -> serde_json::Value {
