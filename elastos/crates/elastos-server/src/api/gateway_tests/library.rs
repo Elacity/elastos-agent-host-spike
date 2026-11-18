@@ -10821,6 +10821,10 @@ mod route_17_two_person_purchases {
         mint_a_hex: String,
         mint_b_hex: String,
         p_open: serde_json::Value,
+        /// Seam reads consumed by the fixture's P open (0 when unarmed).
+        p_open_reads: u64,
+        /// The scripted first reading of the fixture's P open, when armed.
+        p_open_clock: Option<u64>,
         p_read_init: serde_json::Value,
         p_read_segment: serde_json::Value,
         clear_init: Vec<u8>,
@@ -11018,7 +11022,7 @@ mod route_17_two_person_purchases {
             .unwrap()
     }
 
-    async fn two_person_purchase_fixture() -> Route17Fixture {
+    async fn two_person_purchase_fixture(open_clock_step: Option<u64>) -> Route17Fixture {
         let dir = tempfile::tempdir().unwrap();
         enable_protected_content(dir.path());
         crate::protected_content_runtime::tests::write_device_key(dir.path(), 0x5a);
@@ -11140,8 +11144,21 @@ mod route_17_two_person_purchases {
         .await;
 
         // P's control: open and read P's own purchased mint while mint A is the
-        // published protected object.
+        // published protected object. A caller may script the open's wall-clock
+        // reading so the open can be shown to consume one value under a step.
+        let armed = open_clock_step.map(|step| {
+            let first = crate::auth::now_ts();
+            (
+                crate::test_clock::arm(first, first.saturating_add(step)),
+                first,
+            )
+        });
         let p_open = player_open(&app, &p_player_token, &mint_a_hex, &p.principal_id).await;
+        let p_open_reads = crate::test_clock::reads();
+        let p_open_clock = armed.map(|(guard, first)| {
+            drop(guard);
+            first
+        });
         assert_eq!(p_open["status"], "ok", "{p_open}");
         let p_handle = p_open["data"]["viewer_session_handle"]
             .as_str()
@@ -11210,6 +11227,8 @@ mod route_17_two_person_purchases {
             mint_a_hex,
             mint_b_hex,
             p_open,
+            p_open_reads,
+            p_open_clock,
             p_read_init,
             p_read_segment,
             clear_init,
@@ -11220,7 +11239,7 @@ mod route_17_two_person_purchases {
     #[tokio::test]
     async fn route_17_a_person_opens_and_reads_its_own_purchased_mint() {
         let _guard = protected_content_gateway_mock_test_guard().lock().await;
-        let fixture = two_person_purchase_fixture().await;
+        let fixture = two_person_purchase_fixture(None).await;
 
         // P's own purchase exists for P's own mint.
         let p_purchase = crate::protected_content_runtime::load_runtime_custody_purchase(
@@ -11286,7 +11305,7 @@ mod route_17_two_person_purchases {
     #[tokio::test]
     async fn route_17_a_player_launch_cannot_present_another_persons_mint_or_viewer_handle() {
         let _guard = protected_content_gateway_mock_test_guard().lock().await;
-        let fixture = two_person_purchase_fixture().await;
+        let fixture = two_person_purchase_fixture(None).await;
 
         // R4.17 (A1): P's player launch presents Q's mint id; refused at the
         // purchase-owner check, not by the pre-mint player-token gate.
@@ -11418,6 +11437,32 @@ mod route_17_two_person_purchases {
             cross_read_own_mint.get("data").is_none(),
             "{cross_read_own_mint}"
         );
+    }
+
+    /// The clock steps 120 s forward inside a viewer open. The open must
+    /// consume the single reading it took at its top for every window it
+    /// assembles and verifies, so the response window is derived from that
+    /// one value and the open still completes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_open_reads_the_clock_once_under_a_forward_step() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = two_person_purchase_fixture(Some(120)).await;
+        let first = fixture.p_open_clock.expect("armed open clock");
+
+        assert_eq!(
+            fixture.p_open_reads, 1,
+            "open_runtime_custody_viewer must read the clock once"
+        );
+        assert_eq!(fixture.p_open["status"], "ok", "{}", fixture.p_open);
+        // The active session's expiry is the assembled release operation's
+        // expiry, `now + 50`.
+        assert_eq!(
+            fixture.p_open["data"]["expires_at"].as_u64(),
+            Some(first.saturating_add(50)),
+            "the viewer window must derive from the open's single reading"
+        );
+        assert!(fixture.p_open["data"]["viewer_session_handle"].is_string());
     }
 }
 

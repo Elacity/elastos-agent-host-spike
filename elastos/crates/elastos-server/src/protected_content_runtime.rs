@@ -6001,11 +6001,30 @@ pub(crate) async fn verify_fresh_runtime_custody_availability(
     })
 }
 
+/// The one wall-clock reading of a viewer open.
+///
+/// A test may script the reading so the open can be shown to consume a single
+/// value even when the wall clock steps.
+fn viewer_open_now() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(value) = crate::test_clock::next() {
+            return value;
+        }
+    }
+    crate::auth::now_ts()
+}
+
 pub(crate) async fn open_runtime_custody_viewer(
     data_dir: &Path,
     registry: Arc<ProviderRegistry>,
     input: RuntimeCustodyViewerOpenInput,
 ) -> anyhow::Result<Value> {
+    // One wall-clock reading per open. Every availability, expiry, release,
+    // operation, coordinator, resume and receipt consumer below uses this
+    // value, so a wall-clock step inside the operation cannot split two
+    // readings that are compared with each other.
+    let now = viewer_open_now();
     let mint_id = parse_mint_id_hex(&input.mint_id)?;
     let _viewer_lifecycle_guard =
         acquire_runtime_custody_viewer_lifecycle_guard(data_dir, &input.principal_id, mint_id)
@@ -6068,11 +6087,10 @@ pub(crate) async fn open_runtime_custody_viewer(
         ) {
             anyhow::bail!(RUNTIME_CUSTODY_OPEN_DENIED_MESSAGE);
         }
-        let viewer_now = crate::auth::now_ts();
         match record.lifecycle_status {
             RuntimeCustodyViewerLifecycleStatus::Active
                 if record.matches_runtime_session_binding(&runtime_session_binding)
-                    && !record.is_expired(viewer_now) =>
+                    && !record.is_expired(now) =>
             {
                 let session =
                     record.to_runtime_viewer_session(asset.media_identity.encrypted_content())?;
@@ -6086,7 +6104,7 @@ pub(crate) async fn open_runtime_custody_viewer(
             RuntimeCustodyViewerLifecycleStatus::OpenPending
                 if record.pending_release.is_some()
                     && record.matches_runtime_session_binding(&runtime_session_binding)
-                    && !record.is_expired(viewer_now) =>
+                    && !record.is_expired(now) =>
             {
                 tracing::debug!(
                     mint_id = %hex::encode(mint_id.as_bytes()),
@@ -6096,7 +6114,7 @@ pub(crate) async fn open_runtime_custody_viewer(
             }
             RuntimeCustodyViewerLifecycleStatus::Active
                 if !record.matches_runtime_session_binding(&runtime_session_binding)
-                    && !record.is_expired(viewer_now) =>
+                    && !record.is_expired(now) =>
             {
                 anyhow::bail!(RUNTIME_CUSTODY_OPEN_DENIED_MESSAGE);
             }
@@ -6104,7 +6122,7 @@ pub(crate) async fn open_runtime_custody_viewer(
             | RuntimeCustodyViewerLifecycleStatus::Active
             | RuntimeCustodyViewerLifecycleStatus::CleanupPending => {
                 if record.lifecycle_status == RuntimeCustodyViewerLifecycleStatus::Active
-                    && !record.is_expired(viewer_now)
+                    && !record.is_expired(now)
                     && !record.matches_runtime_session_binding(&runtime_session_binding)
                 {
                     anyhow::bail!(RUNTIME_CUSTODY_OPEN_DENIED_MESSAGE);
@@ -6123,14 +6141,9 @@ pub(crate) async fn open_runtime_custody_viewer(
             | RuntimeCustodyViewerLifecycleStatus::AlreadyAbsent => {}
         }
     }
-    let (draft, fresh_availability) = verify_fresh_runtime_custody_availability(
-        data_dir,
-        &registry,
-        &listing,
-        mint_id,
-        crate::auth::now_ts(),
-    )
-    .await?;
+    let (draft, fresh_availability) =
+        verify_fresh_runtime_custody_availability(data_dir, &registry, &listing, mint_id, now)
+            .await?;
     if fresh_availability.content_cid() != purchase.cid {
         anyhow::bail!(RUNTIME_CUSTODY_AVAILABILITY_UNAVAILABLE_MESSAGE);
     }
@@ -6145,7 +6158,6 @@ pub(crate) async fn open_runtime_custody_viewer(
     let (media_identity, protected_init) =
         fetch_runtime_custody_open_media(registry.as_ref(), &purchase.cid, draft.media_identity())
             .await?;
-    let now = crate::auth::now_ts();
     let decrypt = RuntimeDecryptRegistryAdapter::new(registry.clone());
     let (prepared, mut open_pending, audit_request_id, replay_wallet_request) =
         if let Some(record) = resumed_pending_release {
@@ -6195,7 +6207,7 @@ pub(crate) async fn open_runtime_custody_viewer(
                     audit_request_id: prepared.audit_request_id(),
                     viewer_session_handle: *prepared.prepared_recipient_handle(),
                     expires_at: prepared.expires_at(),
-                    now: crate::auth::now_ts(),
+                    now,
                 })?;
             if let Err(error) = persist_runtime_custody_viewer_record(
                 data_dir,
@@ -6246,7 +6258,7 @@ pub(crate) async fn open_runtime_custody_viewer(
                         &approval_request_id,
                         &prepared,
                     ));
-                    open_pending.updated_at = crate::auth::now_ts();
+                    open_pending.updated_at = now;
                     persist_runtime_custody_viewer_record(
                         data_dir,
                         &input.principal_id,
@@ -6434,10 +6446,7 @@ pub(crate) async fn open_runtime_custody_viewer(
                 ?reason,
                 "runtime custody open: release nonterminal, resuming exact operation"
             );
-            match coordinator
-                .resume_exact(operation_hash, crate::auth::now_ts())
-                .await
-            {
+            match coordinator.resume_exact(operation_hash, now).await {
                 Ok(RuntimeReleaseCoordinatorOutcome::Terminal(
                     RuntimeReleaseTerminalResult::ContributionsReady {
                         signed_node_contributions,
@@ -6474,13 +6483,12 @@ pub(crate) async fn open_runtime_custody_viewer(
             )));
         }
     };
-    let receipt_now = crate::auth::now_ts();
     let terminal_receipt = match sign_runtime_terminal_receipt(
         &device_key,
         &operation,
         &contributions,
         &composition.signed_epoch,
-        receipt_now,
+        now,
     ) {
         Ok(receipt) => receipt,
         Err(_) => {
@@ -6524,7 +6532,7 @@ pub(crate) async fn open_runtime_custody_viewer(
             protected_init_segment: &protected_init,
             signed_node_contributions: &contributions,
             signed_terminal_receipt: &terminal_receipt,
-            now_unix_seconds: crate::auth::now_ts(),
+            now_unix_seconds: now,
         },
     )
     .await
@@ -6545,7 +6553,6 @@ pub(crate) async fn open_runtime_custody_viewer(
     };
     let handle = *session.viewer_session_handle();
     let expires_at = session.expires_at();
-    let viewer_now = crate::auth::now_ts();
     let record = RuntimeCustodyViewerRecord::from_active_session(
         &input.principal_id,
         &profile_did,
@@ -6553,7 +6560,7 @@ pub(crate) async fn open_runtime_custody_viewer(
         &purchase.content_id,
         runtime_session_binding,
         &session,
-        viewer_now,
+        now,
     )?;
     if let Err(error) =
         persist_runtime_custody_viewer_record(data_dir, &input.principal_id, mint_id, &record)
