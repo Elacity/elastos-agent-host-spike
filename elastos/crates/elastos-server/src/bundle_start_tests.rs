@@ -1271,20 +1271,13 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     };
     let start = body_of("pub(crate) async fn start_by_bundle(");
     let member = body_of("async fn admit_closure_member(");
+    let maker = body_of("pub(crate) fn check(");
     let walk = ["checked_bundle", "_within("].concat();
     assert_eq!(start.matches(&walk).count(), 0);
-    // One bundle's checks, in their order: the walk; the CID; the signature;
-    // and only then the manifest, where a pinned manifest is turned into one
-    // that can start, and the component's imports.
-    let order = [
-        walk.as_str(),
-        "after_walk(asked)",
-        "bundle.cid() != *asked",
-        "bundle_admission::check_bundle_signature(&signature, asked, trust)",
-        "bundle_admission::admit_bundle_manifest(",
-        "validate_component_imports_for_manifest(",
-    ];
-    let places: Vec<usize> = order
+    // The walk, then the moment after it, then the one maker. The CID, the
+    // signature, the manifest and the imports are that maker, in that order.
+    let walked = [walk.as_str(), "after_walk(asked)", "VerifiedBundle::check("];
+    let walked_at: Vec<usize> = walked
         .iter()
         .map(|text| {
             assert_eq!(member.matches(text).count(), 1, "{text}");
@@ -1292,9 +1285,30 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         })
         .collect();
     assert!(
+        walked_at.windows(2).all(|pair| pair[0] < pair[1]),
+        "{walked_at:?}"
+    );
+    assert!(
+        member.find("left.max_entries").unwrap() < member.find("VerifiedBundle::check(").unwrap()
+    );
+    let order = [
+        "bundle.cid() != *asked",
+        "bundle_admission::check_bundle_signature(signature, asked, trust)",
+        "bundle_admission::admit_bundle_manifest(",
+        "validate_component_imports_for_manifest(",
+    ];
+    let places: Vec<usize> = order
+        .iter()
+        .map(|text| {
+            assert_eq!(maker.matches(text).count(), 1, "{text}");
+            maker.find(text).unwrap()
+        })
+        .collect();
+    assert!(
         places.windows(2).all(|pair| pair[0] < pair[1]),
         "{places:?}"
     );
+    assert_eq!(maker.matches("VerifiedBundle {").count(), 1);
     // Who is trusted is read once, by the start, before the first bundle;
     // the member check is handed that reading and takes none of its own;
     // and the reading is let go before anything is loaded.
@@ -1375,7 +1389,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
             .count(),
         1
     );
-    for body in [start, member] {
+    for body in [start, member, maker] {
         for never in [
             "fs::read",
             "read_to_string",
@@ -1408,12 +1422,9 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     // One capsule is loaded, from the walked bytes and the judged manifest:
     // sealed when that manifest has no asks, unsealed when it has. Nothing
     // else decides the seal.
-    assert_eq!(
-        start
-            .matches("let (bytes, manifest) = (starts.component, starts.manifest);")
-            .count(),
-        1
-    );
+    assert_eq!(start.matches("starts.into_component()").count(), 1);
+    assert!(!start.contains("starts.component"));
+    assert!(!start.contains("starts.manifest"));
     let seal = "let loaded = match manifest.asks.is_empty() {\n            \
                 true => component.load_admitted_sealed(bytes, manifest).await,\n            \
                 false => component.load_admitted(bytes, manifest).await,\n        };";
@@ -1422,7 +1433,48 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     assert_eq!(start.matches(".load_admitted(").count(), 1);
     for never in ["start_loaded", "load_admitted", "provider"] {
         assert!(!member.contains(never), "{never}");
+        assert!(!maker.contains(never), "{never}");
     }
+}
+
+/// One production construction of [`crate::runtime::VerifiedBundle`], and
+/// `start_by_bundle` loads only from that value.
+#[test]
+fn verified_bundle_has_one_maker_and_start_by_bundle_takes_it() {
+    let _test_maker = crate::runtime::VerifiedBundle::unchecked_for_test;
+    let marker = ["VerifiedBundle", " {"].concat();
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut makers = Vec::new();
+    for path in &files {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name.contains("test") {
+            continue;
+        }
+        let text = fs::read_to_string(path).expect("read");
+        let count = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with(&marker))
+            .count();
+        if count > 0 {
+            makers.push((name.into_owned(), count));
+        }
+    }
+    makers.sort();
+    assert_eq!(makers, [("runtime.rs".to_string(), 1)]);
+    let source = include_str!("runtime.rs");
+    let start = {
+        let body = &source[source.find("pub(crate) async fn start_by_bundle(").unwrap()..];
+        &body[..body.find("\n    }\n").unwrap()]
+    };
+    assert_eq!(
+        start.matches("(VerifiedBundle, AcceptedSignature)").count(),
+        1
+    );
+    assert_eq!(start.matches("starts.into_component()").count(), 1);
 }
 
 /// The pins come off a manifest at one place in the server: where the start
