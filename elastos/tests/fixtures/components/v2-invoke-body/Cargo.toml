@@ -1,0 +1,13 @@
+[package]
+name = "v2-invoke-body-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "=0.60.0", default-features = false, features = ["macros", "async", "realloc"] }
+
+[workspace]

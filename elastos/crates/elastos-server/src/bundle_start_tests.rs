@@ -431,7 +431,7 @@ fn code(result: Result<(String, String), BundleRefusal>) -> &'static str {
 }
 
 #[tokio::test]
-async fn v2_resident_starts_from_folder_while_cid_admission_stays_closed() {
+async fn v2_resident_is_refused_from_folder_and_cid() {
     let publisher = key(42);
     let home = Home::trusting(&[&publisher]).await;
     home.admit(&[&publisher], true).await;
@@ -443,8 +443,16 @@ async fn v2_resident_starts_from_folder_while_cid_admission_stays_closed() {
     ))
     .unwrap();
     let folder = home.bundle("v2", &json.to_string(), &v2_component);
-    let folder_handle = home.runtime.run_local(&folder, Vec::new()).await.unwrap();
-    home.runtime.stop(&folder_handle).await.unwrap();
+    assert!(matches!(
+        home.runtime.run_local(&folder, Vec::new()).await,
+        Err(elastos_common::ElastosError::InvalidManifest(why))
+            if why == "Bus v2 contract not yet runnable"
+    ));
+    assert!(home.runtime.list_capsules().await.is_empty());
+    assert!(
+        !home.data().exists(),
+        "a refused folder start leaves no store"
+    );
 
     let cid = home.stage(&folder, &publisher).await;
     assert!(matches!(

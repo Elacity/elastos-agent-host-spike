@@ -190,8 +190,6 @@ impl ComponentProvider {
                 config
                     .wasm_component_model(true)
                     .wasm_component_model_async(true)
-                    .wasm_component_model_more_async_builtins(true)
-                    .wasm_component_model_async_stackful(true)
                     .concurrency_support(true)
                     .consume_fuel(true)
                     .epoch_interruption(true)
@@ -252,11 +250,12 @@ impl ComponentProvider {
     /// to the bridge is refused by this provider, and no handler sees it,
     /// whichever handler is installed and whenever. The seal is a mark on
     /// this one activation's entry and on nothing else, so it can never seal
-    /// another capsule. The entry is taken away when the start returns. A
-    /// start that is cancelled before it returns leaves its entry behind,
+    /// another capsule. A v1 entry is taken away when the start returns. A
+    /// resident v2 entry stays until its task ends or stop removes it. A
+    /// v1 start that is cancelled before it returns leaves its entry behind,
     /// still sealed. If the start had not yet marked it running it is still
-    /// marked loading, and `stop` takes it away; once it is marked running
-    /// `stop` refuses it, and it stays.
+    /// marked loading, and `stop` takes it away; once v1 is marked running,
+    /// `stop` refuses it.
     pub async fn load_admitted_sealed(
         &self,
         bytes: Vec<u8>,
@@ -402,9 +401,6 @@ impl ComponentProvider {
         store
             .set_fuel(COMPONENT_FUEL)
             .map_err(|err| run_error("v2 fuel", err))?;
-        store
-            .fuel_async_yield_interval(Some(10_000_000))
-            .map_err(|err| run_error("v2 fuel yield", err))?;
         store.set_epoch_deadline(deadline_ticks(COMPONENT_RUN_DEADLINE));
         store.epoch_deadline_callback(|_| Ok(UpdateDeadline::Interrupt));
         let mut linker = Linker::new(&engine);
@@ -938,9 +934,9 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
 impl v2::elastos::bus::providers::Host for ComponentState {}
 impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<ComponentState> {
     async fn invoke(
-        _: &wasmtime::component::Accessor<ComponentState, Self>,
+        accessor: &wasmtime::component::Accessor<ComponentState, Self>,
         _: v2::elastos::bus::types::InvokeRequest,
-        _: Option<StreamReader<u8>>,
+        body: Option<StreamReader<u8>>,
     ) -> std::result::Result<
         (
             v2::elastos::bus::types::InvokeStatus,
@@ -951,6 +947,9 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         ),
         v2::elastos::bus::types::BusError,
     > {
+        if let Some(mut body) = body {
+            let _ = accessor.with(|mut access| body.close(&mut access));
+        }
         Err(v2::elastos::bus::types::BusError::Unavailable(
             "providers are not available in this slice".into(),
         ))
@@ -1045,9 +1044,7 @@ mod tests {
         assert!(v2.get_epoch_interruption(), "v2 epoch stays on");
         assert_eq!(
             v1.get_wasm_features() ^ v2.get_wasm_features(),
-            WasmFeatures::CM_ASYNC
-                | WasmFeatures::CM_MORE_ASYNC_BUILTINS
-                | WasmFeatures::CM_ASYNC_STACKFUL,
+            WasmFeatures::CM_ASYNC,
             "v2 enables only its component-model async features beyond v1"
         );
     }
@@ -1159,6 +1156,36 @@ mod tests {
         })
         .await
         .expect("closing the events stream must record stopped");
+    }
+
+    #[tokio::test]
+    async fn v2_invoke_refusal_closes_guest_body_and_completes_its_writer() {
+        let provider = ComponentProvider::new();
+        let (_, mut manifest) = component_fixture();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let bytes =
+            include_bytes!("../../../../tests/fixtures/components/v2-invoke-body.component.wasm");
+        let handle = provider
+            .load_admitted(bytes.to_vec(), manifest)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), provider.start(&handle))
+            .await
+            .expect("guest start completes")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
+                    assert_eq!(ending, "returned", "invoke is unavailable and writer ends");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the refused body writer must finish after the host closes its reader");
+        assert!(provider.instances.read().await.is_empty());
     }
 
     /// A file of `len` zero bytes named as the fixture manifest's entrypoint.
