@@ -10,7 +10,7 @@ use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleKin
 use crate::resource_bridge::LaunchContent;
 use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
-use elastos_compute::providers::{BridgeHostcall, ComponentProvider};
+use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
@@ -194,10 +194,6 @@ const CAUSE_TASK_LOST: &str = "activation task ended before its outcome";
 struct ActivationStop {
     flag: Arc<crate::resource_bridge::ActivationStopFlag>,
     cause: StdMutex<Option<String>>,
-    /// Set just before the stop is given to the compute provider. A start
-    /// that fails after that is the stop's doing; one that failed before it
-    /// is the guest's own failure.
-    given: std::sync::atomic::AtomicBool,
 }
 
 impl ActivationStop {
@@ -278,7 +274,6 @@ impl ActivationContextHeld {
         let stop = Arc::new(ActivationStop {
             flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
             cause: StdMutex::new(None),
-            given: Default::default(),
         });
         runtime
             .activation_stops
@@ -419,6 +414,17 @@ fn stop_reason(status: &str, cause: &str) -> elastos_runtime::primitives::audit:
         CAPSULE_STOPPED if cause == CAUSE_COMPLETED => StopReason::Completed,
         CAPSULE_STOPPED => StopReason::Requested,
         _ => StopReason::Error(cause.to_string()),
+    }
+}
+
+/// Whether a start that failed is the stop's doing: the stop took the loading
+/// component away, or the epoch callback interrupted its start function. Any
+/// other failed start is the guest's own.
+fn start_ended_by_stop(err: &ElastosError) -> bool {
+    match err {
+        ElastosError::CapsuleNotFound(_) => true,
+        ElastosError::Compute(message) => message == STOPPED_BEFORE_RUN,
+        _ => false,
     }
 }
 
@@ -1509,7 +1515,7 @@ impl Runtime {
     /// the activation as `stopped` with the reason it was requested with when
     /// the worker's ending is that stop's doing: a return or a `stopped`
     /// after the request, a trap after the bridge left the guest's call for
-    /// it, or a failed start after the stop was given to the provider.
+    /// it, or a start the stop took away or interrupted.
     fn watch_activation(
         &self,
         id: elastos_common::CapsuleId,
@@ -1553,13 +1559,8 @@ impl Runtime {
                         ),
                     }
                 }
-                // A start that fails is the guest's own failure unless the
-                // stop was given to the provider first: then the stop took
-                // the component away or interrupted its start function.
                 Err(err) => match held.requested_stop() {
-                    Some(cause) if held.stop.given.load(Ordering::Acquire) => {
-                        (CAPSULE_STOPPED, cause)
-                    }
+                    Some(cause) if start_ended_by_stop(&err) => (CAPSULE_STOPPED, cause),
                     _ => (CAPSULE_FAILED, err.to_string()),
                 },
             };
@@ -1815,7 +1816,6 @@ impl Runtime {
         stop.request(reason);
         if let Some((handle, provider)) = provider {
             tracing::info!("Stopping capsule '{}' ({})", info.name, id);
-            stop.given.store(true, Ordering::Release);
             provider.stop(handle).await?;
         }
 
@@ -4142,7 +4142,6 @@ pub(crate) mod tests {
         let stop = ActivationStop {
             flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
             cause: StdMutex::new(None),
-            given: Default::default(),
         };
         assert_eq!(stop.cause(), None);
         stop.request("first");
@@ -4150,6 +4149,33 @@ pub(crate) mod tests {
         stop.request("second");
         assert_eq!(stop.cause().as_deref(), Some("stopped: first"));
         assert!(stop.flag.requested.load(Ordering::Acquire));
+    }
+
+    /// A3-R S4+S5 fix 1. A stop given to the provider while the component is
+    /// still loading takes it away, and the start that follows fails as the
+    /// stop's doing. A start interrupted by the stop is the stop's doing too;
+    /// a start that ends on its own fuel is the guest's failure.
+    #[tokio::test]
+    async fn a_start_the_stop_took_away_is_the_stops_doing() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("app.component.wasm"), quiet_component()).unwrap();
+        let manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("taken-away")).unwrap();
+        let component = ComponentProvider::new();
+        let handle = component.load(temp.path(), manifest).await.unwrap();
+        component.stop(&handle).await.unwrap();
+        let err = match component.start_resident(&handle).await {
+            Ok(_) => panic!("a component the stop took away started"),
+            Err(err) => err,
+        };
+        assert!(start_ended_by_stop(&err), "{err}");
+        assert!(start_ended_by_stop(&ElastosError::Compute(
+            STOPPED_BEFORE_RUN.to_string()
+        )));
+        let own = "Failed to instantiate component capsule: all fuel consumed by WebAssembly";
+        assert!(!start_ended_by_stop(&ElastosError::Compute(
+            own.to_string()
+        )));
     }
 
     /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
