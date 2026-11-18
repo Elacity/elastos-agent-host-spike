@@ -1,0 +1,578 @@
+//! Fixed child install report. All allocation and path preparation finish before fork.
+#![allow(dead_code)] // The provider spawn binding arrives in a later B3 slice.
+
+use super::{landlock_plan, preexec_installer, rights_table::RuntimeProviderId};
+use std::{
+    ffi::{CStr, CString},
+    os::unix::ffi::OsStrExt,
+    os::unix::fs::MetadataExt,
+    path::Path,
+};
+
+const RECORD_LEN: usize = 12;
+const EXEC_TAG: u32 = 7;
+const DUP2_TAG: u32 = 8;
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum TestReport {
+    Normal,
+    NoRecordAfterDelay,
+    ShortRecord,
+}
+
+#[cfg(test)]
+type TestHook = TestReport;
+#[cfg(not(test))]
+type TestHook = ();
+
+#[cfg(test)]
+const NORMAL_TEST_HOOK: TestHook = TestReport::Normal;
+#[cfg(not(test))]
+const NORMAL_TEST_HOOK: TestHook = ();
+
+#[derive(Debug)]
+enum LaunchError {
+    BeforeFork(String),
+    ChildFailed { pid: libc::pid_t, reason: String },
+}
+
+/// The successful PID belongs to the caller. Failed children belong to this function.
+fn start(
+    provider: RuntimeProviderId,
+    storage_root: &Path,
+    executable: &Path,
+    args: &[&CStr],
+) -> Result<libc::pid_t, LaunchError> {
+    let path = CString::new(executable.as_os_str().as_bytes()).map_err(|_| {
+        LaunchError::BeforeFork(
+            "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL".into(),
+        )
+    })?;
+    let prepared = preexec_installer::prepare(
+        provider,
+        &landlock_plan::Bindings {
+            storage_root: storage_root.to_path_buf(),
+            provider_executable: executable.to_path_buf(),
+        },
+    )
+    .map_err(LaunchError::BeforeFork)?;
+    launch(&prepared, &path, args, NORMAL_TEST_HOOK, None, None)
+}
+
+fn launch(
+    prepared: &preexec_installer::Prepared,
+    path: &CStr,
+    args: &[&CStr],
+    test_hook: TestHook,
+    stdin_read: Option<i32>,
+    stdout_write: Option<i32>,
+) -> Result<libc::pid_t, LaunchError> {
+    let mut argv = Vec::with_capacity(args.len() + 2);
+    argv.push(path.as_ptr());
+    argv.extend(args.iter().map(|arg| arg.as_ptr()));
+    argv.push(std::ptr::null());
+    let envp = [std::ptr::null()];
+    // A zero-byte pipe only proves that the writer closed. Compare the live
+    // child's executable with the requested file before handing out its PID.
+    // Self-exec is ambiguous before exec, so fail closed in that case.
+    let requested_exe = std::fs::metadata(Path::new(std::ffi::OsStr::from_bytes(path.to_bytes())))
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    let launcher_exe = std::fs::metadata("/proc/self/exe")
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    let mut pipe = [-1; 2];
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+        return Err(LaunchError::BeforeFork(format!(
+            "provider start is refused: the seccomp install report channel could not open: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if pipe[0] < 3 || pipe[1] < 3 {
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        return Err(LaunchError::BeforeFork(
+            "provider start is refused: the report descriptor is below fd 3".into(),
+        ));
+    }
+    let flags = unsafe { libc::fcntl(pipe[1], libc::F_GETFD) };
+    if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        return Err(LaunchError::BeforeFork(
+            "provider start is refused: the report descriptor lacks FD_CLOEXEC".into(),
+        ));
+    }
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        return Err(LaunchError::BeforeFork(format!(
+            "provider start is refused: fork failed: {error}"
+        )));
+    }
+    if pid == 0 {
+        unsafe {
+            libc::close(pipe[0]);
+        }
+        if let Some(fd) = stdin_read {
+            if unsafe { libc::dup2(fd, 0) } < 0 {
+                write_record_and_exit(
+                    pipe[1],
+                    &error_record(DUP2_TAG, unsafe { *libc::__errno_location() }),
+                );
+            }
+        }
+        if let Some(fd) = stdout_write {
+            if unsafe { libc::dup2(fd, 1) } < 0 {
+                write_record_and_exit(
+                    pipe[1],
+                    &error_record(DUP2_TAG, unsafe { *libc::__errno_location() }),
+                );
+            }
+        }
+        child_test_hook(test_hook, pipe[1]);
+        if let Err(failure) = unsafe { preexec_installer::install(prepared, pipe[1]) } {
+            write_record_and_exit(pipe[1], &failure.record());
+        }
+        unsafe {
+            libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr());
+        }
+        let errno = unsafe { *libc::__errno_location() };
+        write_record_and_exit(pipe[1], &error_record(EXEC_TAG, errno));
+    }
+    unsafe {
+        libc::close(pipe[1]);
+    }
+    let mut bytes = [0u8; RECORD_LEN + 1];
+    let mut length = 0;
+    let mut read_failure = None;
+    loop {
+        let read = unsafe {
+            libc::read(
+                pipe[0],
+                bytes[length..].as_mut_ptr().cast(),
+                bytes.len() - length,
+            )
+        };
+        if read == 0 {
+            break;
+        }
+        if read < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            read_failure = Some(std::io::Error::last_os_error());
+            break;
+        }
+        length += read as usize;
+        if length == bytes.len() {
+            break;
+        }
+    }
+    unsafe {
+        libc::close(pipe[0]);
+    }
+    if length == 0 && read_failure.is_none() {
+        // CLOEXEC also closes an exec'd child's writer. An exited child may
+        // have closed it without ever reporting a failed install or exec.
+        let mut status = 0;
+        loop {
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if waited == 0 {
+                let child_exe = std::fs::metadata(format!("/proc/{pid}/exe"))
+                    .ok()
+                    .map(|meta| (meta.dev(), meta.ino()));
+                if child_exe == requested_exe
+                    && requested_exe.is_some()
+                    && requested_exe != launcher_exe
+                {
+                    return Ok(pid);
+                }
+                // The writer closed before exec, the executable changed, or
+                // the child exited while /proc was read. Refuse and own cleanup.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                break;
+            }
+            if waited == pid {
+                return Err(LaunchError::ChildFailed {
+                    pid,
+                    reason: decode(&[]),
+                });
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return Err(LaunchError::ChildFailed {
+                    pid,
+                    reason: decode(&[]),
+                });
+            }
+        }
+        while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+        return Err(LaunchError::ChildFailed {
+            pid,
+            reason: decode(&[]),
+        });
+    }
+    let reason = match read_failure {
+        Some(ref error) => {
+            format!("seccomp install report refused: the child report could not be read: {error}")
+        }
+        None => decode(&bytes[..length]),
+    };
+    let mut status = 0;
+    if read_failure.is_some() {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break;
+        }
+    }
+    Err(LaunchError::ChildFailed { pid, reason })
+}
+
+#[cfg(test)]
+fn child_test_hook(hook: TestHook, writer: i32) {
+    match hook {
+        TestReport::Normal => {}
+        TestReport::NoRecordAfterDelay => {
+            unsafe { libc::close(writer) };
+            let delay = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 50_000_000,
+            };
+            unsafe {
+                libc::syscall(
+                    libc::SYS_nanosleep,
+                    &delay,
+                    std::ptr::null::<libc::timespec>(),
+                );
+                libc::_exit(127)
+            }
+        }
+        TestReport::ShortRecord => unsafe {
+            libc::write(writer, b"short".as_ptr().cast(), 5);
+            libc::_exit(127)
+        },
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn child_test_hook(_: TestHook, _: i32) {}
+
+fn error_record(tag: u32, errno: i32) -> [u8; RECORD_LEN] {
+    let [t0, t1, t2, t3] = tag.to_ne_bytes();
+    let [e0, e1, e2, e3] = errno.to_ne_bytes();
+    [t0, t1, t2, t3, 0, 0, 0, 0, e0, e1, e2, e3]
+}
+
+/// Only async-signal-safe calls and stack data run here, including on write failure.
+fn write_record_and_exit(fd: i32, record: &[u8; RECORD_LEN]) -> ! {
+    let mut written = 0;
+    while written < RECORD_LEN {
+        let count = unsafe {
+            libc::write(
+                fd,
+                record.as_ptr().add(written).cast(),
+                RECORD_LEN - written,
+            )
+        };
+        if count < 0 && unsafe { *libc::__errno_location() } == libc::EINTR {
+            continue;
+        }
+        if count <= 0 {
+            break;
+        }
+        written += count as usize;
+    }
+    unsafe { libc::_exit(127) }
+}
+
+fn decode(bytes: &[u8]) -> String {
+    if bytes.len() != RECORD_LEN {
+        return format!("seccomp install report refused: the child reported {} bytes and one record is {RECORD_LEN}", bytes.len());
+    }
+    let tag = u32::from_ne_bytes(bytes[..4].try_into().unwrap());
+    let index = u32::from_ne_bytes(bytes[4..8].try_into().unwrap());
+    let errno = i32::from_ne_bytes(bytes[8..].try_into().unwrap());
+    if tag == EXEC_TAG {
+        return format!("provider exec refused: execve failed with errno {errno}");
+    }
+    if tag == DUP2_TAG {
+        return format!("provider start is refused: dup2 failed with errno {errno}");
+    }
+    preexec_installer::Failure::from_record(tag, index, errno)
+        .map(|failure| failure.to_string())
+        .unwrap_or_else(|| format!("seccomp install report refused: the child named step {tag}, which is no install step"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn refused_before_fork_names_reason() {
+        let bad = Path::new(std::ffi::OsStr::from_bytes(b"bad\0path"));
+        let result = start(RuntimeProviderId::Did, Path::new("/"), bad, &[]);
+        assert!(
+            matches!(result, Err(LaunchError::BeforeFork(ref reason)) if reason == "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL")
+        );
+    }
+
+    #[test]
+    fn decoder_refuses_invalid_records_and_names_dup2() {
+        for length in [RECORD_LEN - 1, RECORD_LEN + 1] {
+            assert_eq!(
+                decode(&vec![0; length]),
+                format!("seccomp install report refused: the child reported {length} bytes and one record is {RECORD_LEN}")
+            );
+        }
+        assert_eq!(
+            decode(&error_record(9, libc::EACCES)),
+            "seccomp install report refused: the child named step 9, which is no install step"
+        );
+        assert_eq!(
+            decode(&error_record(DUP2_TAG, libc::EBADF)),
+            "provider start is refused: dup2 failed with errno 9"
+        );
+    }
+
+    #[test]
+    fn installer_failure_crosses_pipe_and_child_is_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let path = CString::new("/bin/true").unwrap();
+        let bindings = landlock_plan::Bindings {
+            storage_root: root.path().to_path_buf(),
+            provider_executable: "/bin/true".into(),
+        };
+        let expected_rule = landlock_plan::build(
+            RuntimeProviderId::Did,
+            &bindings,
+            landlock_plan::kernel_abi().unwrap(),
+        )
+        .unwrap()
+        .rules
+        .iter()
+        .position(|rule| rule.0 == "STORAGE_ROOT")
+        .expect("storage rule");
+        let prepared = preexec_installer::prepare(RuntimeProviderId::Did, &bindings).unwrap();
+        std::fs::remove_dir(root.path()).unwrap();
+        let (pid, reason) = match launch(&prepared, &path, &[], TestReport::Normal, None, None) {
+            Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
+            Ok(pid) => {
+                let mut status = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                panic!("the failed installer must refuse the launch");
+            }
+            other => panic!("the failed installer must refuse the launch: {other:?}"),
+        };
+        assert_eq!(
+            reason,
+            format!("landlock install refused: the path rule {expected_rule} could not be added with errno 2"),
+            "the failed installer must report its step"
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1,
+            "the failed child must already be reaped"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn exec_refusal_crosses_pipe_and_child_is_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("not-executable");
+        std::fs::write(&executable, b"not an executable").unwrap();
+        let (pid, reason) = match start(RuntimeProviderId::Did, root.path(), &executable, &[]) {
+            Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
+            Ok(pid) => {
+                let mut status = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                panic!("execve failure must refuse the launch");
+            }
+            other => panic!("execve failure must refuse the launch: {other:?}"),
+        };
+        assert_eq!(
+            reason, "provider exec refused: execve failed with errno 13",
+            "execve failure must cross the report pipe"
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1,
+            "the exec-refused child must already be reaped"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn child_exits_without_record_is_refused_and_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let path = CString::new("/bin/true").unwrap();
+        let prepared = preexec_installer::prepare(
+            RuntimeProviderId::Did,
+            &landlock_plan::Bindings {
+                storage_root: root.path().to_path_buf(),
+                provider_executable: "/bin/true".into(),
+            },
+        )
+        .unwrap();
+        let (pid, reason) = match launch(
+            &prepared,
+            &path,
+            &[],
+            TestReport::NoRecordAfterDelay,
+            None,
+            None,
+        ) {
+            Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
+            Ok(pid) => {
+                let mut status = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                panic!("a child that exits without a record must be refused");
+            }
+            other => panic!("a child that exits without a record must be refused: {other:?}"),
+        };
+        assert_eq!(
+            reason,
+            "seccomp install report refused: the child reported 0 bytes and one record is 12"
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1,
+            "the child without a record must already be reaped"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn short_child_record_is_refused_and_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let path = CString::new("/bin/true").unwrap();
+        let prepared = preexec_installer::prepare(
+            RuntimeProviderId::Did,
+            &landlock_plan::Bindings {
+                storage_root: root.path().to_path_buf(),
+                provider_executable: "/bin/true".into(),
+            },
+        )
+        .unwrap();
+        let (pid, reason) = match launch(&prepared, &path, &[], TestReport::ShortRecord, None, None)
+        {
+            Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
+            other => panic!("a short child record must refuse the launch: {other:?}"),
+        };
+        assert_eq!(
+            reason,
+            "seccomp install report refused: the child reported 5 bytes and one record is 12"
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn exec_closes_report_and_all_other_descriptors() {
+        let root = tempfile::tempdir().unwrap();
+        let path = CString::new("/bin/cat").unwrap();
+        let marker = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(
+            unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&marker), libc::F_SETFD, 0) },
+            0
+        );
+        let prepared = preexec_installer::prepare(
+            RuntimeProviderId::Did,
+            &landlock_plan::Bindings {
+                storage_root: root.path().to_path_buf(),
+                provider_executable: "/bin/cat".into(),
+            },
+        )
+        .unwrap();
+        let mut input = [-1; 2];
+        let mut output = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(input.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::pipe2(output.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let pid = launch(
+            &prepared,
+            &path,
+            &[],
+            TestReport::Normal,
+            Some(input[0]),
+            Some(output[1]),
+        )
+        .unwrap_or_else(|err| panic!("exec must succeed: {err:?}"));
+        unsafe {
+            libc::close(input[0]);
+            libc::close(output[1]);
+        }
+        assert_eq!(unsafe { libc::write(input[1], b"x".as_ptr().cast(), 1) }, 1);
+        let mut reply = [0u8; 1];
+        assert_eq!(
+            unsafe { libc::read(output[0], reply.as_mut_ptr().cast(), 1) },
+            1,
+            "the exec'd child must answer through fd 1"
+        );
+        assert_eq!(reply, *b"x");
+        let fds = std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .parse::<i32>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        unsafe {
+            libc::close(input[1]);
+            libc::close(output[0]);
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            fds.iter().all(|fd| *fd <= 2),
+            "the exec'd child must see only fds 0-2: {fds:?}; marker {}",
+            std::os::fd::AsRawFd::as_raw_fd(&marker)
+        );
+        assert_eq!(status, 0);
+    }
+}
