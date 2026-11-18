@@ -987,11 +987,11 @@ pub(crate) mod tests {
         }
 
         /// Writes a second signed Agent Host folder whose manifest adds
-        /// `claim` to its capabilities, exactly as the stored host is
+        /// `claims` to its capabilities, exactly as the stored host is
         /// written, and returns the folder and the CID the Runtime's walk
-        /// gives it. The extra claim names another agent's root; admission
+        /// gives it. The extra claims name another agent's root; admission
         /// still binds the agent the request names.
-        fn host_with_claim(&self, name: &str, claim: &str) -> (std::path::PathBuf, String) {
+        fn host_with_claims(&self, name: &str, claims: &[String]) -> (std::path::PathBuf, String) {
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
 
             let key = SigningKey::from_bytes(&[0x44; 32]);
@@ -1005,7 +1005,7 @@ pub(crate) mod tests {
             let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
             let mut manifest: elastos_common::CapsuleManifest =
                 serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
-            manifest.capabilities.push(claim.to_string());
+            manifest.capabilities.extend_from_slice(claims);
             sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
             std::fs::write(
                 dir.join("capsule.json"),
@@ -2264,6 +2264,452 @@ pub(crate) mod tests {
         );
     }
 
+    /// The sentence the bridge uses when a rooted URI names anything but the
+    /// caller's own stored root, on both the request and the invoke path.
+    const A9R_SCOPE: &str =
+        "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+
+    /// The three files A keeps under its own `UsersAI` root in the A9-R rows:
+    /// the agent's format-2 journal, its `memory/notes.md`, and one ordinary
+    /// file that is neither journal nor memory.
+    fn a9r_own_uris(root: &str) -> (String, String, String) {
+        (
+            format!("{root}/.AppData/Agents/agent-host/tasks/t1/journal"),
+            format!("{root}/memory/notes.md"),
+            format!("{root}/notes/alpha.txt"),
+        )
+    }
+
+    /// Writes A's three files the way production writes a principal-root
+    /// object, so each has real bytes before either agent launches.
+    fn a9r_place_own(home: &ProbeLaunch, agent: &str, root: &str, own: &(String, String, String)) {
+        let mut journal = b"EAHJ".to_vec();
+        journal.extend_from_slice(&2u16.to_le_bytes());
+        journal.extend_from_slice(agent.as_bytes());
+        let notes = format!("notes for {agent}");
+        let foreign = b"alpha".to_vec();
+        for (uri, content) in [
+            (own.0.as_str(), journal),
+            (own.1.as_str(), notes.into_bytes()),
+            (own.2.as_str(), foreign),
+        ] {
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, uri).unwrap();
+            crate::auth::write_principal_root_object(
+                &home.data_dir,
+                agent,
+                root,
+                uri,
+                &path,
+                &content,
+            )
+            .unwrap();
+        }
+    }
+
+    /// A9-R's fixture: one Home, two stored agents of its owner, each with its
+    /// own `UsersAI` root, and the three files A keeps under its own root
+    /// before either agent launches.
+    struct A9rRow {
+        home: ProbeLaunch,
+        a: String,
+        b: String,
+        b_host: std::path::PathBuf,
+        root_a: String,
+        own: (String, String, String),
+    }
+
+    impl A9rRow {
+        async fn new() -> Self {
+            let home = ProbeLaunch::new(&["a"]).await;
+            let [a] = home.agents.as_slice() else {
+                panic!("one agent");
+            };
+            let a = a.clone();
+            let root_a = home.root(&a);
+            // Reuse the probe component. B's separately signed bundle names
+            // A's bare root and its children, so the ceiling permits every
+            // foreign-root cell before the principal-scope rule rejects it.
+            let (b_host, b_cid) =
+                home.host_with_claims("a9r-b-host", &[root_a.clone(), format!("{root_a}/*")]);
+            let b = home.create_agent_for_host("b", &b_cid);
+            let own = a9r_own_uris(&root_a);
+            a9r_place_own(&home, &a, &root_a, &own);
+            Self {
+                home,
+                a,
+                b,
+                b_host,
+                root_a,
+                own,
+            }
+        }
+    }
+
+    /// Grants B's requests under either agent root as the shell would. A's
+    /// first request stays pending so A remains live throughout B's launch.
+    fn grant_requests_under(
+        store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        manager: Arc<elastos_runtime::capability::CapabilityManager>,
+        roots: [String; 2],
+        held_id: String,
+    ) -> tokio::task::JoinHandle<()> {
+        use elastos_runtime::capability::pending::GrantDuration;
+        use elastos_runtime::capability::token::TokenConstraints;
+        tokio::spawn(async move {
+            let b_notes = format!("{}/memory/notes.md", roots[0]);
+            loop {
+                for pending in store.list_pending().await {
+                    if pending.id.as_str() == held_id {
+                        continue;
+                    }
+                    let resource = pending.resource.as_str();
+                    if !roots
+                        .iter()
+                        .any(|root| resource == root || resource.starts_with(&format!("{root}/")))
+                    {
+                        continue;
+                    }
+                    // B asks for its own notes before each foreign invoke.
+                    // Give that request a deliberately broad test grant: with
+                    // valid token and manifest authority, only the principal
+                    // scope can stop the foreign URI at dispatch.
+                    let granted_resource = if resource == b_notes {
+                        elastos_runtime::capability::ResourceId::new("localhost://UsersAI/*")
+                    } else {
+                        pending.resource.clone()
+                    };
+                    let token = manager.grant(
+                        &pending.session_id.0,
+                        granted_resource,
+                        pending.action,
+                        TokenConstraints::default(),
+                        None,
+                    );
+                    let _ = store
+                        .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+                        .await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+    }
+
+    /// A9-R: two agents of one Home through the real Runtime, both live at the
+    /// same time. A's activation is held inside its own first bridge call — its
+    /// own journal grant, left pending — for the whole of B's launch, so A is a
+    /// running instance with a live session when B's cells are refused. Only
+    /// requests under B's own stored root are granted, which keeps A held; after
+    /// B returns, A is released and must read its own three files back through
+    /// the same bridge.
+    ///
+    /// B asks for `target` by the request path and the invoke path, for A's
+    /// root as a listing, and once for its own alias as the control that the
+    /// alias resolves to B's own root.
+    async fn two_resident_agents_hold_a_while_b_is_refused(
+        home: &ProbeLaunch,
+        a: &str,
+        b: &str,
+        b_host: &std::path::Path,
+        own: &(String, String, String),
+        target: &str,
+    ) -> (
+        Result<Json<LaunchResponse>, (StatusCode, String)>,
+        Result<Json<LaunchResponse>, (StatusCode, String)>,
+        Vec<String>,
+        Vec<(String, String, PlanExpect)>,
+        elastos_runtime::capability::pending::PendingCapabilityRequest,
+    ) {
+        let root_a = home.root(a);
+        let root_b = home.root(b);
+        let b_notes = format!("{root_b}/memory/notes.md");
+        let target = target.to_string();
+
+        // A reads its own journal, notes and foreign file after its release.
+        let a_plan: Vec<String> = [&own.0, &own.1, &own.2]
+            .into_iter()
+            .map(|uri| format!("invoke\t{uri}\t{uri}\tread\tread\t"))
+            .collect();
+        home.plan(a, &a_plan);
+
+        let mut plan: Vec<(String, String, PlanExpect)> = Vec::new();
+        for (id, operation, action) in [
+            ("R1", "read", "read"),
+            ("W1", "write", "write"),
+            ("D1", "delete", "delete"),
+        ] {
+            plan.push((
+                format!("{id} request"),
+                format!("request\t{target}\t{action}"),
+                PlanExpect::Scope,
+            ));
+            plan.push((
+                format!("{id} invoke"),
+                format!("invoke\t{b_notes}\t{target}\t{operation}\t{action}\t"),
+                PlanExpect::Invalid,
+            ));
+        }
+        // A bare-root list has no protected object-storage path. If the
+        // invoke scope guard is removed, B's matching ceiling and broad test
+        // grant carry this call all the way to the localhost provider. Keep
+        // R1 request first so the request-scope plant fails at that grant.
+        plan.insert(
+            1,
+            (
+                "L1 invoke".to_string(),
+                format!("invoke\t{b_notes}\t{root_a}\tlist\tread\t"),
+                PlanExpect::Invalid,
+            ),
+        );
+        plan.push((
+            "L1 request".to_string(),
+            format!("request\t{root_a}\tread"),
+            PlanExpect::Scope,
+        ));
+        plan.push((
+            "H1 request".to_string(),
+            "request\tlocalhost://UsersAI/self/memory/notes.md\tread".to_string(),
+            PlanExpect::HeldRequest,
+        ));
+        home.plan(
+            b,
+            &plan
+                .iter()
+                .map(|(_, line, _)| line.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        let a_dir =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &root_a).unwrap();
+        let a_launch = home.launch(a);
+        let b_work = async {
+            // A is live and inside the bridge before B is launched.
+            let a_first = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(request) =
+                        home.pending_store.list_pending().await.into_iter().next()
+                    {
+                        break request;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("A must ask for its own journal grant");
+            assert_eq!(
+                a_first.resource.as_str(),
+                own.0.as_str(),
+                "A's first bridge call is its own journal"
+            );
+            let a_before = tree_hashes(&a_dir);
+
+            let grants = grant_requests_under(
+                home.pending_store.clone(),
+                home.capability_manager.clone(),
+                [root_b.clone(), root_a.clone()],
+                a_first.id.as_str().to_string(),
+            );
+            let b_run = home.launch_from(b_host, b).await;
+            grants.abort();
+
+            // A is still the same activation, held in the same request, after
+            // B's launch has returned.
+            let still = home.pending_store.list_pending().await;
+            assert!(
+                still
+                    .iter()
+                    .any(|request| request.id.as_str() == a_first.id.as_str()),
+                "A must still be held in its own first bridge call: {still:?}"
+            );
+            // B's refused cells created no record at all: A's held request is
+            // the only one, before and after B's launch.
+            assert_eq!(
+                still.len(),
+                1,
+                "a refused cell became a pending record: {still:?}"
+            );
+            assert_eq!(tree_hashes(&a_dir), a_before, "B changed A's tree");
+            let all =
+                grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+            (a_first, b_run, all)
+        };
+        let (a_run, (a_first, b_run, all)) = tokio::join!(a_launch, b_work);
+        all.abort();
+        (a_run, b_run, home.results(b), plan, a_first)
+    }
+
+    /// The clauses every A9-R row shares after both launches return: B's cells
+    /// carry the production sentence, A read its own three, A's stored bytes
+    /// are A's, nothing named A's root became a pending record, the provider
+    /// was never called, and the two agents ran in two different sessions.
+    async fn assert_a9r_denial(
+        row: &A9rRow,
+        a_run: &LaunchResponse,
+        b_run: &LaunchResponse,
+        a_first: &elastos_runtime::capability::pending::PendingCapabilityRequest,
+        results: &[String],
+        plan: &[(String, String, PlanExpect)],
+    ) {
+        let (home, a, b, own) = (&row.home, row.a.as_str(), row.b.as_str(), &row.own);
+        let root_a = row.root_a.as_str();
+        assert_eq!(b_run.status, "completed");
+        let a_session = a_first.session_id.0.clone();
+        assert_eq!(
+            a_run.id, a_session,
+            "A's launch is the session it asked from"
+        );
+
+        assert_eq!(results.len(), plan.len(), "{results:?}");
+        for (index, (label, _, expect)) in plan.iter().enumerate() {
+            let outcome = plan_outcome(results, index);
+            match expect {
+                PlanExpect::Scope => {
+                    assert!(outcome.contains("Internal("), "{label}: {outcome}");
+                    assert!(outcome.contains(A9R_SCOPE), "{label}: {outcome}");
+                }
+                PlanExpect::Invalid => {
+                    assert!(outcome.contains("Invalid("), "{label}: {outcome}");
+                    assert!(outcome.contains(A9R_SCOPE), "{label}: {outcome}");
+                }
+                PlanExpect::HeldRequest => assert_eq!(outcome, "ok", "{label}: {outcome}"),
+                _ => panic!("{label}: unexpected cell kind"),
+            }
+        }
+
+        // The control: A's own guest read its journal, its notes and its
+        // foreign file back through the same bridge.
+        let a_own = home.results(a);
+        assert_eq!(a_own.len(), 3, "{a_own:?}");
+        for (index, label) in ["journal", "notes", "foreign"].iter().enumerate() {
+            assert!(
+                plan_outcome(&a_own, index).starts_with("ok"),
+                "A reads its own {label}: {a_own:?}"
+            );
+        }
+
+        // A's stored bytes are A's: the format-2 journal names A, the notes are
+        // the guest's text for A, and the foreign file is the one the test
+        // placed and nobody wrote.
+        let read = |uri: &str| {
+            let path =
+                elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, uri).unwrap();
+            crate::auth::read_principal_root_object(&home.data_dir, a, root_a, uri, &path).unwrap()
+        };
+        let journal = read(&own.0);
+        assert_eq!(&journal[..4], b"EAHJ", "format-2 journal");
+        assert_eq!(journal[4..6], 2u16.to_le_bytes());
+        assert_eq!(&journal[6..], a.as_bytes(), "the journal names A");
+        assert_eq!(
+            read(&own.1),
+            format!("a5-launch-probe notes for {a}").into_bytes()
+        );
+        assert_eq!(read(&own.2), b"alpha".to_vec());
+
+        // Two live instances, two sessions: A's calls carry A's session and
+        // B's calls carry B's, and no completed call of either names A's root
+        // other than A's own.
+        let invoked_a = home.invoked(a);
+        let invoked_b = home.invoked(b);
+        assert!(!invoked_a.is_empty() && !invoked_b.is_empty());
+        let b_session = b_run.id.clone();
+        assert_ne!(a_session, b_session);
+        assert!(
+            invoked_a
+                .iter()
+                .all(|(session, _, _)| session.as_deref() == Some(a_session.as_str())),
+            "{invoked_a:?}"
+        );
+        assert!(
+            invoked_b
+                .iter()
+                .all(|(session, _, _)| session.as_deref() == Some(b_session.as_str())),
+            "{invoked_b:?}"
+        );
+        assert!(
+            invoked_b
+                .iter()
+                .all(|(_, _, reason)| !reason.contains(root_a)),
+            "B reached A's root: {invoked_b:?}"
+        );
+
+        // No refused cell became a pending record, and none reached the
+        // provider. B's listing cell named A's bare root, which no launched
+        // guest ever asks for legitimately, so it can be checked by name.
+        assert!(home.pending_store.list_pending().await.is_empty());
+        let requested = home.capability_requested();
+        assert!(
+            !requested.iter().any(|resource| resource == root_a),
+            "a capability request record names A's bare root: {requested:?}"
+        );
+        assert!(home.requests().is_empty(), "{:?}", home.requests());
+    }
+
+    /// A9-R clause one, ISO-journal: with both agents live, B is refused A's
+    /// agent journal through the real Runtime, and A reads its own.
+    #[tokio::test]
+    async fn both_resident_b_is_refused_a_journal_and_a_reads_its_own() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let row = A9rRow::new().await;
+        let (a_run, b_run, results, plan, a_first) = two_resident_agents_hold_a_while_b_is_refused(
+            &row.home,
+            &row.a,
+            &row.b,
+            &row.b_host,
+            &row.own,
+            &row.own.0,
+        )
+        .await;
+        let (a_run, b_run) = (a_run.unwrap().0, b_run.unwrap().0);
+        assert_eq!(a_run.status, "completed", "A finishes after its release");
+        assert_a9r_denial(&row, &a_run, &b_run, &a_first, &results, &plan).await;
+    }
+
+    /// A9-R clause two, ISO-memory: with both agents live, B is refused A's
+    /// `memory/notes.md`, and A reads its own.
+    #[tokio::test]
+    async fn both_resident_b_is_refused_a_memory_file_and_a_reads_its_own() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let row = A9rRow::new().await;
+        let (a_run, b_run, results, plan, a_first) = two_resident_agents_hold_a_while_b_is_refused(
+            &row.home,
+            &row.a,
+            &row.b,
+            &row.b_host,
+            &row.own,
+            &row.own.1,
+        )
+        .await;
+        let (a_run, b_run) = (a_run.unwrap().0, b_run.unwrap().0);
+        assert_eq!(a_run.status, "completed", "A finishes after its release");
+        assert_a9r_denial(&row, &a_run, &b_run, &a_first, &results, &plan).await;
+    }
+
+    /// A9-R clause three, ISO-foreign: with both agents live, B is refused a
+    /// file of A's that is neither journal nor memory, and A reads its own.
+    #[tokio::test]
+    async fn both_resident_b_is_refused_a_foreign_file_and_a_reads_its_own() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let row = A9rRow::new().await;
+        let (a_run, b_run, results, plan, a_first) = two_resident_agents_hold_a_while_b_is_refused(
+            &row.home,
+            &row.a,
+            &row.b,
+            &row.b_host,
+            &row.own,
+            &row.own.2,
+        )
+        .await;
+        let (a_run, b_run) = (a_run.unwrap().0, b_run.unwrap().0);
+        assert_eq!(a_run.status, "completed", "A finishes after its release");
+        assert_a9r_denial(&row, &a_run, &b_run, &a_first, &results, &plan).await;
+    }
+
     /// Row E (blocker evidence, no production change): a start that did not
     /// admit a stored agent refuses its principal by name before reading the
     /// folder. This is the attached start route that row 4's route 4 lacks.
@@ -2889,7 +3335,7 @@ pub(crate) mod tests {
         let root_b = home.root(&b);
 
         let (claim_dir, claim_cid) =
-            home.host_with_claim("claimed-probe", &format!("{root_b}/memory/notes.md"));
+            home.host_with_claims("claimed-probe", &[format!("{root_b}/memory/notes.md")]);
         let agent = home.create_agent_for_host("c", &claim_cid);
         let root = home.root(&agent);
         assert_ne!(root, root_b, "the claim names another agent's root");
