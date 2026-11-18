@@ -2573,6 +2573,13 @@ struct BrowserExitAdmission {
     reservations: browser_exit::BrowserExitReservations,
 }
 
+/// The one clock reading an Exit admission takes. The authority read, the
+/// relay-path validation and the post-admission recheck of the same grant all
+/// use it, so a wall-clock step between them cannot split one admission.
+fn exit_admission_now() -> u64 {
+    crate::operation_clock::now_ts()
+}
+
 async fn handle_browser_carrier_exit_stream(
     send: &mut iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
@@ -2594,16 +2601,17 @@ async fn handle_browser_carrier_exit_stream(
             source,
             request: data.clone(),
         };
-        let grant = authority.read().await?;
+        let now = exit_admission_now();
+        let grant = authority.read_at(now).await?;
         let reservation = reservations.reserve(
             &grant,
             data["stream_id"]
                 .as_str()
                 .context("Exit stream id required")?,
         )?;
-        let relay = browser_carrier_exit_relay_path(&registry, data, &grant, &source).await?;
+        let relay = browser_carrier_exit_relay_path(&registry, data, &grant, &source, now).await?;
         anyhow::ensure!(
-            authority.read().await? == grant,
+            authority.read_at(now).await? == grant,
             "Exit authority changed during admission"
         );
         Ok::<_, anyhow::Error>((authority, grant, reservation, relay))
@@ -2649,8 +2657,9 @@ async fn browser_carrier_exit_relay_path(
     data: &serde_json::Value,
     grant: &BrowserExitGrant,
     source: &iroh::PublicKey,
+    now: u64,
 ) -> Result<(PathBuf, String)> {
-    grant.validate(source, data, crate::auth::now_ts())?;
+    grant.validate(source, data, now)?;
     let schema = data
         .get("schema")
         .and_then(|value| value.as_str())
@@ -14704,7 +14713,8 @@ pub(crate) mod tests {
                 &registry,
                 &request,
                 &browser_exit_test_grant(),
-                &authenticated_test_source_endpoint()
+                &authenticated_test_source_endpoint(),
+                crate::auth::now_ts()
             )
             .await
             .is_err(),
@@ -14739,6 +14749,7 @@ pub(crate) mod tests {
             &request,
             &browser_exit_test_grant(),
             &authenticated_test_source_endpoint(),
+            crate::auth::now_ts(),
         )
         .await
         .unwrap();
@@ -14757,6 +14768,7 @@ pub(crate) mod tests {
             &request,
             &browser_exit_test_grant(),
             &authenticated_test_source_endpoint(),
+            crate::auth::now_ts(),
         )
         .await
         .unwrap_err()
@@ -14764,6 +14776,54 @@ pub(crate) mod tests {
         assert!(
             err.contains("relay_ipc"),
             "unexpected error for missing relay_ipc: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_carrier_exit_admission_takes_one_reading_under_a_backward_step() {
+        let registry = ProviderRegistry::new();
+        registry
+            .register_sub_provider(
+                "exit",
+                Arc::new(MockCarrierExitProvider {
+                    relay_path: Some("/tmp/clockprod2-exit.sock".to_string()),
+                }),
+            )
+            .await
+            .unwrap();
+        let now = crate::auth::now_ts();
+        let source = authenticated_test_source_endpoint();
+        let grant = BrowserExitGrant {
+            provider_principal_id: "person:provider".into(),
+            requester_principal_id: "person:local:alice".into(),
+            requester_endpoint: source,
+            grant_id: "operator-grant:server-exit:alice".into(),
+            revision: now,
+            expires_at: now.saturating_add(60),
+            max_active_streams: 4,
+            max_active_streams_per_principal: 2,
+        };
+        let request = serde_json::json!({
+            "schema": BROWSER_CARRIER_STREAM_SCHEMA,
+            "carrier_service": "elastos://exit/open_stream",
+            "grant_id": "operator-grant:server-exit:alice",
+            "stream_id": "remote-carrier:clockprod2:test",
+            "target": "tls://example.com:443",
+            "principal_id": "person:local:alice",
+        });
+        // The wall reading served after the first one is 120 s behind it: a
+        // second reading inside the admission would reject the grant.
+        let _armed = crate::operation_clock::arm(now, now.saturating_sub(120));
+        let admission_now = crate::operation_clock::now_ts();
+        let relay =
+            browser_carrier_exit_relay_path(&registry, &request, &grant, &source, admission_now)
+                .await
+                .unwrap();
+        assert_eq!(relay.0, PathBuf::from("/tmp/clockprod2-exit.sock"));
+        assert_eq!(
+            crate::operation_clock::reads(),
+            1,
+            "one Exit admission must take one clock reading"
         );
     }
 

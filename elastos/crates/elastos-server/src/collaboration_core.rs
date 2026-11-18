@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use anyhow::Context;
 use elastos_common::collaboration_protocol::{
@@ -72,6 +73,11 @@ pub(crate) struct CollaborationCore {
     mutation_mutex: Mutex<()>,
     /// Counted from stored outgoing messages, so only a saved message counts.
     sends_per_window: usize,
+    /// The monotonic instant this process admitted each outgoing message,
+    /// keyed by request id. The send window measures elapsed `Instant` time,
+    /// so a wall-clock step back cannot reopen it; a message restored from
+    /// disk has no anchor and keeps its stored wall stamp as before.
+    send_instants: Mutex<HashMap<String, Instant>>,
     receive_rate: ProfileRateLimiter,
     presence_receive_rate: ProfileRateLimiter,
     /// Serializes receive-rate admission through its durable commit and count.
@@ -461,6 +467,7 @@ impl CollaborationCore {
             community_membership,
             mutation_mutex: Mutex::new(()),
             sends_per_window: COMMUNITY_SENDS_PER_WINDOW,
+            send_instants: Mutex::new(HashMap::new()),
             receive_rate: ProfileRateLimiter::new(
                 COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW,
                 COMMUNITY_RATE_WINDOW_SECS,
@@ -1526,6 +1533,10 @@ impl CollaborationCore {
             let value = self.outgoing_handle(&record, prepared.verified_message().clone());
             state.outgoing.push(record);
             ensure_state_fits(state)?;
+            self.send_instants
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(operation.request_id.clone(), Instant::now());
             Ok(Mutation {
                 value,
                 changed: true,
@@ -1548,40 +1559,72 @@ impl CollaborationCore {
     /// Counts this Profile's stored Community messages created in the last
     /// window. Stored state is the count, so an unsaved send never counts and
     /// a saved one always does, across restarts too.
+    ///
+    /// Recent means less than one window of *elapsed* time, measured as the
+    /// larger of the wall-clock difference and the monotonic time since this
+    /// process admitted the message. A backward wall step can therefore never
+    /// reopen the window; a message restored from disk has no monotonic anchor
+    /// and keeps the stored wall stamp as before.
     fn check_community_send_window(
         &self,
         state: &CoreState,
         sender_profile_did: &str,
         now: u64,
     ) -> Result<(), CommunitySendRateLimited> {
-        let window_start = now.saturating_sub(COMMUNITY_RATE_WINDOW_SECS);
-        let recent = state
-            .outgoing
-            .iter()
-            .filter(|entry| {
-                entry.local_product_projection != OutgoingProductProjectionState::Retired
-            })
-            .filter_map(|entry| {
-                serde_json::from_str::<SignedCollaborationMessage>(&entry.envelope).ok()
-            })
-            .filter(|message| {
-                message.payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
-                    && message.payload.sender_profile_did == sender_profile_did
-                    && message.payload.created_at > window_start
-            })
-            .map(|message| message.payload.created_at);
-        let (count, oldest) = recent.fold((0, u64::MAX), |(count, oldest), created_at| {
-            (count + 1, oldest.min(created_at))
-        });
+        let mut instants = self
+            .send_instants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut recent_ids = HashSet::new();
+        let mut count = 0;
+        let mut oldest_elapsed = 0;
+        for entry in state.outgoing.iter().filter(|entry| {
+            entry.local_product_projection != OutgoingProductProjectionState::Retired
+        }) {
+            let Ok(message) = serde_json::from_str::<SignedCollaborationMessage>(&entry.envelope)
+            else {
+                continue;
+            };
+            if message.payload.payload_type != COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                continue;
+            }
+            let wall_elapsed = now.saturating_sub(message.payload.created_at);
+            let elapsed = instants
+                .get(&entry.operation.request_id)
+                .map_or(wall_elapsed, |admitted| {
+                    wall_elapsed.max(admitted.elapsed().as_secs())
+                });
+            if elapsed >= COMMUNITY_RATE_WINDOW_SECS {
+                continue;
+            }
+            recent_ids.insert(entry.operation.request_id.clone());
+            if message.payload.sender_profile_did != sender_profile_did {
+                continue;
+            }
+            count += 1;
+            oldest_elapsed = oldest_elapsed.max(elapsed);
+        }
+        instants.retain(|request_id, _| recent_ids.contains(request_id));
         if count < self.sends_per_window {
             return Ok(());
         }
         Err(CommunitySendRateLimited {
-            retry_after_secs: oldest
-                .saturating_add(COMMUNITY_RATE_WINDOW_SECS)
-                .saturating_sub(now)
+            retry_after_secs: COMMUNITY_RATE_WINDOW_SECS
+                .saturating_sub(oldest_elapsed)
                 .max(1),
         })
+    }
+
+    /// Treat `by` as elapsed monotonic send-window time, as a real wait would.
+    #[cfg(test)]
+    pub(crate) fn advance_send_window(&self, by: std::time::Duration) {
+        let mut instants = self
+            .send_instants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for admitted in instants.values_mut() {
+            *admitted = admitted.checked_sub(by).unwrap_or(*admitted);
+        }
     }
 
     #[cfg(test)]
@@ -6068,6 +6111,50 @@ mod tests {
             "burst-over",
             serde_json::json!({"body":"over"}),
             NOW + COMMUNITY_RATE_WINDOW_SECS,
+            TTL,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn community_send_window_measures_elapsed_monotonic_time_across_a_backward_wall_step() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        for index in 0..COMMUNITY_SENDS_PER_WINDOW {
+            prepare(
+                &core,
+                &format!("window-{index}"),
+                serde_json::json!({"body":format!("message {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        // The wall clock steps back 30 s between two sends. No monotonic time
+        // has passed, so the next send is still inside the window.
+        let refused = prepare(
+            &core,
+            "window-after-step",
+            serde_json::json!({"body":"after step"}),
+            NOW.saturating_sub(30),
+            TTL,
+        )
+        .unwrap_err();
+        assert!(
+            refused.downcast_ref::<CommunitySendRateLimited>().is_some(),
+            "a backward wall step must not reopen the send window"
+        );
+        // The retry shape the Linux build hits: the wall reading is still 30 s
+        // behind the sends, but a full window of monotonic time has elapsed.
+        // Elapsed monotonic time governs, so the send is admitted.
+        core.advance_send_window(std::time::Duration::from_secs(
+            COMMUNITY_RATE_WINDOW_SECS + 1,
+        ));
+        prepare(
+            &core,
+            "window-after-step",
+            serde_json::json!({"body":"after step"}),
+            NOW.saturating_sub(30),
             TTL,
         )
         .unwrap();
