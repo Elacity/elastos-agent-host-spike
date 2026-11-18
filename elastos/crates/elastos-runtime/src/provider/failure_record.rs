@@ -5,12 +5,21 @@ use super::{landlock_plan, preexec_installer, rights_table::RuntimeProviderId};
 use std::{
     ffi::{CStr, CString},
     os::unix::ffi::OsStrExt,
+    os::unix::fs::MetadataExt,
     path::Path,
 };
 
 const RECORD_LEN: usize = 12;
 const EXEC_TAG: u32 = 7;
 const DUP2_TAG: u32 = 8;
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum TestReport {
+    Normal,
+    NoRecordAfterDelay,
+    ShortRecord,
+}
 
 #[derive(Debug)]
 enum LaunchError {
@@ -43,7 +52,7 @@ fn start(
         &path,
         args,
         #[cfg(test)]
-        false,
+        TestReport::Normal,
         None,
         None,
     )
@@ -53,7 +62,7 @@ fn launch(
     prepared: &preexec_installer::Prepared,
     path: &CStr,
     args: &[&CStr],
-    #[cfg(test)] exit_without_record: bool,
+    #[cfg(test)] test_report: TestReport,
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
 ) -> Result<libc::pid_t, LaunchError> {
@@ -62,6 +71,15 @@ fn launch(
     argv.extend(args.iter().map(|arg| arg.as_ptr()));
     argv.push(std::ptr::null());
     let envp = [std::ptr::null()];
+    // A zero-byte pipe only proves that the writer closed. Compare the live
+    // child's executable with the requested file before handing out its PID.
+    // Self-exec is ambiguous before exec, so fail closed in that case.
+    let requested_exe = std::fs::metadata(Path::new(std::ffi::OsStr::from_bytes(path.to_bytes())))
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    let launcher_exe = std::fs::metadata("/proc/self/exe")
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
     let mut pipe = [-1; 2];
     if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
         return Err(LaunchError::BeforeFork(format!(
@@ -120,8 +138,27 @@ fn launch(
             }
         }
         #[cfg(test)]
-        if exit_without_record {
-            unsafe { libc::_exit(127) }
+        match test_report {
+            TestReport::Normal => {}
+            TestReport::NoRecordAfterDelay => {
+                unsafe { libc::close(pipe[1]) };
+                let delay = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 50_000_000,
+                };
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_nanosleep,
+                        &delay,
+                        std::ptr::null::<libc::timespec>(),
+                    );
+                    libc::_exit(127)
+                }
+            }
+            TestReport::ShortRecord => unsafe {
+                libc::write(pipe[1], b"short".as_ptr().cast(), 5);
+                libc::_exit(127)
+            },
         }
         if let Err(failure) = unsafe { preexec_installer::install(prepared, pipe[1]) } {
             write_record_and_exit(pipe[1], &failure.record());
@@ -171,7 +208,19 @@ fn launch(
         loop {
             let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
             if waited == 0 {
-                return Ok(pid);
+                let child_exe = std::fs::metadata(format!("/proc/{pid}/exe"))
+                    .ok()
+                    .map(|meta| (meta.dev(), meta.ino()));
+                if child_exe == requested_exe
+                    && requested_exe.is_some()
+                    && requested_exe != launcher_exe
+                {
+                    return Ok(pid);
+                }
+                // The writer closed before exec, the executable changed, or
+                // the child exited while /proc was read. Refuse and own cleanup.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                break;
             }
             if waited == pid {
                 return Err(LaunchError::ChildFailed {
@@ -186,6 +235,15 @@ fn launch(
                 });
             }
         }
+        while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+        return Err(LaunchError::ChildFailed {
+            pid,
+            reason: decode(&[]),
+        });
     }
     let reason = match read_failure {
         Some(ref error) => {
@@ -287,16 +345,23 @@ mod tests {
     fn installer_failure_crosses_pipe_and_child_is_reaped() {
         let root = tempfile::tempdir().unwrap();
         let path = CString::new("/bin/true").unwrap();
-        let prepared = preexec_installer::prepare(
+        let bindings = landlock_plan::Bindings {
+            storage_root: root.path().to_path_buf(),
+            provider_executable: "/bin/true".into(),
+        };
+        let expected_rule = landlock_plan::build(
             RuntimeProviderId::Did,
-            &landlock_plan::Bindings {
-                storage_root: root.path().to_path_buf(),
-                provider_executable: "/bin/true".into(),
-            },
+            &bindings,
+            landlock_plan::kernel_abi().unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .rules
+        .iter()
+        .position(|rule| rule.0 == "STORAGE_ROOT")
+        .expect("storage rule");
+        let prepared = preexec_installer::prepare(RuntimeProviderId::Did, &bindings).unwrap();
         std::fs::remove_dir(root.path()).unwrap();
-        let (pid, reason) = match launch(&prepared, &path, &[], false, None, None) {
+        let (pid, reason) = match launch(&prepared, &path, &[], TestReport::Normal, None, None) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
             Ok(pid) => {
                 let mut status = 0;
@@ -306,7 +371,8 @@ mod tests {
             other => panic!("the failed installer must refuse the launch: {other:?}"),
         };
         assert_eq!(
-            reason, "landlock install refused: the path rule 0 could not be added with errno 2",
+            reason,
+            format!("landlock install refused: the path rule {expected_rule} could not be added with errno 2"),
             "the failed installer must report its step"
         );
         let mut status = 0;
@@ -363,7 +429,14 @@ mod tests {
             },
         )
         .unwrap();
-        let (pid, reason) = match launch(&prepared, &path, &[], true, None, None) {
+        let (pid, reason) = match launch(
+            &prepared,
+            &path,
+            &[],
+            TestReport::NoRecordAfterDelay,
+            None,
+            None,
+        ) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
             Ok(pid) => {
                 let mut status = 0;
@@ -381,6 +454,38 @@ mod tests {
             unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
             -1,
             "the child without a record must already be reaped"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn short_child_record_is_refused_and_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let path = CString::new("/bin/true").unwrap();
+        let prepared = preexec_installer::prepare(
+            RuntimeProviderId::Did,
+            &landlock_plan::Bindings {
+                storage_root: root.path().to_path_buf(),
+                provider_executable: "/bin/true".into(),
+            },
+        )
+        .unwrap();
+        let (pid, reason) = match launch(&prepared, &path, &[], TestReport::ShortRecord, None, None)
+        {
+            Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
+            other => panic!("a short child record must refuse the launch: {other:?}"),
+        };
+        assert_eq!(
+            reason,
+            "seccomp install report refused: the child reported 5 bytes and one record is 12"
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
         );
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
@@ -419,7 +524,7 @@ mod tests {
             &prepared,
             &path,
             &[],
-            false,
+            TestReport::Normal,
             Some(input[0]),
             Some(output[1]),
         )
