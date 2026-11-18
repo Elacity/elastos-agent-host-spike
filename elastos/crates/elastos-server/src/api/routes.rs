@@ -987,11 +987,11 @@ pub(crate) mod tests {
         }
 
         /// Writes a second signed Agent Host folder whose manifest adds
-        /// `claim` to its capabilities, exactly as the stored host is
+        /// `claims` to its capabilities, exactly as the stored host is
         /// written, and returns the folder and the CID the Runtime's walk
-        /// gives it. The extra claim names another agent's root; admission
+        /// gives it. The extra claims name another agent's root; admission
         /// still binds the agent the request names.
-        fn host_with_claim(&self, name: &str, claim: &str) -> (std::path::PathBuf, String) {
+        fn host_with_claims(&self, name: &str, claims: &[String]) -> (std::path::PathBuf, String) {
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
 
             let key = SigningKey::from_bytes(&[0x44; 32]);
@@ -1005,7 +1005,7 @@ pub(crate) mod tests {
             let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
             let mut manifest: elastos_common::CapsuleManifest =
                 serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
-            manifest.capabilities.push(claim.to_string());
+            manifest.capabilities.extend_from_slice(claims);
             sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
             std::fs::write(
                 dir.join("capsule.json"),
@@ -2314,52 +2314,74 @@ pub(crate) mod tests {
         home: ProbeLaunch,
         a: String,
         b: String,
+        b_host: std::path::PathBuf,
         root_a: String,
         own: (String, String, String),
     }
 
     impl A9rRow {
         async fn new() -> Self {
-            let home = ProbeLaunch::new(&["a", "b"]).await;
-            let [a, b] = home.agents.as_slice() else {
-                panic!("two agents");
+            let home = ProbeLaunch::new(&["a"]).await;
+            let [a] = home.agents.as_slice() else {
+                panic!("one agent");
             };
-            let (a, b) = (a.clone(), b.clone());
+            let a = a.clone();
             let root_a = home.root(&a);
+            // Reuse the probe component. B's separately signed bundle names
+            // A's bare root and its children, so the ceiling permits every
+            // foreign-root cell before the principal-scope rule rejects it.
+            let (b_host, b_cid) =
+                home.host_with_claims("a9r-b-host", &[root_a.clone(), format!("{root_a}/*")]);
+            let b = home.create_agent_for_host("b", &b_cid);
             let own = a9r_own_uris(&root_a);
             a9r_place_own(&home, &a, &root_a, &own);
             Self {
                 home,
                 a,
                 b,
+                b_host,
                 root_a,
                 own,
             }
         }
     }
 
-    /// Grants every pending request whose resource is `root` or a path under
-    /// it, as the shell would, and keeps doing it until the test stops the
-    /// task. Every other agent's requests stay pending, which is what holds A
-    /// inside its own first bridge call while B runs.
+    /// Grants B's requests under either agent root as the shell would. A's
+    /// first request stays pending so A remains live throughout B's launch.
     fn grant_requests_under(
         store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         manager: Arc<elastos_runtime::capability::CapabilityManager>,
-        root: String,
+        roots: [String; 2],
+        held_id: String,
     ) -> tokio::task::JoinHandle<()> {
         use elastos_runtime::capability::pending::GrantDuration;
         use elastos_runtime::capability::token::TokenConstraints;
         tokio::spawn(async move {
-            let under = format!("{root}/");
+            let b_notes = format!("{}/memory/notes.md", roots[0]);
             loop {
                 for pending in store.list_pending().await {
-                    let resource = pending.resource.as_str();
-                    if resource != root && !resource.starts_with(&under) {
+                    if pending.id.as_str() == held_id {
                         continue;
                     }
+                    let resource = pending.resource.as_str();
+                    if !roots
+                        .iter()
+                        .any(|root| resource == root || resource.starts_with(&format!("{root}/")))
+                    {
+                        continue;
+                    }
+                    // B asks for its own notes before each foreign invoke.
+                    // Give that request a deliberately broad test grant: with
+                    // valid token and manifest authority, only the principal
+                    // scope can stop the foreign URI at dispatch.
+                    let granted_resource = if resource == b_notes {
+                        elastos_runtime::capability::ResourceId::new("localhost://UsersAI/*")
+                    } else {
+                        pending.resource.clone()
+                    };
                     let token = manager.grant(
                         &pending.session_id.0,
-                        pending.resource.clone(),
+                        granted_resource,
                         pending.action,
                         TokenConstraints::default(),
                         None,
@@ -2388,6 +2410,7 @@ pub(crate) mod tests {
         home: &ProbeLaunch,
         a: &str,
         b: &str,
+        b_host: &std::path::Path,
         own: &(String, String, String),
         target: &str,
     ) -> (
@@ -2426,15 +2449,22 @@ pub(crate) mod tests {
                 PlanExpect::Invalid,
             ));
         }
+        // A bare-root list has no protected object-storage path. If the
+        // invoke scope guard is removed, B's matching ceiling and broad test
+        // grant carry this call all the way to the localhost provider. Keep
+        // R1 request first so the request-scope plant fails at that grant.
+        plan.insert(
+            1,
+            (
+                "L1 invoke".to_string(),
+                format!("invoke\t{b_notes}\t{root_a}\tlist\tread\t"),
+                PlanExpect::Invalid,
+            ),
+        );
         plan.push((
             "L1 request".to_string(),
             format!("request\t{root_a}\tread"),
             PlanExpect::Scope,
-        ));
-        plan.push((
-            "L1 invoke".to_string(),
-            format!("invoke\t{b_notes}\t{root_a}\tlist\tread\t"),
-            PlanExpect::Invalid,
         ));
         plan.push((
             "H1 request".to_string(),
@@ -2476,9 +2506,10 @@ pub(crate) mod tests {
             let grants = grant_requests_under(
                 home.pending_store.clone(),
                 home.capability_manager.clone(),
-                root_b.clone(),
+                [root_b.clone(), root_a.clone()],
+                a_first.id.as_str().to_string(),
             );
-            let b_run = home.launch(b).await;
+            let b_run = home.launch_from(b_host, b).await;
             grants.abort();
 
             // A is still the same activation, held in the same request, after
@@ -2622,7 +2653,12 @@ pub(crate) mod tests {
         }
         let row = A9rRow::new().await;
         let (a_run, b_run, results, plan, a_first) = two_resident_agents_hold_a_while_b_is_refused(
-            &row.home, &row.a, &row.b, &row.own, &row.own.0,
+            &row.home,
+            &row.a,
+            &row.b,
+            &row.b_host,
+            &row.own,
+            &row.own.0,
         )
         .await;
         let (a_run, b_run) = (a_run.unwrap().0, b_run.unwrap().0);
@@ -2639,7 +2675,12 @@ pub(crate) mod tests {
         }
         let row = A9rRow::new().await;
         let (a_run, b_run, results, plan, a_first) = two_resident_agents_hold_a_while_b_is_refused(
-            &row.home, &row.a, &row.b, &row.own, &row.own.1,
+            &row.home,
+            &row.a,
+            &row.b,
+            &row.b_host,
+            &row.own,
+            &row.own.1,
         )
         .await;
         let (a_run, b_run) = (a_run.unwrap().0, b_run.unwrap().0);
@@ -2656,7 +2697,12 @@ pub(crate) mod tests {
         }
         let row = A9rRow::new().await;
         let (a_run, b_run, results, plan, a_first) = two_resident_agents_hold_a_while_b_is_refused(
-            &row.home, &row.a, &row.b, &row.own, &row.own.2,
+            &row.home,
+            &row.a,
+            &row.b,
+            &row.b_host,
+            &row.own,
+            &row.own.2,
         )
         .await;
         let (a_run, b_run) = (a_run.unwrap().0, b_run.unwrap().0);
@@ -3289,7 +3335,7 @@ pub(crate) mod tests {
         let root_b = home.root(&b);
 
         let (claim_dir, claim_cid) =
-            home.host_with_claim("claimed-probe", &format!("{root_b}/memory/notes.md"));
+            home.host_with_claims("claimed-probe", &[format!("{root_b}/memory/notes.md")]);
         let agent = home.create_agent_for_host("c", &claim_cid);
         let root = home.root(&agent);
         assert_ne!(root, root_b, "the claim names another agent's root");
