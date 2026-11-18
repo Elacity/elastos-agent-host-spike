@@ -7781,6 +7781,7 @@ async fn runtime_decrypt_registry_adapter_process_reconstructs_for_prepared_reci
     let mut protect_schemes = protect_registry.sub_provider_schemes().await;
     protect_schemes.sort();
     assert_eq!(protect_schemes, Vec::<String>::new());
+    let now = crate::auth::now_ts();
     assert_eq!(
         prepare_recipient(
             &decrypt,
@@ -7788,8 +7789,8 @@ async fn runtime_decrypt_registry_adapter_process_reconstructs_for_prepared_reci
             RuntimeSessionBindingV1::new(digest(0x66)).unwrap(),
             RuntimeReleaseAuditIdV1::new(digest(0xaf)).unwrap(),
             runtime_operation_issuer_for_seed(0x21),
-            crate::auth::now_ts(),
-            crate::auth::now_ts() + 45,
+            now,
+            now.saturating_add(45),
         )
         .await,
         Err(RuntimeOpenError::DecryptResult)
