@@ -9105,6 +9105,76 @@ async fn test_browser_account_access_status_returns_only_exact_origin_bound_gran
 }
 
 #[tokio::test]
+async fn test_browser_account_access_status_reads_the_clock_once_under_a_step() {
+    // The clock steps 60 s forward between the request-grant check and the
+    // completed-result grant check. Both checks must consume one value: the
+    // grant, 60 s inside its ceiling, stays valid.
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let browser_token = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("localhost:61180"));
+    headers.insert("origin", HeaderValue::from_static("null"));
+    headers.insert(
+        "x-elastos-home-token",
+        HeaderValue::from_str(&browser_token).unwrap(),
+    );
+    let launch =
+        require_home_launch_token_binding(dir.path(), &headers, &[BROWSER_CAPSULE_ID]).unwrap();
+    let runtime_authority = runtime_wallet_authority(dir.path(), &launch).unwrap();
+    let request_id = "wallet-approval:browser-consent-clock";
+    let first = crate::auth::now_ts();
+    let grant_expires_at = first.saturating_add(60);
+    let exact = completed_browser_account_access_approval(
+        runtime_authority.verified_context(),
+        request_id,
+        grant_expires_at,
+    );
+    let provider = MockWalletProvider {
+        challenges: TokioMutex::default(),
+        bitcoin_challenges: TokioMutex::default(),
+        accounts: TokioMutex::default(),
+        approvals: TokioMutex::new(vec![exact]),
+        defaults: TokioMutex::default(),
+    };
+    let app = gateway_router(wallet_test_state_with_provider(dir.path(), provider).await);
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("page_url", "https://dapp.example/connect")
+        .append_pair("origin", "https://dapp.example")
+        .finish();
+    let clock = crate::test_clock::arm(first, first.saturating_add(60));
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .uri(format!(
+                    "/api/apps/browser/wallet/approvals/{request_id}?{query}"
+                ))
+                .header("x-elastos-home-token", browser_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reads = crate::test_clock::reads();
+    drop(clock);
+    assert_eq!(
+        reads, 1,
+        "the account-access completion must read the clock once"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status["status"], "completed");
+    assert_eq!(status["account_access"]["permission"], "eth_accounts");
+    assert_eq!(
+        status["account_access"]["grant_expires_at"].as_u64(),
+        Some(grant_expires_at)
+    );
+}
+
+#[tokio::test]
 async fn test_browser_readiness_denial_precedes_profile_and_launch_effects() {
     for (readiness_data, reason) in [
         (

@@ -9,9 +9,9 @@
 //! launch, and each row also launches a stored agent of the same Home through
 //! the production `launch_capsule` entry, from that Home's own data dir.
 //! `launch_capsule` starts the capsule and returns
-//! `LaunchResponse { id, name, status }` with no token (`api/routes.rs:157-161`),
+//! `LaunchResponse { id, name, status, session_id }` with no token (`api/routes.rs:182-187`),
 //! and no code on the admitted start path stores a session grant
-//! (`runtime.rs:348-361`, `agent_admission.rs`). The gateway accepts only Home
+//! (`runtime.rs:402-462`, `agent_admission.rs`). The gateway accepts only Home
 //! launch tokens (`gateway_home_token.rs:737-770`), which an agent launch
 //! never receives. So an agent's guest has nothing to present: a route
 //! request with no Home token is refused by the gateway's admission step
@@ -286,8 +286,8 @@ fn app_request(method: &str, uri: &str, token: &str, body: Option<Value>) -> Req
 
 /// A route request with no `x-elastos-home-token`. That is everything an
 /// agent launch can present: `launch_capsule` answers
-/// `LaunchResponse { id, name, status }` (`api/routes.rs:157-161`) and the
-/// admitted start stores no session grant (`runtime.rs:348-361`), while the
+/// `LaunchResponse { id, name, status, session_id }` (`api/routes.rs:182-187`) and the
+/// admitted start stores no session grant (`runtime.rs:402-462`), while the
 /// gateway accepts only Home launch tokens (`gateway_home_token.rs:737-770`).
 fn agent_request(method: &str, uri: &str, body: Option<Value>) -> Request<Body> {
     let builder = test_browser_request("localhost:61180", "null")
@@ -303,10 +303,10 @@ fn agent_request(method: &str, uri: &str, body: Option<Value>) -> Request<Body> 
 }
 
 /// Launches the Home's stored agent through the production `launch_capsule`
-/// entry (`api/routes.rs:88`) in this same Home, with its capability requests
-/// granted as a shell grants them. It shows the launch's answer carries no
-/// token and that the admitted start stored no session grant for the agent,
-/// then returns the agent's own route location under this Home.
+/// entry (`api/routes.rs:99`) in this same Home, with its capability requests
+/// granted as a shell grants them and its activation waited out. It shows the
+/// launch's answer carries no token and no session grant is stored for the
+/// agent, then returns the agent's own route location under this Home.
 async fn launch_stored_agent(home: &TwoPersonHome, relative: &str) -> std::path::PathBuf {
     let agent_home = home.agent.as_ref().expect("the agent case is built");
     let launched = agent_home
@@ -316,9 +316,18 @@ async fn launch_stored_agent(home: &TwoPersonHome, relative: &str) -> std::path:
         .expect("the stored agent launches");
     let answer = serde_json::to_value(&launched.0).unwrap();
     assert_eq!(
-        answer["status"], "completed",
-        "the agent launch ran to its own answer"
+        answer["status"], "starting",
+        "the agent launch answers at admission"
     );
+    assert_eq!(
+        answer["session_id"], answer["id"],
+        "the launch names the session its guest runs in"
+    );
+    let end = agent_home
+        .probe
+        .wait_ended(answer["id"].as_str().expect("the launch names its id"))
+        .await;
+    assert_eq!(end.cause.as_deref(), Some("completed"));
     let keys = answer
         .as_object()
         .expect("the launch answer is an object")
@@ -327,8 +336,8 @@ async fn launch_stored_agent(home: &TwoPersonHome, relative: &str) -> std::path:
         .collect::<Vec<_>>();
     assert_eq!(
         keys,
-        ["id", "name", "status"],
-        "an agent launch returns no token (`api/routes.rs:157-161`)"
+        ["id", "name", "session_id", "status"],
+        "an agent launch returns no token (`api/routes.rs:182-187`)"
     );
     let sessions = crate::auth::load_auth_state(&agent_home.probe.data_dir)
         .expect("the agent's Home reads")
@@ -337,7 +346,7 @@ async fn launch_stored_agent(home: &TwoPersonHome, relative: &str) -> std::path:
         sessions
             .iter()
             .all(|session| session.grant.principal_id != agent_home.id),
-        "an admitted agent launch stores no session grant (`runtime.rs:348-361`)"
+        "an admitted agent launch stores no session grant (`runtime.rs:402-462`)"
     );
     let agent_root = agent_home.probe.root(&agent_home.id);
     object_path(home, &agent_root, relative)
@@ -347,7 +356,7 @@ async fn launch_stored_agent(home: &TwoPersonHome, relative: &str) -> std::path:
 /// with no Home launch token. The gateway's admission step refuses it before
 /// the handler runs: `require_gateway_launch_for` (`gateway_frontdoor.rs:276`)
 /// requires a Home launch token, and an agent launch never receives one
-/// (`gateway_home_token.rs:737-770`, `api/routes.rs:157-161`).
+/// (`gateway_home_token.rs:737-770`, `api/routes.rs:182-187`).
 /// `gateway_frontdoor.rs:190` answers with the production literal. The route
 /// writes no file in this same Home.
 async fn assert_agent_launch_refused(
@@ -388,8 +397,8 @@ async fn assert_agent_launch_refused(
 /// 9's fence is this fixed relative path plus the agent case: the request
 /// carries no path field, a body that names one is refused, and a stored
 /// agent of this same Home has no token this route accepts. An agent launch
-/// returns `LaunchResponse { id, name, status }` and stores no session grant
-/// (`api/routes.rs:157-161`, `runtime.rs:348-361`); a tokenless request is
+/// returns `LaunchResponse { id, name, status, session_id }` and stores no session grant
+/// (`api/routes.rs:182-187`, `runtime.rs:402-462`); a tokenless request is
 /// refused by the gateway's admission step before the route's own token check
 /// runs (`gateway_frontdoor.rs:276`, literal at `:190`) and writes nothing.
 #[tokio::test]
@@ -519,8 +528,8 @@ async fn route_13_home_agent_workspace_refuses_an_agent_launch_and_two_people_ge
 /// `{context.root().localhost_root()}/.AppData/ElastOS/Assistant/workspace.json`.
 /// The token is the one the person's Home launch produced for `assistant`.
 /// Two people's launches get two different locations. A stored agent of the
-/// same Home has no token for the route (`api/routes.rs:157-161`,
-/// `runtime.rs:348-361`); a tokenless request is refused by the gateway's
+/// same Home has no token for the route (`api/routes.rs:182-187`,
+/// `runtime.rs:402-462`); a tokenless request is refused by the gateway's
 /// admission step before the route's own token check runs
 /// (`gateway_frontdoor.rs:276`, literal at `:190`) and writes nothing.
 #[tokio::test]
@@ -634,8 +643,8 @@ async fn route_14_assistant_workspace_refuses_an_agent_launch_and_two_people_get
 /// `{context.root().localhost_root()}/.AppData/ElastOS/Assistant/workspace-v2.json`.
 /// The token is the one the person's Home launch produced for `assistant`.
 /// Two people's launches get two different locations. A stored agent of the
-/// same Home has no token for the route (`api/routes.rs:157-161`,
-/// `runtime.rs:348-361`); a tokenless request is refused by the gateway's
+/// same Home has no token for the route (`api/routes.rs:182-187`,
+/// `runtime.rs:402-462`); a tokenless request is refused by the gateway's
 /// admission step before the route's own token check runs
 /// (`gateway_frontdoor.rs:276`, literal at `:190`) and writes nothing.
 #[tokio::test]
@@ -755,8 +764,8 @@ async fn route_15_assistant_workspace_v2_refuses_an_agent_launch_and_two_people_
 /// The token is the one the person's Home launch produced for the `home-gui`
 /// shell, one of the three shell ids the route accepts (`:6453`).
 /// Two people's launches get two different locations. A stored agent of the
-/// same Home has no token for the route (`api/routes.rs:157-161`,
-/// `runtime.rs:348-361`); a tokenless request is refused by the gateway's
+/// same Home has no token for the route (`api/routes.rs:182-187`,
+/// `runtime.rs:402-462`); a tokenless request is refused by the gateway's
 /// admission step before the route's own token check runs
 /// (`gateway_frontdoor.rs:276`, literal at `:190`) and writes nothing.
 #[tokio::test]

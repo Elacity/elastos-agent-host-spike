@@ -277,6 +277,16 @@ impl BridgePrincipal {
     }
 }
 
+/// One activation's stop request, shared by its end and the bridge's wait
+/// loop (M1-R A10-R). `requested` is set by the stop route before it waits;
+/// `cancelled` is set by the wait loop when it leaves the guest's call
+/// because of it, so the end can tell this stop's ending from a trap's.
+#[derive(Debug, Default)]
+pub struct ActivationStopFlag {
+    pub requested: std::sync::atomic::AtomicBool,
+    pub cancelled: std::sync::atomic::AtomicBool,
+}
+
 /// Resources needed by the bridge to handle requests.
 #[derive(Clone)]
 pub struct BridgeContext {
@@ -298,6 +308,11 @@ pub struct BridgeContext {
     /// Model-token ceiling admission recorded for this capsule. `None` is not
     /// an admitted agent, and the model rule does not apply.
     pub model_token_ceiling: Option<u64>,
+    /// The stop requested for this activation, if any (M1-R A10-R). The wait
+    /// loop reads it, so a guest held in a capability wait leaves at once
+    /// instead of waiting out the shell's polls; it records that it left for
+    /// the stop, and the activation's own end then denies the request.
+    pub stop: Option<Arc<ActivationStopFlag>>,
 }
 
 /// Spawn a resource bridge handler for a microVM capsule.
@@ -1408,6 +1423,31 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                     // The shell polls /api/capability/pending and grants/denies.
                     let mut granted_token = None;
                     for _ in 0..CAPABILITY_APPROVAL_MAX_POLLS {
+                        // A stop requested for this activation ends the wait
+                        // now (M1-R A10-R): a guest whose call waits up to 30 s
+                        // for the shell must not hold the stop for that long.
+                        if ctx.stop.as_ref().is_some_and(|stop| {
+                            stop.requested.load(std::sync::atomic::Ordering::Acquire)
+                        }) {
+                            if let Some(stop) = &ctx.stop {
+                                stop.cancelled
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
+                            tracing::info!(
+                                "bridge: cancelled {} {} for capsule '{}'",
+                                action,
+                                resource,
+                                ctx.capsule_id,
+                            );
+                            return Ok(serde_json::json!({
+                                "id": id,
+                                "response": {
+                                    "type": "error",
+                                    "code": "cancelled",
+                                    "message": "the activation was stopped",
+                                },
+                            }));
+                        }
                         tokio::time::sleep(std::time::Duration::from_millis(
                             CAPABILITY_APPROVAL_POLL_MS,
                         ))
@@ -2099,6 +2139,7 @@ mod tests {
             data_dir: None,
             launch: None,
             model_token_ceiling: None,
+            stop: None,
         }
     }
 
@@ -3644,9 +3685,10 @@ mod tests {
             ),
             ("start_loaded", &[("elastos-server/src/runtime.rs", 2)][..]),
             (
-                "run_local_admitted",
+                "start_local_admitted",
                 &[("elastos-server/src/api/routes.rs", 1)][..],
             ),
+            ("run_local_admitted", &[][..]),
             (
                 "spawn_resource_bridge",
                 &[("elastos-server/src/supervisor.rs", 1)][..],

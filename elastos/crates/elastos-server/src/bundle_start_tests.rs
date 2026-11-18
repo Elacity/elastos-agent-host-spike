@@ -1399,13 +1399,12 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         }
     }
     // It passes no ceiling of its own: the shared end fills it. One capsule
-    // is started, the one asked for.
-    assert_eq!(
-        start
-            .matches("self.start_loaded(component, &mut handle, args, principal_id, None)")
-            .count(),
-        1
-    );
+    // is started, the one asked for, and a bundle start is still bounded.
+    let bounded =
+        "self.start_loaded(\n            component,\n            &mut handle,\n            \
+                   args,\n            principal_id,\n            None,\n            \
+                   LaunchMode::Bounded,\n        )";
+    assert_eq!(start.matches(bounded).count(), 1);
     // One capsule is loaded, from the walked bytes and the judged manifest:
     // sealed when that manifest has no asks, unsealed when it has. Nothing
     // else decides the seal.

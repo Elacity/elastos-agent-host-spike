@@ -176,6 +176,9 @@ struct V2RunControl {
 /// What a sealed component gets for any call to the bridge.
 pub const SEALED_BRIDGE: &str = "this capsule was started with no authority: it has no bridge";
 
+/// The start error of an activation whose stop interrupted its start function.
+pub const STOPPED_BEFORE_RUN: &str = "component was stopped before its run began";
+
 struct ComponentState {
     /// A sealed activation's call to the bridge is refused here, before any
     /// handler is looked at.
@@ -270,6 +273,10 @@ impl ComponentProvider {
                         | WasmFeatures::STACK_SWITCHING,
                     false,
                 );
+                // Wasmtime's macOS Mach handler thread aborts the process on an
+                // interrupted receive; the Unix signal handler traps on the
+                // faulting thread instead. Signals-based traps stay on.
+                config.macos_use_mach_ports(false);
                 let engine = Engine::new(&config).map_err(|err| err.to_string())?;
                 // The one ticker. A store with no deadline set traps at once,
                 // so a run can never be left without one.
@@ -308,6 +315,9 @@ impl ComponentProvider {
                             | WasmFeatures::STACK_SWITCHING,
                         false,
                     );
+                // The same signal-trap choice as v1: the two engines are in one
+                // process and wasmtime's global trap handler must agree.
+                config.macos_use_mach_ports(false);
                 let engine = Engine::new(&config).map_err(|err| err.to_string())?;
                 let ticker = engine.clone();
                 std::thread::Builder::new()
@@ -532,9 +542,9 @@ impl ComponentProvider {
                         Some(ActivationOutcome::Trapped(message)) => {
                             Err(ElastosError::Compute(message))
                         }
-                        Some(ActivationOutcome::Stopped) => Err(ElastosError::Compute(
-                            "component was stopped before its run began".into(),
-                        )),
+                        Some(ActivationOutcome::Stopped) => {
+                            Err(ElastosError::Compute(STOPPED_BEFORE_RUN.into()))
+                        }
                         _ => Err(ElastosError::Compute(
                             "component run ended before the guest started".into(),
                         )),
@@ -2396,6 +2406,102 @@ mod tests {
             lasted < Duration::from_secs(2),
             "a 200 ms limit ended the start function only after {lasted:?}"
         );
+    }
+
+    /// A v1 component whose core `run` executes `body` before returning 0, so a
+    /// test can fault the guest where a native fault is what raises the trap.
+    fn trap_component_bytes(body: &str) -> Vec<u8> {
+        let text = format!(
+            r#"(component
+              (import "elastos:bus/types@1.0.0" (instance $types
+                (type $error (variant
+                  (case "denied" string) (case "not-found" string) (case "invalid" string)
+                  (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+                (export "bus-error" (type (eq $error)))))
+              (alias export $types "bus-error" (type $bus-error))
+              (core module $m
+                (memory (export "memory") 1)
+                (func (export "run") (result i32) {body} (i32.const 0)))
+              (core instance $i (instantiate $m))
+              (func $run (result (result (error $bus-error)))
+                (canon lift (core func $i "run") (memory $i "memory")))
+              (instance $lifecycle (export "run" (func $run)))
+              (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#
+        );
+        wat::parse_str(text).expect("component text")
+    }
+
+    /// The trap a guest body ends with, named as Wasmtime names it, on the one
+    /// engine the provider runs it on.
+    fn trap_named_by(run: &str) -> String {
+        let engine = ComponentProvider::engine().expect("component engine");
+        let component = Component::new(&engine, trap_component_bytes(run)).expect("compiles");
+        let (result, _) = run_to_its_end(component, state_with_deadline(Duration::from_secs(5)));
+        let text = result.expect_err("the guest body must trap").to_string();
+        text.lines().next().unwrap_or_default().to_string()
+    }
+
+    /// The first byte past a one-page memory is a guard page: the load faults in
+    /// native code and only the installed trap handler turns that into a trap.
+    /// On macOS this is the SIGBUS the signal handler receives; a Mach-port
+    /// engine would take the fault down the other path entirely.
+    #[test]
+    fn a_guest_out_of_bounds_load_traps_as_a_named_trap() {
+        assert_eq!(
+            trap_named_by("(drop (i32.load (i32.const 0x1_0000)))"),
+            "Compute error: Component lifecycle run failed: \
+             wasm trap: out of bounds memory access"
+        );
+    }
+
+    /// `unreachable` is a native illegal instruction, so the trap again comes
+    /// from the handler rather than from a check the compiler emits.
+    #[test]
+    fn a_guest_unreachable_traps_as_a_named_trap() {
+        assert_eq!(
+            trap_named_by("unreachable"),
+            "Compute error: Component lifecycle run failed: \
+             wasm trap: wasm `unreachable` instruction executed"
+        );
+    }
+
+    /// Wasmtime has no getter for `macos_use_mach_ports` (the field is
+    /// crate-private and `Config` exposes no accessor, unlike
+    /// `get_signals_based_traps`), so the two call sites are pinned in the
+    /// source: the setting is process-global, chosen by the first Engine in the
+    /// process, and a second Engine with the other value panics.
+    #[test]
+    fn both_engines_are_built_for_signal_traps_not_mach_ports() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/providers/component.rs"
+        ))
+        .expect("the compute source");
+        // The rows themselves name the setting, and a `#[cfg(test)]` item sits
+        // inside the production engine code, so cut at the test module's own
+        // header rather than at the first `#[cfg(test)]`.
+        let production = source
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("the test module")
+            .0;
+        let (v1, v2) = production
+            .split_once("pub(crate) fn v2_engine()")
+            .expect("the v2 engine initializer");
+        for (name, half) in [("v1", v1), ("v2", v2)] {
+            assert_eq!(
+                half.matches("macos_use_mach_ports(false)").count(),
+                1,
+                "the {name} engine initializer must set macos_use_mach_ports(false) exactly once"
+            );
+            let set = half
+                .find("config.macos_use_mach_ports")
+                .expect("the setting");
+            let built = half.find("Engine::new(&config)").expect("Engine::new");
+            assert!(
+                set < built,
+                "the {name} setting must precede its Engine::new"
+            );
+        }
     }
 
     #[test]
