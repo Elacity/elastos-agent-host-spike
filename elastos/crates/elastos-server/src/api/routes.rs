@@ -755,6 +755,49 @@ pub(crate) mod tests {
         }
     }
 
+    /// Records every raw request the bridge routes to the model provider.
+    #[derive(Default)]
+    struct CapturingModelProvider {
+        requests: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl CapturingModelProvider {
+        fn requests(&self) -> Vec<serde_json::Value> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl elastos_runtime::provider::Provider for CapturingModelProvider {
+        async fn handle(
+            &self,
+            _request: elastos_runtime::provider::ResourceRequest,
+        ) -> Result<
+            elastos_runtime::provider::ResourceResponse,
+            elastos_runtime::provider::ProviderError,
+        > {
+            Err(elastos_runtime::provider::ProviderError::Provider(
+                "raw provider fixture does not implement ResourceRequest".to_string(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["model"]
+        }
+
+        fn name(&self) -> &'static str {
+            "capturing-model"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, elastos_runtime::provider::ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(serde_json::json!({"status": "ok", "data": {"ok": true}}))
+        }
+    }
+
     /// A Home whose stored agents are the probe package: the probe's manifest
     /// name and the CID its capsule directory records, signed by a key the
     /// runtime trusts. Two agents, or as many as asked for, share the Home.
@@ -1013,6 +1056,33 @@ pub(crate) mod tests {
             )
             .unwrap();
             let cid = crate::stage_cmd::bundle_cid(&dir).expect("the claimed host is walkable");
+            (dir, cid)
+        }
+
+        /// A signed copy of the probe whose manifest asks for `tokens` model
+        /// tokens (`None` asks for none) and may call the model.
+        fn model_host(&self, name: &str, tokens: Option<u64>) -> (std::path::PathBuf, String) {
+            use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+            let key = SigningKey::from_bytes(&[0x44; 32]);
+            let dir = self.fixture_root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/a5-launch-probe");
+            for file in ["capsule.json", "a5-launch-probe.component.wasm"] {
+                std::fs::copy(fixture.join(file), dir.join(file)).unwrap();
+            }
+            let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
+            let mut manifest: elastos_common::CapsuleManifest =
+                serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
+            manifest.capabilities.push("elastos://model/*".to_string());
+            manifest.resources.model_tokens = tokens;
+            sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let cid = crate::stage_cmd::bundle_cid(&dir).expect("the model host is walkable");
             (dir, cid)
         }
 
@@ -2247,6 +2317,7 @@ pub(crate) mod tests {
             manifest_capabilities: Vec::new(),
             data_dir: Some(home.data_dir.clone()),
             launch: None,
+            model_token_ceiling: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
         let refused = crate::resource_bridge::protected_principal_root_resource_response_for_test(
@@ -2937,6 +3008,92 @@ pub(crate) mod tests {
             "the absent peer pointer and the absent plan are the only failed calls: {events:?}"
         );
         grants.abort();
+    }
+
+    async fn admitted_model_agent(
+        tokens: Option<u64>,
+    ) -> (
+        ProbeLaunch,
+        std::path::PathBuf,
+        String,
+        Arc<CapturingModelProvider>,
+    ) {
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.model_host("model-host", tokens);
+        let agent = home.create_agent_for_host("model", &cid);
+        let model = Arc::new(CapturingModelProvider::default());
+        let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+        registry.register(model.clone()).await;
+        registry.register(home.provider.clone()).await;
+        home.runtime
+            .set_provider_registry(
+                registry,
+                home.capability_manager.clone(),
+                home.pending_store.clone(),
+                home.data_dir.clone(),
+            )
+            .await;
+        (home, dir, agent, model)
+    }
+
+    async fn ask_model(
+        home: &ProbeLaunch,
+        dir: &std::path::Path,
+        agent: &str,
+        asked: Option<u64>,
+    ) -> String {
+        let body = match asked {
+            None => String::new(),
+            Some(tokens) => format!("\",\"model_tokens\":{tokens},\"pad\":\""),
+        };
+        home.plan(
+            agent,
+            &[format!(
+                "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t{body}"
+            )],
+        );
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let launched = home.launch_from(dir, agent).await.unwrap().0;
+        grants.abort();
+        assert_eq!(launched.status, "completed");
+        home.results(agent).join("\n")
+    }
+
+    /// An admitted agent whose signed manifest asks for no model tokens cannot
+    /// reach the model. The provider records no call.
+    #[tokio::test]
+    async fn no_ask_no_model() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(None).await;
+        let outcome = ask_model(&home, &dir, &agent, None).await;
+        assert!(
+            outcome.contains("model_budget_exceeded: signed ceiling is 0"),
+            "{outcome}"
+        );
+        assert!(model.requests().is_empty(), "{:?}", model.requests());
+    }
+
+    /// A guest body that names more tokens than the signed ceiling does not
+    /// change the ceiling the bridge holds, and is not granted that larger amount.
+    #[tokio::test]
+    async fn guest_cannot_raise_cap() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let signed = 16;
+        let (home, dir, agent, model) = admitted_model_agent(Some(signed)).await;
+        let outcome = ask_model(&home, &dir, &agent, Some(1_000_000)).await;
+        assert!(
+            outcome.contains(&format!(
+                "model_budget_exceeded: signed ceiling is {signed}"
+            )),
+            "{outcome}"
+        );
+        assert!(!outcome.contains("signed ceiling is 1000000"), "{outcome}");
+        assert!(model.requests().is_empty(), "{:?}", model.requests());
     }
 }
 

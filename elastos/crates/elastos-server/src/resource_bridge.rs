@@ -295,6 +295,9 @@ pub struct BridgeContext {
     /// The content this capsule was launched with, when it is the program of
     /// a content launch that is still running. Nothing else has one.
     pub launch: Option<Arc<LaunchContent>>,
+    /// Model-token ceiling admission recorded for this capsule. `None` is not
+    /// an admitted agent, and the model rule does not apply.
+    pub model_token_ceiling: Option<u64>,
 }
 
 /// Spawn a resource bridge handler for a microVM capsule.
@@ -728,6 +731,12 @@ async fn authorize_and_dispatch_resource_invoke(
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
     }
 
+    if dispatch.scheme == "model" {
+        if let Some(refusal) = model_budget_refusal(bridge_ctx, &dispatch.request) {
+            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+        }
+    }
+
     match bridge_ctx
         .provider_registry
         .send_raw(&dispatch.scheme, &dispatch.request)
@@ -1085,6 +1094,35 @@ fn provider_error_result(code: &str, message: &str) -> serde_json::Value {
             "message": message,
         },
     })
+}
+
+/// Why an admitted agent's model invoke is refused. One reason: the signed
+/// ceiling does not allow it. The request body is not a source of the ceiling.
+enum ModelBudgetRefusal {
+    SignedCeiling(u64),
+}
+
+impl ModelBudgetRefusal {
+    fn response(self) -> serde_json::Value {
+        let Self::SignedCeiling(held) = self;
+        resource_error_response(
+            "model_budget_exceeded",
+            &format!("model_budget_exceeded: signed ceiling is {held}"),
+        )
+    }
+}
+
+/// Refuse a model invoke that the signed ceiling does not allow. `None` means
+/// this capsule is not an admitted agent, or the ceiling allows the invoke.
+fn model_budget_refusal(
+    ctx: &BridgeContext,
+    request: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    // The ceiling is the one admission stored. The body is not read for it.
+    let held = ctx.model_token_ceiling?;
+    let named = request.get("model_tokens").filter(|value| !value.is_null());
+    let over = named.is_some_and(|value| value.as_u64().is_none_or(|asked| asked > held));
+    (held == 0 || over).then(|| ModelBudgetRefusal::SignedCeiling(held).response())
 }
 
 fn resource_error_response(code: &str, message: &str) -> serde_json::Value {
@@ -2063,6 +2101,7 @@ mod tests {
             ]),
             data_dir: None,
             launch: None,
+            model_token_ceiling: None,
         }
     }
 

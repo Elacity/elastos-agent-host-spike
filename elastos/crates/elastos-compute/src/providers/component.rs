@@ -514,9 +514,11 @@ impl ComputeProvider for ComponentProvider {
 fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::BusError {
     let message = message.into();
     match code {
-        "denied" | "capability_denied" | "missing_token" | "invalid_token" => {
-            elastos::bus::types::BusError::Denied(message)
-        }
+        "denied"
+        | "capability_denied"
+        | "missing_token"
+        | "invalid_token"
+        | "model_budget_exceeded" => elastos::bus::types::BusError::Denied(message),
         "not_found" => elastos::bus::types::BusError::NotFound(message),
         "timeout" => elastos::bus::types::BusError::Timeout(message),
         "unavailable" => elastos::bus::types::BusError::Unavailable(message),
@@ -1665,6 +1667,10 @@ mod tests {
         }
         assert!(matches!(
             invoke_with("capability_denied"),
+            elastos::bus::types::BusError::Denied(_)
+        ));
+        assert!(matches!(
+            invoke_with("model_budget_exceeded"),
             elastos::bus::types::BusError::Denied(_)
         ));
     }

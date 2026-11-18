@@ -3582,6 +3582,42 @@ async fn changing_an_ask_changes_the_cid_and_the_signed_launch_is_refused() {
     );
 }
 
+/// N9. `model_tokens` is inside the bytes the CID names. Editing it after
+/// signing gives the folder another CID, and the signature made over the old
+/// CID is refused for the edited one.
+#[tokio::test]
+async fn ceiling_is_signed() {
+    let publisher = key(103);
+    let bridge = RealBridge::trusting(&[&publisher]).await;
+    let resources = serde_json::json!({"memory_mb": 64, "cpu_shares": 100, "model_tokens": 16});
+    let folder = bridge.bundle("budget", &manifest_with("budget", "resources", resources));
+    let cid = bridge.stage(&folder, &publisher).await;
+    let mut edited: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(folder.join("capsule.json")).unwrap()).unwrap();
+    edited["resources"]["model_tokens"] = serde_json::json!(32);
+    let edited_manifest = edited.to_string();
+    fs::write(folder.join("capsule.json"), &edited_manifest).unwrap();
+    let edited_cid = bundle_cid(&folder).unwrap();
+    assert_ne!(edited_cid, cid, "model_tokens is inside the signed bytes");
+    bridge.overwrite(&cid, "capsule.json", edited_manifest.as_bytes());
+    assert_eq!(
+        bridge.run(&cid).await.unwrap_err(),
+        BundleRefusal::CidMismatch {
+            asked: cid.clone(),
+            computed: edited_cid.clone()
+        }
+    );
+    assert_eq!(bridge.stage(&folder, &publisher).await, edited_cid);
+    bridge.put_signature(&edited_cid, &signed(&cid, &publisher));
+    assert_eq!(
+        bridge.run(&edited_cid).await.unwrap_err(),
+        BundleRefusal::SignatureNamesAnotherCid {
+            file: cid,
+            computed: edited_cid
+        }
+    );
+}
+
 /// B2-file. The lab's `asks.json` is bytes in the closure and never authority
 /// at a start by CID. A bundle whose `capsule.json` declares no asks starts
 /// sealed with that file beside its manifest: the admitted manifest's asks
