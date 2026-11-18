@@ -2738,12 +2738,13 @@ pub(crate) mod tests {
     }
 
     /// A12-R at one ending: nothing of the instance remains. A late call from
-    /// its id is refused at the manifest (F-ctxleak leaves the ceiling and the
-    /// call gets through); no grant of its session is live (F-norevoke keeps
-    /// one); nothing of it waits for an answer; every record of its session is
-    /// denied by the Runtime; the provider holds no entry for it; and its
-    /// entry leaves the list once its 60 s have passed, read at an instant
-    /// rather than waited for.
+    /// its id, carrying a token minted for exactly that call, is refused at
+    /// the manifest (F-ctxleak leaves the ceiling and the call gets past the
+    /// manifest and the grant check to the read); no grant of its session is
+    /// live (F-norevoke keeps one); nothing of it waits for an answer; every
+    /// record of its session is denied by the Runtime; the provider holds no
+    /// entry for it; and its entry leaves the list once its 60 s have passed,
+    /// read at an instant rather than waited for.
     async fn assert_nothing_remains(
         home: &ProbeLaunch,
         instance: &str,
@@ -2752,17 +2753,30 @@ pub(crate) mod tests {
         cause: &str,
         seeded: (&str, &str),
     ) {
-        // The late call first: it is what a leaked ceiling or principal would
-        // still let through. It is the context the installed host call builds
-        // for this id, read from the Runtime's own tables.
+        use elastos_runtime::capability::{Action, ResourceId, TokenConstraints};
+        // The late call first: it is what a leaked ceiling would still let
+        // through. It is the context the installed host call builds for this
+        // id, read from the Runtime's own tables, and a token minted now for
+        // exactly this call: a malformed or absent token would refuse it
+        // whatever the end left, so the answer below is the missing ceiling's.
+        // The grant is revoked after the answer, so the views see the session
+        // as the end left it.
         let tables = home.runtime.bridge_tables_for_test(instance);
+        let late_uri = format!("{}/memory/notes.md", home.root(principal));
+        let late_token = home.capability_manager.grant(
+            instance,
+            ResourceId::new(&late_uri),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
         let line = serde_json::json!({
             "id": 31,
             "request": {
                 "type": "resource_invoke",
-                "uri": format!("{}/memory/notes.md", home.root(principal)),
+                "uri": late_uri,
                 "operation": "read",
-                "token": "tok",
+                "token": late_token.to_base64().expect("a minted token is base64"),
                 "body": {},
             }
         })
@@ -2786,6 +2800,10 @@ pub(crate) mod tests {
             answer["response"]["code"], "manifest_capability_denied",
             "a late call from the ended instance {instance} must be refused: {answer}"
         );
+        home.capability_manager
+            .revoke(*late_token.id(), "the row's late call")
+            .await
+            .expect("the row's minted grant is revoked");
 
         // The all-sessions live grant view: no live grant of the instance.
         let live = home.live_view().await;

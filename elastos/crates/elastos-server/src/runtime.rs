@@ -313,7 +313,9 @@ impl ActivationContextHeld {
     /// pending requests are denied by the Runtime and its grants revoked
     /// before the context goes; the stop is audited once; and the entry is
     /// written last, so a reader that sees `ended_at` also sees that nothing
-    /// of the activation is left.
+    /// of the activation is left. Its retention is timed from that write: the
+    /// entry's removal is scheduled here, so it happens at its 60 s even if
+    /// nothing lists or registers again.
     async fn end_instance(mut self, status: &str, cause: &str) {
         // An activation that already ended has no entry to stop; an ending
         // one keeps it until its worker sees the stop flag.
@@ -334,11 +336,36 @@ impl ActivationContextHeld {
                 .audit_log()
                 .capsule_stop(&self.id.0, stop_reason(status, cause));
         }
+        let ended_at = std::time::Instant::now();
         let mut capsules = self.registry.write().await;
-        if let Some(info) = capsules.get_mut(&self.id.0) {
+        let recorded = if let Some(info) = capsules.get_mut(&self.id.0) {
             info.status = status.to_string();
             info.cause = Some(cause.to_string());
-            info.ended_at = Some(std::time::Instant::now());
+            info.ended_at = Some(ended_at);
+            true
+        } else {
+            false
+        };
+        drop(capsules);
+
+        // Retention is a timer, not a reader's courtesy: one sleep per ended
+        // entry, on the runtime that ended it, removes the entry at its
+        // [`ENDED_CAPSULE_RETENTION`]. A reader that pruned it first, or an
+        // entry a later start replaced, leaves this a no-op: only this end's
+        // own `ended_at` is removed.
+        if recorded {
+            let registry = self.registry.clone();
+            let id = self.id.0.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(ENDED_CAPSULE_RETENTION).await;
+                let mut capsules = registry.write().await;
+                if capsules
+                    .get(&id)
+                    .is_some_and(|info| info.ended_at == Some(ended_at))
+                {
+                    capsules.remove(&id);
+                }
+            });
         }
     }
 }
@@ -1833,9 +1860,10 @@ impl Runtime {
 }
 
 /// Removes the entries whose activation ended at least
-/// [`ENDED_CAPSULE_RETENTION`] before `now`. The registry has no timer: an
-/// ended entry lives until a reader prunes it, so no sleeping task is needed
-/// and a test can ask for a later `now`.
+/// [`ENDED_CAPSULE_RETENTION`] before `now`. The end schedules its own
+/// removal (see [`ActivationContextHeld::end_instance`]); a reader still
+/// prunes, so the boundary can be read at an injected instant and an entry
+/// registered already ended cannot outlive its retention either.
 fn prune_ended(capsules: &mut HashMap<String, RunningCapsuleInfo>, now: std::time::Instant) {
     capsules.retain(|_, info| match info.ended_at {
         Some(ended_at) => now.duration_since(ended_at) < ENDED_CAPSULE_RETENTION,
@@ -2424,6 +2452,71 @@ pub(crate) mod tests {
             runtime.context_left_for_test(&id).await,
             Vec::<&str>::new(),
             "the one end leaves nothing"
+        );
+    }
+
+    /// A12-R retention with no reader after the end: the entry the end leaves
+    /// is removed by the timer the end itself arms, so an entry nothing lists
+    /// or registers again cannot sit in the registry past its 60 s. The clock
+    /// is paused: the row moves it to the retention instant instead of waiting
+    /// for it, and the only reads below are at the real instant, which is
+    /// millimetres from the end and cannot prune. F-notimer (no scheduled
+    /// removal) leaves the entry there and reddens the last row.
+    #[tokio::test(start_paused = true)]
+    async fn an_ended_entry_is_removed_at_its_retention_without_a_reader() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let manifest: CapsuleManifest = serde_json::from_str(&component_manifest_json("retained"))
+            .expect("the component manifest");
+        let handle = CapsuleHandle {
+            id: CapsuleId::new("component-retained"),
+            manifest,
+            args: Vec::new(),
+        };
+        let id = handle.id.0.clone();
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: "retained".to_string(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: None,
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+
+        let held = ActivationContextHeld::new(&runtime, &handle, component);
+        held.end_instance(CAPSULE_FAILED, "test end").await;
+        // Let the removal task take its sleep before the clock moves.
+        tokio::task::yield_now().await;
+        assert!(
+            runtime.get_capsule(&id).await.is_some(),
+            "the ended entry is kept at its end"
+        );
+
+        let before = ENDED_CAPSULE_RETENTION - std::time::Duration::from_secs(1);
+        tokio::time::advance(before).await;
+        tokio::task::yield_now().await;
+        assert!(
+            runtime.get_capsule(&id).await.is_some(),
+            "the ended entry is kept 59 s after its end"
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            runtime.get_capsule(&id).await.is_none(),
+            "the ended entry is gone at its retention, with nothing reading it"
         );
     }
 
