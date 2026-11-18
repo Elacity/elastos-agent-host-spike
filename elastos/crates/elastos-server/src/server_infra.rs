@@ -645,7 +645,7 @@ pub(crate) async fn start_carrier_plane(
 async fn serve_capability_store(
     data_dir: &Path,
 ) -> anyhow::Result<Arc<capability::CapabilityStore>> {
-    capability::CapabilityStore::with_persistence(data_dir.join("capability_store"))
+    api::handlers::settle::open_capability_store(data_dir)
         .await
         .map(Arc::new)
         .map_err(|err| anyhow::anyhow!("capability store unavailable: {err}"))
@@ -4274,6 +4274,73 @@ mod tests {
                 Err(capability::manager::ValidationError::TokenRevoked)
             ),
             "revoked token must stay revoked after restart: {result:?}"
+        );
+    }
+
+    /// A3-R S3 fix 2: the Home's start applies the pending revocation list.
+    /// An end's revoke the store could not save is refused by the restarted
+    /// Home's capability store.
+    #[tokio::test]
+    async fn serve_capability_store_applies_pending_revocations() {
+        use elastos_server::api::handlers::settle;
+        let data_dir = TempDir::new().unwrap();
+        let resource = capability::ResourceId::new("elastos://content/fetch");
+        let plane = |store| {
+            capability::CapabilityManager::load_or_generate(
+                data_dir.path(),
+                store,
+                Arc::new(primitives::audit::AuditLog::new()),
+                Arc::new(primitives::metrics::MetricsManager::new()),
+            )
+        };
+        let store = serve_capability_store(data_dir.path()).await.unwrap();
+        let manager = plane(store);
+        let pending = capability::pending::PendingRequestStore::new(manager.audit_log().clone());
+        let session = session::SessionId::from_string("ended-capsule");
+        let request = pending
+            .create_request(session, resource.clone(), capability::Action::Read)
+            .await;
+        let token = manager.grant(
+            "ended-capsule",
+            resource.clone(),
+            capability::Action::Read,
+            capability::TokenConstraints::default(),
+            None,
+        );
+        pending
+            .grant_request(
+                request.id.as_str(),
+                token.clone(),
+                capability::GrantDuration::Session,
+            )
+            .await
+            .unwrap();
+        let store_dir = settle::capability_store_dir(data_dir.path());
+        fs::create_dir(store_dir.join("revoked_tokens")).unwrap();
+        let settled = settle::settle_and_revoke(
+            &pending,
+            &manager,
+            data_dir.path(),
+            "ended-capsule",
+            "trapped",
+        )
+        .await;
+        assert!(settled.is_err(), "the save failed: {settled:?}");
+
+        let restarted = plane(serve_capability_store(data_dir.path()).await.unwrap());
+        let result = restarted
+            .validate(
+                &token,
+                "ended-capsule",
+                capability::Action::Read,
+                &resource,
+                None,
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err(capability::manager::ValidationError::TokenRevoked),
+            "the restarted Home refuses the unsaved revoke"
         );
     }
 

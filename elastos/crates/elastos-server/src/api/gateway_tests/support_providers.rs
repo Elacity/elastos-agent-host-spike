@@ -250,9 +250,18 @@ fn seed_mock_published_protected_content(
 }
 
 fn advance_mock_published_protected_content_receipt() {
+    let next;
+    {
+        let published = mock_published_protected_content().lock().unwrap();
+        next = published.as_ref().unwrap().receipt.payload.checked_at + 1;
+    }
+    set_mock_published_protected_content_receipt_checked_at(next);
+}
+
+fn set_mock_published_protected_content_receipt_checked_at(checked_at: u64) {
     let mut published = mock_published_protected_content().lock().unwrap();
     let state = published.as_mut().unwrap();
-    state.receipt.payload.checked_at += 1;
+    state.receipt.payload.checked_at = checked_at;
     let payload_bytes =
         serde_json::to_string(&serde_json::to_value(&state.receipt.payload).unwrap()).unwrap();
     let (signature, signer_did) = crate::crypto::domain_separated_sign(
