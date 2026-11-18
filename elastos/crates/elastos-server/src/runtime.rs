@@ -116,6 +116,10 @@ pub struct Runtime {
     /// admission recorded and passed into the start. The manifest is not
     /// read again for this number.
     bridge_model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
+    /// The capability store and manager a detached activation's end settles
+    /// through, set with the provider registry. `None` is a Runtime with no
+    /// capability plane (the CLI): an ending there has nothing to settle.
+    instance_authority: StdRwLock<Option<InstanceAuthority>>,
     /// For each program a content launch is running, by its capsule id: the
     /// content it was launched with. Kept like the ceilings, beside them.
     launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
@@ -162,9 +166,39 @@ impl Drop for LaunchHeld {
     }
 }
 
+/// The capability store and manager a detached activation's end settles and
+/// revokes through: the same pair the bridge asked a grant from. A revoke
+/// that store cannot save is kept in the pending revocation list of the Home
+/// at `data_dir`.
+#[derive(Clone)]
+struct InstanceAuthority {
+    pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+    data_dir: std::path::PathBuf,
+}
+
+/// The cause an activation records when the task watching it went away before
+/// the guest's outcome was known.
+const CAUSE_TASK_LOST: &str = "activation task ended before its outcome";
+
+/// Where an end that is still owed runs when its guard is dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwedEnd {
+    /// In a task of the current runtime.
+    Task,
+    /// On a thread of its own: the task was dropped before the end finished,
+    /// as a runtime shutting down drops the tasks it has not run.
+    Thread,
+    /// Nowhere: the thread could not finish it either.
+    Lost,
+}
+
 /// Owns a detached component's admission context until its watcher has
-/// removed it. Dropping a route or a watcher still cleans up the loaded
-/// component, its bridge context and its registry entry.
+/// ended it. One ending, however the activation ends: the worker is stopped,
+/// the session's pending requests are denied and its grants revoked, the
+/// ceiling and principal go away, one `capsule_stop` is audited with the
+/// cause, and the registry entry records the status, cause and end. Nothing
+/// here starts the activation again.
 struct ActivationContextHeld {
     id: elastos_common::CapsuleId,
     handle: CapsuleHandle,
@@ -172,11 +206,23 @@ struct ActivationContextHeld {
     registry: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
     manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
     model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
+    authority: Option<InstanceAuthority>,
+    /// The end is owed until the registry entry records it.
     armed: bool,
+    owed: OwedEnd,
+    /// The status and cause the session was settled with, so an end run
+    /// again after a lost task records and audits the same ones.
+    settled: Option<(String, String)>,
+    audited: bool,
 }
 
 impl ActivationContextHeld {
     fn new(runtime: &Runtime, handle: &CapsuleHandle, component: Arc<ComponentProvider>) -> Self {
+        let authority = runtime
+            .instance_authority
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
         Self {
             id: handle.id.clone(),
             handle: handle.clone(),
@@ -184,10 +230,16 @@ impl ActivationContextHeld {
             registry: runtime.running_capsules.clone(),
             manifest_capabilities: runtime.bridge_manifest_capabilities.clone(),
             model_token_ceilings: runtime.bridge_model_token_ceilings.clone(),
+            authority,
             armed: true,
+            owed: OwedEnd::Task,
+            settled: None,
+            audited: false,
         }
     }
 
+    /// Takes away what the start put in place: the bridge principal, the
+    /// manifest ceiling and the model-token ceiling.
     async fn release(&mut self) {
         self.component.clear_bridge_principal(&self.id).await;
         if let Ok(mut bounds) = self.manifest_capabilities.write() {
@@ -197,7 +249,93 @@ impl ActivationContextHeld {
             .write()
             .unwrap_or_else(|err| err.into_inner())
             .remove(&self.id.0);
+    }
+
+    /// The one ending of a detached activation (M1-R A11-R). `status` is
+    /// `failed` with this `cause`, or `stopped` with its own. The session's
+    /// pending requests are denied by the Runtime and its grants revoked
+    /// before the context goes; the stop is audited once; and the entry is
+    /// written last, so a reader that sees `ended_at` also sees that nothing
+    /// of the activation is left. A revoke the store could not save ends the
+    /// entry `failed`, with a cause that names it.
+    async fn end_instance(mut self, status: &str, cause: &str) {
+        let (status, cause) = match self.settled.clone() {
+            Some(settled) => settled,
+            None => {
+                // An activation that already ended has no entry to stop; an
+                // ending one keeps it until its worker sees the stop flag.
+                let _ = self.component.stop(&self.handle).await;
+                let settled = match &self.authority {
+                    Some(authority) => {
+                        crate::api::handlers::settle::settle_and_revoke(
+                            &authority.pending_store,
+                            &authority.capability_manager,
+                            &authority.data_dir,
+                            &self.id.0,
+                            cause,
+                        )
+                        .await
+                    }
+                    None => Ok(()),
+                };
+                let ended = match settled {
+                    Ok(()) => (status.to_string(), cause.to_string()),
+                    Err(error) => (
+                        CAPSULE_FAILED.to_string(),
+                        format!("{cause}; revocation not saved: {error}"),
+                    ),
+                };
+                self.settled = Some(ended.clone());
+                ended
+            }
+        };
+        self.release().await;
+        if let (Some(authority), false) = (&self.authority, self.audited) {
+            authority
+                .capability_manager
+                .audit_log()
+                .capsule_stop(&self.id.0, stop_reason(&status, &cause));
+            self.audited = true;
+        }
+        let mut capsules = self.registry.write().await;
+        if let Some(info) = capsules.get_mut(&self.id.0) {
+            if info.ended_at.is_none() {
+                info.status = status;
+                info.cause = Some(cause);
+                info.ended_at = Some(std::time::Instant::now());
+            }
+        }
         self.armed = false;
+    }
+
+    /// This guard's owed end, moved into a new guard; this one is left
+    /// disarmed.
+    fn take_owed(&mut self) -> Self {
+        self.armed = false;
+        ActivationContextHeld {
+            id: self.id.clone(),
+            handle: self.handle.clone(),
+            component: self.component.clone(),
+            registry: self.registry.clone(),
+            manifest_capabilities: self.manifest_capabilities.clone(),
+            model_token_ceilings: self.model_token_ceilings.clone(),
+            authority: self.authority.clone(),
+            armed: true,
+            owed: self.owed,
+            settled: self.settled.take(),
+            audited: self.audited,
+        }
+    }
+}
+
+/// The audit reason one ending carries. A trap is the activation's error; a
+/// natural return completed; anything else was stopped.
+fn stop_reason(status: &str, cause: &str) -> elastos_runtime::primitives::audit::StopReason {
+    use elastos_runtime::primitives::audit::StopReason;
+    match status {
+        CAPSULE_STOPPED if cause == CAUSE_COMPLETED => StopReason::Completed,
+        CAPSULE_STOPPED => StopReason::Requested,
+        _ => StopReason::Error(cause.to_string()),
     }
 }
 
@@ -206,30 +344,37 @@ impl Drop for ActivationContextHeld {
         if !self.armed {
             return;
         }
-        let id = self.id.clone();
-        let handle = self.handle.clone();
-        let component = self.component.clone();
-        let registry = self.registry.clone();
-        let manifest_capabilities = self.manifest_capabilities.clone();
-        let model_token_ceilings = self.model_token_ceilings.clone();
-        tokio::spawn(async move {
-            let _ = component.stop(&handle).await;
-            component.clear_bridge_principal(&id).await;
-            if let Ok(mut bounds) = manifest_capabilities.write() {
-                bounds.remove(&id.0);
+        if self.owed == OwedEnd::Lost {
+            self.armed = false;
+            tracing::error!("activation {}: its end could not run", self.id.0);
+            return;
+        }
+        // The watcher, or the task running the end, went away before the end
+        // was recorded. The end still runs, once, from where it got to: in a
+        // task first, and on a thread of its own if that task is dropped too.
+        // The new guard stays armed until its end is recorded.
+        let mut end = self.take_owed();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) if end.owed == OwedEnd::Task => {
+                end.owed = OwedEnd::Thread;
+                runtime.spawn(end.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
             }
-            model_token_ceilings
-                .write()
-                .unwrap_or_else(|err| err.into_inner())
-                .remove(&id.0);
-            if let Some(info) = registry.write().await.get_mut(&id.0) {
-                if info.ended_at.is_none() {
-                    info.status = CAPSULE_FAILED.to_string();
-                    info.cause = Some("activation task ended before its outcome".to_string());
-                    info.ended_at = Some(std::time::Instant::now());
+            _ => {
+                end.owed = OwedEnd::Lost;
+                let thread = std::thread::Builder::new().name("activation-end".into());
+                let spawned = thread.spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    if let Ok(runtime) = runtime {
+                        runtime.block_on(end.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+                    }
+                });
+                if let Err(error) = spawned {
+                    tracing::error!(%error, "activation {}: no thread for its end", self.id.0);
                 }
             }
-        });
+        }
     }
 }
 
@@ -246,6 +391,7 @@ impl Runtime {
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
+            instance_authority: StdRwLock::new(None),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
         }
@@ -266,6 +412,7 @@ impl Runtime {
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
+            instance_authority: StdRwLock::new(None),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
         }
@@ -283,6 +430,16 @@ impl Runtime {
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         data_dir: std::path::PathBuf,
     ) {
+        // A detached activation's end settles through this pair, so it is held
+        // from here rather than read again at the end.
+        *self
+            .instance_authority
+            .write()
+            .unwrap_or_else(|err| err.into_inner()) = Some(InstanceAuthority {
+            pending_store: pending_store.clone(),
+            capability_manager: capability_manager.clone(),
+            data_dir: data_dir.clone(),
+        });
         if let Some(ref component) = self.component_provider {
             let host_reg = registry.clone();
             let host_cap_mgr = capability_manager.clone();
@@ -1227,16 +1384,17 @@ impl Runtime {
         self.running_capsules.write().await
     }
 
-    /// Starts this activation and waits for its worker to publish its outcome, then takes
-    /// the ceiling and principal away and leaves the entry `stopped` with
-    /// cause `completed`, or `failed` with the trap's cause. The entry keeps
-    /// its `ended_at` for [`ENDED_CAPSULE_RETENTION`].
+    /// Starts this activation and waits for its worker to publish its outcome, then ends it
+    /// through [`ActivationContextHeld::end_instance`]: the entry is `stopped`
+    /// with cause `completed` on a natural return, or `failed` with the
+    /// trap's cause, and it keeps its `ended_at` for
+    /// [`ENDED_CAPSULE_RETENTION`].
     fn watch_activation(
         &self,
         id: elastos_common::CapsuleId,
         handle: CapsuleHandle,
         component: Arc<ComponentProvider>,
-        mut held: ActivationContextHeld,
+        held: ActivationContextHeld,
     ) {
         use elastos_compute::providers::ActivationOutcome;
 
@@ -1261,15 +1419,7 @@ impl Runtime {
                 }
                 Err(err) => (CAPSULE_FAILED, err.to_string()),
             };
-            held.release().await;
-            // The entry ends after the context is gone, so a reader that sees
-            // `ended_at` also sees that nothing of the activation is left.
-            let mut capsules = registry.write().await;
-            if let Some(info) = capsules.get_mut(&id.0) {
-                info.status = status.to_string();
-                info.cause = Some(cause);
-                info.ended_at = Some(std::time::Instant::now());
-            }
+            held.end_instance(status, &cause).await;
         });
     }
 
@@ -1454,6 +1604,12 @@ impl Runtime {
     /// Returns Ok(true) if stopped, Ok(false) if not found or if the entry
     /// records an activation that has already ended: an ended entry is kept
     /// for its session, status and cause, and there is nothing left to stop.
+    ///
+    /// A detached component's entry is ended only by its watcher, through
+    /// [`ActivationContextHeld::end_instance`], with the outcome its worker
+    /// published: the stop asks the worker to stop and leaves the entry to
+    /// that one end. A stop that races a trap therefore never erases the
+    /// trap's record or writes a second end.
     pub async fn stop_capsule_by_id(&self, id: &str) -> Result<bool> {
         // Get capsule info and handle
         let capsule_info = {
@@ -1477,18 +1633,31 @@ impl Runtime {
             }
         }
 
-        // Update status to stopped
-        {
-            let mut capsules = self.running_capsules.write().await;
-            if let Some(info) = capsules.get_mut(id) {
-                info.status = "stopped".to_string();
-            }
+        // Read again under the write lock: the activation may have ended
+        // while the stop was asked.
+        let mut capsules = self.running_capsules.write().await;
+        let Some(entry) = capsules.get(id) else {
+            return Ok(false);
+        };
+        if entry.ended_at.is_some() {
+            return Ok(false);
         }
-
-        // Unregister the capsule
-        self.unregister_capsule(id).await;
-
+        if self.ended_by_its_watcher(entry) {
+            return Ok(true);
+        }
+        capsules.remove(id);
+        tracing::info!("Unregistered capsule: {}", id);
         Ok(true)
+    }
+
+    /// Whether `entry` is a detached component's: only `start_loaded`
+    /// registers a component, and its watcher always ends it.
+    fn ended_by_its_watcher(&self, entry: &RunningCapsuleInfo) -> bool {
+        self.component_provider.is_some()
+            && entry
+                .handle
+                .as_ref()
+                .is_some_and(|handle| handle.manifest.is_component_capsule())
     }
 }
 
@@ -3778,5 +3947,162 @@ pub(crate) mod tests {
             component_provider.status(&handle).await,
             Err(ElastosError::CapsuleNotFound(_))
         ));
+    }
+
+    /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
+    /// task, and the runtime shuts down before it runs that task, as a
+    /// runtime does with the tasks it has not run. The end still happens
+    /// once: the entry ends `failed` with the lost-task cause, the session's
+    /// pending request is denied and its grant revoked, and one
+    /// `capsule_stop` is audited.
+    #[test]
+    fn a_lost_end_task_still_ends_the_activation_once() {
+        use elastos_runtime::capability::manager::ValidationError;
+        use elastos_runtime::capability::{Action, RequestStatus, ResourceId};
+        use elastos_runtime::primitives::audit::StopReason;
+        use elastos_runtime::session::SessionId;
+
+        const ID: &str = "lost-end";
+        let resource = ResourceId::new("elastos://content/publish");
+        let shutting_down = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (runtime, audit_log, pending_store, manager, pending, token, _temp) = shutting_down
+            .block_on(async {
+                let temp = tempfile::tempdir().unwrap();
+                let storage = LocalFSProvider::new(temp.path().join("storage"))
+                    .await
+                    .unwrap();
+                let component = Arc::new(ComponentProvider::new());
+                let runtime = Runtime::with_providers_and_component(
+                    Arc::new(storage),
+                    Vec::new(),
+                    Some(component.clone()),
+                );
+                let audit_log = Arc::new(AuditLog::new());
+                let manager = Arc::new(CapabilityManager::new(
+                    Arc::new(CapabilityStore::new()),
+                    audit_log.clone(),
+                    Arc::new(MetricsManager::new()),
+                ));
+                let pending_store = Arc::new(
+                    elastos_runtime::capability::pending::PendingRequestStore::new(
+                        audit_log.clone(),
+                    ),
+                );
+                let data_dir = temp.path().join("data");
+                std::fs::create_dir_all(&data_dir).unwrap();
+                runtime
+                    .set_provider_registry(
+                        Arc::new(ProviderRegistry::new()),
+                        manager.clone(),
+                        pending_store.clone(),
+                        data_dir,
+                    )
+                    .await;
+
+                let handle = CapsuleHandle {
+                    id: CapsuleId::new(ID),
+                    manifest: serde_json::from_str(&component_manifest_json(ID)).unwrap(),
+                    args: Vec::new(),
+                };
+                runtime
+                    .register_capsule(RunningCapsuleInfo {
+                        id: ID.to_string(),
+                        name: ID.to_string(),
+                        status: CAPSULE_RUNNING.to_string(),
+                        capsule_type: CapsuleType::Wasm,
+                        handle: Some(handle.clone()),
+                        session_id: ID.to_string(),
+                        principal: None,
+                        cause: None,
+                        ended_at: None,
+                    })
+                    .await;
+                let session = || SessionId::from_string(ID);
+                let pending = pending_store
+                    .create_request(session(), resource.clone(), Action::Read)
+                    .await
+                    .id
+                    .to_string();
+                let granted = pending_store
+                    .create_request(session(), resource.clone(), Action::Write)
+                    .await
+                    .id
+                    .to_string();
+                let constraints = TokenConstraints::default();
+                let token = manager.grant(ID, resource.clone(), Action::Write, constraints, None);
+                pending_store
+                    .grant_request(&granted, token.clone(), GrantDuration::Session)
+                    .await
+                    .unwrap();
+
+                drop(ActivationContextHeld::new(&runtime, &handle, component));
+                (
+                    runtime,
+                    audit_log,
+                    pending_store,
+                    manager,
+                    pending,
+                    token,
+                    temp,
+                )
+            });
+        let entry = runtime.running_capsules.try_read().unwrap()[ID].clone();
+        assert!(entry.ended_at.is_none(), "the end's task has not run");
+        drop(shutting_down);
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        after.block_on(async {
+            let entry = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(entry) = runtime.get_capsule(ID).await {
+                        if entry.ended_at.is_some() {
+                            break entry;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the end still runs after its task was dropped");
+            assert_eq!(entry.status, CAPSULE_FAILED);
+            assert_eq!(entry.cause.as_deref(), Some(CAUSE_TASK_LOST));
+
+            let RequestStatus::Denied { reason, settled_by } =
+                pending_store.get_request(&pending).await.unwrap().status
+            else {
+                panic!("the pending request is not settled");
+            };
+            assert_eq!(reason, format!("instance ended: {CAUSE_TASK_LOST}"));
+            assert_eq!(settled_by, Settler::Runtime);
+            assert_eq!(
+                manager
+                    .validate(&token, ID, Action::Write, &resource, None)
+                    .await,
+                Err(ValidationError::TokenRevoked)
+            );
+
+            // Exactly once, also after the end had time to run again.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let stops: Vec<_> = audit_log
+                .recent_events(usize::MAX)
+                .into_iter()
+                .filter_map(|event| match event {
+                    AuditEvent::CapsuleStop {
+                        capsule_id, reason, ..
+                    } if capsule_id == ID => Some(reason),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                matches!(stops.as_slice(), [StopReason::Error(cause)] if cause == CAUSE_TASK_LOST),
+                "{stops:?}"
+            );
+        });
     }
 }
