@@ -855,6 +855,28 @@ pub(crate) mod tests {
         /// The stored person every agent here belongs to. It is the person
         /// `agents::create` records in each agent's `owner`.
         owner: String,
+        /// Where the revoke list is saved, for a probe that saves it.
+        tokens: Option<std::path::PathBuf>,
+    }
+
+    /// The probe's token plane: an unsaved store under a fresh key, or `store`
+    /// under the fixed key a restarted plane is made with again.
+    fn probe_token_manager(
+        store: Option<elastos_runtime::capability::CapabilityStore>,
+        audit_log: Arc<AuditLog>,
+    ) -> elastos_runtime::capability::CapabilityManager {
+        use elastos_runtime::capability::{CapabilityManager, CapabilityStore};
+        use elastos_runtime::primitives::metrics::MetricsManager;
+        let metrics = Arc::new(MetricsManager::new());
+        match store {
+            None => CapabilityManager::new(Arc::new(CapabilityStore::new()), audit_log, metrics),
+            Some(store) => CapabilityManager::with_key(
+                elastos_runtime::signature::SigningKey::from_bytes(&[0x52; 32]),
+                Arc::new(store),
+                audit_log,
+                metrics,
+            ),
+        }
     }
 
     const PROBE_HOST: &str = "a5-launch-probe";
@@ -863,7 +885,14 @@ pub(crate) mod tests {
 
     impl ProbeLaunch {
         pub(crate) async fn new(names: &[&str]) -> Self {
-            let temp = tempfile::tempdir().unwrap();
+            Self::new_with(tempfile::tempdir().unwrap(), names, None).await
+        }
+
+        async fn new_with(
+            temp: tempfile::TempDir,
+            names: &[&str],
+            tokens: Option<elastos_runtime::capability::CapabilityStore>,
+        ) -> Self {
             let data_dir = temp.path().join("data");
             std::fs::create_dir_all(&data_dir).unwrap();
             let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
@@ -881,8 +910,39 @@ pub(crate) mod tests {
                 "session:a5-launch",
                 &context,
                 names,
+                tokens,
             )
             .await
+        }
+
+        /// A probe whose revoke list is saved under [`Self::tokens_dir`] and
+        /// whose tokens are signed with a fixed key, so
+        /// [`Self::restarted_tokens`] is this Home's token plane after a
+        /// restart.
+        pub(crate) async fn with_saved_revokes(names: &[&str]) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let tokens = temp.path().join("tokens");
+            let store = elastos_runtime::capability::CapabilityStore::with_persistence(&tokens)
+                .await
+                .unwrap();
+            let mut probe = Self::new_with(temp, names, Some(store)).await;
+            probe.tokens = Some(tokens);
+            probe
+        }
+
+        pub(crate) fn tokens_dir(&self) -> std::path::PathBuf {
+            self.tokens.clone().expect("a probe with saved revokes")
+        }
+
+        /// A new token plane over the saved revoke list and the same key.
+        pub(crate) async fn restarted_tokens(
+            &self,
+        ) -> elastos_runtime::capability::CapabilityManager {
+            let store =
+                elastos_runtime::capability::CapabilityStore::with_persistence(self.tokens_dir())
+                    .await
+                    .unwrap();
+            probe_token_manager(Some(store), self.audit_log.clone())
         }
 
         /// A probe over an existing Home. The stored agents belong to
@@ -905,10 +965,12 @@ pub(crate) mod tests {
                 session_id,
                 context,
                 names,
+                None,
             )
             .await
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn build(
             temp: Option<tempfile::TempDir>,
             data_dir: std::path::PathBuf,
@@ -917,11 +979,10 @@ pub(crate) mod tests {
             session_id: &str,
             context: &gateway::HomeLaunchTokenContext,
             names: &[&str],
+            tokens: Option<elastos_runtime::capability::CapabilityStore>,
         ) -> Self {
             use crate::agents;
             use elastos_compute::providers::ComponentProvider;
-            use elastos_runtime::capability::{CapabilityManager, CapabilityStore};
-            use elastos_runtime::primitives::metrics::MetricsManager;
             use elastos_runtime::provider::ProviderRegistry;
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
             use elastos_storage::providers::LocalFSProvider;
@@ -950,11 +1011,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let audit_log = Arc::new(AuditLog::new());
-            let capability_manager = Arc::new(CapabilityManager::new(
-                Arc::new(CapabilityStore::new()),
-                audit_log.clone(),
-                Arc::new(MetricsManager::new()),
-            ));
+            let capability_manager = Arc::new(probe_token_manager(tokens, audit_log.clone()));
             let pending_store = Arc::new(
                 elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
             );
@@ -1063,6 +1120,7 @@ pub(crate) mod tests {
                 grant,
                 agents,
                 owner: owner.to_string(),
+                tokens: None,
             }
         }
 
@@ -1459,8 +1517,8 @@ pub(crate) mod tests {
 
     /// Grants every pending request the named sessions make, as the shell
     /// would, and keeps doing it until the test stops the task. A request for
-    /// a resource in `held` is left pending. Every grant it makes is pushed to
-    /// `made`, so a row can check a token it made afterwards.
+    /// a resource in `held` is left pending. Every grant the store accepts is
+    /// pushed to `made`, so a row can check a token it made afterwards.
     pub(crate) fn grant_requests_of(
         store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         manager: Arc<elastos_runtime::capability::CapabilityManager>,
@@ -1492,10 +1550,12 @@ pub(crate) mod tests {
                         TokenConstraints::default(),
                         None,
                     );
-                    made.lock().unwrap().push(token.clone());
-                    let _ = store
-                        .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+                    let granted = store
+                        .grant_request(pending.id.as_str(), token.clone(), GrantDuration::Session)
                         .await;
+                    if granted.is_ok() {
+                        made.lock().unwrap().push(token);
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -2231,6 +2291,231 @@ pub(crate) mod tests {
         b_grants.abort();
         assert_eq!(b_end.status, "stopped");
         assert_eq!(b_end.cause.as_deref(), Some("completed"));
+    }
+
+    /// Writes the pointer `agent`'s guest reads under its own root: it names
+    /// `peer`'s notes, which the bridge refuses at the principal scope, so
+    /// the guest traps with that refusal. Returns the peer's file.
+    fn point_at_peer(home: &ProbeLaunch, agent: &str, peer: &str) -> String {
+        let (root, peer_root) = (home.root(agent), home.root(peer));
+        let peer_file = format!("{peer_root}/memory/notes.md");
+        let pointer_uri = format!("{root}/memory/peer");
+        let pointer_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &pointer_uri)
+                .unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            agent,
+            &root,
+            &pointer_uri,
+            &pointer_path,
+            peer_file.as_bytes(),
+        )
+        .unwrap();
+        peer_file
+    }
+
+    /// Every `capsule_stop` the Home audited for instance `id`, in order.
+    fn stops_of(
+        home: &ProbeLaunch,
+        id: &str,
+    ) -> Vec<elastos_runtime::primitives::audit::StopReason> {
+        home.audit_log
+            .recent_events(usize::MAX)
+            .into_iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::CapsuleStop {
+                    capsule_id,
+                    reason,
+                    ..
+                } if capsule_id == id => Some(reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SCOPE_REFUSAL: &str =
+        "localhost://UsersAI roots must use UsersAI/self or the active principal root";
+
+    /// A3-R S3 fix 1 row. The Home's saved revoke list cannot be replaced
+    /// while two activations end: A traps and B returns. Each grant is
+    /// refused in this process at once. The saved list lacks them, so a Home
+    /// restarted from it would accept them again; each end is therefore
+    /// recorded `failed`, with a cause that names the revoke it could not
+    /// save, and its one `capsule_stop` carries that cause.
+    #[tokio::test]
+    async fn an_unsaved_revoke_ends_the_activation_unsettled() {
+        use elastos_runtime::capability::manager::ValidationError;
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::with_saved_revokes(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let peer = point_at_peer(&home, a, b);
+        // The replacement of the saved list cannot be renamed over a folder.
+        std::fs::create_dir(home.tokens_dir().join("revoked_tokens")).unwrap();
+
+        let run_a = home.launch(a).await.unwrap().0;
+        let run_b = home.launch(b).await.unwrap().0;
+        let made = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run_a.id.clone(), run_b.id.clone()],
+            Vec::new(),
+            made.clone(),
+        );
+        let end_a = home.wait_ended(&run_a.id).await;
+        let end_b = home.wait_ended(&run_b.id).await;
+        grants.abort();
+
+        for (end, outcome) in [(&end_a, peer.as_str()), (&end_b, "completed")] {
+            assert_eq!(end.status, "failed", "{end:?}");
+            let cause = end.cause.clone().expect("an end records its cause");
+            assert!(cause.contains(outcome), "{cause}");
+            assert!(
+                cause.contains("; revocation not saved: "),
+                "the end names the revoke it could not save: {cause}"
+            );
+            let stops = stops_of(&home, &end.id);
+            assert!(
+                matches!(stops.as_slice(), [StopReason::Error(detail)] if detail == &cause),
+                "one stop audit with the recorded cause: {stops:?}"
+            );
+        }
+        assert!(
+            end_a.cause.as_deref().unwrap().contains(SCOPE_REFUSAL),
+            "{end_a:?}"
+        );
+
+        let made = made.lock().unwrap().clone();
+        assert!(!made.is_empty(), "both sessions were granted");
+        let restarted = home.restarted_tokens().await;
+        let mut accepted_after_restart = 0;
+        for token in &made {
+            let session = token.capsule().to_string();
+            let here = home
+                .capability_manager
+                .validate(token, &session, token.action(), token.resource(), None)
+                .await;
+            assert_eq!(here, Err(ValidationError::TokenRevoked), "in this process");
+            let after = restarted
+                .validate(token, &session, token.action(), token.resource(), None)
+                .await;
+            if after.is_ok() {
+                accepted_after_restart += 1;
+            }
+        }
+        assert_eq!(
+            accepted_after_restart,
+            made.len(),
+            "the saved list lacks every revoke, which the ends record"
+        );
+    }
+
+    /// A3-R S3 fix 1 row: a stop and A's trap race, in both orders.
+    /// First the stop reads A's entry while A's end waits to record the trap;
+    /// the stop then finds A already ended and answers so, and A's record is
+    /// the trap's. Then a second run is stopped while its guest is held in
+    /// its first call; the stop leaves the entry to the run's own end. Each
+    /// run ends exactly once, with one cause and one `capsule_stop` that
+    /// carries it.
+    #[tokio::test]
+    async fn a_stop_racing_a_trap_ends_once() {
+        use elastos_runtime::primitives::audit::StopReason;
+
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let peer = point_at_peer(&home, a, b);
+
+        let run = home.launch(a).await.unwrap().0;
+        home.wait_pending(&run.id).await;
+        home.wait_running(&run.id).await;
+        // The registry is held: the stop's read of the entry waits first in
+        // line, and A's end, which records last, waits behind it.
+        let registry = home.runtime.hold_capsule_registry_for_test().await;
+        let stopper = {
+            let runtime = home.runtime.clone();
+            let id = run.id.clone();
+            tokio::spawn(async move { runtime.stop_capsule_by_id(&id).await.unwrap() })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while stops_of(&home, &run.id).is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("A traps and its end audits the stop");
+        drop(registry);
+        let stopped = stopper.await.unwrap();
+        grants.abort();
+
+        let end = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the trap's record survives the racing stop");
+        assert!(end.ended_at.is_some(), "{end:?}");
+        assert_eq!(end.status, "failed", "{end:?}");
+        let cause = end.cause.clone().expect("a trap records its cause");
+        assert!(cause.contains(SCOPE_REFUSAL), "{cause}");
+        assert!(cause.contains(&peer), "{cause}");
+        assert!(!stopped, "the stop found A already ended");
+        let stops = stops_of(&home, &run.id);
+        assert!(
+            matches!(stops.as_slice(), [StopReason::Error(detail)] if detail == &cause),
+            "one stop audit, the trap's: {stops:?}"
+        );
+
+        let second = home.launch(a).await.unwrap().0;
+        home.wait_pending(&second.id).await;
+        home.wait_running(&second.id).await;
+        assert!(
+            home.runtime.stop_capsule_by_id(&second.id).await.unwrap(),
+            "a live run is asked to stop"
+        );
+        assert!(
+            home.runtime.get_capsule(&second.id).await.is_some(),
+            "the stop leaves the entry to the run's own end"
+        );
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![second.id.clone()],
+            Vec::new(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let end = home.wait_ended(&second.id).await;
+        grants.abort();
+        let cause = end.cause.clone().expect("an end records its cause");
+        let stops = stops_of(&home, &second.id);
+        let agrees = match (end.status.as_str(), stops.as_slice()) {
+            ("stopped", [StopReason::Requested]) => cause == "stopped by request",
+            ("failed", [StopReason::Error(detail)]) => detail == &cause,
+            _ => false,
+        };
+        assert!(
+            agrees,
+            "one end, one cause, one stop audit: {end:?} {stops:?}"
+        );
+        assert_eq!(home.listed().await.len(), 2, "two runs, each ended once");
     }
 
     /// An ended entry is listed for the 60 s retention and is gone after it,

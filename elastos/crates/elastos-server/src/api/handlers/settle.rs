@@ -8,13 +8,19 @@ use elastos_runtime::capability::{CapabilityManager, RequestStatus, Settler};
 /// `session_id`, settled by the Runtime with a reason that names `cause`.
 /// Tokens are revoked through `CapabilityManager::revoke`. Other sessions'
 /// requests and grants are left as they are.
+///
+/// A revoke whose save fails still refuses its token in this process, and the
+/// rest of the session still settles. The save error is returned: the saved
+/// revoke list may lack that token, so a restart could accept it again, and
+/// the caller records the end as not settled.
 pub async fn settle_and_revoke(
     store: &PendingRequestStore,
     manager: &CapabilityManager,
     session_id: &str,
     cause: &str,
-) {
+) -> std::io::Result<()> {
     let reason = format!("instance ended: {cause}");
+    let mut saved = Ok(());
     for request in store.list_session_pending(session_id).await {
         // Fails only if the request left Pending after the listing; a grant
         // made in between is revoked by the loop below, which lists later.
@@ -30,16 +36,16 @@ pub async fn settle_and_revoke(
             continue;
         }
         if let RequestStatus::Granted { token, .. } = &request.status {
-            // The token is revoked in this process either way; an unsaved
-            // revoke list is logged and the rest of the session still settles.
             if let Err(error) = manager.revoke(*token.id(), &reason).await {
                 tracing::error!(%error, "settle {session_id}: revocation persistence failed");
+                saved = Err(error);
             }
             store
                 .revoke_request_by(request.id.as_str(), &reason, Settler::Runtime)
                 .await;
         }
     }
+    saved
 }
 
 #[cfg(test)]
@@ -54,14 +60,28 @@ mod tests {
     };
     use elastos_runtime::primitives::{audit::AuditLog, metrics::MetricsManager};
     use elastos_runtime::session::SessionId;
+    use elastos_runtime::signature::SigningKey;
     use std::sync::Arc;
 
     const RESOURCE: &str = "elastos://content/publish";
 
     fn state() -> CapabilityState {
-        let audit = Arc::new(AuditLog::new());
         let tokens = Arc::new(CapabilityStore::new());
-        let manager = CapabilityManager::new(
+        state_over(tokens, SigningKey::from_bytes(&[0x50; 32]))
+    }
+
+    /// A Home's capability plane whose revoke list is saved under `dir` and
+    /// whose tokens are signed with `key`. A second call over the same `dir`
+    /// and `key` is that Home after a restart.
+    async fn saved_state(dir: &std::path::Path, key: &[u8; 32]) -> CapabilityState {
+        let tokens = Arc::new(CapabilityStore::with_persistence(dir).await.unwrap());
+        state_over(tokens, SigningKey::from_bytes(key))
+    }
+
+    fn state_over(tokens: Arc<CapabilityStore>, key: SigningKey) -> CapabilityState {
+        let audit = Arc::new(AuditLog::new());
+        let manager = CapabilityManager::with_key(
+            key,
             tokens.clone(),
             audit.clone(),
             Arc::new(MetricsManager::new()),
@@ -122,7 +142,8 @@ mod tests {
             "session-a",
             "stopped",
         )
-        .await;
+        .await
+        .unwrap();
 
         for (row, id) in [("A pending", &a_pending), ("A grant", &a_grant)] {
             let RequestStatus::Denied { reason, settled_by } = status(&state, id).await else {
@@ -145,5 +166,48 @@ mod tests {
         );
         let b_check = validate(&state, "session-b", &b_token).await;
         assert_eq!(b_check, Ok(()), "B token still live");
+    }
+
+    /// A revoke whose save fails is returned to the caller; the token is
+    /// refused in this process and its request still settles. Reloaded from
+    /// the store, that token validates again, which is why the caller records
+    /// the end as not settled. With a working store the revoke holds across
+    /// the reload, so the reload is a real restart and not a refusal of every
+    /// token.
+    #[tokio::test]
+    async fn settle_and_revoke_returns_a_revoke_it_could_not_save() {
+        let key = [0x51; 32];
+        for broken in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = saved_state(dir.path(), &key).await;
+            let (_, grant, token) = seed(&state, "session-a").await;
+            if broken {
+                // The saved list's replacement cannot be renamed over a folder.
+                std::fs::create_dir(dir.path().join("revoked_tokens")).unwrap();
+            }
+            let settled = settle_and_revoke(
+                &state.pending_store,
+                &state.capability_manager,
+                "session-a",
+                "trapped",
+            )
+            .await;
+            assert_eq!(settled.is_err(), broken, "broken={broken}: {settled:?}");
+            let here = validate(&state, "session-a", &token).await;
+            assert_eq!(here, Err(ValidationError::TokenRevoked), "broken={broken}");
+            assert!(
+                matches!(status(&state, &grant).await, RequestStatus::Denied { .. }),
+                "broken={broken}: the grant's request still settles"
+            );
+
+            let restarted = saved_state(dir.path(), &key).await;
+            let after = validate(&restarted, "session-a", &token).await;
+            let expected = if broken {
+                Ok(())
+            } else {
+                Err(ValidationError::TokenRevoked)
+            };
+            assert_eq!(after, expected, "broken={broken}: after the reload");
+        }
     }
 }
