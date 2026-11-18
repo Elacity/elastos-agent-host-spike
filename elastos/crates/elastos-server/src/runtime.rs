@@ -441,6 +441,14 @@ impl Runtime {
             }
         }
 
+        // The server has no owner or stop route for a resident v2 activation.
+        // Refuse it before loading a component or running any guest code.
+        if manifest.bus_contract.as_deref() == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT) {
+            return Err(ElastosError::InvalidManifest(
+                "Bus v2 contract not yet runnable".into(),
+            ));
+        }
+
         // Reject entrypoints that escape the capsule directory
         if manifest.entrypoint.contains("..")
             || std::path::Path::new(&manifest.entrypoint).is_absolute()
