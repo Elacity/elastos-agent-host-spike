@@ -216,6 +216,28 @@ impl RuntimeTransactionEffectStore {
     }
 }
 
+/// The wall-clock reading for one transaction-effect mutation. A test may
+/// script it so the mutation can be shown to consume a single value.
+fn transaction_effect_now() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(value) = crate::test_clock::next() {
+            return value;
+        }
+    }
+    now_ts()
+}
+
+/// Stamp a mutation's `updated_at` from this mutation's single clock reading
+/// without ever moving it behind the record's creation time. `validate`
+/// requires `updated_at >= created_at`, and equality is legal, so a wall-clock
+/// step backwards between the creation read and this mutation cannot make the
+/// record structurally invalid.
+fn stamp_effect_updated_at(effect: &mut RuntimeTransactionEffect) {
+    let created_at = effect.created_at;
+    effect.updated_at = transaction_effect_now().max(created_at);
+}
+
 impl RuntimeTransactionEffect {
     fn validate(&self, principal_id: &str) -> anyhow::Result<()> {
         if self.schema != TRANSACTION_EFFECT_SCHEMA
@@ -542,7 +564,7 @@ fn rebind_prepared_exact_effect(
         &effect.approval_request_id,
         transaction_approval_operation(effect),
     )?;
-    effect.updated_at = now_ts();
+    stamp_effect_updated_at(effect);
     effect.validate(authority.verified_context().principal_id())
 }
 
@@ -727,7 +749,7 @@ pub(in crate::api::gateway) async fn ensure_exact_runtime_transaction_approval(
                 if effect.state == TransactionEffectState::Prepared {
                     effect.state = TransactionEffectState::ApprovalPending;
                 }
-                effect.updated_at = now_ts();
+                stamp_effect_updated_at(effect);
                 save_transaction_effect_store(state, &store)?;
                 approval
             }
@@ -955,7 +977,7 @@ async fn ensure_effect_wallet_approval(
     if effect.state == TransactionEffectState::Prepared {
         effect.state = TransactionEffectState::ApprovalPending;
     }
-    effect.updated_at = now_ts();
+    stamp_effect_updated_at(effect);
     save_transaction_effect_store(state, store)?;
     Ok(approval)
 }
@@ -977,7 +999,7 @@ fn ensure_requested_transaction_audit(
         })?;
     let effect = &mut store.effects[effect_index];
     effect.requested_audit_completed = true;
-    effect.updated_at = now_ts();
+    stamp_effect_updated_at(effect);
     save_transaction_effect_store(state, store)
 }
 
@@ -1116,7 +1138,7 @@ pub(in crate::api::gateway) async fn complete_runtime_transaction_effect(
             effect.signed_result = Some(signed_result);
             effect.state = TransactionEffectState::BroadcastInFlight;
             effect.completion_error = None;
-            effect.updated_at = now_ts();
+            stamp_effect_updated_at(effect);
             save_transaction_effect_store(state, &store)?;
             reconcile_transaction_effect(state, &mut store, effect_index).await?;
         } else {
@@ -1162,7 +1184,7 @@ pub(in crate::api::gateway) async fn complete_runtime_transaction_effect(
             effect.signed_result = Some(signed_result);
             effect.state = TransactionEffectState::Signed;
             effect.completion_error = None;
-            effect.updated_at = now_ts();
+            stamp_effect_updated_at(effect);
             save_transaction_effect_store(state, &store)?;
 
             let signed_transaction = store.effects[effect_index]
@@ -1176,7 +1198,7 @@ pub(in crate::api::gateway) async fn complete_runtime_transaction_effect(
                 .to_string();
             store.effects[effect_index].signed_transaction = None;
             store.effects[effect_index].state = TransactionEffectState::BroadcastInFlight;
-            store.effects[effect_index].updated_at = now_ts();
+            stamp_effect_updated_at(&mut store.effects[effect_index]);
             save_transaction_effect_store(state, &store)?;
             let receipt = transaction_chain_data(
                 state,
@@ -1193,7 +1215,7 @@ pub(in crate::api::gateway) async fn complete_runtime_transaction_effect(
                 let effect = &mut store.effects[effect_index];
                 effect.state = TransactionEffectState::Indeterminate;
                 effect.completion_error = Some(err.to_string());
-                effect.updated_at = now_ts();
+                stamp_effect_updated_at(effect);
                 save_transaction_effect_store(state, &store)?;
                 return Err((
                     StatusCode::BAD_GATEWAY,
@@ -1204,7 +1226,7 @@ pub(in crate::api::gateway) async fn complete_runtime_transaction_effect(
             effect.receipt = Some(receipt);
             effect.state = TransactionEffectState::ReceiptConfirmed;
             effect.completion_error = None;
-            effect.updated_at = now_ts();
+            stamp_effect_updated_at(effect);
             save_transaction_effect_store(state, &store)?;
         }
     }
@@ -1331,7 +1353,7 @@ async fn finish_transaction_completion(
         }
     }
     let effect = &mut store.effects[effect_index];
-    effect.updated_at = now_ts();
+    stamp_effect_updated_at(effect);
     if effect.requested_audit_completed
         && effect.projection_completed
         && effect.completion_audit_completed
@@ -1398,7 +1420,7 @@ async fn reconcile_transaction_effect(
                     let effect = &mut store.effects[effect_index];
                     effect.state = TransactionEffectState::Indeterminate;
                     effect.completion_error = Some(err.to_string());
-                    effect.updated_at = now_ts();
+                    stamp_effect_updated_at(effect);
                     save_transaction_effect_store(state, store)?;
                     return Err((
                         StatusCode::BAD_GATEWAY,
@@ -1416,7 +1438,7 @@ async fn reconcile_transaction_effect(
                     effect.receipt = Some(result);
                     effect.state = TransactionEffectState::ReceiptConfirmed;
                     effect.completion_error = None;
-                    effect.updated_at = now_ts();
+                    stamp_effect_updated_at(effect);
                     save_transaction_effect_store(state, store)?;
                     return Ok(());
                 }
@@ -1435,7 +1457,7 @@ async fn reconcile_transaction_effect(
     let effect = &mut store.effects[effect_index];
     effect.state = TransactionEffectState::Indeterminate;
     effect.completion_error = Some(message.clone());
-    effect.updated_at = now_ts();
+    stamp_effect_updated_at(effect);
     save_transaction_effect_store(state, store)?;
     Err((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -3082,6 +3104,27 @@ mod exact_signed_transaction_tests {
         );
         let signature = k256::ecdsa::Signature::from_scalars(r, high_s).unwrap();
         assert!(validate_low_s_signature(&signature).is_err());
+    }
+
+    #[test]
+    fn update_stamp_reads_the_clock_once_and_never_precedes_creation() {
+        // The creation stamp is `created_at`; the clock is already 30 s behind
+        // it when the mutation starts and 60 s behind if a second read were
+        // taken. The mutation must consume one value (its own read, clamped at
+        // the creation stamp) and never observe the later scripted reading.
+        let key = signing_key(0x11);
+        let mut effect = effect_for_key(&key);
+        let created_at = 1_800_000_000u64;
+        effect.created_at = created_at;
+        effect.updated_at = created_at;
+        let clock =
+            crate::test_clock::arm(created_at.saturating_sub(30), created_at.saturating_sub(60));
+        stamp_effect_updated_at(&mut effect);
+        let reads = crate::test_clock::reads();
+        drop(clock);
+        assert_eq!(reads, 1, "the mutation must read the clock once");
+        assert_eq!(effect.updated_at, effect.created_at);
+        effect.validate("principal:test").unwrap();
     }
 }
 
