@@ -850,6 +850,9 @@ fn completed_browser_account_access_approval(
     let account_id = "wallet:eip155:20:0x1111111111111111111111111111111111111111";
     let address = "0x1111111111111111111111111111111111111111";
     let payload_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    // One clock reading orders created/completed/expiry without a step
+    // between the three stamps.
+    let now = crate::auth::now_ts();
     let payload = json!({
         "schema": "elastos.browser.account-access-request/v1",
         "permission": "eth_accounts",
@@ -888,9 +891,9 @@ fn completed_browser_account_access_approval(
         "reason": "Browser origin requests exact account access",
         "payload": payload,
         "payload_hash": payload_hash,
-        "created_at": crate::auth::now_ts().saturating_sub(1),
-        "expires_at": crate::auth::now_ts().saturating_add(600),
-        "completed_at": crate::auth::now_ts(),
+        "created_at": now.saturating_sub(1),
+        "expires_at": now.saturating_add(600),
+        "completed_at": now,
         "signed_result": {
             "schema": "elastos.browser.account-access-result/v1",
             "request_id": request_id,

@@ -5857,13 +5857,14 @@ mod tests {
     }
 
     fn grant_room_authorization(data: &Path) -> RoomSessionAuthorization {
+        let now = now_ts();
         let authorization = RoomSessionAuthorization {
             principal_id: "person:local:room".into(),
             session_id: "auth:room".into(),
             proof_binding_id: Some("proof:room".into()),
             grant_id: "grant:room".into(),
             authority_actor: "home".into(),
-            expires_at: now_ts() + 300,
+            expires_at: now.saturating_add(300),
         };
         crate::auth::store_session_grant(
             data,
@@ -5873,7 +5874,7 @@ mod tests {
                 session_id: authorization.session_id.clone(),
                 proof_binding_id: authorization.proof_binding_id.clone().unwrap(),
                 grant_id: authorization.grant_id.clone(),
-                issued_at: now_ts(),
+                issued_at: now,
                 expires_at: authorization.expires_at,
                 apps: vec!["home".into()],
             },

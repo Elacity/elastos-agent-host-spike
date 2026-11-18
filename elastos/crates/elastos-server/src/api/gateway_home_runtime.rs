@@ -1945,14 +1945,15 @@ mod tests {
             "grant:alice",
             crate::auth::PrincipalKind::Human,
         );
+        let now = now_ts();
         let mut grant = elastos_runtime::auth::AuthSessionGrantV1 {
             schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
             principal_id: context.principal_id().to_string(),
             session_id: context.session_id.clone(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             grant_id: context.grant_id.clone(),
-            issued_at: now_ts(),
-            expires_at: now_ts() + 300,
+            issued_at: now,
+            expires_at: now.saturating_add(300),
             apps: vec![HOME_CAPSULE_ID.into()],
         };
         // The verifier reads the principal's stored root; give the fixture one.
@@ -1966,8 +1967,10 @@ mod tests {
         headers.insert("x-elastos-home-token", token.parse().unwrap());
         let validated =
             require_home_launch_token_context(data.path(), &headers, HOME_CAPSULE_ID).unwrap();
-        // Expire the stored grant after frame validation, before projection minting.
-        grant.expires_at = now_ts();
+        // Expire the stored grant after frame validation, before projection
+        // minting. A fixed past stamp cannot be revived by a backward clock
+        // step between this write and the verifier's own read.
+        grant.expires_at = 0;
         crate::auth::store_session_grant(data.path(), grant).unwrap();
         let (status, Json(body)) = issue_home_projection_launch_token_with_context(
             data.path(),
