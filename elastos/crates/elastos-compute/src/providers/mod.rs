@@ -4,7 +4,7 @@ mod component;
 
 use std::sync::Arc;
 
-pub use component::{ComponentProvider, SEALED_BRIDGE};
+pub use component::{ActivationOutcome, ComponentProvider, ResidentActivation, SEALED_BRIDGE};
 
 /// Synchronous request/response bridge from a Component into the Runtime Bus.
 pub type BridgeHostcall =
