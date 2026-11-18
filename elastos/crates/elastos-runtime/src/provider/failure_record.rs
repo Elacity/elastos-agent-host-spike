@@ -21,6 +21,16 @@ enum TestReport {
     ShortRecord,
 }
 
+#[cfg(test)]
+type TestHook = TestReport;
+#[cfg(not(test))]
+type TestHook = ();
+
+#[cfg(test)]
+const NORMAL_TEST_HOOK: TestHook = TestReport::Normal;
+#[cfg(not(test))]
+const NORMAL_TEST_HOOK: TestHook = ();
+
 #[derive(Debug)]
 enum LaunchError {
     BeforeFork(String),
@@ -47,22 +57,14 @@ fn start(
         },
     )
     .map_err(LaunchError::BeforeFork)?;
-    launch(
-        &prepared,
-        &path,
-        args,
-        #[cfg(test)]
-        TestReport::Normal,
-        None,
-        None,
-    )
+    launch(&prepared, &path, args, NORMAL_TEST_HOOK, None, None)
 }
 
 fn launch(
     prepared: &preexec_installer::Prepared,
     path: &CStr,
     args: &[&CStr],
-    #[cfg(test)] test_report: TestReport,
+    test_hook: TestHook,
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
 ) -> Result<libc::pid_t, LaunchError> {
@@ -137,29 +139,7 @@ fn launch(
                 );
             }
         }
-        #[cfg(test)]
-        match test_report {
-            TestReport::Normal => {}
-            TestReport::NoRecordAfterDelay => {
-                unsafe { libc::close(pipe[1]) };
-                let delay = libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: 50_000_000,
-                };
-                unsafe {
-                    libc::syscall(
-                        libc::SYS_nanosleep,
-                        &delay,
-                        std::ptr::null::<libc::timespec>(),
-                    );
-                    libc::_exit(127)
-                }
-            }
-            TestReport::ShortRecord => unsafe {
-                libc::write(pipe[1], b"short".as_ptr().cast(), 5);
-                libc::_exit(127)
-            },
-        }
+        child_test_hook(test_hook, pipe[1]);
         if let Err(failure) = unsafe { preexec_installer::install(prepared, pipe[1]) } {
             write_record_and_exit(pipe[1], &failure.record());
         }
@@ -262,6 +242,36 @@ fn launch(
     }
     Err(LaunchError::ChildFailed { pid, reason })
 }
+
+#[cfg(test)]
+fn child_test_hook(hook: TestHook, writer: i32) {
+    match hook {
+        TestReport::Normal => {}
+        TestReport::NoRecordAfterDelay => {
+            unsafe { libc::close(writer) };
+            let delay = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 50_000_000,
+            };
+            unsafe {
+                libc::syscall(
+                    libc::SYS_nanosleep,
+                    &delay,
+                    std::ptr::null::<libc::timespec>(),
+                );
+                libc::_exit(127)
+            }
+        }
+        TestReport::ShortRecord => unsafe {
+            libc::write(writer, b"short".as_ptr().cast(), 5);
+            libc::_exit(127)
+        },
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn child_test_hook(_: TestHook, _: i32) {}
 
 fn error_record(tag: u32, errno: i32) -> [u8; RECORD_LEN] {
     let [t0, t1, t2, t3] = tag.to_ne_bytes();
