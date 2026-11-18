@@ -1804,6 +1804,7 @@ struct HomeCapsulesResponse {
 #[derive(Deserialize)]
 struct HomeCapsuleInfo {
     name: String,
+    status: Option<String>,
 }
 
 pub(super) async fn home_runtime_summary(data_dir: &std::path::Path) -> HomeRuntimeSummary {
@@ -1925,6 +1926,7 @@ async fn home_list_runtime_capsules(
     let mut names = response
         .capsules
         .into_iter()
+        .filter(|capsule| !matches!(capsule.status.as_deref(), Some("stopped" | "failed")))
         .map(|capsule| capsule.name)
         .collect::<Vec<_>>();
     names.sort();

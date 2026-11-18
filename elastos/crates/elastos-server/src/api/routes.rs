@@ -1204,6 +1204,22 @@ pub(crate) mod tests {
             .unwrap_or_else(|_| panic!("the activation {id} does not end"))
         }
 
+        /// Wait for the watcher's state change after the guest's first call.
+        pub(crate) async fn wait_running(&self, id: &str) -> crate::runtime::RunningCapsuleInfo {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(info) = self.runtime.get_capsule(id).await {
+                        if info.status == "running" {
+                            break info;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the activation {id} does not become running"))
+        }
+
         /// Waits until this activation's own capability request reaches the
         /// pending store, the observable edge of "its guest is in the bridge".
         pub(crate) async fn wait_pending(
@@ -1619,7 +1635,7 @@ pub(crate) mod tests {
         assert_ne!(a_launch.id, b_launch.id, "two instances, two ids");
         home.wait_pending(&b_launch.id).await;
 
-        let a_now = home.runtime.get_capsule(&a_launch.id).await.unwrap();
+        let a_now = home.wait_running(&a_launch.id).await;
         assert_eq!(a_now.status, "running", "A still runs after B's launch");
         assert_eq!(a_now.session_id, a_id);
         let held = home.pending_store.list_pending().await;
@@ -1644,7 +1660,7 @@ pub(crate) mod tests {
         }
         // The list view deliberately names no principal; the registry's own
         // field is where admission's actor is asserted.
-        let b_now = home.runtime.get_capsule(&b_launch.id).await.unwrap();
+        let b_now = home.wait_running(&b_launch.id).await;
         assert_eq!(a_now.principal.as_deref(), Some(a.as_str()));
         assert_eq!(b_now.principal.as_deref(), Some(b.as_str()));
         assert_ne!(a_now.principal, b_now.principal, "two principals");
@@ -1677,7 +1693,7 @@ pub(crate) mod tests {
     /// The launch answers `starting` with its session while its guest runs; the
     /// entry is `running` from the moment the worker reports `started` until the
     /// guest ends.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn the_launch_answers_starting_and_the_entry_runs_from_the_workers_started() {
         if crate::agents::require_build().is_err() {
             return;
@@ -1685,15 +1701,28 @@ pub(crate) mod tests {
         let home = ProbeLaunch::new(&["a"]).await;
         let agent = home.agents.first().expect("one agent").clone();
 
-        let answer = home.launch(&agent).await.unwrap().0;
+        // Keep this task on the current thread through the route return and
+        // registry read. The watcher is spawned at the end of admission, so
+        // it cannot observe the worker's `started` until this task yields.
+        let answer = tokio::task::unconstrained(home.launch(&agent))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(answer.status, "starting");
         assert_eq!(answer.session_id, answer.id);
-        home.wait_pending(&answer.id).await;
-        let entry = home
-            .runtime
-            .get_capsule(&answer.id)
+        let starting = tokio::task::unconstrained(home.runtime.get_capsule(&answer.id))
             .await
-            .expect("the entry exists while the guest runs");
+            .expect("admission registered the entry");
+        assert_eq!(
+            starting.status, "starting",
+            "the registry starts at admission"
+        );
+        assert_eq!(starting.session_id, answer.id);
+        assert_eq!(starting.principal.as_deref(), Some(agent.as_str()));
+        assert_eq!(starting.cause, None);
+        assert_eq!(starting.ended_at, None);
+        home.wait_pending(&answer.id).await;
+        let entry = home.wait_running(&answer.id).await;
         assert_eq!(entry.status, "running");
         assert_eq!(entry.session_id, answer.id);
         assert_eq!(entry.cause, None);
@@ -1705,6 +1734,80 @@ pub(crate) mod tests {
             grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
         home.wait_ended(&answer.id).await;
         grants.abort();
+    }
+
+    /// A worker that cannot enter the guest leaves the admitted entry failed
+    /// with the start error; it never reports running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pre_guest_start_failure_ends_failed_with_its_cause() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents.first().expect("one agent").clone();
+        let answer = tokio::task::unconstrained(home.launch(&agent))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(answer.status, "starting");
+        let starting = tokio::task::unconstrained(home.runtime.get_capsule(&answer.id))
+            .await
+            .expect("admission registered the entry");
+        assert_eq!(starting.status, "starting");
+        tokio::task::unconstrained(home.runtime.remove_loaded_component_for_test(&answer.id)).await;
+        let ended = home.wait_ended(&answer.id).await;
+        assert_eq!(ended.status, "failed");
+        let cause = ended.cause.expect("a start error has a cause");
+        assert!(
+            cause.contains("Capsule not found") || cause.contains("not found"),
+            "{cause}"
+        );
+        assert!(ended.ended_at.is_some());
+        assert_eq!(home.runtime.ceiling_of(&answer.id), None);
+    }
+
+    /// Dropping the route while registration waits releases the admission
+    /// context and the loaded component through the launch guard.
+    #[tokio::test]
+    async fn cancelling_a_launch_before_registration_releases_its_context() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = Arc::new(ProbeLaunch::new(&["a"]).await);
+        let agent = home.agents.first().expect("one agent").clone();
+        let registry = home.runtime.hold_capsule_registry_for_test().await;
+        let route_home = home.clone();
+        let route = tokio::spawn(async move { route_home.launch(&agent).await });
+        let held_id = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some((id, _)) = home.runtime.model_token_ceilings_held().first() {
+                    break id.clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the route holds its admitted model ceiling");
+        route.abort();
+        let _ = route.await;
+        drop(registry);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if home.runtime.ceiling_of(&held_id).is_none()
+                    && home
+                        .runtime
+                        .model_token_ceilings_held()
+                        .iter()
+                        .all(|(id, _)| id != &held_id)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a cancelled route releases its bridge context");
+        assert!(home.runtime.get_capsule(&held_id).await.is_none());
     }
 
     /// A natural return ends the entry `stopped` with cause `completed`, and
@@ -2974,7 +3077,13 @@ pub(crate) mod tests {
                 a_first.id.as_str().to_string(),
             );
             let b_run = home.launch_from(b_host, b).await;
-            grants.abort();
+            let b_id = b_run
+                .as_ref()
+                .expect("B's route admits its launch")
+                .0
+                .id
+                .clone();
+            let b_end = home.wait_ended(&b_id).await;
 
             // A is still the same activation, held in the same request, after
             // B's launch has returned.
@@ -2985,19 +3094,19 @@ pub(crate) mod tests {
                     .any(|request| request.id.as_str() == a_first.id.as_str()),
                 "A must still be held in its own first bridge call: {still:?}"
             );
-            // B's refused cells created no record at all: A's held request is
-            // the only one, before and after B's launch.
-            assert_eq!(
-                still.len(),
-                1,
+            // B has ended while A remains held. Any pending record other than
+            // A's held request came from a refused cell.
+            assert!(
+                still.iter().all(|request| request.id == a_first.id),
                 "a refused cell became a pending record: {still:?}"
             );
             assert_eq!(tree_hashes(&a_dir), a_before, "B changed A's tree");
+            grants.abort();
             let all =
                 grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
-            (a_first, b_run, all)
+            (a_first, b_run, b_end, all)
         };
-        let (a_run, (a_first, b_run, all)) = tokio::join!(a_launch, b_work);
+        let (a_run, (a_first, b_run, b_end, all)) = tokio::join!(a_launch, b_work);
         let (a_run, b_run) = (
             a_run.expect("the A launch task does not panic").0,
             b_run.expect("the B launch task does not panic").0,
@@ -3006,7 +3115,6 @@ pub(crate) mod tests {
         // ends are the registry's: wait for both before reading what the
         // guests wrote.
         let a_end = home.wait_ended(&a_run.id).await;
-        let b_end = home.wait_ended(&b_run.id).await;
         all.abort();
         (a_run, a_end, b_run, b_end, home.results(b), plan, a_first)
     }

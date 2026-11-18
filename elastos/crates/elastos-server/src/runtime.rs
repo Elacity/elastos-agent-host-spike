@@ -49,7 +49,8 @@ pub struct RunningCapsuleInfo {
     /// The session this instance runs in: the capsule id the bridge and the
     /// pending store use for it, which is also the instance id.
     pub session_id: String,
-    /// The principal admission bound the instance to, for an agent launch.
+    /// The principal admission bound the instance to, for an agent launch or
+    /// a launch grant.
     pub principal: Option<String>,
     /// Why the activation ended, once it has: `completed` for a natural
     /// return, or the trap's message.
@@ -158,6 +159,77 @@ impl Drop for LaunchHeld {
             Err(poisoned) => poisoned.into_inner(),
         };
         launches.remove(&self.id);
+    }
+}
+
+/// Owns a detached component's admission context until its watcher has
+/// removed it. Dropping a route or a watcher still cleans up the loaded
+/// component, its bridge context and its registry entry.
+struct ActivationContextHeld {
+    id: elastos_common::CapsuleId,
+    handle: CapsuleHandle,
+    component: Arc<ComponentProvider>,
+    registry: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
+    manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
+    armed: bool,
+}
+
+impl ActivationContextHeld {
+    fn new(runtime: &Runtime, handle: &CapsuleHandle, component: Arc<ComponentProvider>) -> Self {
+        Self {
+            id: handle.id.clone(),
+            handle: handle.clone(),
+            component,
+            registry: runtime.running_capsules.clone(),
+            manifest_capabilities: runtime.bridge_manifest_capabilities.clone(),
+            model_token_ceilings: runtime.bridge_model_token_ceilings.clone(),
+            armed: true,
+        }
+    }
+
+    async fn release(&mut self) {
+        self.component.clear_bridge_principal(&self.id).await;
+        if let Ok(mut bounds) = self.manifest_capabilities.write() {
+            bounds.remove(&self.id.0);
+        }
+        self.model_token_ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id.0);
+        self.armed = false;
+    }
+}
+
+impl Drop for ActivationContextHeld {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let id = self.id.clone();
+        let handle = self.handle.clone();
+        let component = self.component.clone();
+        let registry = self.registry.clone();
+        let manifest_capabilities = self.manifest_capabilities.clone();
+        let model_token_ceilings = self.model_token_ceilings.clone();
+        tokio::spawn(async move {
+            let _ = component.stop(&handle).await;
+            component.clear_bridge_principal(&id).await;
+            if let Ok(mut bounds) = manifest_capabilities.write() {
+                bounds.remove(&id.0);
+            }
+            model_token_ceilings
+                .write()
+                .unwrap_or_else(|err| err.into_inner())
+                .remove(&id.0);
+            if let Some(info) = registry.write().await.get_mut(&id.0) {
+                if info.ended_at.is_none() {
+                    info.status = CAPSULE_FAILED.to_string();
+                    info.cause = Some("activation task ended before its outcome".to_string());
+                    info.ended_at = Some(std::time::Instant::now());
+                }
+            }
+        });
     }
 }
 
@@ -1044,6 +1116,9 @@ impl Runtime {
             } else {
                 None
             };
+        let held = detached_component
+            .as_ref()
+            .map(|component| ActivationContextHeld::new(self, handle, component.clone()));
         self.hold_launch_context(handle, principal_id.clone(), model_token_ceiling)
             .await;
 
@@ -1064,7 +1139,12 @@ impl Runtime {
                 ended_at: None,
             })
             .await;
-            self.watch_activation(id, handle.clone(), component);
+            self.watch_activation(
+                id,
+                handle.clone(),
+                component,
+                held.expect("detached context"),
+            );
             return Ok(());
         }
 
@@ -1119,6 +1199,34 @@ impl Runtime {
             .remove(&id.0);
     }
 
+    /// Remove a loaded component before the watcher can start its guest. This
+    /// exercises the real provider's pre-start error through the registry.
+    #[cfg(test)]
+    pub(crate) async fn remove_loaded_component_for_test(&self, id: &str) {
+        let handle = self
+            .get_capsule(id)
+            .await
+            .and_then(|entry| entry.handle)
+            .expect("the admitted component has a handle");
+        let component = self
+            .component_provider
+            .as_ref()
+            .expect("component provider");
+        component
+            .stop(&handle)
+            .await
+            .expect("remove the loaded component");
+    }
+
+    /// Hold registration so a route can be cancelled after it has installed
+    /// its admission context and before its watcher owns that context.
+    #[cfg(test)]
+    pub(crate) async fn hold_capsule_registry_for_test(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<String, RunningCapsuleInfo>> {
+        self.running_capsules.write().await
+    }
+
     /// Starts this activation and waits for its worker to publish its outcome, then takes
     /// the ceiling and principal away and leaves the entry `stopped` with
     /// cause `completed`, or `failed` with the trap's cause. The entry keeps
@@ -1128,12 +1236,11 @@ impl Runtime {
         id: elastos_common::CapsuleId,
         handle: CapsuleHandle,
         component: Arc<ComponentProvider>,
+        mut held: ActivationContextHeld,
     ) {
         use elastos_compute::providers::ActivationOutcome;
 
         let registry = self.running_capsules.clone();
-        let manifest_capabilities = self.bridge_manifest_capabilities.clone();
-        let model_token_ceilings = self.bridge_model_token_ceilings.clone();
         tokio::spawn(async move {
             let (status, cause) = match component.start_resident(&handle).await {
                 Ok(mut activation) => {
@@ -1154,14 +1261,7 @@ impl Runtime {
                 }
                 Err(err) => (CAPSULE_FAILED, err.to_string()),
             };
-            component.clear_bridge_principal(&id).await;
-            if let Ok(mut bounds) = manifest_capabilities.write() {
-                bounds.remove(&id.0);
-            }
-            model_token_ceilings
-                .write()
-                .unwrap_or_else(|err| err.into_inner())
-                .remove(&id.0);
+            held.release().await;
             // The entry ends after the context is gone, so a reader that sees
             // `ended_at` also sees that nothing of the activation is left.
             let mut capsules = registry.write().await;
@@ -1311,13 +1411,20 @@ impl Runtime {
     /// List all registered capsules, sorted by id. An entry that ended more
     /// than [`ENDED_CAPSULE_RETENTION`] ago leaves the listing here.
     pub async fn list_capsules(&self) -> Vec<RunningCapsuleInfo> {
-        self.list_capsules_at(std::time::Instant::now()).await
+        self.list_capsules_pruning_at(std::time::Instant::now())
+            .await
     }
 
-    /// [`Self::list_capsules`] with a caller's reading of now, so a reader can
-    /// ask what the listing will be after the retention without waiting for
-    /// it.
-    pub async fn list_capsules_at(&self, now: std::time::Instant) -> Vec<RunningCapsuleInfo> {
+    /// Test the retention boundary without waiting for the clock.
+    #[cfg(test)]
+    pub(crate) async fn list_capsules_at(
+        &self,
+        now: std::time::Instant,
+    ) -> Vec<RunningCapsuleInfo> {
+        self.list_capsules_pruning_at(now).await
+    }
+
+    async fn list_capsules_pruning_at(&self, now: std::time::Instant) -> Vec<RunningCapsuleInfo> {
         let mut capsules = self.running_capsules.write().await;
         prune_ended(&mut capsules, now);
         let mut listed: Vec<RunningCapsuleInfo> = capsules.values().cloned().collect();
