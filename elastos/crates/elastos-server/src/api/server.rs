@@ -637,25 +637,37 @@ pub(crate) mod tests {
             .split_once("fn start_server_with_sessions(")
             .unwrap();
         let serve = serve.1.split_once("\n}\n").unwrap().0;
+        let mut wrong = Vec::new();
+        for never in "Router .route .merge .layer .nest .fallback .with_state".split(' ') {
+            if serve.contains(never) {
+                wrong.push(format!("serve adds {never} after the builder"));
+            }
+        }
         for once in [
             "let app = build_router(config)?;",
             ".serve(app.into_make_service())",
             "axum::serve(listener, app)",
         ] {
-            assert_eq!(serve.matches(once).count(), 1, "serve has {once} once");
+            if serve.matches(once).count() != 1 {
+                wrong.push(format!("serve does not have {once} once"));
+            }
         }
         let words = serve.split(|c: char| !c.is_alphanumeric() && c != '_');
         let app_uses = words.filter(|word| *word == "app").count();
-        assert_eq!(app_uses, 3, "serve uses the built router only to serve it");
-        for never in "Router .route .merge .layer .nest .fallback .with_state".split(' ') {
-            assert!(
-                !serve.contains(never),
-                "serve adds {never} after the builder"
-            );
+        if app_uses != 3 {
+            wrong.push(format!("serve names the router {app_uses} times, not 3"));
         }
-        assert_eq!(production.matches("build_router(").count(), 2);
         let test_call = ["build_router", "(ServerConfig {"].concat();
-        assert_eq!(tests.matches(&test_call).count(), 1);
+        for (part, text, needle, want) in [
+            ("production", production, "build_router(", 2),
+            ("tests", tests, test_call.as_str(), 1),
+        ] {
+            let got = text.matches(needle).count();
+            if got != want {
+                wrong.push(format!("{part} names {needle} {got} times, not {want}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[tokio::test]
