@@ -1743,6 +1743,7 @@ async fn runtime_custody_prebuy_availability_refetches_fresh_exact_receipt_witho
         &listing,
         harness.mint_id,
         now,
+        crate::auth::now_ts,
     )
     .await
     .unwrap();
@@ -1812,6 +1813,7 @@ async fn runtime_custody_prebuy_availability_rejects_stale_receipt() {
         &listing,
         harness.mint_id,
         now,
+        crate::auth::now_ts,
     )
     .await
     .is_err());
@@ -1865,6 +1867,7 @@ async fn runtime_custody_prebuy_availability_rejects_wrong_receipt_binding_or_ma
             &listing,
             harness.mint_id,
             now,
+            crate::auth::now_ts,
         )
         .await
         .is_err());
@@ -1884,6 +1887,7 @@ async fn runtime_custody_prebuy_availability_rejects_wrong_receipt_binding_or_ma
         &listing,
         wrong_signer.mint_id,
         now,
+        crate::auth::now_ts,
     )
     .await
     .is_err());
@@ -1924,6 +1928,7 @@ async fn runtime_custody_prebuy_availability_rejects_missing_listing_and_wrong_m
         &listing,
         digest(0x33),
         NOW,
+        crate::auth::now_ts,
     )
     .await
     .is_err());
@@ -6836,7 +6841,7 @@ async fn runtime_release_coordinator_process_two_of_three_success_stops_before_t
         ],
     )
     .unwrap()
-    .with_response_clock(crate::auth::now_ts);
+    .with_response_now(crate::auth::now_ts());
     let wallet_now = crate::auth::now_ts();
     let (wallet_request, wallet_response) = wallet_request_response_for_release_at(
         &operation,
@@ -7544,7 +7549,7 @@ async fn runtime_decrypt_registry_adapter_process_reconstructs_for_prepared_reci
         ],
     )
     .unwrap()
-    .with_response_clock(crate::auth::now_ts);
+    .with_response_now(crate::auth::now_ts());
     let outcome = coordinator
         .release(
             &wallet_request,
@@ -7593,7 +7598,7 @@ async fn runtime_decrypt_registry_adapter_process_reconstructs_for_prepared_reci
         ],
     )
     .unwrap()
-    .with_response_clock(crate::auth::now_ts);
+    .with_response_now(crate::auth::now_ts());
     let replay_outcome = replay_coordinator
         .release(
             &wallet_request,
@@ -10433,7 +10438,7 @@ async fn runtime_custody_release_wallet_pends_on_managed_approval_and_resumes_ex
         signed_rights.request().binding(),
         &buy.binding_for_session(session).unwrap()
     );
-    super::wallet_signed_rights_from_bytes(&signed_request_bytes, &response_bytes).unwrap();
+    super::wallet_signed_rights_from_bytes(&signed_request_bytes, &response_bytes, now).unwrap();
     assert_eq!(
         wallet.seen_request_ids(),
         vec![approval_request_id.clone(); 3],
@@ -10761,6 +10766,102 @@ async fn runtime_custody_viewer_open_replays_exact_active_session_without_provid
         ])
     );
     assert!(harness.content_provider.requests().await.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_custody_viewer_open_rejects_a_record_that_expires_while_waiting_for_the_lock() {
+    let harness = runtime_custody_prebuy_availability_harness(
+        0x61,
+        ContentAvailabilityTestConfig::accepted(),
+    )
+    .await;
+    let principal_id = "person:local:runtime-custody-viewer-lock-wait-expiry";
+    let (proof_binding_id, _) =
+        install_profile_authority_keeping_device_key(&harness.data_dir, principal_id);
+    let current_profile_did = load_profile_did_for_test(&harness.data_dir, principal_id);
+    let mint = runtime_mint_journal(&harness.data_dir)
+        .load(harness.mint_id)
+        .unwrap();
+    let purchase = persist_runtime_custody_purchase_for_mint(
+        &harness.data_dir,
+        &mint,
+        principal_id,
+        &current_profile_did,
+        crate::auth::now_ts(),
+    );
+    let early = crate::auth::now_ts();
+    let expires_at = early.saturating_add(30);
+    let _session = persist_runtime_custody_active_viewer_for_purchase(
+        &harness.data_dir,
+        &mint,
+        &purchase,
+        &proof_binding_id,
+        "runtime-session:alpha",
+        "grant:alpha",
+        opaque_handle(0x21),
+        expires_at,
+    );
+
+    // Hold the lifecycle lock so the open queues. The seam starts at the
+    // pre-wait reading; if the open read the clock before taking the lock it
+    // would accept the record as live. The record must instead be judged by
+    // the reading taken after the lock, when it has expired.
+    let lifecycle = super::acquire_runtime_custody_viewer_lifecycle_guard(
+        &harness.data_dir,
+        principal_id,
+        mint.draft().mint_id(),
+    )
+    .await;
+    let clock = crate::test_clock::arm(early, early.saturating_add(1));
+    let mut open = Box::pin(super::open_runtime_custody_viewer(
+        &harness.data_dir,
+        harness.registry.clone(),
+        super::RuntimeCustodyViewerOpenInput {
+            principal_id: principal_id.to_string(),
+            mint_id: hex::encode(harness.mint_id.as_bytes()),
+            launch_id: Some(TEST_VIEWER_LAUNCH_ID.to_string()),
+            proof_binding_id: Some(proof_binding_id),
+            session_id: Some("runtime-session:alpha".to_string()),
+            grant_id: Some("grant:alpha".to_string()),
+        },
+    ));
+    assert!(
+        futures_lite::future::poll_once(&mut open).await.is_none(),
+        "the open must queue on the lifecycle lock"
+    );
+    assert_eq!(
+        crate::test_clock::reads(),
+        0,
+        "the open must not read the clock before it holds the lifecycle lock"
+    );
+    crate::test_clock::set_next(expires_at);
+    drop(lifecycle);
+    let error = open.await.unwrap_err();
+    assert_eq!(
+        crate::test_clock::reads(),
+        1,
+        "the open must read the clock once, after the lock"
+    );
+    drop(clock);
+    assert!(
+        error
+            .to_string()
+            .contains(RUNTIME_CUSTODY_DECRYPT_UNAVAILABLE_MESSAGE),
+        "{error}"
+    );
+    let record = super::load_runtime_custody_viewer_record(
+        &harness.data_dir,
+        principal_id,
+        mint.draft().mint_id(),
+    )
+    .unwrap()
+    .expect("record");
+    assert_eq!(
+        record.lifecycle_status,
+        super::RuntimeCustodyViewerLifecycleStatus::CleanupPending,
+        "the expired session must be settled, not returned live"
+    );
 }
 
 #[cfg(unix)]

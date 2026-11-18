@@ -190,7 +190,7 @@ pub struct RuntimeReleaseCoordinator<'a> {
     journal: RuntimeReleaseJournal,
     expected_runtime_issuer: RuntimeOperationIssuerKeyV1,
     selected_providers: Vec<RuntimeSelectedProvider<'a>>,
-    response_clock: Option<fn() -> u64>,
+    response_now_unix_seconds: Option<u64>,
 }
 
 impl<'a> RuntimeReleaseCoordinator<'a> {
@@ -209,25 +209,27 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
             journal,
             expected_runtime_issuer,
             selected_providers,
-            response_clock: None,
+            response_now_unix_seconds: None,
         })
     }
 
-    /// Validate provider responses against a live clock instead of the
-    /// operation-start `now`. Providers stamp decisions and contributions with
-    /// their own wall clocks while the release call is in flight; with a
-    /// frozen `now`, any provider walk longer than the permitted clock skew
-    /// fails closed as `ProviderEffectUncertain`. Statement verification of
-    /// caller-supplied pre-signed inputs still uses the caller's `now`.
+    /// Validate provider responses against the operation's single `now`
+    /// instead of sampling a clock again. The operation's caller takes one
+    /// wall-clock reading per operation and passes it here, so response
+    /// validation cannot split two readings that are compared with each
+    /// other. Statement verification of caller-supplied pre-signed inputs
+    /// still uses the caller's `now`.
     #[must_use]
-    pub fn with_response_clock(mut self, response_clock: fn() -> u64) -> Self {
-        self.response_clock = Some(response_clock);
+    pub fn with_response_now(mut self, response_now_unix_seconds: u64) -> Self {
+        self.response_now_unix_seconds = Some(response_now_unix_seconds);
         self
     }
 
     fn response_validation_now(&self, operation_now_unix_seconds: u64) -> u64 {
-        match self.response_clock {
-            Some(clock) => clock().max(operation_now_unix_seconds),
+        match self.response_now_unix_seconds {
+            Some(response_now_unix_seconds) => {
+                response_now_unix_seconds.max(operation_now_unix_seconds)
+            }
             None => operation_now_unix_seconds,
         }
     }

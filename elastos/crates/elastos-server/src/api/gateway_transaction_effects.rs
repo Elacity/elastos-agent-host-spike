@@ -3108,16 +3108,17 @@ mod exact_signed_transaction_tests {
 
     #[test]
     fn update_stamp_reads_the_clock_once_and_never_precedes_creation() {
-        // The clock steps 30 s backwards between the creation read and the
-        // mutation's read. The mutation must consume one value (its own read,
-        // clamped at the creation stamp) and stay structurally valid.
+        // The creation stamp is `created_at`; the clock is already 30 s behind
+        // it when the mutation starts and 60 s behind if a second read were
+        // taken. The mutation must consume one value (its own read, clamped at
+        // the creation stamp) and never observe the later scripted reading.
         let key = signing_key(0x11);
         let mut effect = effect_for_key(&key);
         let created_at = 1_800_000_000u64;
         effect.created_at = created_at;
         effect.updated_at = created_at;
         let clock =
-            crate::test_clock::arm(created_at.saturating_sub(30), created_at.saturating_sub(30));
+            crate::test_clock::arm(created_at.saturating_sub(30), created_at.saturating_sub(60));
         stamp_effect_updated_at(&mut effect);
         let reads = crate::test_clock::reads();
         drop(clock);

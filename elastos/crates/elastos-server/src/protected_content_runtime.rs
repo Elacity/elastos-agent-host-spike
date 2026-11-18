@@ -5159,13 +5159,16 @@ async fn verify_runtime_portable_media(
     package: &RuntimePortableListingPackage,
     decoded: &DecodedRuntimePortableAsset,
     now_unix_seconds: u64,
+    now_clock: impl Fn() -> u64 + Copy,
 ) -> anyhow::Result<(RuntimeMintDraft, RuntimeVerifiedContentAvailability)> {
-    // The caller samples its clock before the fresh ensure; walking a dead
+    // The caller may sample its clock before the fresh ensure; walking a dead
     // candidate's connect timeouts can take longer than the receipt's
     // future-skew allowance, so a receipt stamped at completion would read
     // as "in the future". Verify against the later of the two clocks (a
-    // fixed test clock ahead of wall time is preserved).
-    let now_unix_seconds = now_unix_seconds.max(crate::auth::now_ts());
+    // fixed test clock ahead of wall time is preserved). A viewer open passes
+    // a clock that returns its single operation reading, so the open makes no
+    // second sample; a buy or import passes the live clock.
+    let now_unix_seconds = now_unix_seconds.max(now_clock());
     let trusted_receipt_signer_did =
         crate::collaboration_profile_authority::load_existing_device_did(data_dir)?
             .ok_or_else(|| anyhow::anyhow!("local Runtime device signing key is missing"))?;
@@ -5200,7 +5203,7 @@ async fn verify_runtime_portable_media(
         &decoded.media_identity,
         &requirement,
         // Re-sampled: the refresh above may have walked dead-candidate timeouts.
-        now_unix_seconds.max(crate::auth::now_ts()),
+        now_unix_seconds.max(now_clock()),
     )?;
     let composition = load_runtime_custody_composition(data_dir, registry.clone())?
         .ok_or_else(|| anyhow::anyhow!(RUNTIME_CUSTODY_COMPOSITION_MISSING_MESSAGE))?;
@@ -5212,7 +5215,7 @@ async fn verify_runtime_portable_media(
         &composition.signed_epoch,
         &composition.signed_committee_authorization,
         // Re-sampled: the refresh above may have walked dead-candidate timeouts.
-        now_unix_seconds.max(crate::auth::now_ts()),
+        now_unix_seconds.max(now_clock()),
         &configured_nodes,
     )?;
     let draft = RuntimeMintDraft::new(
@@ -5273,6 +5276,7 @@ pub(crate) async fn import_runtime_custody_listing(
         &package,
         &decoded,
         crate::auth::now_ts(),
+        crate::auth::now_ts,
     )
     .await?;
     let availability = RuntimeCustodyListingAvailabilitySummary {
@@ -5976,6 +5980,7 @@ pub(crate) async fn verify_fresh_runtime_custody_availability(
     listing: &RuntimeCustodyListingRecord,
     mint_id: Digest32,
     now_unix_seconds: u64,
+    now_clock: impl Fn() -> u64 + Copy,
 ) -> anyhow::Result<(RuntimeMintDraft, RuntimeVerifiedContentAvailability)> {
     let expected_mint_id = hex::encode(mint_id.as_bytes());
     if listing.package.mint_id != expected_mint_id {
@@ -5989,6 +5994,7 @@ pub(crate) async fn verify_fresh_runtime_custody_availability(
         &listing.package,
         &decoded,
         now_unix_seconds,
+        now_clock,
     )
     .await
     .map_err(|error| {
@@ -6020,15 +6026,18 @@ pub(crate) async fn open_runtime_custody_viewer(
     registry: Arc<ProviderRegistry>,
     input: RuntimeCustodyViewerOpenInput,
 ) -> anyhow::Result<Value> {
-    // One wall-clock reading per open. Every availability, expiry, release,
-    // operation, coordinator, resume and receipt consumer below uses this
-    // value, so a wall-clock step inside the operation cannot split two
-    // readings that are compared with each other.
-    let now = viewer_open_now();
     let mint_id = parse_mint_id_hex(&input.mint_id)?;
     let _viewer_lifecycle_guard =
         acquire_runtime_custody_viewer_lifecycle_guard(data_dir, &input.principal_id, mint_id)
             .await;
+    // One wall-clock reading per open, taken after the lifecycle lock is
+    // acquired. Every availability, expiry, release, operation, coordinator,
+    // resume and receipt consumer below uses this value, so a wall-clock step
+    // inside the operation cannot split two readings that are compared with
+    // each other, and a record that expires while this open waits for the
+    // lock is judged by the later reading rather than the one it saw on
+    // arrival.
+    let now = viewer_open_now();
     let purchase = load_runtime_custody_purchase(data_dir, &input.principal_id, mint_id)?
         .ok_or_else(|| anyhow::anyhow!(RUNTIME_CUSTODY_OPEN_DENIED_MESSAGE))?;
     if purchase.principal_id != input.principal_id {
@@ -6141,9 +6150,15 @@ pub(crate) async fn open_runtime_custody_viewer(
             | RuntimeCustodyViewerLifecycleStatus::AlreadyAbsent => {}
         }
     }
-    let (draft, fresh_availability) =
-        verify_fresh_runtime_custody_availability(data_dir, &registry, &listing, mint_id, now)
-            .await?;
+    let (draft, fresh_availability) = verify_fresh_runtime_custody_availability(
+        data_dir,
+        &registry,
+        &listing,
+        mint_id,
+        now,
+        move || now,
+    )
+    .await?;
     if fresh_availability.content_cid() != purchase.cid {
         anyhow::bail!(RUNTIME_CUSTODY_AVAILABILITY_UNAVAILABLE_MESSAGE);
     }
@@ -6423,7 +6438,7 @@ pub(crate) async fn open_runtime_custody_viewer(
     let coordinator =
         RuntimeReleaseCoordinator::new(runtime_release_journal(data_dir), runtime_issuer, selected)
             .map_err(release_unavailable!())?
-            .with_response_clock(crate::auth::now_ts);
+            .with_response_now(now);
     let contributions = match coordinator
         .release(
             &release_wallet_request,
@@ -7585,7 +7600,7 @@ async fn invoke_runtime_release_wallet(
             approval_request_id,
         });
     }
-    let signed_rights = wallet_signed_rights_from_bytes(&request_bytes, &response_bytes)
+    let signed_rights = wallet_signed_rights_from_bytes(&request_bytes, &response_bytes, now)
         .map_err(release_unavailable!())?;
     if signed_rights.request() != &rights_request {
         return Err(release_unavailable!()(
@@ -7604,8 +7619,8 @@ async fn invoke_runtime_release_wallet(
 fn wallet_signed_rights_from_bytes(
     wallet_request_bytes: &[u8],
     wallet_response_bytes: &[u8],
+    now: u64,
 ) -> Result<WalletSignedRightsRequestV1, String> {
-    let now = crate::auth::now_ts();
     let request =
         elastos_wallet_contract::WalletProviderRequestV2::decode_at(wallet_request_bytes, now)
             .map_err(|err| format!("wallet request does not decode: {err:?}"))?;

@@ -24,7 +24,11 @@ thread_local! {
 }
 
 /// Disarms the script when dropped.
-pub(crate) struct ClockGuard(());
+///
+/// The script lives in a thread-local, so the guard is deliberately `!Send`:
+/// dropping it on another worker thread would clear that thread's slot and
+/// leave the arming thread's script armed.
+pub(crate) struct ClockGuard(std::marker::PhantomData<std::rc::Rc<()>>);
 
 impl Drop for ClockGuard {
     fn drop(&mut self) {
@@ -42,7 +46,7 @@ pub(crate) fn arm(first: u64, rest: u64) -> ClockGuard {
             reads: 0,
         }));
     });
-    ClockGuard(())
+    ClockGuard(std::marker::PhantomData)
 }
 
 /// The next scripted reading, or `None` when no test armed the seam.
@@ -58,6 +62,24 @@ pub(crate) fn next() -> Option<u64> {
         slot.set(Some(script));
         Some(value)
     })
+}
+
+/// Replace the next unserved reading without changing the served count.
+///
+/// A test uses this to advance the script while an operation is queued, so
+/// the operation's read happens after the test's chosen step.
+pub(crate) fn set_next(value: u64) {
+    SCRIPT.with(|slot| {
+        let Some(mut script) = slot.get() else {
+            return;
+        };
+        if script.reads == 0 {
+            script.first = value;
+        } else {
+            script.rest = value;
+        }
+        slot.set(Some(script));
+    });
 }
 
 /// Number of clock reads served by the armed script.
