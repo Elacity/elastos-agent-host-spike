@@ -2742,20 +2742,22 @@ pub(crate) mod tests {
         assert_eq!(provider.requests.lock().await.len(), 1, "nothing more");
     }
 
-    /// A6-R. Two component capsules are two instances, so two sessions, each
-    /// with its own grant set. A's token is minted for A's session and filed
-    /// for A; B's own pending request is settled with that same token, as a
-    /// shell that mixed the two up would. B's guest presents it and the real
+    /// A6-R. Two admitted agents run two component instances with distinct
+    /// principals and sessions. A's token is minted for A's session and filed
+    /// for A; B's own pending request is settled with a leaked copy. B's guest
+    /// presents it and the real
     /// bridge refuses it at `validate`'s caller step with `capability_denied`
     /// before the provider is reached; the audit names B as the caller of the
     /// failed use and `wrong_capsule` as the reason. A's own invoke is the
     /// control: the provider is called exactly once, for A.
     #[tokio::test]
     async fn sibling_token_refused() {
-        use crate::bundle_admission::tests::{key, signed};
-        use crate::stage_cmd::{bundle_cid, stage_bundle};
+        if !crate::agents::build_allows() {
+            return;
+        }
+        use crate::bundle_admission::tests::key;
+        use crate::stage_cmd::bundle_cid;
         let temp_dir = tempfile::tempdir().unwrap();
-        let data_dir = temp_dir.path().join("data");
         let storage = Arc::new(
             LocalFSProvider::new(temp_dir.path().join("storage"))
                 .await
@@ -2768,8 +2770,51 @@ pub(crate) mod tests {
         ));
         let publisher = key(107);
         let trusted = [hex::encode(publisher.verifying_key().to_bytes())];
+        let component = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"),
+        )
+        .unwrap();
+        let probe = "elastos://test/bus/probe";
+        let folder = temp_dir.path().join("agent-host");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("agent-host")).unwrap();
+        manifest.asks = serde_json::from_value(serde_json::json!([
+            {"resource": probe, "actions": ["read"]}
+        ]))
+        .unwrap();
+        manifest.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
+        elastos_runtime::signature::sign_capsule(
+            &publisher,
+            &mut manifest,
+            &hash_content(&component),
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(folder.join("app.component.wasm"), &component).unwrap();
+        let cid = bundle_cid(&folder).unwrap();
+        let (home, agents) = crate::agents::tests::home_with_agents_if_built(2, &cid)
+            .expect("A6-R agent row requires prototype agents");
+        let data_dir = home.path().to_path_buf();
+        assert_ne!(agents[0], agents[1], "two distinct A5 agent principals");
+        for agent in &agents {
+            assert!(
+                agent.starts_with("agent:v2:"),
+                "A5 agent principal: {agent}"
+            );
+            let root =
+                crate::auth::principal_stored_localhost_root(Some(&data_dir), agent).unwrap();
+            assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        }
         runtime
-            .configure_capsule_admission(temp_dir.path(), &trusted, false)
+            .configure_capsule_admission(&data_dir, &trusted, false)
             .await
             .unwrap();
         let audit_log = Arc::new(AuditLog::new());
@@ -2786,53 +2831,45 @@ pub(crate) mod tests {
         registry.register(provider.clone()).await;
         runtime
             .set_provider_registry(
-                registry,
+                registry.clone(),
                 capability_manager.clone(),
                 pending_store.clone(),
-                temp_dir.path().join("runtime-data"),
+                data_dir.clone(),
             )
             .await;
 
-        let component = std::fs::read(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"),
-        )
-        .unwrap();
-        let probe = "elastos://test/bus/probe";
-        // Stage a bundle named `name` whose manifest asks to read the probe.
-        let staged = |name: &'static str| {
-            let (runtime, data_dir, component) = (runtime.clone(), data_dir.clone(), &component);
-            let folder = temp_dir.path().join("source").join(name);
-            let signature = temp_dir.path().join(format!("{name}.sig.json"));
-            let publisher = &publisher;
-            async move {
-                let mut manifest: serde_json::Value =
-                    serde_json::from_str(&component_manifest_json(name)).unwrap();
-                manifest["asks"] = serde_json::json!([{"resource": probe, "actions": ["read"]}]);
-                std::fs::create_dir_all(&folder).unwrap();
-                std::fs::write(folder.join("capsule.json"), manifest.to_string()).unwrap();
-                std::fs::write(folder.join("app.component.wasm"), component).unwrap();
-                let cid = bundle_cid(&folder).unwrap();
-                std::fs::write(&signature, signed(&cid, publisher)).unwrap();
-                stage_bundle(&runtime, &data_dir, &folder, &signature)
-                    .await
-                    .unwrap();
-                cid
-            }
-        };
-        let start = |cid: String| {
-            let (runtime, data_dir) = (runtime.clone(), data_dir.clone());
+        let start = |agent: &str| {
+            let admission = crate::agent_admission::admit_launch(
+                &data_dir,
+                &data_dir,
+                Some(home.owner.principal_id.as_str()),
+                Some(agent),
+                crate::agent_admission::walk_launch(&folder).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(admission.actor(), agent);
+            let (runtime, folder) = (runtime.clone(), folder.clone());
             tokio::spawn(async move {
-                let person = Some("person:local:bus-conformance".to_string());
                 runtime
-                    .run_by_bundle(&data_dir, &cid, Vec::new(), person)
+                    .run_local_admitted(&folder, Vec::new(), admission)
                     .await
                     .map(|(handle, _)| handle)
             })
         };
 
-        let launch_a = start(staged("agent-a").await);
-        let launch_b = start(staged("agent-b").await);
+        let launch_a = start(&agents[0]);
+        let a_pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(held) = pending_store.list_pending().await.into_iter().next() {
+                    break held;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("A asks for its grant");
+        let launch_b = start(&agents[1]);
 
         // Two instances, two sessions: the one probe is asked for twice.
         let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -2846,13 +2883,16 @@ pub(crate) mod tests {
         })
         .await
         .expect("both instances ask the shell for the probe");
-        let (a_pending, b_pending) = (pending[0].clone(), pending[1].clone());
+        let b_pending = pending
+            .into_iter()
+            .find(|request| request.id != a_pending.id)
+            .expect("B has its own request");
         let a_session = a_pending.session_id.as_str().to_string();
         let b_session = b_pending.session_id.as_str().to_string();
         assert_ne!(a_session, b_session, "two instances are two sessions");
 
         // A's token, minted for A's session. Filed for A, and also handed to
-        // B's own pending request: the sibling token.
+        // B's own pending request: a leaked sibling token.
         let a_token = capability_manager.grant(
             &a_session,
             a_pending.resource.clone(),
@@ -2876,21 +2916,56 @@ pub(crate) mod tests {
             left.expect("the first launch task does not panic"),
             right.expect("the second launch task does not panic"),
         );
+        let calls = provider.requests.lock().await.clone();
         assert_eq!(
-            provider.requests.lock().await.len(),
+            calls.len(),
             1,
             "the provider is called once, for A; B's call never reaches it"
+        );
+        assert_eq!(
+            calls[0]["probe"], "bus-v1-conformance",
+            "A's probe is the one provider call"
         );
         let (ran, refused) = match (left, right) {
             (Ok(handle), Err(refusal)) | (Err(refusal), Ok(handle)) => (handle, refusal),
             _ => panic!("exactly one instance uses its own grant and completes"),
         };
         assert_eq!(ran.id.0, a_session, "A's own token runs A's own instance");
-        assert_eq!(refused.code(), "bundle_start_failed");
+        assert!(
+            refused.to_string().contains("BusError::Denied"),
+            "B's component receives the bridge denial: {refused}"
+        );
         assert!(
             refused.to_string().contains("Capability validation failed"),
             "B's invoke is refused by the capability check: {refused}"
         );
+
+        // The bridge persists the principal and session of the component
+        // invocation, independently of the capability-use audit below.
+        let completed: Vec<_> = crate::auth::load_auth_state(&data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type == "component.invoke.completed")
+            .collect();
+        assert_eq!(
+            completed.len(),
+            2,
+            "one completed invoke per agent: {completed:?}"
+        );
+        for (principal, session, result) in [
+            (&agents[0], &a_session, "ok"),
+            (&agents[1], &b_session, "denied"),
+        ] {
+            assert!(
+                completed.iter().any(|event| {
+                    event.principal_id.as_deref() == Some(principal.as_str())
+                        && event.session_id.as_deref() == Some(session.as_str())
+                        && event.result == result
+                }),
+                "{principal} must own its {result} persisted invoke event: {completed:?}"
+            );
+        }
 
         let events = audit_log.recent_events(2_000);
         let token_id = a_token.id().to_string();
@@ -2941,6 +3016,37 @@ pub(crate) mod tests {
             warnings[0].contains(&b_session),
             "the same record names B as the caller: {}",
             warnings[0]
+        );
+
+        // The guest's BusError maps the wire code to Denied. Inspect the same
+        // bridge entry with B's leaked token to pin its exact wire code.
+        let context = crate::resource_bridge::BridgeContext {
+            provider_registry: registry,
+            capability_manager: capability_manager.clone(),
+            pending_store: pending_store.clone(),
+            capsule_id: b_session.clone(),
+            principal_id: Some(agents[1].clone()),
+            manifest_capabilities: manifest.resource_authority_bounds(),
+            data_dir: Some(data_dir.clone()),
+            launch: None,
+        };
+        let line = serde_json::json!({
+            "id": 99,
+            "request": {
+                "type": "resource_invoke", "uri": probe, "operation": "read",
+                "token": a_token.to_base64().unwrap(),
+                "body": {"probe": "bus-v1-conformance"}
+            }
+        })
+        .to_string();
+        let denied = crate::resource_bridge::handle_component_resource_request(&line, context)
+            .await
+            .unwrap();
+        assert_eq!(denied["response"]["code"], "capability_denied", "{denied}");
+        assert_eq!(
+            provider.requests.lock().await.len(),
+            1,
+            "only A reached the provider"
         );
     }
 

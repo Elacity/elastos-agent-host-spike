@@ -1173,7 +1173,7 @@ mod tests {
     /// is minted for A. B's session holds its own granted record, settled with
     /// A's token, as the real bridge would leave it. The all-sessions live view
     /// lists A's grant once, under A, and B's record is not a live grant of
-    /// B's; B's own view is empty and A's view holds A's grant.
+    /// B's; B's own view holds B's granted record, and A's view holds A's grant.
     #[tokio::test]
     async fn own_grant_set_lists_a_grant_under_a_only_never_under_b() {
         let state = test_state();
@@ -1183,8 +1183,8 @@ mod tests {
         );
         let (a_id, a_token) = grant_in(&state, a.id.as_str(), None, None).await;
 
-        // B's own record, granted with A's token: the same state the bridge
-        // leaves behind when a sibling token is filed for B.
+        // B's own record holds a leaked copy of A's token. The shell grant
+        // route mints a token for the requesting session instead.
         let resource = ResourceId::new("elastos://content/publish");
         let store = &state.pending_store;
         let b_request = store.create_request(b.id.clone(), resource, Action::Write);
