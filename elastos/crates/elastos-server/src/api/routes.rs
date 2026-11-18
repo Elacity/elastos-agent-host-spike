@@ -868,6 +868,11 @@ pub(crate) mod tests {
         audit_log: Arc<AuditLog>,
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+        /// The same token store the manager holds: the live view's own input.
+        capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
+        /// The provider registry the bridge dispatches through, so a row can
+        /// make a late call under the context the end left.
+        registry: Arc<elastos_runtime::provider::ProviderRegistry>,
         provider: Arc<CapturingLocalhostProvider>,
         capsule_dir: std::path::PathBuf,
         grant: String,
@@ -878,6 +883,10 @@ pub(crate) mod tests {
     }
 
     const PROBE_HOST: &str = "a5-launch-probe";
+    /// The resource of the requests a row seeds in an instance's session:
+    /// one granted, one pending. A grant loop holds it, so the pending one
+    /// stays pending until the instance's end.
+    const SEEDED_REQUEST_RESOURCE: &str = "elastos://content/publish";
     /// The package CID the install records; the launch compares the Runtime's own walk.
     const PROBE_REGISTRY_CID: &str = "bafkreia5probe";
 
@@ -998,8 +1007,9 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let audit_log = Arc::new(AuditLog::new());
+            let capability_store = Arc::new(CapabilityStore::new());
             let capability_manager = Arc::new(CapabilityManager::new(
-                Arc::new(CapabilityStore::new()),
+                capability_store.clone(),
                 audit_log.clone(),
                 Arc::new(MetricsManager::new()),
             ));
@@ -1011,7 +1021,7 @@ pub(crate) mod tests {
             registry.register(provider.clone()).await;
             runtime
                 .set_provider_registry(
-                    registry,
+                    registry.clone(),
                     capability_manager.clone(),
                     pending_store.clone(),
                     data_dir.clone(),
@@ -1106,6 +1116,8 @@ pub(crate) mod tests {
                 audit_log,
                 pending_store,
                 capability_manager,
+                capability_store,
+                registry,
                 provider,
                 capsule_dir,
                 grant,
@@ -1329,6 +1341,112 @@ pub(crate) mod tests {
                 .as_array()
                 .expect("the list is an array")
                 .clone()
+        }
+
+        /// The shell's capability state over this Home's stores: the views
+        /// below read the same store and manager the bridge does.
+        fn capability_state(&self) -> crate::api::handlers::CapabilityState {
+            use crate::api::handlers::CapabilityState;
+            use elastos_runtime::capability::evaluator::ShellPassthroughVerifier;
+            use elastos_runtime::capability::PolicyEvaluator;
+            CapabilityState {
+                pending_store: self.pending_store.clone(),
+                capability_manager: self.capability_manager.clone(),
+                capability_store: self.capability_store.clone(),
+                policy_evaluator: Arc::new(PolicyEvaluator::new(
+                    Box::new(ShellPassthroughVerifier),
+                    self.audit_log.clone(),
+                )),
+            }
+        }
+
+        /// `GET /api/capability/list?scope=all_sessions_live` as the shell: the
+        /// live grants of every session.
+        pub(crate) async fn live_view(&self) -> Vec<serde_json::Value> {
+            use crate::api::handlers::capability::list_capabilities;
+            use axum::extract::{Query, State};
+            use elastos_runtime::session::Session;
+            let state = self.capability_state();
+            let uri = "http://runtime/api/capability/list?scope=all_sessions_live";
+            let query = Query::try_from_uri(&uri.parse().unwrap()).unwrap();
+            let shell = Extension(Session::new_shell("shell-vm".to_string()));
+            let body = list_capabilities(State(state), shell, query)
+                .await
+                .expect("the shell may list every session's live grants");
+            serde_json::to_value(body.0).unwrap()["capabilities"]
+                .as_array()
+                .expect("the live view is an array")
+                .clone()
+        }
+
+        /// `GET /api/capability/pending` as the shell: every request still
+        /// waiting for an answer.
+        pub(crate) async fn pending_view(&self) -> Vec<serde_json::Value> {
+            use crate::api::handlers::capability::list_pending;
+            use axum::extract::State;
+            use elastos_runtime::session::Session;
+            let state = self.capability_state();
+            let shell = Extension(Session::new_shell("shell-vm".to_string()));
+            let body = list_pending(State(state), shell).await;
+            serde_json::to_value(body.0).unwrap()["requests"]
+                .as_array()
+                .expect("the pending view is an array")
+                .clone()
+        }
+
+        /// `GET /api/capability/requests?session=` as the shell: every record
+        /// the store still holds for one session, with its settler.
+        pub(crate) async fn request_view(&self, session: &str) -> Vec<serde_json::Value> {
+            use crate::api::handlers::capability::{session_requests, SessionRequestsQuery};
+            use axum::extract::{Query, State};
+            use elastos_runtime::session::Session;
+            let state = self.capability_state();
+            let shell = Extension(Session::new_shell("shell-vm".to_string()));
+            let query = Query(SessionRequestsQuery {
+                session: Some(session.to_string()),
+            });
+            let body = session_requests(State(state), shell, query)
+                .await
+                .expect("the shell may read a session's records");
+            serde_json::to_value(body.0).unwrap()["requests"]
+                .as_array()
+                .expect("the request view is an array")
+                .clone()
+        }
+
+        /// One granted and one pending request in this instance's session, as
+        /// a bridge leaves them: the ask it already spent, and the one it is
+        /// still waiting on. Both name [`SEEDED_REQUEST_RESOURCE`], which a
+        /// grant loop holds so the pending one stays pending.
+        async fn seed_session_requests(&self, session: &str) -> (String, String) {
+            use elastos_runtime::capability::pending::GrantDuration;
+            use elastos_runtime::capability::{Action, ResourceId, TokenConstraints};
+            let store = &self.pending_store;
+            let manager = &self.capability_manager;
+            let id = elastos_runtime::session::SessionId::from_string(session.to_string());
+            let resource = ResourceId::new(SEEDED_REQUEST_RESOURCE);
+            let granted = store
+                .create_request(id.clone(), resource.clone(), Action::Write)
+                .await
+                .id
+                .to_string();
+            let token = manager.grant(
+                session,
+                resource.clone(),
+                Action::Write,
+                TokenConstraints::default(),
+                None,
+            );
+            store
+                .grant_request(&granted, token, GrantDuration::Session)
+                .await
+                .unwrap();
+            let pending = store
+                .create_request(id, resource, Action::Read)
+                .await
+                .id
+                .to_string();
+            (granted, pending)
         }
 
         /// The same launch from `dir`, which must walk to the bytes the agent's
@@ -2591,6 +2709,323 @@ pub(crate) mod tests {
             .await;
         assert!(after.is_empty(), "{after:?}");
         assert!(home.runtime.get_capsule(&answer.id).await.is_none());
+    }
+
+    /// What a start puts in place for an instance, before any end: the
+    /// context the one end must clear. It is the Runtime's four tables and the
+    /// compute provider's activation entry. The entry's own principal is the
+    /// provider's; that row lives with `forget_instance` in the compute crate
+    /// (`providers::component::tests::forgetting_an_instance_takes_its_entry_and_principal_away`).
+    async fn assert_context_filled(home: &ProbeLaunch, instance: &str) {
+        let mut left = home.runtime.context_left_for_test(instance).await;
+        left.sort_unstable();
+        assert_eq!(
+            left,
+            ["manifest ceiling", "model-token ceiling", "stop request",],
+            "the start filled {instance}'s context"
+        );
+        let handle = home
+            .runtime
+            .get_capsule(instance)
+            .await
+            .expect("the instance is registered while it runs")
+            .handle
+            .expect("a component launch keeps its handle");
+        assert!(
+            home.runtime.provider_entry_for_test(&handle).await,
+            "the start left the provider an activation entry for {instance}"
+        );
+    }
+
+    /// A12-R at one ending: nothing of the instance remains. A late call from
+    /// its id is refused at the manifest (F-ctxleak leaves the ceiling and the
+    /// call gets through); no grant of its session is live (F-norevoke keeps
+    /// one); nothing of it waits for an answer; every record of its session is
+    /// denied by the Runtime; the provider holds no entry for it; and its
+    /// entry leaves the list once its 60 s have passed, read at an instant
+    /// rather than waited for.
+    async fn assert_nothing_remains(
+        home: &ProbeLaunch,
+        instance: &str,
+        principal: &str,
+        status: &str,
+        cause: &str,
+        seeded: (&str, &str),
+    ) {
+        // The late call first: it is what a leaked ceiling or principal would
+        // still let through. It is the context the installed host call builds
+        // for this id, read from the Runtime's own tables.
+        let tables = home.runtime.bridge_tables_for_test(instance);
+        let line = serde_json::json!({
+            "id": 31,
+            "request": {
+                "type": "resource_invoke",
+                "uri": format!("{}/memory/notes.md", home.root(principal)),
+                "operation": "read",
+                "token": "tok",
+                "body": {},
+            }
+        })
+        .to_string();
+        let ctx = crate::resource_bridge::BridgeContext {
+            provider_registry: home.registry.clone(),
+            capability_manager: home.capability_manager.clone(),
+            pending_store: home.pending_store.clone(),
+            capsule_id: instance.to_string(),
+            principal_id: Some(principal.to_string()),
+            manifest_capabilities: tables.manifest_capabilities,
+            data_dir: Some(home.data_dir.clone()),
+            launch: tables.launch,
+            model_token_ceiling: tables.model_token_ceiling,
+            stop: tables.stop,
+        };
+        let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
+            .await
+            .expect("the bridge answers a late call");
+        assert_eq!(
+            answer["response"]["code"], "manifest_capability_denied",
+            "a late call from the ended instance {instance} must be refused: {answer}"
+        );
+
+        // The all-sessions live grant view: no live grant of the instance.
+        let live = home.live_view().await;
+        assert!(
+            !live.iter().any(|grant| grant["session_id"] == instance),
+            "a live grant of {instance} remains: {live:?}"
+        );
+
+        // The pending view: nothing of the instance waits for an answer.
+        let waiting = home.pending_view().await;
+        assert!(
+            !waiting
+                .iter()
+                .any(|request| request["session_id"] == instance),
+            "a request of {instance} still waits: {waiting:?}"
+        );
+
+        // The request view: every record of the session is denied by the
+        // Runtime, the two this row seeded among them.
+        let records = home.request_view(instance).await;
+        for record in &records {
+            assert_eq!(record["status"], "denied", "{record}");
+            assert_eq!(record["settled_by"], "runtime", "{record}");
+        }
+        for id in [seeded.0, seeded.1] {
+            assert!(
+                records.iter().any(|record| record["request_id"] == id),
+                "the seeded request {id} left the store: {records:?}"
+            );
+        }
+
+        // No ceiling, model-token ceiling, launch content or stop request of
+        // the instance.
+        let left = home.runtime.context_left_for_test(instance).await;
+        assert!(left.is_empty(), "{instance} left {left:?} behind");
+
+        // And no provider entry: nothing it could run or hand a call.
+        let handle = home
+            .runtime
+            .get_capsule(instance)
+            .await
+            .expect("the ended entry keeps its handle")
+            .handle
+            .expect("a component launch keeps its handle");
+        assert!(
+            !home.runtime.provider_entry_for_test(&handle).await,
+            "the provider still holds an activation entry for {instance}"
+        );
+
+        // The entry: still listed 59 s after its end, gone at 61 s.
+        let entry = home
+            .runtime
+            .get_capsule(instance)
+            .await
+            .expect("the ended entry is kept");
+        assert_eq!(entry.status, status);
+        assert_eq!(entry.cause.as_deref(), Some(cause));
+        let ended_at = entry.ended_at.expect("the entry records its end");
+        let within = home
+            .runtime
+            .list_capsules_at(ended_at + std::time::Duration::from_secs(59))
+            .await;
+        assert!(
+            within.iter().any(|info| info.id == instance),
+            "the entry is listed 59 s after its end: {within:?}"
+        );
+        let after = home
+            .runtime
+            .list_capsules_at(ended_at + std::time::Duration::from_secs(61))
+            .await;
+        assert!(
+            !after.iter().any(|info| info.id == instance),
+            "the entry is gone 61 s after its end: {after:?}"
+        );
+        assert!(home.runtime.get_capsule(instance).await.is_none());
+        assert!(
+            home.listed().await.is_empty(),
+            "no entry of the ended instance is listed"
+        );
+    }
+
+    /// A12-R after a stop (S4's ending). A spinning guest is stopped with a
+    /// reason; the ask it was already granted is revoked, the one still
+    /// pending is denied by the Runtime, its ceiling and provider entry are
+    /// gone, a late call is refused, and its entry leaves the list at 60 s.
+    #[tokio::test]
+    async fn nothing_remains_after_stop() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let (spin_dir, spin_cid) = home.spin_host();
+        let spinning = home.create_agent_for_host("spinning", &spin_cid);
+        let run = home.launch_from(&spin_dir, &spinning).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+        home.wait_running(&run.id).await;
+
+        // What the bridge left in the instance's session, and what the start
+        // put in place: the context the end must clear.
+        let seeded = home.seed_session_requests(&run.id).await;
+        assert!(
+            home.live_view()
+                .await
+                .iter()
+                .any(|grant| grant["session_id"] == run.id),
+            "the seeded grant is live before the end"
+        );
+        assert!(
+            home.pending_view()
+                .await
+                .iter()
+                .any(|request| request["session_id"] == run.id),
+            "the seeded ask waits before the end"
+        );
+        assert_context_filled(&home, &run.id).await;
+
+        let (status, _) = stop_route(&home, &run.id, Some("spinning too long")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        assert_nothing_remains(
+            &home,
+            &run.id,
+            &spinning,
+            "stopped",
+            "stopped: spinning too long",
+            (seeded.0.as_str(), seeded.1.as_str()),
+        )
+        .await;
+    }
+
+    /// A12-R after a cancel (S5's ending). The guest is inside its first
+    /// bridge call when `DELETE` arrives; the call is denied by the Runtime
+    /// with the stop's cause, and the instance leaves no live grant, no
+    /// pending request, no context or principal, no accepting late call and
+    /// no entry after 60 s.
+    #[tokio::test]
+    async fn nothing_remains_after_cancel() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = home.agents.first().expect("one agent").clone();
+        let run = home.launch(&agent).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+        // The guest is inside its first bridge call, which no shell answers.
+        let held = home.wait_pending(&run.id).await;
+        let seeded = home.seed_session_requests(&run.id).await;
+        assert_context_filled(&home, &run.id).await;
+
+        let (status, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_route(&home, &run.id, Some("waiting too long")),
+        )
+        .await
+        .expect("the stop must complete while the guest is inside its call");
+        assert_eq!(status, StatusCode::OK);
+
+        // The call the guest was waiting on is denied by the Runtime with the
+        // stop's cause.
+        let after = home
+            .pending_store
+            .get_request(held.id.as_str())
+            .await
+            .expect("the held request is still recorded");
+        let elastos_runtime::capability::RequestStatus::Denied { reason, settled_by } =
+            &after.status
+        else {
+            panic!("the held request is not settled: {:?}", after.status);
+        };
+        assert_eq!(reason, "instance ended: stopped: waiting too long");
+        assert_eq!(*settled_by, elastos_runtime::capability::Settler::Runtime);
+
+        assert_nothing_remains(
+            &home,
+            &run.id,
+            &agent,
+            "stopped",
+            "stopped: waiting too long",
+            (seeded.0.as_str(), seeded.1.as_str()),
+        )
+        .await;
+    }
+
+    /// A12-R after a failure (S3's ending). The guest traps on a refusal of
+    /// another agent's stored root; the grants it had are revoked, the ask
+    /// still pending is denied by the Runtime, the context and principal are
+    /// gone, a late call is refused, and the entry leaves the list at 60 s.
+    #[tokio::test]
+    async fn nothing_remains_after_failure() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let [a, b] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let (root_a, root_b) = (home.root(a), home.root(b));
+        let peer = format!("{root_b}/memory/notes.md");
+        let pointer_uri = format!("{root_a}/memory/peer");
+        let pointer_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &pointer_uri)
+                .unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            a,
+            &root_a,
+            &pointer_uri,
+            &pointer_path,
+            peer.as_bytes(),
+        )
+        .unwrap();
+
+        let run = home.launch(a).await.unwrap().0;
+        assert_eq!(run.status, "starting");
+        let seeded = home.seed_session_requests(&run.id).await;
+        assert_context_filled(&home, &run.id).await;
+
+        // A's own calls are granted as the shell would grant them; the seeded
+        // ask is held, so it stays pending until A's end.
+        let grants = grant_requests_of(
+            home.pending_store.clone(),
+            home.capability_manager.clone(),
+            vec![run.id.clone()],
+            vec![SEEDED_REQUEST_RESOURCE.to_string()],
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let end = home.wait_ended(&run.id).await;
+        grants.abort();
+        assert_eq!(end.status, "failed");
+        let cause = end.cause.clone().expect("a trap records its cause");
+
+        assert_nothing_remains(
+            &home,
+            &run.id,
+            a,
+            "failed",
+            &cause,
+            (seeded.0.as_str(), seeded.1.as_str()),
+        )
+        .await;
     }
 
     /// Row 2, refusal: agent X's own guest asks for agent Y's file by Y's

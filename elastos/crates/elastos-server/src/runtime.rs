@@ -230,6 +230,9 @@ struct ActivationContextHeld {
     manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
     model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
     activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
+    /// The launch contents, by capsule id: a content launch's program reads
+    /// its content from here until its end, and no other activation does.
+    launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
     /// This activation's stop request, the same value the bridge and the stop
     /// route hold.
     stop: Arc<ActivationStop>,
@@ -263,6 +266,7 @@ impl ActivationContextHeld {
             manifest_capabilities: runtime.bridge_manifest_capabilities.clone(),
             model_token_ceilings: runtime.bridge_model_token_ceilings.clone(),
             activation_stops: runtime.activation_stops.clone(),
+            launch_contents: runtime.launch_contents.clone(),
             stop,
             authority,
             armed: true,
@@ -279,14 +283,21 @@ impl ActivationContextHeld {
         self.stop.cancelled()
     }
 
-    /// Takes away what the start put in place: the bridge principal, the
-    /// manifest ceiling, the model-token ceiling and the stop request.
+    /// Takes away what the start put in place: the provider's activation
+    /// entry and the principal the guest ran for, the manifest ceiling, the
+    /// model-token ceiling, the launch content and the stop request. It is
+    /// called at the one end of every detached activation, so nothing of the
+    /// instance is left for a reader or a late bridge call.
     async fn release(&mut self) {
-        self.component.clear_bridge_principal(&self.id).await;
+        self.component.forget_instance(&self.id).await;
         if let Ok(mut bounds) = self.manifest_capabilities.write() {
             bounds.remove(&self.id.0);
         }
         self.model_token_ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id.0);
+        self.launch_contents
             .write()
             .unwrap_or_else(|err| err.into_inner())
             .remove(&self.id.0);
@@ -360,12 +371,23 @@ impl Drop for ActivationContextHeld {
             manifest_capabilities: self.manifest_capabilities.clone(),
             model_token_ceilings: self.model_token_ceilings.clone(),
             activation_stops: self.activation_stops.clone(),
+            launch_contents: self.launch_contents.clone(),
             stop: self.stop.clone(),
             authority: self.authority.clone(),
             armed: false,
         };
         tokio::spawn(async move { end.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST).await });
     }
+}
+
+/// Test only: the four tables the installed bridge host call reads for one
+/// capsule id, so a row can make a late call under exactly what an end left.
+#[cfg(test)]
+pub(crate) struct BridgeTables {
+    pub manifest_capabilities: Vec<AuthorityBound>,
+    pub launch: Option<Arc<LaunchContent>>,
+    pub model_token_ceiling: Option<u64>,
+    pub stop: Option<Arc<crate::resource_bridge::ActivationStopFlag>>,
 }
 
 impl Runtime {
@@ -449,12 +471,16 @@ impl Runtime {
                     .unwrap_or_default();
                 // The content this caller was launched with, if it is the
                 // program of a content launch: looked up by its own id, as
-                // its ceiling is, and nobody else's.
-                // A poisoned lock still holds the table, as for the guard.
+                // its ceiling is, and nobody else's. A poisoned lock still
+                // holds the table, as for the guard. The read guard ends with
+                // this statement: it is not held across the call below, so an
+                // activation's end can take the content away while another
+                // guest is inside the bridge.
                 let launch = host_launch_contents
                     .read()
-                    .unwrap_or_else(|it| it.into_inner());
-                let launch = launch.get(capsule_id).cloned();
+                    .unwrap_or_else(|it| it.into_inner())
+                    .get(capsule_id)
+                    .cloned();
                 let model_token_ceiling = host_model_token_ceilings
                     .read()
                     .unwrap_or_else(|it| it.into_inner())
@@ -1244,6 +1270,79 @@ impl Runtime {
         ceiling.map(|ceiling| ceiling.iter().map(ToString::to_string).collect())
     }
 
+    /// Test only: what an end left in this Runtime's own tables, by the name
+    /// of each that still holds the instance's id. Empty is A12-R's "nothing
+    /// remains": no manifest ceiling, model-token ceiling, launch content or
+    /// stop request. The compute provider's activation entry and principal
+    /// are its tables: `provider_entry_for_test` reads the entry, and the
+    /// provider's own row proves `forget_instance` takes the principal away.
+    #[cfg(test)]
+    pub(crate) async fn context_left_for_test(&self, id: &str) -> Vec<&'static str> {
+        let mut left = Vec::new();
+        if table_holds(&self.bridge_manifest_capabilities, id) {
+            left.push("manifest ceiling");
+        }
+        if table_holds(&self.bridge_model_token_ceilings, id) {
+            left.push("model-token ceiling");
+        }
+        if table_holds(&self.launch_contents, id) {
+            left.push("launch content");
+        }
+        if table_holds(&self.activation_stops, id) {
+            left.push("stop request");
+        }
+        left
+    }
+
+    /// Test only: whether the compute provider still holds an activation
+    /// entry for this handle. `status` is the provider's own answer: an entry
+    /// is a status, a forgotten one is not found.
+    #[cfg(test)]
+    pub(crate) async fn provider_entry_for_test(&self, handle: &CapsuleHandle) -> bool {
+        match &self.component_provider {
+            Some(component) => component.status(handle).await.is_ok(),
+            None => false,
+        }
+    }
+
+    /// Test only: the tables the installed bridge host call reads for a call
+    /// from `id`, as it reads them: the manifest ceiling, the launch content,
+    /// the model-token ceiling and the stop request. A row builds the context
+    /// from these, so a late call is judged by exactly what the end left.
+    #[cfg(test)]
+    pub(crate) fn bridge_tables_for_test(&self, id: &str) -> BridgeTables {
+        let manifest_capabilities = self
+            .bridge_manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(id).cloned())
+            .unwrap_or_default();
+        let launch = self
+            .launch_contents
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .cloned();
+        let model_token_ceiling = self
+            .bridge_model_token_ceilings
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .copied();
+        let stop = self
+            .activation_stops
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .map(|stop| stop.flag.clone());
+        BridgeTables {
+            manifest_capabilities,
+            launch,
+            model_token_ceiling,
+            stop,
+        }
+    }
+
     /// The end of every start, and the one place in this file that fills a
     /// capsule's ceiling: from the one bounds function, for a start from a
     /// folder and for a start by CID alike. While the activation runs, that
@@ -1742,6 +1841,16 @@ fn prune_ended(capsules: &mut HashMap<String, RunningCapsuleInfo>, now: std::tim
         Some(ended_at) => now.duration_since(ended_at) < ENDED_CAPSULE_RETENTION,
         None => true,
     });
+}
+
+/// Whether a table still holds this id. A poisoned lock still holds its map,
+/// as every reader here assumes.
+#[cfg(test)]
+fn table_holds<T>(table: &StdRwLock<HashMap<String, T>>, id: &str) -> bool {
+    table
+        .read()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains_key(id)
 }
 
 #[cfg(test)]
@@ -2252,6 +2361,70 @@ pub(crate) mod tests {
         );
         assert_eq!(calls.lock().unwrap().len(), 1, "no call without the person");
         assert!(none_left(), "no ceiling is left after that start either");
+    }
+
+    /// A12-R at the one end, in this Runtime's tables: the manifest ceiling,
+    /// the model-token ceiling, the launch content and the stop request all
+    /// go. No agent launch holds content; a content start does, under its
+    /// program's own id, and the end takes it away, so nothing a later bridge
+    /// call could be held to or read survives.
+    #[tokio::test]
+    async fn the_one_end_leaves_nothing_in_the_tables_the_start_filled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let manifest: CapsuleManifest = serde_json::from_str(&component_manifest_json("ended"))
+            .expect("the component manifest");
+        let handle = CapsuleHandle {
+            id: CapsuleId::new("component-ended"),
+            manifest,
+            args: Vec::new(),
+        };
+        let id = handle.id.0.clone();
+        runtime.launch_contents.write().unwrap().insert(
+            id.clone(),
+            Arc::new(
+                crate::resource_bridge::LaunchContent::new(std::collections::BTreeMap::new())
+                    .expect("an empty content"),
+            ),
+        );
+        runtime
+            .bridge_manifest_capabilities
+            .write()
+            .unwrap()
+            .insert(id.clone(), handle.manifest.resource_authority_bounds());
+        runtime
+            .bridge_model_token_ceilings
+            .write()
+            .unwrap()
+            .insert(id.clone(), 7);
+
+        let held = ActivationContextHeld::new(&runtime, &handle, component);
+        let mut filled = runtime.context_left_for_test(&id).await;
+        filled.sort_unstable();
+        assert_eq!(
+            filled,
+            [
+                "launch content",
+                "manifest ceiling",
+                "model-token ceiling",
+                "stop request",
+            ],
+            "the start filled the tables"
+        );
+
+        held.end_instance(CAPSULE_FAILED, "test end").await;
+        assert_eq!(
+            runtime.context_left_for_test(&id).await,
+            Vec::<&str>::new(),
+            "the one end leaves nothing"
+        );
     }
 
     pub(crate) async fn test_runtime() -> (Runtime, tempfile::TempDir) {

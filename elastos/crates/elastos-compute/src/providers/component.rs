@@ -249,6 +249,17 @@ impl ComponentProvider {
         self.bridge_principals.write().await.remove(capsule_id);
     }
 
+    /// Takes this capsule's activation entry away, with the principal it ran
+    /// for. The Runtime's one end path calls this, so a stopped, cancelled or
+    /// failed activation leaves nothing the provider could still run, ask
+    /// with, or hand a late call. A worker that still runs keeps the engine
+    /// and component it took out of the entry; its own removal then finds no
+    /// entry to take.
+    pub async fn forget_instance(&self, capsule_id: &CapsuleId) {
+        self.instances.write().await.remove(capsule_id);
+        self.clear_bridge_principal(capsule_id).await;
+    }
+
     /// The one engine every v1 component in this process compiles and runs on.
     /// The v1 ABI uses none of these proposals, so they are off here as well as
     /// compiled out of the build (`threads`, `gc`, `stack-switching` in Cargo.toml).
@@ -2873,5 +2884,54 @@ mod tests {
             (journal.to_string(), "read".to_string()),
         ];
         assert_eq!(asked, [pair.clone(), pair].concat());
+    }
+
+    /// A12-R at the compute provider's own tables: the end of an activation
+    /// takes its entry away, so the provider can neither run it nor let it
+    /// ask again, and takes the principal it ran for away with it. The
+    /// Runtime's `end_instance` is the one caller (`runtime.rs::release`).
+    #[tokio::test]
+    async fn forgetting_an_instance_takes_its_entry_and_principal_away() {
+        let provider = ComponentProvider::new();
+        let (path, manifest) = component_fixture();
+        let bytes = std::fs::read(path.join("bus-v1-conformance.component.wasm"))
+            .expect("the conformance component is readable");
+        let handle = provider
+            .load_admitted(bytes, manifest)
+            .await
+            .expect("the conformance component loads");
+        provider
+            .set_bridge_principal(&handle.id, Some("person:local:ended".to_string()))
+            .await;
+        assert!(
+            provider.instances.read().await.contains_key(&handle.id),
+            "the load holds an activation entry"
+        );
+        assert_eq!(
+            provider.bridge_principals.read().await.get(&handle.id),
+            Some(&Some("person:local:ended".to_string())),
+            "the start's principal is held for the activation"
+        );
+
+        provider.forget_instance(&handle.id).await;
+
+        assert!(
+            !provider.instances.read().await.contains_key(&handle.id),
+            "the end leaves no activation entry"
+        );
+        assert!(
+            provider
+                .bridge_principals
+                .read()
+                .await
+                .get(&handle.id)
+                .is_none(),
+            "the end leaves no principal"
+        );
+        assert_eq!(
+            provider.status(&handle).await.unwrap_err().to_string(),
+            format!("Capsule not found: {}", handle.id.0),
+            "the provider cannot run the ended activation"
+        );
     }
 }
