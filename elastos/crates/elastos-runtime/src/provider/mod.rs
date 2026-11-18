@@ -19,6 +19,7 @@ mod linux_model_seccomp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod local_model_broker;
 mod macos_profile;
+mod os_entry;
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")

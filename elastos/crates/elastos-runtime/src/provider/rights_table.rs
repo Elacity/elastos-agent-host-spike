@@ -42,7 +42,7 @@ pub(super) enum RuntimeProviderId {
 }
 
 impl RuntimeProviderId {
-    fn rights(self) -> &'static [&'static str] {
+    pub(super) fn rights(self) -> &'static [&'static str] {
         match self {
             Self::Did => DID_RIGHT_IDS,
             Self::Wallet => WALLET_RIGHT_IDS,

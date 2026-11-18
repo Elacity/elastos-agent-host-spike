@@ -32,13 +32,13 @@ const NORMAL_TEST_HOOK: TestHook = TestReport::Normal;
 const NORMAL_TEST_HOOK: TestHook = ();
 
 #[derive(Debug)]
-enum LaunchError {
+pub(super) enum LaunchError {
     BeforeFork(String),
     ChildFailed { pid: libc::pid_t, reason: String },
 }
 
 /// The successful PID belongs to the caller. Failed children belong to this function.
-fn start(
+pub(super) fn start(
     provider: RuntimeProviderId,
     storage_root: &Path,
     executable: &Path,

@@ -5,20 +5,21 @@
 //! manifest that names `storage` could still declare
 //! `(allow file-read* file-write* (subpath "/"))` and pass validation. This
 //! module holds the Runtime's own template for each approved id, so the rule
-//! text has exactly one owner. `check_rights_against_runtime_templates` is the
-//! spawn gate: every right's rules must equal the template for its id.
+//! text has exactly one owner.
+//!
+//! `check_rights_against_runtime_templates` is the spawn gate. Empty declared
+//! rights resolve to the Runtime grant for that Runtime provider id. A
+//! non-empty list must be that grant or a subset of it, and each declared
+//! right's rules must equal the template. An id that the dictionary knows but
+//! this provider's grant does not is refused. `os_entry::start_provider` is
+//! the caller. The server does not call it yet.
 //!
 //! The templates are byte-for-byte the rules in the committed provider
 //! manifests. Comparison normalises whitespace only; rule order and rule count
 //! stay meaningful, and template text carries no `;` comments, so a declared
 //! rule with a comment is refused.
 
-// The spawn gate (`check_rights_against_runtime_templates`) gets its caller in
-// Y50b; until then its only users are this module's tests. Remove this allow
-// with the wiring.
-#![allow(dead_code)]
-
-use super::rights_table;
+use super::rights_table::{self, RuntimeProviderId};
 use elastos_common::ProviderAuthority;
 
 /// The Runtime's approved rule text for one right id.
@@ -50,34 +51,84 @@ fn rules_match(declared: &[String], template: &[&str]) -> bool {
             .all(|(rule, approved)| normalised(rule) == normalised(approved))
 }
 
-/// Refuse any provider right whose rules differ from the Runtime template.
+fn provider_label(provider: RuntimeProviderId) -> &'static str {
+    match provider {
+        RuntimeProviderId::Did => "did-provider",
+        RuntimeProviderId::Wallet => "wallet-provider",
+        RuntimeProviderId::Model => "model-provider",
+    }
+}
+
+/// Resolve declared rights to the rows confinement may use.
 ///
-/// This is the spawn gate for provider confinement rights. It checks every
-/// right before anything starts, so a refusal leaves no provider state behind.
-pub(crate) fn check_rights_against_runtime_templates(
+/// Empty rights select `provider`'s Runtime grant from `dictionary`. Any other
+/// list must be that grant or a subset, with each right's rules equal to its
+/// template. The check finishes before a process is created.
+pub(super) fn check_rights_against_runtime_templates<'a>(
+    provider: RuntimeProviderId,
     authority: &ProviderAuthority,
-) -> Result<(), String> {
-    for right in &authority.rights {
-        let Some(template) = approved_right_template(&right.id) else {
+    dictionary: &'a [rights_table::RightRow],
+) -> Result<Vec<&'a rights_table::RightRow>, String> {
+    if authority.rights.is_empty() {
+        let mut rows = Vec::with_capacity(provider.rights().len());
+        for id in provider.rights() {
+            let row = dictionary
+                .iter()
+                .find(|row| row.id == *id)
+                .unwrap_or_else(|| panic!("Runtime right {id} is missing from the dictionary"));
+            rows.push(row);
+        }
+        return Ok(rows);
+    }
+    let mut admitted = Vec::with_capacity(authority.rights.len());
+    for (index, right) in authority.rights.iter().enumerate() {
+        if authority.rights[..index]
+            .iter()
+            .any(|earlier| earlier.id == right.id)
+        {
+            return Err(format!(
+                "provider authority right \"{}\" is declared more than once",
+                right.id
+            ));
+        }
+        let Some(row) = dictionary.iter().find(|row| row.id == right.id) else {
             return Err(format!(
                 "provider authority right \"{}\" is not an approved right id",
                 right.id
             ));
         };
+        if !provider.rights().contains(&right.id.as_str()) {
+            return Err(format!(
+                "provider right \"{}\" is not in the {} Runtime grant",
+                right.id,
+                provider_label(provider)
+            ));
+        }
+        let template = approved_right_template(&right.id).unwrap_or(row.rules);
         if !rules_match(&right.rules, template) {
             return Err(format!(
                 "provider right \"{}\" rule text differs from the Runtime template",
                 right.id
             ));
         }
+        admitted.push(row);
     }
-    Ok(())
+    Ok(admitted)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use elastos_common::CapsuleManifest;
+
+    fn gate(authority: &ProviderAuthority) -> Result<(), String> {
+        check_rights_against_runtime_templates(
+            RuntimeProviderId::Did,
+            authority,
+            rights_table::RIGHTS,
+        )
+        .map(|_| ())
+    }
 
     fn committed_authority(name: &str) -> ProviderAuthority {
         let path = format!(
@@ -117,9 +168,13 @@ mod tests {
 
     #[test]
     fn committed_provider_manifests_match_runtime_templates() {
-        for name in ["did", "wallet", "model"] {
+        for (name, provider) in [
+            ("did", RuntimeProviderId::Did),
+            ("wallet", RuntimeProviderId::Wallet),
+            ("model", RuntimeProviderId::Model),
+        ] {
             let authority = committed_authority(name);
-            check_rights_against_runtime_templates(&authority)
+            check_rights_against_runtime_templates(provider, &authority, rights_table::RIGHTS)
                 .unwrap_or_else(|err| panic!("{name}-provider: {err}"));
         }
     }
@@ -132,7 +187,7 @@ mod tests {
         rules.push(template[1].to_string());
         *rules_mut(&mut authority, "storage") = rules;
         assert_eq!(
-            check_rights_against_runtime_templates(&authority),
+            gate(&authority),
             Err(
                 "provider right \"storage\" rule text differs from the Runtime template"
                     .to_string()
@@ -147,7 +202,7 @@ mod tests {
         rules.swap(0, 1);
         *rules_mut(&mut authority, "storage") = rules;
         assert_eq!(
-            check_rights_against_runtime_templates(&authority),
+            gate(&authority),
             Err(
                 "provider right \"storage\" rule text differs from the Runtime template"
                     .to_string()
@@ -164,7 +219,7 @@ mod tests {
             "(allow file-read* file-write*\n (subpath (param \"STORAGE_ROOT\")))\t".to_string(),
         ];
         assert_eq!(template.len(), 2);
-        check_rights_against_runtime_templates(&authority).unwrap();
+        gate(&authority).unwrap();
     }
 
     #[test]
@@ -174,7 +229,7 @@ mod tests {
                         (allow process-exec (subpath \"/\"))";
         *rules_mut(&mut authority, "bound-executable") = vec![smuggled.to_string()];
         assert_eq!(
-            check_rights_against_runtime_templates(&authority),
+            gate(&authority),
             Err(
                 "provider right \"bound-executable\" rule text differs from the Runtime template"
                     .to_string()
@@ -188,7 +243,7 @@ mod tests {
         *rules_mut(&mut authority, "bound-executable") =
             vec![r#"(allow process-exec (subpath "/"))"#.to_string()];
         assert_eq!(
-            check_rights_against_runtime_templates(&authority),
+            gate(&authority),
             Err(
                 "provider right \"bound-executable\" rule text differs from the Runtime template"
                     .to_string()
@@ -205,8 +260,122 @@ mod tests {
             .push(serde_json::json!({"id": "network", "rules": ["(allow network*)"]}));
         let authority: ProviderAuthority = serde_json::from_value(value).unwrap();
         assert_eq!(
-            check_rights_against_runtime_templates(&authority),
+            gate(&authority),
             Err("provider authority right \"network\" is not an approved right id".to_string())
+        );
+    }
+
+    fn row_ids<'a>(
+        provider: RuntimeProviderId,
+        authority: &ProviderAuthority,
+        dictionary: &'a [rights_table::RightRow],
+    ) -> Result<Vec<&'a str>, String> {
+        check_rights_against_runtime_templates(provider, authority, dictionary)
+            .map(|rows| rows.iter().map(|row| row.id).collect())
+    }
+
+    fn with_extra_dictionary_id() -> Vec<rights_table::RightRow> {
+        let mut dictionary = rights_table::RIGHTS.to_vec();
+        dictionary.push(rights_table::RightRow {
+            id: "future-only",
+            rules: &["(allow file-read*)"],
+            linux_syscalls: "",
+        });
+        dictionary
+    }
+
+    #[test]
+    fn empty_rights_take_the_runtime_table_for_that_provider() {
+        let dictionary = with_extra_dictionary_id();
+        for (name, provider) in [
+            ("did", RuntimeProviderId::Did),
+            ("wallet", RuntimeProviderId::Wallet),
+            ("model", RuntimeProviderId::Model),
+        ] {
+            let mut authority = committed_authority(name);
+            authority.rights.clear();
+            assert_eq!(
+                row_ids(provider, &authority, &dictionary).unwrap(),
+                provider.rights().to_vec(),
+                "{name} empty rights"
+            );
+        }
+    }
+
+    #[test]
+    fn narrower_equal_and_wider_than_the_grant() {
+        let mut narrower = did_authority();
+        narrower.rights.retain(|right| right.id == "storage");
+        assert_eq!(
+            row_ids(RuntimeProviderId::Did, &narrower, rights_table::RIGHTS).unwrap(),
+            vec!["storage"]
+        );
+        assert_eq!(
+            row_ids(
+                RuntimeProviderId::Did,
+                &did_authority(),
+                rights_table::RIGHTS
+            )
+            .unwrap(),
+            RuntimeProviderId::Did.rights().to_vec()
+        );
+        let dictionary = with_extra_dictionary_id();
+        let mut wider = serde_json::to_value(did_authority()).unwrap();
+        wider["rights"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "future-only",
+                "rules": ["(allow file-read*)"]
+            }));
+        let wider: ProviderAuthority = serde_json::from_value(wider).unwrap();
+        assert_eq!(
+            row_ids(RuntimeProviderId::Did, &wider, &dictionary),
+            Err(
+                "provider right \"future-only\" is not in the did-provider Runtime grant"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn dictionary_only_id_is_refused() {
+        let dictionary = with_extra_dictionary_id();
+        let mut value = serde_json::to_value(did_authority()).unwrap();
+        value["rights"] = serde_json::json!([{
+            "id": "future-only",
+            "rules": ["(allow file-read*)"]
+        }]);
+        let authority: ProviderAuthority = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            row_ids(RuntimeProviderId::Did, &authority, &dictionary),
+            Err(
+                "provider right \"future-only\" is not in the did-provider Runtime grant"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            row_ids(RuntimeProviderId::Wallet, &authority, &dictionary),
+            Err(
+                "provider right \"future-only\" is not in the wallet-provider Runtime grant"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn duplicate_declared_right_is_refused() {
+        let mut authority = did_authority();
+        let storage = authority
+            .rights
+            .iter()
+            .find(|right| right.id == "storage")
+            .unwrap()
+            .clone();
+        authority.rights.push(storage);
+        assert_eq!(
+            gate(&authority),
+            Err("provider authority right \"storage\" is declared more than once".to_string())
         );
     }
 }
