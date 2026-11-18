@@ -19,6 +19,37 @@ enum Step {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Failure(Step, i32);
 
+impl Failure {
+    // Three native-endian words. The child copies only stack bytes to the pipe.
+    pub(super) fn record(&self) -> [u8; 12] {
+        let (tag, index) = match self.0 {
+            Step::CloseRange => (1u32, 0),
+            Step::Create => (2, 0),
+            Step::Add(index) => (3, index as u32),
+            Step::NoNewPrivileges => (4, 0),
+            Step::Restrict => (5, 0),
+            Step::Seccomp => (6, 0),
+        };
+        let [t0, t1, t2, t3] = tag.to_ne_bytes();
+        let [i0, i1, i2, i3] = index.to_ne_bytes();
+        let [e0, e1, e2, e3] = self.1.to_ne_bytes();
+        [t0, t1, t2, t3, i0, i1, i2, i3, e0, e1, e2, e3]
+    }
+
+    pub(super) fn from_record(tag: u32, index: u32, errno: i32) -> Option<Self> {
+        let step = match tag {
+            1 => Step::CloseRange,
+            2 => Step::Create,
+            3 => Step::Add(index as usize),
+            4 => Step::NoNewPrivileges,
+            5 => Step::Restrict,
+            6 => Step::Seccomp,
+            _ => return None,
+        };
+        Some(Self(step, errno))
+    }
+}
+
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self(step, errno) = self;
@@ -202,6 +233,25 @@ mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn fixed_failure_record_preserves_step_index_and_errno() {
+        for (step, errno) in [
+            (Step::CloseRange, libc::EBADF),
+            (Step::Create, libc::EINVAL),
+            (Step::Add(3), libc::EACCES),
+            (Step::NoNewPrivileges, libc::EPERM),
+            (Step::Restrict, libc::ENOENT),
+            (Step::Seccomp, libc::E2BIG),
+        ] {
+            let failure = Failure(step, errno);
+            let record = failure.record();
+            let tag = u32::from_ne_bytes(record[..4].try_into().unwrap());
+            let index = u32::from_ne_bytes(record[4..8].try_into().unwrap());
+            let observed = i32::from_ne_bytes(record[8..].try_into().unwrap());
+            assert_eq!(Failure::from_record(tag, index, observed), Some(failure));
+        }
+    }
 
     #[test]
     fn installed_child_closes_fds_and_denies_outside_file_and_socket() {
