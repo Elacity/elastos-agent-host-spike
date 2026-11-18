@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, OnceLock,
 };
 use std::task::{Context, Poll};
@@ -70,7 +70,7 @@ const V2_STOP_GRACE: Duration = Duration::from_millis(20);
 #[cfg(not(test))]
 const V2_EPOCH_TICKS: u64 = 1_000;
 #[cfg(test)]
-const V2_TEST_EPOCH_TICKS: u64 = 5;
+const V2_TEST_EPOCH_TICKS: u64 = 30;
 /// The named ending of a run that the deadline stopped.
 const ENDING_EPOCH_DEADLINE: &str = "epoch-deadline";
 /// The named ending of a run that used up its fuel.
@@ -87,6 +87,18 @@ struct ComponentActivation {
     stop_requested: Arc<AtomicBool>,
     cancel_requested: Arc<AtomicBool>,
     task: Option<tokio::task::AbortHandle>,
+    #[cfg(test)]
+    test_max_ticks: u64,
+    #[cfg(test)]
+    pending_read: Arc<AtomicBool>,
+}
+
+struct V2RunControl {
+    stop_requested: Arc<AtomicBool>,
+    cancel_requested: Arc<AtomicBool>,
+    max_ticks: u64,
+    #[cfg(test)]
+    pending_read: Arc<AtomicBool>,
 }
 
 /// What a sealed component gets for any call to the bridge.
@@ -342,6 +354,10 @@ impl ComponentProvider {
                 stop_requested: Arc::new(AtomicBool::new(false)),
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 task: None,
+                #[cfg(test)]
+                test_max_ticks: V2_TEST_EPOCH_TICKS,
+                #[cfg(test)]
+                pending_read: Arc::new(AtomicBool::new(false)),
             },
         );
 
@@ -413,8 +429,7 @@ impl ComponentProvider {
         component: Component,
         state: ComponentState,
         receiver: mpsc::UnboundedReceiver<v2::elastos::bus::types::Event>,
-        stop_requested: Arc<AtomicBool>,
-        cancel_requested: Arc<AtomicBool>,
+        control: V2RunControl,
         ready: tokio::sync::oneshot::Sender<Result<()>>,
     ) -> Result<&'static str> {
         let mut store = Store::new(&engine, state);
@@ -422,24 +437,24 @@ impl ComponentProvider {
         store
             .set_fuel(V2_FUEL)
             .map_err(|err| run_error("v2 fuel", err))?;
-        // Count ticks reached by executing guest code. An idle stream read
-        // does not consume the v1 wall-clock deadline while it waits.
+        // Count guest execution between delivered events. A stream wake can
+        // reach the callback once even when the guest was idle for 10 ms.
         store.set_epoch_deadline(1);
-        let mut ticks = 0;
-        #[cfg(test)]
-        let max_ticks = V2_TEST_EPOCH_TICKS;
-        #[cfg(not(test))]
-        let max_ticks = V2_EPOCH_TICKS;
+        let ticks = Arc::new(AtomicU64::new(0));
+        let deadline_ticks = ticks.clone();
+        let cancel_requested = control.cancel_requested.clone();
+        let max_ticks = control.max_ticks;
         store.epoch_deadline_callback(move |_| {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            ticks += 1;
-            Ok(if ticks >= max_ticks {
-                UpdateDeadline::Interrupt
-            } else {
-                UpdateDeadline::Continue(1)
-            })
+            Ok(
+                if deadline_ticks.fetch_add(1, Ordering::AcqRel) + 1 >= max_ticks {
+                    UpdateDeadline::Interrupt
+                } else {
+                    UpdateDeadline::Continue(1)
+                },
+            )
         });
         let mut linker = Linker::new(&engine);
         v2::ProductCapsuleV2::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
@@ -453,8 +468,16 @@ impl ComponentProvider {
                     return Err(error);
                 }
             };
-        let events = StreamReader::new(&mut store, V2EventFeed(receiver))
-            .map_err(|err| run_error("Failed to open v2 events", err))?;
+        let events = StreamReader::new(
+            &mut store,
+            V2EventFeed(
+                receiver,
+                ticks,
+                #[cfg(test)]
+                control.pending_read.clone(),
+            ),
+        )
+        .map_err(|err| run_error("Failed to open v2 events", err))?;
         let _ = ready.send(Ok(()));
         store
             .run_concurrent(async move |accessor| {
@@ -467,7 +490,7 @@ impl ComponentProvider {
             .map_err(|err| run_error("V2 lifecycle run failed", err))?
             .map_err(|err| run_error("V2 lifecycle run failed", err))?
             .map_err(|err| ElastosError::Compute(format!("V2 lifecycle denied: {err:?}")))?;
-        Ok(if stop_requested.load(Ordering::Acquire) {
+        Ok(if control.stop_requested.load(Ordering::Acquire) {
             "stopped"
         } else {
             "returned"
@@ -475,7 +498,11 @@ impl ComponentProvider {
     }
 }
 
-struct V2EventFeed(mpsc::UnboundedReceiver<v2::elastos::bus::types::Event>);
+struct V2EventFeed(
+    mpsc::UnboundedReceiver<v2::elastos::bus::types::Event>,
+    Arc<AtomicU64>,
+    #[cfg(test)] Arc<AtomicBool>,
+);
 
 impl<D> StreamProducer<D> for V2EventFeed {
     type Item = v2::elastos::bus::types::Event;
@@ -490,12 +517,17 @@ impl<D> StreamProducer<D> for V2EventFeed {
     ) -> Poll<wasmtime::Result<StreamResult>> {
         match self.0.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
+                self.1.store(0, Ordering::Release);
                 destination.set_buffer(Some(event));
                 Poll::Ready(Ok(StreamResult::Completed))
             }
             Poll::Ready(None) => Poll::Ready(Ok(StreamResult::Dropped)),
             Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                #[cfg(test)]
+                self.2.store(true, Ordering::Release);
+                Poll::Pending
+            }
         }
     }
 }
@@ -583,13 +615,18 @@ impl ComputeProvider for ComponentProvider {
                 sealed: instance.sealed,
                 ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
             };
-            let (engine, component, stop_requested, cancel_requested) = (
-                instance.engine.clone(),
-                instance.component.clone(),
-                instance.stop_requested.clone(),
-                instance.cancel_requested.clone(),
-            );
-            let ending_cancel = cancel_requested.clone();
+            let (engine, component) = (instance.engine.clone(), instance.component.clone());
+            let control = V2RunControl {
+                stop_requested: instance.stop_requested.clone(),
+                cancel_requested: instance.cancel_requested.clone(),
+                #[cfg(test)]
+                max_ticks: instance.test_max_ticks,
+                #[cfg(not(test))]
+                max_ticks: V2_EPOCH_TICKS,
+                #[cfg(test)]
+                pending_read: instance.pending_read.clone(),
+            };
+            let ending_cancel = control.cancel_requested.clone();
             #[cfg(test)]
             let panic = self.panic_next_v2.swap(false, Ordering::AcqRel);
             let run = tokio::spawn(async move {
@@ -597,16 +634,7 @@ impl ComputeProvider for ComponentProvider {
                 if panic {
                     panic!("injected v2 task panic");
                 }
-                Self::run_v2(
-                    engine,
-                    component,
-                    state,
-                    receiver,
-                    stop_requested,
-                    cancel_requested,
-                    ready_tx,
-                )
-                .await
+                Self::run_v2(engine, component, state, receiver, control, ready_tx).await
             });
             instance.task = Some(run.abort_handle());
             instance.status = CapsuleStatus::Running;
@@ -697,23 +725,19 @@ impl ComputeProvider for ComponentProvider {
         if let Some(instance) = instances.get_mut(&handle.id) {
             if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
                 instance.stop_requested.store(true, Ordering::Release);
-                task = instance.task.take().map(|task| {
-                    (
-                        task,
-                        instance.cancel_requested.clone(),
-                        instance.engine.clone(),
-                    )
-                });
+                task = instance
+                    .task
+                    .take()
+                    .map(|task| (task, instance.cancel_requested.clone()));
             }
         }
         instances.remove(&handle.id);
         drop(instances);
-        if let Some((task, cancel_requested, engine)) = task {
+        if let Some((task, cancel_requested)) = task {
             tokio::spawn(async move {
                 tokio::time::sleep(V2_STOP_GRACE).await;
                 if !task.is_finished() {
                     cancel_requested.store(true, Ordering::Release);
-                    engine.increment_epoch();
                     task.abort();
                 }
             });
@@ -1264,6 +1288,22 @@ mod tests {
         .expect("v2 task must end within the test bound")
     }
 
+    async fn v2_pending_read(provider: &ComponentProvider, handle: &CapsuleHandle) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if provider.instances.read().await[&handle.id]
+                    .pending_read
+                    .load(Ordering::Acquire)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("guest must enter its events read before stop");
+    }
+
     #[tokio::test]
     async fn v2_stream_wait_outlives_v1_deadline() {
         let provider = ComponentProvider::new();
@@ -1288,23 +1328,74 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn v2_ignore_close_ends_cancelled_after_grace() {
         let provider = ComponentProvider::new();
-        let bytes = v2_variant(&[
-            (
-                "i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n      i32.const 0)",
-                "(loop $ignore i32.const 0 i32.const 0 i32.const 65536 memory.fill br $ignore)\n      i32.const 0)",
-            ),
-            (
-                "i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n        i32.const 0 return",
-                "call $next return",
-            ),
-        ]);
+        let bytes = v2_variant(&[(
+            "local.get $event i32.const 2 i32.eq\n      if",
+            "(loop $ignore i32.const 0 i32.const 0 i32.const 65536 memory.fill br $ignore)\n      local.get $event i32.const 2 i32.eq\n      if",
+        )]);
         let handle = load_v2_fixture(&provider, bytes).await;
         provider.start(&handle).await.unwrap();
+        v2_pending_read(&provider, &handle).await;
         let stopped_at = Instant::now();
         provider.stop(&handle).await.unwrap();
         assert_eq!(v2_ending(&provider, &handle).await, "cancelled");
         assert!(stopped_at.elapsed() >= V2_STOP_GRACE);
+        assert!(
+            stopped_at.elapsed() < Duration::from_millis(180),
+            "stop cancellation must beat the 30-tick execution budget"
+        );
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_wait_after_close_ends_cancelled_after_grace() {
+        let provider = ComponentProvider::new();
+        let bytes = v2_variant(&[(
+            "local.get $event i32.const 2 i32.eq\n      if",
+            "call $new-stream global.set $other\n      global.get $other i32.wrap_i64 global.set $events\n      global.get $events i32.const 128 i32.const 1 call $read\n      i32.const -1 i32.ne if unreachable end\n      global.get $events global.get $set call $join\n      global.get $set i32.const 4 i32.shl i32.const 2 i32.or return\n      local.get $event i32.const 2 i32.eq\n      if",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider.start(&handle).await.unwrap();
+        v2_pending_read(&provider, &handle).await;
+        provider.stop(&handle).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(500), v2_ending(&provider, &handle))
+                .await
+                .expect("waiting guest must be aborted after grace"),
+            "cancelled"
+        );
+        assert!(provider.instances.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_event_wakes_do_not_spend_the_execution_budget() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 8;
+        provider.start(&handle).await.unwrap();
+        for _ in 0..10 {
+            let sender = provider
+                .instances
+                .read()
+                .await
+                .get(&handle.id)
+                .and_then(|instance| instance.events.clone());
+            if let Some(sender) = sender {
+                let _ = sender.send(v2::elastos::bus::types::Event::Message(Vec::new()));
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        provider.stop(&handle).await.unwrap();
+        assert_eq!(v2_ending(&provider, &handle).await, "stopped");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1316,9 +1407,12 @@ mod tests {
         )]);
         let handle = load_v2_fixture(&provider, bytes).await;
         provider.start(&handle).await.unwrap();
-        assert!(v2_ending(&provider, &handle)
-            .await
-            .contains(ENDING_EPOCH_DEADLINE));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), v2_ending(&provider, &handle))
+                .await
+                .expect("spin must reach its execution budget")
+                .contains(ENDING_EPOCH_DEADLINE)
+        );
         assert!(provider.instances.read().await.is_empty());
     }
 
