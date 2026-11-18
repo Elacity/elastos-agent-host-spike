@@ -93,6 +93,25 @@ pub(super) fn admit_runtime_grant(provider: RuntimeProviderId) -> AdmittedRights
         .expect("the Runtime grant admits")
 }
 
+/// `git show <spec>` from the repo root. A missing git binary fails here and names `spec`.
+#[cfg(test)]
+#[rustfmt::skip]
+pub(super) fn git_show(spec: &str) -> std::process::Output {
+    std::process::Command::new("git").args(["-C", concat!(env!("CARGO_MANIFEST_DIR"), "/../../.."), "show", spec]).output().unwrap_or_else(|err| panic!("git show {spec}: git missing: {err}"))
+}
+
+/// The committed capsule authority, through the same gate `start_provider` uses.
+#[cfg(test)]
+#[rustfmt::skip]
+pub(super) fn admit_committed(provider: RuntimeProviderId) -> AdmittedRights {
+    let name = match provider { RuntimeProviderId::Did => "did-provider", RuntimeProviderId::Wallet => "wallet-provider", RuntimeProviderId::Model => "model-provider" };
+    let path = format!("{}/../../../capsules/{name}/capsule.json", env!("CARGO_MANIFEST_DIR"));
+    let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"));
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&json).unwrap_or_else(|err| panic!("{path}: {err}"));
+    let authority = manifest.authority.unwrap_or_else(|| panic!("{path}: provider authority is missing"));
+    check_rights_against_runtime_templates(provider, &authority, rights_table::RIGHTS).unwrap_or_else(|err| panic!("{name} committed authority: {err}"))
+}
+
 /// Resolve declared rights to the rows the OS entry installs.
 ///
 /// Empty rights select `provider`'s grant through `rights_table::resolve` on

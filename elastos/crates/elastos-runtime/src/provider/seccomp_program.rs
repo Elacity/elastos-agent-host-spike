@@ -93,7 +93,7 @@ pub(super) fn program(
 #[rustfmt::skip]
 mod tests {
     use super::*;
-    use super::super::rights::admit_runtime_grant;
+    use super::super::rights::admit_committed;
 
     fn golden(text: &str) -> Vec<Instruction> {
         text.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).map(|line| {
@@ -112,7 +112,7 @@ mod tests {
         macro_rules! check {
             ($file:literal, $arch:ident, $provider:ident) => {
                 assert_eq!(program(RuntimeProviderId::$provider,
-                    &admit_runtime_grant(RuntimeProviderId::$provider), AuditArch::$arch),
+                    &admit_committed(RuntimeProviderId::$provider), AuditArch::$arch),
                     golden(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
                         "/../../../capsules/wallet-provider/tests/", $file))), $file);
             };
@@ -129,5 +129,34 @@ mod tests {
     #[should_panic(expected = "has no syscall number row")]
     fn unknown_syscall_name_fails_loudly() {
         number("missing_call", AuditArch::Aarch64);
+    }
+
+    /// Head minus the rename/renameat equality+allow pair. did goldens arrive at
+    /// c2dc6ca08 and wallet goldens at 51c503fe7; both are absent at the pin.
+    #[test]
+    fn model_golden_at_pin_d0dd5693_drops_rename_pairs() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../..");
+        for arch in ["x86_64", "aarch64"] {
+            let head = std::fs::read_to_string(format!("{root}/capsules/wallet-provider/tests/model-seccomp-{arch}.golden")).unwrap();
+            let lines: Vec<_> = head.lines().collect();
+            let mut kept = String::new();
+            let mut index = 0;
+            while index < lines.len() {
+                let drop_pair = (lines[index].ends_with("# SYS_rename") || lines[index].ends_with("# SYS_renameat")) && lines.get(index + 1).is_some_and(|line| line.trim_start().starts_with("0x0006") && line.contains("0x7fff0000"));
+                if drop_pair { index += 2; continue; }
+                kept.push_str(lines[index]); kept.push('\n'); index += 1;
+            }
+            let spec = format!("d0dd5693:capsules/wallet-provider/tests/model-seccomp-{arch}.golden");
+            let out = super::super::rights::git_show(&spec);
+            assert!(out.status.success(), "pin {spec} missing: {}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(kept.into_bytes(), out.stdout, "pin d0dd5693 model {arch} golden minus the rename pair");
+        }
+        for (provider, added) in [("did", "c2dc6ca08"), ("wallet", "51c503fe7")] {
+            for arch in ["x86_64", "aarch64"] {
+                let spec = format!("d0dd5693:capsules/wallet-provider/tests/{provider}-seccomp-{arch}.golden");
+                assert!(!super::super::rights::git_show(&spec).status.success(), "{provider} golden is absent at pin d0dd5693; added at {added}");
+            }
+            assert!(super::super::rights::git_show(&format!("{added}:capsules/wallet-provider/tests/{provider}-seccomp-x86_64.golden")).status.success(), "{provider} golden is the post-pin addition at {added}");
+        }
     }
 }

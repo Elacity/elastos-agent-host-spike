@@ -480,6 +480,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          # The B3 R-DIFF rows read the pinned lab reference with `git show d0dd5693:...`, so this job needs history.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
       - name: configure Rust compile cache
         if: env.CI_USE_CACHE == 'true'

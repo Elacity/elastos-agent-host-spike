@@ -1148,11 +1148,15 @@ fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
     assert_eq!(handler.matches("host_manifest_capabilities").count(), 1);
     assert_eq!(handler.matches("manifest_capabilities,\n").count(), 1);
     // The content of a launch is looked up the same way: by the caller's own
-    // id, there and nowhere else, and a caller with no entry gets none.
+    // id, there and nowhere else, and a caller with no entry gets none. Its
+    // guard ends with the lookup: the content table's lock is not held across
+    // the call, so an end can take content away while a guest is in the
+    // bridge.
     let held = "let launch = host_launch_contents\n                    \
                 .read()\n                    \
-                .unwrap_or_else(|it| it.into_inner());\n                \
-                let launch = launch.get(capsule_id).cloned();";
+                .unwrap_or_else(|it| it.into_inner())\n                    \
+                .get(capsule_id)\n                    \
+                .cloned();";
     assert_eq!(handler.matches(held).count(), 1);
     assert_eq!(handler.matches("host_launch_contents").count(), 1);
     assert_eq!(handler.matches("launch,\n").count(), 1);
