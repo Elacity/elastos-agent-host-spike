@@ -71,6 +71,11 @@ pub struct Runtime {
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
     bridge_manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    /// Model-token ceiling for an admitted agent, by capsule id. A missing
+    /// entry is not an admitted agent. Present, including 0, is the ceiling
+    /// admission recorded and passed into the start. The manifest is not
+    /// read again for this number.
+    bridge_model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
     /// For each program a content launch is running, by its capsule id: the
     /// content it was launched with. Kept like the ceilings, beside them.
     launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
@@ -129,6 +134,7 @@ impl Runtime {
             running_capsules: RwLock::new(HashMap::new()),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
         }
@@ -148,6 +154,7 @@ impl Runtime {
             running_capsules: RwLock::new(HashMap::new()),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
         }
@@ -171,6 +178,7 @@ impl Runtime {
             let host_pending = pending_store.clone();
             let host_data_dir = data_dir.clone();
             let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
+            let host_model_token_ceilings = self.bridge_model_token_ceilings.clone();
             let host_launch_contents = self.launch_contents.clone();
             let host_handle = tokio::runtime::Handle::current();
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
@@ -187,6 +195,11 @@ impl Runtime {
                     .read()
                     .unwrap_or_else(|it| it.into_inner());
                 let launch = launch.get(capsule_id).cloned();
+                let model_token_ceiling = host_model_token_ceilings
+                    .read()
+                    .unwrap_or_else(|it| it.into_inner())
+                    .get(capsule_id)
+                    .copied();
                 let ctx = crate::resource_bridge::BridgeContext {
                     provider_registry: host_reg.clone(),
                     capability_manager: host_cap_mgr.clone(),
@@ -196,6 +209,7 @@ impl Runtime {
                     manifest_capabilities,
                     data_dir: Some(host_data_dir.clone()),
                     launch,
+                    model_token_ceiling,
                 };
                 let response = host_handle
                     .block_on(crate::resource_bridge::handle_component_resource_request(
@@ -352,9 +366,15 @@ impl Runtime {
         admission: crate::agent_admission::AdmissionContext,
     ) -> Result<(CapsuleHandle, Signer)> {
         let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
+        let ceiling = admission.model_token_ceiling();
         let (manifest, entrypoint) = admission.into_parts();
-        self.run_signer(path, args, Some(actor), Some((manifest, entrypoint)))
-            .await
+        self.run_signer(
+            path,
+            args,
+            Some(actor),
+            Some((manifest, entrypoint, ceiling)),
+        )
+        .await
     }
 
     /// Load one local start. `admitted` is the walked manifest and entrypoint
@@ -366,7 +386,7 @@ impl Runtime {
         path: &Path,
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
-        admitted: Option<(CapsuleManifest, Vec<u8>)>,
+        admitted: Option<(CapsuleManifest, Vec<u8>, u64)>,
     ) -> Result<(CapsuleHandle, Signer)> {
         let admitted_launch = admitted.is_some();
         if !admitted_launch {
@@ -377,9 +397,11 @@ impl Runtime {
             )
             .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
         }
-        let (manifest, walked) = match admitted {
-            Some((manifest, entrypoint)) => (Some(manifest), Some(entrypoint)),
-            None => (None, None),
+        let (manifest, walked, admitted_ceiling) = match admitted {
+            Some((manifest, entrypoint, ceiling)) => {
+                (Some(manifest), Some(entrypoint), Some(ceiling))
+            }
+            None => (None, None, None),
         };
         let manifest: CapsuleManifest = match manifest {
             Some(manifest) => {
@@ -412,6 +434,13 @@ impl Runtime {
                 manifest
             }
         };
+        if let Some(ceiling) = admitted_ceiling {
+            if manifest.resources.model_token_ceiling() != ceiling {
+                return Err(ElastosError::InvalidManifest(
+                    "the model-token ceiling is the one admission recorded".into(),
+                ));
+            }
+        }
 
         // The server has no owner or stop route for a resident v2 activation.
         // Refuse it before loading a component or running any guest code.
@@ -506,6 +535,7 @@ impl Runtime {
             &mut handle,
             args,
             principal_id.map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
+            admitted_ceiling,
         )
         .await?;
 
@@ -779,7 +809,7 @@ impl Runtime {
         let held = launch
             .clone()
             .map(|launch| LaunchHeld::new(&self.launch_contents, &handle.id.0, launch));
-        let started = self.start_loaded(component, &mut handle, args, principal_id);
+        let started = self.start_loaded(component, &mut handle, args, principal_id, None);
         let started = started.await;
         drop(held);
         started.map_err(failed)?;
@@ -867,6 +897,22 @@ impl Runtime {
         launches.get(id).map(|launch| launch.paths())
     }
 
+    /// Test only: the model-token ceilings the bridge holds right now, one
+    /// entry per admitted instance. A missing id is not an admitted agent.
+    #[cfg(test)]
+    pub(crate) fn model_token_ceilings_held(&self) -> Vec<(String, u64)> {
+        let ceilings = self
+            .bridge_model_token_ceilings
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut held: Vec<_> = ceilings
+            .iter()
+            .map(|(id, ceiling)| (id.clone(), *ceiling))
+            .collect();
+        held.sort();
+        held
+    }
+
     /// Test only: the ceiling the bridge holds the capsule `id` to right now,
     /// each entry as it prints.
     #[cfg(test)]
@@ -889,12 +935,22 @@ impl Runtime {
         handle: &mut CapsuleHandle,
         args: Vec<String>,
         principal_id: Option<String>,
+        model_token_ceiling: Option<u64>,
     ) -> Result<()> {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.insert(
                 handle.id.0.clone(),
                 handle.manifest.resource_authority_bounds(),
             );
+        }
+        // `Some` is the ceiling admission recorded for this start. A start
+        // that was not admitted passes `None` and gets no entry. The manifest
+        // is not read again for the number.
+        if let Some(ceiling) = model_token_ceiling {
+            self.bridge_model_token_ceilings
+                .write()
+                .unwrap_or_else(|err| err.into_inner())
+                .insert(handle.id.0.clone(), ceiling);
         }
         if handle.manifest.is_component_capsule() {
             if let Some(ref component) = self.component_provider {
@@ -917,6 +973,10 @@ impl Runtime {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.remove(&handle.id.0);
         }
+        self.bridge_model_token_ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&handle.id.0);
         start
     }
 
@@ -3037,6 +3097,7 @@ pub(crate) mod tests {
             manifest_capabilities: manifest.resource_authority_bounds(),
             data_dir: Some(data_dir.clone()),
             launch: None,
+            model_token_ceiling: None,
         };
         let line = serde_json::json!({
             "id": 99,

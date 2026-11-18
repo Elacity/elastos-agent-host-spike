@@ -46,6 +46,7 @@ fn microvm_manifest(name: &str) -> CapsuleManifest {
             memory_mb: 128,
             cpu_shares: 100,
             gpu: false,
+            model_tokens: None,
         },
         permissions: Default::default(),
         // None means "no authority constraint" for a synthetic test manifest
