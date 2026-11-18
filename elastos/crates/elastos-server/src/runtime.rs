@@ -30,9 +30,22 @@ pub const CAPSULE_FAILED: &str = "failed";
 pub const CAUSE_COMPLETED: &str = "completed";
 
 /// How long an ended activation stays listed, so its session, status and cause
-/// can still be read after the response that started it has long gone. The
-/// entry leaves on the first listing after this, not on a timer.
+/// can still be read after the response that started it has long gone. The end
+/// schedules its own removal at this instant; a listing also prunes an entry
+/// this old, so an entry cannot outlive its retention even if the runtime the
+/// end armed its timer on has gone.
 pub const ENDED_CAPSULE_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long the removal thread of an end whose start runtime has shut down
+/// waits before it takes the entry. Production waits
+/// [`ENDED_CAPSULE_RETENTION`]; the unit row that exercises that thread sleeps
+/// in real time rather than on a paused clock, so it waits a short period
+/// instead of a minute. The timer a live runtime runs, and the pruner a reader
+/// runs, both use [`ENDED_CAPSULE_RETENTION`].
+#[cfg(not(test))]
+const LOST_END_RETENTION: std::time::Duration = ENDED_CAPSULE_RETENTION;
+#[cfg(test)]
+const LOST_END_RETENTION: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Information about a running capsule (for API responses and lifecycle management)
 #[derive(Debug, Clone)]
@@ -422,16 +435,40 @@ impl ActivationContextHeld {
         if recorded {
             let registry = self.registry.clone();
             let id = self.id.0.clone();
-            self.end_runtime.spawn(async move {
+            let timer = self.end_runtime.spawn(async move {
                 tokio::time::sleep(ENDED_CAPSULE_RETENTION).await;
                 let mut capsules = registry.write().await;
-                if capsules
-                    .get(&id)
-                    .is_some_and(|info| info.ended_at == Some(ended_at))
-                {
-                    capsules.remove(&id);
-                }
+                remove_ended_entry(&mut capsules, &id, ended_at);
             });
+            // A runtime that has itself shut down binds nothing: tokio shuts
+            // the spawned task down before it is ever polled, so this handle is
+            // already finished when `spawn` returns. A live runtime cannot
+            // finish a sleep at once, so a finished handle here means the
+            // timer will never run. The S3 lost-task end is this case: the
+            // runtime the activation started on went away before the end ran,
+            // and the fallback thread runs the end on a runtime of its own.
+            // The removal gets a thread instead: it sleeps before it takes the
+            // registry lock, so no lock is held across the sleep, and the
+            // registry it holds is the map's own `Arc`, not the Runtime, so a
+            // gone Runtime does not matter.
+            if timer.is_finished() {
+                let registry = self.registry.clone();
+                let id = self.id.0.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("ended-capsule-retention".into())
+                    .spawn(move || {
+                        std::thread::sleep(LOST_END_RETENTION);
+                        let mut capsules = registry.blocking_write();
+                        remove_ended_entry(&mut capsules, &id, ended_at);
+                    });
+                if let Err(error) = spawned {
+                    tracing::error!(
+                        %error,
+                        "activation {}: no thread for its retention",
+                        self.id.0
+                    );
+                }
+            }
         }
     }
 
@@ -2000,6 +2037,22 @@ impl Runtime {
     }
 }
 
+/// Takes an ended entry away only if it is still this end's: a reader may have
+/// pruned it first, or a later start may have replaced it, and neither is this
+/// end's to remove.
+fn remove_ended_entry(
+    capsules: &mut HashMap<String, RunningCapsuleInfo>,
+    id: &str,
+    ended_at: std::time::Instant,
+) {
+    if capsules
+        .get(id)
+        .is_some_and(|info| info.ended_at == Some(ended_at))
+    {
+        capsules.remove(id);
+    }
+}
+
 /// Removes the entries whose activation ended at least
 /// [`ENDED_CAPSULE_RETENTION`] before `now`. The end schedules its own
 /// removal (see [`ActivationContextHeld::end_instance`]); a reader still
@@ -2730,6 +2783,96 @@ pub(crate) mod tests {
             !runtime.running_capsules.read().await.contains_key(&id),
             "the fallback end's entry is gone at its retention, with nothing reading it"
         );
+    }
+
+    /// A3-R S6 fix 3: an end whose start runtime has itself shut down still
+    /// removes its entry at retention. The S3 lost-task shape: the runtime the
+    /// activation started on goes away before the fallback end runs, so the
+    /// timer cannot be spawned on it; the end gives the removal a thread that
+    /// waits the retention and takes the entry under the same `ended_at`
+    /// match. The entry is read from the map, not through a listing that would
+    /// prune it, so only that removal can take it away. The thread sleeps in
+    /// real time, on [`LOST_END_RETENTION`], which the unit build shortens.
+    /// F-losttimer removes the thread fallback: the entry stays, reddening the
+    /// last row.
+    #[test]
+    fn a_lost_end_removes_its_entry_at_retention_without_a_registry_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the activation starts on");
+        let (runtime, held, id) = start.block_on(async {
+            let storage = Arc::new(
+                LocalFSProvider::new(temp_dir.path().to_path_buf())
+                    .await
+                    .unwrap(),
+            );
+            let component = Arc::new(ComponentProvider::new());
+            let runtime =
+                Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+            let manifest: CapsuleManifest =
+                serde_json::from_str(&component_manifest_json("lost-retained"))
+                    .expect("the component manifest");
+            let handle = CapsuleHandle {
+                id: CapsuleId::new("component-lost-retained"),
+                manifest,
+                args: Vec::new(),
+            };
+            let id = handle.id.0.clone();
+            runtime
+                .register_capsule(RunningCapsuleInfo {
+                    id: id.clone(),
+                    name: "lost-retained".to_string(),
+                    status: CAPSULE_STARTING.to_string(),
+                    capsule_type: handle.manifest.capsule_type.clone(),
+                    handle: Some(handle.clone()),
+                    session_id: id.clone(),
+                    principal: None,
+                    cause: None,
+                    ended_at: None,
+                })
+                .await;
+            let held = ActivationContextHeld::new(&runtime, &handle, component);
+            (runtime, held, id)
+        });
+        // The start runtime goes away before the end runs, as it does in the
+        // lost-task case; the end then runs from a thread on a runtime of its
+        // own, just as `Drop` hands a lost end over.
+        drop(start);
+        std::thread::spawn(move || {
+            let end_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the lost end");
+            end_runtime.block_on(held.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+        })
+        .join()
+        .expect("the lost end runs");
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the row reads on");
+        after.block_on(async {
+            assert!(
+                runtime.running_capsules.read().await.contains_key(&id),
+                "the ended entry is kept at its end"
+            );
+            let removed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if !runtime.running_capsules.read().await.contains_key(&id) {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            assert!(
+                removed.is_ok(),
+                "the lost end's entry is gone at its retention, with nothing reading it"
+            );
+        });
     }
 
     pub(crate) async fn test_runtime() -> (Runtime, tempfile::TempDir) {
