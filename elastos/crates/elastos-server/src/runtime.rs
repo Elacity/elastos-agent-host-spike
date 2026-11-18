@@ -256,6 +256,11 @@ struct ActivationContextHeld {
     /// route hold.
     stop: Arc<ActivationStop>,
     authority: Option<InstanceAuthority>,
+    /// The runtime the activation started on. The retention timer is spawned
+    /// here, not on whichever runtime runs the end: the fallback end runs on a
+    /// throwaway current-thread runtime that closes when it returns, and a
+    /// timer on that runtime would close with it.
+    end_runtime: tokio::runtime::Handle,
     /// The end is owed until the registry entry records it.
     armed: bool,
     owed: OwedEnd,
@@ -288,6 +293,7 @@ impl ActivationContextHeld {
             handle: handle.clone(),
             component,
             registry: runtime.running_capsules.clone(),
+            end_runtime: tokio::runtime::Handle::current(),
             manifest_capabilities: runtime.bridge_manifest_capabilities.clone(),
             model_token_ceilings: runtime.bridge_model_token_ceilings.clone(),
             activation_stops: runtime.activation_stops.clone(),
@@ -409,14 +415,14 @@ impl ActivationContextHeld {
         self.armed = false;
 
         // Retention is a timer, not a reader's courtesy: one sleep per ended
-        // entry, on the runtime that ended it, removes the entry at its
-        // [`ENDED_CAPSULE_RETENTION`]. A reader that pruned it first, or an
-        // entry a later start replaced, leaves this a no-op: only this end's
-        // own `ended_at` is removed.
+        // entry, spawned on the runtime the activation started on, removes the
+        // entry at its [`ENDED_CAPSULE_RETENTION`]. A reader that pruned it
+        // first, or an entry a later start replaced, leaves this a no-op: only
+        // this end's own `ended_at` is removed.
         if recorded {
             let registry = self.registry.clone();
             let id = self.id.0.clone();
-            tokio::spawn(async move {
+            self.end_runtime.spawn(async move {
                 tokio::time::sleep(ENDED_CAPSULE_RETENTION).await;
                 let mut capsules = registry.write().await;
                 if capsules
@@ -438,6 +444,7 @@ impl ActivationContextHeld {
             handle: self.handle.clone(),
             component: self.component.clone(),
             registry: self.registry.clone(),
+            end_runtime: self.end_runtime.clone(),
             manifest_capabilities: self.manifest_capabilities.clone(),
             model_token_ceilings: self.model_token_ceilings.clone(),
             activation_stops: self.activation_stops.clone(),
@@ -1436,6 +1443,20 @@ impl Runtime {
         match &self.component_provider {
             Some(component) => component.status(handle).await.is_ok(),
             None => false,
+        }
+    }
+
+    /// Test only: the principal the compute provider holds for this handle's
+    /// activation; `Some(None)` for an activation bound to no principal, `None`
+    /// when it holds no binding.
+    #[cfg(test)]
+    pub(crate) async fn provider_principal_for_test(
+        &self,
+        handle: &CapsuleHandle,
+    ) -> Option<Option<String>> {
+        match &self.component_provider {
+            Some(component) => component.bridge_principal(&handle.id).await,
+            None => None,
         }
     }
 
@@ -2637,6 +2658,77 @@ pub(crate) mod tests {
         assert!(
             runtime.get_capsule(&id).await.is_none(),
             "the ended entry is gone at its retention, with nothing reading it"
+        );
+    }
+
+    /// A12-R fix 2: the fallback end still removes its entry at retention. The
+    /// end runs on a throwaway current-thread runtime, the way `Drop` hands a
+    /// lost end to a thread, and that runtime closes when the end returns. The
+    /// timer is spawned on the runtime the activation started on, so it
+    /// survives; the clock here is that runtime's, paused, and the entry is
+    /// read from the map, not through a listing that would prune it.
+    /// F-fallbacktimer spawns the timer on the throwaway runtime instead, and
+    /// the entry is still there after the retention, reddening the last row.
+    #[tokio::test(start_paused = true)]
+    async fn a_fallback_end_removes_its_entry_at_retention_without_a_registry_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("fallback-retained"))
+                .expect("the component manifest");
+        let handle = CapsuleHandle {
+            id: CapsuleId::new("component-fallback-retained"),
+            manifest,
+            args: Vec::new(),
+        };
+        let id = handle.id.0.clone();
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: "fallback-retained".to_string(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: None,
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+
+        let held = ActivationContextHeld::new(&runtime, &handle, component);
+        // The fallback: end_instance on a runtime of its own that goes away
+        // when the end returns, exactly as the lost-task thread builds one.
+        std::thread::spawn(move || {
+            let end_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the fallback end");
+            end_runtime.block_on(held.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+        })
+        .join()
+        .expect("the fallback end runs");
+
+        // Let the removal task take its sleep on this runtime before the clock
+        // moves.
+        tokio::task::yield_now().await;
+        assert!(
+            runtime.running_capsules.read().await.contains_key(&id),
+            "the ended entry is kept at its end"
+        );
+
+        tokio::time::advance(ENDED_CAPSULE_RETENTION).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !runtime.running_capsules.read().await.contains_key(&id),
+            "the fallback end's entry is gone at its retention, with nothing reading it"
         );
     }
 

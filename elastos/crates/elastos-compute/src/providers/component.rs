@@ -252,6 +252,14 @@ impl ComponentProvider {
         self.bridge_principals.write().await.remove(capsule_id);
     }
 
+    /// The principal this capsule's activation runs for, if one is bound:
+    /// `Some(None)` is an activation bound to no principal, `None` that the
+    /// provider holds no binding for it. The Runtime's one end takes it away
+    /// with the activation entry ([`Self::forget_instance`]).
+    pub async fn bridge_principal(&self, capsule_id: &CapsuleId) -> Option<Option<String>> {
+        self.bridge_principals.read().await.get(capsule_id).cloned()
+    }
+
     /// Takes this capsule's activation entry away, with the principal it ran
     /// for. The Runtime's one end path calls this, so a stopped, cancelled or
     /// failed activation leaves nothing the provider could still run, ask

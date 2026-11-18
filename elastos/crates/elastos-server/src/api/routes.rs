@@ -3407,11 +3407,11 @@ pub(crate) mod tests {
     }
 
     /// What a start puts in place for an instance, before any end: the
-    /// context the one end must clear. It is the Runtime's four tables and the
-    /// compute provider's activation entry. The entry's own principal is the
-    /// provider's; that row lives with `forget_instance` in the compute crate
-    /// (`providers::component::tests::forgetting_an_instance_takes_its_entry_and_principal_away`).
-    async fn assert_context_filled(home: &ProbeLaunch, instance: &str) {
+    /// context the one end must clear. It is the Runtime's four tables, and the
+    /// compute provider's activation entry and the principal it runs for. The
+    /// principal is read here as well as after the end, so the after-row is not
+    /// green because the start never bound one.
+    async fn assert_context_filled(home: &ProbeLaunch, instance: &str, principal: &str) {
         let mut left = home.runtime.context_left_for_test(instance).await;
         left.sort_unstable();
         assert_eq!(
@@ -3429,6 +3429,11 @@ pub(crate) mod tests {
         assert!(
             home.runtime.provider_entry_for_test(&handle).await,
             "the start left the provider an activation entry for {instance}"
+        );
+        assert_eq!(
+            home.runtime.provider_principal_for_test(&handle).await,
+            Some(Some(principal.to_string())),
+            "the start bound {instance} to {principal}"
         );
     }
 
@@ -3547,6 +3552,13 @@ pub(crate) mod tests {
             !home.runtime.provider_entry_for_test(&handle).await,
             "the provider still holds an activation entry for {instance}"
         );
+        assert!(
+            home.runtime
+                .provider_principal_for_test(&handle)
+                .await
+                .is_none(),
+            "the provider still holds the principal {instance} ran for"
+        );
 
         // The entry: still listed 59 s after its end, gone at 61 s.
         let entry = home
@@ -3613,7 +3625,7 @@ pub(crate) mod tests {
                 .any(|request| request["session_id"] == run.id),
             "the seeded ask waits before the end"
         );
-        assert_context_filled(&home, &run.id).await;
+        assert_context_filled(&home, &run.id, &spinning).await;
 
         let (status, _) = stop_route(&home, &run.id, Some("spinning too long")).await;
         assert_eq!(status, StatusCode::OK);
@@ -3646,7 +3658,7 @@ pub(crate) mod tests {
         // The guest is inside its first bridge call, which no shell answers.
         let held = home.wait_pending(&run.id).await;
         let seeded = home.seed_session_requests(&run.id).await;
-        assert_context_filled(&home, &run.id).await;
+        assert_context_filled(&home, &run.id, &agent).await;
 
         let (status, _) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -3714,7 +3726,7 @@ pub(crate) mod tests {
         let run = home.launch(a).await.unwrap().0;
         assert_eq!(run.status, "starting");
         let seeded = home.seed_session_requests(&run.id).await;
-        assert_context_filled(&home, &run.id).await;
+        assert_context_filled(&home, &run.id, a).await;
 
         // A's own calls are granted as the shell would grant them; the seeded
         // ask is held, so it stays pending until A's end.
