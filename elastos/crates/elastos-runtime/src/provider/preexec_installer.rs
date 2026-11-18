@@ -101,7 +101,7 @@ pub(super) fn prepare(
 
 /// # Safety
 /// Call only in a forked child before exec. The caller owns fds 0–2, passes
-/// its open failure-record write descriptor (at least 3), and writes any
+/// its open failure-record write descriptor (at least 3, with FD_CLOEXEC), and writes any
 /// returned failure to that descriptor before exiting the child.
 pub(super) unsafe fn install(prepared: &Prepared, keep: i32) -> Result<(), Failure> {
     let mut ruleset = -1;
@@ -212,7 +212,9 @@ mod tests {
         let allowed_path = CString::new(allowed_path.as_os_str().as_bytes()).unwrap();
         let marker = std::fs::File::open("/dev/null").unwrap();
         let report = std::fs::File::open("/dev/null").unwrap();
+        let upper_marker = std::fs::File::open("/dev/null").unwrap();
         assert!(report.as_raw_fd() > 3);
+        assert!(upper_marker.as_raw_fd() > report.as_raw_fd());
         let prepared = prepare(
             RuntimeProviderId::Did,
             &landlock_plan::Bindings {
@@ -229,6 +231,8 @@ mod tests {
             }
             let kept_open = unsafe { libc::close(report.as_raw_fd()) } == 0;
             let fd_closed = unsafe { libc::close(marker.as_raw_fd()) } == -1
+                && unsafe { *libc::__errno_location() } == libc::EBADF;
+            let upper_fd_closed = unsafe { libc::close(upper_marker.as_raw_fd()) } == -1
                 && unsafe { *libc::__errno_location() } == libc::EBADF;
             let allowed = unsafe {
                 libc::syscall(
@@ -257,7 +261,13 @@ mod tests {
                 socket == -1 && unsafe { *libc::__errno_location() } == libc::EACCES;
             unsafe {
                 libc::_exit(
-                    if kept_open && fd_closed && file_allowed && file_denied && socket_denied {
+                    if kept_open
+                        && fd_closed
+                        && upper_fd_closed
+                        && file_allowed
+                        && file_denied
+                        && socket_denied
+                    {
                         0
                     } else {
                         81
