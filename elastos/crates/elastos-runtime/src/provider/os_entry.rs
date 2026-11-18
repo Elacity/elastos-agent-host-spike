@@ -11,7 +11,33 @@
 use super::rights::AdmittedRights;
 use super::rights_table::{self, RuntimeProviderId};
 use elastos_common::ProviderAuthority;
+use std::os::fd::OwnedFd;
 use std::path::Path;
+
+/// The descriptors the caller created for the child's fd 0 and fd 1 (the
+/// child ends), plus the parent ends that are returned in `Launched`.
+///
+/// The caller creates both pipes, passes the child ends to the launcher, and
+/// drops them after the call. The parent ends travel through this value so the
+/// launched handle carries the only remaining copies.
+#[allow(dead_code)] // macOS refuses before reading any field.
+pub(super) struct ChildStdio {
+    pub stdin: i32,
+    pub stdout: i32,
+    pub to_child: OwnedFd,
+    pub from_child: OwnedFd,
+}
+
+/// A provider process the OS arm started. `pid` is the launcher's, and the two
+/// parent ends are the protocol pipes. The successful pid belongs to the
+/// caller, which owns its reap.
+#[allow(dead_code)] // macOS refuses before this handle exists.
+#[derive(Debug)]
+pub(super) struct Launched {
+    pub pid: libc::pid_t,
+    pub to_child: OwnedFd,
+    pub from_child: OwnedFd,
+}
 
 #[cfg(all(
     not(elastos_unsupported_os_check),
@@ -53,13 +79,14 @@ pub(super) fn start_provider(
     authority: &ProviderAuthority,
     executable: &Path,
     storage_root: &Path,
-) -> Result<i32, String> {
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
     let admitted = super::rights::check_rights_against_runtime_templates(
         provider,
         authority,
         rights_table::RIGHTS,
     )?;
-    dispatch(provider, &admitted, executable, storage_root)
+    dispatch(provider, &admitted, executable, storage_root, stdio)
 }
 
 #[allow(dead_code)] // Only the OS arms call this, and those arms have no server caller yet.
@@ -81,16 +108,29 @@ fn dispatch(
     admitted: &AdmittedRights,
     executable: &Path,
     storage_root: &Path,
-) -> Result<i32, String> {
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
     require_grant(admitted)?;
     // `start` builds the plan from `admitted`, then forks. Allocation finishes
     // before the fork. This function adds nothing between fork and exec.
     let args: &[&std::ffi::CStr] = &[];
-    failure_record::start(provider, admitted, storage_root, executable, args).map_err(|error| {
-        match error {
-            failure_record::LaunchError::BeforeFork(reason) => reason,
-            failure_record::LaunchError::ChildFailed { reason, .. } => reason,
-        }
+    let pid = failure_record::start(
+        provider,
+        admitted,
+        storage_root,
+        executable,
+        args,
+        Some(stdio.stdin),
+        Some(stdio.stdout),
+    )
+    .map_err(|error| match error {
+        failure_record::LaunchError::BeforeFork(reason) => reason,
+        failure_record::LaunchError::ChildFailed { reason, .. } => reason,
+    })?;
+    Ok(Launched {
+        pid,
+        to_child: stdio.to_child,
+        from_child: stdio.from_child,
     })
 }
 
@@ -101,7 +141,8 @@ fn dispatch(
     admitted: &AdmittedRights,
     executable: &Path,
     storage_root: &Path,
-) -> Result<i32, String> {
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
     require_grant(admitted)?;
     let profile = super::macos_profile::render_macos_profile(provider, admitted);
     if !profile.starts_with("(version 1)\n(deny default)\n(deny network*)\n") {
@@ -110,7 +151,7 @@ fn dispatch(
                 .to_string(),
         );
     }
-    let _ = (executable, storage_root);
+    let _ = (executable, storage_root, stdio);
     Err(MACOS_NO_SPAWN.to_string())
 }
 
@@ -135,9 +176,10 @@ fn refuse_unsupported_os(
     admitted: &AdmittedRights,
     executable: &Path,
     storage_root: &Path,
-) -> Result<i32, String> {
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
     require_grant(admitted)?;
-    let _ = (provider, executable, storage_root);
+    let _ = (provider, executable, storage_root, stdio);
     Err(UNSUPPORTED_OS.to_string())
 }
 
@@ -157,15 +199,40 @@ fn dispatch(
     admitted: &AdmittedRights,
     executable: &Path,
     storage_root: &Path,
-) -> Result<i32, String> {
-    refuse_unsupported_os(provider, admitted, executable, storage_root)
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
+    refuse_unsupported_os(provider, admitted, executable, storage_root, stdio)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::FromRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+
+    fn pipe_pair() -> (i32, i32) {
+        let mut fds = [-1; 2];
+        #[cfg(target_os = "linux")]
+        let opened = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        #[cfg(not(target_os = "linux"))]
+        let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(opened, 0);
+        (fds[0], fds[1])
+    }
+
+    fn stdio() -> ChildStdio {
+        let (input_read, input_write) = pipe_pair();
+        let (output_read, output_write) = pipe_pair();
+        unsafe {
+            ChildStdio {
+                stdin: input_read,
+                stdout: output_write,
+                to_child: OwnedFd::from_raw_fd(input_write),
+                from_child: OwnedFd::from_raw_fd(output_read),
+            }
+        }
+    }
 
     fn committed_authority(name: &str) -> ProviderAuthority {
         let path = format!(
@@ -209,8 +276,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (program, marker) = marker_program(dir.path());
         let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Did);
-        let error = refuse_unsupported_os(RuntimeProviderId::Did, &admitted, &program, dir.path())
-            .unwrap_err();
+        let error = refuse_unsupported_os(
+            RuntimeProviderId::Did,
+            &admitted,
+            &program,
+            dir.path(),
+            stdio(),
+        )
+        .unwrap_err();
         assert_eq!(
             error,
             "provider start is refused: this operating system has no confinement, so the provider binary does not start"
@@ -221,7 +294,7 @@ mod tests {
     #[test]
     fn unsupported_dispatch_only_calls_the_refusal() {
         let production = production_source();
-        let call = "refuse_unsupported_os(provider, admitted, executable, storage_root)";
+        let call = "refuse_unsupported_os(provider, admitted, executable, storage_root, stdio)";
         assert_eq!(production.matches(call).count(), 1);
         let at = production.find(call).unwrap();
         let head = production[..at].rfind("fn dispatch").unwrap();
@@ -315,8 +388,10 @@ mod tests {
     fn os_arms_install_the_admitted_rows() {
         let production = production_source();
         assert!(!production.contains("applied_rows"));
-        assert!(production
-            .contains("failure_record::start(provider, admitted, storage_root, executable, args)"));
+        let normalised: String = production.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalised.contains(
+            "failure_record::start( provider, admitted, storage_root, executable, args, Some(stdio.stdin), Some(stdio.stdout), )"
+        ));
         assert!(production.contains("render_macos_profile(provider, admitted)"));
         assert!(
             !production.contains("for_provider"),
@@ -420,7 +495,14 @@ mod tests {
             template[1].to_string(),
         ];
         assert_eq!(
-            start_provider(RuntimeProviderId::Did, &authority, &program, dir.path()).map(|_| ()),
+            start_provider(
+                RuntimeProviderId::Did,
+                &authority,
+                &program,
+                dir.path(),
+                stdio(),
+            )
+            .map(|_| ()),
             Err(
                 "provider right \"storage\" rule text differs from the Runtime template"
                     .to_string()
@@ -437,7 +519,14 @@ mod tests {
         let mut authority = committed_authority("did");
         authority.rights.clear();
         assert_eq!(
-            start_provider(RuntimeProviderId::Did, &authority, &program, dir.path()).unwrap_err(),
+            start_provider(
+                RuntimeProviderId::Did,
+                &authority,
+                &program,
+                dir.path(),
+                stdio(),
+            )
+            .unwrap_err(),
             "provider start on macos is refused: the Seatbelt profile has no spawn path yet"
         );
         assert!(!marker.exists(), "the provider binary never runs");

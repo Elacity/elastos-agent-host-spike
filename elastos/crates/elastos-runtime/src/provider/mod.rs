@@ -21,7 +21,9 @@ mod rights_table;
 mod seccomp_list;
 mod seccomp_program;
 
-pub use bridge::{CapsuleProvider, ProviderBridge, ProviderConfig as BridgeProviderConfig};
+pub use bridge::{
+    CapsuleProvider, Confined, ProviderBridge, ProviderConfig as BridgeProviderConfig,
+};
 pub use registry::{
     decode_provider_stream_payload, EntryType, LocalIpfsCapacityObservation, Provider,
     ProviderByteRange, ProviderCarrierInvoker, ProviderCarrierRoute, ProviderError,

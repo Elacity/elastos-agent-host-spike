@@ -45,6 +45,8 @@ pub(super) fn start(
     storage_root: &Path,
     executable: &Path,
     args: &[&CStr],
+    stdin_read: Option<i32>,
+    stdout_write: Option<i32>,
 ) -> Result<libc::pid_t, LaunchError> {
     let path = CString::new(executable.as_os_str().as_bytes()).map_err(|_| {
         LaunchError::BeforeFork(
@@ -60,7 +62,14 @@ pub(super) fn start(
         },
     )
     .map_err(LaunchError::BeforeFork)?;
-    launch(&prepared, &path, args, NORMAL_TEST_HOOK, None, None)
+    launch(
+        &prepared,
+        &path,
+        args,
+        NORMAL_TEST_HOOK,
+        stdin_read,
+        stdout_write,
+    )
 }
 
 fn launch(
@@ -335,7 +344,15 @@ mod tests {
     fn refused_before_fork_names_reason() {
         let bad = Path::new(std::ffi::OsStr::from_bytes(b"bad\0path"));
         let rows = did_rows();
-        let result = start(RuntimeProviderId::Did, &rows, Path::new("/"), bad, &[]);
+        let result = start(
+            RuntimeProviderId::Did,
+            &rows,
+            Path::new("/"),
+            bad,
+            &[],
+            None,
+            None,
+        );
         assert!(
             matches!(result, Err(LaunchError::BeforeFork(ref reason)) if reason == "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL")
         );
@@ -414,16 +431,23 @@ mod tests {
         let executable = root.path().join("not-executable");
         std::fs::write(&executable, b"not an executable").unwrap();
         let rows = did_rows();
-        let (pid, reason) =
-            match start(RuntimeProviderId::Did, &rows, root.path(), &executable, &[]) {
-                Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
-                Ok(pid) => {
-                    let mut status = 0;
-                    unsafe { libc::waitpid(pid, &mut status, 0) };
-                    panic!("execve failure must refuse the launch");
-                }
-                other => panic!("execve failure must refuse the launch: {other:?}"),
-            };
+        let (pid, reason) = match start(
+            RuntimeProviderId::Did,
+            &rows,
+            root.path(),
+            &executable,
+            &[],
+            None,
+            None,
+        ) {
+            Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
+            Ok(pid) => {
+                let mut status = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                panic!("execve failure must refuse the launch");
+            }
+            other => panic!("execve failure must refuse the launch: {other:?}"),
+        };
         assert_eq!(
             reason, "provider exec refused: execve failed with errno 13",
             "execve failure must cross the report pipe"

@@ -12,13 +12,16 @@ use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::Mutex as StdMutex;
 
+use elastos_common::ProviderAuthority;
+
 #[cfg(target_os = "macos")]
 use elastos_model_contract::{model_input_hash, model_run_id, RuntimeCreateBinding};
 
 use serde::{Deserialize, Serialize};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use super::registry::{
     EntryType, Provider, ProviderError, ResourceAction, ResourceEntry, ResourceRequest,
@@ -509,6 +512,8 @@ pub enum BridgeError {
     Provider { code: String, message: String },
     /// Background provider I/O task failed
     TaskJoin(String),
+    /// The Runtime refused to start a provider; it names the reason verbatim.
+    Refused(String),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -526,6 +531,7 @@ impl std::fmt::Display for BridgeError {
             BridgeError::TaskJoin(message) => {
                 write!(f, "provider bridge task failed: {}", message)
             }
+            BridgeError::Refused(message) => write!(f, "{}", message),
         }
     }
 }
@@ -548,6 +554,9 @@ struct ProviderIo {
 pub struct ProviderBridge {
     io: Arc<Mutex<ProviderIo>>,
     child: Mutex<Option<Child>>,
+    /// A forked provider whose pid this process owns. At most one of `child`
+    /// and `fork` is set. The blocking `waitpid` task is the only reaper.
+    fork: Mutex<Option<ForkChild>>,
     #[cfg(unix)]
     helper_owner: Mutex<Option<elastos_common::process_lifetime::ParentLifetime>>,
     /// True once a shutdown attempt has completed (child reaped, or the
@@ -597,6 +606,134 @@ impl Drop for BrokerTasks {
     }
 }
 
+/// A forked provider the Runtime owns. `status` resolves after the blocking
+/// `waitpid` task reaps the pid, so that task is the only reaper.
+struct ForkChild {
+    pid: libc::pid_t,
+    status: oneshot::Receiver<i32>,
+}
+
+impl ForkChild {
+    fn start(pid: libc::pid_t) -> Self {
+        let (sender, status) = oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let mut word = 0;
+            loop {
+                let waited = unsafe { libc::waitpid(pid, &mut word, 0) };
+                if waited == pid {
+                    break;
+                }
+                if waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                {
+                    break;
+                }
+            }
+            let _ = sender.send(word);
+        });
+        Self { pid, status }
+    }
+}
+
+impl Drop for ForkChild {
+    fn drop(&mut self) {
+        // A resolved status means the waitpid task already reaped the pid.
+        if self.status.try_recv().is_err() {
+            unsafe {
+                libc::kill(self.pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// A provider that was confined at launch and answered `Init`.
+///
+/// The field is private and `spawn_confined` is the only constructor. There is
+/// no `From<ProviderBridge>`, so a plain spawn cannot be dressed as confined.
+pub struct Confined {
+    bridge: Arc<ProviderBridge>,
+}
+
+impl Confined {
+    pub fn bridge(&self) -> &Arc<ProviderBridge> {
+        &self.bridge
+    }
+}
+
+impl std::fmt::Debug for Confined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Confined")
+    }
+}
+
+/// Create `storage_root` at 0700 owned by the euid, open it and sync it.
+/// Returns whether this call created the directory.
+fn create_storage_root(storage_root: &Path) -> Result<bool, BridgeError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let created = match std::fs::DirBuilder::new().mode(0o700).create(storage_root) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(BridgeError::Io(error)),
+    };
+    let cleanup = |error: BridgeError| {
+        if created {
+            let _ = std::fs::remove_dir(storage_root);
+        }
+        error
+    };
+    let metadata =
+        std::fs::metadata(storage_root).map_err(|error| cleanup(BridgeError::Io(error)))?;
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(cleanup(BridgeError::Refused(
+            "provider start is refused: the storage root is not owned by the effective user"
+                .to_string(),
+        )));
+    }
+    std::fs::set_permissions(storage_root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| cleanup(BridgeError::Io(error)))?;
+    let directory =
+        std::fs::File::open(storage_root).map_err(|error| cleanup(BridgeError::Io(error)))?;
+    directory
+        .sync_all()
+        .map_err(|error| cleanup(BridgeError::Io(error)))?;
+    Ok(created)
+}
+
+fn pipe_pair() -> Result<(OwnedFd, OwnedFd), BridgeError> {
+    let mut fds = [-1; 2];
+    #[cfg(target_os = "linux")]
+    let opened = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let opened = {
+        let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if opened == 0 {
+            for fd in fds {
+                let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+                if flags < 0
+                    || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+                {
+                    return Err(BridgeError::Spawn(std::io::Error::last_os_error()));
+                }
+            }
+        }
+        opened
+    };
+    if opened < 0 {
+        return Err(BridgeError::Spawn(std::io::Error::last_os_error()));
+    }
+    unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
+}
+
+fn nonblocking(file: std::fs::File) -> std::fs::File {
+    let fd = file.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    file
+}
+
 impl ProviderBridge {
     async fn force_child_reap(
         child: &mut Child,
@@ -633,6 +770,85 @@ impl ProviderBridge {
     /// for the init response.
     pub async fn spawn(binary_path: &Path, config: ProviderConfig) -> Result<Self, BridgeError> {
         Self::spawn_with_timeouts(binary_path, config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT).await
+    }
+
+    /// Start a rights-declaring provider through the OS entry and return
+    /// `Confined` only after `Init` succeeded.
+    ///
+    /// The Runtime creates the fresh storage root, opens it and syncs it. The
+    /// child's stdin and stdout are fresh pipes. A refusal returns `Err` and
+    /// starts nothing; there is no fallback to the plain `spawn`.
+    pub async fn spawn_confined(
+        component_key: &str,
+        authority: &ProviderAuthority,
+        binary_path: &Path,
+        storage_root: &Path,
+        config: ProviderConfig,
+    ) -> Result<Confined, BridgeError> {
+        let Some(provider) =
+            super::rights_table::RuntimeProviderId::from_component_key(component_key)
+        else {
+            return Err(BridgeError::Refused(format!(
+                "provider start is refused: component key \"{component_key}\" is not one of did-provider, wallet-provider, model-provider"
+            )));
+        };
+        let created = create_storage_root(storage_root)?;
+        let (stdin_read, to_child) = pipe_pair()?;
+        let (from_child, stdout_write) = pipe_pair()?;
+        let stdio = super::os_entry::ChildStdio {
+            stdin: stdin_read.as_raw_fd(),
+            stdout: stdout_write.as_raw_fd(),
+            to_child,
+            from_child,
+        };
+        let launched =
+            super::os_entry::start_provider(provider, authority, binary_path, storage_root, stdio)
+                .map_err(|reason| {
+                    if created {
+                        let _ = std::fs::remove_dir(storage_root);
+                    }
+                    BridgeError::Refused(reason)
+                })?;
+        // The child holds its copies; these are the parent's, and must close
+        // so the child sees EOF on stdin and the parent sees EOF on stdout.
+        drop(stdin_read);
+        drop(stdout_write);
+
+        let to_child = nonblocking(std::fs::File::from(launched.to_child));
+        let from_child = nonblocking(std::fs::File::from(launched.from_child));
+        let bridge = Self {
+            io: Arc::new(Mutex::new(ProviderIo {
+                writer: Box::new(tokio::fs::File::from_std(to_child)),
+                reader: Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
+                    from_child,
+                ))),
+            })),
+            child: Mutex::new(None),
+            fork: Mutex::new(Some(ForkChild::start(launched.pid))),
+            #[cfg(unix)]
+            helper_owner: Mutex::new(None),
+            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
+            shutdown_timeout: SHUTDOWN_TIMEOUT,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_ipc_dir: Mutex::new(None),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_brokers: Mutex::new(BrokerTasks::default()),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_provider_pid: Arc::new(AtomicU32::new(0)),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_provider_birth: Arc::new(AtomicU64::new(0)),
+            #[cfg(target_os = "macos")]
+            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+        };
+        if let Err(error) = bridge.init_provider(config, INIT_TIMEOUT).await {
+            if created {
+                let _ = std::fs::remove_dir(storage_root);
+            }
+            return Err(error);
+        }
+        Ok(Confined {
+            bridge: Arc::new(bridge),
+        })
     }
 
     /// Admit only Runtime-selected private engine sockets for the native model provider.
@@ -1296,6 +1512,7 @@ impl ProviderBridge {
                 reader: Box::new(tokio::io::BufReader::new(stdout)),
             })),
             child: Mutex::new(Some(child)),
+            fork: Mutex::new(None),
             #[cfg(unix)]
             helper_owner: Mutex::new(helper_owner),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -1312,13 +1529,22 @@ impl ProviderBridge {
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         };
 
-        // Send Init request
+        bridge.init_provider(config, init_timeout).await?;
+        Ok(bridge)
+    }
+
+    /// The one Init implementation: send `Init`, bound by `init_timeout`, and
+    /// settle a failed start through `shutdown`.
+    async fn init_provider(
+        &self,
+        config: ProviderConfig,
+        init_timeout: std::time::Duration,
+    ) -> Result<(), BridgeError> {
         let init_req = ProviderRequest::Init { config };
-        let response = match tokio::time::timeout(init_timeout, bridge.request_raw(init_req)).await
-        {
+        let response = match tokio::time::timeout(init_timeout, self.request_raw(init_req)).await {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
-                let shutdown_error = bridge.shutdown().await.err().map(|err| err.to_string());
+                let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
                         format!("{error}; failed to settle provider child: {shutdown_error}")
@@ -1328,7 +1554,7 @@ impl ProviderBridge {
                 return Err(BridgeError::InitFailed(detail));
             }
             Err(_) => {
-                let shutdown_error = bridge.shutdown().await.err().map(|err| err.to_string());
+                let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
                         format!("provider init timed out; failed to settle provider child: {shutdown_error}")
@@ -1340,9 +1566,9 @@ impl ProviderBridge {
         };
 
         match response {
-            ProviderResponse::Ok { .. } => Ok(bridge),
+            ProviderResponse::Ok { .. } => Ok(()),
             ProviderResponse::Error { code, message } => {
-                let shutdown_error = bridge.shutdown().await.err().map(|err| err.to_string());
+                let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
                         format!(
@@ -1367,6 +1593,7 @@ impl ProviderBridge {
                 reader: Box::new(reader),
             })),
             child: Mutex::new(None),
+            fork: Mutex::new(None),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -1554,10 +1781,55 @@ impl ProviderBridge {
         .map_err(|err| BridgeError::TaskJoin(err.to_string()))?
     }
 
+    /// Deliver the protocol shutdown on the transport alone.
+    async fn protocol_shutdown(&self) -> Result<(), BridgeError> {
+        tokio::time::timeout(
+            self.shutdown_timeout,
+            self.request_raw(ProviderRequest::Shutdown),
+        )
+        .await
+        .map_err(|_| BridgeError::Timeout)
+        .and_then(|result| result)
+        .and_then(|response| match response {
+            ProviderResponse::Ok { .. } => Ok(()),
+            ProviderResponse::Error { code, message } => {
+                Err(BridgeError::Provider { code, message })
+            }
+        })
+    }
+
     /// Gracefully shut down the provider.
     pub async fn shutdown(&self) -> Result<(), BridgeError> {
         #[cfg(unix)]
         self.helper_owner.lock().await.take();
+        if let Some(mut fork) = self.fork.lock().await.take() {
+            let protocol_error = self.protocol_shutdown().await.err();
+            let status_error =
+                match tokio::time::timeout(self.shutdown_timeout, &mut fork.status).await {
+                    Ok(Ok(0)) => None,
+                    Ok(Ok(_)) => Some(BridgeError::ProcessExited),
+                    Ok(Err(_)) => Some(BridgeError::ProcessExited),
+                    Err(_) => {
+                        unsafe {
+                            libc::kill(fork.pid, libc::SIGKILL);
+                        }
+                        match tokio::time::timeout(self.shutdown_timeout, &mut fork.status).await {
+                            Ok(_) => Some(BridgeError::Timeout),
+                            Err(_) => return Err(BridgeError::Timeout),
+                        }
+                    }
+                };
+            self.shutdown_completed
+                .store(true, std::sync::atomic::Ordering::Release);
+            drop(fork);
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            self.stop_local_brokers().await;
+            return match (protocol_error, status_error) {
+                (Some(error), _) => Err(error),
+                (None, Some(error)) => Err(error),
+                (None, None) => Ok(()),
+            };
+        }
         let mut child_guard = self.child.lock().await;
         let Some(child) = child_guard.as_mut() else {
             if self
@@ -1679,6 +1951,12 @@ impl CapsuleProvider {
             bridge,
             scheme_static,
         }
+    }
+
+    /// Create a CapsuleProvider from a provider the confined entry launched.
+    /// Only `spawn_confined` can produce `Confined`.
+    pub fn from_confined(confined: Confined, scheme: impl Into<String>) -> Self {
+        Self::with_scheme(confined.bridge, scheme)
     }
 
     /// Get a reference to the underlying bridge for raw communication.
@@ -3424,5 +3702,395 @@ mod tests {
             !process_exists(&pid.to_string()),
             "provider survived shutdown"
         );
+    }
+
+    // === Slice 10: spawn_confined and Confined ===
+
+    fn committed_authority(name: &str) -> ProviderAuthority {
+        let path = format!(
+            "{}/../../../capsules/{name}-provider/capsule.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let json = std::fs::read_to_string(&path).unwrap();
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&json).unwrap();
+        manifest.authority.unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_confined_probe(root: &Path, pid_file: &Path, mode: &str) -> PathBuf {
+        let source = root.join("confined-provider-probe.rs");
+        let binary = root.join("confined-provider-probe");
+        let pid = pid_file.to_str().unwrap();
+        let text = include_str!("../../tests/fixtures/confined_provider_probe.rs")
+            .replace("@@PID_FILE@@", pid)
+            .replace("@@MODE@@", mode);
+        std::fs::write(&source, text).unwrap();
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-O"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "probe build failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        binary
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pid_gone(pid: libc::pid_t) -> bool {
+        (unsafe { libc::kill(pid, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fork_pid(bridge: &ProviderBridge) -> libc::pid_t {
+        bridge
+            .fork
+            .try_lock()
+            .expect("no live request holds the fork handle")
+            .as_ref()
+            .expect("a confined start keeps its fork handle")
+            .pid
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn confined_start_answers_init_over_its_own_pipes() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = build_confined_probe(temp.path(), Path::new(""), "ok");
+        let root = temp.path().join("did-root");
+        let confined = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("confined start must answer Init: {error}"));
+        let pid = fork_pid(confined.bridge());
+        // Row 2: the child's fd 0 and fd 1 are its own pipes, and it inherited
+        // nothing else.
+        let fds = std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            fds.iter()
+                .all(|fd| fd.parse::<i32>().is_ok_and(|fd| fd <= 2)),
+            "the child sees only fds 0-2: {fds:?}"
+        );
+        let child_stdin = std::fs::read_link(format!("/proc/{pid}/fd/0")).unwrap();
+        let child_stdout = std::fs::read_link(format!("/proc/{pid}/fd/1")).unwrap();
+        let parent_stdin = std::fs::read_link("/proc/self/fd/0").unwrap();
+        assert!(child_stdin.to_string_lossy().starts_with("pipe:"));
+        assert!(child_stdout.to_string_lossy().starts_with("pipe:"));
+        assert_ne!(
+            child_stdin, parent_stdin,
+            "the child inherited the parent's stdin"
+        );
+        // Row 1: Shutdown is answered, the child exits, and the pid is reaped.
+        confined.bridge().shutdown().await.unwrap();
+        for _ in 0..250 {
+            if pid_gone(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(pid_gone(pid), "the confined child was not reaped");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn refused_start_leaves_no_root_and_success_leaves_one() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        // Refused: a widened rule stops before the fork and removes the root.
+        let widened = temp.path().join("widened-root");
+        let mut authority = committed_authority("did");
+        let storage = authority
+            .rights
+            .iter_mut()
+            .find(|right| right.id == "storage")
+            .unwrap();
+        storage.rules = vec![r#"(allow file-read* file-write* (subpath "/"))"#.to_string()];
+        let error = match ProviderBridge::spawn_confined(
+            "did-provider",
+            &authority,
+            &temp.path().join("never-runs"),
+            &widened,
+            ProviderConfig::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("a widened declaration must refuse"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider right \"storage\" rule text differs from the Runtime template"
+        );
+        assert!(!widened.exists(), "a refused start leaves no root");
+        // Success: the root is 0700 and owned by the euid.
+        let binary = build_confined_probe(temp.path(), Path::new(""), "ok");
+        let root = temp.path().join("kept-root");
+        let confined = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap();
+        let metadata = std::fs::metadata(&root).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        confined.bridge().shutdown().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn refused_start_never_runs_the_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("ran");
+        let program = temp.path().join("mark.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut authority = committed_authority("did");
+        authority
+            .rights
+            .iter_mut()
+            .find(|right| right.id == "storage")
+            .unwrap()
+            .rules = vec![r#"(allow file-read* file-write* (subpath "/"))"#.to_string()];
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &authority,
+            &program,
+            &temp.path().join("root"),
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider right \"storage\" rule text differs from the Runtime template"
+        );
+        assert!(!marker.exists(), "the provider binary never runs");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_init_leaves_no_live_child_and_no_zombie() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let pid_file = root.join("child.pid");
+        let binary = build_confined_probe(temp.path(), &pid_file, "reject_init");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, BridgeError::InitFailed(_)), "{error}");
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            pid_gone(pid),
+            "an Init failure must reap the child: pid {pid} still visible"
+        );
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn each_start_uses_its_own_root_and_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = build_confined_probe(temp.path(), Path::new(""), "ok");
+        let root_a = temp.path().join("root-a");
+        let root_b = temp.path().join("root-b");
+        let mut pids = Vec::new();
+        for root in [&root_a, &root_b, &root_a] {
+            let confined = ProviderBridge::spawn_confined(
+                "did-provider",
+                &committed_authority("did"),
+                &binary,
+                root,
+                ProviderConfig::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("start under {}: {error}", root.display()));
+            let pid = fork_pid(confined.bridge());
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+            assert!(
+                status.lines().any(|line| line == "Seccomp:\t2"),
+                "each start installs the filter: {status}"
+            );
+            assert!(
+                status.lines().any(|line| line == "NoNewPrivs:\t1"),
+                "each start sets no_new_privs: {status}"
+            );
+            pids.push(pid);
+            confined.bridge().shutdown().await.unwrap();
+            for _ in 0..250 {
+                if pid_gone(pid) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(pid_gone(pid));
+        }
+        assert_ne!(pids[0], pids[1]);
+        assert_ne!(pids[1], pids[2]);
+        assert!(root_a.is_dir() && root_b.is_dir());
+    }
+
+    #[tokio::test]
+    async fn unknown_component_key_is_refused_before_the_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let error = ProviderBridge::spawn_confined(
+            "ipfs-provider",
+            &committed_authority("did"),
+            &temp.path().join("never-runs"),
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: component key \"ipfs-provider\" is not one of did-provider, wallet-provider, model-provider"
+        );
+        assert!(!root.exists(), "the refused key creates no root");
+    }
+
+    #[test]
+    fn only_the_confined_entry_makes_a_confined() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut other = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                if path.ends_with("provider/bridge.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                if text.contains("fn from_confined") || text.contains("Confined {") {
+                    other.push(path);
+                }
+            }
+        }
+        assert!(
+            other.is_empty(),
+            "only bridge.rs constructs Confined: {other:?}"
+        );
+        let source = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider/bridge.rs"),
+        )
+        .unwrap();
+        let from_needle = concat!("pub ", "fn from_confined(confined: Confined, scheme");
+        assert_eq!(source.matches(from_needle).count(), 1);
+        let struct_needle = concat!(
+            "pub struct Confined {\n    br",
+            "idge: Arc<ProviderBridge>,"
+        );
+        assert_eq!(source.matches(struct_needle).count(), 1);
+        assert!(!source.contains(concat!("impl From<ProviderBridge> ", "for Confined")));
+        let start = source.find("pub async fn spawn_confined(").unwrap();
+        let end = source[start..]
+            .find("/// Admit only Runtime-selected private engine sockets")
+            .map(|at| at + start)
+            .expect("the confined start ends before the model path");
+        let body = &source[start..end];
+        assert!(
+            !body.contains("ProviderBridge::spawn") && !body.contains("Self::spawn("),
+            "the confined start has no unconfined fallback"
+        );
+        assert!(body.contains("super::os_entry::start_provider("));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_confined_start_refuses_and_starts_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("ran");
+        let program = temp.path().join("mark.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = temp.path().join("root");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &program,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider start on macos is refused: the Seatbelt profile has no spawn path yet"
+        );
+        assert!(!marker.exists(), "the provider binary never runs");
+        assert!(!root.exists(), "a refused start leaves no root");
+    }
+
+    #[cfg(elastos_unsupported_os_check)]
+    #[tokio::test]
+    async fn unsupported_os_confined_start_refuses_and_starts_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("ran");
+        let program = temp.path().join("mark.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = temp.path().join("root");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &program,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: this operating system has no confinement, so the provider binary does not start"
+        );
+        assert!(!marker.exists(), "the provider binary never runs");
+        assert!(!root.exists(), "a refused start leaves no root");
     }
 }
