@@ -1,19 +1,26 @@
 //! Operating-system entry for a provider whose rights have passed the grant gate.
 //!
-//! `start_provider` is that entry. It resolves rights first, then:
-//! Linux (x86_64 or aarch64) calls the failure-record launcher;
-//! macOS renders the Seatbelt profile and stops, because no `sandbox-exec`
-//! spawn exists yet; every other OS refuses before creating a process.
-//! The server does not call this. The tests in this module do. The child path
+//! `start_provider` is that entry. It resolves rights first. Linux (x86_64 or
+//! aarch64) installs the admitted rows through the failure-record launcher.
+//! macOS renders those rows as a Seatbelt profile and stops without spawning.
+//! Every other OS refuses before creating a process. The launcher is a private
+//! child of this module. The server does not call this entry. The child path
 //! between fork and exec stays in `failure_record` and is unchanged here.
 
 // No server caller yet, so the entry is unused outside tests. The rights gate
 // is called from here, so rights.rs does not carry this allow.
 #![allow(dead_code)]
 
-use super::rights_table::{self, RuntimeProviderId};
+use super::rights_table::{self, RightRow, RuntimeProviderId};
 use elastos_common::ProviderAuthority;
 use std::path::Path;
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[path = "failure_record.rs"]
+mod failure_record;
 
 const UNSUPPORTED_OS: &str = "provider start is refused: this operating system has no confinement, so the provider binary does not start";
 const MACOS_NO_SPAWN: &str =
@@ -34,11 +41,17 @@ pub(super) fn start_provider(
     dispatch(provider, &admitted, executable, storage_root)
 }
 
-fn require_grant(admitted: &[&rights_table::RightRow]) -> Result<(), String> {
+fn require_grant(admitted: &[&RightRow]) -> Result<(), String> {
     if admitted.is_empty() {
         return Err("provider start is refused: the Runtime grant has no rights".to_string());
     }
     Ok(())
+}
+
+/// The rows an OS arm installs. Both arms pass this to their plan builder.
+fn applied_rows<'a>(provider: RuntimeProviderId, admitted: &[&'a RightRow]) -> Vec<&'a RightRow> {
+    let _ = provider;
+    admitted.to_vec()
 }
 
 #[cfg(all(
@@ -47,20 +60,19 @@ fn require_grant(admitted: &[&rights_table::RightRow]) -> Result<(), String> {
 ))]
 fn dispatch(
     provider: RuntimeProviderId,
-    admitted: &[&rights_table::RightRow],
+    admitted: &[&RightRow],
     executable: &Path,
     storage_root: &Path,
 ) -> Result<i32, String> {
     require_grant(admitted)?;
-    // `start` installs this provider's full Runtime plan. The admitted rows
-    // are the declaration that passed the grant. Allocation for the gate is
-    // finished. `start` forks only after its own buffers exist; this function
-    // adds nothing between fork and exec.
+    let rows = applied_rows(provider, admitted);
+    // `start` builds the plan from `rows`, then forks. Allocation finishes
+    // before the fork. This function adds nothing between fork and exec.
     let args: &[&std::ffi::CStr] = &[];
-    super::failure_record::start(provider, storage_root, executable, args).map_err(|error| {
+    failure_record::start(provider, &rows, storage_root, executable, args).map_err(|error| {
         match error {
-            super::failure_record::LaunchError::BeforeFork(reason) => reason,
-            super::failure_record::LaunchError::ChildFailed { reason, .. } => reason,
+            failure_record::LaunchError::BeforeFork(reason) => reason,
+            failure_record::LaunchError::ChildFailed { reason, .. } => reason,
         }
     })
 }
@@ -68,13 +80,13 @@ fn dispatch(
 #[cfg(target_os = "macos")]
 fn dispatch(
     provider: RuntimeProviderId,
-    admitted: &[&rights_table::RightRow],
+    admitted: &[&RightRow],
     executable: &Path,
     storage_root: &Path,
 ) -> Result<i32, String> {
     require_grant(admitted)?;
-    // The renderer emits this provider's full Seatbelt profile.
-    let profile = super::macos_profile::render_macos_profile(provider);
+    let rows = applied_rows(provider, admitted);
+    let profile = super::macos_profile::render_macos_profile(provider, &rows);
     if !profile.starts_with("(version 1)\n(deny default)\n(deny network*)\n") {
         return Err(
             "provider start on macos is refused: the Seatbelt profile is missing its deny-default head"
@@ -85,6 +97,8 @@ fn dispatch(
     Err(MACOS_NO_SPAWN.to_string())
 }
 
+/// The unsupported-OS arm. Real `dispatch` on an unsupported target calls this
+/// and returns it. Tests call this same function.
 #[cfg(any(
     test,
     not(any(
@@ -95,8 +109,14 @@ fn dispatch(
         )
     ))
 ))]
-fn refuse_unsupported_os(executable: &Path) -> Result<i32, String> {
-    let _ = (executable, "unsupported-os-does-not-spawn");
+fn refuse_unsupported_os(
+    provider: RuntimeProviderId,
+    admitted: &[&RightRow],
+    executable: &Path,
+    storage_root: &Path,
+) -> Result<i32, String> {
+    require_grant(admitted)?;
+    let _ = (provider, executable, storage_root);
     Err(UNSUPPORTED_OS.to_string())
 }
 
@@ -109,13 +129,11 @@ fn refuse_unsupported_os(executable: &Path) -> Result<i32, String> {
 )))]
 fn dispatch(
     provider: RuntimeProviderId,
-    admitted: &[&rights_table::RightRow],
+    admitted: &[&RightRow],
     executable: &Path,
     storage_root: &Path,
 ) -> Result<i32, String> {
-    require_grant(admitted)?;
-    let _ = (provider, storage_root);
-    refuse_unsupported_os(executable)
+    refuse_unsupported_os(provider, admitted, executable, storage_root)
 }
 
 #[cfg(test)]
@@ -148,16 +166,178 @@ mod tests {
         (program, marker)
     }
 
+    fn production_source() -> String {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/provider/os_entry.rs"
+        ));
+        let source = std::fs::read_to_string(path).unwrap();
+        source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
     #[test]
     fn unsupported_os_refuses_before_the_binary_runs() {
         let dir = tempfile::tempdir().unwrap();
         let (program, marker) = marker_program(dir.path());
-        let error = refuse_unsupported_os(&program).unwrap_err();
+        let admitted: Vec<_> = rights_table::RIGHTS.iter().collect();
+        let error = refuse_unsupported_os(RuntimeProviderId::Did, &admitted, &program, dir.path())
+            .unwrap_err();
         assert_eq!(
             error,
             "provider start is refused: this operating system has no confinement, so the provider binary does not start"
         );
         assert!(!marker.exists(), "the provider binary never runs");
+    }
+
+    #[test]
+    fn unsupported_dispatch_only_calls_the_refusal() {
+        let production = production_source();
+        let call = "refuse_unsupported_os(provider, admitted, executable, storage_root)";
+        assert_eq!(production.matches(call).count(), 1);
+        let at = production.find(call).unwrap();
+        let head = production[..at].rfind("fn dispatch").unwrap();
+        let open = production[head..].find('{').unwrap() + head;
+        let close = production[open..].find('}').unwrap() + open;
+        let body = production[open + 1..close]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(body, call);
+    }
+
+    #[test]
+    fn only_os_entry_names_the_launcher() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut named = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                if text.contains("failure_record::start")
+                    || text.contains("failure_record::LaunchError")
+                {
+                    named.push(path);
+                }
+            }
+        }
+        named.sort();
+        let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider/os_entry.rs");
+        assert_eq!(named, vec![entry]);
+        let production = production_source();
+        assert!(production.contains("mod failure_record;"));
+        assert!(production.contains("failure_record::start("));
+        let module =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/provider/mod.rs"))
+                .unwrap();
+        assert!(
+            !module.contains("failure_record"),
+            "the launcher stays a child of the OS entry"
+        );
+    }
+
+    #[test]
+    fn os_arms_install_the_applied_rows() {
+        let production = production_source();
+        assert_eq!(
+            production
+                .matches("applied_rows(provider, admitted)")
+                .count(),
+            2
+        );
+        assert!(production
+            .contains("failure_record::start(provider, &rows, storage_root, executable, args)"));
+        assert!(production.contains("render_macos_profile(provider, &rows)"));
+        assert!(
+            !production.contains("for_provider"),
+            "the arms build from the admitted rows"
+        );
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider");
+        let launcher = std::fs::read_to_string(root.join("failure_record.rs")).unwrap();
+        let start = launcher.find("pub(super) fn start(").unwrap();
+        let launch = launcher.find("fn launch(").unwrap();
+        let start_body: String = launcher[start..launch]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(start_body.contains("preexec_installer::prepare(provider,rows,"));
+        assert!(!start_body.contains("for_provider"));
+        let installer = std::fs::read_to_string(root.join("preexec_installer.rs")).unwrap();
+        let prepare = installer.find("pub(super) fn prepare(").unwrap();
+        let install = installer.find("pub(super) unsafe fn install(").unwrap();
+        let prepare_body: String = installer[prepare..install]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(prepare_body.contains("landlock_plan::build(provider,rows,"));
+        assert!(prepare_body.contains("seccomp_program::program(provider,rows,"));
+        assert!(!prepare_body.contains("for_provider"));
+    }
+
+    #[test]
+    fn narrower_declaration_produces_a_narrower_plan() {
+        let mut authority = committed_authority("did");
+        authority
+            .rights
+            .retain(|right| right.id == "bound-executable");
+        let admitted = super::super::rights::check_rights_against_runtime_templates(
+            RuntimeProviderId::Did,
+            &authority,
+            rights_table::RIGHTS,
+        )
+        .unwrap();
+        let applied = applied_rows(RuntimeProviderId::Did, &admitted);
+        let full_rows = super::super::rights_table::for_provider(RuntimeProviderId::Did);
+        let bindings = super::super::landlock_plan::Bindings {
+            storage_root: PathBuf::from("/provider/did"),
+            provider_executable: PathBuf::from("/bin/did"),
+        };
+        let narrow =
+            super::super::landlock_plan::build(RuntimeProviderId::Did, &applied, &bindings, 5)
+                .unwrap();
+        let full =
+            super::super::landlock_plan::build(RuntimeProviderId::Did, &full_rows, &bindings, 5)
+                .unwrap();
+        assert_eq!(
+            full.rules.len(),
+            narrow.rules.len() + 1,
+            "a narrower declaration applies one fewer Landlock rule"
+        );
+        assert!(narrow
+            .rules
+            .iter()
+            .any(|rule| rule.0 == "PROVIDER_EXECUTABLE"));
+        assert!(!narrow.rules.iter().any(|rule| rule.0 == "STORAGE_ROOT"));
+        assert!(full.rules.iter().any(|rule| rule.0 == "STORAGE_ROOT"));
+        let arch = super::super::seccomp_list::AuditArch::Aarch64;
+        let narrow_names =
+            super::super::seccomp_list::linux_seccomp_list(RuntimeProviderId::Did, &applied, arch);
+        let full_names = super::super::seccomp_list::linux_seccomp_list(
+            RuntimeProviderId::Did,
+            &full_rows,
+            arch,
+        );
+        assert!(full_names.contains(&"write"));
+        assert!(!narrow_names.contains(&"write"));
+        assert!(narrow_names.len() < full_names.len());
+        let narrow_profile =
+            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Did, &applied);
+        let full_profile =
+            super::super::macos_profile::render_macos_profile(RuntimeProviderId::Did, &full_rows);
+        assert!(!narrow_profile.contains("STORAGE_ROOT"));
+        assert!(full_profile.contains("STORAGE_ROOT"));
+        assert!(narrow_profile.len() < full_profile.len());
     }
 
     #[test]

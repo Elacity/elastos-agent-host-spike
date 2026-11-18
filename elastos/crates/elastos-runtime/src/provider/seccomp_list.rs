@@ -1,5 +1,5 @@
 //! Names admitted by each Runtime provider's Linux filter.
-use super::rights_table::{for_provider, RuntimeProviderId};
+use super::rights_table::{RightRow, RuntimeProviderId};
 use super::seccomp_program::number;
 
 #[derive(Clone, Copy, Debug)]
@@ -16,10 +16,11 @@ const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exi
 /// The lab sorts names after it joins declared rights and measured launch calls.
 pub(super) fn linux_seccomp_list(
     provider: RuntimeProviderId,
+    rows: &[&RightRow],
     arch: AuditArch,
 ) -> Vec<&'static str> {
-    let mut names: Vec<_> = for_provider(provider)
-        .into_iter()
+    let mut names: Vec<_> = rows
+        .iter()
         .flat_map(|row| row.linux_syscalls.split_whitespace())
         .chain(ROOT_READ.split_whitespace())
         .chain(["uname", "sysinfo"])

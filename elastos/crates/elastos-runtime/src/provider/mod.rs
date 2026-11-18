@@ -8,11 +8,6 @@
 
 pub mod bridge;
 pub mod dispatch;
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-mod failure_record;
 mod landlock_plan;
 #[cfg(target_os = "linux")]
 mod linux_model_seccomp;

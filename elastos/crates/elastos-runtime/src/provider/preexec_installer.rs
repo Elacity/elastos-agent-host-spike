@@ -95,9 +95,10 @@ pub(super) struct Prepared {
 
 pub(super) fn prepare(
     provider: RuntimeProviderId,
+    rows: &[&super::rights_table::RightRow],
     bindings: &landlock_plan::Bindings,
 ) -> Result<Prepared, String> {
-    let plan = landlock_plan::build(provider, bindings, landlock_plan::kernel_abi()?)?;
+    let plan = landlock_plan::build(provider, rows, bindings, landlock_plan::kernel_abi()?)?;
     let paths = plan
         .rules
         .iter()
@@ -111,7 +112,7 @@ pub(super) fn prepare(
     } else {
         AuditArch::Aarch64
     };
-    let filters = seccomp_program::program(provider, arch)
+    let filters = seccomp_program::program(provider, rows, arch)
         .into_iter()
         .map(|[code, jt, jf, k]| libc::sock_filter {
             code: code as u16,
@@ -265,8 +266,10 @@ mod tests {
         let upper_marker = std::fs::File::open("/dev/null").unwrap();
         assert!(report.as_raw_fd() > 3);
         assert!(upper_marker.as_raw_fd() > report.as_raw_fd());
+        let rows = super::super::rights_table::for_provider(RuntimeProviderId::Did);
         let prepared = prepare(
             RuntimeProviderId::Did,
+            &rows,
             &landlock_plan::Bindings {
                 storage_root: root.path().to_path_buf(),
                 provider_executable: "/bin/true".into(),

@@ -59,11 +59,12 @@ fn provider_label(provider: RuntimeProviderId) -> &'static str {
     }
 }
 
-/// Resolve declared rights to the rows confinement may use.
+/// Resolve declared rights to the rows the OS entry installs.
 ///
 /// Empty rights select `provider`'s Runtime grant from `dictionary`. Any other
 /// list must be that grant or a subset, with each right's rules equal to its
-/// template. The check finishes before a process is created.
+/// template. The Linux plan and the macOS profile are built from the returned
+/// rows. The check finishes before a process is created.
 pub(super) fn check_rights_against_runtime_templates<'a>(
     provider: RuntimeProviderId,
     authority: &ProviderAuthority,

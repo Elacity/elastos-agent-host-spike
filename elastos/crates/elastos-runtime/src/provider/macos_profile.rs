@@ -1,16 +1,15 @@
 //! Seatbelt text for Runtime-owned provider grants. The launcher binds paths with -D.
 
-use super::rights_table::{for_provider, RuntimeProviderId};
+use super::rights_table::{RightRow, RuntimeProviderId};
 
 const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 
-/// Render the approved rights and the macOS process-start baseline in profile order.
-#[allow(dead_code)] // The spawn caller is added in a later slice.
-pub(super) fn render_macos_profile(provider: RuntimeProviderId) -> String {
-    let grants = for_provider(provider);
+/// Render `rows` and the macOS process-start baseline in profile order.
+#[allow(dead_code)] // The macOS arm renders this profile and then refuses.
+pub(super) fn render_macos_profile(provider: RuntimeProviderId, rows: &[&RightRow]) -> String {
     let mut forms = HEAD.to_vec();
     // The executable rule precedes the baseline; storage follows it in all three oracles.
-    for row in grants.iter().filter(|row| row.id == "bound-executable") {
+    for row in rows.iter().filter(|row| row.id == "bound-executable") {
         forms.extend_from_slice(row.rules);
     }
     forms.push(match provider {
@@ -18,7 +17,7 @@ pub(super) fn render_macos_profile(provider: RuntimeProviderId) -> String {
         RuntimeProviderId::Did | RuntimeProviderId::Wallet => "(allow file-read* (literal \"/\"))",
     });
     forms.push("(allow sysctl-read)");
-    for row in grants.iter().filter(|row| row.id != "bound-executable") {
+    for row in rows.iter().filter(|row| row.id != "bound-executable") {
         forms.extend_from_slice(row.rules);
     }
     forms.join("\n") + "\n"
@@ -75,7 +74,10 @@ mod tests {
                 include_str!("../../../../../capsules/model-provider/confine.sb"),
             ),
         ] {
-            let rendered = render_macos_profile(provider);
+            let rendered = render_macos_profile(
+                provider,
+                &super::super::rights_table::for_provider(provider),
+            );
             let mut parameters = BTreeSet::new();
             for argument in path_arguments(&rendered) {
                 if argument == "\"/\"" {
