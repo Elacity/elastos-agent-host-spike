@@ -611,6 +611,9 @@ impl Drop for BrokerTasks {
 struct ForkChild {
     pid: libc::pid_t,
     status: oneshot::Receiver<i32>,
+    /// True once the status was received; the waitpid task has reaped the pid,
+    /// so `Drop` must not signal it again.
+    reaped: bool,
 }
 
 impl ForkChild {
@@ -630,14 +633,18 @@ impl ForkChild {
             }
             let _ = sender.send(word);
         });
-        Self { pid, status }
+        Self {
+            pid,
+            status,
+            reaped: false,
+        }
     }
 }
 
 impl Drop for ForkChild {
     fn drop(&mut self) {
-        // A resolved status means the waitpid task already reaped the pid.
-        if self.status.try_recv().is_err() {
+        // A received status means the waitpid task already reaped the pid.
+        if !self.reaped && self.status.try_recv().is_err() {
             unsafe {
                 libc::kill(self.pid, libc::SIGKILL);
             }
@@ -723,17 +730,6 @@ fn pipe_pair() -> Result<(OwnedFd, OwnedFd), BridgeError> {
     unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
 }
 
-fn nonblocking(file: std::fs::File) -> std::fs::File {
-    let fd = file.as_raw_fd();
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-    }
-    file
-}
-
 impl ProviderBridge {
     async fn force_child_reap(
         child: &mut Child,
@@ -793,8 +789,14 @@ impl ProviderBridge {
             )));
         };
         let created = create_storage_root(storage_root)?;
-        let (stdin_read, to_child) = pipe_pair()?;
-        let (from_child, stdout_write) = pipe_pair()?;
+        let discard_created_root = |error: BridgeError| {
+            if created {
+                let _ = std::fs::remove_dir(storage_root);
+            }
+            error
+        };
+        let (stdin_read, to_child) = pipe_pair().map_err(discard_created_root)?;
+        let (from_child, stdout_write) = pipe_pair().map_err(discard_created_root)?;
         let stdio = super::os_entry::ChildStdio {
             stdin: stdin_read.as_raw_fd(),
             stdout: stdout_write.as_raw_fd(),
@@ -814,8 +816,8 @@ impl ProviderBridge {
         drop(stdin_read);
         drop(stdout_write);
 
-        let to_child = nonblocking(std::fs::File::from(launched.to_child));
-        let from_child = nonblocking(std::fs::File::from(launched.from_child));
+        let to_child = std::fs::File::from(launched.to_child);
+        let from_child = std::fs::File::from(launched.from_child);
         let bridge = Self {
             io: Arc::new(Mutex::new(ProviderIo {
                 writer: Box::new(tokio::fs::File::from_std(to_child)),
@@ -1806,15 +1808,22 @@ impl ProviderBridge {
             let protocol_error = self.protocol_shutdown().await.err();
             let status_error =
                 match tokio::time::timeout(self.shutdown_timeout, &mut fork.status).await {
-                    Ok(Ok(0)) => None,
-                    Ok(Ok(_)) => Some(BridgeError::ProcessExited),
-                    Ok(Err(_)) => Some(BridgeError::ProcessExited),
+                    Ok(status) => {
+                        fork.reaped = status.is_ok();
+                        match status {
+                            Ok(0) => None,
+                            _ => Some(BridgeError::ProcessExited),
+                        }
+                    }
                     Err(_) => {
                         unsafe {
                             libc::kill(fork.pid, libc::SIGKILL);
                         }
                         match tokio::time::timeout(self.shutdown_timeout, &mut fork.status).await {
-                            Ok(_) => Some(BridgeError::Timeout),
+                            Ok(status) => {
+                                fork.reaped = status.is_ok();
+                                Some(BridgeError::Timeout)
+                            }
                             Err(_) => return Err(BridgeError::Timeout),
                         }
                     }
