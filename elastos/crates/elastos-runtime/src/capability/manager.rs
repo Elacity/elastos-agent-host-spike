@@ -699,7 +699,10 @@ impl CapabilityManager {
             .capability_use(&token.id, capsule_id, &token.resource, token.action, false);
         self.audit_log.security_warning(
             "capability_validation_failed",
-            &format!("token {} failed validation: {}", token.id, reason),
+            &format!(
+                "capsule {} presented token {} failed validation: {}",
+                capsule_id, token.id, reason
+            ),
         );
     }
 }

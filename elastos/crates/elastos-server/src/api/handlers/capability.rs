@@ -1169,6 +1169,101 @@ mod tests {
         (body, ids)
     }
 
+    /// A6-R, the live views. A's grant is filed in A's session and its token
+    /// is minted for A. B's session holds its own granted record, settled with
+    /// A's token, as the real bridge would leave it. The all-sessions live view
+    /// lists A's grant once, under A, and B's record is not a live grant of
+    /// B's; B's own view holds B's granted record, and A's view holds A's grant.
+    #[tokio::test]
+    async fn own_grant_set_lists_a_grant_under_a_only_never_under_b() {
+        let state = test_state();
+        let (a, b) = (
+            Session::new_capsule("vm-a".into()),
+            Session::new_capsule("vm-b".into()),
+        );
+        let (a_id, a_token) = grant_in(&state, a.id.as_str(), None, None).await;
+
+        // B's own record holds a leaked copy of A's token. The shell grant
+        // route mints a token for the requesting session instead.
+        let resource = ResourceId::new("elastos://content/publish");
+        let store = &state.pending_store;
+        let b_request = store.create_request(b.id.clone(), resource, Action::Write);
+        let b_request = b_request.await;
+        let b_id = b_request.id.to_string();
+        store
+            .grant_request(&b_id, a_token.clone(), GrantDuration::Session)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .list_requests()
+                .await
+                .iter()
+                .filter(|r| r.is_granted())
+                .count(),
+            2,
+            "both records are granted, so only the live rule drops one"
+        );
+
+        // The all-sessions live view: A's grant once, under A; no row for B.
+        let (mut body, ids) = live_view(&state).await;
+        assert_eq!(ids, vec![a_id.clone()], "only A's grant is live");
+        for entry in body["capabilities"].as_array_mut().unwrap() {
+            entry.as_object_mut().unwrap().remove("granted_at");
+        }
+        assert_eq!(
+            body,
+            json!({ "scope": "all_sessions_live", "capabilities": [{
+                "request_id": a_id.clone(), "session_id": a.id.as_str(),
+                "duration": "session", "resource": "elastos://content/publish",
+                "action": "write" }] }),
+            "A's grant is listed under A and no other session"
+        );
+
+        // B's own view holds B's record and never A's grant. The default
+        // view is main's unchanged granted list, not the live rule: B's
+        // record is granted, so it is listed here even though its token is
+        // A's and cannot validate for B. The live view above is what drops
+        // that record.
+        let query = Query(ListCapabilitiesQuery { scope: None });
+        let b_listed = list_capabilities(State(state.clone()), Extension(b.clone()), query)
+            .await
+            .unwrap()
+            .0;
+        let b_ids: Vec<_> = b_listed
+            .capabilities
+            .iter()
+            .map(|c| c.request_id.clone())
+            .collect();
+        assert!(
+            !b_ids.contains(&a_id),
+            "A's grant is never listed under B: {b_ids:?}"
+        );
+        assert_eq!(
+            b_ids,
+            vec![b_id.clone()],
+            "B's view holds only B's own record"
+        );
+
+        // A's own view holds A's grant.
+        let query = Query(ListCapabilitiesQuery { scope: None });
+        let a_listed = list_capabilities(State(state.clone()), Extension(a.clone()), query)
+            .await
+            .unwrap()
+            .0;
+        let a_ids: Vec<_> = a_listed
+            .capabilities
+            .iter()
+            .map(|c| c.request_id.clone())
+            .collect();
+        assert_eq!(a_ids, vec![a_id], "A's per-session view holds A's grant");
+        assert!(
+            !a_ids.contains(&b_id),
+            "B's record is never listed under A: {a_ids:?}"
+        );
+        assert!(a_listed.scope.is_none(), "the default view names no scope");
+    }
+
     #[tokio::test]
     async fn live_scope_lists_only_live_grants_of_every_session() {
         let start = elastos_common::SecureTimestamp::now().unix_secs;
