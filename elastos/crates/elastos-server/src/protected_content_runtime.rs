@@ -5164,11 +5164,11 @@ async fn verify_runtime_portable_media(
     // The caller may sample its clock before the fresh ensure; walking a dead
     // candidate's connect timeouts can take longer than the receipt's
     // future-skew allowance, so a receipt stamped at completion would read
-    // as "in the future". Verify against the later of the two clocks (a
-    // fixed test clock ahead of wall time is preserved). A viewer open passes
-    // a clock that returns its single operation reading, so the open makes no
-    // second sample; a buy or import passes the live clock.
-    let now_unix_seconds = now_unix_seconds.max(now_clock());
+    // as "in the future". The receipt and the selected nodes are one
+    // verification decision, so this check takes exactly one reading below,
+    // when it verifies, and never earlier than the caller's reading (a
+    // backward step cannot make it verify against a moment before the
+    // operation).
     let trusted_receipt_signer_did =
         crate::collaboration_profile_authority::load_existing_device_did(data_dir)?
             .ok_or_else(|| anyhow::anyhow!("local Runtime device signing key is missing"))?;
@@ -5196,14 +5196,14 @@ async fn verify_runtime_portable_media(
         &decoded.media_identity,
     )
     .await?;
+    let verification_now_unix_seconds = now_unix_seconds.max(now_clock());
     let availability = verify_protected_content_receipt(
         &package.content_cid,
         &manifest,
         &receipt,
         &decoded.media_identity,
         &requirement,
-        // Re-sampled: the refresh above may have walked dead-candidate timeouts.
-        now_unix_seconds.max(now_clock()),
+        verification_now_unix_seconds,
     )?;
     let composition = load_runtime_custody_composition(data_dir, registry.clone())?
         .ok_or_else(|| anyhow::anyhow!(RUNTIME_CUSTODY_COMPOSITION_MISSING_MESSAGE))?;
@@ -5214,8 +5214,7 @@ async fn verify_runtime_portable_media(
         &composition.signed_pool,
         &composition.signed_epoch,
         &composition.signed_committee_authorization,
-        // Re-sampled: the refresh above may have walked dead-candidate timeouts.
-        now_unix_seconds.max(now_clock()),
+        verification_now_unix_seconds,
         &configured_nodes,
     )?;
     let draft = RuntimeMintDraft::new(
@@ -6021,6 +6020,25 @@ fn viewer_open_now() -> u64 {
     crate::auth::now_ts()
 }
 
+/// The wall-clock reading of one later decision inside a viewer open.
+///
+/// The open keeps its single reading for its own expiry decisions, release
+/// window, operation assembly, resume and record stamps. The decisions that
+/// verify a provider-stamped artifact — the availability receipt (stamped when
+/// the fresh `ensure` finishes), each release coordinator response, the
+/// terminal receipt's contributions and the session-open request — take their
+/// own reading when they run instead, and clamp it at the open's reading so a
+/// backward step never verifies against an earlier moment.
+fn viewer_decision_now() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(value) = crate::test_clock::next() {
+            return value;
+        }
+    }
+    crate::auth::now_ts()
+}
+
 pub(crate) async fn open_runtime_custody_viewer(
     data_dir: &Path,
     registry: Arc<ProviderRegistry>,
@@ -6156,7 +6174,7 @@ pub(crate) async fn open_runtime_custody_viewer(
         &listing,
         mint_id,
         now,
-        move || now,
+        viewer_decision_now,
     )
     .await?;
     if fresh_availability.content_cid() != purchase.cid {
@@ -6438,7 +6456,7 @@ pub(crate) async fn open_runtime_custody_viewer(
     let coordinator =
         RuntimeReleaseCoordinator::new(runtime_release_journal(data_dir), runtime_issuer, selected)
             .map_err(release_unavailable!())?
-            .with_response_now(now);
+            .with_response_clock(viewer_decision_now);
     let contributions = match coordinator
         .release(
             &release_wallet_request,
@@ -6504,6 +6522,7 @@ pub(crate) async fn open_runtime_custody_viewer(
         &contributions,
         &composition.signed_epoch,
         now,
+        viewer_decision_now,
     ) {
         Ok(receipt) => receipt,
         Err(_) => {
@@ -6535,6 +6554,10 @@ pub(crate) async fn open_runtime_custody_viewer(
                 anyhow::bail!("local Runtime device signing key is invalid");
             }
         };
+    // The session-open request carries the provider-stamped contributions and
+    // the terminal receipt, so this decision verifies them against its own
+    // reading, never earlier than the open's.
+    let session_now_unix_seconds = now.max(viewer_decision_now());
     let session = match open_viewer_session(
         &decrypt,
         &RuntimeOpenViewerSessionInput {
@@ -6547,7 +6570,7 @@ pub(crate) async fn open_runtime_custody_viewer(
             protected_init_segment: &protected_init,
             signed_node_contributions: &contributions,
             signed_terminal_receipt: &terminal_receipt,
-            now_unix_seconds: now,
+            now_unix_seconds: session_now_unix_seconds,
         },
     )
     .await
@@ -7655,9 +7678,20 @@ fn sign_runtime_terminal_receipt(
     contributions: &[elastos_protected_content_contracts::SignedNodeContributionV1],
     epoch: &SignedCustodyEpochV1,
     now: u64,
+    now_clock: impl Fn() -> u64 + Copy,
 ) -> anyhow::Result<SignedTerminalReceiptV1> {
+    // The contributions were stamped by the providers while the release was in
+    // flight, so this decision verifies them against one reading taken here,
+    // never earlier than the open's reading. `now` still bounds the open's own
+    // windows: `issued_at` below never runs behind the operation's reading and
+    // the receipt never expires after the release request or the
+    // contributions.
+    let receipt_now_unix_seconds = now.max(now_clock());
     let authenticated = operation
-        .verify(operation.statement().runtime_operation_issuer(), now)
+        .verify(
+            operation.statement().runtime_operation_issuer(),
+            receipt_now_unix_seconds,
+        )
         .map_err(release_unavailable!())?;
     let node_set = epoch
         .statement()
@@ -7667,7 +7701,7 @@ fn sign_runtime_terminal_receipt(
         .iter()
         .map(|contribution| {
             authenticated
-                .verify_node_contribution(contribution, &node_set, now)
+                .verify_node_contribution(contribution, &node_set, receipt_now_unix_seconds)
                 .map(|verified| NodeContributionRefV1::from(&verified))
         })
         .collect::<Result<Vec<_>, _>>()

@@ -11022,7 +11022,11 @@ mod route_17_two_person_purchases {
             .unwrap()
     }
 
-    async fn two_person_purchase_fixture(open_clock_step: Option<u64>) -> Route17Fixture {
+    /// `open_clock` scripts the fixture's P open as `(behind, step)`: the
+    /// open's first reading is `now - behind` and every later reading is that
+    /// value plus `step` (a negative step models a backward step). `None`
+    /// leaves the wall clock alone.
+    async fn two_person_purchase_fixture(open_clock: Option<(u64, i64)>) -> Route17Fixture {
         let dir = tempfile::tempdir().unwrap();
         enable_protected_content(dir.path());
         crate::protected_content_runtime::tests::write_device_key(dir.path(), 0x5a);
@@ -11145,13 +11149,16 @@ mod route_17_two_person_purchases {
 
         // P's control: open and read P's own purchased mint while mint A is the
         // published protected object. A caller may script the open's wall-clock
-        // reading so the open can be shown to consume one value under a step.
-        let armed = open_clock_step.map(|step| {
-            let first = crate::auth::now_ts();
-            (
-                crate::test_clock::arm(first, first.saturating_add(step)),
-                first,
-            )
+        // reading so the open can be shown to consume one value for its own
+        // decisions while later decisions read the stepped clock.
+        let armed = open_clock.map(|(behind, step)| {
+            let first = crate::auth::now_ts().saturating_sub(behind);
+            let later = first.saturating_add_signed(step);
+            // The published availability receipt is stamped when the fresh
+            // `ensure` finishes, which is the later reading, so the open's
+            // availability check must read at that time (clamped at `first`).
+            set_mock_published_protected_content_receipt_checked_at(first.max(later));
+            (crate::test_clock::arm(first, later), first)
         });
         let p_open = player_open(&app, &p_player_token, &mint_a_hex, &p.principal_id).await;
         let p_open_reads = crate::test_clock::reads();
@@ -11439,30 +11446,90 @@ mod route_17_two_person_purchases {
         );
     }
 
-    /// The clock steps 120 s forward inside a viewer open. The open must
-    /// consume the single reading it took at its top for every window it
-    /// assembles and verifies, so the response window is derived from that
-    /// one value and the open still completes.
+    /// A steady clock advances 6 s between the open's reading and the
+    /// availability receipt, which is stamped when the fresh `ensure`
+    /// finishes. The open's own windows still derive from the open's reading,
+    /// while availability verification takes its own later reading, so the
+    /// open completes. Feeding availability the open's reading again makes
+    /// this row fail closed on the 5 s future-skew allowance.
     #[cfg(unix)]
     #[tokio::test]
-    async fn route_17_open_reads_the_clock_once_under_a_forward_step() {
+    async fn route_17_open_availability_reads_the_clock_when_it_verifies() {
         let _guard = protected_content_gateway_mock_test_guard().lock().await;
-        let fixture = two_person_purchase_fixture(Some(120)).await;
+        // First reading 6 s behind wall time, later readings at wall time: the
+        // receipt and the provider responses are stamped 6 s after the open's
+        // reading.
+        let fixture = two_person_purchase_fixture(Some((6, 6))).await;
         let first = fixture.p_open_clock.expect("armed open clock");
 
-        assert_eq!(
-            fixture.p_open_reads, 1,
-            "open_runtime_custody_viewer must read the clock once"
-        );
         assert_eq!(fixture.p_open["status"], "ok", "{}", fixture.p_open);
-        // The active session's expiry is the assembled release operation's
-        // expiry, `now + 50`.
+        // The viewer window is still the open's own decision: its reading plus
+        // the unchanged 50 s operation window.
         assert_eq!(
             fixture.p_open["data"]["expires_at"].as_u64(),
             Some(first.saturating_add(50)),
             "the viewer window must derive from the open's single reading"
         );
         assert!(fixture.p_open["data"]["viewer_session_handle"].is_string());
+        // One open reading and one reading per later decision: availability,
+        // two rights responses, one replay-set check, two contributions, one
+        // reconcile, the terminal receipt and the session open.
+        assert_eq!(
+            fixture.p_open_reads, 10,
+            "the open must read once and each later decision must read once"
+        );
+    }
+
+    /// A steady clock advances 12 s between the open's reading and the
+    /// provider decisions, which are stamped while the release is in flight.
+    /// Response validation takes its own reading at validation time, so the
+    /// open completes although every provider stamp is 12 s ahead of the
+    /// operation's reading. Feeding response validation the open's reading
+    /// again makes this row fail closed on the 5 s future-skew allowance.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_open_release_response_reads_the_clock_when_it_validates() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = two_person_purchase_fixture(Some((12, 12))).await;
+        let first = fixture.p_open_clock.expect("armed open clock");
+
+        assert_eq!(fixture.p_open["status"], "ok", "{}", fixture.p_open);
+        // The open's own decisions keep its single reading: record expiry,
+        // the release request and operation assembly use `first`, so the
+        // session still expires at `first + 50`.
+        assert_eq!(
+            fixture.p_open["data"]["expires_at"].as_u64(),
+            Some(first.saturating_add(50)),
+            "the viewer window must derive from the open's single reading"
+        );
+        assert_eq!(
+            fixture.p_open_reads, 10,
+            "the open must read once and each later decision must read once"
+        );
+    }
+
+    /// The wall clock steps 70 s backward after the open's reading. Each later
+    /// decision clamps its own reading at the open's, so no decision ever
+    /// verifies a provider-stamped artifact against a moment before the
+    /// operation: the open still completes. A decision that used the raw
+    /// stepped value would see a 70 s old availability receipt and refuse.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn route_17_open_never_uses_a_reading_behind_its_own() {
+        let _guard = protected_content_gateway_mock_test_guard().lock().await;
+        let fixture = two_person_purchase_fixture(Some((0, -70))).await;
+        let first = fixture.p_open_clock.expect("armed open clock");
+
+        assert_eq!(fixture.p_open["status"], "ok", "{}", fixture.p_open);
+        assert_eq!(
+            fixture.p_open["data"]["expires_at"].as_u64(),
+            Some(first.saturating_add(50)),
+            "the viewer window must derive from the open's single reading"
+        );
+        assert_eq!(
+            fixture.p_open_reads, 10,
+            "every decision must read once even when the step is backward"
+        );
     }
 }
 

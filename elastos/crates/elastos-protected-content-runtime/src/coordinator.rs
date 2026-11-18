@@ -190,7 +190,7 @@ pub struct RuntimeReleaseCoordinator<'a> {
     journal: RuntimeReleaseJournal,
     expected_runtime_issuer: RuntimeOperationIssuerKeyV1,
     selected_providers: Vec<RuntimeSelectedProvider<'a>>,
-    response_now_unix_seconds: Option<u64>,
+    response_clock: Option<fn() -> u64>,
 }
 
 impl<'a> RuntimeReleaseCoordinator<'a> {
@@ -209,27 +209,35 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
             journal,
             expected_runtime_issuer,
             selected_providers,
-            response_now_unix_seconds: None,
+            response_clock: None,
         })
     }
 
-    /// Validate provider responses against the operation's single `now`
-    /// instead of sampling a clock again. The operation's caller takes one
-    /// wall-clock reading per operation and passes it here, so response
-    /// validation cannot split two readings that are compared with each
-    /// other. Statement verification of caller-supplied pre-signed inputs
-    /// still uses the caller's `now`.
+    /// Validate provider responses against a clock read when each response is
+    /// validated, not against the operation's single `now`.
+    ///
+    /// Providers stamp decisions and contributions with their own wall clocks
+    /// while the release call is in flight. Judging a response stamped
+    /// seconds after the operation's `now` by that fixed value fails closed on
+    /// a steady clock, so response validation takes its own reading at the
+    /// moment it validates. The reading is clamped at the operation's `now`,
+    /// so a backward step can never validate a response earlier than the
+    /// operation.
+    ///
+    /// Each decision reads the clock once: all checks of one provider
+    /// response, one replay set or one reconcile offer share one value.
+    /// Statement verification of caller-supplied pre-signed inputs still uses
+    /// the caller's `now`.
     #[must_use]
-    pub fn with_response_now(mut self, response_now_unix_seconds: u64) -> Self {
-        self.response_now_unix_seconds = Some(response_now_unix_seconds);
+    pub fn with_response_clock(mut self, response_clock: fn() -> u64) -> Self {
+        self.response_clock = Some(response_clock);
         self
     }
 
+    /// One reading for the validation decision that follows.
     fn response_validation_now(&self, operation_now_unix_seconds: u64) -> u64 {
-        match self.response_now_unix_seconds {
-            Some(response_now_unix_seconds) => {
-                response_now_unix_seconds.max(operation_now_unix_seconds)
-            }
+        match self.response_clock {
+            Some(clock) => clock().max(operation_now_unix_seconds),
             None => operation_now_unix_seconds,
         }
     }
@@ -369,6 +377,10 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
             .statement()
             .node_set()
             .map_err(|_| RuntimeReleaseCoordinatorError::OperationAuthority)?;
+        // One reading for this reconcile decision: the offer's decisions are
+        // validated against the clock as it is now, never earlier than the
+        // operation.
+        let response_now_unix_seconds = self.response_validation_now(now_unix_seconds);
         let terminal = match offer {
             RuntimeReleaseReconcileOffer::RightsDenied {
                 signed_node_rights_decision,
@@ -377,7 +389,7 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
                     .verify_node_rights_decision(
                         &signed_node_rights_decision,
                         &node_set,
-                        self.response_validation_now(now_unix_seconds),
+                        response_now_unix_seconds,
                     )
                     .map_err(|_| RuntimeReleaseCoordinatorError::ProviderResult)?;
                 if verified.decision() != RightsDecisionV1::Denied {
@@ -394,7 +406,7 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
                     &authenticated,
                     &node_set,
                     &signed_node_contributions,
-                    self.response_validation_now(now_unix_seconds),
+                    response_now_unix_seconds,
                 )?,
             },
         };
@@ -515,11 +527,12 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
                     StartedOperationResolutionMode::ExactResume => continue,
                 },
             };
+            // One reading for this provider's response decision: the request
+            // binding and the signed decision are checked against the same
+            // moment, never earlier than the operation.
+            let response_now_unix_seconds = self.response_validation_now(context.now_unix_seconds);
             if response
-                .validate_against_request_at(
-                    &request,
-                    self.response_validation_now(context.now_unix_seconds),
-                )
+                .validate_against_request_at(&request, response_now_unix_seconds)
                 .is_err()
             {
                 return match context.mode {
@@ -552,11 +565,7 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
             };
             let verified = context
                 .authenticated
-                .verify_node_rights_decision(
-                    &decision,
-                    &node_set,
-                    self.response_validation_now(context.now_unix_seconds),
-                )
+                .verify_node_rights_decision(&decision, &node_set, response_now_unix_seconds)
                 .map_err(|_| RuntimeReleaseCoordinatorError::ProviderResult)?;
             if verified.node_public_key() != provider.node_public_key {
                 return Err(RuntimeReleaseCoordinatorError::ProviderResult);
@@ -616,12 +625,16 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
                     StartedOperationResolutionMode::ExactResume => continue,
                 },
             };
+            // One reading for this provider's contribution decision: the
+            // response binding and the contribution identity are checked
+            // against the same moment, never earlier than the operation.
+            let response_now_unix_seconds = self.response_validation_now(context.now_unix_seconds);
             if response
                 .validate_against_request_at(
                     &request,
                     self.expected_runtime_issuer,
                     provider.node_public_key,
-                    self.response_validation_now(context.now_unix_seconds),
+                    response_now_unix_seconds,
                 )
                 .is_err()
             {
@@ -640,7 +653,7 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
                 &node_set,
                 &contribution,
                 provider.node_public_key,
-                self.response_validation_now(context.now_unix_seconds),
+                response_now_unix_seconds,
             )?;
             contributions.push(contribution);
             if contributions.len() == threshold {
@@ -666,16 +679,18 @@ impl<'a> RuntimeReleaseCoordinator<'a> {
             .iter()
             .map(|provider| provider.node_public_key)
             .collect::<BTreeSet<_>>();
+        if context.replayable_rights_decisions.is_empty() {
+            return Ok(HashMap::new());
+        }
         let mut persisted_by_node =
             HashMap::with_capacity(context.replayable_rights_decisions.len());
+        // One reading for this replay-set decision: every persisted decision
+        // in the set is verified against the same moment.
+        let response_now_unix_seconds = self.response_validation_now(context.now_unix_seconds);
         for decision in context.replayable_rights_decisions {
             let verified = context
                 .authenticated
-                .verify_node_rights_decision(
-                    decision,
-                    node_set,
-                    self.response_validation_now(context.now_unix_seconds),
-                )
+                .verify_node_rights_decision(decision, node_set, response_now_unix_seconds)
                 .map_err(|_| RuntimeReleaseCoordinatorError::ProviderResult)?;
             if verified.decision() != RightsDecisionV1::Allowed {
                 return Err(RuntimeReleaseCoordinatorError::ProviderResult);

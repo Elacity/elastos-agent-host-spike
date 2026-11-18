@@ -6841,7 +6841,7 @@ async fn runtime_release_coordinator_process_two_of_three_success_stops_before_t
         ],
     )
     .unwrap()
-    .with_response_now(crate::auth::now_ts());
+    .with_response_clock(crate::auth::now_ts);
     let wallet_now = crate::auth::now_ts();
     let (wallet_request, wallet_response) = wallet_request_response_for_release_at(
         &operation,
@@ -7549,7 +7549,7 @@ async fn runtime_decrypt_registry_adapter_process_reconstructs_for_prepared_reci
         ],
     )
     .unwrap()
-    .with_response_now(crate::auth::now_ts());
+    .with_response_clock(crate::auth::now_ts);
     let outcome = coordinator
         .release(
             &wallet_request,
@@ -7598,7 +7598,7 @@ async fn runtime_decrypt_registry_adapter_process_reconstructs_for_prepared_reci
         ],
     )
     .unwrap()
-    .with_response_now(crate::auth::now_ts());
+    .with_response_clock(crate::auth::now_ts);
     let replay_outcome = replay_coordinator
         .release(
             &wallet_request,
