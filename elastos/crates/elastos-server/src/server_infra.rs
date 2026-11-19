@@ -2523,6 +2523,7 @@ mod tests {
     #[test]
     fn wallet_refusal_texts_and_os_choice_match_runtime_entry() {
         let runtime = include_str!("../../elastos-runtime/src/provider/os_entry.rs");
+        let server = include_str!("server_infra.rs");
         let unsupported = runtime
             .split_once("const UNSUPPORTED_OS: &str =")
             .unwrap()
@@ -2540,6 +2541,37 @@ mod tests {
         assert_eq!(WALLET_UNSUPPORTED_OS, unsupported);
         assert_eq!(WALLET_MACOS_NO_SPAWN, macos);
 
+        // The three choices must use the Runtime's Linux, macOS and
+        // unsupported-OS cfg arms, in that order.
+        fn cfg_before(source: &str, position: usize) -> String {
+            let start = source[..position].rfind("#[cfg(").unwrap();
+            let end = start + source[start..].find(")]").unwrap() + 2;
+            source[start..end]
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect()
+        }
+        let choices = server
+            .split_once("fn wallet_confinement_refusal()")
+            .unwrap()
+            .1
+            .split_once("/// Create the wallet storage parent")
+            .unwrap()
+            .0;
+        let dispatches: Vec<_> = runtime
+            .match_indices("\nfn dispatch(")
+            .map(|(position, _)| position)
+            .collect();
+        assert_eq!(dispatches.len(), 3);
+        for (choice, dispatch) in [
+            ("        None\n", dispatches[0]),
+            ("Some(WALLET_MACOS_NO_SPAWN)", dispatches[1]),
+            ("Some(WALLET_UNSUPPORTED_OS)", dispatches[2]),
+        ] {
+            let position = choices.find(choice).unwrap();
+            assert_eq!(cfg_before(choices, position), cfg_before(runtime, dispatch));
+        }
+
         let expected = if cfg!(elastos_unsupported_os_check)
             || !cfg!(any(
                 target_os = "macos",
@@ -2555,6 +2587,24 @@ mod tests {
             None
         };
         assert_eq!(wallet_confinement_refusal(), expected);
+    }
+
+    #[test]
+    fn wallet_parent_preparation_uses_real_effective_uid() {
+        let source = include_str!("server_infra.rs");
+        let prepare = source
+            .split_once("fn prepare_wallet_storage_parent(")
+            .unwrap()
+            .1
+            .split_once("\nasync fn start_wallet_provider(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            prepare
+                .matches("tighten_wallet_parent(&directory, unsafe { libc::geteuid() })")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
