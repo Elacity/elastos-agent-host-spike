@@ -11889,6 +11889,228 @@ pub(crate) mod tests {
         panic!("carrier test endpoint never published a direct address");
     }
 
+    /// A stall that ends when the same part is read again. The fixture holds
+    /// one read of a part here; the repeat that production sends after the
+    /// answer budget wakes it, so the hold lasts exactly as long as the
+    /// caller's budget and never races a wall-clock deadline.
+    #[derive(Default)]
+    pub(crate) struct StallGate {
+        released: StdMutex<std::collections::BTreeSet<u64>>,
+        /// Reads held so far, by range start. [`GatedAnswerInvoker`] ends the
+        /// first read's answer budget when this count grows for that part.
+        held: StdMutex<std::collections::BTreeMap<u64, u64>>,
+        notify: tokio::sync::Notify,
+    }
+
+    impl StallGate {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        /// Holds one read of the part at `start` until `release(start)`.
+        async fn hold(&self, start: u64) {
+            *self.held.lock().unwrap().entry(start).or_default() += 1;
+            self.notify.notify_waiters();
+            loop {
+                let notified = self.notify.notified();
+                if self.released.lock().unwrap().remove(&start) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        /// Ends the hold on the part at `start`.
+        fn release(&self, start: u64) {
+            self.released.lock().unwrap().insert(start);
+            self.notify.notify_waiters();
+        }
+
+        /// Reads of the part at `start` held so far.
+        fn holds_at(&self, start: u64) -> u64 {
+            self.held.lock().unwrap().get(&start).copied().unwrap_or(0)
+        }
+
+        /// Waits until the part at `start` is held more than `after` times.
+        async fn hold_after(&self, start: u64, after: u64) {
+            loop {
+                let notified = self.notify.notified();
+                if self.holds_at(start) > after {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    /// The Carrier invoker for the gated stall fixture. It answers bounded
+    /// content reads through the same [`CarrierClient`] production uses, but
+    /// the answer budget belongs to the fixture: the first read of a gated
+    /// part is cut exactly when the holder holds it instead of after a
+    /// wall-clock wait, and every read runs under no wall-clock deadline, so
+    /// a loaded machine cannot cut the repeat that ends the hold.
+    pub(crate) struct GatedAnswerInvoker {
+        inner: Arc<CarrierProviderInvoker>,
+        peer_endpoint: Endpoint,
+        gate: Arc<StallGate>,
+        gated: std::collections::BTreeSet<u64>,
+        peer_clients:
+            tokio::sync::Mutex<std::collections::BTreeMap<iroh::PublicKey, Arc<CarrierClient>>>,
+    }
+
+    impl GatedAnswerInvoker {
+        pub(crate) fn new(
+            inner: Arc<CarrierProviderInvoker>,
+            peer_endpoint: Endpoint,
+            gate: Arc<StallGate>,
+            gated: std::collections::BTreeSet<u64>,
+        ) -> Self {
+            Self {
+                inner,
+                peer_endpoint,
+                gate,
+                gated,
+                peer_clients: tokio::sync::Mutex::new(std::collections::BTreeMap::new()),
+            }
+        }
+
+        async fn client(
+            &self,
+            addr: iroh::EndpointAddr,
+        ) -> std::result::Result<Arc<CarrierClient>, ProviderError> {
+            let peer = addr.id;
+            if let Some(client) = self.peer_clients.lock().await.get(&peer).cloned() {
+                return Ok(client);
+            }
+            let client = self.connect(addr).await?;
+            let mut peers = self.peer_clients.lock().await;
+            Ok(peers.entry(peer).or_insert_with(|| client.clone()).clone())
+        }
+
+        /// A fresh connection. A gated read whose answer budget the fixture
+        /// ended leaves its stream behind on the holder, so its repeat dials
+        /// again instead of sharing that connection.
+        async fn connect(
+            &self,
+            addr: iroh::EndpointAddr,
+        ) -> std::result::Result<Arc<CarrierClient>, ProviderError> {
+            // The fixture's connect budget, not the product's 5 s one.
+            Ok(Arc::new(
+                CarrierClient::connect_known_endpoint(&self.peer_endpoint, addr, 3_600)
+                    .await
+                    .map_err(|err| {
+                        ProviderError::Io(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionAborted,
+                            format!("fixture Carrier connect failed: {err:#}"),
+                        ))
+                    })?,
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderCarrierInvoker for GatedAnswerInvoker {
+        async fn invoke_carrier_provider(
+            &self,
+            route: &ProviderCarrierRoute,
+            invocation: &ProviderInvocation,
+            request: serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, ProviderError> {
+            let ProviderCarrierRoute::ConnectTicket {
+                connect_ticket,
+                peer_did,
+                ..
+            } = route
+            else {
+                return self
+                    .inner
+                    .invoke_carrier_provider(route, invocation, request)
+                    .await;
+            };
+            if !bounded_content_fetch(invocation, &request) {
+                return self
+                    .inner
+                    .invoke_carrier_provider(route, invocation, request)
+                    .await;
+            }
+            let mut endpoints = decode_ticket_endpoints(connect_ticket);
+            if let Some(peer_did) = peer_did.as_deref() {
+                endpoints.retain(|endpoint| carrier_endpoint_matches_peer(endpoint, peer_did));
+            }
+            if endpoints.is_empty() {
+                return Err(ProviderError::Provider(
+                    "fixture Carrier ticket has no reachable endpoint".to_string(),
+                ));
+            }
+            // A gated part's first read ends its answer budget as soon as the
+            // holder holds it; later reads of the same part are not held.
+            let held = request
+                .get("range")
+                .and_then(|range| range.get("start"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|start| self.gated.contains(start));
+            let mut errors = Vec::new();
+            let mut transit = true;
+            for endpoint in endpoints {
+                let peer = endpoint.id;
+                let client = if held.is_some() {
+                    self.connect(endpoint).await
+                } else {
+                    self.client(endpoint).await
+                };
+                let client = match client {
+                    Ok(client) => client,
+                    Err(err) => {
+                        errors.push(err.to_string());
+                        continue;
+                    }
+                };
+                let answer = client.invoke_provider(invocation, request.clone());
+                tokio::pin!(answer);
+                let result = match held {
+                    Some(start) => {
+                        let holds = self.gate.holds_at(start);
+                        tokio::select! {
+                            result = &mut answer => Some(result),
+                            _ = self.gate.hold_after(start, holds) => None,
+                        }
+                    }
+                    None => Some(answer.await),
+                };
+                let Some(result) = result else {
+                    // The holder has this read: production's answer budget
+                    // would pass here, so report the same transit error the
+                    // product reports when its budget passes.
+                    return Err(ProviderError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "fixture answer deadline passed".to_string(),
+                    )));
+                };
+                match result {
+                    Ok(response) => return Ok(response),
+                    Err(err) => {
+                        self.peer_clients.lock().await.remove(&peer);
+                        transit &= err.downcast_ref::<CarrierTransportFailure>().is_some();
+                        errors.push(format!("{err:#}"));
+                    }
+                }
+            }
+            // A read that failed only in transit stays typed as I/O so its
+            // caller may repeat it, as on the product's ticket route.
+            Err(if transit {
+                ProviderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    format!("fixture Carrier read failed: {}", errors.join(" | ")),
+                ))
+            } else {
+                ProviderError::Provider(format!(
+                    "fixture Carrier read failed: {}",
+                    errors.join(" | ")
+                ))
+            })
+        }
+    }
+
     /// How a fixture holder answers reads.
     #[derive(Default)]
     pub(crate) struct HolderBehavior {
@@ -11899,6 +12121,11 @@ pub(crate) mod tests {
         pub(crate) serialized: bool,
         /// Range starts whose first read stalls past the 5 s answer budget.
         pub(crate) stall_once: std::collections::BTreeSet<u64>,
+        /// Range starts whose first read waits for `gate` until the part is
+        /// read again, so a test decides when the stall ends.
+        pub(crate) gate_once: std::collections::BTreeSet<u64>,
+        /// The gate `gate_once` reads wait on.
+        pub(crate) gate: Option<Arc<StallGate>>,
         /// Range starts whose every read stalls past the answer budget.
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
         /// Range starts whose first read the holder refuses.
@@ -11917,6 +12144,8 @@ pub(crate) mod tests {
         pub(crate) delay: Duration,
         pub(crate) serial: Option<tokio::sync::Mutex<()>>,
         pub(crate) stall_once: StdMutex<std::collections::BTreeSet<u64>>,
+        pub(crate) gate_once: StdMutex<std::collections::BTreeSet<u64>>,
+        pub(crate) gate: Option<Arc<StallGate>>,
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
         pub(crate) refuse_once: StdMutex<std::collections::BTreeSet<u64>>,
         pub(crate) refuse_always: std::collections::BTreeSet<u64>,
@@ -11958,6 +12187,14 @@ pub(crate) mod tests {
             self.requests.lock().unwrap().push(logged);
             tokio::time::sleep(self.delay).await;
             let start = request["_runtime_invocation"]["range"]["start"].as_u64();
+            let gated = start.filter(|start| self.gate_once.lock().unwrap().remove(start));
+            if let (Some(start), Some(gate)) = (start, self.gate.as_ref()) {
+                match gated {
+                    // A repeat of a held part ends that hold.
+                    None => gate.release(start),
+                    Some(start) => gate.hold(start).await,
+                }
+            }
             let stalls = start.is_some_and(|start| {
                 self.stall_always.contains(&start) || self.stall_once.lock().unwrap().remove(&start)
             });
@@ -12188,6 +12425,8 @@ pub(crate) mod tests {
                     delay: behavior.delay,
                     serial: behavior.serialized.then(|| tokio::sync::Mutex::new(())),
                     stall_once: StdMutex::new(behavior.stall_once),
+                    gate_once: StdMutex::new(behavior.gate_once),
+                    gate: behavior.gate,
                     stall_always: behavior.stall_always,
                     refuse_once: StdMutex::new(behavior.refuse_once),
                     refuse_always: behavior.refuse_always,

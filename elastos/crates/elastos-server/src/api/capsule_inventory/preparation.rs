@@ -12496,6 +12496,9 @@ server.serve_forever()
             serve: impl FnOnce(&mut std::collections::BTreeMap<String, Vec<u8>>),
         ) -> Self {
             use crate::carrier::tests as carrier_fixture;
+            // A gated fixture owns the answer budget for its part reads.
+            let gate = behavior.gate.clone();
+            let gated = behavior.gate_once.clone();
             let (root, cid, files, registry) = Self::consumer(fail_capacity_at).await;
             let (consumer_sk, consumer_did) = elastos_identity::derive_did(&[seed; 32]);
             let consumer = crate::carrier::start_isolated_carrier_node_with_registry(
@@ -12506,14 +12509,27 @@ server.serve_forever()
             )
             .await
             .unwrap();
-            registry
-                .set_carrier_invoker(Arc::new(
-                    crate::carrier::CarrierProviderInvoker::with_carrier_endpoint_and_registry(
-                        consumer.endpoint.clone(),
-                        Arc::downgrade(&registry),
-                    ),
-                ))
-                .await;
+            let invoker = Arc::new(
+                crate::carrier::CarrierProviderInvoker::with_carrier_endpoint_and_registry(
+                    consumer.endpoint.clone(),
+                    Arc::downgrade(&registry),
+                ),
+            );
+            match gate {
+                Some(gate) => {
+                    registry
+                        .set_carrier_invoker(Arc::new(
+                            crate::carrier::tests::GatedAnswerInvoker::new(
+                                invoker,
+                                consumer.endpoint.clone(),
+                                gate,
+                                gated,
+                            ),
+                        ))
+                        .await;
+                }
+                None => registry.set_carrier_invoker(invoker).await,
+            }
             // The only holder is announced up front; after it fails a read, wait
             // 1 s (not the product's 30 s) for another before reporting failure.
             registry
@@ -12840,12 +12856,17 @@ server.serve_forever()
 
     #[tokio::test]
     async fn model_preparation_repeats_a_part_read_that_stalls_once() {
-        // Two weight parts each stall once past the 5 s holder answer budget.
+        // Each weight part's first read is held by the fixture until that
+        // part is read again. The fixture's invoker owns the answer budget:
+        // it ends the held read as soon as the holder has it, and the repeat
+        // answers under no wall-clock deadline, so neither the stall nor the
+        // repeat depends on how fast the machine settles a timer.
         let stalled = [3 * 65536, 20 * 65536];
         let fixture = SlowHolderPreparation::start(
             103,
             crate::carrier::tests::HolderBehavior {
-                stall_once: stalled.into(),
+                gate_once: stalled.into(),
+                gate: Some(crate::carrier::tests::StallGate::new()),
                 ..Default::default()
             },
             |_| {},
