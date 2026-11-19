@@ -7173,7 +7173,7 @@ mod tests {
     }
 
     /// The probe Agent Host's manifest as it is on disk, unsigned; only its
-    /// asks are read here.
+    /// ceiling is read here.
     fn submit_plan_host_manifest() -> elastos_common::CapsuleManifest {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/components/a5-launch-probe/capsule.json");

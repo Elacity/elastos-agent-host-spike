@@ -14,15 +14,9 @@
   "agent": {
     "kind": "agent"
   },
-  "asks": [
-    {
-      "resource": "localhost://UsersAI/self/*",
-      "actions": ["read", "write"]
-    },
-    {
-      "resource": "elastos://inspect/submit_agent_plan",
-      "actions": ["write"]
-    }
+  "capabilities": [
+    "localhost://UsersAI/self/*",
+    "elastos://inspect/submit_agent_plan"
   ],
   "resources": {
     "memory_mb": 16,
