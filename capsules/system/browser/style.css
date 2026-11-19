@@ -930,6 +930,7 @@ input[type="file"].visually-hidden {
 
 [data-settings="agents"] .pc2-input { display: block; width: min(100%, 24rem); min-width: 0; margin: 4px 0 10px; }
 #agents-list { display: grid; gap: 10px; margin: 8px 0 12px; }
+#agent-allow, #agent-retry { margin-top: 8px; }
 
 .account-list,
 .network-table-card,

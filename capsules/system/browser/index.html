@@ -376,14 +376,17 @@
             <div class="pc2-group"><div class="pc2-group-row">
                 <p id="agents-status" class="pc2-card-sublabel" role="status" aria-live="polite"></p>
                 <div id="agents-list" aria-live="polite"></div>
+                <button id="agent-allow" class="pc2-btn" type="button" hidden>Allow agents on this Home</button>
+                <div id="agent-form" hidden>
                 <label class="pc2-card-label" for="agent-name">Name</label>
                 <input id="agent-name" class="pc2-input" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-label="Agent name">
                 <label class="pc2-card-label" for="agent-host">Agent host</label>
                 <input id="agent-host" class="pc2-input" type="text" maxlength="128" autocomplete="off" spellcheck="false" aria-label="Agent host" value="agent-host">
                 <div class="system-inline-row">
                   <button id="agent-create" class="pc2-btn" type="button">Create agent</button>
-                  <button id="agent-retry" class="pc2-btn pc2-btn-secondary" type="button" hidden>Retry</button>
                 </div>
+                </div>
+                <button id="agent-retry" class="pc2-btn pc2-btn-secondary" type="button" hidden>Retry</button>
             </div></div>
           </section>
         </section>

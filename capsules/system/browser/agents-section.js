@@ -1,5 +1,8 @@
 const OFF = "Off until you turn it on";
 const ON = "On";
+const NOT_BUILT = "agents are not built into this Runtime";
+const NOT_ON = "agents are not turned on for this Home";
+const HOME_OFF = "Agents are off for this Home";
 
 function text(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -8,6 +11,11 @@ function text(value) {
 function reason(error) {
   const found = text(error && error.message).match(/^request failed: \d{3}\s+([\s\S]+)$/);
   return (found && found[1].trim()) || "The Home did not answer.";
+}
+
+function retryable(error) {
+  const code = text(error && error.message).match(/^request failed: (\d{3})\b/);
+  return !code || Number(code[1]) >= 500;
 }
 
 function stateText(agent, pending) {
@@ -25,16 +33,20 @@ function el(doc, tag, className, textContent) {
 }
 
 export function bindAgents(doc, request) {
-  const [listNode, statusNode, nameInput, hostInput, createButton, retryButton] = [
-    "#agents-list", "#agents-status", "#agent-name", "#agent-host", "#agent-create", "#agent-retry",
+  const [listNode, statusNode, formNode, nameInput, hostInput, createButton, allowButton, retryButton] = [
+    "#agents-list", "#agents-status", "#agent-form", "#agent-name", "#agent-host", "#agent-create", "#agent-allow", "#agent-retry",
   ].map((id) => doc.querySelector(id));
-  if (!listNode || !statusNode || !nameInput || !hostInput || !createButton || !retryButton) return { load() {} };
-  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false;
+  if (!listNode || !statusNode || !formNode || !nameInput || !hostInput || !createButton || !allowButton || !retryButton) return { load() {} };
+  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait";
 
   function paint() {
-    statusNode.textContent = failure || (pendingId === "create" ? pendingLabel : "");
+    const banner = failure || (pendingId === "create" || pendingId === "allow" ? pendingLabel : "");
+    statusNode.textContent = banner || (gate === "missing" ? "Agents are not built into this Runtime" : gate === "off" ? HOME_OFF : "");
+    formNode.hidden = gate !== "ready";
+    allowButton.hidden = gate !== "off";
+    allowButton.disabled = busy;
     retryButton.hidden = !retry;
-    createButton.disabled = busy;
+    createButton.disabled = busy || gate !== "ready";
     const rows = agents.map((agent) => {
       const pending = pendingId === agent.agent_id ? pendingLabel : "";
       const state = el(doc, "div", "pc2-card-sublabel", stateText(agent, pending));
@@ -49,7 +61,7 @@ export function bindAgents(doc, request) {
       row.append(copy, button);
       return row;
     });
-    if (!rows.length && !failure && pendingId !== "create") rows.push(el(doc, "p", "pc2-card-sublabel", "You have no agents."));
+    if (gate === "ready" && !rows.length && !failure && pendingId !== "create") rows.push(el(doc, "p", "pc2-card-sublabel", "You have no agents."));
     listNode.replaceChildren(...rows);
   }
 
@@ -63,7 +75,7 @@ export function bindAgents(doc, request) {
       await job();
     } catch (error) {
       failure = reason(error);
-      retry = job;
+      if (retryable(error)) retry = job;
     } finally {
       busy = false;
       pendingId = "";
@@ -73,9 +85,21 @@ export function bindAgents(doc, request) {
   }
 
   async function load() {
-    const body = await request("/api/apps/system/agents");
+    let body;
+    try {
+      body = await request("/api/apps/system/agents");
+    } catch (error) {
+      const why = reason(error);
+      if (why === NOT_BUILT || why === NOT_ON) {
+        gate = why === NOT_ON ? "off" : "missing";
+        agents = [];
+        return;
+      }
+      throw error;
+    }
     if (!body || !Array.isArray(body.agents)) throw new Error("request failed: 502 The Home did not list agents.");
     agents = body.agents;
+    gate = "ready";
   }
 
   function post(id, label, path, body, accept) {
@@ -83,8 +107,9 @@ export function bindAgents(doc, request) {
       pendingId = id;
       pendingLabel = label;
       paint();
-      const reply = await request(path, { method: "POST", body: JSON.stringify(body) });
+      const reply = await request(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
       if (!accept(reply)) throw new Error("request failed: 502 The Home did not confirm that change.");
+      if (id === "create") nameInput.value = "";
       await load();
     };
   }
@@ -107,7 +132,12 @@ export function bindAgents(doc, request) {
     }, (updated) => updated && updated.agent_id === agent.agent_id && updated.active === active);
   }
 
-  createButton.addEventListener("click", () => run(createJob()));
+  function allowJob() {
+    return post("allow", "Allowing", "/api/apps/system/agents/enable", null, (reply) => reply && reply.enabled === true);
+  }
+
+  createButton.addEventListener("click", () => { if (gate === "ready") run(createJob()); });
+  allowButton.addEventListener("click", () => { if (gate === "off") run(allowJob()); });
   retryButton.addEventListener("click", () => run(retry));
   paint();
   return { load: () => run(load) };
