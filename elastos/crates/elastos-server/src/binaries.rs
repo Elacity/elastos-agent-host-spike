@@ -696,33 +696,82 @@ mod tests {
         );
     }
 
-    /// R6 ONLY-MAKER. The needle is built from parts so this file's own text
-    /// never matches it.
+    /// R6 ONLY-MAKER. Needles are built from parts so this file's own text
+    /// never matches them; whitespace is removed before matching.
     #[test]
     fn admitted_provider_has_one_maker_in_binaries_and_no_other_route() {
+        let squash = |text: &str| text.split_whitespace().collect::<String>();
+        let type_open = ["Admitted", "Provider{"].concat();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut sites = BTreeMap::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for path in std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let n = squash(&std::fs::read_to_string(&path).unwrap())
+                        .matches(&type_open)
+                        .count();
+                    if n > 0 {
+                        sites.insert(path.strip_prefix(root).unwrap().to_owned(), n);
+                    }
+                }
+            }
+        }
+        // The struct head and the impl head; any other site is a second literal.
+        assert_eq!(sites, BTreeMap::from([("src/binaries.rs".into(), 2)]));
+
         let source = include_str!("binaries.rs");
-        let struct_head = ["struct ", "AdmittedProvider {"].concat();
-        let impl_head = ["impl ", "AdmittedProvider {"].concat();
-        let literal = ["Ok(Some(Self", " {"].concat();
+        let struct_head = ["struct Admitted", "Provider {"].concat();
         assert_eq!(source.matches(&struct_head).count(), 1);
-        assert_eq!(source.matches(&impl_head).count(), 1);
-        assert_eq!(source.matches(&literal).count(), 1);
+        assert_eq!(
+            source
+                .matches(&["impl Admitted", "Provider {"].concat())
+                .count(),
+            1
+        );
         assert!(!source.contains(&["for ", "Admitted", "Provider"].concat()));
         let at = source.find(&struct_head).unwrap();
-        let above = &source[at.saturating_sub(80)..at];
-        let body = &source[at..];
-        let body = &body[..body.find("\n}\n").unwrap()];
-        assert!(
-            !body.contains("pub ")
-                && !body.contains("Clone")
-                && !body.contains("Serialize")
-                && !above.contains("Clone")
-                && !above.contains("Serialize")
-        );
+        let attributes = &source[source[..at].rfind("\n\n").unwrap()..at];
+        let body = &source[at..][..source[at..].find("\n}\n").unwrap()];
+        assert!(!attributes.contains("derive"), "{attributes}");
+        assert!(!body.contains("pub"), "{body}");
+
+        let self_open = ["Self", "{"].concat();
         let maker = source.find("fn admit_with_bin_dir(").unwrap();
-        let literal_at = source.find(&literal).unwrap();
+        let end = maker + source[maker..].find("\n    }\n").unwrap();
+        assert_eq!(squash(&source[maker..end]).matches(&self_open).count(), 1);
+        let outside = squash(&[&source[..maker], &source[end..]].concat());
+        assert_eq!(
+            outside.matches(&self_open).count(),
+            0,
+            "a Self literal outside the maker"
+        );
+    }
+
+    /// R7 VALIDATE: a manifest that `validate()` refuses is not admitted.
+    #[test]
+    fn admit_refuses_a_manifest_that_does_not_validate() {
+        let (_temp, data_dir, _path) = fixture();
+        let path = data_dir.join("capsules/did-provider/capsule.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("\"rootfs.ext4\"", "\"../rootfs.ext4\"")).unwrap();
+        let error = admit(&data_dir, &BTreeMap::new()).err().expect("refused");
+        assert!(error.to_string().contains("path traversal"), "{error}");
+    }
+
+    /// R8 SIGNER-READ: a Home whose signed release cannot be read is refused.
+    #[test]
+    fn admit_refuses_a_home_whose_release_cannot_be_read() {
+        let (_temp, data_dir, _path) = fixture();
+        std::fs::write(data_dir.join("installation"), b"").unwrap();
+        let error = AdmittedProvider::admit(&data_dir, "did-provider")
+            .err()
+            .expect("refused");
         assert!(
-            maker < literal_at && literal_at < maker + source[maker..].find("\n    }\n").unwrap()
+            error.to_string().contains("No trusted source configured"),
+            "{error}"
         );
     }
 }
