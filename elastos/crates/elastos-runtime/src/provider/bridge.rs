@@ -703,7 +703,15 @@ fn note_reap_wait() {
 fn note_reap_wait() {}
 
 #[cfg(test)]
+fn swap_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().expect("cleanup swap tests")
+}
+
+#[cfg(test)]
 struct HeldUnlinkSwap {
+    dev: u64,
+    ino: u64,
     aside: std::ffi::CString,
     canary: std::ffi::CString,
 }
@@ -712,18 +720,38 @@ struct HeldUnlinkSwap {
 static HELD_UNLINK_SWAP: std::sync::Mutex<Option<HeldUnlinkSwap>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
-fn arm_held_unlink_swap(aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+fn arm_held_unlink_swap(dev: u64, ino: u64, aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
     *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = Some(HeldUnlinkSwap {
+        dev,
+        ino,
         aside: aside.to_owned(),
         canary: canary.to_owned(),
     });
 }
 
-/// Tests can move the live name aside and put another directory there before
-/// the remove. Production returns at once.
 #[cfg(test)]
-fn pause_before_held_unlink(parent: &OwnedFd, _directory: &OwnedFd, name: &std::ffi::CStr) {
-    let Some(swap) = HELD_UNLINK_SWAP.lock().expect("held unlink swap").take() else {
+fn held_unlink_swap_is_armed() -> bool {
+    HELD_UNLINK_SWAP.lock().expect("held unlink swap").is_some()
+}
+
+/// Tests can move the live name aside and put another directory there before
+/// the remove. The swap is for one directory. Production returns at once.
+#[cfg(test)]
+fn pause_before_held_unlink(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) {
+    let Ok(info) = stat_fd(directory.as_raw_fd()) else {
+        return;
+    };
+    let swap = {
+        let mut slot = HELD_UNLINK_SWAP.lock().expect("held unlink swap");
+        if slot
+            .as_ref()
+            .is_some_and(|swap| swap.dev != stat_dev(&info) || swap.ino != stat_ino(&info))
+        {
+            return;
+        }
+        slot.take()
+    };
+    let Some(swap) = swap else {
         return;
     };
     unsafe {
@@ -744,6 +772,225 @@ fn pause_before_held_unlink(parent: &OwnedFd, _directory: &OwnedFd, name: &std::
 
 #[cfg(not(test))]
 fn pause_before_held_unlink(_parent: &OwnedFd, _directory: &OwnedFd, _name: &std::ffi::CStr) {}
+
+#[cfg(test)]
+struct MismatchSwap {
+    dev: u64,
+    ino: u64,
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+    blocker: std::ffi::CString,
+}
+
+#[cfg(test)]
+static MISMATCH_SWAP: std::sync::Mutex<Option<MismatchSwap>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn arm_mismatch_swap(
+    dev: u64,
+    ino: u64,
+    aside: &std::ffi::CStr,
+    canary: &std::ffi::CStr,
+    blocker: &std::ffi::CStr,
+) {
+    *MISMATCH_SWAP.lock().expect("mismatch swap") = Some(MismatchSwap {
+        dev,
+        ino,
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+        blocker: blocker.to_owned(),
+    });
+}
+
+/// Tests can replace the private name after the rename and occupy the public
+/// name. Production returns at once.
+#[cfg(test)]
+fn pause_after_quarantine_rename(
+    parent: &OwnedFd,
+    directory: &OwnedFd,
+    quarantine: &std::ffi::CStr,
+    name: &std::ffi::CStr,
+) {
+    let Ok(info) = stat_fd(directory.as_raw_fd()) else {
+        return;
+    };
+    let swap = {
+        let mut slot = MISMATCH_SWAP.lock().expect("mismatch swap");
+        let matches = slot
+            .as_ref()
+            .is_some_and(|swap| swap.dev == stat_dev(&info) && swap.ino == stat_ino(&info));
+        if !matches {
+            return;
+        }
+        slot.take()
+    };
+    let Some(swap) = swap else {
+        return;
+    };
+    let aside = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            quarantine.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        )
+    };
+    let canary = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            quarantine.as_ptr(),
+        )
+    };
+    let blocker = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.blocker.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    assert_eq!(
+        (aside, canary, blocker),
+        (0, 0, 0),
+        "the identity-check swap could not be arranged"
+    );
+}
+
+#[cfg(not(test))]
+fn pause_after_quarantine_rename(
+    _parent: &OwnedFd,
+    _directory: &OwnedFd,
+    _quarantine: &std::ffi::CStr,
+    _name: &std::ffi::CStr,
+) {
+}
+
+#[cfg(test)]
+struct PrivateUnlinkSwap {
+    dev: u64,
+    ino: u64,
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+}
+
+#[cfg(test)]
+static PRIVATE_UNLINK_SWAP: std::sync::Mutex<Option<PrivateUnlinkSwap>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn arm_private_unlink_swap(dev: u64, ino: u64, aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+    *PRIVATE_UNLINK_SWAP.lock().expect("private unlink swap") = Some(PrivateUnlinkSwap {
+        dev,
+        ino,
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+    });
+}
+
+/// Tests can replace the private name after it has matched the held object.
+/// Production returns at once.
+#[cfg(test)]
+fn pause_before_private_unlink(
+    parent: &OwnedFd,
+    expected: &libc::stat,
+    quarantine: &std::ffi::CStr,
+) {
+    let swap = {
+        let mut slot = PRIVATE_UNLINK_SWAP.lock().expect("private unlink swap");
+        let matches = slot
+            .as_ref()
+            .is_some_and(|swap| swap.dev == stat_dev(expected) && swap.ino == stat_ino(expected));
+        if !matches {
+            return;
+        }
+        slot.take()
+    };
+    let Some(swap) = swap else {
+        return;
+    };
+    let aside = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            quarantine.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        )
+    };
+    let canary = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            quarantine.as_ptr(),
+        )
+    };
+    assert_eq!(
+        (aside, canary),
+        (0, 0),
+        "the private-name swap could not be arranged"
+    );
+}
+
+#[cfg(not(test))]
+fn pause_before_private_unlink(
+    _parent: &OwnedFd,
+    _expected: &libc::stat,
+    _quarantine: &std::ffi::CStr,
+) {
+}
+
+#[cfg(test)]
+struct UnopenedSwap {
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+}
+
+#[cfg(test)]
+static UNOPENED_SWAP: std::sync::Mutex<Option<UnopenedSwap>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn arm_unopened_swap(aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+    *UNOPENED_SWAP.lock().expect("unopened root") = Some(UnopenedSwap {
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+    });
+}
+
+/// Tests can replace a directory this start just created, before it is opened.
+/// Production returns at once.
+#[cfg(test)]
+fn pause_after_creating_root(parent: &OwnedFd, name: &std::ffi::CStr) {
+    let Some(swap) = UNOPENED_SWAP.lock().expect("unopened root").take() else {
+        return;
+    };
+    let aside = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        )
+    };
+    let canary = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    let hidden = unsafe { libc::fchmodat(parent.as_raw_fd(), name.as_ptr(), 0, 0) };
+    assert_eq!(
+        (aside, canary, hidden),
+        (0, 0, 0),
+        "the unopened-root swap could not be arranged"
+    );
+}
+
+#[cfg(not(test))]
+fn pause_after_creating_root(_parent: &OwnedFd, _name: &std::ffi::CStr) {}
 
 impl ForkChild {
     fn start(pid: libc::pid_t) -> Result<Self, BridgeError> {
@@ -1127,18 +1374,54 @@ fn rename_exclusive(parent: &OwnedFd, from: &std::ffi::CStr, to: &std::ffi::CStr
     }
 }
 
+/// Put the private name back on the public name. A failed check does not remove
+/// the private entry: that entry may be a different file.
 fn restore_name(parent: &OwnedFd, quarantine: &std::ffi::CStr, name: &std::ffi::CStr) {
-    if !rename_exclusive(parent, quarantine, name) {
-        unsafe {
-            libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), libc::AT_REMOVEDIR);
-        }
+    let _ = rename_exclusive(parent, quarantine, name);
+}
+
+fn entry_matches(
+    parent: &OwnedFd,
+    name: &std::ffi::CStr,
+    flags: libc::c_int,
+    expected: &libc::stat,
+) -> bool {
+    if flags == libc::AT_REMOVEDIR {
+        let Ok(opened) = open_directory_at(parent, name) else {
+            return false;
+        };
+        let Ok(info) = stat_fd(opened.as_raw_fd()) else {
+            return false;
+        };
+        return same_directory(&info, expected);
     }
+    let Ok(info) = lstat_at(parent, name) else {
+        return false;
+    };
+    same_directory(&info, expected)
+}
+
+/// Remove the private name only when it is still `expected`. A mismatch is
+/// renamed back and left in place.
+fn release_private_name(
+    parent: &OwnedFd,
+    quarantine: &std::ffi::CStr,
+    original: &std::ffi::CStr,
+    flags: libc::c_int,
+    expected: &libc::stat,
+) -> bool {
+    pause_before_private_unlink(parent, expected, quarantine);
+    if !entry_matches(parent, quarantine, flags, expected) {
+        restore_name(parent, quarantine, original);
+        return false;
+    }
+    unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), flags) == 0 }
 }
 
 /// Move `name` to a private sibling, and remove that sibling only when it is
-/// the held directory. `unlinkat` on this kernel accepts `AT_REMOVEDIR` and
-/// rejects every other flag, so the last remove still names the private entry.
-/// The public name is not that argument.
+/// still the held directory. A different directory at the private name is
+/// renamed back. `unlinkat` accepts `AT_REMOVEDIR` and rejects every other
+/// flag, so the remove names the private entry and only after that check.
 fn relocate_held_directory(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) -> bool {
     let Some(quarantine) = private_component() else {
         return false;
@@ -1146,21 +1429,17 @@ fn relocate_held_directory(parent: &OwnedFd, directory: &OwnedFd, name: &std::ff
     if !rename_exclusive(parent, name, &quarantine) {
         return false;
     }
-    let Ok(opened) = open_directory_at(parent, &quarantine) else {
+    pause_after_quarantine_rename(parent, directory, &quarantine, name);
+    let Ok(held) = stat_fd(directory.as_raw_fd()) else {
         restore_name(parent, &quarantine, name);
         return false;
     };
-    let (Ok(opened_info), Ok(held)) = (stat_fd(opened.as_raw_fd()), stat_fd(directory.as_raw_fd()))
-    else {
-        restore_name(parent, &quarantine, name);
-        return false;
-    };
-    if !same_directory(&opened_info, &held) {
+    if !entry_matches(parent, &quarantine, libc::AT_REMOVEDIR, &held) {
         restore_name(parent, &quarantine, name);
         return false;
     }
     remove_children(directory);
-    unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), libc::AT_REMOVEDIR) == 0 }
+    release_private_name(parent, &quarantine, name, libc::AT_REMOVEDIR, &held)
 }
 
 /// Unlink a non-directory only when its dev and inode are still the listed ones.
@@ -1171,15 +1450,11 @@ fn unlink_listed_file(parent: &OwnedFd, name: &std::ffi::CStr, listed: &libc::st
     if !rename_exclusive(parent, name, &quarantine) {
         return false;
     }
-    let Ok(now) = lstat_at(parent, &quarantine) else {
-        restore_name(parent, &quarantine, name);
-        return false;
-    };
-    if !same_directory(&now, listed) {
+    if !entry_matches(parent, &quarantine, 0, listed) {
         restore_name(parent, &quarantine, name);
         return false;
     }
-    unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), 0) == 0 }
+    release_private_name(parent, &quarantine, name, 0, listed)
 }
 
 fn unlink_name_if_held(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) -> bool {
@@ -1221,10 +1496,11 @@ fn create_directory_at(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<bool, 
     }
 }
 
-fn unlink_directory_at(parent: &OwnedFd, name: &std::ffi::CStr) {
-    unsafe {
-        libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR);
-    }
+/// A directory this start created and never opened stays. Removing the name
+/// can remove a different directory.
+fn keep_unopened_root(parent: &OwnedFd, name: &std::ffi::CStr) {
+    // The name stays because this start never opened the directory.
+    let _ = (parent, name);
 }
 
 fn name_is_symlink(parent: &OwnedFd, name: &std::ffi::CStr) -> bool {
@@ -1276,11 +1552,14 @@ fn create_storage_root(storage_root: &Path) -> Result<CreatedStorageRoot, Bridge
     let name_c = std::ffi::CString::new(name.as_bytes())
         .map_err(|_| refused("provider start is refused: the storage root name contains NUL"))?;
     let created = create_directory_at(&parent, &name_c)?;
+    if created {
+        pause_after_creating_root(&parent, &name_c);
+    }
     let directory = match open_directory_at(&parent, &name_c) {
         Ok(directory) => directory,
         Err(error) => {
             if created {
-                unlink_directory_at(&parent, &name_c);
+                keep_unopened_root(&parent, &name_c);
             }
             let symlink = name_is_symlink(&parent, &name_c);
             return Err(match error.raw_os_error() {
@@ -4816,6 +5095,7 @@ mod tests {
     #[test]
     fn a_swap_during_cleanup_keeps_the_name_and_removes_the_opened_directory() {
         use std::os::unix::fs::MetadataExt;
+        let swap_tests = swap_test_lock();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("root");
         std::fs::create_dir(&root).unwrap();
@@ -4833,7 +5113,8 @@ mod tests {
             }
         }
         let _clear = ClearSwap;
-        arm_held_unlink_swap(c"root.opened", c"canary");
+        let info = stat_fd(guard.directory.as_raw_fd()).unwrap();
+        arm_held_unlink_swap(stat_dev(&info), stat_ino(&info), c"root.opened", c"canary");
         drop(guard);
         assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
         assert_eq!(
@@ -4851,6 +5132,156 @@ mod tests {
                 .is_some_and(|name| name.starts_with(".elastos-held-"))
         });
         assert!(!leftover, "cleanup leaves no private name");
+        drop(swap_tests);
+    }
+
+    #[test]
+    fn a_private_name_that_fails_the_identity_check_stays() {
+        use std::os::unix::fs::MetadataExt;
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(temp.path().join("blocker"), b"block").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        let info = stat_fd(guard.directory.as_raw_fd()).unwrap();
+        arm_mismatch_swap(
+            stat_dev(&info),
+            stat_ino(&info),
+            c"root.held",
+            c"canary",
+            c"blocker",
+        );
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *MISMATCH_SWAP.lock().expect("mismatch swap") = None;
+            }
+        }
+        let _clear = Clear;
+        drop(guard);
+        let kept = std::fs::read_dir(temp.path()).unwrap().any(|entry| {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".elastos-held-")
+                && entry.metadata().unwrap().mode() & 0o777 == 0o755
+        });
+        assert!(
+            kept,
+            "a directory that failed the identity check stays under its private name"
+        );
+        assert_eq!(std::fs::read(temp.path().join("root")).unwrap(), b"block");
+        drop(swap_tests);
+    }
+
+    #[test]
+    fn a_swap_of_the_private_name_keeps_the_directory_placed_there() {
+        use std::os::unix::fs::MetadataExt;
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        let info = stat_fd(guard.directory.as_raw_fd()).unwrap();
+        arm_private_unlink_swap(stat_dev(&info), stat_ino(&info), c"root.held", c"canary");
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *PRIVATE_UNLINK_SWAP.lock().expect("private unlink swap") = None;
+            }
+        }
+        let _clear = Clear;
+        drop(guard);
+        assert!(
+            root.is_dir(),
+            "a swap of the private name keeps the directory that was placed there"
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o755
+        );
+        assert!(!temp.path().join("root.held").exists());
+        drop(swap_tests);
+    }
+
+    #[test]
+    fn an_unopened_created_root_leaves_the_directory_now_at_its_name() {
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        arm_unopened_swap(c"root.created", c"canary");
+        struct Clear<'a> {
+            root: &'a Path,
+        }
+        impl Drop for Clear<'_> {
+            fn drop(&mut self) {
+                *UNOPENED_SWAP.lock().expect("unopened root") = None;
+                let _ = std::fs::set_permissions(self.root, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _clear = Clear { root: &root };
+        assert!(
+            create_storage_root(&root).is_err(),
+            "an unopened root must be refused"
+        );
+        assert!(
+            root.is_dir(),
+            "a directory this start never opened stays at the storage root name"
+        );
+        assert!(temp.path().join("root.created").is_dir());
+        drop(swap_tests);
+    }
+
+    #[test]
+    fn a_swap_for_one_root_stays_armed_while_another_root_is_removed() {
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root_a = temp.path().join("root-a");
+        let root_b = temp.path().join("root-b");
+        std::fs::create_dir(&root_a).unwrap();
+        std::fs::create_dir(&root_b).unwrap();
+        std::fs::write(root_a.join("wrote"), b"a").unwrap();
+        std::fs::write(root_b.join("wrote"), b"b").unwrap();
+        std::fs::create_dir(temp.path().join("canary-a")).unwrap();
+        let mut guard_a = create_storage_root(&root_a).unwrap();
+        let mut guard_b = create_storage_root(&root_b).unwrap();
+        guard_a.armed = true;
+        guard_b.armed = true;
+        let info = stat_fd(guard_a.directory.as_raw_fd()).unwrap();
+        arm_held_unlink_swap(stat_dev(&info), stat_ino(&info), c"aside-a", c"canary-a");
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = None;
+            }
+        }
+        let _clear = Clear;
+        drop(guard_b);
+        assert!(
+            held_unlink_swap_is_armed(),
+            "a swap for one directory stays armed while another root is removed"
+        );
+        assert!(!root_b.exists());
+        *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = None;
+        drop(guard_a);
+        drop(swap_tests);
     }
 
     #[tokio::test]
