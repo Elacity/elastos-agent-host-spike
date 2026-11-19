@@ -8144,12 +8144,16 @@ export!(AgentHost);
 #[cfg(test)]
 const RENDERING_FORMAT: u16 = 2;
 
-/// The declared per-step asks, compiled in from `asks.json` in this lane. The
-/// file is an auditable declaration, not the policy check: the Runtime
-/// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
-/// manifest and retires into that one place when the Runtime defines per-step
-/// asks (P10). It is read by this module's tests only, so the shipped guest
-/// keeps no new production path.
+/// The signed manifest. Its `asks` are this guest's maximum.
+#[cfg(test)]
+const MANIFEST_JSON: &str = include_str!("../capsule.json");
+
+#[cfg(test)]
+const CAPSULE_SCHEMA: &str = "elastos.capsule/v1";
+
+#[cfg(test)]
+const MANIFEST_KEYS: &str = " schema name version description author role type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources ";
+
 #[cfg(test)]
 const ASKS_JSON: &str = include_str!("../asks.json");
 
@@ -8381,6 +8385,106 @@ fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
         _ => {}
     }
     None
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestDeclaredAsk {
+    resource: String,
+    actions: Vec<String>,
+}
+
+#[cfg(test)]
+fn manifest_resource_refusal(resource: &str) -> Option<&'static str> {
+    let Some(path) = resource.strip_prefix("localhost://") else {
+        return ask_resource_refusal(resource).or(Some("asks url"));
+    };
+    let Some(rest) = path.strip_prefix("Users/self/") else {
+        return ask_resource_refusal(path).or(Some("asks users path"));
+    };
+    if rest.is_empty() || rest == "*" {
+        return None;
+    }
+    if rest.to_ascii_lowercase().contains("users/") {
+        return Some("asks users path");
+    }
+    let Some(body) = rest.strip_suffix("/*").or_else(|| rest.strip_suffix('/')) else {
+        return Some("asks literal directory");
+    };
+    if body.is_empty() {
+        return None;
+    }
+    ask_resource_refusal(&format!("{body}/"))
+}
+
+#[cfg(test)]
+fn parse_manifest_asks(text: &str) -> Result<Vec<ManifestDeclaredAsk>, &'static str> {
+    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "asks json")?;
+    if repeated_object_key(text).is_some() {
+        return Err("asks duplicate field");
+    }
+    let document = document.as_object().ok_or("asks root")?;
+    if document
+        .keys()
+        .any(|key| !MANIFEST_KEYS.contains(&format!(" {key} ")))
+    {
+        return Err("asks unknown field");
+    }
+    let schema = document.get("schema").ok_or("asks schema missing")?;
+    let schema = schema.as_str().ok_or("asks schema type")?;
+    if schema != CAPSULE_SCHEMA {
+        return Err("asks schema unsupported");
+    }
+    let entries = document.get("asks").ok_or("asks list missing")?;
+    let entries = entries.as_array().ok_or("asks list type")?;
+    if entries.is_empty() {
+        return Err("asks empty");
+    }
+    let mut asks = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry = entry.as_object().ok_or("asks entry")?;
+        if entry
+            .keys()
+            .any(|key| key != "resource" && key != "actions")
+        {
+            return Err("asks entry field");
+        }
+        let actions = entry.get("actions").ok_or("asks actions missing")?;
+        let actions = actions.as_array().ok_or("asks actions type")?;
+        if actions.is_empty() {
+            return Err("asks actions empty");
+        }
+        let mut words = Vec::with_capacity(actions.len());
+        for action in actions {
+            let action = action.as_str().ok_or("asks action type")?;
+            if action == "unspecified" {
+                return Err("asks kind unspecified");
+            }
+            if !matches!(
+                action,
+                "read" | "write" | "execute" | "message" | "delete" | "admin"
+            ) {
+                return Err("asks action unknown");
+            }
+            words.push(action.to_string());
+        }
+        let resource = entry.get("resource").ok_or("asks resource missing")?;
+        let resource = resource.as_str().ok_or("asks resource type")?;
+        if resource.is_empty() {
+            return Err("asks resource empty");
+        }
+        if resource.chars().any(char::is_whitespace) {
+            return Err("asks whitespace");
+        }
+        if let Some(reason) = manifest_resource_refusal(resource) {
+            return Err(reason);
+        }
+        asks.push(ManifestDeclaredAsk {
+            resource: resource.to_string(),
+            actions: words,
+        });
+    }
+    Ok(asks)
 }
 
 /// Parse the declaration with its closed shape: only `schema` and `asks`,
@@ -20345,24 +20449,28 @@ mod tests {
     /// The one manifest row: its resource and the actions on that resource.
     fn manifest_journal_ask() -> (String, Vec<String>) {
         let capsule: serde_json::Value =
-            serde_json::from_str(include_str!("../capsule.json")).expect("capsule.json parses");
+            serde_json::from_str(MANIFEST_JSON).expect("capsule.json parses");
         assert!(
             capsule.get("capabilities").is_none(),
             "the manifest maximum is asks"
         );
-        let asks = capsule["asks"].as_array().expect("the manifest lists asks");
+        let asks = parse_manifest_asks(MANIFEST_JSON)
+            .unwrap_or_else(|reason| panic!("the manifest asks are refused: {reason}"));
         assert_eq!(asks.len(), 1, "the manifest lists one ask");
-        let resource = asks[0]["resource"]
-            .as_str()
-            .expect("an ask names a resource")
-            .to_string();
-        let actions = asks[0]["actions"]
-            .as_array()
-            .expect("an ask lists actions")
-            .iter()
-            .map(|action| action.as_str().expect("an action is a string").to_string())
-            .collect();
-        (resource, actions)
+        let ask = &asks[0];
+        (ask.resource.clone(), ask.actions.clone())
+    }
+
+    #[test]
+    fn the_manifest_ask_refuses_an_unknown_field() {
+        let parsed = parse_manifest_asks(MANIFEST_JSON);
+        assert!(parsed.is_ok(), "the manifest asks parse: {parsed:?}");
+        let text = MANIFEST_JSON.replacen(
+            "\"actions\": [\"write\", \"read\"]",
+            "\"actions\": [\"write\", \"read\"], \"note\": \"extra\"",
+            1,
+        );
+        assert_eq!(parse_manifest_asks(&text).err(), Some("asks entry field"));
     }
 
     /// A pattern that ends in `/*` covers a longer resource under that
