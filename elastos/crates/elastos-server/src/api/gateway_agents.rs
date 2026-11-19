@@ -1,5 +1,5 @@
 //! The owner's agent routes: turn agents on or off for this Home, create,
-//! list and retire. No route here runs an agent.
+//! list, rename and retire. No route here runs an agent.
 //!
 //! Every route makes the same owner check as the System guest-registration
 //! route: a Home launch token for System, on a proof binding that is stored,
@@ -13,6 +13,13 @@ use crate::agents::{Caller, CreateRequest, Refused};
 #[serde(deny_unknown_fields)]
 struct RetireRequest {
     agent_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameRequest {
+    agent_id: String,
+    display_name: String,
 }
 
 /// The checked caller: their token context and their stored admin record.
@@ -124,6 +131,23 @@ pub(super) async fn agents_retire(
             &state.data_dir,
             &owner.caller(),
             &request.agent_id,
+            now_ts(),
+        )
+    }))
+}
+
+pub(super) async fn agents_rename(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    agents_response(agents_owner(&state, &headers).and_then(|owner| {
+        let request: RenameRequest = agents_request(&body)?;
+        crate::agents::rename(
+            &state.data_dir,
+            &owner.caller(),
+            &request.agent_id,
+            &request.display_name,
             now_ts(),
         )
     }))
