@@ -8,6 +8,7 @@ const ENABLE: &str = "/api/apps/system/agents/enable";
 const DISABLE: &str = "/api/apps/system/agents/disable";
 const CREATE: &str = "/api/apps/system/agents/create";
 const RETIRE: &str = "/api/apps/system/agents/retire";
+const RENAME: &str = "/api/apps/system/agents/rename";
 const LIST: &str = "/api/apps/system/agents";
 
 /// Sends one request and returns its status and body text.
@@ -78,7 +79,11 @@ mod off {
             (DISABLE, None),
             (CREATE, Some(create)),
             (LIST, None),
-            (RETIRE, Some(json!({ "agent_id": agent_id }))),
+            (RETIRE, Some(json!({ "agent_id": &agent_id }))),
+            (
+                RENAME,
+                Some(json!({ "agent_id": &agent_id, "display_name": "Helper 2" })),
+            ),
         ];
         for (path, body) in routes {
             assert_eq!(
@@ -169,6 +174,13 @@ mod on {
                 RETIRE,
                 json!({"agent_id": "agent:v2:0123456789abcdef0123456789abcdef"}),
             ),
+            (
+                RENAME,
+                json!({
+                    "agent_id": "agent:v2:0123456789abcdef0123456789abcdef",
+                    "display_name": "Helper 2"
+                }),
+            ),
         ] {
             for token in [&unproved, &guest.system_token] {
                 let answer = call(&app, path, token, Some(body.clone())).await;
@@ -199,6 +211,13 @@ mod on {
             (
                 RETIRE,
                 Some(json!({"agent_id": "agent:v2:0123456789abcdef0123456789abcdef"})),
+            ),
+            (
+                RENAME,
+                Some(json!({
+                    "agent_id": "agent:v2:0123456789abcdef0123456789abcdef",
+                    "display_name": "Helper 2"
+                })),
             ),
         ];
         // The passkey is revoked while its session is left open, so the
@@ -238,6 +257,11 @@ mod on {
         assert_eq!(call(&app, CREATE, token, Some(create_body("r"))).await, off);
         let retire = json!({"agent_id": "agent:v2:0123456789abcdef0123456789abcdef"});
         assert_eq!(call(&app, RETIRE, token, Some(retire)).await, off);
+        let rename = json!({
+            "agent_id": "agent:v2:0123456789abcdef0123456789abcdef",
+            "display_name": "Helper 2"
+        });
+        assert_eq!(call(&app, RENAME, token, Some(rename)).await, off);
         assert!(!agent_file(dir.path()).exists());
     }
 
@@ -295,7 +319,20 @@ mod on {
         );
         assert_eq!(std::fs::read(agent_file(&home.data)).unwrap(), written);
 
-        let retire = json!({ "agent_id": agent_id });
+        let rename = json!({ "agent_id": &agent_id, "display_name": "Helper 2" });
+        let (status, body) = call(&app, RENAME, token, Some(rename.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let renamed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(renamed["agent_id"], agent_id);
+        assert_eq!(renamed["display_name"], "Helper 2");
+        assert_eq!(renamed["retired_at"], Value::Null);
+        let mut unknown = rename;
+        unknown["owner"] = json!("person:local:someone");
+        let (status, text) = call(&app, RENAME, token, Some(unknown)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(text.starts_with("agent request is invalid: "), "{text}");
+
+        let retire = json!({ "agent_id": &agent_id });
         let (status, body) = call(&app, RETIRE, token, Some(retire.clone())).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let retired: Value = serde_json::from_str(&body).unwrap();
@@ -354,6 +391,12 @@ mod on {
         assert_eq!(answer(listed.await).await, not_the_home);
         let retired = agents_retire(state(), headers.clone(), body(json!({"agent_id": "a"})));
         assert_eq!(answer(retired.await).await, not_the_home);
+        let renamed = agents_rename(
+            state(),
+            headers.clone(),
+            body(json!({"agent_id": "a", "display_name": "Helper 2"})),
+        );
+        assert_eq!(answer(renamed.await).await, not_the_home);
         assert_eq!(std::fs::read(agent_file(&home.data)).unwrap(), written);
     }
 
@@ -385,6 +428,11 @@ mod on {
         }
         let retire = json!({"agent_id": "agent:v2:0123456789abcdef0123456789abcdef"});
         assert_eq!(call(&app, RETIRE, token, Some(retire)).await, unavailable);
+        let rename = json!({
+            "agent_id": "agent:v2:0123456789abcdef0123456789abcdef",
+            "display_name": "Helper 2"
+        });
+        assert_eq!(call(&app, RENAME, token, Some(rename)).await, unavailable);
         assert_eq!(std::fs::read(&path).unwrap(), planted, "never rewritten");
         assert_eq!(audit_len(dir.path()), events);
 
