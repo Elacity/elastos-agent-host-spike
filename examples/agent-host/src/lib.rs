@@ -20306,26 +20306,121 @@ mod tests {
         }
     }
 
-    /// The journal ask is exactly the capsule's one declared capability: its
-    /// own task journal root under the launching person. A sibling agent's
-    /// journal stays outside the declaration.
-    #[test]
-    fn the_journal_ask_is_the_capsules_own_root() {
+    /// The one manifest row: its resource and the actions on that resource.
+    fn manifest_journal_ask() -> (String, Vec<String>) {
         let capsule: serde_json::Value =
             serde_json::from_str(include_str!("../capsule.json")).expect("capsule.json parses");
-        let capabilities = capsule["capabilities"]
-            .as_array()
-            .expect("the capsule declares its capabilities");
-        assert_eq!(capabilities.len(), 1, "the capsule declares one capability");
-        let own_root = capabilities[0]
+        assert!(
+            capsule.get("capabilities").is_none(),
+            "the manifest maximum is asks"
+        );
+        let asks = capsule["asks"].as_array().expect("the manifest lists asks");
+        assert_eq!(asks.len(), 1, "the manifest lists one ask");
+        let resource = asks[0]["resource"]
             .as_str()
-            .expect("a capability is a string")
+            .expect("an ask names a resource")
+            .to_string();
+        let actions = asks[0]["actions"]
+            .as_array()
+            .expect("an ask lists actions")
+            .iter()
+            .map(|action| action.as_str().expect("an action is a string").to_string())
+            .collect();
+        (resource, actions)
+    }
+
+    /// A pattern that ends in `/*` covers a longer resource under that
+    /// directory. The listed actions are the ones that row allows.
+    fn journal_manifest_ask_fits(
+        pattern: &str,
+        actions: &[&str],
+        resource: &str,
+        action: &str,
+    ) -> bool {
+        let covered = match pattern.strip_suffix("/*") {
+            Some(root) => {
+                let prefix = format!("{root}/");
+                resource.starts_with(&prefix)
+                    && resource.len() > prefix.len()
+                    && !resource
+                        .split('/')
+                        .any(|segment| segment == ".." || segment == ".")
+            }
+            None => resource == pattern,
+        };
+        covered && actions.contains(&action)
+    }
+
+    /// Stores each grant request the guest makes.
+    struct GrantRequestLog {
+        calls: Vec<(String, String)>,
+    }
+
+    impl ResourceBus for GrantRequestLog {
+        fn request_grant(
+            &mut self,
+            resource: &str,
+            action: &str,
+            _reason: &str,
+        ) -> Result<String, BusFailure> {
+            self.calls.push((action.to_string(), resource.to_string()));
+            Ok(action.to_string())
+        }
+
+        fn invoke(
+            &mut self,
+            _resource: &str,
+            _operation: &str,
+            _body: &[u8],
+            _grant: &str,
+        ) -> Result<Vec<u8>, BusFailure> {
+            Err(BusFailure::Denied)
+        }
+    }
+
+    /// The running guest asks for write, then read, on its own journal. Both
+    /// requests fit the manifest row. A sibling agent's journal stays outside
+    /// that row. The row is a maximum: approval still decides the grant.
+    #[test]
+    fn the_two_journal_requests_fit_the_manifest_asks() {
+        let cursor = journal_cursor("agent-host", "demo").expect("the guest's journal id");
+        let mut bus = GrantRequestLog { calls: Vec::new() };
+        let _grants = request_journal_grants(&mut bus, &cursor);
+        assert_eq!(
+            bus.calls,
+            vec![
+                ("write".to_string(), cursor.resource.clone()),
+                ("read".to_string(), cursor.resource.clone()),
+            ]
+        );
+        let (pattern, actions) = manifest_journal_ask();
+        let listed: Vec<&str> = actions.iter().map(String::as_str).collect();
+        assert_eq!(listed, ["write", "read"]);
+        for (action, resource) in &bus.calls {
+            assert!(
+                journal_manifest_ask_fits(&pattern, &listed, resource, action),
+                "{action} {resource} is outside the manifest ask {pattern} {listed:?}"
+            );
+        }
+        let other = journal_resource("other-agent", "demo").expect("a sibling journal id");
+        assert!(
+            !journal_manifest_ask_fits(&pattern, &listed, &other, "write"),
+            "the manifest ask stays on this guest's journal"
+        );
+    }
+
+    /// The lane-local journal row names this capsule's own root, the same root
+    /// the manifest ask names. A sibling agent's journal stays outside that row.
+    #[test]
+    fn the_journal_ask_is_the_capsules_own_root() {
+        let (resource, _) = manifest_journal_ask();
+        let own_root = resource
             .strip_suffix('*')
-            .expect("the capability ends with a directory wildcard");
+            .expect("the ask resource ends with a directory wildcard");
         let journal = declared_asks()
             .iter()
             .find(|ask| ask.kind == ProposalKind::JournalAppend)
-            .expect("the declaration declares the journal append");
+            .expect("the lane-local list names the journal append");
         let declared = format!(
             "localhost://{}",
             journal.pattern.replacen(PRINCIPAL_MARKER, "Users/self", 1)
@@ -20336,7 +20431,7 @@ mod tests {
                 ProposalKind::JournalAppend,
                 "localhost://Users/self/.AppData/Agents/other-agent/tasks/t/journal"
             ),
-            "the journal ask names this capsule's own root only"
+            "the journal row names this capsule's own root"
         );
     }
 
