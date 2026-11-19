@@ -1354,6 +1354,37 @@ fn staged_support_recovers_interrupted_activation_and_preserves_owner_data() {
     }
 }
 
+/// A support folder that is a component capsule keeps the Home's record of
+/// the walk CID of the bytes the transaction verified, so a start after the
+/// update reads an accepted folder.
+#[test]
+fn finished_restart_records_support_capsule_folders() {
+    let fixture = RestartFixture::new();
+    let destination = fixture.data.join("capsules/probe");
+    let manifest = br#"{"schema":"elastos.capsule/v1","version":"0.1.0","name":"probe","role":"app","type":"wasm","entrypoint":"probe.wasm"}"#;
+    let candidate = fixture.root.path().join("candidate-probe");
+    fs::create_dir_all(candidate.join("probe")).unwrap();
+    write_new(&candidate.join("probe/capsule.json"), manifest, 0o644).unwrap();
+    write_new(&candidate.join("probe/probe.wasm"), b"\0asm\x01", 0o644).unwrap();
+    let writer = fixture.writer();
+    prepare_release(&writer);
+    writer
+        .prepare_support(&[(PathBuf::from("capsules"), candidate)])
+        .unwrap();
+    writer.prepare_restart(restart_plan()).unwrap();
+    writer.commit_checked(|| Ok(())).unwrap();
+    let candidate_start = started(&writer, false);
+    writer
+        .record_ready(&candidate_start.generation, CANDIDATE_PID)
+        .unwrap();
+    writer.finish_restart().unwrap();
+    assert_eq!(
+        crate::setup::recorded_install_cid(&fixture.data, &destination),
+        Some(crate::stage_cmd::bundle_cid(&destination).unwrap()),
+        "the finished update leaves the Home's record of the installed folder"
+    );
+}
+
 #[test]
 fn staged_support_refuses_paths_outside_owned_assets_and_overlapping_runtime() {
     for path in [

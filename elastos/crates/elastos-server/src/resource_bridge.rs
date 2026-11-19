@@ -6507,9 +6507,18 @@ mod tests {
         let manifest: elastos_common::CapsuleManifest =
             serde_json::from_str(include_str!("../../../../examples/agent-host/capsule.json"))
                 .unwrap();
+        manifest
+            .validate()
+            .expect("the agent host manifest validates");
         assert_eq!(
             manifest.resource_authority_bounds(),
-            vec!["localhost://Users/self/.AppData/Agents/agent-host/*".to_string()]
+            vec![elastos_common::AuthorityBound {
+                resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
+                actions: Some(vec![
+                    elastos_common::AskAction::Write,
+                    elastos_common::AskAction::Read,
+                ]),
+            }]
         );
         let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
         ctx.manifest_capabilities = manifest.resource_authority_bounds();
@@ -6541,7 +6550,7 @@ mod tests {
                 "localhost://Users/self/.AppData/Agents",
                 "manifest_capability_denied",
             ),
-            (journal_self, "capability_denied"),
+            (journal_self, "manifest_capability_denied"),
         ] {
             for grant in &grants {
                 let line = serde_json::json!({
@@ -6578,8 +6587,8 @@ mod tests {
             };
             assert_eq!(asked["response"]["code"], expected, "{uri}");
         }
-        // No request can obtain a delete grant in the area any more. Even a
-        // Delete token minted directly is refused by the Agents rule when used.
+        // Delete is outside the ask's actions, so the manifest refuses the
+        // invoke. The provider sees no request.
         let delete = bridge_token(&ctx, &journal, Action::Delete);
         let line = serde_json::json!({
             "id": 70,
@@ -6593,7 +6602,7 @@ mod tests {
         })
         .to_string();
         let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
-        assert_eq!(response["response"]["code"], "operation_not_allowed");
+        assert_eq!(response["response"]["code"], "manifest_capability_denied");
         assert!(provider.requests().await.is_empty());
         assert!(journal_path(&temp, &journal).is_file());
         assert!(temp.path().join("Users").is_dir());
