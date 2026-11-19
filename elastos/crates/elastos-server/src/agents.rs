@@ -1,7 +1,8 @@
 //! Agents that belong to one person.
 //!
 //! An owner turns agents on for their Home, then creates, lists, renames and
-//! retires them. Nothing in this module runs an agent.
+//! retires them, and turns one agent on or off. Nothing in this module runs
+//! an agent.
 //!
 //! Agent records are kept in their own file,
 //! `ElastOS/System/Auth/agent-records.json`. The owner's sign-in file never
@@ -1057,7 +1058,8 @@ pub(crate) fn set_active(
 
 /// One stored agent of `owner_id`, for a launch. Every gate applies before a
 /// record leaves this module: the build, the Home's stored choice, a stored
-/// person as the owner, the agent's own owner, and its retirement.
+/// person as the owner, the agent's own owner, its retirement, and whether
+/// its owner has turned this agent on.
 pub(crate) fn stored_agent(
     data_dir: &Path,
     owner_id: &str,

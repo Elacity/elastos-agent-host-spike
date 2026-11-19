@@ -1,5 +1,6 @@
 //! The owner's agent routes: turn agents on or off for this Home, create,
-//! list, rename and retire. No route here runs an agent.
+//! list, rename, retire, and turn one agent on or off. No route here runs an
+//! agent.
 //!
 //! Every route makes the same owner check as the System guest-registration
 //! route: a Home launch token for System, on a proof binding that is stored,

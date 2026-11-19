@@ -508,6 +508,103 @@ mod on {
     }
 
     #[tokio::test]
+    async fn another_admin_cannot_turn_on_someone_elses_agent() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "other-admin").await;
+        let data = &installed.home.data;
+        let other = passkey_authority_with_name_role_credential(
+            data,
+            Some("Other Admin"),
+            crate::auth::RuntimePrincipalRole::Admin,
+            "gateway-test-other-admin-passkey",
+        );
+        crate::auth::store_test_principal_root_protection(data, &other.principal_id);
+        let stored =
+            crate::auth::load_principal_for_proof_binding(data, &other.proof_binding_id).unwrap();
+        assert!(crate::auth::is_admin(&stored));
+        assert_ne!(stored.principal_id, installed.owner.principal_id);
+        let owner = installed.owner.principal_id.as_str();
+        let dir = data.join("capsules").join(AGENT_HOST);
+        let launch = || {
+            crate::agent_admission::admit_launch(
+                data,
+                data,
+                Some(owner),
+                Some(&agent_id),
+                crate::agent_admission::walk_launch(&dir).unwrap(),
+            )
+        };
+        let on = json!({ "agent_id": &agent_id, "active": true });
+        let answer = call(&installed.app, ACTIVATE, &other.system_token, Some(on)).await;
+        let launch_text = match launch() {
+            Ok(_) => "launch admitted".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(
+            (answer.0, answer.1, launch_text),
+            (
+                StatusCode::CONFLICT,
+                "the caller owns no agent with that id".to_string(),
+                crate::agents::NOT_ACTIVE.to_string(),
+            ),
+            "another_admin_cannot_turn_on_someone_elses_agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_turns_agent_off_again() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "off-again").await;
+        let data = &installed.home.data;
+        let owner = installed.owner.principal_id.as_str();
+        let dir = data.join("capsules").join(AGENT_HOST);
+        let launch = |id: &str| {
+            crate::agent_admission::admit_launch(
+                data,
+                data,
+                Some(owner),
+                Some(id),
+                crate::agent_admission::walk_launch(&dir).unwrap(),
+            )
+        };
+        let token = &installed.owner.system_token;
+        assert_eq!(
+            call(
+                &installed.app,
+                ACTIVATE,
+                token,
+                Some(json!({ "agent_id": &agent_id, "active": true }))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(launch(&agent_id).unwrap().unwrap().actor(), agent_id);
+        let on_file: Value =
+            serde_json::from_slice(&std::fs::read(agent_file(data)).unwrap()).unwrap();
+        assert!(on_file["agents"][0].get("active").is_none());
+        assert_eq!(
+            call(
+                &installed.app,
+                ACTIVATE,
+                token,
+                Some(json!({ "agent_id": &agent_id, "active": false }))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            launch(&agent_id).unwrap_err().to_string(),
+            crate::agents::NOT_ACTIVE,
+            "owner_turns_agent_off_again"
+        );
+        let off_file: Value =
+            serde_json::from_slice(&std::fs::read(agent_file(data)).unwrap()).unwrap();
+        assert_eq!(off_file["agents"][0]["active"], json!(false));
+    }
+
+    #[tokio::test]
     async fn agent_cannot_activate_itself() {
         let installed = installed_home();
         let agent_id = create_agent(&installed, "self-1").await;
