@@ -964,6 +964,7 @@ impl Supervisor {
         archive.unpack(staged.path())?;
         std::fs::write(staged.path().join(CACHED_CID_FILE), format!("{}\n", cid))?;
         write_artifact_sha256_receipt(staged.path(), sha256)?;
+        crate::setup::record_install_cid(staged.path(), dest)?;
         let retired = parent.join(format!(".capsule-retired-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&retired);
         if dest.exists() {
@@ -2192,6 +2193,7 @@ mod tests {
                         .trim(),
                     hex::encode(sha2::Sha256::digest(&bytes))
                 );
+                assert_install_cid_names(&dest, &["browser/index.html", "capsule.json"]);
                 // A second open uses the verified package even with Carrier stopped.
                 let ensure =
                     crate::setup::ensure_capsule_component_for_home_launch(data, "chat-room")
@@ -2201,6 +2203,74 @@ mod tests {
                 assert_eq!(supervisor.ensure_capsule("chat-room").await.unwrap(), dest);
             }
         }
+    }
+
+    /// The record beside `dir` holds the walk CID of `dir` now, and that walk
+    /// read exactly the archive's `files` and the two install receipts.
+    fn assert_install_cid_names(dir: &Path, files: &[&str]) -> String {
+        let budget = crate::bundle_admission::BUNDLE_WALK_BUDGET;
+        let walked = elastos_bundle_identity::checked_bundle_within(dir, budget).unwrap();
+        let mut read: Vec<&str> = walked.entries().iter().map(|e| e.path.as_str()).collect();
+        read.sort_unstable();
+        let mut expected = [CACHED_ARTIFACT_SHA_FILE, CACHED_CID_FILE].to_vec();
+        expected.extend_from_slice(files);
+        assert_eq!(read, expected, "the walk read only what the install wrote");
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        let recorded = std::fs::read_to_string(record).expect("the install wrote no record");
+        assert_eq!(recorded.trim(), walked.cid().to_string());
+        walked.cid().to_string()
+    }
+
+    #[tokio::test]
+    async fn capsule_install_records_its_walk_cid_and_a_reinstall_updates_it() {
+        let capsule = include_bytes!("../../../../capsules/chat-room/capsule.json");
+        let data = tempfile::tempdir().unwrap();
+        let cache = data.path().join("capsules/chat-room");
+        let mut recorded = Vec::new();
+        for page in [&b"first"[..], &b"second"[..]] {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for (path, bytes) in [("capsule.json", &capsule[..]), ("browser/index.html", page)] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, path, bytes).unwrap();
+            }
+            let archive = builder.into_inner().unwrap().finish().unwrap();
+            let entry: CapsuleEntry = serde_json::from_value(serde_json::json!({
+                "cid": TEST_SUPERVISOR_CID, "size": archive.len(),
+                "sha256": hex::encode(sha2::Sha256::digest(&archive)),
+            }))
+            .unwrap();
+            let registry = ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: HashMap::new(),
+                capsules: HashMap::from([("chat-room".to_string(), entry)]),
+                profiles: HashMap::new(),
+            };
+            let mut supervisor = Supervisor::new(data.path().to_path_buf(), registry);
+            supervisor.set_provider_registry(
+                registry_with_content_provider(serde_json::json!({"status": "ok",
+                    "data": {"data": base64::engine::general_purpose::STANDARD.encode(&archive)}}))
+                .await,
+            );
+            assert_eq!(supervisor.ensure_capsule("chat-room").await.unwrap(), cache);
+            assert_eq!(
+                std::fs::read(cache.join("browser/index.html")).unwrap(),
+                page
+            );
+            recorded.push(assert_install_cid_names(
+                &cache,
+                &["browser/index.html", "capsule.json"],
+            ));
+        }
+        assert_ne!(
+            recorded[0], recorded[1],
+            "the reinstall kept the first record"
+        );
     }
 
     #[test]
