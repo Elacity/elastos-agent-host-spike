@@ -7172,22 +7172,6 @@ mod tests {
         serde_json::from_slice(&std::fs::read(path).expect("stored record")).unwrap()
     }
 
-    /// The request ids a reader is shown: the pending records whose stored
-    /// principal is that reader, the rule the Inbox listing applies.
-    fn pending_plans_for(data_dir: &Path, reader: &str) -> Vec<String> {
-        submit_record_files(data_dir)
-            .iter()
-            .map(|name| read_submit_record(data_dir, name.trim_end_matches(".json")))
-            .filter(|record| record["status"] == "pending" && record["principal_id"] == reader)
-            .map(|record| {
-                record["request_id"]
-                    .as_str()
-                    .expect("request id")
-                    .to_string()
-            })
-            .collect()
-    }
-
     /// The probe Agent Host's manifest as it is on disk, unsigned; only its
     /// asks are read here.
     fn submit_plan_host_manifest() -> elastos_common::CapsuleManifest {
@@ -7459,8 +7443,8 @@ mod tests {
         assert_eq!(stored["request"]["request"]["owner"], "person:else");
     }
 
-    // Slice 2's Inbox listing shows a pending record to the reader whose id is
-    // its stored principal. The owner must be that principal, not the agent.
+    // The Inbox listing that Inbox, Home's summary and Home events read: the
+    // owner's holds the plan's card, and the agent's own holds none.
     #[tokio::test]
     async fn a15r_bus_plan_card_reaches_owner_not_agent() {
         let Some((home, ctx, _provider, requester, owner)) = submit_agent_plan_context().await
@@ -7468,19 +7452,47 @@ mod tests {
             return assert_refused_without_agents_built().await;
         };
         let response = submit_with_write(&ctx, 78, &submitted_plan(serde_json::json!({}))).await;
-        let request_id = response["response"]["result"]["data"]["request_id"]
+        let data = &response["response"]["result"]["data"];
+        let request_id = data["request_id"]
             .as_str()
-            .unwrap_or_else(|| panic!("a pending plan: {response}"))
-            .to_string();
+            .unwrap_or_else(|| panic!("a pending plan: {response}"));
+        let sha256 = data["request_binding"]["sha256"].as_str().unwrap();
 
+        let owner_listing = crate::api::gateway::inbox_request_entries_for_test(
+            home.path(),
+            &owner,
+            Some(&home.owner.proof_binding_id),
+            crate::auth::PrincipalKind::Human,
+        )
+        .await;
+        let owner_cards: Vec<_> = owner_listing
+            .iter()
+            .filter(|(_, kind, _)| kind == "agent_plan")
+            .collect();
         assert_eq!(
-            pending_plans_for(home.path(), &owner),
-            vec![request_id],
-            "the owner's pending listing holds the plan"
+            owner_cards.len(),
+            1,
+            "the owner's Inbox listing holds the agent-plan card: {owner_listing:?}"
         );
+        let (id, _, body) = owner_cards[0];
+        assert_eq!(id, &format!("agent-plan-request:{request_id}"));
         assert!(
-            pending_plans_for(home.path(), &requester).is_empty(),
-            "the agent's own principal is shown no plan"
+            body.contains(&format!("Binding sha256: {sha256}")),
+            "{body}"
+        );
+
+        let agent_listing = crate::api::gateway::inbox_request_entries_for_test(
+            home.path(),
+            &requester,
+            None,
+            crate::auth::PrincipalKind::Agent,
+        )
+        .await;
+        assert!(
+            agent_listing
+                .iter()
+                .all(|(id, kind, _)| kind != "agent_plan" && !id.contains(request_id)),
+            "the agent's own Inbox listing holds no plan card: {agent_listing:?}"
         );
     }
 
