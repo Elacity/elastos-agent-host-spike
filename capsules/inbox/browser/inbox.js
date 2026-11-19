@@ -125,7 +125,8 @@
         || entry.kind === "service_access_request"
         || entry.kind === "service_access_grant"
         || entry.kind === "hosted_route_decision"
-        || entry.kind === "hosted_route_history";
+        || entry.kind === "hosted_route_history"
+        || entry.kind === "agent_plan";
       return namedRequest ? text || fallback : publicInboxText(text, fallback);
     }
 
@@ -603,7 +604,7 @@
         actions.appendChild(createActionButton("Never", "community-presence-never:" + request, "danger"));
       }
 
-      if (entry.kind !== "browser_internet_request" && entry.kind !== "wallet_approval_request" && entry.kind !== "capability_request" && entry.kind !== "inspect_action_request" && entry.kind !== "external_http_request" && entry.kind !== "hosted_route_decision" && entry.kind !== "hosted_route_history" && entry.kind !== "contact_request" && entry.kind !== "service_access_request" && entry.kind !== "service_access_grant" && entry.kind !== "community_presence_request") {
+      if (entry.kind !== "browser_internet_request" && entry.kind !== "wallet_approval_request" && entry.kind !== "capability_request" && entry.kind !== "inspect_action_request" && entry.kind !== "agent_plan" && entry.kind !== "external_http_request" && entry.kind !== "hosted_route_decision" && entry.kind !== "hosted_route_history" && entry.kind !== "contact_request" && entry.kind !== "service_access_request" && entry.kind !== "service_access_grant" && entry.kind !== "community_presence_request") {
         actions.appendChild(createActionButton("Dismiss", "notification-dismiss:" + entry.id));
       }
     }
@@ -647,7 +648,7 @@
       }
 
       const bodyText = inboxEntryText(entry, "body", "This request needs your review.");
-      const body = entry.kind === "hosted_route_decision" || entry.kind === "hosted_route_history"
+      const body = entry.kind === "hosted_route_decision" || entry.kind === "hosted_route_history" || entry.kind === "agent_plan"
         ? createFactList(bodyText) : document.createElement("p");
       body.classList.add("entry-body");
       if (body.tagName === "P") body.textContent = bodyText;

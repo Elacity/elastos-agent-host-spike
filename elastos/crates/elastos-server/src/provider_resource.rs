@@ -1323,6 +1323,31 @@ mod tests {
         assert_eq!(prod.matches(".effect").count(), 2);
     }
 
+    /// A text guard, not behaviour evidence (review checklist 11). It reads
+    /// the decision function's source text for a `target_os` branch. The
+    /// behaviour evidence is the named `b4r_` rows that Linux CI and macOS CI
+    /// each run.
+    #[test]
+    fn b4r_decision_function_has_no_target_os_text_guard() {
+        let source = include_str!("../../elastos-runtime/src/capability/manager.rs");
+        let start = source.find("pub async fn validate(").unwrap();
+        let end = source.find("pub async fn delegate(").unwrap();
+        assert!(start < end, "the decision function precedes delegate");
+        let window = &source[start..end];
+        assert!(
+            window.len() > 1000,
+            "the scan window names the decision function"
+        );
+        assert!(
+            window.contains("WrongAction"),
+            "the scan window is the action check"
+        );
+        assert!(
+            !window.contains("target_os"),
+            "the decision function text has no target_os branch"
+        );
+    }
+
     /// Each row's outputs are the keys of one serialized success response.
     /// Payload fields stay inside `data`.
     #[test]

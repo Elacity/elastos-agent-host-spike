@@ -1213,9 +1213,10 @@ pub(crate) mod tests {
                 serde_json::to_vec(&manifest).unwrap(),
             )
             .unwrap();
-            // The bytes are final. The stored host CID is the one walk the
-            // Runtime makes of exactly these files; `.elastos-cid` is beside
-            // them and takes no part in it.
+            // The bytes are final: the folder the probe starts is the one an
+            // install recorded here, and the stored host CID is the one walk
+            // the Runtime makes of exactly these files.
+            crate::setup::record_install_cid(&data_dir, &capsule_dir, &capsule_dir);
             let probe_cid = crate::stage_cmd::bundle_cid(&capsule_dir)
                 .expect("the probe host bundle is walkable");
             let agents = names
@@ -1243,7 +1244,10 @@ pub(crate) mod tests {
                     .unwrap()
                     .agent_id
                 })
-                .collect();
+                .collect::<Vec<String>>();
+            for id in &agents {
+                agents::set_active(&data_dir, &caller, id, true, 1).unwrap();
+            }
             // A person's Home launch token is a projection under the Home
             // capsule's authority (`gateway_home_runtime.rs:149`), which is
             // the app the person's sign-in grant authorizes. The Runtime-local
@@ -1345,7 +1349,7 @@ pub(crate) mod tests {
                 proof_binding_id: &record.proof_binding_id,
                 session_id: "session:a5-launch",
             };
-            agents::create(
+            let agent_id = agents::create(
                 &self.data_dir,
                 &caller,
                 &agents::CreateRequest {
@@ -1365,7 +1369,9 @@ pub(crate) mod tests {
                 2,
             )
             .unwrap()
-            .agent_id
+            .agent_id;
+            agents::set_active(&self.data_dir, &caller, &agent_id, true, 2).unwrap();
+            agent_id
         }
 
         /// Writes a signed copy of the probe whose guest spins in `run` and
@@ -2092,6 +2098,393 @@ pub(crate) mod tests {
             assert_eq!(sessions.len(), 1, "one launch for {agent}: {sessions:?}");
             assert!(sessions.contains(session), "the session is {session}");
         }
+    }
+
+    /// Installs the launch probe as this Home's signed Agent Host, under the
+    /// publisher key the release fixture already uses. Create and launch both
+    /// walk this one directory.
+    fn install_probe_as_signed_agent_host() -> crate::installed_release::tests::Fixture {
+        use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+
+        let mut home = crate::installed_release::tests::Fixture::new();
+        let probe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/a5-launch-probe");
+        let wasm = std::fs::read(probe.join("a5-launch-probe.component.wasm")).unwrap();
+        let mut manifest: elastos_common::CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(probe.join("capsule.json")).unwrap()).unwrap();
+        manifest.name = "agent-host".to_string();
+        manifest.signature = None;
+        sign_capsule(
+            &SigningKey::from_bytes(&[71; 32]),
+            &mut manifest,
+            &hash_content(&wasm),
+        )
+        .unwrap();
+        let sha256 = "ab".repeat(32);
+        let cid = "bafkreiagenthost";
+        std::fs::write(
+            home.data.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "external": {"agent-host": {
+                    "install_path": "capsules/agent-host",
+                    "platforms": {(crate::setup::detect_platform()): {
+                        "cid": cid,
+                        "checksum": format!("sha256:{sha256}"),
+                        "extract_path": "capsules/agent-host"
+                    }}
+                }},
+                "capsules": {"agent-host": {"cid": cid, "sha256": sha256}},
+                "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        home.bind_components();
+        let dir = home.data.join("capsules").join("agent-host");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join(&manifest.entrypoint), &wasm).unwrap();
+        std::fs::write(dir.join(".elastos-cid"), format!("{cid}\n")).unwrap();
+        std::fs::write(dir.join(".elastos-artifact-sha256"), &sha256).unwrap();
+        let admitted = crate::agent_admission::verify_agent_host(&home.data, "agent-host")
+            .expect("the installed probe is an admitted Agent Host");
+        assert_eq!(admitted.package().name, "agent-host");
+        assert!(!admitted.package().bundle_cid.is_empty());
+        home
+    }
+
+    /// An admin passkey owner on `data_dir`, with storage protection and a
+    /// System launch token the create route accepts.
+    fn route_owner(
+        data_dir: &std::path::Path,
+    ) -> (String, String, gateway::HomeLaunchTokenContext) {
+        use elastos_runtime::auth::{AuthSessionGrantV1, PasskeyWebAuthnBinding, ProofBinding};
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let now = crate::auth::now_ts();
+        let binding = ProofBinding::passkey_webauthn(PasskeyWebAuthnBinding {
+            credential_id: "u4-route-owner".to_string(),
+            public_key: "gateway-test-public-key".to_string(),
+            sign_count: 1,
+            user_verified: true,
+            origin: "https://elastos.elacitylabs.com".to_string(),
+            rp_id: "elastos.elacitylabs.com".to_string(),
+            created_at: now,
+            last_used_at: now,
+            revoked_at: None,
+        });
+        let principal_id = crate::auth::passkey_credential_principal_id(
+            "elastos.elacitylabs.com",
+            "u4-route-owner",
+        )
+        .unwrap();
+        let principal = crate::auth::upsert_principal_for_binding_as_role_named(
+            data_dir,
+            binding,
+            principal_id,
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("Route owner"),
+            now,
+        )
+        .unwrap();
+        crate::auth::store_test_principal_root_protection(data_dir, &principal.principal_id);
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{}", gateway::uuid_like_token()),
+            session_id: format!("auth:{}", gateway::uuid_like_token()),
+            principal_id: principal.principal_id.clone(),
+            proof_binding_id: principal.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 12 * 60 * 60,
+            apps: vec![
+                gateway::HOME_CAPSULE_ID.to_string(),
+                gateway::SYSTEM_CAPSULE_ID.to_string(),
+            ],
+        };
+        crate::auth::store_session_grant(data_dir, grant.clone()).unwrap();
+        let token = gateway::issue_home_launch_token_for_auth_grant(
+            data_dir,
+            gateway::SYSTEM_CAPSULE_ID,
+            &grant,
+        )
+        .unwrap();
+        let context = gateway::HomeLaunchTokenContext::for_test(
+            principal.principal_id.clone(),
+            grant.session_id,
+            Some(principal.proof_binding_id),
+            grant.grant_id,
+            crate::auth::PrincipalKind::Human,
+        );
+        (principal.principal_id, token, context)
+    }
+
+    async fn post_system(
+        app: &axum::Router,
+        path: &str,
+        token: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, String) {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "localhost")
+            .header("origin", "null")
+            .header("x-elastos-home-token", token)
+            .header("content-type", "application/json")
+            .body(match body {
+                Some(body) => Body::from(body.to_string()),
+                None => Body::empty(),
+            })
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn launch_installed(
+        home: Arc<ProbeLaunch>,
+        dir: std::path::PathBuf,
+        grant: String,
+        agent_id: String,
+    ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
+        launch_capsule(
+            Extension(home.runtime.clone()),
+            Extension(home.audit_log.clone()),
+            Extension(Some(home.data_dir.clone())),
+            Json(LaunchRequest {
+                path: dir.to_string_lossy().into_owned(),
+                principal_id: None,
+                launch_grant: Some(grant),
+                agent_id: Some(agent_id),
+            }),
+        )
+        .await
+    }
+
+    /// U4 row. Two agents are created by `POST /api/apps/system/agents/create`,
+    /// then each is launched by that stored id through `launch_capsule`. Each
+    /// running instance is bound to its own stored id and record, neither
+    /// instance is the other agent's id, and both run the one installed host.
+    /// This base has no per-agent "starts off" gate, so create leaves an agent
+    /// launchable.
+    #[tokio::test]
+    async fn two_route_created_ids_one_host() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home_files = install_probe_as_signed_agent_host();
+        let data_dir = home_files.data.clone();
+        let capsule_dir = data_dir.join("capsules").join("agent-host");
+        let (owner, token, context) = route_owner(&data_dir);
+        let app = crate::api::gateway::gateway_router(crate::api::gateway::GatewayState {
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            carrier_endpoint: None,
+            collaboration_discovery_service: None,
+            browser_internet: Default::default(),
+            identity_manager: Arc::new(std::sync::OnceLock::new()),
+            cache_dir: data_dir.clone(),
+            data_dir: data_dir.clone(),
+        });
+        let enabled = post_system(&app, "/api/apps/system/agents/enable", &token, None).await;
+        assert_eq!(enabled.0, StatusCode::OK, "{}", enabled.1);
+
+        let mut created = Vec::new();
+        for (name, request_id) in [
+            ("Route One", "request-route-1"),
+            ("Route Two", "request-route-2"),
+        ] {
+            let (status, body) = post_system(
+                &app,
+                "/api/apps/system/agents/create",
+                &token,
+                Some(serde_json::json!({
+                    "display_name": name,
+                    "agent_host": "agent-host",
+                    "request_id": request_id
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            created.push(serde_json::from_str::<serde_json::Value>(&body).unwrap());
+        }
+        let a_id = created[0]["agent_id"].as_str().unwrap().to_string();
+        let b_id = created[1]["agent_id"].as_str().unwrap().to_string();
+        assert_ne!(a_id, b_id, "the route minted two ids");
+        assert_eq!(created[0]["agent_host"], created[1]["agent_host"]);
+        assert_eq!(created[0]["agent_host"]["name"], "agent-host");
+        let host_cid = created[0]["agent_host"]["bundle_cid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            !host_cid.is_empty(),
+            "create stored the host's walked bytes"
+        );
+
+        let file = crate::agents::agent_file_path(&data_dir).unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let rows = stored["agents"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "the route wrote two records");
+        for (id, view) in [(&a_id, &created[0]), (&b_id, &created[1])] {
+            let row = rows
+                .iter()
+                .find(|row| row["record"]["principal_id"] == *id)
+                .unwrap_or_else(|| panic!("no stored record for {id}"));
+            let record = &row["record"];
+            assert_eq!(record["principal_id"], *id);
+            assert_eq!(record["owner"], owner);
+            assert_eq!(
+                record["localhost_root"],
+                crate::auth::principal_kind_localhost_root(id, crate::auth::PrincipalKind::Agent)
+            );
+            assert_eq!(record["agent_host_package"], view["agent_host"]);
+            assert!(record["retired_at"].is_null());
+        }
+        assert_ne!(
+            rows[0]["record"]["localhost_root"], rows[1]["record"]["localhost_root"],
+            "each stored record owns its own root"
+        );
+
+        let launch_grant = gateway::issue_home_projection_launch_token_with_context(
+            &data_dir,
+            "agent-host",
+            "agent-host",
+            &context,
+        )
+        .unwrap();
+        let home = Arc::new(
+            ProbeLaunch::over_home(
+                data_dir.clone(),
+                &owner,
+                context.proof_binding_id().unwrap(),
+                context.session_id(),
+                &context,
+                &[],
+            )
+            .await,
+        );
+        assert!(
+            home.agents.is_empty(),
+            "the launch fixture created no agent of its own"
+        );
+
+        let a_home = home.clone();
+        let a_dir = capsule_dir.clone();
+        let a_grant = launch_grant.clone();
+        let a_name = a_id.clone();
+        let a_task =
+            tokio::spawn(async move { launch_installed(a_home, a_dir, a_grant, a_name).await });
+        let a_pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(request) = home.pending_store.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first route-created agent reaches its own bridge call");
+
+        let b_home = home.clone();
+        let b_dir = capsule_dir.clone();
+        let b_grant = launch_grant.clone();
+        let b_name = b_id.clone();
+        let b_task =
+            tokio::spawn(async move { launch_installed(b_home, b_dir, b_grant, b_name).await });
+        let b_launch = tokio::time::timeout(std::time::Duration::from_secs(10), b_task)
+            .await
+            .expect("the second launch returns while the first runs")
+            .expect("the second launch task stays alive");
+        let a_launch = tokio::time::timeout(std::time::Duration::from_secs(10), a_task)
+            .await
+            .expect("the first launch returns")
+            .expect("the first launch task stays alive");
+        assert_eq!(
+            a_launch.as_ref().map(|answer| answer.0.status.as_str()),
+            Ok("starting"),
+            "first route-created launch is bound to its own stored id"
+        );
+        assert_eq!(
+            b_launch.as_ref().map(|answer| answer.0.status.as_str()),
+            Ok("starting"),
+            "second route-created launch is bound to its own stored id"
+        );
+        let a_launch = a_launch.unwrap().0;
+        let b_launch = b_launch.unwrap().0;
+        assert_eq!(a_launch.id, a_pending.session_id.0);
+        assert_ne!(a_launch.id, b_launch.id, "two instances");
+        home.wait_pending(&b_launch.id).await;
+
+        let a_now = home.wait_running(&a_launch.id).await;
+        let b_now = home.wait_running(&b_launch.id).await;
+        assert_eq!(a_now.name, "agent-host");
+        assert_eq!(b_now.name, "agent-host", "both run on the same host");
+        assert_eq!(
+            a_now.principal.as_deref(),
+            Some(a_id.as_str()),
+            "first route-created launch is bound to its own stored id"
+        );
+        assert_eq!(
+            b_now.principal.as_deref(),
+            Some(b_id.as_str()),
+            "second route-created launch is bound to its own stored id"
+        );
+        assert_ne!(
+            a_now.principal.as_deref(),
+            Some(b_id.as_str()),
+            "the first agent does not launch as the second"
+        );
+        assert_ne!(
+            b_now.principal.as_deref(),
+            Some(a_id.as_str()),
+            "the second agent does not launch as the first"
+        );
+
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let a_end = home.wait_ended(&a_launch.id).await;
+        let b_end = home.wait_ended(&b_launch.id).await;
+        grants.abort();
+        for end in [&a_end, &b_end] {
+            assert_eq!(end.status, "stopped");
+            assert_eq!(end.cause.as_deref(), Some("completed"));
+            assert_eq!(end.name, "agent-host");
+        }
+        for (agent, session) in [(&a_id, &a_launch.id), (&b_id, &b_launch.id)] {
+            let sessions: std::collections::BTreeSet<String> = home
+                .invoked(agent)
+                .into_iter()
+                .filter_map(|(session, _, _)| session)
+                .collect();
+            assert_eq!(
+                sessions.iter().cloned().collect::<Vec<_>>(),
+                vec![session.clone()],
+                "{agent} ran only its own launch"
+            );
+        }
+        let other = home.invoked(&a_id);
+        assert!(
+            other
+                .iter()
+                .all(|(session, _, _)| session.as_deref() != Some(b_launch.id.as_str())),
+            "the first agent's calls are not the second launch"
+        );
     }
 
     /// The launch answers `starting` with its session while its guest runs; the
@@ -5284,6 +5677,7 @@ pub(crate) mod tests {
         )
         .unwrap()
         .agent_id;
+        agents::set_active(&data_dir, &caller, &agent, true, 1).unwrap();
 
         // The forged capsule: the stored manifest name and the stored CID in
         // its own `.elastos-cid`, signed by a trusted key, over other code.
@@ -5377,6 +5771,165 @@ pub(crate) mod tests {
                 .all(|event| event.event_type != "component.invoke.completed"),
             "no principal was bound to a bridge call"
         );
+    }
+
+    /// The route reaches the bundle signature check through its by-CID
+    /// fallback for a staged slot. Three files fail it in the three ways it
+    /// can: a signer key that does not decode, a signature that does not
+    /// verify, and a signature by a key this Home does not trust. Each gives
+    /// the one refusal, and each takes the same steps before it.
+    #[tokio::test]
+    async fn the_route_refuses_three_slot_signature_failures_with_the_same_work() {
+        use elastos_compute::providers::ComponentProvider;
+        use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+        use elastos_storage::providers::LocalFSProvider;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let trusted = SigningKey::from_bytes(&[0x62; 32]);
+        runtime
+            .configure_capsule_admission(
+                &data_dir,
+                &[hex::encode(trusted.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+
+        // One component folder this Home records no install for, signed by
+        // the key it trusts.
+        let name = "slot-signature-cases";
+        let folder = temp.path().join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/a5-launch-probe");
+        let wasm = std::fs::read(fixture.join("a5-launch-probe.component.wasm")).unwrap();
+        let mut manifest: elastos_common::CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(fixture.join("capsule.json")).unwrap()).unwrap();
+        manifest.name = name.to_string();
+        manifest.agent = None;
+        manifest.capabilities = Vec::new();
+        sign_capsule(&trusted, &mut manifest, &hash_content(&wasm)).unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(folder.join(&manifest.entrypoint), &wasm).unwrap();
+
+        // The slot the fallback reads: the folder's own bytes, staged under
+        // the CID this Home accepts.
+        let cid = crate::stage_cmd::bundle_cid(&folder).expect("the folder is walkable");
+        let slot_cid: elastos_bundle_identity::LabCid = cid.parse().expect("a CID");
+        let staged = temp.path().join("staged.sig.json");
+        std::fs::write(
+            &staged,
+            crate::bundle_admission::tests::signed(&cid, &trusted),
+        )
+        .unwrap();
+        crate::stage_cmd::stage_bundle(&runtime, &data_dir, &folder, &staged)
+            .await
+            .expect("the slot stages");
+
+        // The shell session's launch token for this folder's capsule.
+        let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
+        let owner = context.principal_id().to_string();
+        crate::auth::store_test_principal_root_protection(&data_dir, &owner);
+        crate::agents::tests::make_admin(&data_dir, &owner);
+        let grant =
+            gateway::issue_home_launch_token_with_context(&data_dir, name, &context).unwrap();
+
+        let stranger = SigningKey::from_bytes(&[0x63; 32]);
+        let by_trusted = crate::bundle_admission::tests::sign_by_hand(
+            &trusted,
+            crate::bundle_admission::BUNDLE_SIGNATURE_DOMAIN,
+            &cid,
+        );
+        let by_stranger = crate::bundle_admission::tests::sign_by_hand(
+            &stranger,
+            crate::bundle_admission::BUNDLE_SIGNATURE_DOMAIN,
+            &cid,
+        );
+        let cases = [
+            (
+                "a signer key that does not decode",
+                crate::bundle_admission::tests::file_for(
+                    &cid,
+                    "did:key:not-a-canonical-key",
+                    &by_trusted,
+                ),
+            ),
+            (
+                "a signature that does not verify",
+                crate::bundle_admission::tests::file_for(
+                    &cid,
+                    &crate::bundle_admission::tests::did(&trusted.verifying_key()),
+                    &by_stranger,
+                ),
+            ),
+            (
+                "a key the Home does not trust",
+                crate::bundle_admission::tests::file_for(
+                    &cid,
+                    &crate::bundle_admission::tests::did(&stranger.verifying_key()),
+                    &by_stranger,
+                ),
+            ),
+        ];
+
+        let signature_path = crate::bundle_admission::bundle_signature_path(&data_dir, &slot_cid);
+        let mut refusals = Vec::new();
+        let mut works = Vec::new();
+        for (case, file) in &cases {
+            std::fs::write(&signature_path, file).unwrap();
+            let _ = crate::bundle_admission::tests::take_signature_check_work();
+            let response = launch_capsule(
+                Extension(runtime.clone()),
+                Extension(audit_log.clone()),
+                Extension(Some(data_dir.clone())),
+                Json(LaunchRequest {
+                    path: folder.to_string_lossy().into_owned(),
+                    principal_id: None,
+                    launch_grant: Some(grant.clone()),
+                    agent_id: None,
+                }),
+            )
+            .await;
+            let (status, message) = match response {
+                Ok(_) => panic!("{case}: the route started the folder"),
+                Err(error) => error,
+            };
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{case}");
+            assert!(message.contains("is not installed"), "{case}: {message}");
+            assert!(message.contains(&cid), "{case}: {message}");
+            refusals.push(message);
+            works.push(crate::bundle_admission::tests::take_signature_check_work());
+        }
+        assert_eq!(
+            refusals[0], refusals[1],
+            "the same refusal for the same folder"
+        );
+        assert_eq!(
+            refusals[1], refusals[2],
+            "the same refusal for the same folder"
+        );
+        let same_work: Vec<&'static str> = vec!["signer key", "signature check", "trust scan"];
+        for (case, work) in cases.iter().map(|(case, _)| case).zip(&works) {
+            assert_eq!(work, &same_work, "{case}: the signature check's steps");
+        }
+        assert!(runtime.list_capsules().await.is_empty(), "nothing started");
     }
 
     /// Round 3, point 3: a record written before the Runtime stored the Agent
@@ -6118,6 +6671,7 @@ pub(crate) mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+        crate::setup::record_install_cid(&data_dir, &dir, &dir);
 
         let grants = grant_probe_requests(pending_store, capability_manager);
         let launched = tokio::time::timeout(

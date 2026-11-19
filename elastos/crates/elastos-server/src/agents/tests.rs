@@ -193,6 +193,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             created_at: 5,
             updated_at: 5,
         },
+        active: true,
     }
 }
 
@@ -1034,6 +1035,36 @@ fn create_one(home: &Home, request_id: &str) -> AgentView {
     create_as(home, &home.caller(), request_id).unwrap()
 }
 
+#[cfg(feature = "prototype-agents")]
+fn create_real(home: &Home, request_id: &str) -> AgentView {
+    create(home.path(), &home.caller(), &request(request_id), admit, 9).unwrap()
+}
+
+#[cfg(feature = "prototype-agents")]
+fn write_agent_note(home: &Home, agent_id: &str) -> (String, String, PathBuf) {
+    let root = crate::auth::principal_stored_localhost_root(Some(home.path()), agent_id).unwrap();
+    let uri = format!("{root}/journal/stable-id.txt");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(home.path(), &uri).unwrap();
+    crate::auth::write_principal_root_object(
+        home.path(),
+        agent_id,
+        &root,
+        &uri,
+        &path,
+        b"agent-owned data",
+    )
+    .unwrap();
+    (root, uri, path)
+}
+
+#[cfg(feature = "prototype-agents")]
+fn assert_agent_note(home: &Home, agent_id: &str, root: &str, uri: &str, path: &Path) {
+    assert_eq!(
+        crate::auth::read_principal_root_object(home.path(), agent_id, root, uri, path).unwrap(),
+        b"agent-owned data"
+    );
+}
+
 /// A second admin person with storage protection, in the same Home.
 fn second_person(home: &Home, principal_id: &str) -> PrincipalRecord {
     crate::auth::store_test_principal_root_protection(home.path(), principal_id);
@@ -1519,6 +1550,126 @@ fn rename_changes_display_name_only() {
     assert_eq!(kept.protection, snapshot.protection);
 }
 
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn stable_id_after_rename_and_reopen() {
+    let home = Home::new();
+    turn_on(&home);
+    let created = create_real(&home, "stable-id-request");
+    let original_id = created.agent_id;
+    let (original_root, uri, path) = write_agent_note(&home, &original_id);
+
+    let renamed =
+        rename(home.path(), &home.caller(), &original_id, "Renamed", 11).expect("rename succeeds");
+    assert_eq!(renamed.agent_id, original_id, "rename keeps the ID");
+
+    let Home { dir, owner: _ } = home;
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    let owner = crate::auth::stored_principal_record(dir.path(), OWNER_ID)
+        .unwrap()
+        .unwrap();
+    let reopened = Home { dir, owner };
+    let [stored] = loaded(&reopened).agents.try_into().unwrap();
+    assert_eq!(stored.record.principal_id, original_id, "reopened ID");
+    assert_eq!(stored.record.localhost_root, original_root, "reopened root");
+    assert_agent_note(&reopened, &original_id, &original_root, &uri, &path);
+}
+
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn owner_recovery_reopens_agent_data() {
+    const ORIGIN: &str = "http://localhost:61180";
+    let dir = tempfile::tempdir().unwrap();
+    let mut identity = elastos_identity::IdentityManager::new(dir.path().into()).unwrap();
+    let secret = crate::auth::random_secret_hex();
+    let admission = crate::auth::OwnerAdmission {
+        origin: ORIGIN,
+        rp_id: "localhost",
+        claimant: &secret,
+        loopback: true,
+    };
+    let (_, options) = crate::auth::begin_owner_enrollment(
+        dir.path(),
+        &mut identity,
+        &admission,
+        "owner",
+        crate::auth::now_ts(),
+    )
+    .unwrap()
+    .unwrap();
+    let response = crate::auth::owner_attestation_for_test(
+        &options.unwrap().public_key.challenge,
+        "localhost",
+        ORIGIN,
+    );
+    let grant = crate::auth::complete_owner_enrollment(
+        dir.path(),
+        &mut identity,
+        &admission,
+        "owner",
+        Some(&response),
+        None,
+        crate::auth::now_ts(),
+    )
+    .unwrap()
+    .unwrap();
+    let owner =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &grant.proof_binding_id).unwrap();
+    let protection =
+        crate::auth::store_test_principal_root_protection(dir.path(), &owner.principal_id);
+    let kit = crate::auth::recovery_kit_from_archive(
+        dir.path(),
+        protection.protectors[0].archive.as_ref().unwrap(),
+    )
+    .unwrap();
+    let home = Home { dir, owner };
+    turn_on(&home);
+    let original_id = create_real(&home, "recovery-request").agent_id;
+    let (original_root, uri, path) = write_agent_note(&home, &original_id);
+    let original_binding = home.owner.proof_binding_id.clone();
+
+    let code = crate::auth::arm_owner_recovery(home.path(), ORIGIN, "localhost", 300).unwrap();
+    let client = crate::auth::OwnerRecoveryClient {
+        origin: ORIGIN,
+        rp_id: "localhost",
+        code: &code,
+    };
+    let options =
+        crate::auth::begin_owner_recovery(home.path(), &mut identity, &client, "recovery").unwrap();
+    let response = crate::auth::passkey_attestation_with_id_for_test(
+        &options.public_key.challenge,
+        "localhost",
+        ORIGIN,
+        b"replacement-passkey",
+    );
+    crate::auth::complete_owner_recovery(
+        home.path(),
+        &mut identity,
+        &client,
+        "recovery",
+        &response,
+        &kit,
+    )
+    .expect("same-Home owner recovery succeeds");
+
+    let owner_id = home.owner.principal_id.clone();
+    let Home { dir, owner: _ } = home;
+    drop(identity);
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    let owner = crate::auth::stored_principal_record(dir.path(), &owner_id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(owner.proof_binding_id, original_binding);
+    let reopened = Home { dir, owner };
+    let [stored] = loaded(&reopened).agents.try_into().unwrap();
+    assert_eq!(stored.record.principal_id, original_id, "recovered ID");
+    assert_eq!(
+        stored.record.localhost_root, original_root,
+        "recovered root"
+    );
+    assert_agent_note(&reopened, &original_id, &original_root, &uri, &path);
+}
+
 #[test]
 fn rename_is_owner_only() {
     let home = Home::new();
@@ -1866,6 +2017,7 @@ fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-1");
+    crate::agents::set_active(home.path(), &home.caller(), &agent.agent_id, true, 10).unwrap();
     let stored = crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id).unwrap();
     assert_eq!(stored.record.principal_id, agent.agent_id);
     assert_eq!(stored.record.owner.as_deref(), Some(OWNER_ID));
@@ -1916,6 +2068,30 @@ fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
             .unwrap_err()
             .to_string(),
         NOT_ENABLED
+    );
+}
+
+/// A file with no `active` field is the shape from before this change.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn existing_agent_records_keep_their_behaviour() {
+    let (host, host_cid) = host_capsule(crate::agent_admission::tests::AGENT_HOST, b"old-record");
+    let (home, agents) = home_with_agents(1, &host_cid);
+    let raw = home.agent_bytes();
+    assert!(!raw.windows(8).any(|window| window == b"\"active\""));
+    assert!(parse_strict(&raw).unwrap().agents[0].active);
+    assert_eq!(
+        admit_walked(
+            home.path(),
+            home.path(),
+            host.path(),
+            Some(OWNER_ID),
+            Some(&agents[0])
+        )
+        .unwrap()
+        .unwrap()
+        .actor(),
+        agents[0]
     );
 }
 
@@ -1981,7 +2157,7 @@ pub(crate) fn home_with_agents(
     crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();
     let agents = (0..count)
         .map(|index| {
-            crate::agents::create(
+            let agent_id = crate::agents::create(
                 home.path(),
                 &caller,
                 &crate::agents::CreateRequest {
@@ -2001,7 +2177,9 @@ pub(crate) fn home_with_agents(
                 1,
             )
             .unwrap()
-            .agent_id
+            .agent_id;
+            crate::agents::set_active(home.path(), &caller, &agent_id, true, 1).unwrap();
+            agent_id
         })
         .collect();
     (home, agents)

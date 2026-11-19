@@ -1451,10 +1451,11 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     assert_eq!(production.matches(".admit_closure_member(").count(), 2);
     assert_eq!(production.matches("admit_bundle_manifest(").count(), 1);
     // The budget of a start is the server's one walk budget and nothing
-    // else: the constant is named once, where the one caller of the observed
-    // form hands it over; what is left starts as that budget; and it is
-    // changed at two places, each of which only takes away from it.
-    assert_eq!(production.matches("BUNDLE_WALK_BUDGET").count(), 1);
+    // else: the start hands it over to its observed form, and the folder
+    // gate's two walks name the same constant. What is left starts as that
+    // budget and is changed at two places, each of which only takes away
+    // from it.
+    assert_eq!(production.matches("BUNDLE_WALK_BUDGET").count(), 3);
     let handed_over = "let budget = bundle_admission::BUNDLE_WALK_BUDGET;\n        \
                        self.run_by_bundle_observed(data_dir, cid, args, principal_id, budget, |_| {})";
     assert_eq!(production.matches(handed_over).count(), 1);
