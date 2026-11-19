@@ -2714,6 +2714,15 @@ pub(crate) fn install_cid_record(dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(dir.with_file_name(record))
 }
 
+/// The CID recorded beside `dir` by an install of it, if one was written.
+/// An absent or unreadable record, and one that holds no CID, give `None`.
+pub(crate) fn recorded_install_cid(dir: &Path) -> Option<String> {
+    let record = install_cid_record(dir).ok()?;
+    let text = fs::read_to_string(record).ok()?;
+    let cid = text.trim();
+    (!cid.is_empty()).then(|| cid.to_string())
+}
+
 /// Records the walk CID of `walked`, its extracted bytes and receipts, as the
 /// install CID of `dir`, the folder the install places them at. The install
 /// goes on when the record cannot be written, and then keeps no record.
