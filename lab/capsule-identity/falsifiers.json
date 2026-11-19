@@ -4257,8 +4257,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        .map(|entry| entry.content.clone())\n",
-          "new": "        .map(|entry| entry.content.clone())\n        .or(Some(Vec::new()))\n"
+          "old": "    if parsed.asks.is_empty() {\n        None\n    } else {\n",
+          "new": "    if parsed.asks.is_empty() {\n        return Some(Vec::new());\n    } else {\n"
         }
       ],
       "tests": [
