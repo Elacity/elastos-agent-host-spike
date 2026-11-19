@@ -193,6 +193,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             created_at: 5,
             updated_at: 5,
         },
+        active: true,
     }
 }
 
@@ -1866,6 +1867,7 @@ fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-1");
+    crate::agents::set_active(home.path(), &home.caller(), &agent.agent_id, true, 10).unwrap();
     let stored = crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id).unwrap();
     assert_eq!(stored.record.principal_id, agent.agent_id);
     assert_eq!(stored.record.owner.as_deref(), Some(OWNER_ID));
@@ -1916,6 +1918,30 @@ fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
             .unwrap_err()
             .to_string(),
         NOT_ENABLED
+    );
+}
+
+/// A file with no `active` field is the shape from before this change.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn existing_agent_records_keep_their_behaviour() {
+    let (host, host_cid) = host_capsule(crate::agent_admission::tests::AGENT_HOST, b"old-record");
+    let (home, agents) = home_with_agents(1, &host_cid);
+    let raw = home.agent_bytes();
+    assert!(!raw.windows(8).any(|window| window == b"\"active\""));
+    assert!(parse_strict(&raw).unwrap().agents[0].active);
+    assert_eq!(
+        admit_walked(
+            home.path(),
+            home.path(),
+            host.path(),
+            Some(OWNER_ID),
+            Some(&agents[0])
+        )
+        .unwrap()
+        .unwrap()
+        .actor(),
+        agents[0]
     );
 }
 
@@ -1981,7 +2007,7 @@ pub(crate) fn home_with_agents(
     crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();
     let agents = (0..count)
         .map(|index| {
-            crate::agents::create(
+            let agent_id = crate::agents::create(
                 home.path(),
                 &caller,
                 &crate::agents::CreateRequest {
@@ -2001,7 +2027,9 @@ pub(crate) fn home_with_agents(
                 1,
             )
             .unwrap()
-            .agent_id
+            .agent_id;
+            crate::agents::set_active(home.path(), &caller, &agent_id, true, 1).unwrap();
+            agent_id
         })
         .collect();
     (home, agents)

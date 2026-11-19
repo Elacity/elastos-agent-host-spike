@@ -22,6 +22,13 @@ struct RenameRequest {
     display_name: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActiveRequest {
+    agent_id: String,
+    active: bool,
+}
+
 /// The checked caller: their token context and their stored admin record.
 struct AgentsOwner {
     context: HomeLaunchTokenContext,
@@ -148,6 +155,23 @@ pub(super) async fn agents_rename(
             &owner.caller(),
             &request.agent_id,
             &request.display_name,
+            now_ts(),
+        )
+    }))
+}
+
+pub(super) async fn agents_activate(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    agents_response(agents_owner(&state, &headers).and_then(|owner| {
+        let request: ActiveRequest = agents_request(&body)?;
+        crate::agents::set_active(
+            &state.data_dir,
+            &owner.caller(),
+            &request.agent_id,
+            request.active,
             now_ts(),
         )
     }))

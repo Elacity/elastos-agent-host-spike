@@ -1243,7 +1243,10 @@ pub(crate) mod tests {
                     .unwrap()
                     .agent_id
                 })
-                .collect();
+                .collect::<Vec<String>>();
+            for id in &agents {
+                agents::set_active(&data_dir, &caller, id, true, 1).unwrap();
+            }
             // A person's Home launch token is a projection under the Home
             // capsule's authority (`gateway_home_runtime.rs:149`), which is
             // the app the person's sign-in grant authorizes. The Runtime-local
@@ -1345,7 +1348,7 @@ pub(crate) mod tests {
                 proof_binding_id: &record.proof_binding_id,
                 session_id: "session:a5-launch",
             };
-            agents::create(
+            let agent_id = agents::create(
                 &self.data_dir,
                 &caller,
                 &agents::CreateRequest {
@@ -1365,7 +1368,9 @@ pub(crate) mod tests {
                 2,
             )
             .unwrap()
-            .agent_id
+            .agent_id;
+            agents::set_active(&self.data_dir, &caller, &agent_id, true, 2).unwrap();
+            agent_id
         }
 
         /// Writes a signed copy of the probe whose guest spins in `run` and
@@ -5284,6 +5289,7 @@ pub(crate) mod tests {
         )
         .unwrap()
         .agent_id;
+        agents::set_active(&data_dir, &caller, &agent, true, 1).unwrap();
 
         // The forged capsule: the stored manifest name and the stored CID in
         // its own `.elastos-cid`, signed by a trusted key, over other code.

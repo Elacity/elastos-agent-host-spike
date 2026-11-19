@@ -9,6 +9,7 @@ const DISABLE: &str = "/api/apps/system/agents/disable";
 const CREATE: &str = "/api/apps/system/agents/create";
 const RETIRE: &str = "/api/apps/system/agents/retire";
 const RENAME: &str = "/api/apps/system/agents/rename";
+const ACTIVATE: &str = "/api/apps/system/agents/activate";
 const LIST: &str = "/api/apps/system/agents";
 
 /// Sends one request and returns its status and body text.
@@ -83,6 +84,10 @@ mod off {
             (
                 RENAME,
                 Some(json!({ "agent_id": &agent_id, "display_name": "Helper 2" })),
+            ),
+            (
+                ACTIVATE,
+                Some(json!({ "agent_id": &agent_id, "active": true })),
             ),
         ];
         for (path, body) in routes {
@@ -450,5 +455,114 @@ mod on {
         )
         .unwrap()
         .is_some());
+    }
+
+    async fn create_agent(installed: &InstalledHome, request_id: &str) -> String {
+        let token = &installed.owner.system_token;
+        assert_eq!(
+            call(&installed.app, ENABLE, token, None).await.0,
+            StatusCode::OK
+        );
+        let (status, body) =
+            call(&installed.app, CREATE, token, Some(create_body(request_id))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<Value>(&body).unwrap()["agent_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn new_agent_off_until_owner_activation() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "off-1").await;
+        let data = &installed.home.data;
+        let owner = installed.owner.principal_id.as_str();
+        let dir = data.join("capsules").join(AGENT_HOST);
+        let launch = |id: &str| {
+            crate::agent_admission::admit_launch(
+                data,
+                data,
+                Some(owner),
+                Some(id),
+                crate::agent_admission::walk_launch(&dir).unwrap(),
+            )
+        };
+        assert_eq!(
+            launch(&agent_id).unwrap_err().to_string(),
+            crate::agents::NOT_ACTIVE
+        );
+        let on = json!({ "agent_id": &agent_id, "active": true });
+        assert_eq!(
+            call(
+                &installed.app,
+                ACTIVATE,
+                &installed.owner.system_token,
+                Some(on)
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(launch(&agent_id).unwrap().unwrap().actor(), agent_id);
+    }
+
+    #[tokio::test]
+    async fn agent_cannot_activate_itself() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "self-1").await;
+        let data = &installed.home.data;
+        let root = crate::auth::principal_kind_localhost_root(
+            &agent_id,
+            crate::auth::PrincipalKind::Agent,
+        );
+        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
+            .unwrap()
+            .unwrap()
+            .record
+            .proof_binding_id;
+        let now = now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{}", uuid_like_token()),
+            session_id: format!("auth:{}", uuid_like_token()),
+            principal_id: agent_id.clone(),
+            proof_binding_id: binding,
+            issued_at: now,
+            expires_at: now + 3600,
+            apps: vec![SYSTEM_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(data, grant.clone()).unwrap();
+        let agent_token =
+            issue_home_launch_token_for_auth_grant(data, SYSTEM_CAPSULE_ID, &grant).unwrap();
+        // The front door refuses every agent principal before a route runs.
+        // This calls the activate handler, so the refusal is the route's own
+        // owner check. Dropping that check is what turns this assertion red.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("localhost:61180"),
+        );
+        headers.insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("null"),
+        );
+        headers.insert(
+            "x-elastos-home-token",
+            axum::http::HeaderValue::from_str(&agent_token).unwrap(),
+        );
+        let response = super::super::super::gateway_agents::agents_activate(
+            axum::extract::State(installed.state.clone()),
+            headers,
+            axum::body::Bytes::from(json!({"agent_id": &agent_id, "active": true}).to_string()),
+        )
+        .await;
+        assert_eq!(answer(response).await, admin_required());
+        assert_eq!(
+            crate::agents::stored_agent(data, &installed.owner.principal_id, &agent_id)
+                .unwrap_err()
+                .to_string(),
+            crate::agents::NOT_ACTIVE
+        );
     }
 }
