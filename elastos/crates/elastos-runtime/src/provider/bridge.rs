@@ -677,6 +677,20 @@ fn launched_pid_line(_pid: libc::pid_t) -> Option<String> {
     None
 }
 
+#[cfg(test)]
+static REAP_HOLD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Tests can hold the reaper for one pid. Production returns at once.
+#[cfg(test)]
+fn pause_before_reap(pid: libc::pid_t) {
+    while REAP_HOLD_PID.load(std::sync::atomic::Ordering::Acquire) == pid {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[cfg(not(test))]
+fn pause_before_reap(_pid: libc::pid_t) {}
+
 impl ForkChild {
     fn start(pid: libc::pid_t) -> Result<Self, BridgeError> {
         #[cfg(target_os = "linux")]
@@ -686,6 +700,7 @@ impl ForkChild {
         };
         let (sender, status) = oneshot::channel();
         tokio::task::spawn_blocking(move || {
+            pause_before_reap(pid);
             let mut word = 0;
             loop {
                 let waited = unsafe { libc::waitpid(pid, &mut word, 0) };
@@ -762,13 +777,11 @@ impl std::fmt::Debug for Confined {
 
 /// A storage root this start created. Drop removes that directory through the
 /// descriptor opened at creation. A root that already existed stays. A later
-/// symlink at the same path is a different file, so it is left in place.
+/// name at the same path is a different file, so it is left in place.
 struct CreatedStorageRoot {
     parent: OwnedFd,
     name: std::ffi::CString,
     directory: OwnedFd,
-    dev: u64,
-    ino: u64,
     armed: bool,
 }
 
@@ -779,7 +792,7 @@ impl CreatedStorageRoot {
 
     fn remove_opened_root(&self) {
         remove_children(&self.directory);
-        unlink_opened_directory(&self.parent, &self.name, self.dev, self.ino);
+        let _ = unlink_held_directory(&self.parent, &self.directory, Some(&self.name));
     }
 }
 
@@ -912,7 +925,7 @@ fn remove_children(directory: &OwnedFd) {
             };
             if stat_dev(&opened) == stat_dev(&info) && stat_ino(&opened) == stat_ino(&info) {
                 remove_children(&child);
-                unlink_directory_at(directory, &name);
+                let _ = unlink_held_directory(directory, &child, Some(&name));
             }
         } else {
             unsafe {
@@ -922,32 +935,66 @@ fn remove_children(directory: &OwnedFd) {
     }
 }
 
-fn unlink_if_same(parent: &OwnedFd, name: &std::ffi::CStr, dev: u64, ino: u64) -> bool {
-    let Ok(info) = lstat_at(parent, name) else {
+/// The last component of the directory this descriptor holds.
+fn held_directory_name(directory: &OwnedFd) -> Option<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_os = "linux")]
+    let bytes = {
+        let link = std::fs::read_link(format!("/proc/self/fd/{}", directory.as_raw_fd())).ok()?;
+        link.file_name()?.as_bytes().to_vec()
+    };
+    #[cfg(target_os = "macos")]
+    let bytes = {
+        let mut buf = [0u8; 1024];
+        let rc = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        let text = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().cast()) };
+        let path = Path::new(std::ffi::OsStr::from_bytes(text.to_bytes()));
+        path.file_name()?.as_bytes().to_vec()
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let bytes = {
+        let _ = directory;
+        return None;
+    };
+    std::ffi::CString::new(bytes).ok()
+}
+
+/// Unlink `name` only when opening it still returns the held directory.
+fn unlink_name_if_held(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) -> bool {
+    let Ok(opened) = open_directory_at(parent, name) else {
         return false;
     };
-    if info.st_mode & libc::S_IFMT != libc::S_IFDIR {
+    let Ok(opened_info) = stat_fd(opened.as_raw_fd()) else {
         return false;
-    }
-    if stat_dev(&info) != dev || stat_ino(&info) != ino {
+    };
+    let Ok(held) = stat_fd(directory.as_raw_fd()) else {
+        return false;
+    };
+    if stat_dev(&opened_info) != stat_dev(&held) || stat_ino(&opened_info) != stat_ino(&held) {
         return false;
     }
     unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) == 0 }
 }
 
-/// Unlink the opened directory. The original name is used only when it still
-/// names that directory; otherwise the parent is scanned for the same inode.
-fn unlink_opened_directory(parent: &OwnedFd, name: &std::ffi::CStr, dev: u64, ino: u64) {
-    if unlink_if_same(parent, name, dev, ino) {
-        return;
-    }
-    let Ok(names) = list_entries(parent) else {
-        return;
-    };
-    for entry in names {
-        if unlink_if_same(parent, &entry, dev, ino) {
-            return;
+/// Remove the directory this descriptor holds. The name comes from the
+/// descriptor. The remembered name is used only when it still opens as that
+/// same directory, so a different directory placed at the old name stays.
+fn unlink_held_directory(
+    parent: &OwnedFd,
+    directory: &OwnedFd,
+    remembered: Option<&std::ffi::CStr>,
+) -> bool {
+    if let Some(name) = held_directory_name(directory) {
+        if unlink_name_if_held(parent, directory, &name) {
+            return true;
         }
+    }
+    match remembered {
+        Some(name) => unlink_name_if_held(parent, directory, name),
+        None => false,
     }
 }
 
@@ -1066,8 +1113,6 @@ fn create_storage_root(storage_root: &Path) -> Result<CreatedStorageRoot, Bridge
         parent,
         name: name_c,
         directory,
-        dev: stat_dev(&info),
-        ino: stat_ino(&info),
         armed: created,
     })
 }
@@ -2196,7 +2241,14 @@ impl ProviderBridge {
                                 fork.reaped = status.is_ok();
                                 Some(BridgeError::Timeout)
                             }
-                            Err(_) => return Err(BridgeError::Timeout),
+                            Err(_) => {
+                                // The signal has been sent and the reaper has not
+                                // collected the child. Wait for that collection
+                                // before returning, so the caller does not remove
+                                // the root while the child is still live.
+                                fork.reaped = (&mut fork.status).await.is_ok();
+                                Some(BridgeError::Timeout)
+                            }
                         }
                     }
                 };
@@ -4525,6 +4577,35 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_root_is_removed_and_the_directory_at_the_old_name_stays() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        let opened = temp.path().join("root.opened");
+        std::fs::rename(&root, &opened).unwrap();
+        std::fs::rename(&canary, &root).unwrap();
+        drop(guard);
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o755,
+            "the directory now at the old name stays"
+        );
+        assert!(
+            !opened.exists(),
+            "cleanup removes the opened directory and leaves the directory now at its old name"
+        );
+    }
+
+    #[test]
     fn a_disarmed_root_stays() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("root");
@@ -4535,6 +4616,58 @@ mod tests {
         guard.disarm();
         drop(guard);
         assert!(root.join("wrote").is_file());
+    }
+
+    #[tokio::test]
+    async fn a_second_shutdown_wait_reaps_before_it_returns() {
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                loop {
+                    libc::sleep(30);
+                }
+            }
+        }
+        assert!(pid > 0, "fork");
+        struct Release(libc::pid_t);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if REAP_HOLD_PID.load(std::sync::atomic::Ordering::Acquire) == self.0 {
+                    REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+        REAP_HOLD_PID.store(pid, std::sync::atomic::Ordering::Release);
+        let _release = Release(pid);
+        let fork = match ForkChild::start(pid) {
+            Ok(fork) => fork,
+            Err(error) => {
+                REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let mut status = 0;
+                let _ = unsafe { libc::waitpid(pid, &mut status, 0) };
+                panic!("the child could not be owned: {error}");
+            }
+        };
+        let mut bridge = ProviderBridge::from_io(
+            tokio::io::BufReader::new(tokio::io::empty()),
+            tokio::io::sink(),
+        );
+        bridge.shutdown_timeout = std::time::Duration::from_millis(40);
+        *bridge.fork.lock().await = Some(fork);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if REAP_HOLD_PID.load(std::sync::atomic::Ordering::Acquire) == pid {
+                REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+            }
+        });
+        let _ = bridge.shutdown().await;
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        let reaped =
+            waited == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+        let _ = releaser.join();
+        assert!(reaped, "shutdown returns only after the child is reaped");
     }
 
     #[test]
