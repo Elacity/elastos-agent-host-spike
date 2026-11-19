@@ -2205,20 +2205,33 @@ mod tests {
         }
     }
 
-    /// The record beside `dir` holds the walk CID of `dir` now, and that walk
-    /// read exactly the archive's `files` and the two install receipts.
+    /// `dir` holds exactly the archive's `files` and the two install receipts,
+    /// and the record beside it holds the CID a launch's walk of `dir` gives.
     fn assert_install_cid_names(dir: &Path, files: &[&str]) -> String {
-        let budget = crate::bundle_admission::BUNDLE_WALK_BUDGET;
-        let walked = elastos_bundle_identity::checked_bundle_within(dir, budget).unwrap();
-        let mut read: Vec<&str> = walked.entries().iter().map(|e| e.path.as_str()).collect();
-        read.sort_unstable();
+        fn listed(dir: &Path, prefix: &str, found: &mut Vec<String>) {
+            for item in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+                let path = format!("{prefix}{}", item.file_name().to_str().unwrap());
+                if item.file_type().unwrap().is_dir() {
+                    listed(&item.path(), &format!("{path}/"), found);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        listed(dir, "", &mut found);
+        found.sort_unstable();
         let mut expected = [CACHED_ARTIFACT_SHA_FILE, CACHED_CID_FILE].to_vec();
         expected.extend_from_slice(files);
-        assert_eq!(read, expected, "the walk read only what the install wrote");
+        assert_eq!(
+            found, expected,
+            "the folder holds only what the install wrote"
+        );
+        let walked = crate::agent_admission::walk_launch(dir).unwrap().bundle_cid;
         let record = crate::setup::install_cid_record(dir).unwrap();
         let recorded = std::fs::read_to_string(record).expect("the install wrote no record");
-        assert_eq!(recorded.trim(), walked.cid().to_string());
-        walked.cid().to_string()
+        assert_eq!(recorded.trim(), walked);
+        walked
     }
 
     #[tokio::test]

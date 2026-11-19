@@ -2718,9 +2718,9 @@ pub(crate) fn install_cid_record(dir: &Path) -> anyhow::Result<PathBuf> {
 /// install CID of `dir`, the folder the install places them at. A folder the
 /// walk refuses keeps no record.
 pub(crate) fn record_install_cid(walked: &Path, dir: &Path) -> anyhow::Result<()> {
+    use crate::bundle_admission::BUNDLE_WALK_BUDGET;
     let record = install_cid_record(dir)?;
-    let budget = crate::bundle_admission::BUNDLE_WALK_BUDGET;
-    match elastos_bundle_identity::checked_bundle_within(walked, budget) {
+    match elastos_bundle_identity::checked_bundle_within(walked, BUNDLE_WALK_BUDGET) {
         Ok(bundle) => fs::write(&record, format!("{}\n", bundle.cid()))?,
         Err(_) => match fs::remove_file(&record) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
