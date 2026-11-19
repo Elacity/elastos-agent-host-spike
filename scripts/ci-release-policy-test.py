@@ -241,6 +241,7 @@ AUDIT_ARCHIVE_SHA256 = "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69e
 RESTORE_VERIFIERS = {
     "restore pinned ARM64 engine": 'build-llama-server-bundle.sh --verify-archive "$RUNNER_TEMP/llama-arm64-bundle"',
     "restore pinned AMD64 engine": 'build-llama-server-bundle.sh --platform linux-amd64 --verify-archive "$RUNNER_TEMP/llama-amd64-bundle"',
+    "restore engine build-tool archives": "bash scripts/ci-apt-prerequisites.sh",
     "restore Ubuntu prerequisite archives": "bash scripts/ci-apt-prerequisites.sh",
     "restore verified Kubo inputs": "python3 scripts/ci-kubo-cache.py fetch ",
     "restore the pinned published release": "python3 scripts/update-hop-compare.py fetch-previous-release",
@@ -1020,9 +1021,11 @@ class ReleasePolicyTests(unittest.TestCase):
                 self.assertFalse(evaluate(guard[1], context), job)
             elif guard:
                 self.assertTrue(evaluate(guard[1], context), job)
-            checkout, = [step for step in steps(job) if "uses: actions/checkout@" in step]
-            self.assertEqual(field(checkout, "ref"),
-                             "${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}")
+            checkouts = [step for step in steps(job) if "uses: actions/checkout@" in step]
+            self.assertTrue(checkouts, job)
+            for checkout in checkouts:
+                self.assertEqual(field(checkout, "ref"),
+                                 "${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}")
         for event, ref, ref_type, override, _ in CASES:
             context = event_context(event, ref, ref_type, override)
             expected_job = event in ("merge_group", "workflow_dispatch", "pull_request") or \
@@ -1259,7 +1262,9 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(field(release_jobs["engine-llama-arm64"], key),
                              field(JOBS["engine-llama-arm64"], key))
         restore, = [step for step in engine if "actions/cache/restore@" in step]
-        ci_restore, = [step for step in steps("engine-llama-arm64") if "actions/cache/restore@" in step]
+        ci_restore, = [step for step in steps("engine-llama-arm64")
+                       if step.startswith("name: restore pinned ARM64 engine\n")]
+        self.assertIn("actions/cache/restore@", ci_restore)
         for key in ("uses", "key", "path"):
             self.assertEqual(field(restore, key), field(ci_restore, key))
         self.assertNotIn("restore-keys:", restore)
@@ -1635,7 +1640,7 @@ class ReleasePolicyTests(unittest.TestCase):
         validate_cache_guards(SOURCE)
         caches = [(job, step) for job in JOBS for step in steps(job)
                   if CACHE_RE.search(step)]
-        self.assertEqual(len(caches), 33)
+        self.assertEqual(len(caches), 37)
         for event, ref, ref_type, override, cached in CASES:
             with self.subTest(event=event, ref=ref, override=override):
                 context = event_context(event, ref, ref_type, override)
@@ -1658,7 +1663,8 @@ class ReleasePolicyTests(unittest.TestCase):
                                     expected = expected and save
                                     if step.startswith("name: save verified Kubo inputs\n"):
                                         expected = expected and kubo_hit != "true"
-                                    if step.startswith("name: save Ubuntu prerequisite archives\n"):
+                                    if step.startswith(("name: save Ubuntu prerequisite archives\n",
+                                                        "name: save engine build-tool archives\n")):
                                         expected = expected and apt_changed == "true"
                                 self.assertEqual(allowed and evaluate(field(step, "if"), context), expected,
                                                  f"cache guard in {job} (Kubo hit={kubo_hit}, apt changed={apt_changed})")
@@ -2031,6 +2037,12 @@ class ReleasePolicyTests(unittest.TestCase):
                 "        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4\n"
                 "        with:\n          path: x\n          key: x\n"
                 "      - name: restore the pinned published release\n", 1),
+            "engine apt check removed": SOURCE.replace(
+                "        run: bash scripts/ci-apt-prerequisites.sh\n",
+                "        run: true\n", 1),
+            "engine apt check skipped": SOURCE.replace(
+                "      - name: install engine build tools\n",
+                "      - name: install engine build tools\n        if: false\n", 1),
         }
         for name, changed in mutations.items():
             self.assertNotEqual(changed, SOURCE, name)
@@ -2592,8 +2604,12 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("name: linux-cli-update-hop-receipt", upload)
 
     def test_engine_cache_has_exact_recipe_key_and_trusted_writers_only(self):
-        restore, = [step for step in steps("engine-llama-arm64") if "actions/cache/restore@" in step]
-        save, = [step for step in steps("engine-llama-arm64") if "actions/cache/save@" in step]
+        restore, = [step for step in steps("engine-llama-arm64")
+                    if step.startswith("name: restore pinned ARM64 engine\n")]
+        save, = [step for step in steps("engine-llama-arm64")
+                 if step.startswith("name: save pinned ARM64 engine\n")]
+        self.assertIn("actions/cache/restore@", restore)
+        self.assertIn("actions/cache/save@", save)
         self.assertEqual(field(restore, "key"), "${{ steps.engine-recipe.outputs.cache-key }}")
         self.assertEqual(field(save, "key"), "${{ steps.engine-cache.outputs.cache-primary-key }}")
         self.assertNotIn("restore-keys:", restore)
@@ -2607,9 +2623,54 @@ class ReleasePolicyTests(unittest.TestCase):
                                  cached and (event, ref) in CACHE_WRITERS and hit == "false")
         self.assertEqual(field(JOBS["engine-llama-arm64"], "image"),
                          field(JOBS["engine-llama-arm64"], "BUILD_CONTAINER_IMAGE"))
-        self.assertIn('apt-get install -y -qq --no-install-recommends "${tools[@]}"',
+        prerequisite, = [step for step in steps("engine-llama-arm64")
+                         if step.startswith("name: install engine build tools\n")]
+        self.assertIn("run: bash scripts/ci-apt-prerequisites.sh", prerequisite)
+        self.assertIn('ENGINE_BUILD_TOOLS: build-essential cmake git ca-certificates curl binutils file python3',
                       JOBS["engine-llama-arm64"])
-        self.assertIn('read -r -a tools <<< "$ENGINE_BUILD_TOOLS"', JOBS["engine-llama-arm64"])
+
+    def test_apt_restore_verifier_checks_signed_indexes_and_archive_hashes(self):
+        helper = (WORKFLOW.parents[2] / "scripts/ci-apt-prerequisites.sh").read_text()
+        lists = helper.split("verify_cached_lists() {", 1)[1].split("\narchive_manifest() {", 1)[0]
+        archives = helper.split("verify_archives() {", 1)[1].split("\nverify_cached_lists() {", 1)[0]
+        self.assertIn("gpgv --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg", lists)
+        self.assertIn('--output "$verified_file" "$inrelease"', lists)
+        self.assertIn("digest=$(awk", lists)
+        self.assertIn('"$verified_file")', lists)
+        self.assertIn('apt-helper cat-file "$package_file" | sha256sum', lists)
+        self.assertIn('[[ "$actual" == "$digest" ]] || return 1', lists)
+        self.assertIn('digest=$(as_root sha256sum "$archive")', archives)
+        self.assertIn('$1 == "SHA256:" && $2 == hash', archives)
+        self.assertLess(helper.index("if verify_cached_lists; then"), helper.index("install_offline \"$cached_sources\""))
+        self.assertLess(helper.index("verify_archives restore \"${cached_options[@]}\""),
+                        helper.index("install_offline \"$cached_sources\""))
+
+    def test_engine_apt_caches_bind_all_inputs_to_the_verifier(self):
+        cache_paths = ("/var/cache/apt/archives/*.deb", "/var/cache/apt/ci-lists",
+                       "/var/cache/apt/ci-mirror", "/var/cache/apt/ci-packages")
+        for job in ("engine-llama-amd64", "engine-llama-arm64"):
+            with self.subTest(job=job):
+                job_steps = steps(job)
+                restore, = [step for step in job_steps if step.startswith("name: restore engine build-tool archives\n")]
+                install, = [step for step in job_steps if step.startswith("name: install engine build tools\n")]
+                save, = [step for step in job_steps if step.startswith("name: save engine build-tool archives\n")]
+                self.assertIn("actions/cache/restore@", restore)
+                self.assertIn("actions/cache/save@", save)
+                self.assertLess(job_steps.index(restore), job_steps.index(install))
+                self.assertLess(job_steps.index(install), job_steps.index(save))
+                self.assertEqual(field(install, "run"), RESTORE_VERIFIERS["restore engine build-tool archives"])
+                self.assertNotIn("        if:", install)
+                for cache_step in (restore, save):
+                    paths = re.search(r"(?m)^          path: \|\n((?:            .*\n)+)", cache_step)
+                    self.assertIsNotNone(paths)
+                    self.assertEqual(tuple(paths[1].split()), cache_paths)
+                    self.assertEqual(field(cache_step, "key"), field(restore, "key"))
+                key = field(restore, "key")
+                for input_name in ("runner.arch", "env.BUILD_CONTAINER_IMAGE", "env.ENGINE_BUILD_TOOLS",
+                                   "hashFiles('scripts/ci-apt-prerequisites.sh')", "github.run_id"):
+                    self.assertIn(input_name, key)
+                self.assertEqual(field(restore, "restore-keys"), key.removesuffix("${{ github.run_id }}"))
+                self.assertIn("steps.apt-prerequisites.outputs.changed == 'true'", field(save, "if"))
 
     def test_engine_recipe_key_changes_with_source_container_or_tools(self):
         recipe, = [step for step in steps("engine-llama-arm64") if "id: engine-recipe" in step]
@@ -2666,7 +2727,9 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(consumer_gate, "if"), "matrix.os == 'ubuntu-22.04-arm'")
         producer = steps("engine-llama-arm64")
         gate = next(i for i, step in enumerate(producer) if verify in step)
-        saving = next(i for i, step in enumerate(producer) if "actions/cache/save@" in step)
+        saving = next(i for i, step in enumerate(producer)
+                      if step.startswith("name: save pinned ARM64 engine\n"))
+        self.assertIn("actions/cache/save@", producer[saving])
         self.assertLess(gate, saving)
         self.assertNotIn("always()", producer[saving])
         pin = field(SOURCE, "CI_LLAMA_ARM64_SHA256")
