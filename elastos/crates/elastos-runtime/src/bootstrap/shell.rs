@@ -141,8 +141,12 @@ impl ShellManager {
 
         // Read manifest
         let manifest_path = path.join("capsule.json");
-        let manifest_data = elastos_common::capsule_manifest_file::read(&manifest_path)
-            .map_err(|e| ShellError::Launch(format!("Failed to read shell manifest: {}", e)))?;
+        let manifest_data = tokio::task::spawn_blocking(move || {
+            elastos_common::capsule_manifest_file::read(&manifest_path)
+        })
+        .await
+        .map_err(|e| ShellError::Launch(format!("Shell manifest read task failed: {e}")))?
+        .map_err(|e| ShellError::Launch(format!("Failed to read shell manifest: {}", e)))?;
 
         let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&manifest_data)
             .map_err(|e| ShellError::Launch(format!("Failed to parse shell manifest: {}", e)))?;
