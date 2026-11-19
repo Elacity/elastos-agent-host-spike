@@ -612,7 +612,7 @@ struct ForkChild {
     pid: libc::pid_t,
     /// Opened before the wait. A later signal names this process.
     #[cfg(target_os = "linux")]
-    pidfd: Option<OwnedFd>,
+    pidfd: OwnedFd,
     status: oneshot::Receiver<i32>,
     /// True once the status was received; the waitpid task has reaped the pid,
     /// so `Drop` must not signal it again.
@@ -620,19 +620,70 @@ struct ForkChild {
 }
 
 #[cfg(target_os = "linux")]
-fn open_pidfd(pid: libc::pid_t) -> Option<OwnedFd> {
+fn open_pidfd(pid: libc::pid_t) -> Result<OwnedFd, BridgeError> {
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
     if fd < 0 {
-        None
+        Err(refused(
+            "provider start is refused: the process handle could not be opened",
+        ))
     } else {
-        Some(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+        Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
     }
 }
 
+/// The child is still ours: it has not been waited on, so the pid cannot have
+/// been reused. Reap it and refuse the start.
+#[cfg(any(test, target_os = "linux"))]
+fn reap_refused_child(pid: libc::pid_t) {
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let mut status = 0;
+    loop {
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid
+            || (waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR))
+        {
+            break;
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn refuse_child_without_process_handle(pid: libc::pid_t) -> BridgeError {
+    reap_refused_child(pid);
+    refused("provider start is refused: the process handle could not be opened")
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static REPORT_LAUNCHED_PID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The next confined start writes the launched pid as the child's first stdin
+/// line. The probe records that line; standard error is `/dev/null`.
+#[cfg(all(test, target_os = "linux"))]
+fn set_report_launched_pid(enabled: bool) {
+    REPORT_LAUNCHED_PID.with(|cell| cell.set(enabled));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn launched_pid_line(pid: libc::pid_t) -> Option<String> {
+    REPORT_LAUNCHED_PID
+        .with(|cell| cell.get())
+        .then(|| format!("{pid}\n"))
+}
+
+#[cfg(not(all(test, target_os = "linux")))]
+fn launched_pid_line(_pid: libc::pid_t) -> Option<String> {
+    None
+}
+
 impl ForkChild {
-    fn start(pid: libc::pid_t) -> Self {
+    fn start(pid: libc::pid_t) -> Result<Self, BridgeError> {
         #[cfg(target_os = "linux")]
-        let pidfd = open_pidfd(pid);
+        let pidfd = match open_pidfd(pid) {
+            Ok(pidfd) => pidfd,
+            Err(_) => return Err(refuse_child_without_process_handle(pid)),
+        };
         let (sender, status) = oneshot::channel();
         tokio::task::spawn_blocking(move || {
             let mut word = 0;
@@ -648,33 +699,30 @@ impl ForkChild {
             }
             let _ = sender.send(word);
         });
-        Self {
+        Ok(Self {
             pid,
             #[cfg(target_os = "linux")]
             pidfd,
             status,
             reaped: false,
-        }
+        })
     }
 
     fn force_kill(&self) {
         #[cfg(target_os = "linux")]
         {
-            // The pid is kept for the wait. The signal names the pidfd opened
-            // for this process; a missing pidfd does not fall back to the pid.
+            // The pid stays with the wait. The signal names the pidfd opened
+            // for this process.
             let _ = self.pid;
-            if let Some(pidfd) = &self.pidfd {
-                unsafe {
-                    libc::syscall(
-                        libc::SYS_pidfd_send_signal,
-                        pidfd.as_raw_fd(),
-                        libc::SIGKILL,
-                        0,
-                        0,
-                    );
-                }
-            }
-            return;
+            let _ = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.pidfd.as_raw_fd(),
+                    libc::SIGKILL,
+                    0,
+                    0,
+                )
+            };
         }
         #[cfg(not(target_os = "linux"))]
         unsafe {
@@ -712,23 +760,33 @@ impl std::fmt::Debug for Confined {
     }
 }
 
-/// A storage root this start created. Drop removes that tree unless the start
-/// returned `Confined`. A root that already existed stays.
-struct CreatedStorageRoot<'a> {
-    path: &'a Path,
+/// A storage root this start created. Drop removes that directory through the
+/// descriptor opened at creation. A root that already existed stays. A later
+/// symlink at the same path is a different file, so it is left in place.
+struct CreatedStorageRoot {
+    parent: OwnedFd,
+    name: std::ffi::CString,
+    directory: OwnedFd,
+    dev: u64,
+    ino: u64,
     armed: bool,
 }
 
-impl CreatedStorageRoot<'_> {
+impl CreatedStorageRoot {
     fn disarm(&mut self) {
         self.armed = false;
     }
+
+    fn remove_opened_root(&self) {
+        remove_children(&self.directory);
+        unlink_opened_directory(&self.parent, &self.name, self.dev, self.ino);
+    }
 }
 
-impl Drop for CreatedStorageRoot<'_> {
+impl Drop for CreatedStorageRoot {
     fn drop(&mut self) {
         if self.armed {
-            let _ = std::fs::remove_dir_all(self.path);
+            self.remove_opened_root();
         }
     }
 }
@@ -778,6 +836,121 @@ fn stat_fd(fd: i32) -> std::io::Result<libc::stat> {
     }
 }
 
+fn stat_dev(info: &libc::stat) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        info.st_dev
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        info.st_dev as u64
+    }
+}
+
+fn stat_ino(info: &libc::stat) -> u64 {
+    info.st_ino
+}
+
+fn lstat_at(directory: &OwnedFd, name: &std::ffi::CStr) -> std::io::Result<libc::stat> {
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let rc = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { info.assume_init() })
+    }
+}
+
+fn list_entries(directory: &OwnedFd) -> std::io::Result<Vec<std::ffi::CString>> {
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(error);
+    }
+    let mut names = Vec::new();
+    loop {
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name != c"." && name != c".." {
+            names.push(name.to_owned());
+        }
+    }
+    unsafe { libc::closedir(stream) };
+    Ok(names)
+}
+
+/// Remove entries through `directory`. A symlink is unlinked itself.
+fn remove_children(directory: &OwnedFd) {
+    let Ok(names) = list_entries(directory) else {
+        return;
+    };
+    for name in names {
+        let Ok(info) = lstat_at(directory, &name) else {
+            continue;
+        };
+        if info.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            let Ok(child) = open_directory_at(directory, &name) else {
+                continue;
+            };
+            let Ok(opened) = stat_fd(child.as_raw_fd()) else {
+                continue;
+            };
+            if stat_dev(&opened) == stat_dev(&info) && stat_ino(&opened) == stat_ino(&info) {
+                remove_children(&child);
+                unlink_directory_at(directory, &name);
+            }
+        } else {
+            unsafe {
+                libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0);
+            }
+        }
+    }
+}
+
+fn unlink_if_same(parent: &OwnedFd, name: &std::ffi::CStr, dev: u64, ino: u64) -> bool {
+    let Ok(info) = lstat_at(parent, name) else {
+        return false;
+    };
+    if info.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return false;
+    }
+    if stat_dev(&info) != dev || stat_ino(&info) != ino {
+        return false;
+    }
+    unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) == 0 }
+}
+
+/// Unlink the opened directory. The original name is used only when it still
+/// names that directory; otherwise the parent is scanned for the same inode.
+fn unlink_opened_directory(parent: &OwnedFd, name: &std::ffi::CStr, dev: u64, ino: u64) {
+    if unlink_if_same(parent, name, dev, ino) {
+        return;
+    }
+    let Ok(names) = list_entries(parent) else {
+        return;
+    };
+    for entry in names {
+        if unlink_if_same(parent, &entry, dev, ino) {
+            return;
+        }
+    }
+}
+
 fn create_directory_at(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<bool, BridgeError> {
     if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } == 0 {
         return Ok(true);
@@ -813,10 +986,9 @@ fn name_is_symlink(parent: &OwnedFd, name: &std::ffi::CStr) -> bool {
     info.st_mode & libc::S_IFMT == libc::S_IFLNK
 }
 
-/// Create `storage_root` at 0700 under a Runtime-owned parent, open it with
-/// `O_DIRECTORY | O_NOFOLLOW`, and return whether this call created it plus
-/// the device and inode of the directory that was opened.
-fn create_storage_root(storage_root: &Path) -> Result<(bool, u64, u64), BridgeError> {
+/// Create `storage_root` at 0700 under a Runtime-owned parent and open it with
+/// `O_DIRECTORY | O_NOFOLLOW`. The returned guard holds that descriptor.
+fn create_storage_root(storage_root: &Path) -> Result<CreatedStorageRoot, BridgeError> {
     use std::os::unix::ffi::OsStrExt;
     let parent_path = storage_root
         .parent()
@@ -890,7 +1062,14 @@ fn create_storage_root(storage_root: &Path) -> Result<(bool, u64, u64), BridgeEr
         }
         return Err(BridgeError::Io(error));
     }
-    Ok((created, info.st_dev as u64, info.st_ino as u64))
+    Ok(CreatedStorageRoot {
+        parent,
+        name: name_c,
+        directory,
+        dev: stat_dev(&info),
+        ino: stat_ino(&info),
+        armed: created,
+    })
 }
 
 fn pipe_pair() -> Result<(OwnedFd, OwnedFd), BridgeError> {
@@ -990,11 +1169,7 @@ impl ProviderBridge {
                 "provider start is refused: component key \"{component_key}\" is not one of did-provider, wallet-provider, model-provider"
             )));
         };
-        let (created, storage_dev, storage_ino) = create_storage_root(storage_root)?;
-        let mut created_root = CreatedStorageRoot {
-            path: storage_root,
-            armed: created,
-        };
+        let mut created_root = create_storage_root(storage_root)?;
         let (stdin_read, to_child) = pipe_pair()?;
         let (from_child, stdout_write) = pipe_pair()?;
         let stdio = super::os_entry::ChildStdio {
@@ -1005,8 +1180,8 @@ impl ProviderBridge {
         };
         let storage = super::landlock_plan::StorageRoot {
             path: storage_root,
-            dev: storage_dev,
-            ino: storage_ino,
+            dev: created_root.dev,
+            ino: created_root.ino,
         };
         let launched =
             super::os_entry::start_provider(provider, authority, binary_path, &storage, stdio)
@@ -1016,7 +1191,15 @@ impl ProviderBridge {
         drop(stdin_read);
         drop(stdout_write);
 
-        let to_child = std::fs::File::from(launched.to_child);
+        let fork = ForkChild::start(launched.pid)?;
+        let mut to_child = std::fs::File::from(launched.to_child);
+        if let Some(line) = launched_pid_line(launched.pid) {
+            use std::io::Write as _;
+            if let Err(error) = to_child.write_all(line.as_bytes()) {
+                drop(fork);
+                return Err(BridgeError::Io(error));
+            }
+        }
         let from_child = std::fs::File::from(launched.from_child);
         let bridge = Self {
             io: Arc::new(Mutex::new(ProviderIo {
@@ -1026,7 +1209,7 @@ impl ProviderBridge {
                 ))),
             })),
             child: Mutex::new(None),
-            fork: Mutex::new(Some(ForkChild::start(launched.pid))),
+            fork: Mutex::new(Some(fork)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -4114,12 +4297,29 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    struct ClearLaunchedPid;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ClearLaunchedPid {
+        fn drop(&mut self) {
+            super::set_report_launched_pid(false);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn report_launched_pid() -> ClearLaunchedPid {
+        super::set_report_launched_pid(true);
+        ClearLaunchedPid
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn failed_init_leaves_no_live_child_and_no_zombie() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let pid_file = root.join("child.pid");
+        let _report = report_launched_pid();
         let binary = build_confined_probe(temp.path(), &pid_file, "reject_init");
         let error = ProviderBridge::spawn_confined(
             "did-provider",
@@ -4150,6 +4350,7 @@ mod tests {
         let root_a = temp.path().join("root-a");
         let root_b = temp.path().join("root-b");
         let mut pids = Vec::new();
+        let _report = report_launched_pid();
         for root in [&root_a, &root_b, &root_a] {
             let pid_file = root.join("child.pid");
             let binary = build_confined_probe(temp.path(), &pid_file, "ok");
@@ -4255,6 +4456,8 @@ mod tests {
         std::fs::create_dir(&canary).unwrap();
         std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let canary_meta = std::fs::symlink_metadata(&canary).unwrap();
+        let (canary_dev, canary_ino) = (canary_meta.dev(), canary_meta.ino());
         let binary = build_confined_probe(temp.path(), &root.join("child.pid"), "ok");
         struct ClearSwap;
         impl Drop for ClearSwap {
@@ -4276,15 +4479,20 @@ mod tests {
         if let Ok(confined) = &started {
             let _ = confined.bridge().shutdown().await;
         }
-        let metadata = std::fs::metadata(&root).unwrap();
+        let survivor = find_directory(temp.path(), canary_dev, canary_ino)
+            .unwrap_or_else(|| panic!("the canary and its permissions stay unchanged"));
         assert_eq!(
-            metadata.mode() & 0o777,
+            std::fs::symlink_metadata(&survivor).unwrap().mode() & 0o777,
             0o755,
             "the canary and its permissions stay unchanged"
         );
-        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::read(survivor.join("kept")).unwrap(),
+            b"kept",
+            "the canary and its permissions stay unchanged"
+        );
         assert!(
-            !root.join("child.pid").exists(),
+            !survivor.join("child.pid").exists(),
             "the canary and its permissions stay unchanged"
         );
         let error = started.expect_err("a swapped storage root must refuse");
@@ -4292,6 +4500,35 @@ mod tests {
             error.to_string().contains("could not be added"),
             "a swapped storage root must refuse in the installer: {error}"
         );
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn find_directory(root: &Path, dev: u64, ino: u64) -> Option<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let entries = std::fs::read_dir(&dir).ok()?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                if meta.is_dir() {
+                    if meta.dev() == dev && meta.ino() == ino {
+                        return Some(path);
+                    }
+                    pending.push(path);
+                }
+            }
+        }
+        None
     }
 
     #[cfg(target_os = "linux")]
@@ -4343,13 +4580,18 @@ mod tests {
             .stderr(std::process::Stdio::from(canary))
             .output()
             .unwrap();
-        assert_eq!(
-            std::fs::read(&canary_path).unwrap(),
-            b"CANARY",
-            "the canary stays unchanged; harness status {} stdout {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout)
-        );
+        let canary_bytes = std::fs::read(&canary_path).unwrap();
+        if canary_bytes != b"CANARY" {
+            let text = String::from_utf8_lossy(&canary_bytes);
+            if text.contains("PROBE-STDERR") {
+                panic!("the probe wrote PROBE-STDERR to the inherited standard error");
+            }
+            panic!(
+                "the stderr harness changed the canary without the probe marker: status {} stdout {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
         assert!(
             output.status.success(),
             "harness failed: {}",
@@ -4393,19 +4635,44 @@ mod tests {
         let outside = temp.path().join("outside");
         std::fs::write(&outside, b"stay").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
-        let swapped = temp.path().join("swapped");
-        std::os::unix::fs::symlink(&outside, &swapped).unwrap();
-        drop(CreatedStorageRoot {
-            path: &root,
-            armed: true,
-        });
-        drop(CreatedStorageRoot {
-            path: &swapped,
-            armed: true,
-        });
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        drop(guard);
         assert!(!root.exists(), "a failed start removes the created root");
-        assert!(!swapped.exists());
         assert_eq!(std::fs::read(&outside).unwrap(), b"stay");
+    }
+
+    #[test]
+    fn a_symlink_at_the_root_path_leaves_the_canary() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        let opened = temp.path().join("root.opened");
+        std::fs::rename(&root, &opened).unwrap();
+        std::os::unix::fs::symlink(&canary, &root).unwrap();
+        drop(guard);
+        assert_eq!(std::fs::read(canary.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::symlink_metadata(&canary).unwrap().mode() & 0o777,
+            0o755
+        );
+        assert!(
+            !opened.exists(),
+            "cleanup removes the directory this start opened"
+        );
+        assert!(std::fs::symlink_metadata(&root)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
     }
 
     #[test]
@@ -4414,13 +4681,34 @@ mod tests {
         let root = temp.path().join("root");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("wrote"), b"x").unwrap();
-        let mut guard = CreatedStorageRoot {
-            path: &root,
-            armed: true,
-        };
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
         guard.disarm();
         drop(guard);
         assert!(root.join("wrote").is_file());
+    }
+
+    #[test]
+    fn a_start_without_a_process_handle_reaps_the_child() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid > 0, "fork");
+        if pid == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        let error = refuse_child_without_process_handle(pid);
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: the process handle could not be opened"
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 
     #[tokio::test]

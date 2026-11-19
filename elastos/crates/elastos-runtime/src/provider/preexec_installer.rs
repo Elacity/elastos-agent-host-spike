@@ -142,6 +142,21 @@ pub(super) fn prepare(
     })
 }
 
+fn stat_dev(info: &libc::stat) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        info.st_dev
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        info.st_dev as u64
+    }
+}
+
+fn stat_ino(info: &libc::stat) -> u64 {
+    info.st_ino
+}
+
 /// # Safety
 /// Call only in a forked child before exec. The caller owns fds 0–2, passes
 /// its open failure-record write descriptor (at least 3, with FD_CLOEXEC), and writes any
@@ -216,8 +231,8 @@ pub(super) unsafe fn install(prepared: &Prepared, keep: i32) -> Result<(), Failu
                         return Err(errno);
                     }
                     let info = unsafe { info.assume_init() };
-                    if info.st_dev as u64 != prepared.storage_dev
-                        || info.st_ino as u64 != prepared.storage_ino
+                    if stat_dev(&info) != prepared.storage_dev
+                        || stat_ino(&info) != prepared.storage_ino
                     {
                         unsafe { libc::close(fd) };
                         return Err(libc::ESTALE);
