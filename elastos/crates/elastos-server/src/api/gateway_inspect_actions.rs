@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "gateway_inspect_actions/agent_plan.rs"]
+mod agent_plan;
 #[path = "gateway_inspect_actions/binding.rs"]
 mod binding;
 #[path = "gateway_inspect_actions/store.rs"]
@@ -10,7 +12,7 @@ use binding::{
 };
 use store::{
     claim_pending_inspect_action_record, read_inspect_action_record, write_inspect_action_record,
-    InspectActionRequestRecord, INSPECT_ACTION_SCHEMA,
+    InspectActionRequestRecord, INSPECT_ACTION_KIND, INSPECT_ACTION_SCHEMA,
 };
 
 pub(super) async fn gateway_inspect_action_request(
@@ -574,6 +576,7 @@ async fn create_inspect_action_request(
     );
     let record = InspectActionRequestRecord {
         schema: INSPECT_ACTION_SCHEMA.to_string(),
+        kind: INSPECT_ACTION_KIND.to_string(),
         request_id,
         principal_id: context.principal_id().to_string(),
         session_id: context.session_id().to_string(),
