@@ -2463,6 +2463,18 @@ mod tests {
         (temp, data_dir, binary)
     }
 
+    #[cfg(target_os = "linux")]
+    fn wallet_probe_failure(wallet_root: &Path) -> String {
+        let path = wallet_root.join("probe.error");
+        match fs::read_to_string(&path) {
+            Ok(report) => format!("wallet probe panic: {report}"),
+            Err(error) => format!(
+                "wallet probe report unavailable at {}: {error}",
+                path.display()
+            ),
+        }
+    }
+
     #[test]
     fn wallet_start_path_admits_and_starts_only_confined() {
         let source = include_str!("server_infra.rs");
@@ -2693,7 +2705,7 @@ mod tests {
         let registry = provider::ProviderRegistry::new();
         let bridge = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
             .await
-            .unwrap()
+            .unwrap_or_else(|error| panic!("{error}; {}", wallet_probe_failure(&wallet_root)))
             .unwrap();
         assert!(registry
             .registration_for_uri("elastos://wallet/status")
@@ -2776,7 +2788,11 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert!(error.to_string().contains("already registered"), "{error}");
+        assert!(
+            error.to_string().contains("already registered"),
+            "{error}; {}",
+            wallet_probe_failure(&wallet_root)
+        );
         assert_eq!(fs::read(wallet_root.join("shutdown")).unwrap(), b"yes");
         let pid: libc::pid_t = fs::read_to_string(wallet_root.join("child.pid"))
             .unwrap()

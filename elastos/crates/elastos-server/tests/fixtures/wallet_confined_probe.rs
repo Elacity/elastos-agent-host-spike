@@ -1,17 +1,40 @@
 use std::io::{BufRead, Write};
+use std::os::raw::c_char;
 
 const ROOT: &str = "@@ROOT@@";
 const BASE: &str = "@@BASE@@";
 const MARKER: &str = "@@MARKER@@";
 const PROTOCOL: &str = "@@PROTOCOL@@";
 
+unsafe extern "C" {
+    fn readlinkat(dirfd: i32, path: *const c_char, buf: *mut c_char, bufsiz: usize) -> isize;
+}
+
 /// Minimal wallet-provider stdio stand-in for the start-path rows. It writes the
 /// marker outside STORAGE_ROOT: the sandbox refuses that write, so the file only
 /// appears when a plain start runs this binary unbounded.
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let _ = std::fs::write(format!("{ROOT}/probe.error"), info.to_string());
+    }));
     let _ = std::fs::write(MARKER, b"started");
     let _ = std::fs::create_dir_all(ROOT);
-    std::fs::write(format!("{ROOT}/child.pid"), std::process::id().to_string()).unwrap();
+    // getpid and readlink are outside the wallet seccomp grant; readlinkat is allowed.
+    let mut target = [0u8; 32];
+    let count = unsafe {
+        readlinkat(
+            -100, // AT_FDCWD
+            c"/proc/self".as_ptr(),
+            target.as_mut_ptr().cast(),
+            target.len(),
+        )
+    };
+    if count < 0 {
+        panic!("readlinkat /proc/self: {}", std::io::Error::last_os_error());
+    }
+    let pid = std::str::from_utf8(&target[..count as usize]).unwrap();
+    assert!(pid.bytes().all(|byte| byte.is_ascii_digit()));
+    std::fs::write(format!("{ROOT}/child.pid"), pid).unwrap();
     let mut output = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
@@ -33,11 +56,19 @@ fn main() {
             )
             .unwrap();
         } else if line.contains("\"op\":\"create_wallet\"") {
-            std::fs::write(format!("{ROOT}/wallet-state.json"), b"{\"accounts\":[\"a1\"]}").unwrap();
-            writeln!(output, "{{\"status\":\"ok\",\"data\":{{\"created\":\"a1\"}}}}").unwrap();
+            std::fs::write(
+                format!("{ROOT}/wallet-state.json"),
+                b"{\"accounts\":[\"a1\"]}",
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "{{\"status\":\"ok\",\"data\":{{\"created\":\"a1\"}}}}"
+            )
+            .unwrap();
         } else if line.contains("\"op\":\"list_wallets\"") {
-            let state = std::fs::read_to_string(format!("{ROOT}/wallet-state.json"))
-                .unwrap_or_default();
+            let state =
+                std::fs::read_to_string(format!("{ROOT}/wallet-state.json")).unwrap_or_default();
             let accounts = if state.contains("a1") { 1 } else { 0 };
             writeln!(
                 output,
