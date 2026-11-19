@@ -286,7 +286,7 @@ fn principal_from_launch_request(
 
 fn launch_capsule_name(capsule_dir: &std::path::Path) -> Result<String, (StatusCode, String)> {
     let manifest_path = capsule_dir.join("capsule.json");
-    let bytes = std::fs::read(&manifest_path).map_err(|err| {
+    let bytes = elastos_common::capsule_manifest_file::read(&manifest_path).map_err(|err| {
         (
             StatusCode::BAD_REQUEST,
             format!("read capsule manifest for launch grant: {err}"),

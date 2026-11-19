@@ -141,11 +141,10 @@ impl ShellManager {
 
         // Read manifest
         let manifest_path = path.join("capsule.json");
-        let manifest_data = tokio::fs::read_to_string(&manifest_path)
-            .await
+        let manifest_data = elastos_common::capsule_manifest_file::read(&manifest_path)
             .map_err(|e| ShellError::Launch(format!("Failed to read shell manifest: {}", e)))?;
 
-        let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_data)
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&manifest_data)
             .map_err(|e| ShellError::Launch(format!("Failed to parse shell manifest: {}", e)))?;
 
         manifest

@@ -793,10 +793,9 @@ impl Supervisor {
     ) -> Result<(PathBuf, elastos_common::CapsuleManifest)> {
         let capsule_dir = self.ensure_capsule(name).await?;
         let manifest_path = capsule_dir.join("capsule.json");
-        let manifest_data = tokio::fs::read_to_string(&manifest_path)
-            .await
+        let manifest_data = elastos_common::capsule_manifest_file::read(&manifest_path)
             .with_context(|| format!("reading capsule.json for '{name}'"))?;
-        let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_data)
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&manifest_data)
             .with_context(|| format!("parsing capsule.json for '{name}'"))?;
         Ok((capsule_dir, manifest))
     }
