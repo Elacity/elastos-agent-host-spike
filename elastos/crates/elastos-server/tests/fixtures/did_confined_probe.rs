@@ -3,7 +3,9 @@ use std::io::{BufRead, Write};
 const ROOT: &str = "@@ROOT@@";
 
 fn main() {
-    std::fs::write(format!("{ROOT}/child.pid"), std::process::id().to_string()).unwrap();
+    // getpid is outside the DID seccomp grant; /proc/self names this child.
+    let pid = std::fs::read_link("/proc/self").unwrap();
+    std::fs::write(format!("{ROOT}/child.pid"), pid.to_str().unwrap()).unwrap();
     let mut output = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
