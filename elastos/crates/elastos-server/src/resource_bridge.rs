@@ -4116,6 +4116,182 @@ mod tests {
         );
     }
 
+    fn b4r_documents(principal_id: &str) -> (tempfile::TempDir, BridgeContext, String) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        // No listed asks, so the manifest ceiling allows read and write. A
+        // plant that asks for Read is not refused here.
+        ctx.manifest_capabilities =
+            any_action(vec![format!("{}/Documents/*", protection.localhost_root)]);
+        (temp, ctx, protection.localhost_root)
+    }
+
+    fn b4r_names(root: &str, name: &str) -> (String, String) {
+        (
+            format!("localhost://Users/self/Documents/{name}"),
+            format!("{root}/Documents/{name}"),
+        )
+    }
+
+    fn b4r_path(temp: &tempfile::TempDir, scoped: &str) -> std::path::PathBuf {
+        let path = rooted_localhost_fs_path(temp.path(), scoped).expect("file-backed path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        path
+    }
+
+    async fn b4r_invoke(
+        ctx: &BridgeContext,
+        operation: &str,
+        uri: &str,
+        token: &str,
+        content: Option<&str>,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({});
+        if let Some(content) = content {
+            body["content"] = serde_json::Value::String(content.to_string());
+        }
+        let line = serde_json::json!({
+            "id": 7,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": operation,
+                "token": token,
+                "body": body,
+            }
+        })
+        .to_string();
+        handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers")
+    }
+
+    /// A read grant calling localhost write is `capability_denied` before the
+    /// file is created or changed. The manifest ceiling allows the call.
+    #[tokio::test]
+    async fn b4r_read_grant_on_localhost_write_is_refused_before_effect() {
+        let principal_id = "person:local:b4r-read-on-write";
+        let (temp, ctx, root) = b4r_documents(principal_id);
+        let (absent_uri, absent_scoped) = b4r_names(&root, "absent.txt");
+        let (present_uri, present_scoped) = b4r_names(&root, "present.txt");
+        let absent_path = b4r_path(&temp, &absent_scoped);
+        let present_path = b4r_path(&temp, &present_scoped);
+        let original = b"kept-bytes";
+        std::fs::write(&present_path, original).expect("seed");
+        assert!(!absent_path.exists());
+
+        let absent = b4r_invoke(
+            &ctx,
+            "write",
+            &absent_uri,
+            &bridge_token(&ctx, &absent_scoped, Action::Read),
+            Some("should-not-land"),
+        )
+        .await;
+        let absent_code = absent["response"]["code"].as_str();
+        assert_ne!(
+            absent_code,
+            Some("manifest_capability_denied"),
+            "manifest ceiling refused before the token check: {absent}"
+        );
+        assert_eq!(
+            absent_code,
+            Some("capability_denied"),
+            "read grant on localhost write is capability_denied before the effect; status={} file_exists={} response={absent}",
+            absent["response"]["result"]["status"].as_str().unwrap_or(""),
+            absent_path.exists(),
+        );
+        assert!(
+            !absent_path.exists(),
+            "a refused write does not create the file"
+        );
+
+        let present = b4r_invoke(
+            &ctx,
+            "write",
+            &present_uri,
+            &bridge_token(&ctx, &present_scoped, Action::Read),
+            Some("should-not-replace"),
+        )
+        .await;
+        assert_eq!(
+            present["response"]["code"].as_str(),
+            Some("capability_denied"),
+            "read grant on an existing file is capability_denied: {present}"
+        );
+        assert_eq!(
+            std::fs::read(&present_path).expect("pre-existing file remains"),
+            original,
+            "a refused write leaves the file bytes unchanged"
+        );
+
+        let granted = b4r_invoke(
+            &ctx,
+            "write",
+            &absent_uri,
+            &bridge_token(&ctx, &absent_scoped, Action::Write),
+            Some("landed"),
+        )
+        .await;
+        assert_eq!(
+            granted["response"]["result"]["status"], "ok",
+            "a write grant reaches storage: {granted}"
+        );
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                principal_id,
+                &root,
+                &absent_scoped,
+                &absent_path,
+            )
+            .expect("stored object"),
+            b"landed"
+        );
+    }
+
+    /// A write grant calling localhost read is `capability_denied`.
+    #[tokio::test]
+    async fn b4r_write_grant_on_localhost_read_is_refused() {
+        let (temp, ctx, root) = b4r_documents("person:local:b4r-write-on-read");
+        let (uri, scoped) = b4r_names(&root, "note.txt");
+        let path = b4r_path(&temp, &scoped);
+        let original = b"read-target";
+        std::fs::write(&path, original).expect("seed");
+
+        let response = b4r_invoke(
+            &ctx,
+            "read",
+            &uri,
+            &bridge_token(&ctx, &scoped, Action::Write),
+            None,
+        )
+        .await;
+        assert_ne!(
+            response["response"]["code"].as_str(),
+            Some("manifest_capability_denied"),
+            "manifest ceiling refused before the token check: {response}"
+        );
+        assert_eq!(
+            response["response"]["code"].as_str(),
+            Some("capability_denied"),
+            "write grant on localhost read is capability_denied: {response}"
+        );
+        assert_eq!(std::fs::read(&path).expect("file remains"), original);
+    }
+
+    /// Base `85f93f3b9` displays the webspace write right as the bytes `write`.
+    #[test]
+    fn b4r_webspace_write_required_right_is_unchanged_from_base() {
+        let right = provider_operation_action("webspace", "write")
+            .expect("webspace write has a required right");
+        assert_eq!(right.to_string().as_bytes(), b"write");
+    }
+
     #[test]
     fn resource_invoke_dispatch_rejects_unscoped_current_user_alias() {
         let result = resource_invoke_dispatch(
