@@ -1213,9 +1213,10 @@ pub(crate) mod tests {
                 serde_json::to_vec(&manifest).unwrap(),
             )
             .unwrap();
-            // The bytes are final. The stored host CID is the one walk the
-            // Runtime makes of exactly these files; `.elastos-cid` is beside
-            // them and takes no part in it.
+            // The bytes are final: the folder the probe starts is the one an
+            // install recorded here, and the stored host CID is the one walk
+            // the Runtime makes of exactly these files.
+            crate::setup::record_install_cid(&data_dir, &capsule_dir, &capsule_dir);
             let probe_cid = crate::stage_cmd::bundle_cid(&capsule_dir)
                 .expect("the probe host bundle is walkable");
             let agents = names
@@ -5766,6 +5767,165 @@ pub(crate) mod tests {
         );
     }
 
+    /// The route reaches the bundle signature check through its by-CID
+    /// fallback for a staged slot. Three files fail it in the three ways it
+    /// can: a signer key that does not decode, a signature that does not
+    /// verify, and a signature by a key this Home does not trust. Each gives
+    /// the one refusal, and each takes the same steps before it.
+    #[tokio::test]
+    async fn the_route_refuses_three_slot_signature_failures_with_the_same_work() {
+        use elastos_compute::providers::ComponentProvider;
+        use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
+        use elastos_storage::providers::LocalFSProvider;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let trusted = SigningKey::from_bytes(&[0x62; 32]);
+        runtime
+            .configure_capsule_admission(
+                &data_dir,
+                &[hex::encode(trusted.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+
+        // One component folder this Home records no install for, signed by
+        // the key it trusts.
+        let name = "slot-signature-cases";
+        let folder = temp.path().join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/a5-launch-probe");
+        let wasm = std::fs::read(fixture.join("a5-launch-probe.component.wasm")).unwrap();
+        let mut manifest: elastos_common::CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(fixture.join("capsule.json")).unwrap()).unwrap();
+        manifest.name = name.to_string();
+        manifest.agent = None;
+        manifest.capabilities = Vec::new();
+        sign_capsule(&trusted, &mut manifest, &hash_content(&wasm)).unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(folder.join(&manifest.entrypoint), &wasm).unwrap();
+
+        // The slot the fallback reads: the folder's own bytes, staged under
+        // the CID this Home accepts.
+        let cid = crate::stage_cmd::bundle_cid(&folder).expect("the folder is walkable");
+        let slot_cid: elastos_bundle_identity::LabCid = cid.parse().expect("a CID");
+        let staged = temp.path().join("staged.sig.json");
+        std::fs::write(
+            &staged,
+            crate::bundle_admission::tests::signed(&cid, &trusted),
+        )
+        .unwrap();
+        crate::stage_cmd::stage_bundle(&runtime, &data_dir, &folder, &staged)
+            .await
+            .expect("the slot stages");
+
+        // The shell session's launch token for this folder's capsule.
+        let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
+        let owner = context.principal_id().to_string();
+        crate::auth::store_test_principal_root_protection(&data_dir, &owner);
+        crate::agents::tests::make_admin(&data_dir, &owner);
+        let grant =
+            gateway::issue_home_launch_token_with_context(&data_dir, name, &context).unwrap();
+
+        let stranger = SigningKey::from_bytes(&[0x63; 32]);
+        let by_trusted = crate::bundle_admission::tests::sign_by_hand(
+            &trusted,
+            crate::bundle_admission::BUNDLE_SIGNATURE_DOMAIN,
+            &cid,
+        );
+        let by_stranger = crate::bundle_admission::tests::sign_by_hand(
+            &stranger,
+            crate::bundle_admission::BUNDLE_SIGNATURE_DOMAIN,
+            &cid,
+        );
+        let cases = [
+            (
+                "a signer key that does not decode",
+                crate::bundle_admission::tests::file_for(
+                    &cid,
+                    "did:key:not-a-canonical-key",
+                    &by_trusted,
+                ),
+            ),
+            (
+                "a signature that does not verify",
+                crate::bundle_admission::tests::file_for(
+                    &cid,
+                    &crate::bundle_admission::tests::did(&trusted.verifying_key()),
+                    &by_stranger,
+                ),
+            ),
+            (
+                "a key the Home does not trust",
+                crate::bundle_admission::tests::file_for(
+                    &cid,
+                    &crate::bundle_admission::tests::did(&stranger.verifying_key()),
+                    &by_stranger,
+                ),
+            ),
+        ];
+
+        let signature_path = crate::bundle_admission::bundle_signature_path(&data_dir, &slot_cid);
+        let mut refusals = Vec::new();
+        let mut works = Vec::new();
+        for (case, file) in &cases {
+            std::fs::write(&signature_path, file).unwrap();
+            let _ = crate::bundle_admission::tests::take_signature_check_work();
+            let response = launch_capsule(
+                Extension(runtime.clone()),
+                Extension(audit_log.clone()),
+                Extension(Some(data_dir.clone())),
+                Json(LaunchRequest {
+                    path: folder.to_string_lossy().into_owned(),
+                    principal_id: None,
+                    launch_grant: Some(grant.clone()),
+                    agent_id: None,
+                }),
+            )
+            .await;
+            let (status, message) = match response {
+                Ok(_) => panic!("{case}: the route started the folder"),
+                Err(error) => error,
+            };
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{case}");
+            assert!(message.contains("is not installed"), "{case}: {message}");
+            assert!(message.contains(&cid), "{case}: {message}");
+            refusals.push(message);
+            works.push(crate::bundle_admission::tests::take_signature_check_work());
+        }
+        assert_eq!(
+            refusals[0], refusals[1],
+            "the same refusal for the same folder"
+        );
+        assert_eq!(
+            refusals[1], refusals[2],
+            "the same refusal for the same folder"
+        );
+        let same_work: Vec<&'static str> = vec!["signer key", "signature check", "trust scan"];
+        for (case, work) in cases.iter().map(|(case, _)| case).zip(&works) {
+            assert_eq!(work, &same_work, "{case}: the signature check's steps");
+        }
+        assert!(runtime.list_capsules().await.is_empty(), "nothing started");
+    }
+
     /// Round 3, point 3: a record written before the Runtime stored the Agent
     /// Host's byte CID still loads through the real strict parser, and every
     /// launch of it is refused by name. The missing CID is never re-derived
@@ -6505,6 +6665,7 @@ pub(crate) mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+        crate::setup::record_install_cid(&data_dir, &dir, &dir);
 
         let grants = grant_probe_requests(pending_store, capability_manager);
         let launched = tokio::time::timeout(
