@@ -321,7 +321,7 @@ async function assertScenario(page, width, height, screenshotPath) {
     await ensureSidebarVisible(frame);
   }
 
-  const tabs = ["account", "personalization", "shell", "security", "models", "about"];
+  const tabs = ["account", "personalization", "shell", "security", "models", "agents", "about"];
   const sidebarTabs = await frame.evaluate(() =>
     [...document.querySelectorAll(".settings-sidebar-item")].map((node) => node.dataset.settings));
   assert(sidebarTabs.join() === tabs.join(), "System sidebar tabs changed", { sidebarTabs });

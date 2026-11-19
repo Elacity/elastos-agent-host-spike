@@ -1146,6 +1146,38 @@ fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
 }
 
 #[test]
+fn the_list_returns_whether_each_agent_is_on() {
+    let home = Home::new();
+    turn_on(&home);
+    let created = create_one(&home, "request-list");
+    let caller = home.caller();
+    let off = serde_json::json!({ "agents": list_in_any_build(home.path(), &caller).unwrap() });
+    assert_eq!(off["agents"][0]["agent_id"], json!(created.agent_id));
+    assert_eq!(
+        off["agents"][0]["active"],
+        json!(false),
+        "the_list_returns_whether_each_agent_is_on"
+    );
+    write_change(&home, Operation::SetActive, |file| {
+        let agent = &mut file.agents[0];
+        agent.active = true;
+        agent.record.updated_at = 10;
+    })
+    .unwrap();
+    // On disk an agent that is on omits the field. The list still says on.
+    let stored: Value = serde_json::from_slice(&home.agent_bytes()).unwrap();
+    assert!(stored["agents"][0].get("active").is_none());
+    let on = serde_json::json!({
+        "agents": list_in_any_build(home.path(), &home.caller()).unwrap()
+    });
+    assert_eq!(
+        on["agents"][0]["active"],
+        json!(true),
+        "the_list_returns_whether_each_agent_is_on"
+    );
+}
+
+#[test]
 fn a_failed_save_leaves_neither_the_record_nor_the_protection() {
     let home = Home::new();
     turn_on(&home);
