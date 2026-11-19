@@ -92,6 +92,7 @@ mod gateway_home_wallet_connector;
 mod gateway_inbox;
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
+pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
 #[path = "gateway_marketplace.rs"]
 mod gateway_marketplace;
 #[path = "gateway_model_remote.rs"]

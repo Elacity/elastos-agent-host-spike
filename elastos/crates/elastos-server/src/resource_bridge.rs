@@ -33,6 +33,9 @@ use elastos_runtime::provider::ProviderRegistry;
 const CAPABILITY_APPROVAL_POLL_MS: u64 = 100;
 const CAPABILITY_APPROVAL_MAX_POLLS: usize = 300;
 const MAX_RESOURCE_FRAME_BYTES: usize = 1_048_576;
+/// The Runtime-owned Inspector operation an agent calls to submit a plan.
+/// The Runtime answers it and it never reaches a provider.
+const SUBMIT_AGENT_PLAN_OPERATION: &str = "submit_agent_plan";
 
 /// The name a content launch binds for its program, and the pattern that
 /// program asks for and is granted: a read of the bare name is the listing,
@@ -295,6 +298,10 @@ pub struct BridgeContext {
     pub pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
     /// Capsule identity for token minting (session ID or capsule name)
     pub capsule_id: String,
+    /// The Runtime session this activation runs in: the component activation
+    /// id the Runtime's hostcall supplies, never the Bus identity field a
+    /// guest sees.
+    pub session_id: String,
     /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
     pub principal_id: Option<String>,
     /// Manifest-declared resource ceilings for capsule-requestable authority:
@@ -722,6 +729,18 @@ async fn authorize_and_dispatch_resource_invoke(
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
     }
 
+    // A plan submission is answered by the Runtime, after the same manifest
+    // and token checks every invoke passes: the Runtime writes one pending
+    // record from its own context and runs nothing.
+    if dispatch.scheme == "inspect" && dispatch.operation == SUBMIT_AGENT_PLAN_OPERATION {
+        let response = submit_agent_plan_response(bridge_ctx, &request["body"]);
+        let outcome = match response.get("type").and_then(|value| value.as_str()) {
+            Some("resource_result") => invoke_outcome(&response["result"]),
+            _ => "denied",
+        };
+        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
+    }
+
     // A launch name is answered here, from the caller's own launch, and
     // never by a provider.
     if dispatch.scheme == "launch" {
@@ -782,6 +801,62 @@ async fn authorize_and_dispatch_resource_invoke(
                 resource_error_response("provider_error", "Provider operation failed"),
             )
         }
+    }
+}
+
+/// The Runtime's answer to an agent plan submission: one pending record built
+/// from the caller's Runtime context, returned whole. The stored owner is the
+/// person on the requesting agent's stored record; the step is not run.
+fn submit_agent_plan_response(
+    bridge_ctx: &BridgeContext,
+    plan: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(data_dir) = bridge_ctx.data_dir.as_deref() else {
+        return resource_error_response(
+            "submit_agent_plan_refused",
+            "agent plan submission requires the Runtime data directory",
+        );
+    };
+    let Some(requester_id) = bridge_ctx.principal_id.as_deref() else {
+        return resource_error_response(
+            "submit_agent_plan_refused",
+            "agent plan submission requires an admitted agent principal",
+        );
+    };
+    let stored = crate::auth::stored_principal_record(data_dir, requester_id)
+        .ok()
+        .flatten();
+    let Some(owner_id) = stored.as_ref().and_then(|record| {
+        (record.kind == crate::auth::PrincipalKind::Agent)
+            .then(|| record.owner.clone())
+            .flatten()
+    }) else {
+        return resource_error_response(
+            "submit_agent_plan_refused",
+            "agent plan submission requires an admitted agent with a stored owner",
+        );
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match crate::api::gateway::submit_pending_agent_plan(
+        data_dir,
+        &owner_id,
+        requester_id,
+        &bridge_ctx.capsule_id,
+        &bridge_ctx.session_id,
+        plan,
+        now,
+    ) {
+        Ok(record) => serde_json::json!({
+            "type": "resource_result",
+            "result": {
+                "status": "ok",
+                "data": record,
+            },
+        }),
+        Err(err) => resource_error_response("submit_agent_plan_refused", &err.to_string()),
     }
 }
 
@@ -2132,6 +2207,7 @@ mod tests {
                 elastos_runtime::capability::pending::PendingRequestStore::new(audit_log),
             ),
             capsule_id: "test-capsule".to_string(),
+            session_id: "test-session".to_string(),
             principal_id: None,
             manifest_capabilities: any_action(vec![
                 "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
@@ -6874,6 +6950,260 @@ mod tests {
             provider.requests().await.is_empty(),
             "rejected Carrier Wallet operations must not reach ProviderRegistry"
         );
+    }
+
+    // A15-R slice 3: an admitted agent submits a plan through the existing Bus
+    // v1 invoke. The Runtime writes one pending record bound to its own
+    // identity and runs nothing.
+    fn submit_record_files(data_dir: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(data_dir.join("inspect-actions")) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .map(|entry| {
+                entry
+                    .expect("record directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn read_submit_record(data_dir: &Path, request_id: &str) -> serde_json::Value {
+        let path = data_dir
+            .join("inspect-actions")
+            .join(format!("{request_id}.json"));
+        serde_json::from_slice(&std::fs::read(path).expect("stored record")).unwrap()
+    }
+
+    fn submit_plan_host_manifest() -> elastos_common::CapsuleManifest {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/a5-launch-probe/capsule.json");
+        serde_json::from_slice(&std::fs::read(path).expect("signed test manifest")).unwrap()
+    }
+
+    /// The submitted plan: one exact typed step plus whatever the row adds.
+    fn submitted_plan(extra: serde_json::Value) -> serde_json::Value {
+        let mut request = serde_json::json!({
+            "path": "localhost://UsersAI/self/Documents/plan.md",
+            "content": [112, 108, 97, 110],
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                request[key] = value.clone();
+            }
+        }
+        serde_json::json!({
+            "steps": [{
+                "scheme": "localhost",
+                "operation": "write",
+                "request": request,
+            }],
+        })
+    }
+
+    fn submit_agent_plan_line(id: u64, token: Option<&str>, plan: &serde_json::Value) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": "elastos://inspect/submit_agent_plan",
+                "operation": "submit_agent_plan",
+                "body": plan,
+                "token": token,
+            },
+        })
+        .to_string()
+    }
+
+    async fn submit_agent_plan_context() -> (
+        tempfile::TempDir,
+        BridgeContext,
+        Arc<CapturingProvider>,
+        String,
+        String,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = crate::auth::valid_agent::plant(temp.path());
+        let owner = agent.owner.clone().expect("the stored agent has an owner");
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(agent.principal_id.clone());
+        ctx.capsule_id = "component-7c1b2a4d".to_string();
+        // The Runtime supplies the activation id; it is not read from the Bus
+        // identity field.
+        ctx.session_id = ctx.capsule_id.clone();
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = submit_plan_host_manifest().resource_authority_bounds();
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        (temp, ctx, provider, agent.principal_id, owner)
+    }
+
+    #[tokio::test]
+    async fn a15r_bus_submit_records_one_bound_pending_plan_and_no_effect() {
+        let (temp, ctx, provider, requester, owner) = submit_agent_plan_context().await;
+        let token = bridge_token(&ctx, "elastos://inspect/submit_agent_plan", Action::Write);
+        let plan = submitted_plan(serde_json::json!({}));
+        let response = handle_request(
+            &submit_agent_plan_line(71, Some(&token), &plan),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response["response"]["type"], "resource_result",
+            "{response}"
+        );
+        let result = &response["response"]["result"];
+        assert_eq!(result["status"], "ok", "{response}");
+        let data = &result["data"];
+        assert_eq!(data["status"], "pending", "{response}");
+        let request_id = data["request_id"].as_str().expect("one request id");
+        assert!(request_id.starts_with("inspect-act-"));
+
+        assert_eq!(
+            submit_record_files(temp.path()),
+            vec![format!("{request_id}.json")],
+            "one pending record and nothing else"
+        );
+        let stored = read_submit_record(temp.path(), request_id);
+        assert_eq!(stored["kind"], "agent_plan");
+        assert_eq!(stored["owner_id"], owner);
+        assert_eq!(stored["principal_id"], requester);
+        assert_eq!(stored["session_id"], ctx.session_id);
+        assert_eq!(stored["id"], ctx.capsule_id);
+        assert_eq!(stored["status"], "pending");
+        assert!(stored["result"].is_null() && stored["error"].is_null());
+        assert_eq!(stored["request"], plan["steps"][0], "the exact typed step");
+
+        // One binding rule: owner, requester, session and the step, under the
+        // same ESP sha256, whole rather than cut.
+        let binding = &stored["request_binding"];
+        assert_eq!(binding["principal"], requester);
+        assert_eq!(binding["capsule"], ctx.capsule_id);
+        assert_eq!(binding["preview"]["owner"], owner);
+        assert_eq!(binding["preview"]["requester"], requester);
+        assert_eq!(binding["preview"]["session"], ctx.session_id);
+        assert_eq!(binding["preview"]["step"], plan["steps"][0]);
+        assert!(!binding["truncated"].as_bool().expect("truncated flag"));
+        let sha256 = binding["sha256"].as_str().expect("a full binding hash");
+        assert_eq!(sha256.len(), 64);
+        assert_eq!(data["request_binding"], *binding);
+
+        assert!(
+            provider.requests().await.is_empty(),
+            "a submission reaches no provider"
+        );
+        assert!(
+            ctx.pending_store.list_pending().await.is_empty(),
+            "a submission asks for no grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn a15r_bus_submit_requires_the_right_agent_identity_and_stored_owner() {
+        let (temp, ctx, _provider, requester, owner) = submit_agent_plan_context().await;
+        let plan = submitted_plan(serde_json::json!({}));
+
+        let refused = handle_request(&submit_agent_plan_line(72, None, &plan), &Some(ctx.clone()))
+            .await
+            .unwrap();
+        assert_eq!(refused["response"]["code"], "missing_token");
+
+        let read = bridge_token(&ctx, "elastos://inspect/submit_agent_plan", Action::Read);
+        let refused = handle_request(
+            &submit_agent_plan_line(73, Some(&read), &plan),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["response"]["code"], "capability_denied");
+
+        let mut without_ask = ctx.clone();
+        without_ask.manifest_capabilities =
+            any_action(vec!["localhost://UsersAI/self/*".to_string()]);
+        let token = bridge_token(&ctx, "elastos://inspect/submit_agent_plan", Action::Write);
+        let refused = handle_request(
+            &submit_agent_plan_line(74, Some(&token), &plan),
+            &Some(without_ask),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["response"]["code"], "manifest_capability_denied");
+
+        let human = "person:local:not-an-agent";
+        crate::auth::store_test_human_principal(temp.path(), human);
+        let mut person = ctx.clone();
+        person.principal_id = Some(human.to_string());
+        let token = bridge_token(
+            &person,
+            "elastos://inspect/submit_agent_plan",
+            Action::Write,
+        );
+        let refused = handle_request(
+            &submit_agent_plan_line(75, Some(&token), &plan),
+            &Some(person),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["response"]["code"], "submit_agent_plan_refused");
+        assert!(
+            refused["response"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("stored owner"),
+            "{refused}"
+        );
+
+        let mut named = plan.clone();
+        named["owner"] = serde_json::json!("person:else");
+        let token = bridge_token(&ctx, "elastos://inspect/submit_agent_plan", Action::Write);
+        let refused = handle_request(
+            &submit_agent_plan_line(76, Some(&token), &named),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["response"]["code"], "submit_agent_plan_refused");
+        assert!(
+            refused["response"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("exact"),
+            "{refused}"
+        );
+
+        assert!(
+            submit_record_files(temp.path()).is_empty(),
+            "no refusal writes a record"
+        );
+
+        // An owner named inside the step request is provider data and never
+        // identity: the record keeps the owner on the requesting agent's
+        // stored record, and the binding covers it.
+        let mut step_owner = plan.clone();
+        step_owner["steps"][0]["request"]["owner"] = serde_json::json!("person:else");
+        let token = bridge_token(&ctx, "elastos://inspect/submit_agent_plan", Action::Write);
+        let response = handle_request(
+            &submit_agent_plan_line(77, Some(&token), &step_owner),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        let data = &response["response"]["result"]["data"];
+        assert_eq!(data["status"], "pending", "{response}");
+        let stored = read_submit_record(temp.path(), data["request_id"].as_str().unwrap());
+        assert_eq!(
+            stored["owner_id"], owner,
+            "the owner comes from the stored agent record"
+        );
+        assert_eq!(stored["principal_id"], requester);
+        assert_eq!(stored["request_binding"]["preview"]["owner"], owner);
+        assert_eq!(stored["request"]["request"]["owner"], "person:else");
     }
 
     #[tokio::test]

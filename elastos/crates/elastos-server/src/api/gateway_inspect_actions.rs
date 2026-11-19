@@ -15,6 +15,39 @@ use store::{
     InspectActionRequestRecord, INSPECT_ACTION_KIND, INSPECT_ACTION_SCHEMA,
 };
 
+/// The one entry point an agent's Bus submission uses: write the pending
+/// agent plan record and return it. Every identity is the caller's Runtime
+/// context; the submitted plan cannot name one. Nothing here runs a step.
+pub(crate) fn submit_pending_agent_plan(
+    data_dir: &FsPath,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+    plan: &serde_json::Value,
+    now: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let context = agent_plan::AgentPlanContext {
+        owner_id,
+        principal_id: requester_id,
+        capsule_id,
+        session_id,
+    };
+    let record = agent_plan::create_pending_agent_plan_record(data_dir, &context, plan, now)?;
+    Ok(serde_json::json!({
+        "schema": INSPECT_ACTION_SCHEMA,
+        "status": "pending",
+        "request_id": record.request_id,
+        "id": record.id,
+        "operation": record.operation,
+        "request": record.request,
+        "plan": record.plan,
+        "request_binding": record.request_binding,
+        "owner_id": record.owner_id,
+        "created_at": record.created_at,
+    }))
+}
+
 pub(super) async fn gateway_inspect_action_request(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
@@ -579,6 +612,7 @@ async fn create_inspect_action_request(
         kind: INSPECT_ACTION_KIND.to_string(),
         request_id,
         principal_id: context.principal_id().to_string(),
+        owner_id: None,
         session_id: context.session_id().to_string(),
         id: id.to_string(),
         operation: operation.to_string(),

@@ -1295,7 +1295,15 @@ pub(crate) mod tests {
             let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
             let mut manifest: elastos_common::CapsuleManifest =
                 serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
-            manifest.capabilities.extend_from_slice(claims);
+            manifest
+                .asks
+                .extend(claims.iter().map(|claim| elastos_common::ManifestAsk {
+                    resource: claim.clone(),
+                    actions: vec![
+                        elastos_common::AskAction::Read,
+                        elastos_common::AskAction::Write,
+                    ],
+                }));
             sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
             std::fs::write(
                 dir.join("capsule.json"),
@@ -1321,7 +1329,10 @@ pub(crate) mod tests {
             let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
             let mut manifest: elastos_common::CapsuleManifest =
                 serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
-            manifest.capabilities.push("elastos://model/*".to_string());
+            manifest.asks.push(elastos_common::ManifestAsk {
+                resource: "elastos://model/*".to_string(),
+                actions: vec![elastos_common::AskAction::Read],
+            });
             manifest.resources.model_tokens = tokens;
             sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
             std::fs::write(
@@ -3486,6 +3497,7 @@ pub(crate) mod tests {
             capability_manager: home.capability_manager.clone(),
             pending_store: home.pending_store.clone(),
             capsule_id: instance.to_string(),
+            session_id: instance.to_string(),
             principal_id: Some(principal.to_string()),
             manifest_capabilities: tables.manifest_capabilities,
             data_dir: Some(home.data_dir.clone()),
@@ -4631,6 +4643,7 @@ pub(crate) mod tests {
             capability_manager: home.capability_manager.clone(),
             pending_store: home.pending_store.clone(),
             capsule_id: "a5-s5-protected-path-companion".to_string(),
+            session_id: "a5-s5-protected-path-companion".to_string(),
             principal_id: Some(x.clone()),
             manifest_capabilities: Vec::new(),
             data_dir: Some(home.data_dir.clone()),
