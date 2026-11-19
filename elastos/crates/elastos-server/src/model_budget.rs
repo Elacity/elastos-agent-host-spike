@@ -38,6 +38,11 @@ impl AgentKey {
     pub(crate) fn principal(&self) -> &str {
         &self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(principal: &str) -> Self {
+        Self(principal.to_string())
+    }
 }
 
 /// The run identity a hold is charged to, derived from the production binding.
