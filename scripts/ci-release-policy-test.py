@@ -1022,7 +1022,7 @@ class ReleasePolicyTests(unittest.TestCase):
             elif guard:
                 self.assertTrue(evaluate(guard[1], context), job)
             checkouts = [step for step in steps(job) if "uses: actions/checkout@" in step]
-            self.assertTrue(checkouts, job)
+            self.assertEqual(len(checkouts), 2 if job in ("engine-llama-amd64", "engine-llama-arm64") else 1, job)
             for checkout in checkouts:
                 self.assertEqual(field(checkout, "ref"),
                                  "${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}")
