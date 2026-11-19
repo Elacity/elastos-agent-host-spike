@@ -8154,45 +8154,10 @@ const CAPSULE_SCHEMA: &str = "elastos.capsule/v1";
 #[cfg(test)]
 const MANIFEST_KEYS: &str = " schema name version description author role type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources ";
 
-#[cfg(test)]
-const ASKS_JSON: &str = r#"{
-  "schema": "elastos.agent-host.asks/v1",
-  "asks": [
-    {"kind": "read", "resource": "<principal>/"},
-    {"kind": "edit", "resource": "<principal>/"},
-    {"kind": "restore", "resource": "<principal>/"},
-    {"kind": "run", "resource": "<principal>/Projects/"},
-    {"kind": "child", "resource": "<principal>/Projects/"},
-    {"kind": "init", "resource": "<principal>/Projects/"},
-    {"kind": "hosted", "resource": "Models/"},
-    {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
-    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}
-  ]
-}
-"#;
-
-#[cfg(test)]
-const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
-
 /// The one marker a declared pattern may hold: the user-namespace root,
 /// `Users/<one name>`. The declaration names no person and no host path.
 #[cfg(test)]
 const PRINCIPAL_MARKER: &str = "<principal>";
-
-/// The one principal a declared pattern may name. The guest names only
-/// `Users/self`, which the Runtime scopes to the launching person, so the
-/// declaration covers that person and no other `Users/<name>`.
-#[cfg(test)]
-const LAUNCHING_PRINCIPAL: &str = "Users/self";
-
-/// One declared ask: a proposal kind and the resource pattern after
-/// `localhost://` that it may name.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Ask {
-    kind: ProposalKind,
-    pattern: String,
-}
 
 /// The declared name of one kind. The match has no wildcard, so a new
 /// `ProposalKind` does not compile until it is named here or marked as the
@@ -8341,8 +8306,7 @@ fn secret_shaped(text: &str) -> bool {
 
 /// The one rule for a declared resource pattern: it names a resource and no
 /// URL, host path, routed `Users/` path, secret, or misplaced marker. The
-/// first match names its cause. `parse_asks` and the declaration test use
-/// this same function, so the rule has one copy.
+/// first match names its cause. The manifest parser uses this for its path.
 #[cfg(test)]
 fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
     let lower = pattern.to_ascii_lowercase();
@@ -8504,109 +8468,11 @@ fn parse_manifest_asks(text: &str) -> Result<Vec<ManifestDeclaredAsk>, &'static 
     Ok(asks)
 }
 
-/// Parse the declaration with its closed shape: only `schema` and `asks`,
-/// only `kind` and `resource` in each ask, and no repeated key. Each refusal
-/// names its own cause; a kind the guest cannot propose, the `unspecified`
-/// placeholder, and a forbidden resource value each have their own reason.
-#[cfg(test)]
-fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
-    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "asks json")?;
-    if repeated_object_key(text).is_some() {
-        return Err("asks duplicate field");
-    }
-    let document = document.as_object().ok_or("asks root")?;
-    if document.keys().any(|key| key != "schema" && key != "asks") {
-        return Err("asks unknown field");
-    }
-    let schema = document.get("schema").ok_or("asks schema missing")?;
-    let schema = schema.as_str().ok_or("asks schema type")?;
-    if schema != ASKS_SCHEMA {
-        return Err("asks schema unsupported");
-    }
-    let entries = document.get("asks").ok_or("asks list missing")?;
-    let entries = entries.as_array().ok_or("asks list type")?;
-    if entries.is_empty() {
-        return Err("asks empty");
-    }
-    let mut asks = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let entry = entry.as_object().ok_or("asks entry")?;
-        if entry.keys().any(|key| key != "kind" && key != "resource") {
-            return Err("asks entry field");
-        }
-        let kind = entry.get("kind").ok_or("asks kind missing")?;
-        let kind = kind.as_str().ok_or("asks kind type")?;
-        if kind == "unspecified" {
-            return Err("asks kind unspecified");
-        }
-        let kind = proposal_kind(kind).ok_or("asks kind unknown")?;
-        let pattern = entry.get("resource").ok_or("asks resource missing")?;
-        let pattern = pattern.as_str().ok_or("asks resource type")?;
-        if pattern.is_empty() {
-            return Err("asks resource empty");
-        }
-        if pattern.chars().any(char::is_whitespace) {
-            return Err("asks whitespace");
-        }
-        if let Some(reason) = ask_resource_refusal(pattern) {
-            return Err(reason);
-        }
-        asks.push(Ask {
-            kind,
-            pattern: pattern.to_string(),
-        });
-    }
-    Ok(asks)
-}
-
-/// The declaration, parsed once from the compiled-in file. Immutable after
-/// that parse, so it holds no per-session state. Keep a malformed declaration's
-/// reason so every reader fails with that reason (fail closed, P11).
-#[cfg(test)]
-static DECLARED_ASKS: std::sync::LazyLock<Result<Vec<Ask>, &'static str>> =
-    std::sync::LazyLock::new(|| parse_asks(ASKS_JSON));
-
 #[cfg(test)]
 fn require_parsed_asks<'a, T>(parsed: &'a Result<Vec<T>, &'static str>) -> &'a [T] {
     parsed
         .as_deref()
         .unwrap_or_else(|reason| panic!("{reason}"))
-}
-
-#[cfg(test)]
-fn declared_asks() -> &'static [Ask] {
-    require_parsed_asks(&DECLARED_ASKS)
-}
-
-/// The one root a declared pattern names: the pattern with `<principal>`
-/// expanded to the launching person, and its trailing `/` dropped so the
-/// directory itself is the prefix. `ask_covers` gives this root to
-/// `resource_covers`, so "under this pattern" has one boundary rule (P10).
-#[cfg(test)]
-fn ask_pattern_root(pattern: &str) -> String {
-    let expanded = match pattern.strip_prefix(PRINCIPAL_MARKER) {
-        Some(tail) => format!("{LAUNCHING_PRINCIPAL}{tail}"),
-        None => pattern.to_string(),
-    };
-    expanded.trim_end_matches('/').to_string()
-}
-
-/// Whether one declared ask's pattern covers a proposed resource. The
-/// pattern's root is expanded once and `resource_covers` decides the
-/// boundary, so a sibling such as `ProjectsX` stays outside `Projects` (P10).
-#[cfg(test)]
-fn ask_covers(ask: &Ask, resource: &str) -> bool {
-    resource
-        .strip_prefix("localhost://")
-        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))
-}
-
-/// The declaration's answer for one proposal. `Unspecified` matches nothing.
-#[cfg(test)]
-fn declared_ask(kind: ProposalKind, resource: &str) -> bool {
-    declared_asks()
-        .iter()
-        .any(|ask| ask.kind == kind && ask_covers(ask, resource))
 }
 
 /// Test-only HTTP client and loopback mock server for the Sparks model.
@@ -20024,10 +19890,8 @@ mod tests {
         assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
     }
 
-    // The manifest `asks` are this guest's maximum. The lane list is the
-    // pattern fixture the parser checks. Each proposal kind the guest can
-    // name is observed in the scenarios. Each observed resource is the
-    // resource that scenario passed.
+    // The manifest `asks` are this guest's maximum. Each proposal kind the
+    // guest can name is observed in the scenarios.
 
     fn asks_document(entries: &str) -> String {
         format!(r#"{{"schema":"{CAPSULE_SCHEMA}","asks":[{entries}]}}"#)
@@ -20081,9 +19945,8 @@ mod tests {
         out
     }
 
-    /// The declaration carries no URL scheme, no host path, no routed
-    /// `Users/` path, no secret-shaped value, and no forbidden field. Every
-    /// entry names a kind the guest can propose.
+    /// The manifest permits a localhost `Users/self` ceiling. These cases
+    /// refuse other schemes, host paths, user routes, secrets, and extra fields.
     #[test]
     fn asks_declare_no_urls_secrets_or_users_paths() {
         let parsed = parse_manifest_asks(MANIFEST_JSON);
@@ -20171,21 +20034,21 @@ mod tests {
                 "asks list missing",
             ),
             (
-                r#"{"asks":[{"kind":"read","resource":"<principal>/"}]}"#.to_string(),
+                r#"{"asks":[{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}]}"#.to_string(),
                 "asks schema missing",
             ),
             (
-                r#"{"schema":1,"asks":[{"kind":"read","resource":"<principal>/"}]}"#.to_string(),
+                r#"{"schema":1,"asks":[{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}]}"#.to_string(),
                 "asks schema type",
             ),
             (
-                r#"{"schema":"wrong","asks":[{"kind":"read","resource":"<principal>/"}]}"#
+                r#"{"schema":"wrong","asks":[{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}]}"#
                     .to_string(),
                 "asks schema unsupported",
             ),
             (
                 format!(
-                    r#"{{"schema":"{ASKS_SCHEMA}","asks":[{{"kind":"read","resource":"<principal>/"}}],"extra":1}}"#
+                    r#"{{"schema":"{CAPSULE_SCHEMA}","asks":[{{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}}],"extra":1}}"#
                 ),
                 "asks unknown field",
             ),
@@ -20196,23 +20059,23 @@ mod tests {
             (asks_document(""), "asks empty"),
             (asks_document("1"), "asks entry"),
             (
-                asks_document(r#"{"actions":["read"],"resource":"<principal>/","extra":1}"#),
+                asks_document(r#"{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*","extra":1}"#),
                 "asks entry field",
             ),
             (
-                asks_document(r#"{"resource":"<principal>/"}"#),
+                asks_document(r#"{"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}"#),
                 "asks kind missing",
             ),
             (
-                asks_document(r#"{"actions":1,"resource":"<principal>/"}"#),
+                asks_document(r#"{"actions":1,"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}"#),
                 "asks kind type",
             ),
             (
-                asks_document(r#"{"actions":["unknown"],"resource":"<principal>/"}"#),
+                asks_document(r#"{"actions":["unknown"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}"#),
                 "asks kind unknown",
             ),
             (
-                asks_document(r#"{"actions":["unspecified"],"resource":"<principal>/"}"#),
+                asks_document(r#"{"actions":["unspecified"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}"#),
                 "asks kind unspecified",
             ),
             (
@@ -20317,7 +20180,7 @@ mod tests {
             ),
             (
                 format!(
-                    r#"{{"schema":"{ASKS_SCHEMA}","schema":"{ASKS_SCHEMA}","asks":[{{"kind":"read","resource":"<principal>/"}}]}}"#
+                    r#"{{"schema":"{CAPSULE_SCHEMA}","schema":"{CAPSULE_SCHEMA}","asks":[{{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}}]}}"#
                 ),
                 "asks duplicate field",
             ),
@@ -20589,72 +20452,64 @@ mod tests {
         );
     }
 
-    /// The lane-local journal row names this capsule's own root, the same root
-    /// the manifest ask names. A sibling agent's journal stays outside that row.
+    /// The signed row names this capsule's own root. A sibling agent's
+    /// journal stays outside it.
     #[test]
     fn the_journal_ask_is_the_capsules_own_root() {
         let (resource, _) = manifest_journal_ask();
         let own_root = resource
             .strip_suffix('*')
             .expect("the ask resource ends with a directory wildcard");
-        let journal = declared_asks()
-            .iter()
-            .find(|ask| ask.kind == ProposalKind::JournalAppend)
-            .expect("the lane-local list names the journal append");
-        let declared = format!(
-            "localhost://{}",
-            journal.pattern.replacen(PRINCIPAL_MARKER, "Users/self", 1)
+        assert_eq!(
+            own_root,
+            "localhost://Users/self/.AppData/Agents/agent-host/"
         );
-        assert_eq!(declared, own_root);
         assert!(
-            !declared_ask(
-                ProposalKind::JournalAppend,
-                "localhost://Users/self/.AppData/Agents/other-agent/tasks/t/journal"
+            !journal_manifest_ask_fits(
+                &resource,
+                &["write", "read"],
+                "localhost://Users/self/.AppData/Agents/other-agent/tasks/t/journal",
+                "write"
             ),
             "the journal row names this capsule's own root"
         );
     }
 
-    /// `<principal>` is the one person the guest launches as. The declaration
-    /// covers that person's resources and no other `Users/<name>`.
+    /// The signed resource names the launching person and this capsule.
     #[test]
     fn a_declared_ask_names_only_the_launching_principal() {
-        assert!(declared_ask(
-            ProposalKind::Read,
-            "localhost://Users/self/Documents/note.txt"
+        let (pattern, actions) = manifest_journal_ask();
+        let listed: Vec<&str> = actions.iter().map(String::as_str).collect();
+        assert!(journal_manifest_ask_fits(
+            &pattern,
+            &listed,
+            "localhost://Users/self/.AppData/Agents/agent-host/tasks/t/journal",
+            "read"
         ));
-        assert!(!declared_ask(
-            ProposalKind::Read,
-            "localhost://Users/other/Documents/note.txt"
-        ));
-        assert!(!declared_ask(
-            ProposalKind::Init,
-            "localhost://Users/other/Projects/demo"
+        assert!(!journal_manifest_ask_fits(
+            &pattern,
+            &listed,
+            "localhost://Users/other/.AppData/Agents/agent-host/tasks/t/journal",
+            "read"
         ));
     }
 
-    /// A declared pattern covers only at a path boundary: `ProjectsX` stays
-    /// outside `Projects`, and `ModelsX` stays outside `Models`. The shipped
-    /// declaration still covers the resources the scenarios above observe.
+    /// The signed resource covers a child journal path, not a sibling path.
     #[test]
     fn a_declared_pattern_covers_only_at_a_path_boundary() {
-        let run = Ask {
-            kind: ProposalKind::Run,
-            pattern: format!("{PRINCIPAL_MARKER}/Projects"),
-        };
-        assert!(!ask_covers(&run, "localhost://Users/self/ProjectsX/a"));
-        let models = Ask {
-            kind: ProposalKind::Hosted,
-            pattern: "Models/".to_string(),
-        };
-        assert!(!ask_covers(&models, "localhost://ModelsX/a"));
-        assert!(declared_ask(
-            ProposalKind::Run,
-            "localhost://Users/self/Projects/demo"
+        let (pattern, actions) = manifest_journal_ask();
+        let listed: Vec<&str> = actions.iter().map(String::as_str).collect();
+        assert!(journal_manifest_ask_fits(
+            &pattern,
+            &listed,
+            "localhost://Users/self/.AppData/Agents/agent-host/tasks/t/journal",
+            "write"
         ));
-        assert!(declared_ask(
-            ProposalKind::Hosted,
-            "localhost://Models/compaction"
+        assert!(!journal_manifest_ask_fits(
+            &pattern,
+            &listed,
+            "localhost://Users/self/.AppData/Agents/agent-hostX/tasks/t/journal",
+            "write"
         ));
     }
 
