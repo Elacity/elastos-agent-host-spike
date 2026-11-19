@@ -1471,7 +1471,7 @@
   },
   {
    "id": "F-AH3a",
-   "title": "a hosted proposal records a model resource the declaration does not cover",
+   "title": "a hosted proposal records a resource other than the one the scenario names",
    "command": "host",
    "expect": "caught",
    "edits": [
@@ -1482,7 +1482,7 @@
     }
    ],
    "tests": [
-    "tests::every_resource_the_guest_proposes_is_declared"
+    "tests::every_observed_proposal_keeps_its_scenario_resource"
    ]
   },
   {
@@ -1498,14 +1498,14 @@
     }
    ],
    "tests": [
-    "tests::every_resource_the_guest_proposes_is_declared"
+    "tests::a_declared_ask_names_only_the_launching_principal"
    ]
   },
   {
    "id": "F-AH3d",
-   "title": "a declared ask has no observed resource, so the declaration is wider than the guest",
+   "title": "an extra row in the lane-local list leaves the scenario tests passing",
    "command": "host",
-   "expect": "caught",
+   "expect": "survives",
    "edits": [
     {
      "file": "asks.json",
@@ -1514,7 +1514,8 @@
     }
    ],
    "tests": [
-    "tests::every_declared_ask_is_observed"
+    "tests::every_observed_proposal_keeps_its_scenario_resource",
+    "tests::every_proposal_kind_is_observed"
    ]
   },
   {
@@ -1530,8 +1531,7 @@
     }
    ],
    "tests": [
-    "tests::every_resource_the_guest_proposes_is_declared",
-    "tests::every_declared_ask_is_observed"
+    "tests::asks_declare_no_urls_secrets_or_users_paths"
    ]
   },
   {

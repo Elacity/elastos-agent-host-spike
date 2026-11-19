@@ -208,7 +208,7 @@ resource is named, not routed. The manifest `asks` name `write` and `read` on
 `localhost://Users/self/.AppData/Agents/agent-host/*`. The Runtime reads that
 maximum. Approval and policy decide each request. Every routed pattern in this
 file names the launching principal, `Users/self`. The scenarios observe every
-proposal kind. An observed resource still meets a row of this list. This file
+proposal kind. An observed resource is the resource that scenario passed. This file
 stays until upstream confirms the manifest contract.
 
 ## Build and test

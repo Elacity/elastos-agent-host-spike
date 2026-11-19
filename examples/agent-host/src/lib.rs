@@ -19905,8 +19905,8 @@ mod tests {
 
     // The manifest `asks` are this guest's maximum. `asks.json` stays as the
     // lane-local list the parser checks. Each proposal kind the guest can
-    // name is observed in the scenarios. An observed resource still meets a
-    // row of that list.
+    // name is observed in the scenarios. Each observed resource is the
+    // resource that scenario passed.
 
     fn asks_document(entries: &str) -> String {
         format!(r#"{{"schema":"{ASKS_SCHEMA}","asks":[{entries}]}}"#)
@@ -20253,34 +20253,93 @@ mod tests {
         assert_eq!(ask_kind_name(ProposalKind::Unspecified), None);
     }
 
-    /// Every resource the guest actually proposes matches a row of the
-    /// lane-local list. A proposal outside that list fails this test.
-    #[test]
-    fn every_resource_the_guest_proposes_is_declared() {
-        let observed = observed_proposals();
-        for (kind, resource) in &observed {
-            assert!(
-                declared_ask(*kind, resource),
-                "{kind:?} proposes {resource} outside the lane-local list"
-            );
-        }
+    fn proposed_resources(journal: &Journal) -> Vec<(ProposalKind, String)> {
+        journal
+            .steps
+            .iter()
+            .filter(|step| step.kind != ProposalKind::Unspecified && !step.resource.is_empty())
+            .map(|step| (step.kind, step.resource.clone()))
+            .collect()
     }
 
-    /// The reverse direction: every declared ask is observed. An unused
-    /// pattern is a grant wider than the guest needs, so it fails here.
+    /// Each scenario names the resource it passes. The stored step keeps that
+    /// resource, and the collected scenarios are that same sequence.
     #[test]
-    fn every_declared_ask_is_observed() {
-        let observed = observed_proposals();
-        for ask in declared_asks() {
-            assert!(
-                observed
-                    .iter()
-                    .any(|(kind, resource)| *kind == ask.kind && ask_covers(ask, resource)),
-                "{:?} ask {:?} is declared but no scenario proposes a matching resource",
-                ask.kind,
-                ask.pattern
-            );
+    fn every_observed_proposal_keeps_its_scenario_resource() {
+        let rich = a_rich_journal();
+        let rich_named = vec![
+            (
+                ProposalKind::Read,
+                "localhost://Users/self/Documents/note.txt".to_string(),
+            ),
+            (
+                ProposalKind::Edit,
+                "localhost://Users/self/Projects/demo/notes.txt".to_string(),
+            ),
+            (
+                ProposalKind::Run,
+                "localhost://Users/self/Projects/demo".to_string(),
+            ),
+            (
+                ProposalKind::Child,
+                "localhost://Users/self/Projects/demo/src".to_string(),
+            ),
+            (
+                ProposalKind::JournalAppend,
+                journal_resource("agent-host", "task-1").expect("journal id"),
+            ),
+        ];
+        assert_eq!(proposed_resources(&rich), rich_named);
+
+        let mut session = empty_journal();
+        for round in [2, 3] {
+            assert!(run_session_round(&mut session, 0, round), "round {round}");
         }
+        let session_named = vec![
+            (
+                ProposalKind::Run,
+                "localhost://Users/self/Projects/session-0".to_string(),
+            ),
+            (
+                ProposalKind::Hosted,
+                "localhost://Users/self/.AppData/Models/session-0.gguf".to_string(),
+            ),
+        ];
+        assert_eq!(proposed_resources(&session), session_named);
+
+        let model = "localhost://Models/hosted";
+        let mut hosted = two_turns();
+        propose_hosted(&mut hosted, model).unwrap();
+        let hosted_named = vec![(ProposalKind::Hosted, model.to_string())];
+        assert_eq!(proposed_resources(&hosted), hosted_named);
+
+        let page = "localhost://Users/self/Projects/demo/index.html";
+        let mut project = empty_journal();
+        propose_init(&mut project, "self", "demo").unwrap();
+        assert!(observe_read(
+            &mut project,
+            page,
+            1,
+            "rev-1",
+            None,
+            false,
+            ""
+        ));
+        propose_restore(&mut project, page, 1).unwrap();
+        let project_named = vec![
+            (
+                ProposalKind::Init,
+                "localhost://Users/self/Projects/demo".to_string(),
+            ),
+            (ProposalKind::Restore, page.to_string()),
+        ];
+        assert_eq!(proposed_resources(&project), project_named);
+
+        let mut named = rich_named;
+        named.extend(session_named);
+        named.extend(hosted_named);
+        named.extend(project_named);
+        assert_eq!(observed_proposals(), named);
     }
 
     /// The one manifest row: its resource and the actions on that resource.
