@@ -14,16 +14,18 @@
 //!
 //! A capsule load or spawn is one of:
 //!
-//! - `.load`, `.start`, `.load_admitted` or `.load_admitted_sealed` on a
+//! - `.load`, `.start`, `.start_resident`, `.load_admitted` or
+//!   `.load_admitted_sealed` on a
 //!   compute-provider receiver: `component`, `compute`, `vm`, `crosvm`, `vz`,
 //!   or any name that ends in `provider`;
 //! - `.launch_capsule`, the supervisor's VM launch;
-//! - `ProviderBridge::spawn` and its variants, a native provider process;
+//! - native provider bridge spawns and every zero-argument call to `spawn`,
+//!   including command builders for host process starts;
 //! - `.register_capsule`.
 //!
-//! VM launches and native provider spawns are listed as `P2-2 (not gated by
-//! B1-R yet)`. The list is the tree as it is today; slice 5 tightens the
-//! folder gate after this one.
+//! VM launches and native provider spawns use the `P2-2` gate phrase. Other
+//! zero-argument spawns name their actual role. The list is the tree as it is
+//! today; slice 5 tightens the folder gate after this one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -49,11 +51,13 @@ struct Site {
 /// The needle fragments. They are joined only at run time.
 const LOAD: &[&str] = &["lo", "ad"];
 const START: &[&str] = &["sta", "rt"];
+const START_RESIDENT: &[&str] = &["start_", "resident"];
 const LOAD_ADMITTED: &[&str] = &["load_", "admitted"];
 const LOAD_SEALED: &[&str] = &["load_admitted_", "sealed"];
 const REGISTER: &[&str] = &["register_", "capsule"];
 const LAUNCH: &[&str] = &["launch_", "capsule"];
 const SPAWN: &[&str] = &["Provider", "Bridge::spawn"];
+const COMMAND_SPAWN: &[&str] = &[".", "spa", "wn()"];
 
 /// The gate of the paths that B1-R does not cover yet.
 const P2_2: &str = "P2-2 (not gated by B1-R yet)";
@@ -82,6 +86,7 @@ fn place(file: &str, function: &str, label: String, calls: usize, gate: &str) ->
 fn places() -> Vec<Place> {
     let load = joined(LOAD);
     let start = joined(START);
+    let resident = joined(START_RESIDENT);
     let admitted = joined(LOAD_ADMITTED);
     let sealed = joined(LOAD_SEALED);
     let register = joined(REGISTER);
@@ -107,14 +112,14 @@ fn places() -> Vec<Place> {
             "start_by_bundle",
             label_of("component", &admitted),
             1,
-            "start by CID: VerifiedBundle holds the CID and the signer",
+            "start by CID: verified bundle CID; signature checked separately",
         ),
         place(
             "elastos-server/src/runtime.rs",
             "start_by_bundle",
             label_of("component", &sealed),
             1,
-            "start by CID: VerifiedBundle holds the CID and the signer",
+            "start by CID: verified bundle CID; signature checked separately",
         ),
         place(
             "elastos-server/src/runtime.rs",
@@ -129,6 +134,139 @@ fn places() -> Vec<Place> {
             register.clone(),
             1,
             "records the capsule its start loaded",
+        ),
+        place(
+            "elastos-server/src/runtime.rs",
+            "watch_activation",
+            label_of("component", &resident),
+            1,
+            "resident start: admitted component handle and held activation",
+        ),
+        place(
+            "elastos-server/src/carrier_service.rs",
+            "spawn",
+            "spawn()".to_string(),
+            1,
+            P2_2,
+        ),
+        place(
+            "elastos-server/src/carrier_service.rs",
+            "send_raw_blocking",
+            "spawn()".to_string(),
+            1,
+            P2_2,
+        ),
+        place(
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_command",
+            "spawn()".to_string(),
+            1,
+            P2_2,
+        ),
+        place(
+            "elastos-server/src/carrier.rs",
+            "start_carrier_node_with_network",
+            "spawn()".to_string(),
+            1,
+            "Carrier network router; outside capsule start",
+        ),
+        place(
+            "elastos-server/src/main.rs",
+            "serve_web_capsule",
+            "spawn()".to_string(),
+            1,
+            "shell capsule: verified installed binary; P2-2",
+        ),
+        place(
+            "elastos-server/src/serve_cmd.rs",
+            "run_serve",
+            "spawn()".to_string(),
+            1,
+            "shell capsule: verified installed binary; P2-2",
+        ),
+        place(
+            "elastos-server/src/setup/browser_linux.rs",
+            "run_host_command",
+            "spawn()".to_string(),
+            1,
+            "Browser setup helper; outside capsule start",
+        ),
+        place(
+            "elastos-server/src/update_controller/child.rs",
+            "spawn",
+            "spawn()".to_string(),
+            1,
+            "owned update child process; outside capsule start",
+        ),
+        place(
+            "elastos-server/src/api/gateway_home_terminal.rs",
+            "start_home_terminal_session",
+            "spawn()".to_string(),
+            1,
+            "terminal start: policy and host binding checked at process gate",
+        ),
+        place(
+            "elastos-server/src/main.rs",
+            "open_browser",
+            "spawn()".to_string(),
+            2,
+            "OS URL opener; no capsule starts",
+        ),
+        place(
+            "elastos-server/src/protected_content_config.rs",
+            "provision_custody_node_with_installed_provider",
+            "spawn()".to_string(),
+            1,
+            "provisioning: verified custody provider binary",
+        ),
+        place(
+            "elastos-server/src/publish.rs",
+            "start",
+            "spawn()".to_string(),
+            1,
+            "publication model import provider; outside capsule start",
+        ),
+        place(
+            "elastos-server/src/runtime_control.rs",
+            "ensure_managed_runtime",
+            "spawn()".to_string(),
+            1,
+            "managed Runtime process: gateway owner start lock",
+        ),
+        place(
+            "elastos-server/src/server_infra.rs",
+            "spawn_browser_local_exit",
+            "spawn()".to_string(),
+            1,
+            "Browser local Exit helper; outside capsule start",
+        ),
+        place(
+            "elastos-server/src/setup.rs",
+            "probe_arm64_model_engine",
+            "spawn()".to_string(),
+            1,
+            "setup compatibility probe; outside capsule start",
+        ),
+        place(
+            "elastos-server/src/setup/browser_config.rs",
+            "generate_with_migration",
+            "spawn()".to_string(),
+            1,
+            "Browser config generator; outside capsule start",
+        ),
+        place(
+            "elastos-server/src/setup/browser_config.rs",
+            "probe_native_host",
+            "spawn()".to_string(),
+            1,
+            "Browser host capability probe; outside capsule start",
+        ),
+        place(
+            "elastos-server/src/update.rs",
+            "verify_installed_binary_version",
+            "spawn()".to_string(),
+            1,
+            "update version probe; outside capsule start",
         ),
         place(
             "elastos-runtime/src/capsule/manager.rs",
@@ -337,17 +475,18 @@ fn every_capsule_load_spawn_and_registration_is_listed_with_its_gate() {
 /// spawn, in one file's production text.
 fn sites(file: &str, text: &str) -> Vec<Site> {
     let mut sites = Vec::new();
-    for parts in [LOAD_SEALED, LOAD_ADMITTED, LOAD, START] {
+    let code = code_only(text);
+    for parts in [LOAD_SEALED, LOAD_ADMITTED, START_RESIDENT, LOAD, START] {
         let method = joined(parts);
         let needle = [".", method.as_str(), "("].concat();
-        for (at, _) in text.match_indices(&needle) {
-            let receiver = receiver_before(text, at);
+        for (at, _) in code.match_indices(&needle) {
+            let receiver = receiver_before(&code, at);
             if !is_capsule_host(receiver) {
                 continue;
             }
             sites.push(Site {
                 file: file.to_string(),
-                function: enclosing_fn(text, at),
+                function: enclosing_fn(&code, at),
                 label: label_of(receiver, &method),
             });
         }
@@ -355,23 +494,125 @@ fn sites(file: &str, text: &str) -> Vec<Site> {
     for parts in [REGISTER, LAUNCH] {
         let method = joined(parts);
         let needle = [".", method.as_str(), "("].concat();
-        for (at, _) in text.match_indices(&needle) {
+        for (at, _) in code.match_indices(&needle) {
             sites.push(Site {
                 file: file.to_string(),
-                function: enclosing_fn(text, at),
+                function: enclosing_fn(&code, at),
                 label: method.clone(),
             });
         }
     }
     let spawn = joined(SPAWN);
-    for (at, _) in text.match_indices(&spawn) {
+    for (at, _) in code.match_indices(&spawn) {
         sites.push(Site {
             file: file.to_string(),
-            function: enclosing_fn(text, at),
+            function: enclosing_fn(&code, at),
             label: spawn.clone(),
         });
     }
+    for at in zero_argument_spawns(&code) {
+        sites.push(Site {
+            file: file.to_string(),
+            function: enclosing_fn(&code, at),
+            label: "spawn()".to_string(),
+        });
+    }
     sites
+}
+
+/// Keep byte positions, but remove strings and comments before looking for
+/// calls or item boundaries. A quoted example cannot become a caller.
+fn code_only(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut code = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        if bytes[i..].starts_with(b"//") {
+            i = line_end(bytes, i);
+        } else if bytes[i..].starts_with(b"/*") {
+            i += 2;
+            let mut depth = 1;
+            while i + 1 < bytes.len() && depth > 0 {
+                if bytes[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            let raw = if bytes[i] == b'r' {
+                Some(i)
+            } else if bytes[i..].starts_with(b"br") {
+                Some(i + 1)
+            } else {
+                None
+            };
+            let mut hashes = 0;
+            if let Some(r) = raw {
+                while bytes.get(r + 1 + hashes) == Some(&b'#') {
+                    hashes += 1;
+                }
+                if bytes.get(r + 1 + hashes) == Some(&b'"') {
+                    i = r + 2 + hashes;
+                    while i < bytes.len() {
+                        if bytes[i] == b'"'
+                            && (0..hashes).all(|n| bytes.get(i + 1 + n) == Some(&b'#'))
+                        {
+                            i += 1 + hashes;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+            }
+            if i == start && (bytes[i] == b'"' || bytes[i..].starts_with(b"b\"")) {
+                i += if bytes[i] == b'b' { 2 } else { 1 };
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                    } else if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            if i == start && bytes[i] == b'\'' {
+                let close = if bytes.get(i + 1) == Some(&b'\\') {
+                    i + 3
+                } else {
+                    i + 2
+                };
+                if bytes.get(close) == Some(&b'\'') {
+                    i = close + 1;
+                }
+            }
+        }
+        if i == start {
+            i += 1;
+        } else {
+            for byte in &mut code[start..i.min(bytes.len())] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+        }
+    }
+    String::from_utf8(code).expect("mask keeps UTF-8 positions")
+}
+
+/// A zero-argument spawn can start a host process even if its command builder
+/// has an unfamiliar local name. List every such production call.
+fn zero_argument_spawns(code: &str) -> Vec<usize> {
+    code.match_indices(&joined(COMMAND_SPAWN))
+        .map(|(at, _)| at)
+        .collect()
 }
 
 /// The receivers that hold a compute provider. A new provider field named
@@ -571,11 +812,12 @@ fn resolve_module(from: &Path, name: &str, path_attr: Option<&str>) -> Option<Pa
 /// `text` with every item that carries `#[cfg(test)]` or
 /// `#[cfg(all(test, ...))]` removed.
 fn without_test_items(text: &str) -> String {
-    let bytes = text.as_bytes();
+    let code = code_only(text);
+    let bytes = code.as_bytes();
     let mut out = String::new();
     let mut cursor = 0;
     while cursor < bytes.len() {
-        let Some((start, end)) = next_test_attribute(text, cursor) else {
+        let Some((start, end)) = next_test_attribute(&code, cursor) else {
             out.push_str(&text[cursor..]);
             break;
         };
@@ -644,17 +886,14 @@ fn test_only(expr: &str) -> bool {
     parts.contains(&"test")
 }
 
-/// The index after the item that starts at `from`, past its attributes,
-/// comments and braces.
+/// The index after the item that starts at `from`. A test field ends at its
+/// comma; a test module ends at its matching brace. The code mask makes
+/// comments and literals inert for both boundaries.
 fn item_end(bytes: &[u8], from: usize) -> usize {
     let mut i = from;
     loop {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
-        }
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            i = line_end(bytes, i);
-            continue;
         }
         if i + 1 < bytes.len() && bytes[i] == b'#' && bytes[i + 1] == b'[' {
             i = skip_bracketed(bytes, i + 1);
@@ -663,24 +902,14 @@ fn item_end(bytes: &[u8], from: usize) -> usize {
         break;
     }
     let mut parens = 0i32;
-    let mut in_string = false;
     while i < bytes.len() {
         let byte = bytes[i];
-        if in_string {
-            if byte == b'\\' {
-                i += 1;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-        } else {
-            match byte {
-                b'"' => in_string = true,
-                b'(' | b'[' => parens += 1,
-                b')' | b']' => parens -= 1,
-                b'{' if parens <= 0 => return skip_braced(bytes, i),
-                b';' if parens <= 0 => return i + 1,
-                _ => {}
-            }
+        match byte {
+            b'(' | b'[' => parens += 1,
+            b')' | b']' => parens -= 1,
+            b'{' if parens <= 0 => return skip_braced(bytes, i),
+            b';' | b',' if parens <= 0 => return i + 1,
+            _ => {}
         }
         i += 1;
     }
@@ -717,18 +946,47 @@ fn skip_pairs(bytes: &[u8], open: usize, left: u8, right: u8) -> usize {
                     return i + 1;
                 }
             }
-            b'"' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
             _ => {}
         }
         i += 1;
     }
     bytes.len()
+}
+
+#[test]
+fn test_item_filter_uses_field_and_module_boundaries() {
+    let source = r##"
+struct Example {
+    #[cfg(test)]
+    test_count: usize,
+    live_count: usize,
+}
+#[cfg(test)]
+mod tests {
+    // } must not close the module
+    const EXAMPLE: &str = r#"{"#;
+    fn hidden() { component.start_resident(&handle); }
+}
+fn production() { component.start_resident(&handle); }
+"##;
+    let filtered = without_test_items(source);
+    assert!(filtered.contains("live_count: usize"));
+    assert!(filtered.contains("fn production()"));
+    assert!(!filtered.contains("test_count: usize"));
+    assert!(!filtered.contains("fn hidden()"));
+    assert_eq!(sites("sample.rs", &filtered).len(), 1);
+
+    let sources = production_sources();
+    let bridge = &sources["elastos-server/src/resource_bridge.rs"];
+    assert!(bridge.contains("fn plain_output_name"));
+    assert!(!bridge.contains("fn block_end"));
+    assert!(!bridge.contains("test_count: usize"));
+    let broker = &sources["elastos-runtime/src/provider/local_model_broker.rs"];
+    assert!(!broker.contains("only_owned_engine_and_exact_route_are_forwarded"));
+}
+
+#[test]
+fn census_source_cannot_supply_its_own_spawn_site() {
+    let own = include_str!("start_census_tests.rs");
+    assert!(sites("start_census_tests.rs", own).is_empty());
 }
