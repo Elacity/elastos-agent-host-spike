@@ -299,26 +299,50 @@ async fn check_and_register_wallet_provider_v2(
     Ok(())
 }
 
-/// The confined wallet entry has no spawn path on every OS but Linux, and the
-/// runtime refuses those starts before it opens any path. Return that refusal
-/// here first so a refused host leaves no `SystemServices` directory.
+#[cfg(any(
+    test,
+    elastos_unsupported_os_check,
+    not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))
+))]
+const WALLET_UNSUPPORTED_OS: &str = "provider start is refused: this operating system has no confinement, so the provider binary does not start";
+
+#[cfg(any(test, all(not(elastos_unsupported_os_check), target_os = "macos")))]
+const WALLET_MACOS_NO_SPAWN: &str =
+    "provider start on macos is refused: the Seatbelt profile has no spawn path yet";
+
+/// Return the Runtime's confined-start refusal before creating `SystemServices`.
+/// The row below checks these texts against the Runtime's private OS entry.
 fn wallet_confinement_refusal() -> Option<&'static str> {
-    #[cfg(all(target_os = "linux", not(elastos_unsupported_os_check)))]
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     {
         None
     }
-    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
     {
-        Some("provider start on macos is refused: the Seatbelt profile has no spawn path yet")
+        Some(WALLET_MACOS_NO_SPAWN)
     }
     #[cfg(any(
         elastos_unsupported_os_check,
-        not(any(target_os = "macos", target_os = "linux"))
+        not(any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        ))
     ))]
     {
-        Some(
-            "provider start is refused: this operating system has no confinement, so the provider binary does not start",
-        )
+        Some(WALLET_UNSUPPORTED_OS)
     }
 }
 
@@ -330,34 +354,37 @@ fn wallet_confinement_refusal() -> Option<&'static str> {
 /// A fresh source Home creates only `ElastOS`, while other services create
 /// `SystemServices` under the umask (0775 under umask 002), so the Runtime fills
 /// a missing level at 0700 and removes group and other write bits from an
-/// existing one, never widening anything. A non-directory is refused here; the
-/// ownership and permission checks stay in the confined entry.
+/// existing one. Inspect and tighten the same opened directory, after checking
+/// its owner. The confined entry checks the storage root again at launch.
+fn tighten_wallet_parent(directory: &std::fs::File, effective_uid: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = directory.metadata()?;
+    if metadata.uid() != effective_uid {
+        anyhow::bail!("wallet storage parent has a foreign owner");
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o022 != 0 {
+        directory.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777 & !0o022))?;
+    }
+    Ok(())
+}
+
 fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
     let parent = wallet_root
         .parent()
         .ok_or_else(|| anyhow::anyhow!("wallet storage root has no parent directory"))?;
-    match std::fs::symlink_metadata(parent) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_dir() {
-                anyhow::bail!(
-                    "wallet storage parent is not a directory: {}",
-                    parent.display()
-                );
-            }
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = metadata.permissions().mode();
-            if mode & 0o022 != 0 {
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(mode & !0o022))
-                    .map_err(|err| {
-                        anyhow::anyhow!(
-                            "cannot tighten wallet storage parent {}: {err}",
-                            parent.display()
-                        )
-                    })?;
-            }
-        }
+    let open_parent = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)
+    };
+    let directory = match open_parent() {
+        Ok(directory) => directory,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            use std::os::unix::fs::DirBuilderExt as _;
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(parent)
@@ -367,14 +394,32 @@ fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
                         parent.display()
                     )
                 })?;
+            open_parent().map_err(|err| {
+                anyhow::anyhow!(
+                    "cannot open wallet storage parent {}: {err}",
+                    parent.display()
+                )
+            })?
+        }
+        Err(err) if err.raw_os_error() == Some(libc::ENOTDIR) => {
+            anyhow::bail!(
+                "wallet storage parent is not a directory: {}",
+                parent.display()
+            )
         }
         Err(err) => {
             return Err(anyhow::anyhow!(
-                "cannot inspect wallet storage parent {}: {err}",
+                "cannot open wallet storage parent {}: {err}",
                 parent.display()
             ))
         }
-    }
+    };
+    tighten_wallet_parent(&directory, unsafe { libc::geteuid() }).map_err(|err| {
+        anyhow::anyhow!(
+            "cannot tighten wallet storage parent {}: {err}",
+            parent.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -2463,6 +2508,43 @@ mod tests {
         assert_eq!(start_path.matches("bridge.shutdown().await").count(), 1);
     }
 
+    #[test]
+    fn wallet_refusal_texts_and_os_choice_match_runtime_entry() {
+        let runtime = include_str!("../../elastos-runtime/src/provider/os_entry.rs");
+        let unsupported = runtime
+            .split_once("const UNSUPPORTED_OS: &str =")
+            .unwrap()
+            .1
+            .split('"')
+            .nth(1)
+            .unwrap();
+        let macos = runtime
+            .split_once("const MACOS_NO_SPAWN: &str =")
+            .unwrap()
+            .1
+            .split('"')
+            .nth(1)
+            .unwrap();
+        assert_eq!(WALLET_UNSUPPORTED_OS, unsupported);
+        assert_eq!(WALLET_MACOS_NO_SPAWN, macos);
+
+        let expected = if cfg!(elastos_unsupported_os_check)
+            || !cfg!(any(
+                target_os = "macos",
+                all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )) {
+            Some(WALLET_UNSUPPORTED_OS)
+        } else if cfg!(target_os = "macos") {
+            Some(WALLET_MACOS_NO_SPAWN)
+        } else {
+            None
+        };
+        assert_eq!(wallet_confinement_refusal(), expected);
+    }
+
     #[tokio::test]
     async fn wallet_missing_row_leaves_helper_route_and_storage_absent() {
         let temp = TempDir::new().unwrap();
@@ -2530,6 +2612,46 @@ mod tests {
         let error = prepare_wallet_storage_parent(&data_dir.join("ElastOS/SystemServices/Wallet"))
             .unwrap_err();
         assert!(error.to_string().contains("not a directory"), "{error}");
+    }
+
+    #[test]
+    fn wallet_symlinked_parent_is_refused_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(data_dir.join("ElastOS")).unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o777)).unwrap();
+        symlink(&target, data_dir.join("ElastOS/SystemServices")).unwrap();
+
+        let result = prepare_wallet_storage_parent(&data_dir.join("ElastOS/SystemServices/Wallet"));
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o777,
+            "the symlink target's permissions must stay unchanged"
+        );
+        assert!(result.is_err(), "a symlinked wallet parent must be refused");
+    }
+
+    #[test]
+    fn wallet_foreign_parent_owner_is_refused_before_tightening() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().join("SystemServices");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+        let directory = fs::File::open(&parent).unwrap();
+        // The seam supplies a different effective uid; changing an owner needs root.
+        let foreign_effective_uid = unsafe { libc::geteuid() }.wrapping_add(1);
+
+        let result = tighten_wallet_parent(&directory, foreign_effective_uid);
+        assert_eq!(
+            fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o777,
+            "a refused parent's permissions must stay unchanged"
+        );
+        assert!(result.is_err(), "a foreign wallet parent must be refused");
     }
 
     #[tokio::test]
