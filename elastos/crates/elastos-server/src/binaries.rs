@@ -724,19 +724,43 @@ mod tests {
 
         let source = include_str!("binaries.rs");
         let struct_head = ["struct Admitted", "Provider {"].concat();
+        let impl_head = ["impl Admitted", "Provider {"].concat();
         assert_eq!(source.matches(&struct_head).count(), 1);
-        assert_eq!(
-            source
-                .matches(&["impl Admitted", "Provider {"].concat())
-                .count(),
-            1
-        );
+        assert_eq!(source.matches(&impl_head).count(), 1);
         assert!(!source.contains(&["for ", "Admitted", "Provider"].concat()));
         let at = source.find(&struct_head).unwrap();
-        let attributes = &source[source[..at].rfind("\n\n").unwrap()..at];
+        // Everything between the previous item's closing brace and the head.
+        let header = &source[source[..at].rfind("\n}\n").unwrap() + 3..at];
+        let header_code: Vec<_> = header
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .collect();
+        assert_eq!(header_code, ["#[allow(dead_code)]", "pub(crate)"]);
         let body = &source[at..][..source[at..].find("\n}\n").unwrap()];
-        assert!(!attributes.contains("derive"), "{attributes}");
         assert!(!body.contains("pub"), "{body}");
+
+        let production = &source[..source.find("#[cfg(test)]\nmod tests").unwrap()];
+        let code: String = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let type_name = ["Admitted", "Provider"].concat();
+        // The two heads; an alias or a free function over the type adds one.
+        assert_eq!(code.matches(&type_name).count(), 2);
+        let maker_name = ["admit_with", "_bin_dir"].concat();
+        // The maker stays private and has one caller, `admit`.
+        let maker_line = format!("\n    fn {maker_name}(\n");
+        assert_eq!(code.matches(&maker_line).count(), 1);
+        assert_eq!(code.matches(&maker_name).count(), 2);
+        let admit_at = code.find("fn admit(").unwrap();
+        let admit_body = &code[admit_at..][..code[admit_at..].find("\n    }\n").unwrap()];
+        assert!(admit_body.contains(&format!("Self::{maker_name}(")));
+        // No `mut self`, `&mut self` or `&mut Self`: nothing changes a made value.
+        let impl_at = code.find(&impl_head).unwrap();
+        let impl_block = &code[impl_at..][..code[impl_at..].find("\n}\n").unwrap()];
+        assert!(!impl_block.contains("mut"), "{impl_block}");
 
         let self_open = ["Self", "{"].concat();
         let maker = source.find("fn admit_with_bin_dir(").unwrap();
