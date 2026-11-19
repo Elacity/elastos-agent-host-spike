@@ -13,9 +13,6 @@
 //! ceiling and a cancel or unknown outcome keeps its hold. **Restart retention
 //! is out of scope:** the account is in memory, so a restart begins at zero.
 
-// N11 wires this in; until then nothing in the crate calls it.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
@@ -37,6 +34,10 @@ impl AgentKey {
     pub(crate) fn from_admission(admission: &AdmissionContext) -> Self {
         Self(admission.actor().to_string())
     }
+
+    pub(crate) fn principal(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The run identity a hold is charged to, derived from the production binding.
@@ -50,13 +51,42 @@ impl AgentKey {
 pub(crate) struct RunKey {
     id: String,
     principal: String,
+    offer_id: String,
+    revision: String,
+    operation: String,
+    input_hash: String,
 }
 
 impl RunKey {
-    pub(crate) fn of(binding: &RuntimeCreateBinding) -> Self {
+    pub(crate) fn of(binding: &RuntimeCreateBinding, revision: &str) -> Self {
         Self {
             id: model_run_id(binding),
             principal: binding.principal_id.clone(),
+            offer_id: binding.offer_id.clone(),
+            revision: revision.to_string(),
+            operation: binding.operation.clone(),
+            input_hash: binding.input_hash.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HoldFingerprint {
+    offer_id: String,
+    revision: String,
+    operation: String,
+    input_hash: String,
+    tokens: u64,
+}
+
+impl HoldFingerprint {
+    fn of(run: &RunKey, tokens: u64) -> Self {
+        Self {
+            offer_id: run.offer_id.clone(),
+            revision: run.revision.clone(),
+            operation: run.operation.clone(),
+            input_hash: run.input_hash.clone(),
+            tokens,
         }
     }
 }
@@ -67,8 +97,9 @@ struct Account {
     ceiling: u64,
     /// Tokens held by reservations, refunded by nothing.
     held: u64,
-    /// Held tokens by `model_run_id()`, so a retry is not charged twice.
-    holds: HashMap<String, u64>,
+    /// Held tokens and request fingerprints by `model_run_id()`; only an
+    /// identical retry reuses a hold without a second charge.
+    holds: HashMap<String, HoldFingerprint>,
 }
 
 /// One reservation of `tokens` for one run. Nothing happens when it is dropped:
@@ -87,6 +118,8 @@ pub(crate) enum Refusal {
     CeilingAlreadySet { ceiling: u64, asked: u64 },
     /// The run key was minted for a different agent than the account asked for.
     RunForOtherAgent,
+    /// The same run id names a different request or reservation.
+    ConflictingRetry,
     /// Holding `asked` more would pass `ceiling`. `held` excludes `asked`.
     OverCap { asked: u64, held: u64, ceiling: u64 },
 }
@@ -139,14 +172,14 @@ impl ModelBudget {
 
     /// Holds `tokens` for `run` — minted from the production binding through
     /// `model_run_id()` — atomically, so concurrent callers never hold more
-    /// than the ceiling together. The same run key on the same agent returns
-    /// the existing hold and is not charged again. `checked_add` turns a
+    /// than the ceiling together. The same run id and fingerprint on the same
+    /// agent return the existing hold without another charge. `checked_add` turns a
     /// would-be overflow into a refusal, not a wrap.
     ///
     /// The run-key entry is written before `held` moves: a panic between them
     /// cannot leave a charge without its run key, which is what makes ignoring
-    /// a poisoned mutex safe. A hold of zero is stored as zero; a retry of that
-    /// run returns zero under the same first-hold-wins rule as any amount.
+    /// a poisoned mutex safe. A hold of zero is stored as zero; an identical
+    /// retry returns that zero hold.
     pub(crate) fn reserve(
         &self,
         agent: &AgentKey,
@@ -158,8 +191,15 @@ impl ModelBudget {
         if run.principal != agent.0 {
             return Err(Refusal::RunForOtherAgent);
         }
-        if let Some(&held) = account.holds.get(&run.id) {
-            return Ok(Hold { tokens: held });
+        let fingerprint = HoldFingerprint::of(run, tokens);
+        if let Some(held) = account.holds.get(&run.id) {
+            return if held == &fingerprint {
+                Ok(Hold {
+                    tokens: held.tokens,
+                })
+            } else {
+                Err(Refusal::ConflictingRetry)
+            };
         }
         let total = account
             .held
@@ -170,7 +210,7 @@ impl ModelBudget {
                 held: account.held,
                 ceiling: account.ceiling,
             })?;
-        account.holds.insert(run.id.clone(), tokens);
+        account.holds.insert(run.id.clone(), fingerprint);
         account.held = total;
         Ok(Hold { tokens })
     }
@@ -178,6 +218,7 @@ impl ModelBudget {
     /// Test-only: waits for the concurrency row's racers to finish their reads.
     /// Production never calls this; a planted check-then-add does.
     #[cfg(test)]
+    #[allow(dead_code)]
     fn after_read_gate(&self) {
         let gate = self
             .after_read
@@ -208,17 +249,20 @@ mod tests {
     /// The key N11 will use: the real `model_run_id()`, so a retried request id
     /// under the same principal and capsule repeats the key.
     fn run_key(agent: &str, request: &str) -> RunKey {
-        RunKey::of(&RuntimeCreateBinding {
-            schema: "elastos.runtime.create/v1".into(),
-            principal_id: agent.into(),
-            session_id: "instance:1".into(),
-            capsule_id: "pkg:agent-host".into(),
-            grant_id: "cap:1".into(),
-            request_id: request.into(),
-            offer_id: "offer:deepseek".into(),
-            operation: "runs_create".into(),
-            input_hash: "sha256:00".into(),
-        })
+        RunKey::of(
+            &RuntimeCreateBinding {
+                schema: "elastos.runtime.create/v1".into(),
+                principal_id: agent.into(),
+                session_id: "instance:1".into(),
+                capsule_id: "pkg:agent-host".into(),
+                grant_id: "cap:1".into(),
+                request_id: request.into(),
+                offer_id: "offer:deepseek".into(),
+                operation: "runs_create".into(),
+                input_hash: "sha256:00".into(),
+            },
+            "sha256:revision",
+        )
     }
 
     fn over_cap(asked: u64, held: u64, ceiling: u64) -> Refusal {
@@ -290,6 +334,41 @@ mod tests {
             budget.reserve(&key(A), &run_key(A, "other"), 50),
             Err(over_cap(50, 60, 100))
         );
+    }
+
+    #[test]
+    fn changed_retry_fingerprint_is_refused() {
+        let budget = opened();
+        let retry = run_key(A, "same-request");
+        budget.reserve(&key(A), &retry, 60).unwrap();
+        for changed in [
+            RunKey {
+                offer_id: "other".into(),
+                ..retry.clone()
+            },
+            RunKey {
+                revision: "new".into(),
+                ..retry.clone()
+            },
+            RunKey {
+                operation: "other".into(),
+                ..retry.clone()
+            },
+            RunKey {
+                input_hash: "sha256:01".into(),
+                ..retry.clone()
+            },
+        ] {
+            assert_eq!(
+                budget.reserve(&key(A), &changed, 60),
+                Err(Refusal::ConflictingRetry)
+            );
+        }
+        assert_eq!(
+            budget.reserve(&key(A), &retry, 61),
+            Err(Refusal::ConflictingRetry)
+        );
+        assert_eq!(budget.reserve(&key(A), &retry, 60), Ok(Hold { tokens: 60 }));
     }
 
     #[test]
