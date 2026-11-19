@@ -694,6 +694,18 @@ async fn start_did_provider(
     Ok(Some(bridge))
 }
 
+async fn start_did_provider_for_server(
+    data_dir: &Path,
+    provider_registry: &provider::ProviderRegistry,
+    device_key_hex: &str,
+) -> anyhow::Result<()> {
+    if let Err(err) = start_did_provider(data_dir, provider_registry, device_key_hex).await {
+        tracing::warn!("Skipping did-provider: {}", err);
+        return Err(err);
+    }
+    Ok(())
+}
+
 async fn setup_server_infrastructure_impl(
     spawn_host_providers: bool,
     ipfs_role: elastos_server::ipfs::IpfsHostRole,
@@ -793,9 +805,7 @@ async fn setup_server_infrastructure_impl(
         Ok(())
     };
 
-    if let Err(err) = start_did_provider(&data_dir, &provider_registry, &device_key_hex).await {
-        tracing::warn!("Skipping did-provider: {}", err);
-    }
+    let _ = start_did_provider_for_server(&data_dir, &provider_registry, &device_key_hex).await;
 
     if spawn_host_providers {
         let binary_path = binaries::resolve_verified_native_provider_binary("localhost-provider")?
@@ -2275,7 +2285,7 @@ mod tests {
         let source = include_str!("server_infra.rs");
         let start = source.find("async fn start_did_provider(").unwrap();
         let end = source[start..]
-            .find("\nasync fn setup_server_infrastructure_impl(")
+            .find("\n    if spawn_host_providers {")
             .unwrap()
             + start;
         let block = &source[start..end];
@@ -2287,6 +2297,13 @@ mod tests {
         );
         assert_eq!(block.matches("ProviderBridge::spawn_confined(").count(), 1);
         assert!(!block.contains("ProviderBridge::spawn("));
+        assert_eq!(
+            block
+                .matches("if let Err(err) = start_did_provider(")
+                .count(),
+            1
+        );
+        assert!(block.contains("let _ = start_did_provider_for_server("));
         assert_eq!(block.matches("bridge.shutdown().await").count(), 1);
         assert!(block.contains("CapsuleProvider::from_confined(confined, \"did\")"));
     }
@@ -2339,10 +2356,10 @@ mod tests {
 
     #[cfg(any(target_os = "macos", elastos_unsupported_os_check))]
     #[tokio::test]
-    async fn did_os_refusal_keeps_marker_and_route_absent() {
+    async fn did_os_refusal_keeps_child_and_route_absent() {
         let (_temp, data_dir, _) = did_fixture();
         let registry = provider::ProviderRegistry::new();
-        let error = start_did_provider(&data_dir, &registry, "fixture")
+        let error = start_did_provider_for_server(&data_dir, &registry, "fixture")
             .await
             .err()
             .unwrap();
@@ -2364,6 +2381,9 @@ mod tests {
             .registration_for_uri("elastos://did/identity")
             .await
             .is_none());
+        #[cfg(target_os = "linux")]
+        assert!(!data_dir.join("did/child.pid").exists());
+        #[cfg(not(target_os = "linux"))]
         assert!(!data_dir.join("marker").exists());
         assert!(!data_dir.join("did").exists());
     }
@@ -2391,6 +2411,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fs::read(data_dir.join("did/nickname")).unwrap(), b"Ada");
+        let outside = registry
+            .send_raw("did", &serde_json::json!({"op":"probe_outside_write"}))
+            .await
+            .unwrap();
+        assert_eq!(outside["data"]["outside_write_refused"], true);
+        assert!(!data_dir.join("outside").exists());
         let pid: libc::pid_t = fs::read_to_string(data_dir.join("did/child.pid"))
             .unwrap()
             .parse()

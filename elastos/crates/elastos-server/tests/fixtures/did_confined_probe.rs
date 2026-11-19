@@ -29,6 +29,17 @@ fn main() {
         } else if line.contains("\"op\":\"set_nickname\"") {
             std::fs::write(format!("{ROOT}/nickname"), b"Ada").unwrap();
             writeln!(output, "{{\"status\":\"ok\"}}").unwrap();
+        } else if line.contains("\"op\":\"probe_outside_write\"") {
+            let refused = std::fs::write(
+                format!("{}/outside", ROOT.trim_end_matches("/did")),
+                b"outside",
+            )
+            .is_err();
+            writeln!(
+                output,
+                "{{\"status\":\"ok\",\"data\":{{\"outside_write_refused\":{refused}}}}}"
+            )
+            .unwrap();
         } else if line.contains("\"op\":\"shutdown\"") {
             std::fs::write(format!("{ROOT}/shutdown"), b"yes").unwrap();
             writeln!(output, "{{\"status\":\"ok\"}}").unwrap();
