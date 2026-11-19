@@ -265,6 +265,18 @@ pub(super) fn require_original(tx: &InstallTransaction, entries: &[Entry]) -> an
     require_installed(tx, entries, true)
 }
 
+/// Each support folder that is a component capsule keeps the Home's record of
+/// the walk CID of the bytes now at its path, so a start reads an accepted
+/// folder. A support path that is not a capsule folder keeps no record.
+fn record_capsule_folders(tx: &InstallTransaction, entries: &[Entry]) {
+    for entry in entries {
+        crate::setup::record_installed_capsule_folder(
+            &tx.data_dir,
+            &tx.data_dir.join(&entry.path),
+        );
+    }
+}
+
 pub(super) fn require_installed(
     tx: &InstallTransaction,
     entries: &[Entry],
@@ -361,7 +373,9 @@ pub(super) fn activate(tx: &InstallTransaction, entries: &[Entry]) -> anyhow::Re
         }
         sync_directory(destination.parent().unwrap())?;
     }
-    require_installed(tx, entries, false)
+    require_installed(tx, entries, false)?;
+    record_capsule_folders(tx, entries);
+    Ok(())
 }
 
 // This is a repair plan, never a replacement digest. Every source file, mode,
@@ -500,7 +514,9 @@ pub(super) fn restore(tx: &InstallTransaction, entries: &[Entry]) -> anyhow::Res
         }
         sync_directory(destination.parent().unwrap())?;
     }
-    require_original(tx, entries)
+    require_original(tx, entries)?;
+    record_capsule_folders(tx, entries);
+    Ok(())
 }
 
 fn repair_cache_tree(current: &Path, recorded: &Path) -> anyhow::Result<()> {
@@ -561,7 +577,9 @@ pub(super) fn repair_installed(
     for (source, destination) in repairs {
         repair_cache_tree(&destination, &source)?;
     }
-    require_installed(tx, entries, previous)
+    require_installed(tx, entries, previous)?;
+    record_capsule_folders(tx, entries);
+    Ok(())
 }
 
 pub(super) fn cleanup(tx: &InstallTransaction, journal: &Journal) -> anyhow::Result<()> {
