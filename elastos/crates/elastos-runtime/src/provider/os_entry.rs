@@ -78,7 +78,7 @@ pub(super) fn start_provider(
     provider: RuntimeProviderId,
     authority: &ProviderAuthority,
     executable: &Path,
-    storage: &super::landlock_plan::StorageRoot<'_>,
+    storage_root: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
     let admitted = super::rights::check_rights_against_runtime_templates(
@@ -86,16 +86,8 @@ pub(super) fn start_provider(
         authority,
         rights_table::RIGHTS,
     )?;
-    dispatch(provider, &admitted, executable, storage, stdio)
+    dispatch(provider, &admitted, executable, storage_root, stdio)
 }
-
-#[cfg(all(
-    test,
-    not(elastos_unsupported_os_check),
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub(super) use failure_record::set_pre_fork_storage_swap;
 
 #[allow(dead_code)] // Only the OS arms call this, and those arms have no server caller yet.
 fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
@@ -115,7 +107,7 @@ fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     executable: &Path,
-    storage: &super::landlock_plan::StorageRoot<'_>,
+    storage_root: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
     require_grant(admitted)?;
@@ -125,7 +117,7 @@ fn dispatch(
     let pid = failure_record::start(
         provider,
         admitted,
-        storage,
+        storage_root,
         executable,
         args,
         Some(stdio.stdin),
@@ -148,7 +140,7 @@ fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     executable: &Path,
-    storage: &super::landlock_plan::StorageRoot<'_>,
+    storage_root: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
     require_grant(admitted)?;
@@ -159,7 +151,7 @@ fn dispatch(
                 .to_string(),
         );
     }
-    let _ = (executable, storage, stdio);
+    let _ = (executable, storage_root, stdio);
     Err(MACOS_NO_SPAWN.to_string())
 }
 
@@ -183,11 +175,11 @@ fn refuse_unsupported_os(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     executable: &Path,
-    storage: &super::landlock_plan::StorageRoot<'_>,
+    storage_root: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
     require_grant(admitted)?;
-    let _ = (provider, executable, storage, stdio);
+    let _ = (provider, executable, storage_root, stdio);
     Err(UNSUPPORTED_OS.to_string())
 }
 
@@ -206,10 +198,10 @@ fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     executable: &Path,
-    storage: &super::landlock_plan::StorageRoot<'_>,
+    storage_root: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
-    refuse_unsupported_os(provider, admitted, executable, storage, stdio)
+    refuse_unsupported_os(provider, admitted, executable, storage_root, stdio)
 }
 
 #[cfg(test)]
@@ -288,11 +280,7 @@ mod tests {
             RuntimeProviderId::Did,
             &admitted,
             &program,
-            &super::super::landlock_plan::StorageRoot {
-                path: dir.path(),
-                dev: 0,
-                ino: 0,
-            },
+            dir.path(),
             stdio(),
         )
         .unwrap_err();
@@ -306,7 +294,7 @@ mod tests {
     #[test]
     fn unsupported_dispatch_only_calls_the_refusal() {
         let production = production_source();
-        let call = "refuse_unsupported_os(provider, admitted, executable, storage, stdio)";
+        let call = "refuse_unsupported_os(provider, admitted, executable, storage_root, stdio)";
         assert_eq!(production.matches(call).count(), 1);
         let at = production.find(call).unwrap();
         let head = production[..at].rfind("fn dispatch").unwrap();
@@ -402,7 +390,7 @@ mod tests {
         assert!(!production.contains("applied_rows"));
         let normalised: String = production.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(normalised.contains(
-            "failure_record::start( provider, admitted, storage, executable, args, Some(stdio.stdin), Some(stdio.stdout), )"
+            "failure_record::start( provider, admitted, storage_root, executable, args, Some(stdio.stdin), Some(stdio.stdout), )"
         ));
         assert!(production.contains("render_macos_profile(provider, admitted)"));
         assert!(
@@ -452,8 +440,6 @@ mod tests {
         let bindings = super::super::landlock_plan::Bindings {
             storage_root: PathBuf::from("/provider/did"),
             provider_executable: PathBuf::from("/bin/did"),
-            storage_dev: 0,
-            storage_ino: 0,
         };
         let narrow =
             super::super::landlock_plan::build(RuntimeProviderId::Did, &admitted, &bindings, 5)
@@ -513,11 +499,7 @@ mod tests {
                 RuntimeProviderId::Did,
                 &authority,
                 &program,
-                &super::super::landlock_plan::StorageRoot {
-                    path: dir.path(),
-                    dev: 0,
-                    ino: 0,
-                },
+                dir.path(),
                 stdio(),
             )
             .map(|_| ()),
@@ -541,11 +523,7 @@ mod tests {
                 RuntimeProviderId::Did,
                 &authority,
                 &program,
-                &super::super::landlock_plan::StorageRoot {
-                    path: dir.path(),
-                    dev: 0,
-                    ino: 0,
-                },
+                dir.path(),
                 stdio(),
             )
             .unwrap_err(),

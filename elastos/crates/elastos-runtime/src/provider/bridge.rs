@@ -1178,13 +1178,8 @@ impl ProviderBridge {
             to_child,
             from_child,
         };
-        let storage = super::landlock_plan::StorageRoot {
-            path: storage_root,
-            dev: created_root.dev,
-            ino: created_root.ino,
-        };
         let launched =
-            super::os_entry::start_provider(provider, authority, binary_path, &storage, stdio)
+            super::os_entry::start_provider(provider, authority, binary_path, storage_root, stdio)
                 .map_err(BridgeError::Refused)?;
         // The child holds its copies; these are the parent's, and must close
         // so the child sees EOF on stdin and the parent sees EOF on stdout.
@@ -4442,166 +4437,20 @@ mod tests {
             .is_symlink());
     }
 
-    #[cfg(all(
-        not(elastos_unsupported_os_check),
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    #[tokio::test]
-    async fn swapped_storage_root_refuses_and_leaves_the_canary() {
-        use std::os::unix::fs::MetadataExt;
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
-        let canary = temp.path().join("canary");
-        std::fs::create_dir(&canary).unwrap();
-        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::write(canary.join("kept"), b"kept").unwrap();
-        let canary_meta = std::fs::symlink_metadata(&canary).unwrap();
-        let (canary_dev, canary_ino) = (canary_meta.dev(), canary_meta.ino());
-        let binary = build_confined_probe(temp.path(), &root.join("child.pid"), "ok");
-        struct ClearSwap;
-        impl Drop for ClearSwap {
-            fn drop(&mut self) {
-                super::super::os_entry::set_pre_fork_storage_swap(None);
-            }
-        }
-        let _clear = ClearSwap;
-        super::super::os_entry::set_pre_fork_storage_swap(Some(canary));
-        let started = ProviderBridge::spawn_confined(
-            "did-provider",
-            &committed_authority("did"),
-            &binary,
-            &root,
-            ProviderConfig::default(),
-        )
-        .await;
-        super::super::os_entry::set_pre_fork_storage_swap(None);
-        if let Ok(confined) = &started {
-            let _ = confined.bridge().shutdown().await;
-        }
-        let survivor = find_directory(temp.path(), canary_dev, canary_ino)
-            .unwrap_or_else(|| panic!("the canary and its permissions stay unchanged"));
-        assert_eq!(
-            std::fs::symlink_metadata(&survivor).unwrap().mode() & 0o777,
-            0o755,
-            "the canary and its permissions stay unchanged"
-        );
-        assert_eq!(
-            std::fs::read(survivor.join("kept")).unwrap(),
-            b"kept",
-            "the canary and its permissions stay unchanged"
-        );
-        assert!(
-            !survivor.join("child.pid").exists(),
-            "the canary and its permissions stay unchanged"
-        );
-        let error = started.expect_err("a swapped storage root must refuse");
-        assert!(
-            error.to_string().contains("could not be added"),
-            "a swapped storage root must refuse in the installer: {error}"
-        );
-    }
-
-    #[cfg(all(
-        not(elastos_unsupported_os_check),
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    fn find_directory(root: &Path, dev: u64, ino: u64) -> Option<PathBuf> {
-        use std::os::unix::fs::MetadataExt;
-        let mut pending = vec![root.to_path_buf()];
-        while let Some(dir) = pending.pop() {
-            let entries = std::fs::read_dir(&dir).ok()?;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                    continue;
-                };
-                if meta.file_type().is_symlink() {
-                    continue;
-                }
-                if meta.is_dir() {
-                    if meta.dev() == dev && meta.ino() == ino {
-                        return Some(path);
-                    }
-                    pending.push(path);
-                }
-            }
-        }
-        None
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn confined_child_stderr_leaves_the_canary_unchanged() {
-        if std::env::var_os("ELASTOS_STDERR_HARNESS").is_some() {
-            let root = PathBuf::from(std::env::var("ELASTOS_STDERR_ROOT").unwrap());
-            let binary = PathBuf::from(std::env::var("ELASTOS_STDERR_BINARY").unwrap());
-            let confined = ProviderBridge::spawn_confined(
-                "did-provider",
-                &committed_authority("did"),
-                &binary,
-                &root,
-                ProviderConfig::default(),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("confined start in the stderr harness: {error}"));
-            confined.bridge().shutdown().await.unwrap();
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("root");
-        let binary = build_confined_probe_reporting(
-            temp.path(),
-            Path::new(""),
-            "ok",
-            root.join("stderr-read").to_str().unwrap(),
-        );
-        let canary_path = temp.path().join("canary");
-        std::fs::write(&canary_path, b"CANARY").unwrap();
-        let canary = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&canary_path)
-            .unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "provider::bridge::tests::confined_child_stderr_leaves_the_canary_unchanged",
-                "--nocapture",
-                "--test-threads",
-                "1",
-            ])
-            .env("ELASTOS_STDERR_HARNESS", "1")
-            .env("ELASTOS_STDERR_ROOT", &root)
-            .env("ELASTOS_STDERR_BINARY", &binary)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::from(canary))
-            .output()
-            .unwrap();
-        let canary_bytes = std::fs::read(&canary_path).unwrap();
-        if canary_bytes != b"CANARY" {
-            let text = String::from_utf8_lossy(&canary_bytes);
-            if text.contains("PROBE-STDERR") {
-                panic!("the probe wrote PROBE-STDERR to the inherited standard error");
-            }
-            panic!(
-                "the stderr harness changed the canary without the probe marker: status {} stdout {}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout)
+    #[test]
+    fn this_branch_does_not_carry_the_launcher_identity() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider");
+        for name in [
+            "landlock_plan.rs",
+            "preexec_installer.rs",
+            "failure_record.rs",
+        ] {
+            let text = std::fs::read_to_string(root.join(name)).unwrap();
+            assert!(
+                !text.contains("storage_dev") && !text.contains("dup2(stderr_fd"),
+                "the launcher identity stays on the launcher branch"
             );
         }
-        assert!(
-            output.status.success(),
-            "harness failed: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let report = std::fs::read(temp.path().join("root").join("stderr-read")).unwrap();
-        assert!(
-            report.starts_with(b"0\n"),
-            "the probe reads nothing from fd 2: {report:?}"
-        );
     }
 
     #[cfg(target_os = "linux")]

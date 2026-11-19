@@ -92,10 +92,6 @@ pub(super) struct Prepared {
     plan: landlock_plan::Plan,
     paths: Vec<CString>,
     filters: Vec<libc::sock_filter>,
-    /// Index of the storage-root rule. The child compares this index only.
-    storage_rule: Option<usize>,
-    storage_dev: u64,
-    storage_ino: u64,
 }
 
 pub(super) fn prepare(
@@ -129,32 +125,11 @@ pub(super) fn prepare(
     if filters.len() > 256 {
         return Err("seccomp install refused: the filter is too long".into());
     }
-    let storage_dev = plan.storage_dev;
-    let storage_ino = plan.storage_ino;
-    let storage_rule = plan.rules.iter().position(|rule| rule.0 == "STORAGE_ROOT");
     Ok(Prepared {
         plan,
         paths,
         filters,
-        storage_rule,
-        storage_dev,
-        storage_ino,
     })
-}
-
-fn stat_dev(info: &libc::stat) -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        info.st_dev
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        info.st_dev as u64
-    }
-}
-
-fn stat_ino(info: &libc::stat) -> u64 {
-    info.st_ino
 }
 
 /// # Safety
@@ -211,32 +186,9 @@ pub(super) unsafe fn install(prepared: &Prepared, keep: i32) -> Result<(), Failu
                 let Some(rule) = prepared.plan.rules.get(index) else {
                     return Err(libc::EINVAL);
                 };
-                // The storage root was opened before fork. Open it again without
-                // following a symlink and require the same device and inode.
-                let storage_root = prepared.storage_rule == Some(index);
-                let flags = if storage_root {
-                    libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY
-                } else {
-                    libc::O_PATH | libc::O_CLOEXEC
-                };
-                let fd = unsafe { libc::open(path.as_ptr(), flags) };
+                let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
                 if fd < 0 {
                     return Err(unsafe { *libc::__errno_location() });
-                }
-                if storage_root {
-                    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
-                    if unsafe { libc::fstat(fd, info.as_mut_ptr()) } < 0 {
-                        let errno = unsafe { *libc::__errno_location() };
-                        unsafe { libc::close(fd) };
-                        return Err(errno);
-                    }
-                    let info = unsafe { info.assume_init() };
-                    if stat_dev(&info) != prepared.storage_dev
-                        || stat_ino(&info) != prepared.storage_ino
-                    {
-                        unsafe { libc::close(fd) };
-                        return Err(libc::ESTALE);
-                    }
                 }
                 let attr = PathAttr {
                     allowed_access: rule.2,
@@ -283,20 +235,6 @@ mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
-    use std::path::Path;
-
-    fn bindings_for(root: &Path, executable: &Path) -> landlock_plan::Bindings {
-        let (storage_dev, storage_ino) = std::fs::symlink_metadata(root)
-            .map(|meta| (meta.dev(), meta.ino()))
-            .unwrap_or((0, 0));
-        landlock_plan::Bindings {
-            storage_root: root.to_path_buf(),
-            provider_executable: executable.to_path_buf(),
-            storage_dev,
-            storage_ino,
-        }
-    }
 
     #[test]
     fn fixed_failure_record_preserves_step_index_and_errno() {
@@ -333,7 +271,10 @@ mod tests {
         let prepared = prepare(
             RuntimeProviderId::Did,
             &admitted,
-            &bindings_for(root.path(), Path::new("/bin/true")),
+            &landlock_plan::Bindings {
+                storage_root: root.path().to_path_buf(),
+                provider_executable: "/bin/true".into(),
+            },
         )
         .unwrap();
         let pid = unsafe { libc::fork() };

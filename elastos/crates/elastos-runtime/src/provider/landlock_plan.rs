@@ -3,10 +3,7 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::{io, path::PathBuf};
 
 // The lab's STORAGE_ROOT, executable, and ABI-5 handled masks (confine.rs:8560-8582, 8685).
 const STORAGE: u64 = 0x41be;
@@ -65,23 +62,10 @@ pub(super) struct Plan {
     pub abi: u32,
     pub handled: u64,
     pub rules: Vec<PathRule>,
-    /// Device and inode of the storage root the Runtime opened before launch.
-    pub storage_dev: u64,
-    pub storage_ino: u64,
 }
-
-/// The storage root the Runtime opened, with the identity of that directory.
-pub(super) struct StorageRoot<'a> {
-    pub path: &'a Path,
-    pub dev: u64,
-    pub ino: u64,
-}
-
 pub(super) struct Bindings {
     pub storage_root: PathBuf,
     pub provider_executable: PathBuf,
-    pub storage_dev: u64,
-    pub storage_ino: u64,
 }
 
 pub(super) fn require_abi(reported: io::Result<u32>) -> Result<u32, String> {
@@ -157,8 +141,6 @@ fn build_for_arch(
         abi,
         handled: HANDLED,
         rules,
-        storage_dev: bindings.storage_dev,
-        storage_ino: bindings.storage_ino,
     })
 }
 
@@ -311,8 +293,6 @@ mod tests {
             let bindings = Bindings {
                 storage_root: format!("/provider/{provider:?}").into(),
                 provider_executable: format!("/bin/{provider:?}").into(),
-                storage_dev: 0,
-                storage_ino: 0,
             };
             let admitted = super::super::rights::admit_runtime_grant(provider);
             for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
