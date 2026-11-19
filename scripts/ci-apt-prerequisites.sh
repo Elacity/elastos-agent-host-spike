@@ -3,11 +3,13 @@
 set -euo pipefail
 
 # A mirror hiccup should not fail a long job: three bounded attempts with
-# growing pauses (15s, then 30s) give a flaky mirror time to recover.
+# growing pauses (15s, then 30s) give a flaky mirror time to recover. Each
+# attempt may take up to 5 minutes: on 19 Nov 2026 a slow mirror made a full
+# package install overrun the old 90 s bound on every attempt.
 retry() {
     local attempt
     for attempt in 1 2 3; do
-        if sudo timeout --kill-after=5s 90s "$@"; then
+        if sudo timeout --kill-after=5s 300s "$@"; then
             return 0
         fi
         echo "apt attempt ${attempt}/3 failed: $*" >&2
@@ -27,7 +29,7 @@ done
 # The runner image's Ubuntu signing key remains the trust root. A cache can
 # supply bytes, but apt verifies them against fresh authenticated indexes.
 options=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=$sources"
-         -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+         -o Acquire::Retries=2 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60
          -o Acquire::AllowInsecureRepositories=false -o APT::Get::AllowUnauthenticated=false
          -o APT::Keep-Downloaded-Packages=true -o Binary::apt::APT::Keep-Downloaded-Packages=true
          -o APT::Update::Error-Mode=any)
