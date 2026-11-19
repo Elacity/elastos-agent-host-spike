@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
-use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal};
+use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
 use crate::resource_bridge::LaunchContent;
 use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
@@ -632,6 +632,99 @@ impl Drop for ActivationContextHeld {
     }
 }
 
+/// The only place a by-CID start can build a [`VerifiedBundle`].
+///
+/// The struct's fields are private to this module. A struct literal written
+/// outside it, including one shaped `Ok(VerifiedBundle { ... })`, does not
+/// compile. [`VerifiedBundle::check`] is the function here that builds one.
+mod verified_bundle {
+    use std::path::Path;
+
+    use elastos_bundle_identity::{CheckedBundle, LabCid};
+    use elastos_common::CapsuleManifest;
+    use elastos_runtime::signature::SignatureVerifier;
+
+    use crate::bundle_admission::{
+        self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal,
+    };
+
+    /// A bundle the by-CID start has checked. The walked CID is the one asked
+    /// for, a publisher this Home trusts signed it, and the manifest was
+    /// admitted. A program loads from [`VerifiedBundle::into_component`].
+    /// The signature this start reports is the [`AcceptedSignature`] returned
+    /// beside the bundle, not a field of the bundle.
+    pub(crate) struct VerifiedBundle {
+        cid: LabCid,
+        admitted: AdmittedBundle,
+    }
+
+    impl VerifiedBundle {
+        /// Builds the bundle the start keeps. The walked CID equals `asked`,
+        /// the signature verifies under `trust`, the manifest is admitted,
+        /// and a program's imports pass.
+        pub(crate) fn check(
+            bundle: &CheckedBundle,
+            asked: &LabCid,
+            signature: &Path,
+            trust: &SignatureVerifier,
+        ) -> std::result::Result<(Self, AcceptedSignature), BundleRefusal> {
+            if bundle.cid() != *asked {
+                return Err(BundleRefusal::CidMismatch {
+                    asked: asked.to_string(),
+                    computed: bundle.cid().to_string(),
+                });
+            }
+            let accepted = bundle_admission::check_bundle_signature(signature, asked, trust)?;
+            let admitted = bundle_admission::admit_bundle_manifest(bundle)?;
+            if admitted.kind == BundleKind::Program {
+                crate::component::validate_component_imports_for_manifest(
+                    &admitted.component,
+                    &admitted.manifest,
+                )
+                .map_err(BundleRefusal::NotAComponent)?;
+            }
+            Ok((
+                VerifiedBundle {
+                    cid: *asked,
+                    admitted,
+                },
+                accepted,
+            ))
+        }
+
+        pub(crate) fn cid(&self) -> &LabCid {
+            &self.cid
+        }
+
+        pub(crate) fn kind(&self) -> BundleKind {
+            self.admitted.kind
+        }
+
+        pub(crate) fn manifest(&self) -> &CapsuleManifest {
+            &self.admitted.manifest
+        }
+
+        pub(crate) fn pins(&self) -> &[(String, String)] {
+            &self.admitted.pins
+        }
+
+        pub(crate) fn take_pins(&mut self) -> Vec<(String, String)> {
+            std::mem::take(&mut self.admitted.pins)
+        }
+
+        pub(crate) fn take_files(&mut self) -> std::collections::BTreeMap<String, Vec<u8>> {
+            std::mem::take(&mut self.admitted.files)
+        }
+
+        /// The manifest and the entrypoint bytes the loader compiles.
+        pub(crate) fn into_component(self) -> (CapsuleManifest, Vec<u8>) {
+            (self.admitted.manifest, self.admitted.component)
+        }
+    }
+}
+
+use verified_bundle::VerifiedBundle;
+
 /// Test only: the four tables the installed bridge host call reads for one
 /// capsule id, so a row can make a late call under exactly what an end left.
 #[cfg(test)]
@@ -1238,14 +1331,14 @@ impl Runtime {
         // until the last of them is judged: trust cannot change between two
         // bundles of one start. It is let go before anything is loaded.
         let trust = self.signature_verifier.read().await;
-        let (mut admitted, accepted) = self
+        let (mut admitted, accepted): (VerifiedBundle, AcceptedSignature) = self
             .admit_closure_member(data_dir, &asked, &trust, &mut left, &mut after_walk)
             .await?;
         // What may sit below the bundle asked for follows from what it is. A
         // program pins programs. Content pins exactly one bundle, its
         // viewer, which must be a page. A page is reached through the
         // content that pins it and is not started by its own CID.
-        let below_root = match (admitted.kind, admitted.pins.len()) {
+        let below_root = match (admitted.kind(), admitted.pins().len()) {
             (BundleKind::Program, _) => BundleKind::Program,
             (BundleKind::Content, 1) => BundleKind::Page,
             (BundleKind::Content, pins) => return Err(BundleRefusal::ContentRequiresInvalid(pins)),
@@ -1265,29 +1358,29 @@ impl Runtime {
         // this walk has just read, held for the launch. A content whose
         // listing would be too long to serve is refused here, before
         // anything it pins is read.
-        let launch = match admitted.kind {
+        let launch = match admitted.kind() {
             BundleKind::Content => {
-                let content = LaunchContent::new(std::mem::take(&mut admitted.files));
+                let content = LaunchContent::new(admitted.take_files());
                 Some(Arc::new(
                     content.map_err(BundleRefusal::ContentListingTooLong)?,
                 ))
             }
             BundleKind::Program | BundleKind::Page => None,
         };
-        let pins = std::mem::take(&mut admitted.pins);
+        let pins = admitted.take_pins();
         // Every bundle admitted so far, by its CID: the name it carries, the
         // deepest place a pin has reached it at, and its own pins. The
         // bundle asked for is kept with its pins like any other: a cycle of
         // pins back to it cannot be built, and if one were, the measuring
         // would go round until the depth limit refused it.
-        let root = (admitted.manifest.name.clone(), 1, pins.clone());
-        let mut seen = HashMap::from([(asked.to_string(), root)]);
+        let root = (admitted.manifest().name.clone(), 1, pins.clone());
+        let mut seen = HashMap::from([(admitted.cid().to_string(), root)]);
         let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
         // The page a content pins, by its name: the one the launch is for.
         let mut kept_page = None;
         // What starts: the program asked for or, under content, the core.
-        let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
+        let mut starts = (admitted.kind() == BundleKind::Program).then_some(admitted);
         while let Some((depth, expected, core, name, pin)) = pending.pop() {
             let refused = |refusal| BundleRefusal::Requirement {
                 name: name.clone(),
@@ -1329,13 +1422,13 @@ impl Runtime {
                 .admit_closure_member(data_dir, &pinned, &trust, &mut left, &mut after_walk)
                 .await
                 .map_err(refused)?;
-            if member.manifest.name != name {
+            if member.manifest().name != name {
                 return Err(refused(BundleRefusal::RequirementMismatch(
-                    member.manifest.name,
+                    member.manifest().name.clone(),
                 )));
             }
-            if member.kind != expected {
-                let found = member.kind;
+            if member.kind() != expected {
+                let found = member.kind();
                 return Err(refused(match core {
                     true => BundleRefusal::ViewerCoreInvalid(format!(
                         "the viewer pins {}, not a program",
@@ -1346,13 +1439,13 @@ impl Runtime {
             }
             // A page pins exactly one bundle, its program. Whatever a
             // program pins is a program.
-            let pins = std::mem::take(&mut member.pins);
-            let page = member.kind == BundleKind::Page;
+            let pins = member.take_pins();
+            let page = member.kind() == BundleKind::Page;
             if page {
                 kept_page = Some(crate::page_launch::Page {
-                    name: member.manifest.name.clone(),
-                    entrypoint: member.manifest.entrypoint.clone(),
-                    files: std::mem::take(&mut member.files),
+                    name: member.manifest().name.clone(),
+                    entrypoint: member.manifest().entrypoint.clone(),
+                    files: member.take_files(),
                 });
             }
             if page && pins.len() != 1 {
@@ -1361,7 +1454,7 @@ impl Runtime {
                     pins.len()
                 ))));
             }
-            let known = (member.manifest.name.clone(), depth, pins.clone());
+            let known = (member.manifest().name.clone(), depth, pins.clone());
             seen.insert(pinned.to_string(), known);
             pending.extend(below(depth, BundleKind::Program, page, pins));
             if core {
@@ -1389,7 +1482,7 @@ impl Runtime {
                 "no program was found under the viewer".to_string(),
             ));
         };
-        let (bytes, manifest) = (starts.component, starts.manifest);
+        let (manifest, bytes) = starts.into_component();
         let loaded = match manifest.asks.is_empty() {
             true => component.load_admitted_sealed(bytes, manifest).await,
             false => component.load_admitted(bytes, manifest).await,
@@ -1425,9 +1518,11 @@ impl Runtime {
     /// The checks every bundle of a start by CID passes, the one asked for
     /// and each pinned one alike, in this order: the store has a slot for
     /// `cid`; one walk of it, inside what is `left` of the closure's budget;
-    /// the files recompute to `cid`; the signature beside it is accepted
-    /// under `trust`, the start's one reading of who is trusted; and only
-    /// then this start judges its manifest and its component's imports.
+    /// and then [`VerifiedBundle::check`], which builds the value this start
+    /// keeps. That function requires the files to recompute to `cid`, accepts
+    /// the signature beside the slot under `trust` (the start's one reading
+    /// of who is trusted), and only then judges the manifest and a program's
+    /// imports. Its fields are private to the module that defines the struct.
     /// What the walk took in comes off `left`.
     ///
     /// The walk is not blind to the manifest: to name a bundle it parses
@@ -1443,7 +1538,7 @@ impl Runtime {
         trust: &SignatureVerifier,
         left: &mut Budget,
         after_walk: &mut impl FnMut(&LabCid),
-    ) -> std::result::Result<(AdmittedBundle, AcceptedSignature), BundleRefusal> {
+    ) -> std::result::Result<(VerifiedBundle, AcceptedSignature), BundleRefusal> {
         let slot = bundle_admission::bundle_slot(data_dir, asked);
         match std::fs::symlink_metadata(&slot) {
             Ok(_) => {}
@@ -1464,23 +1559,8 @@ impl Runtime {
         let bytes: u64 = files.iter().map(|file| file.content.len() as u64).sum();
         left.max_entries = left.max_entries.saturating_sub(files.len());
         left.max_total_bytes = left.max_total_bytes.saturating_sub(bytes);
-        if bundle.cid() != *asked {
-            return Err(BundleRefusal::CidMismatch {
-                asked: asked.to_string(),
-                computed: bundle.cid().to_string(),
-            });
-        }
         let signature = bundle_admission::bundle_signature_path(data_dir, asked);
-        let accepted = bundle_admission::check_bundle_signature(&signature, asked, trust)?;
-        let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
-        if admitted.kind == BundleKind::Program {
-            crate::component::validate_component_imports_for_manifest(
-                &admitted.component,
-                &admitted.manifest,
-            )
-            .map_err(BundleRefusal::NotAComponent)?;
-        }
-        Ok((admitted, accepted))
+        VerifiedBundle::check(&bundle, asked, &signature, trust)
     }
 
     /// Test only: whether who is trusted could be replaced at this moment.
