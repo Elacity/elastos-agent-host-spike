@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use elastos_common::{CapsuleManifest, ProviderAuthority};
 
 use crate::{setup, sources::default_data_dir};
 
@@ -104,11 +107,27 @@ pub fn resolve_verified_native_provider_binary_with_data_dir(
     resolve_verified_native_provider_binary_with_bin_dir(data_dir, name, bin_dir.as_deref())
 }
 
+/// A native provider row that the resolver verified: the executable path, the
+/// checksum its row names, and the row itself.
+struct VerifiedNativeRow {
+    path: PathBuf,
+    checksum: String,
+    component: setup::Component,
+}
+
 fn resolve_verified_native_provider_binary_with_bin_dir(
     data_dir: &Path,
     name: &str,
     bin_dir: Option<&Path>,
 ) -> anyhow::Result<Option<PathBuf>> {
+    Ok(resolve_verified_native_row_with_bin_dir(data_dir, name, bin_dir)?.map(|row| row.path))
+}
+
+fn resolve_verified_native_row_with_bin_dir(
+    data_dir: &Path,
+    name: &str,
+    bin_dir: Option<&Path>,
+) -> anyhow::Result<Option<VerifiedNativeRow>> {
     let manifest_path = data_dir.join("components.json");
     let manifest_bytes = match std::fs::read(&manifest_path) {
         Ok(bytes) => bytes,
@@ -177,12 +196,101 @@ fn resolve_verified_native_provider_binary_with_bin_dir(
         name,
         verified_checksum
     );
-    Ok(Some(path))
+    Ok(Some(VerifiedNativeRow {
+        path,
+        checksum: verified_checksum,
+        component: component.clone(),
+    }))
 }
 
 pub fn resolve_verified_native_provider_binary(name: &str) -> anyhow::Result<Option<PathBuf>> {
     let data_dir = default_data_dir();
     resolve_verified_native_provider_binary_with_data_dir(&data_dir, name)
+}
+
+/// A native provider whose executable, manifest and authority the resolver
+/// verified. The fields are private; only `admit_with_bin_dir` writes them.
+/// No production caller in this slice: S1 calls `admit`.
+#[allow(dead_code)]
+pub(crate) struct AdmittedProvider {
+    key: String,
+    path: PathBuf,
+    checksum: String,
+    signer_did: Option<String>,
+    authority: ProviderAuthority,
+}
+
+#[allow(dead_code)]
+impl AdmittedProvider {
+    /// `Ok(None)` when no row resolves for `key` here; `Err` when a resolved
+    /// row or the manifest beside it does not verify.
+    pub(crate) fn admit(data_dir: &Path, key: &str) -> anyhow::Result<Option<Self>> {
+        let bin_dir = std::env::var_os("ELASTOS_CAPSULE_BIN_DIR").map(PathBuf::from);
+        let signers = setup::installed_release_signers(data_dir)?;
+        Self::admit_with_bin_dir(data_dir, key, bin_dir.as_deref(), &signers)
+    }
+
+    fn admit_with_bin_dir(
+        data_dir: &Path,
+        key: &str,
+        bin_dir: Option<&Path>,
+        signers: &BTreeMap<String, String>,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(row) = resolve_verified_native_row_with_bin_dir(data_dir, key, bin_dir)? else {
+            return Ok(None);
+        };
+        let manifest_path = data_dir.join("capsules").join(key).join("capsule.json");
+        let invalid = |err: String| anyhow::anyhow!("cannot admit '{}': {}", key, err);
+        let bytes = std::fs::read(&manifest_path)
+            .map_err(|err| invalid(format!("read {}: {err}", manifest_path.display())))?;
+        let manifest: CapsuleManifest = serde_json::from_slice(&bytes)
+            .map_err(|err| invalid(format!("{}: {err}", manifest_path.display())))?;
+        manifest.validate().map_err(invalid)?;
+        if manifest.name != key {
+            anyhow::bail!("cannot admit '{}': manifest names '{}'", key, manifest.name);
+        }
+        let runtime = row.component.provider_runtime.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("component '{}' is missing provider runtime metadata", key)
+        })?;
+        if manifest.provides.as_deref() != Some(runtime.provides.as_str()) {
+            anyhow::bail!(
+                "cannot admit '{}': manifest provides {:?}, the row provides '{}'",
+                key,
+                manifest.provides,
+                runtime.provides
+            );
+        }
+        let authority = manifest
+            .authority
+            .ok_or_else(|| invalid("declares no authority".to_string()))?;
+        Ok(Some(Self {
+            key: key.to_owned(),
+            path: row.path,
+            checksum: row.checksum,
+            signer_did: signers.get(key).cloned(),
+            authority,
+        }))
+    }
+
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn checksum(&self) -> &str {
+        &self.checksum
+    }
+
+    pub(crate) fn signer_did(&self) -> Option<&str> {
+        self.signer_did.as_deref()
+    }
+
+    pub(crate) fn authority(&self) -> &ProviderAuthority {
+        &self.authority
+    }
 }
 
 #[cfg(test)]
@@ -460,5 +568,161 @@ mod tests {
             Some(&parent_bin_dir),
         )
         .is_err());
+    }
+
+    /// A Home whose `did-provider` row, binary and manifest all verify.
+    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let bin_dir = data_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bytes = b"did-provider-binary";
+        let path = bin_dir.join("did-provider");
+        std::fs::write(&path, bytes).unwrap();
+        let checksum = format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)));
+        write_components_manifest(
+            &data_dir,
+            "did-provider",
+            &checksum,
+            Some(native_runtime("elastos://did/*")),
+        );
+        write_manifest(&data_dir, "did-provider", "did-provider", "elastos://did/*");
+        (temp, data_dir, path)
+    }
+
+    fn write_manifest(data_dir: &Path, dir_key: &str, name: &str, provides: &str) {
+        let text = format!(
+            r#"{{"schema":"elastos.capsule/v1","version":"0.2.0","name":"{name}","role":"provider",
+"type":"microvm","entrypoint":"rootfs.ext4","provides":"{provides}","authority":{{"reason":"test",
+"capabilities":[{{"resource":"{provides}","actions":["read"],"operations":["read"]}}],
+"audit_events":["test.read"],"rights":[{{"id":"storage","rules":["(allow file-read* (subpath (param \"STORAGE_ROOT\")))"]}}]}}}}"#
+        );
+        let dir = data_dir.join("capsules").join(dir_key);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("capsule.json"), text).unwrap();
+    }
+
+    fn admit(
+        data_dir: &Path,
+        signers: &BTreeMap<String, String>,
+    ) -> anyhow::Result<Option<AdmittedProvider>> {
+        AdmittedProvider::admit_with_bin_dir(data_dir, "did-provider", None, signers)
+    }
+
+    /// R1 ADMIT.
+    #[test]
+    fn admit_returns_the_verified_row_and_the_manifest_authority() {
+        let (_temp, data_dir, path) = fixture();
+        let admitted = admit(&data_dir, &BTreeMap::new()).unwrap().expect("admits");
+        assert_eq!(admitted.key(), "did-provider");
+        assert_eq!(admitted.path(), path);
+        let expected = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(b"did-provider-binary"))
+        );
+        assert_eq!(admitted.checksum(), expected);
+        assert_eq!(admitted.authority().rights.len(), 1);
+        assert_eq!(admitted.authority().rights[0].id, "storage");
+    }
+
+    /// R2 ADMIT-MISMATCH.
+    #[test]
+    fn admit_refuses_a_manifest_that_is_not_the_rows_component() {
+        let (_temp, data_dir, _path) = fixture();
+        write_manifest(
+            &data_dir,
+            "did-provider",
+            "wallet-provider",
+            "elastos://did/*",
+        );
+        let error = admit(&data_dir, &BTreeMap::new()).err().expect("refused");
+        assert!(
+            error.to_string().contains("names 'wallet-provider'"),
+            "{error}"
+        );
+
+        write_manifest(
+            &data_dir,
+            "did-provider",
+            "did-provider",
+            "elastos://wallet/meta/status",
+        );
+        let error = admit(&data_dir, &BTreeMap::new()).err().expect("refused");
+        assert!(
+            error.to_string().contains("elastos://wallet/meta/status")
+                && error.to_string().contains("'elastos://did/*'"),
+            "{error}"
+        );
+    }
+
+    /// R3 ADMIT-NO-MANIFEST: a resolved row without its manifest is a refusal,
+    /// not `Ok(None)`.
+    #[test]
+    fn admit_refuses_a_resolved_row_without_its_manifest() {
+        let (_temp, data_dir, _path) = fixture();
+        std::fs::remove_file(data_dir.join("capsules/did-provider/capsule.json")).unwrap();
+        let error = admit(&data_dir, &BTreeMap::new()).err().expect("refused");
+        assert!(error.to_string().contains("capsule.json"), "{error}");
+    }
+
+    /// R4 ADMIT-BAD-CHECKSUM stays the resolver's row.
+    #[test]
+    fn admit_refuses_bytes_that_differ_from_the_row() {
+        let (_temp, data_dir, path) = fixture();
+        std::fs::write(&path, b"tampered").unwrap();
+        let error = admit(&data_dir, &BTreeMap::new()).err().expect("refused");
+        assert!(
+            error.to_string().contains("failed checksum verification"),
+            "{error}"
+        );
+    }
+
+    /// R5 SIGNER.
+    #[test]
+    fn admit_reports_the_signer_of_the_rows_record() {
+        let (_temp, data_dir, _path) = fixture();
+        let mut signers = BTreeMap::new();
+        signers.insert("did-provider".to_string(), "did:key:zTest".to_string());
+        assert_eq!(
+            admit(&data_dir, &signers).unwrap().unwrap().signer_did(),
+            Some("did:key:zTest")
+        );
+        assert_eq!(
+            admit(&data_dir, &BTreeMap::new())
+                .unwrap()
+                .unwrap()
+                .signer_did(),
+            None
+        );
+    }
+
+    /// R6 ONLY-MAKER. The needle is built from parts so this file's own text
+    /// never matches it.
+    #[test]
+    fn admitted_provider_has_one_maker_in_binaries_and_no_other_route() {
+        let source = include_str!("binaries.rs");
+        let struct_head = ["struct ", "AdmittedProvider {"].concat();
+        let impl_head = ["impl ", "AdmittedProvider {"].concat();
+        let literal = ["Ok(Some(Self", " {"].concat();
+        assert_eq!(source.matches(&struct_head).count(), 1);
+        assert_eq!(source.matches(&impl_head).count(), 1);
+        assert_eq!(source.matches(&literal).count(), 1);
+        assert!(!source.contains(&["for ", "Admitted", "Provider"].concat()));
+        let at = source.find(&struct_head).unwrap();
+        let above = &source[at.saturating_sub(80)..at];
+        let body = &source[at..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            !body.contains("pub ")
+                && !body.contains("Clone")
+                && !body.contains("Serialize")
+                && !above.contains("Clone")
+                && !above.contains("Serialize")
+        );
+        let maker = source.find("fn admit_with_bin_dir(").unwrap();
+        let literal_at = source.find(&literal).unwrap();
+        assert!(
+            maker < literal_at && literal_at < maker + source[maker..].find("\n    }\n").unwrap()
+        );
     }
 }
