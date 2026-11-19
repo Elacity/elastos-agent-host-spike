@@ -13,6 +13,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use ed25519_dalek::{Signature, VerifyingKey};
 
 use elastos_bundle_identity::{Budget, CheckedBundle, LabCid, Refusal, MANIFEST_FILE};
 use elastos_common::{
@@ -324,22 +327,22 @@ pub struct AcceptedSignature {
 /// The order is fixed: the file exists; the Home trusts at least one key;
 /// only then is the file read (up to [`MAX_SIGNATURE_FILE_BYTES`] and one
 /// byte more, to tell a file over the cap), and it parses and names this CID;
-/// the signer is one canonical Ed25519
-/// `did:key`; the signature verifies strictly for that key over the CID text;
-/// and only then, that key is one the Home trusts. There is no `dev_mode`
-/// here: a bundle named by CID is never admitted unsigned.
+/// the signer's key is read; the signature is checked strictly over the CID
+/// text; and that key is looked up among the keys the Home trusts. There is
+/// no `dev_mode` here: a bundle named by CID is never admitted unsigned.
 ///
-/// The key in the file is a claim by whoever wrote the file. Trust is asked
-/// only of a key that has already verified the signature, and this is the
-/// one place in the server that asks it.
+/// The key in the file is a claim by whoever wrote the file. Trust never
+/// stands alone: the check accepts only when the key both decoded and
+/// verified the signature, and this is the one place in the server that asks
+/// whether a key is trusted.
 ///
-/// NOT EQUALISED: TIME. The three ways the last three steps fail give one
-/// refusal with one detail and one log line, but they do not take the same
-/// time: trust adds a list scan, and the signature and key checks keep
-/// caches of what passed (`crypto.rs`, `elastos-identity/src/store.rs`). The
-/// only caller today is a person running a command, one process per attempt,
-/// on a file they supplied. BEFORE ANY ROUTE LETS A REMOTE CALLER REACH THIS
-/// FUNCTION, ITS TIME MUST BE MADE THE SAME FOR THOSE THREE.
+/// The three ways the last three steps fail — a key that does not decode, a
+/// signature that does not verify, and a key the Home does not trust — give
+/// one refusal with one detail and one log line, and they take the same
+/// steps: each runs the signature check uncached and reads every trusted
+/// key, and the one refusal is formed after both. A key that does not decode
+/// is checked as fixed key material, so that step is one Ed25519 check like
+/// the other two.
 pub fn check_bundle_signature(
     file: &Path,
     cid: &LabCid,
@@ -374,20 +377,24 @@ pub fn check_bundle_signature(
             computed,
         });
     }
-    let Ok(key) = crate::crypto::decode_did_key(&parsed.signer_did) else {
-        return Err(not_accepted(&computed));
-    };
-    if crate::crypto::verify_domain_separated_signature(
-        &parsed.signer_did,
-        BUNDLE_SIGNATURE_DOMAIN,
-        computed.as_bytes(),
-        &parsed.signature,
-    )
-    .is_err()
-    {
-        return Err(not_accepted(&computed));
-    }
-    if !verifier.trusts(&key) {
+    // From here the three ways this check can fail take the same steps and
+    // end in the one refusal: the signer's key is read (one that does not
+    // decode stands as fixed key material), the signature is checked
+    // uncached, and every trusted key is read. Nothing below leaves early.
+    let decoded = crate::crypto::decode_did_key(&parsed.signer_did).ok();
+    record_work("signer key");
+    let key = decoded.unwrap_or(*REFUSAL_KEY);
+    let named_key = decoded.is_some();
+    let signature_bytes =
+        hex::decode(&parsed.signature).expect("the format check admitted 128 hex characters");
+    let signature = Signature::from_slice(&signature_bytes).expect("64 signature bytes");
+    let digest =
+        crate::crypto::domain_separated_digest(BUNDLE_SIGNATURE_DOMAIN, computed.as_bytes());
+    record_work("signature check");
+    let verified = crate::crypto::verify_digest_uncached(&key, &digest, &signature).is_ok();
+    record_work("trust scan");
+    let trusted = verifier.trusts(&key);
+    if !(named_key && verified && trusted) {
         return Err(not_accepted(&computed));
     }
     Ok(AcceptedSignature {
@@ -395,6 +402,12 @@ pub fn check_bundle_signature(
         file: bytes,
     })
 }
+
+/// The key a signer whose own key does not decode is checked against: real
+/// key material, so that step is one Ed25519 check like the two a decoded
+/// key's signature gets.
+static REFUSAL_KEY: LazyLock<VerifyingKey> =
+    LazyLock::new(|| ed25519_dalek::SigningKey::from_bytes(&[0x5b; 32]).verifying_key());
 
 /// The one refusal, and the one log line, for a signer that is not a
 /// canonical key, a signature that does not verify, and a key that is not
@@ -697,6 +710,11 @@ pub(crate) mod tests {
         crate::crypto::encode_did_key(key).expect("did:key")
     }
 
+    /// The steps the signature check has taken since the last call, in order.
+    pub(crate) fn take_signature_check_work() -> Vec<&'static str> {
+        SIGNATURE_CHECK_WORK.with(|work| std::mem::take(&mut *work.borrow_mut()))
+    }
+
     /// A signature made here by hand, not by the server's signer: the
     /// SHA-256 of the domain, one zero byte and the payload, signed.
     pub(crate) fn sign_by_hand(key: &SigningKey, domain: &str, payload: &str) -> String {
@@ -993,7 +1011,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn trust_is_asked_once_in_the_server_and_only_after_the_signature_verified() {
+    fn trust_is_asked_once_in_the_server_and_after_the_signature_check() {
         let code = production();
         assert_eq!(
             code.matches(".trusts(").count(),
@@ -1001,15 +1019,15 @@ pub(crate) mod tests {
             "one call site in this file"
         );
         let verify = code
-            .find("verify_domain_separated_signature(")
+            .find("verify_digest_uncached(")
             .expect("the verify call");
         let trusts = code.find(".trusts(").expect("the trust question");
         assert!(
             verify < trusts,
-            "trust is asked before the signature is verified"
+            "trust is asked before the signature is checked"
         );
-        // The three refusals share one maker, which holds the one log line.
-        assert_eq!(code.matches("Err(not_accepted(&computed))").count(), 3);
+        // The three failures form one refusal, which holds the one log line.
+        assert_eq!(code.matches("Err(not_accepted(&computed))").count(), 1);
         assert_eq!(code.matches("tracing::").count(), 1, "one log line");
         // Outside its comments this file never names `dev_mode`: the check
         // takes no such input, so no setting can relax it.
@@ -1105,4 +1123,20 @@ pub(crate) mod tests {
             }
         );
     }
+}
+
+/// Records one step of the signature check for a test; the product keeps
+/// none. It sits after the tests module so the source pin above reads the
+/// check itself and not this.
+fn record_work(_step: &'static str) {
+    #[cfg(test)]
+    SIGNATURE_CHECK_WORK.with(|work| work.borrow_mut().push(_step));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's window onto the signature check: one step per line, in the
+    /// order the check took them. It is not part of the product.
+    pub(crate) static SIGNATURE_CHECK_WORK: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
