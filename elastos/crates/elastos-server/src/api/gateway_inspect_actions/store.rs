@@ -65,21 +65,23 @@ fn pending_request_view(record: InspectActionRequestRecord) -> Option<serde_json
     if !agent_plan && record.kind != INSPECT_ACTION_KIND {
         return None;
     }
-    let current = inspect_action_request_binding(
-        &record.request_id,
-        &record.principal_id,
-        &record.id,
-        &record.operation,
-        &record.plan,
-        &record.request,
-    );
     let binding = if agent_plan {
+        let current = super::agent_plan::agent_plan_request_binding(&record)?;
         if current.truncated {
             return None;
         }
         current
     } else {
-        record.request_binding.clone().unwrap_or(current)
+        record.request_binding.clone().unwrap_or_else(|| {
+            inspect_action_request_binding(
+                &record.request_id,
+                &record.principal_id,
+                &record.id,
+                &record.operation,
+                &record.plan,
+                &record.request,
+            )
+        })
     };
     let mut view = serde_json::json!({
         "schema": record.schema,

@@ -16,6 +16,7 @@ use super::binding::{
 use super::store::{
     write_inspect_action_record, InspectActionRequestRecord, AGENT_PLAN_KIND, INSPECT_ACTION_SCHEMA,
 };
+use crate::esp_binding::EspRequestBinding;
 use crate::inspect_provider::plan_scheme;
 
 /// Identity for a pending agent plan. It comes from Runtime context and never
@@ -74,18 +75,7 @@ pub(super) fn create_pending_agent_plan_record(
         now,
         &inspect_action_request_nonce(),
     );
-    let request_binding = inspect_action_request_binding(
-        &request_id,
-        context.principal_id,
-        context.capsule_id,
-        operation,
-        &preview,
-        &agent_plan_bound_body(context, &step),
-    );
-    if request_binding.truncated {
-        anyhow::bail!("agent plan step preview is too large and is refused rather than cut");
-    }
-    let record = InspectActionRequestRecord {
+    let mut record = InspectActionRequestRecord {
         schema: INSPECT_ACTION_SCHEMA.to_string(),
         kind: AGENT_PLAN_KIND.to_string(),
         request_id,
@@ -96,26 +86,44 @@ pub(super) fn create_pending_agent_plan_record(
         operation: operation.to_string(),
         request: step,
         plan: preview,
-        request_binding: Some(request_binding),
+        request_binding: None,
         status: "pending".to_string(),
         created_at: now,
         updated_at: now,
         result: None,
         error: None,
     };
+    let request_binding = agent_plan_request_binding(&record)
+        .ok_or_else(|| anyhow::anyhow!("agent plan requires a requester"))?;
+    if request_binding.truncated {
+        anyhow::bail!("agent plan step preview is too large and is refused rather than cut");
+    }
+    record.request_binding = Some(request_binding);
     write_inspect_action_record(data_dir, &record)?;
     Ok(record)
 }
 
-/// The body the ESP binding hashes: the exact typed step plus the identities
-/// the Runtime supplies. Nothing here is read from the submitted plan.
-fn agent_plan_bound_body(context: &AgentPlanContext<'_>, step: &Value) -> Value {
-    json!({
-        "owner": context.principal_id,
-        "requester": context.requester_id,
-        "session": context.session_id,
-        "step": step,
-    })
+/// The one binding of an agent plan: the ESP sha256 over its exact typed step
+/// and the identities the Runtime supplied, none read from the submitted plan.
+/// Creating the record stores it; the Inbox recomputes it from the stored
+/// fields. A record with no requester has none.
+pub(super) fn agent_plan_request_binding(
+    record: &InspectActionRequestRecord,
+) -> Option<EspRequestBinding> {
+    let requester = record.requester_id.as_deref()?;
+    Some(inspect_action_request_binding(
+        &record.request_id,
+        &record.principal_id,
+        &record.id,
+        &record.operation,
+        &record.plan,
+        &json!({
+            "owner": record.principal_id,
+            "requester": requester,
+            "session": record.session_id,
+            "step": record.request,
+        }),
+    ))
 }
 
 /// The one typed step a record keeps. More than one step fails closed until the

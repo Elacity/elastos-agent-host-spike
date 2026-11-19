@@ -775,13 +775,16 @@ mod tests {
     }
 
     const PLAN_PRINCIPAL: &str = "person:owner";
+    const PLAN_REQUESTER: &str = "agent:v2:planrequester";
     const PLAN_CAPSULE: &str = "capsule:agent-host";
+    const PLAN_SESSION: &str = "session:agent-1";
 
     fn plan_context() -> agent_plan::AgentPlanContext<'static> {
         agent_plan::AgentPlanContext {
             principal_id: PLAN_PRINCIPAL,
+            requester_id: PLAN_REQUESTER,
             capsule_id: PLAN_CAPSULE,
-            session_id: "session:agent-1",
+            session_id: PLAN_SESSION,
         }
     }
 
@@ -809,7 +812,12 @@ mod tests {
             None,
             "status",
             ["elastos://availability/status".to_string()],
-            &stored_step(request),
+            &serde_json::json!({
+                "owner": PLAN_PRINCIPAL,
+                "requester": PLAN_REQUESTER,
+                "session": PLAN_SESSION,
+                "step": stored_step(request),
+            }),
         )
     }
 
