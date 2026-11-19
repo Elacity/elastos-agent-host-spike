@@ -1,7 +1,8 @@
 //! Agents that belong to one person.
 //!
 //! An owner turns agents on for their Home, then creates, lists, renames and
-//! retires them. Nothing in this module runs an agent.
+//! retires them, and turns one agent on or off. Nothing in this module runs
+//! an agent.
 //!
 //! Agent records are kept in their own file,
 //! `ElastOS/System/Auth/agent-records.json`. The owner's sign-in file never
@@ -126,6 +127,16 @@ pub(crate) struct Enabled {
 pub(crate) struct StoredAgent {
     pub(crate) record: PrincipalRecord,
     pub(crate) protection: PrincipalRootProtectionV1,
+    // Absent means on: a record stored before this field still launches.
+    #[serde(default = "active_when_absent", skip_serializing_if = "is_active")]
+    pub(crate) active: bool,
+}
+
+fn active_when_absent() -> bool {
+    true
+}
+fn is_active(active: &bool) -> bool {
+    *active
 }
 
 impl AgentRecordsFile {
@@ -361,6 +372,7 @@ enum Operation {
     Create,
     Rename,
     Retire,
+    SetActive,
 }
 
 impl Operation {
@@ -371,6 +383,7 @@ impl Operation {
             Self::Create => "agent.record.create",
             Self::Rename => "agent.record.rename",
             Self::Retire => "agent.record.retire",
+            Self::SetActive => "agent.record.active",
         }
     }
 }
@@ -382,7 +395,8 @@ impl Operation {
 /// - disable: `enabled`, from on to off;
 /// - create: one agent added at the end, not retired;
 /// - rename: one agent's `display_name`, and its `updated_at`;
-/// - retire: one agent's `retired_at`, set once, and its `updated_at`.
+/// - retire: one agent's `retired_at`, set once, and its `updated_at`;
+/// - set active: one agent's `active`, and its `updated_at`.
 fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecordsFile) -> bool {
     if after.schema != before.schema || before.sequence.checked_add(1) != Some(after.sequence) {
         return false;
@@ -420,6 +434,17 @@ fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecords
                 && after.agents.len() == before.agents.len()
                 && matches!(changed.as_slice(), [(old, new)] if retires(old, new))
         }
+        Operation::SetActive => {
+            let changed: Vec<_> = before
+                .agents
+                .iter()
+                .zip(&after.agents)
+                .filter(|(old, new)| old != new)
+                .collect();
+            same_enabled
+                && after.agents.len() == before.agents.len()
+                && matches!(changed.as_slice(), [(old, new)] if sets_active(old, new))
+        }
     }
 }
 
@@ -441,6 +466,13 @@ fn retires(old: &StoredAgent, new: &StoredAgent) -> bool {
     expected.record.retired_at = new.record.retired_at;
     expected.record.updated_at = new.record.updated_at;
     old.record.retired_at.is_none() && new.record.retired_at.is_some() && expected == *new
+}
+
+fn sets_active(old: &StoredAgent, new: &StoredAgent) -> bool {
+    let mut expected = old.clone();
+    expected.active = new.active;
+    expected.record.updated_at = new.record.updated_at;
+    old.active != new.active && expected == *new
 }
 
 /// Who asked for a write: a stored person, on their proof-bound session.
@@ -825,6 +857,7 @@ fn create_in_any_build(
             retired_at: None,
             version: PRINCIPAL_RECORD_VERSION,
         },
+        active: false,
     };
     if id_or_root_held(&opened, &agent.record) {
         return refused(ID_HELD);
@@ -867,6 +900,7 @@ fn list_in_any_build(data_dir: &Path, caller: &Caller<'_>) -> anyhow::Result<Vec
 
 const NO_SUCH_AGENT: &str = "the caller owns no agent with that id";
 const ALREADY_RETIRED: &str = "agent is already retired";
+pub(crate) const NOT_ACTIVE: &str = "agent is off until its owner turns it on";
 
 /// Renames one of the caller's agents. The display name and `updated_at`
 /// are the only fields that change. The same name writes nothing. A retired
@@ -979,9 +1013,53 @@ fn retire_in_any_build(
     Ok(retired)
 }
 
+pub(crate) fn set_active(
+    data_dir: &Path,
+    caller: &Caller<'_>,
+    agent_id: &str,
+    active: bool,
+    now: u64,
+) -> anyhow::Result<AgentView> {
+    require_build()?;
+    let opened = open(data_dir, true)?;
+    if opened.file.enabled.is_none() {
+        return refused(NOT_ENABLED);
+    }
+    let owner = caller_person(&opened.owner_file, caller)?;
+    let mut after = opened.file.clone();
+    let Some(agent) = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == agent_id && owned_by(agent, owner))
+    else {
+        return refused(NO_SUCH_AGENT);
+    };
+    if agent.record.retired_at.is_some() {
+        return refused(ALREADY_RETIRED);
+    }
+    if agent.active == active {
+        return Ok(view(agent));
+    }
+    agent.active = active;
+    agent.record.updated_at = now;
+    let shown = view(agent);
+    after.sequence += 1;
+    write(
+        data_dir,
+        &opened,
+        Operation::SetActive,
+        &after,
+        caller,
+        agent_id,
+        now,
+    )?;
+    Ok(shown)
+}
+
 /// One stored agent of `owner_id`, for a launch. Every gate applies before a
 /// record leaves this module: the build, the Home's stored choice, a stored
-/// person as the owner, the agent's own owner, and its retirement.
+/// person as the owner, the agent's own owner, its retirement, and whether
+/// its owner has turned this agent on.
 pub(crate) fn stored_agent(
     data_dir: &Path,
     owner_id: &str,
@@ -1009,6 +1087,9 @@ pub(crate) fn stored_agent(
     };
     if agent.record.retired_at.is_some() {
         return refused(NO_SUCH_AGENT);
+    }
+    if !agent.active {
+        return refused(NOT_ACTIVE);
     }
     Ok(agent.clone())
 }
