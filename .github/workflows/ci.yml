@@ -269,6 +269,7 @@ jobs:
             /var/cache/apt/archives/*.deb
             /var/cache/apt/ci-lists
             /var/cache/apt/ci-mirror
+            /var/cache/apt/ci-packages
           key: apt-engine-ubuntu-24.04-${{ runner.arch }}-${{ env.BUILD_CONTAINER_IMAGE }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.ENGINE_BUILD_TOOLS }}-${{ github.run_id }}
           restore-keys: apt-engine-ubuntu-24.04-${{ runner.arch }}-${{ env.BUILD_CONTAINER_IMAGE }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.ENGINE_BUILD_TOOLS }}-
       - name: install engine build tools
@@ -283,6 +284,7 @@ jobs:
             /var/cache/apt/archives/*.deb
             /var/cache/apt/ci-lists
             /var/cache/apt/ci-mirror
+            /var/cache/apt/ci-packages
           key: apt-engine-ubuntu-24.04-${{ runner.arch }}-${{ env.BUILD_CONTAINER_IMAGE }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.ENGINE_BUILD_TOOLS }}-${{ github.run_id }}
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -360,6 +362,7 @@ jobs:
             /var/cache/apt/archives/*.deb
             /var/cache/apt/ci-lists
             /var/cache/apt/ci-mirror
+            /var/cache/apt/ci-packages
           key: apt-engine-ubuntu-24.04-${{ runner.arch }}-${{ env.BUILD_CONTAINER_IMAGE }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.ENGINE_BUILD_TOOLS }}-${{ github.run_id }}
           restore-keys: apt-engine-ubuntu-24.04-${{ runner.arch }}-${{ env.BUILD_CONTAINER_IMAGE }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.ENGINE_BUILD_TOOLS }}-
       - name: install engine build tools
@@ -374,6 +377,7 @@ jobs:
             /var/cache/apt/archives/*.deb
             /var/cache/apt/ci-lists
             /var/cache/apt/ci-mirror
+            /var/cache/apt/ci-packages
           key: apt-engine-ubuntu-24.04-${{ runner.arch }}-${{ env.BUILD_CONTAINER_IMAGE }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.ENGINE_BUILD_TOOLS }}-${{ github.run_id }}
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -1075,6 +1079,7 @@ jobs:
         run: |
           sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /var/cache/apt/archives /var/cache/apt/ci-lists
           sudo install -o "$(id -u)" -g "$(id -g)" -m 644 /dev/null /var/cache/apt/ci-mirror
+          sudo install -o "$(id -u)" -g "$(id -g)" -m 644 /dev/null /var/cache/apt/ci-packages
           sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives /var/cache/apt/ci-lists
       - name: restore Ubuntu prerequisite archives
         if: env.CI_USE_CACHE == 'true'
@@ -1084,6 +1089,7 @@ jobs:
             /var/cache/apt/archives/*.deb
             /var/cache/apt/ci-lists
             /var/cache/apt/ci-mirror
+            /var/cache/apt/ci-packages
           key: apt-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.CI_APT_PACKAGES }}-${{ github.run_id }}
           restore-keys: apt-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.CI_APT_PACKAGES }}-
       - name: install host prerequisites
@@ -1107,6 +1113,7 @@ jobs:
             /var/cache/apt/archives/*.deb
             /var/cache/apt/ci-lists
             /var/cache/apt/ci-mirror
+            /var/cache/apt/ci-packages
           key: apt-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.CI_APT_PACKAGES }}-${{ github.run_id }}
       - name: bind Kubo cache to its pin
         id: kubo-pin
@@ -1704,6 +1711,7 @@ jobs:
         run: |
           sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /var/cache/apt/archives /var/cache/apt/ci-lists
           sudo install -o "$(id -u)" -g "$(id -g)" -m 644 /dev/null /var/cache/apt/ci-mirror
+          sudo install -o "$(id -u)" -g "$(id -g)" -m 644 /dev/null /var/cache/apt/ci-packages
           sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives /var/cache/apt/ci-lists
       - name: restore Ubuntu prerequisite archives
         if: env.CI_USE_CACHE == 'true'
@@ -1713,6 +1721,7 @@ jobs:
             /var/cache/apt/archives/*.deb
             /var/cache/apt/ci-lists
             /var/cache/apt/ci-mirror
+            /var/cache/apt/ci-packages
           key: apt-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.CI_APT_PACKAGES }}-${{ github.run_id }}
           restore-keys: apt-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.CI_APT_PACKAGES }}-
       - name: install host prerequisites
