@@ -132,6 +132,54 @@ pub(super) fn claim_pending_inspect_action_record(
     Ok(record)
 }
 
+/// Claims one pending agent plan for its owner under the store lock. The card's
+/// whole binding must equal both the stored and the recomputed one, so a changed
+/// plan becomes stale and claims nothing. The passkey check runs before the claim:
+/// a failed passkey leaves the record pending, and a second click finds it claimed.
+pub(super) fn claim_pending_agent_plan_for_owner(
+    data_dir: &Path,
+    request_id: &str,
+    owner_id: &str,
+    approver_is_human: bool,
+    card_binding: &serde_json::Value,
+    updated_at: u64,
+    consume_step_up: impl FnOnce(&InspectActionRequestRecord) -> anyhow::Result<()>,
+) -> anyhow::Result<InspectActionRequestRecord> {
+    let _guard = inspect_action_store_lock()?;
+    let mut record = read_inspect_action_record_unlocked(data_dir, request_id)?;
+    if record.kind != AGENT_PLAN_KIND {
+        anyhow::bail!("agent plan has a different kind");
+    }
+    if !approver_is_human
+        || record.principal_id != owner_id
+        || record.requester_id.as_deref() == Some(owner_id)
+    {
+        anyhow::bail!(
+            "an agent plan is approved by its owner, never the requesting agent or another person"
+        );
+    }
+    if record.status != "pending" {
+        anyhow::bail!("agent plan is not pending");
+    }
+    let card: EspRequestBinding = serde_json::from_value(card_binding.clone())
+        .map_err(|err| anyhow::anyhow!("agent plan card binding is invalid: {err}"))?;
+    if record.request_binding.as_ref() != Some(&card)
+        || super::agent_plan::agent_plan_request_binding(&record) != Some(card.clone())
+    {
+        let message = "agent plan changed before Inbox approval; it is stale";
+        record.status = "stale".to_string();
+        record.error = Some(message.to_string());
+        record.updated_at = updated_at;
+        write_inspect_action_record_unlocked(data_dir, &record)?;
+        anyhow::bail!(message);
+    }
+    consume_step_up(&record)?;
+    record.status = "approved".to_string();
+    record.updated_at = updated_at;
+    write_inspect_action_record_unlocked(data_dir, &record)?;
+    Ok(record)
+}
+
 fn read_inspect_action_record_unlocked(
     data_dir: &Path,
     request_id: &str,
