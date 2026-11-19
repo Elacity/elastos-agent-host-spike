@@ -13,6 +13,12 @@ function reason(error) {
   return (found && found[1].trim()) || "The Home did not answer.";
 }
 
+// A bad reply is this page's refusal. 422 keeps Retry off. A lost answer has no
+// status, and a real 5xx still comes from the server as 500 or higher.
+function pageRefusal(message) {
+  return new Error(`request failed: 422 ${message}`);
+}
+
 function retryable(error) {
   const code = text(error && error.message).match(/^request failed: (\d{3})\b/);
   return !code || Number(code[1]) >= 500;
@@ -97,7 +103,7 @@ export function bindAgents(doc, request) {
       }
       throw error;
     }
-    if (!body || !Array.isArray(body.agents)) throw new Error("request failed: 502 The Home did not list agents.");
+    if (!body || !Array.isArray(body.agents)) throw pageRefusal("The Home did not list agents.");
     agents = body.agents;
     gate = "ready";
   }
@@ -108,7 +114,7 @@ export function bindAgents(doc, request) {
       pendingLabel = label;
       paint();
       const reply = await request(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
-      if (!accept(reply)) throw new Error("request failed: 502 The Home did not confirm that change.");
+      if (!accept(reply)) throw pageRefusal("The Home did not confirm that change.");
       if (id === "create") nameInput.value = "";
       await load();
     };

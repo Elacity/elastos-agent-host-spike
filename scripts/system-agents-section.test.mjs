@@ -10,6 +10,7 @@ const OFF = "Off until you turn it on";
 const REASON = "owner already has the most agents a Home allows";
 const NOT_BUILT = "agents are not built into this Runtime";
 const NOT_ON = "agents are not turned on for this Home";
+const CREATE_ON_REFUSED = "create_reply_that_is_on_is_refused";
 const AGENT_ID = "agent:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OTHER_ID = "agent:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -355,4 +356,91 @@ test("a failed turn on or off shows the server reason and offers no retry", asyn
   assert.equal(ui.status.textContent, reasons[OTHER_ID]);
   assert.equal(ui.retry.hidden, true);
   assert.equal(ui.state(OTHER_ID), "On");
+});
+
+function sourceLines(url) {
+  return readFileSync(url, "utf8").split("\n");
+}
+
+test("a create reply whose agent is on is refused by the page", async () => {
+  const created = { agent_id: AGENT_ID, display_name: "Helper", active: true };
+  const calls = [];
+  const ui = mount((path, init = {}) => {
+    const call = callOf(path, init);
+    calls.push(call);
+    if (path.endsWith("/create")) return Promise.resolve(created);
+    const createdAlready = calls.some((item) => item.path.endsWith("/create"));
+    return Promise.resolve({ agents: createdAlready ? [created] : [] });
+  });
+  await ui.load();
+  ui.name.value = "Helper";
+  ui.create.click();
+  await flush();
+  await flush();
+  assert.equal(ui.status.textContent, "The Home did not confirm that change.", CREATE_ON_REFUSED);
+  assert.equal(ui.state(AGENT_ID), "", CREATE_ON_REFUSED);
+  assert.equal(ui.name.value, "Helper", CREATE_ON_REFUSED);
+  assert.equal(ui.retry.hidden, true, CREATE_ON_REFUSED);
+  assert.equal(ui.form.hidden, false);
+  assert.equal(calls.filter((call) => call.path.endsWith("/create")).length, 1, CREATE_ON_REFUSED);
+  assert.equal(calls.filter((call) => call.path.endsWith("/activate")).length, 0, CREATE_ON_REFUSED);
+  ui.retry.click();
+  await flush();
+  assert.equal(calls.filter((call) => call.path.endsWith("/create")).length, 1, CREATE_ON_REFUSED);
+});
+
+test("a bad list or turn is refused without retry, and a real 502 still offers it", async () => {
+  const listCalls = [];
+  const badList = mount((path, init = {}) => {
+    listCalls.push(callOf(path, init));
+    return Promise.resolve({ agents: { id: AGENT_ID } });
+  });
+  await badList.load();
+  assert.equal(badList.status.textContent, "The Home did not list agents.");
+  assert.equal(badList.retry.hidden, true);
+  assert.equal(badList.form.hidden, true);
+  badList.retry.click();
+  await flush();
+  assert.equal(listCalls.length, 1);
+
+  const agent = { agent_id: AGENT_ID, display_name: "Helper", active: false };
+  const turnCalls = [];
+  const turn = mount((path, init = {}) => {
+    const call = callOf(path, init);
+    turnCalls.push(call);
+    if (path.endsWith("/activate")) return Promise.resolve({ ...agent, active: false });
+    return Promise.resolve({ agents: [agent] });
+  });
+  await turn.load();
+  turn.button("Turn on").click();
+  await flush();
+  await flush();
+  assert.equal(turn.status.textContent, "The Home did not confirm that change.");
+  assert.equal(turn.retry.hidden, true);
+  assert.equal(turn.state(AGENT_ID), OFF);
+  turn.retry.click();
+  await flush();
+  assert.equal(turnCalls.filter((call) => call.path.endsWith("/activate")).length, 1);
+
+  const real = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") return Promise.resolve({ agents: [] });
+    return Promise.reject(new Error("request failed: 502 the gateway timed out"));
+  });
+  await real.load();
+  real.name.value = "Helper";
+  real.create.click();
+  await flush();
+  assert.equal(real.status.textContent, "the gateway timed out");
+  assert.equal(real.retry.hidden, false);
+  assert.equal(real.name.value, "Helper");
+});
+
+test("the page's two refusal sentences are the server's", () => {
+  const rust = sourceLines(new URL("../elastos/crates/elastos-server/src/agents.rs", import.meta.url));
+  const page = sourceLines(new URL("../capsules/system/browser/agents-section.js", import.meta.url));
+  const count = (lines, line) => lines.filter((item) => item === line).length;
+  assert.equal(count(rust, `pub(crate) const FEATURE_OFF: &str = "${NOT_BUILT}";`), 1);
+  assert.equal(count(rust, `pub(crate) const NOT_ENABLED: &str = "${NOT_ON}";`), 1);
+  assert.equal(count(page, `const NOT_BUILT = "${NOT_BUILT}";`), 1);
+  assert.equal(count(page, `const NOT_ON = "${NOT_ON}";`), 1);
 });
