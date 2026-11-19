@@ -20475,41 +20475,35 @@ mod tests {
         );
     }
 
-    /// The signed resource names the launching person and this capsule.
+    /// The guest's production journal path stays inside its signed ask.
     #[test]
     fn a_declared_ask_names_only_the_launching_principal() {
         let (pattern, actions) = manifest_journal_ask();
-        let listed: Vec<&str> = actions.iter().map(String::as_str).collect();
-        assert!(journal_manifest_ask_fits(
-            &pattern,
-            &listed,
-            "localhost://Users/self/.AppData/Agents/agent-host/tasks/t/journal",
-            "read"
-        ));
-        assert!(!journal_manifest_ask_fits(
-            &pattern,
-            &listed,
+        let root = pattern.strip_suffix("/*").expect("a directory ask");
+        let own = journal_resource("agent-host", "t").expect("the guest journal path");
+        assert!(actions.iter().any(|action| action == "read"));
+        assert_eq!(
+            own,
+            "localhost://Users/self/.AppData/Agents/agent-host/tasks/t/journal"
+        );
+        assert!(resource_covers(root, &own));
+        assert!(!resource_covers(
+            root,
             "localhost://Users/other/.AppData/Agents/agent-host/tasks/t/journal",
-            "read"
         ));
     }
 
-    /// The signed resource covers a child journal path, not a sibling path.
+    /// The production path boundary check covers a child journal path.
     #[test]
     fn a_declared_pattern_covers_only_at_a_path_boundary() {
         let (pattern, actions) = manifest_journal_ask();
-        let listed: Vec<&str> = actions.iter().map(String::as_str).collect();
-        assert!(journal_manifest_ask_fits(
-            &pattern,
-            &listed,
-            "localhost://Users/self/.AppData/Agents/agent-host/tasks/t/journal",
-            "write"
-        ));
-        assert!(!journal_manifest_ask_fits(
-            &pattern,
-            &listed,
+        let root = pattern.strip_suffix("/*").expect("a directory ask");
+        let own = journal_resource("agent-host", "t").expect("the guest journal path");
+        assert!(actions.iter().any(|action| action == "write"));
+        assert!(resource_covers(root, &own));
+        assert!(!resource_covers(
+            root,
             "localhost://Users/self/.AppData/Agents/agent-hostX/tasks/t/journal",
-            "write"
         ));
     }
 

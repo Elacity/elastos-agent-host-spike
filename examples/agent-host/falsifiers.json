@@ -1586,14 +1586,14 @@
   },
   {
    "id": "F-AH3h",
-   "title": "the principal marker matches any Users/<name> again",
+   "title": "the guest journal path names another principal",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        Some(tail) => format!(\"{LAUNCHING_PRINCIPAL}{tail}\"),",
-     "new": "        Some(tail) => format!(\"Users{tail}\"),"
+     "old": "const JOURNAL_ROOT: &str = \"localhost://Users/self/.AppData/Agents/\";",
+     "new": "const JOURNAL_ROOT: &str = \"localhost://Users/other/.AppData/Agents/\";"
     }
    ],
    "tests": [
@@ -1602,14 +1602,14 @@
   },
   {
    "id": "F-AH3i",
-   "title": "a declared pattern is matched with a plain prefix test",
+   "title": "the journal boundary check accepts a plain prefix",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))",
-     "new": "        .is_some_and(|path| path.starts_with(&ask_pattern_root(&ask.pattern)))"
+     "old": "                .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1 && !host_path(object)))",
+     "new": "                .is_some_and(|rest| rest.len() > 1 && !host_path(object)))"
     }
    ],
    "tests": [
