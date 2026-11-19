@@ -804,9 +804,26 @@ async fn authorize_and_dispatch_resource_invoke(
     }
 }
 
+/// The owner a requesting agent acts for, while that agent may still act: the
+/// identity is not quarantined, it is an agent, and the launch gate holds
+/// (agents built and turned on for this Home, a stored person as its owner,
+/// the agent not retired).
+fn acting_agent_owner(data_dir: &Path, requester_id: &str) -> anyhow::Result<String> {
+    let mut owner_id = String::new();
+    if let Some(record) = crate::auth::stored_principal_record(data_dir, requester_id)? {
+        crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, requester_id)?;
+        if record.kind != crate::auth::PrincipalKind::Agent {
+            anyhow::bail!("agent plan submission requires an agent principal");
+        }
+        owner_id = record.owner.unwrap_or_default();
+    }
+    crate::agents::stored_agent(data_dir, &owner_id, requester_id)?;
+    Ok(owner_id)
+}
+
 /// The Runtime's answer to an agent plan submission: one pending record built
-/// from the caller's Runtime context, returned whole. The stored owner is the
-/// person on the requesting agent's stored record; the step is not run.
+/// from the caller's Runtime context, returned whole. The record's principal
+/// is the owner on the requesting agent's stored record; the step is not run.
 fn submit_agent_plan_response(
     bridge_ctx: &BridgeContext,
     plan: &serde_json::Value,
@@ -823,18 +840,9 @@ fn submit_agent_plan_response(
             "agent plan submission requires an admitted agent principal",
         );
     };
-    let stored = crate::auth::stored_principal_record(data_dir, requester_id)
-        .ok()
-        .flatten();
-    let Some(owner_id) = stored.as_ref().and_then(|record| {
-        (record.kind == crate::auth::PrincipalKind::Agent)
-            .then(|| record.owner.clone())
-            .flatten()
-    }) else {
-        return resource_error_response(
-            "submit_agent_plan_refused",
-            "agent plan submission requires an admitted agent with a stored owner",
-        );
+    let owner_id = match acting_agent_owner(data_dir, requester_id) {
+        Ok(owner_id) => owner_id,
+        Err(err) => return resource_error_response("submit_agent_plan_refused", &err.to_string()),
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -6979,10 +6987,28 @@ mod tests {
         serde_json::from_slice(&std::fs::read(path).expect("stored record")).unwrap()
     }
 
+    /// The request ids a reader is shown: the pending records whose stored
+    /// principal is that reader, the rule the Inbox listing applies.
+    fn pending_plans_for(data_dir: &Path, reader: &str) -> Vec<String> {
+        submit_record_files(data_dir)
+            .iter()
+            .map(|name| read_submit_record(data_dir, name.trim_end_matches(".json")))
+            .filter(|record| record["status"] == "pending" && record["principal_id"] == reader)
+            .map(|record| {
+                record["request_id"]
+                    .as_str()
+                    .expect("request id")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The probe Agent Host's manifest as it is on disk, unsigned; only its
+    /// asks are read here.
     fn submit_plan_host_manifest() -> elastos_common::CapsuleManifest {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/components/a5-launch-probe/capsule.json");
-        serde_json::from_slice(&std::fs::read(path).expect("signed test manifest")).unwrap()
+        serde_json::from_slice(&std::fs::read(path).expect("probe test manifest")).unwrap()
     }
 
     /// The submitted plan: one exact typed step plus whatever the row adds.
@@ -7019,40 +7045,99 @@ mod tests {
         .to_string()
     }
 
-    async fn submit_agent_plan_context() -> (
-        tempfile::TempDir,
-        BridgeContext,
-        Arc<CapturingProvider>,
-        String,
-        String,
-    ) {
-        let temp = tempfile::tempdir().unwrap();
-        let agent = crate::auth::valid_agent::plant(temp.path());
-        let owner = agent.owner.clone().expect("the stored agent has an owner");
+    /// The probe Agent Host's bridge over `data_dir`, acting as `principal`.
+    async fn submit_plan_bridge(
+        data_dir: &Path,
+        principal: &str,
+    ) -> (BridgeContext, Arc<CapturingProvider>) {
         let mut ctx = bridge_context();
-        ctx.principal_id = Some(agent.principal_id.clone());
+        ctx.principal_id = Some(principal.to_string());
         ctx.capsule_id = "component-7c1b2a4d".to_string();
         // The Runtime supplies the activation id; it is not read from the Bus
         // identity field.
         ctx.session_id = ctx.capsule_id.clone();
-        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.data_dir = Some(data_dir.to_path_buf());
         ctx.manifest_capabilities = submit_plan_host_manifest().resource_authority_bounds();
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
-        (temp, ctx, provider, agent.principal_id, owner)
+        (ctx, provider)
+    }
+
+    /// A Home with agents on and one stored agent, and that agent's bridge:
+    /// (home, bridge, provider, requesting agent, owner). `None` in a build
+    /// without agents.
+    async fn submit_agent_plan_context() -> Option<(
+        crate::agents::tests::Home,
+        BridgeContext,
+        Arc<CapturingProvider>,
+        String,
+        String,
+    )> {
+        let (home, agents) =
+            crate::agents::tests::home_with_agents_if_built(1, "bafkreia15rs3host")?;
+        let requester = agents[0].clone();
+        let owner = home.owner.principal_id.clone();
+        let (ctx, provider) = submit_plan_bridge(home.path(), &requester).await;
+        Some((home, ctx, provider, requester, owner))
+    }
+
+    /// A granted submission of `plan` by the bridge's principal.
+    async fn submit_with_write(
+        ctx: &BridgeContext,
+        id: u64,
+        plan: &serde_json::Value,
+    ) -> serde_json::Value {
+        let token = bridge_token(ctx, "elastos://inspect/submit_agent_plan", Action::Write);
+        handle_request(
+            &submit_agent_plan_line(id, Some(&token), plan),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The submission is refused for `reason`; no record is written and no
+    /// provider is reached.
+    async fn assert_submit_refused(
+        response: &serde_json::Value,
+        ctx: &BridgeContext,
+        provider: &CapturingProvider,
+        reason: &str,
+    ) {
+        assert_eq!(
+            response["response"]["code"], "submit_agent_plan_refused",
+            "{response}"
+        );
+        let message = response["response"]["message"].as_str().unwrap_or("");
+        assert!(message.contains(reason), "refused for {reason}: {response}");
+        assert!(
+            submit_record_files(ctx.data_dir.as_deref().unwrap()).is_empty(),
+            "a refused submission writes no record"
+        );
+        assert!(
+            provider.requests().await.is_empty(),
+            "a refused submission reaches no provider"
+        );
+    }
+
+    /// A build without agents admits no agent, so an agent record in the
+    /// sign-in file is refused and nothing is stored.
+    async fn assert_refused_without_agents_built() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = crate::auth::valid_agent::plant(temp.path());
+        let (ctx, provider) = submit_plan_bridge(temp.path(), &agent.principal_id).await;
+        let response = submit_with_write(&ctx, 70, &submitted_plan(serde_json::json!({}))).await;
+        assert_submit_refused(&response, &ctx, &provider, crate::agents::FEATURE_OFF).await;
     }
 
     #[tokio::test]
     async fn a15r_bus_submit_records_one_bound_pending_plan_and_no_effect() {
-        let (temp, ctx, provider, requester, owner) = submit_agent_plan_context().await;
-        let token = bridge_token(&ctx, "elastos://inspect/submit_agent_plan", Action::Write);
+        let Some((home, ctx, provider, requester, owner)) = submit_agent_plan_context().await
+        else {
+            return assert_refused_without_agents_built().await;
+        };
         let plan = submitted_plan(serde_json::json!({}));
-        let response = handle_request(
-            &submit_agent_plan_line(71, Some(&token), &plan),
-            &Some(ctx.clone()),
-        )
-        .await
-        .unwrap();
+        let response = submit_with_write(&ctx, 71, &plan).await;
 
         assert_eq!(
             response["response"]["type"], "resource_result",
@@ -7066,14 +7151,18 @@ mod tests {
         assert!(request_id.starts_with("inspect-act-"));
 
         assert_eq!(
-            submit_record_files(temp.path()),
+            submit_record_files(home.path()),
             vec![format!("{request_id}.json")],
             "one pending record and nothing else"
         );
-        let stored = read_submit_record(temp.path(), request_id);
+        let stored = read_submit_record(home.path(), request_id);
         assert_eq!(stored["kind"], "agent_plan");
-        assert_eq!(stored["owner_id"], owner);
-        assert_eq!(stored["principal_id"], requester);
+        assert_eq!(
+            stored["principal_id"], owner,
+            "the stored principal is the owner"
+        );
+        assert_eq!(stored["requester_id"], requester);
+        assert!(stored.get("owner_id").is_none(), "one principal field");
         assert_eq!(stored["session_id"], ctx.session_id);
         assert_eq!(stored["id"], ctx.capsule_id);
         assert_eq!(stored["status"], "pending");
@@ -7083,7 +7172,7 @@ mod tests {
         // One binding rule: owner, requester, session and the step, under the
         // same ESP sha256, whole rather than cut.
         let binding = &stored["request_binding"];
-        assert_eq!(binding["principal"], requester);
+        assert_eq!(binding["principal"], owner);
         assert_eq!(binding["capsule"], ctx.capsule_id);
         assert_eq!(binding["preview"]["owner"], owner);
         assert_eq!(binding["preview"]["requester"], requester);
@@ -7106,7 +7195,10 @@ mod tests {
 
     #[tokio::test]
     async fn a15r_bus_submit_requires_the_right_agent_identity_and_stored_owner() {
-        let (temp, ctx, _provider, requester, owner) = submit_agent_plan_context().await;
+        let Some((home, ctx, _provider, requester, owner)) = submit_agent_plan_context().await
+        else {
+            return assert_refused_without_agents_built().await;
+        };
         let plan = submitted_plan(serde_json::json!({}));
 
         let refused = handle_request(&submit_agent_plan_line(72, None, &plan), &Some(ctx.clone()))
@@ -7135,30 +7227,6 @@ mod tests {
         .unwrap();
         assert_eq!(refused["response"]["code"], "manifest_capability_denied");
 
-        let human = "person:local:not-an-agent";
-        crate::auth::store_test_human_principal(temp.path(), human);
-        let mut person = ctx.clone();
-        person.principal_id = Some(human.to_string());
-        let token = bridge_token(
-            &person,
-            "elastos://inspect/submit_agent_plan",
-            Action::Write,
-        );
-        let refused = handle_request(
-            &submit_agent_plan_line(75, Some(&token), &plan),
-            &Some(person),
-        )
-        .await
-        .unwrap();
-        assert_eq!(refused["response"]["code"], "submit_agent_plan_refused");
-        assert!(
-            refused["response"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("stored owner"),
-            "{refused}"
-        );
-
         let mut named = plan.clone();
         named["owner"] = serde_json::json!("person:else");
         let token = bridge_token(&ctx, "elastos://inspect/submit_agent_plan", Action::Write);
@@ -7178,7 +7246,7 @@ mod tests {
         );
 
         assert!(
-            submit_record_files(temp.path()).is_empty(),
+            submit_record_files(home.path()).is_empty(),
             "no refusal writes a record"
         );
 
@@ -7196,14 +7264,92 @@ mod tests {
         .unwrap();
         let data = &response["response"]["result"]["data"];
         assert_eq!(data["status"], "pending", "{response}");
-        let stored = read_submit_record(temp.path(), data["request_id"].as_str().unwrap());
+        let stored = read_submit_record(home.path(), data["request_id"].as_str().unwrap());
         assert_eq!(
-            stored["owner_id"], owner,
+            stored["principal_id"], owner,
             "the owner comes from the stored agent record"
         );
-        assert_eq!(stored["principal_id"], requester);
+        assert_eq!(stored["requester_id"], requester);
         assert_eq!(stored["request_binding"]["preview"]["owner"], owner);
         assert_eq!(stored["request"]["request"]["owner"], "person:else");
+    }
+
+    // Slice 2's Inbox listing shows a pending record to the reader whose id is
+    // its stored principal. The owner must be that principal, not the agent.
+    #[tokio::test]
+    async fn a15r_bus_plan_card_reaches_owner_not_agent() {
+        let Some((home, ctx, _provider, requester, owner)) = submit_agent_plan_context().await
+        else {
+            return assert_refused_without_agents_built().await;
+        };
+        let response = submit_with_write(&ctx, 78, &submitted_plan(serde_json::json!({}))).await;
+        let request_id = response["response"]["result"]["data"]["request_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a pending plan: {response}"))
+            .to_string();
+
+        assert_eq!(
+            pending_plans_for(home.path(), &owner),
+            vec![request_id],
+            "the owner's pending listing holds the plan"
+        );
+        assert!(
+            pending_plans_for(home.path(), &requester).is_empty(),
+            "the agent's own principal is shown no plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn a15r_bus_submit_refused_while_agents_are_off() {
+        let Some((home, ctx, provider, _requester, _owner)) = submit_agent_plan_context().await
+        else {
+            return assert_refused_without_agents_built().await;
+        };
+        crate::agents::set_enabled(home.path(), &home.caller(), false, 2).unwrap();
+        let response = submit_with_write(&ctx, 79, &submitted_plan(serde_json::json!({}))).await;
+        assert_submit_refused(&response, &ctx, &provider, crate::agents::NOT_ENABLED).await;
+    }
+
+    #[tokio::test]
+    async fn a15r_bus_submit_refused_for_a_retired_agent() {
+        let Some((home, ctx, provider, requester, _owner)) = submit_agent_plan_context().await
+        else {
+            return assert_refused_without_agents_built().await;
+        };
+        crate::agents::retire(home.path(), &home.caller(), &requester, 2).unwrap();
+        let response = submit_with_write(&ctx, 80, &submitted_plan(serde_json::json!({}))).await;
+        assert_submit_refused(&response, &ctx, &provider, "owns no agent with that id").await;
+    }
+
+    #[tokio::test]
+    async fn a15r_bus_submit_refused_for_a_quarantined_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = crate::auth::valid_agent::plant(temp.path());
+        // A binding id the agent's admission does not derive quarantines the
+        // record when the sign-in file loads.
+        let path = crate::auth::auth_state_path(temp.path()).unwrap();
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for principal in state["principals"].as_array_mut().unwrap() {
+            if principal["principal_id"] == agent.principal_id.as_str() {
+                principal["proof_binding_id"] = serde_json::json!("agent-admission:v2:not-derived");
+            }
+        }
+        std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+
+        let (ctx, provider) = submit_plan_bridge(temp.path(), &agent.principal_id).await;
+        let response = submit_with_write(&ctx, 81, &submitted_plan(serde_json::json!({}))).await;
+        assert_submit_refused(&response, &ctx, &provider, "quarantined agent record").await;
+    }
+
+    #[tokio::test]
+    async fn a15r_bus_submit_refused_for_a_human_caller() {
+        let temp = tempfile::tempdir().unwrap();
+        let human = "person:local:not-an-agent";
+        crate::auth::store_test_human_principal(temp.path(), human);
+        let (ctx, provider) = submit_plan_bridge(temp.path(), human).await;
+        let response = submit_with_write(&ctx, 82, &submitted_plan(serde_json::json!({}))).await;
+        assert_submit_refused(&response, &ctx, &provider, "requires an agent principal").await;
     }
 
     #[tokio::test]

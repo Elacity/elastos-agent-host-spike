@@ -16,8 +16,10 @@ use store::{
 };
 
 /// The one entry point an agent's Bus submission uses: write the pending
-/// agent plan record and return it. Every identity is the caller's Runtime
-/// context; the submitted plan cannot name one. Nothing here runs a step.
+/// agent plan record and return it. The record's principal is the owner, so
+/// it is the owner's to read and decide; the agent is its requester. Every
+/// identity is the caller's Runtime context; the submitted plan cannot name
+/// one. Nothing here runs a step.
 pub(crate) fn submit_pending_agent_plan(
     data_dir: &FsPath,
     owner_id: &str,
@@ -28,8 +30,8 @@ pub(crate) fn submit_pending_agent_plan(
     now: u64,
 ) -> anyhow::Result<serde_json::Value> {
     let context = agent_plan::AgentPlanContext {
-        owner_id,
-        principal_id: requester_id,
+        principal_id: owner_id,
+        requester_id,
         capsule_id,
         session_id,
     };
@@ -43,7 +45,8 @@ pub(crate) fn submit_pending_agent_plan(
         "request": record.request,
         "plan": record.plan,
         "request_binding": record.request_binding,
-        "owner_id": record.owner_id,
+        "principal_id": record.principal_id,
+        "requester_id": record.requester_id,
         "created_at": record.created_at,
     }))
 }
@@ -612,7 +615,7 @@ async fn create_inspect_action_request(
         kind: INSPECT_ACTION_KIND.to_string(),
         request_id,
         principal_id: context.principal_id().to_string(),
-        owner_id: None,
+        requester_id: None,
         session_id: context.session_id().to_string(),
         id: id.to_string(),
         operation: operation.to_string(),

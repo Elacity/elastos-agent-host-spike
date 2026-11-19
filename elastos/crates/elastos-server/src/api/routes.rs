@@ -1277,7 +1277,7 @@ pub(crate) mod tests {
         }
 
         /// Writes a second signed Agent Host folder whose manifest adds
-        /// `claims` to its capabilities, exactly as the stored host is
+        /// `claims` to its asks (read and write), exactly as the stored host is
         /// written, and returns the folder and the CID the Runtime's walk
         /// gives it. The extra claims name another agent's root; admission
         /// still binds the agent the request names.

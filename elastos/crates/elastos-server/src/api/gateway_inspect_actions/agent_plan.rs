@@ -19,13 +19,14 @@ use super::store::{
 use crate::inspect_provider::plan_scheme;
 
 /// Identity for a pending agent plan. It comes from Runtime context and never
-/// from the submitted plan: the owner is the stored person the agent acts for,
-/// the principal is the requesting agent, the capsule and session are the
-/// component activation the Runtime started.
+/// from the submitted plan: the principal is the owner, the stored person the
+/// agent acts for and who reads and decides the plan; the requester is the
+/// agent; the capsule and session are the component activation the Runtime
+/// started.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct AgentPlanContext<'a> {
-    pub(super) owner_id: &'a str,
     pub(super) principal_id: &'a str,
+    pub(super) requester_id: &'a str,
     pub(super) capsule_id: &'a str,
     pub(super) session_id: &'a str,
 }
@@ -39,14 +40,14 @@ pub(super) fn create_pending_agent_plan_record(
     now: u64,
 ) -> anyhow::Result<InspectActionRequestRecord> {
     for value in [
-        context.owner_id,
         context.principal_id,
+        context.requester_id,
         context.capsule_id,
         context.session_id,
     ] {
         if value.is_empty() || value.trim() != value {
             anyhow::bail!(
-                "agent plan context requires a trimmed owner, principal, capsule and session"
+                "agent plan context requires a trimmed principal, requester, capsule and session"
             );
         }
     }
@@ -89,7 +90,7 @@ pub(super) fn create_pending_agent_plan_record(
         kind: AGENT_PLAN_KIND.to_string(),
         request_id,
         principal_id: context.principal_id.to_string(),
-        owner_id: Some(context.owner_id.to_string()),
+        requester_id: Some(context.requester_id.to_string()),
         session_id: context.session_id.to_string(),
         id: context.capsule_id.to_string(),
         operation: operation.to_string(),
@@ -110,8 +111,8 @@ pub(super) fn create_pending_agent_plan_record(
 /// the Runtime supplies. Nothing here is read from the submitted plan.
 fn agent_plan_bound_body(context: &AgentPlanContext<'_>, step: &Value) -> Value {
     json!({
-        "owner": context.owner_id,
-        "requester": context.principal_id,
+        "owner": context.principal_id,
+        "requester": context.requester_id,
         "session": context.session_id,
         "step": step,
     })
@@ -165,15 +166,15 @@ mod tests {
     use super::super::store::{pending_inspect_action_requests, read_inspect_action_record};
     use super::*;
 
-    const OWNER: &str = "person:local:owner";
-    const PRINCIPAL: &str = "agent:v2:0123456789abcdef0123456789abcdef";
+    const PRINCIPAL: &str = "person:local:owner";
+    const REQUESTER: &str = "agent:v2:0123456789abcdef0123456789abcdef";
     const CAPSULE: &str = "capsule:agent-host";
     const SESSION: &str = "session:agent-1";
 
     fn context() -> AgentPlanContext<'static> {
         AgentPlanContext {
-            owner_id: OWNER,
             principal_id: PRINCIPAL,
+            requester_id: REQUESTER,
             capsule_id: CAPSULE,
             session_id: SESSION,
         }
@@ -181,8 +182,8 @@ mod tests {
 
     fn bound_body(body: Value) -> Value {
         json!({
-            "owner": OWNER,
-            "requester": PRINCIPAL,
+            "owner": PRINCIPAL,
+            "requester": REQUESTER,
             "session": SESSION,
             "step": { "scheme": "availability", "operation": "status", "request": body },
         })
@@ -219,9 +220,9 @@ mod tests {
         let binding = stored.request_binding.unwrap();
         assert_eq!(binding.principal, PRINCIPAL);
         assert_eq!(stored.principal_id, PRINCIPAL);
-        assert_eq!(stored.owner_id.as_deref(), Some(OWNER));
-        assert_eq!(binding.preview["owner"], OWNER);
-        assert_eq!(binding.preview["requester"], PRINCIPAL);
+        assert_eq!(stored.requester_id.as_deref(), Some(REQUESTER));
+        assert_eq!(binding.preview["owner"], PRINCIPAL);
+        assert_eq!(binding.preview["requester"], REQUESTER);
         assert_eq!(binding.preview["session"], SESSION);
         assert_eq!(binding.preview["step"]["request"], body);
         assert_eq!(binding.capsule, CAPSULE);
@@ -336,13 +337,13 @@ mod tests {
             session_id: "",
             ..context()
         };
-        let ownerless = AgentPlanContext {
-            owner_id: "",
+        let no_requester = AgentPlanContext {
+            requester_id: "",
             ..context()
         };
-        for bad in [padded, empty, ownerless] {
+        for bad in [padded, empty, no_requester] {
             let refused = create_pending_agent_plan_record(dir.path(), &bad, &plan, 1).unwrap_err();
-            assert!(refused.to_string().contains("trimmed owner"));
+            assert!(refused.to_string().contains("trimmed principal"));
         }
         assert!(!dir.path().join("inspect-actions").exists());
     }

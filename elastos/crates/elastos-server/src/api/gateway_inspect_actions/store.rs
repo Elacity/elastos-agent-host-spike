@@ -23,10 +23,10 @@ pub(super) struct InspectActionRequestRecord {
     pub(super) kind: String,
     pub(super) request_id: String,
     pub(super) principal_id: String,
-    /// The stored person an agent plan was submitted for. Absent on an
-    /// Inspector action, whose principal is the person itself.
+    /// The agent that submitted an agent plan for `principal_id`, its owner.
+    /// Absent on an Inspector action, whose principal made the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) owner_id: Option<String>,
+    pub(super) requester_id: Option<String>,
     pub(super) session_id: String,
     pub(super) id: String,
     pub(super) operation: String,
@@ -198,7 +198,7 @@ mod tests {
             kind: INSPECT_ACTION_KIND.to_string(),
             request_id: request_id.to_string(),
             principal_id: "person:test".to_string(),
-            owner_id: None,
+            requester_id: None,
             session_id: "session:test".to_string(),
             id: "capsule:test".to_string(),
             operation: "write".to_string(),
