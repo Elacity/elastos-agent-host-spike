@@ -1492,13 +1492,13 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n",
-     "new": ""
+     "file": "capsule.json",
+     "old": "      \"actions\": [\"write\", \"read\"]\n",
+     "new": "      \"actions\": [\"write\"]\n"
     }
    ],
    "tests": [
-    "tests::a_declared_ask_names_only_the_launching_principal"
+    "tests::the_two_journal_requests_fit_the_manifest_asks"
    ]
   },
   {
@@ -1508,9 +1508,9 @@
    "expect": "survives",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},\n    {\"kind\": \"read\", \"resource\": \"Archive/\"},"
+     "file": "capsule.json",
+     "old": "    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\", \"read\"]\n    }",
+     "new": "    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\", \"read\"]\n    },\n    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\"]\n    }"
     }
    ],
    "tests": [
@@ -1525,9 +1525,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
-     "new": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n    {\"kind\": \"unspecified\", \"resource\": \"<principal>/\"},"
+     "file": "capsule.json",
+     "old": "      \"actions\": [\"write\", \"read\"]",
+     "new": "      \"actions\": [\"write\", \"read\", \"unspecified\"]"
     }
    ],
    "tests": [
@@ -1575,9 +1575,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/agent-host/\"}",
-     "new": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/\"}"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://Users/self/.AppData/Agents/*"
     }
    ],
    "tests": [
@@ -1655,9 +1655,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://api.example.com/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "https://api.example.com/"
     }
    ],
    "tests": [
@@ -1671,9 +1671,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/sk-live-abc/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://Users/self/.AppData/Agents/agent-host/sk-live-abc/*"
     }
    ],
    "tests": [
@@ -1687,9 +1687,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
-     "new": "    {\"kind\": \"read\", \"resource\": \"Users/self/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://Users/other/.AppData/Agents/agent-host/*"
     }
    ],
    "tests": [
@@ -1703,9 +1703,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"run\", \"resource\": \"<principal>/Projects/\"},",
-     "new": "    {\"kind\": \"run\", \"resource\": \"/tmp/projects/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "/tmp/projects/"
     }
    ],
    "tests": [
@@ -1719,9 +1719,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://example.invalid/\", \"resource\": \"Models/\"},"
+     "file": "capsule.json",
+     "old": "\"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\"",
+     "new": "\"resource\": \"https://example.invalid/\", \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\""
     }
    ],
    "tests": [
@@ -2279,9 +2279,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"file:/tmp/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "file:/tmp/"
     }
    ],
    "tests": [
@@ -2295,9 +2295,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"data:text/plain,x/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "data:text/plain,x/"
     }
    ],
    "tests": [

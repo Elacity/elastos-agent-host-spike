@@ -8155,7 +8155,21 @@ const CAPSULE_SCHEMA: &str = "elastos.capsule/v1";
 const MANIFEST_KEYS: &str = " schema name version description author role type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources ";
 
 #[cfg(test)]
-const ASKS_JSON: &str = include_str!("../asks.json");
+const ASKS_JSON: &str = r#"{
+  "schema": "elastos.agent-host.asks/v1",
+  "asks": [
+    {"kind": "read", "resource": "<principal>/"},
+    {"kind": "edit", "resource": "<principal>/"},
+    {"kind": "restore", "resource": "<principal>/"},
+    {"kind": "run", "resource": "<principal>/Projects/"},
+    {"kind": "child", "resource": "<principal>/Projects/"},
+    {"kind": "init", "resource": "<principal>/Projects/"},
+    {"kind": "hosted", "resource": "Models/"},
+    {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
+    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}
+  ]
+}
+"#;
 
 #[cfg(test)]
 const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
@@ -20010,8 +20024,8 @@ mod tests {
         assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
     }
 
-    // The manifest `asks` are this guest's maximum. `asks.json` stays as the
-    // lane-local list the parser checks. Each proposal kind the guest can
+    // The manifest `asks` are this guest's maximum. The lane list is the
+    // pattern fixture the parser checks. Each proposal kind the guest can
     // name is observed in the scenarios. Each observed resource is the
     // resource that scenario passed.
 
