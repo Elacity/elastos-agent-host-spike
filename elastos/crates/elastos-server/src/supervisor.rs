@@ -964,7 +964,7 @@ impl Supervisor {
         archive.unpack(staged.path())?;
         std::fs::write(staged.path().join(CACHED_CID_FILE), format!("{}\n", cid))?;
         write_artifact_sha256_receipt(staged.path(), sha256)?;
-        crate::setup::record_install_cid(staged.path(), dest)?;
+        crate::setup::record_install_cid(staged.path(), dest);
         let retired = parent.join(format!(".capsule-retired-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&retired);
         if dest.exists() {
@@ -2129,7 +2129,11 @@ mod tests {
         }
         let bytes = archive.into_inner().unwrap().finish().unwrap();
 
-        for mismatch in [true, false] {
+        for (mismatch, plant) in [
+            (true, None),
+            (false, Some(RecordPlant::Link)),
+            (false, Some(RecordPlant::Folder)),
+        ] {
             let temp = tempfile::tempdir().unwrap();
             let data = temp.path();
             let (server, serving, mut info) =
@@ -2160,6 +2164,9 @@ mod tests {
             std::fs::write(&registry_path, &registry_bytes).unwrap();
             let supervisor = Supervisor::new(data.to_path_buf(), manifest);
             let dest = data.join("capsules/chat-room");
+            if let Some(plant) = plant {
+                plant_at_record(data, &dest, plant);
+            }
 
             let result =
                 crate::setup::ensure_capsule_component_for_home_launch(data, "chat-room").await;
@@ -2193,7 +2200,8 @@ mod tests {
                         .trim(),
                     hex::encode(sha2::Sha256::digest(&bytes))
                 );
-                assert_install_cid_names(&dest, &["browser/index.html", "capsule.json"]);
+                let files = ["browser/index.html", "capsule.json"];
+                assert_install_over(data, &dest, plant.unwrap(), &files);
                 // A second open uses the verified package even with Carrier stopped.
                 let ensure =
                     crate::setup::ensure_capsule_component_for_home_launch(data, "chat-room")
@@ -2234,13 +2242,71 @@ mod tests {
         walked
     }
 
+    /// What a test puts at the install CID record path before an install.
+    #[derive(Clone, Copy)]
+    enum RecordPlant {
+        /// A link to a sentinel file outside `capsules/`.
+        Link,
+        /// A folder, which the rename of a record file cannot replace.
+        Folder,
+    }
+
+    fn plant_at_record(data: &Path, dir: &Path, plant: RecordPlant) {
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&record);
+        match plant {
+            RecordPlant::Link => {
+                std::fs::write(data.join("sentinel"), b"sentinel").unwrap();
+                std::os::unix::fs::symlink(data.join("sentinel"), &record).unwrap();
+            }
+            RecordPlant::Folder => std::fs::create_dir_all(record.join("kept")).unwrap(),
+        }
+    }
+
+    /// After an install over `plant`, only one entry with the record's name is
+    /// beside `dir`. A link kept its sentinel's bytes and is now a regular
+    /// record of the walk; a folder is unchanged, so the install has no record.
+    fn assert_install_over(data: &Path, dir: &Path, plant: RecordPlant, files: &[&str]) {
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        let name = record.file_name().unwrap().to_str().unwrap();
+        let beside: Vec<String> = std::fs::read_dir(record.parent().unwrap())
+            .unwrap()
+            .map(|item| item.unwrap().file_name().into_string().unwrap())
+            .filter(|item| item.starts_with(name))
+            .collect();
+        assert_eq!(beside, [name], "the install left a partial record");
+        let kind = std::fs::symlink_metadata(&record).unwrap().file_type();
+        match plant {
+            RecordPlant::Link => {
+                assert_eq!(
+                    std::fs::read(data.join("sentinel")).unwrap(),
+                    b"sentinel",
+                    "the record write followed the link"
+                );
+                assert!(kind.is_file(), "the record is not a regular file");
+                assert_install_cid_names(dir, files);
+            }
+            RecordPlant::Folder => {
+                assert!(kind.is_dir(), "the failed write replaced the folder");
+                let kept: Vec<_> = std::fs::read_dir(&record).unwrap().collect();
+                assert_eq!(kept.len(), 1, "the failed write changed the folder");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn capsule_install_records_its_walk_cid_and_a_reinstall_updates_it() {
         let capsule = include_bytes!("../../../../capsules/chat-room/capsule.json");
         let data = tempfile::tempdir().unwrap();
         let cache = data.path().join("capsules/chat-room");
         let mut recorded = Vec::new();
-        for page in [&b"first"[..], &b"second"[..]] {
+        for (page, plant) in [
+            (&b"first"[..], None),
+            (&b"second"[..], None),
+            (&b"third"[..], Some(RecordPlant::Link)),
+            (&b"fourth"[..], Some(RecordPlant::Folder)),
+        ] {
             let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
             let mut builder = tar::Builder::new(encoder);
             for (path, bytes) in [("capsule.json", &capsule[..]), ("browser/index.html", page)] {
@@ -2270,15 +2336,19 @@ mod tests {
                     "data": {"data": base64::engine::general_purpose::STANDARD.encode(&archive)}}))
                 .await,
             );
+            if let Some(plant) = plant {
+                plant_at_record(data.path(), &cache, plant);
+            }
             assert_eq!(supervisor.ensure_capsule("chat-room").await.unwrap(), cache);
             assert_eq!(
                 std::fs::read(cache.join("browser/index.html")).unwrap(),
                 page
             );
-            recorded.push(assert_install_cid_names(
-                &cache,
-                &["browser/index.html", "capsule.json"],
-            ));
+            let files = ["browser/index.html", "capsule.json"];
+            match plant {
+                Some(plant) => assert_install_over(data.path(), &cache, plant, &files),
+                None => recorded.push(assert_install_cid_names(&cache, &files)),
+            }
         }
         assert_ne!(
             recorded[0], recorded[1],
