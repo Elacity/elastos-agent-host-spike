@@ -1248,6 +1248,51 @@ async fn a_pinned_bundles_asks_do_not_reach_the_capsule_that_starts() {
     assert_eq!(home.calls(), Vec::new());
 }
 
+/// The body of `signature`, read only after the first `anchor`.
+/// The body runs up to the `}` that shares the signature line's indent.
+fn fn_body<'a>(source: &'a str, anchor: &str, signature: &str) -> &'a str {
+    let anchored = &source[source
+        .find(anchor)
+        .unwrap_or_else(|| panic!("missing {anchor}"))..];
+    let signed = &anchored[anchored
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing {signature} after {anchor}"))..];
+    let at = source.len() - signed.len();
+    let line_start = source[..at].rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let indent = source[line_start..at]
+        .chars()
+        .take_while(|character| *character == ' ')
+        .count();
+    let close = format!("\n{}}}\n", " ".repeat(indent));
+    let end = signed
+        .find(&close)
+        .unwrap_or_else(|| panic!("no close for {signature}"));
+    &signed[..end]
+}
+
+/// A line that writes a `VerifiedBundle` value. The struct definition, the
+/// impl header, and a signature that returns the type (`-> VerifiedBundle {`)
+/// are not constructors. A comment is not one. `Self {` counts only where
+/// the caller asks, because that form is ordinary on other types.
+fn verified_bundle_literal(line: &str, count_self: bool) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return false;
+    }
+    let needle = "VerifiedBundle {";
+    let mut rest = trimmed;
+    let mut wrote_type = false;
+    while let Some(index) = rest.find(needle) {
+        let before = rest[..index].trim_end();
+        if !before.ends_with("struct") && !before.ends_with("impl") && !before.ends_with("->") {
+            wrote_type = true;
+            break;
+        }
+        rest = &rest[index + needle.len()..];
+    }
+    wrote_type || (count_self && trimmed.contains("Self {"))
+}
+
 /// Every Rust file under `dir`.
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
     for item in fs::read_dir(dir).expect("list") {
@@ -1275,20 +1320,17 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     };
     let start = body_of("pub(crate) async fn start_by_bundle(");
     let member = body_of("async fn admit_closure_member(");
+    // The first `pub(crate) fn check(` in the file is not the maker. The
+    // impl that owns the type is the anchor, and the close matches that
+    // function's own indent.
+    assert_eq!(source.matches("impl VerifiedBundle {").count(), 1);
+    let maker = fn_body(source, "impl VerifiedBundle {", "pub(crate) fn check(");
     let walk = ["checked_bundle", "_within("].concat();
     assert_eq!(start.matches(&walk).count(), 0);
-    // One bundle's checks, in their order: the walk; the CID; the signature;
-    // and only then the manifest, where a pinned manifest is turned into one
-    // that can start, and the component's imports.
-    let order = [
-        walk.as_str(),
-        "after_walk(asked)",
-        "bundle.cid() != *asked",
-        "bundle_admission::check_bundle_signature(&signature, asked, trust)",
-        "bundle_admission::admit_bundle_manifest(",
-        "validate_component_imports_for_manifest(",
-    ];
-    let places: Vec<usize> = order
+    // The walk, then the moment after it, then the one maker. The CID, the
+    // signature, the manifest and the imports are that maker, in that order.
+    let walked = [walk.as_str(), "after_walk(asked)", "VerifiedBundle::check("];
+    let walked_at: Vec<usize> = walked
         .iter()
         .map(|text| {
             assert_eq!(member.matches(text).count(), 1, "{text}");
@@ -1296,9 +1338,30 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         })
         .collect();
     assert!(
+        walked_at.windows(2).all(|pair| pair[0] < pair[1]),
+        "{walked_at:?}"
+    );
+    assert!(
+        member.find("left.max_entries").unwrap() < member.find("VerifiedBundle::check(").unwrap()
+    );
+    let order = [
+        "bundle.cid() != *asked",
+        "bundle_admission::check_bundle_signature(signature, asked, trust)",
+        "bundle_admission::admit_bundle_manifest(",
+        "validate_component_imports_for_manifest(",
+    ];
+    let places: Vec<usize> = order
+        .iter()
+        .map(|text| {
+            assert_eq!(maker.matches(text).count(), 1, "{text}");
+            maker.find(text).unwrap()
+        })
+        .collect();
+    assert!(
         places.windows(2).all(|pair| pair[0] < pair[1]),
         "{places:?}"
     );
+    assert_eq!(maker.matches("VerifiedBundle {").count(), 1);
     // Who is trusted is read once, by the start, before the first bundle;
     // the member check is handed that reading and takes none of its own;
     // and the reading is let go before anything is loaded.
@@ -1379,7 +1442,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
             .count(),
         1
     );
-    for body in [start, member] {
+    for body in [start, member, maker] {
         for never in [
             "fs::read",
             "read_to_string",
@@ -1410,23 +1473,102 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
                    LaunchMode::Bounded,\n        )";
     assert_eq!(start.matches(bounded).count(), 1);
     // One capsule is loaded, from the walked bytes and the judged manifest:
-    // sealed when that manifest has no asks, unsealed when it has. Nothing
-    // else decides the seal.
-    assert_eq!(
-        start
-            .matches("let (bytes, manifest) = (starts.component, starts.manifest);")
-            .count(),
-        1
-    );
-    let seal = "let loaded = match manifest.asks.is_empty() {\n            \
+    // sealed when that manifest has no asks, unsealed when it has. The
+    // `bytes` in that match are the ones `into_component` just bound. A
+    // load that calls `into_component` and then compiles some other buffer
+    // does not have this text.
+    assert!(!start.contains("starts.component"));
+    assert!(!start.contains("starts.manifest"));
+    let load = "let (manifest, bytes) = starts.into_component();\n        \
+                let loaded = match manifest.asks.is_empty() {\n            \
                 true => component.load_admitted_sealed(bytes, manifest).await,\n            \
                 false => component.load_admitted(bytes, manifest).await,\n        };";
-    assert_eq!(start.matches(seal).count(), 1);
+    assert_eq!(start.matches(load).count(), 1);
+    assert_eq!(start.matches("starts.into_component()").count(), 1);
+    assert_eq!(start.matches("let bytes").count(), 0);
+    assert_eq!(start.matches("bytes =").count(), 0);
     assert_eq!(start.matches(".load_admitted_sealed(").count(), 1);
     assert_eq!(start.matches(".load_admitted(").count(), 1);
     for never in ["start_loaded", "load_admitted", "provider"] {
         assert!(!member.contains(never), "{never}");
+        assert!(!maker.contains(never), "{never}");
     }
+}
+
+/// `VerifiedBundle` lives in the private module `verified_bundle`, so a
+/// struct literal outside that module does not compile. This row keeps the
+/// module private and holds it to one constructor literal, inside `check`.
+/// `start_by_bundle` takes the type, and the seal match compiles the bytes
+/// that `into_component` binds.
+#[test]
+fn verified_bundle_has_one_maker_and_start_by_bundle_takes_it() {
+    let source = include_str!("runtime.rs");
+    let header = "\nmod verified_bundle {\n";
+    assert_eq!(source.matches(header).count(), 1, "one private module");
+    assert!(!source.contains("pub mod verified_bundle"));
+    assert!(!source.contains("pub(crate) mod verified_bundle"));
+    assert!(!source.contains("pub(super) mod verified_bundle"));
+    let module = {
+        let body = &source[source.find(header).unwrap()..];
+        &body[..body.find("\n}\n").unwrap()]
+    };
+    assert_eq!(module.matches("struct VerifiedBundle {").count(), 1);
+    assert_eq!(module.matches("impl VerifiedBundle {").count(), 1);
+    assert_eq!(module.matches("pub(crate) fn check(").count(), 1);
+    let in_module: Vec<&str> = module
+        .lines()
+        .filter(|line| verified_bundle_literal(line, true))
+        .collect();
+    assert_eq!(in_module.len(), 1, "{in_module:?}");
+    let check = fn_body(source, "impl VerifiedBundle {", "pub(crate) fn check(");
+    let in_check: Vec<&str> = check
+        .lines()
+        .filter(|line| verified_bundle_literal(line, true))
+        .collect();
+    assert_eq!(in_check, in_module, "the literal sits in check");
+    // A literal elsewhere in this file, such as `Ok(VerifiedBundle {`, is
+    // outside the module. Private fields reject it at compile time. This
+    // count is the backstop when that privacy is missing and the file still
+    // compiles.
+    let in_file: Vec<&str> = source
+        .lines()
+        .filter(|line| verified_bundle_literal(line, false))
+        .collect();
+    assert_eq!(in_file, in_module, "{in_file:?}");
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut elsewhere = Vec::new();
+    for path in &files {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name.contains("test") || name == "runtime.rs" {
+            continue;
+        }
+        let text = fs::read_to_string(path).expect("read");
+        let count = text
+            .lines()
+            .filter(|line| verified_bundle_literal(line, false))
+            .count();
+        if count > 0 {
+            elsewhere.push((name.into_owned(), count));
+        }
+    }
+    assert!(elsewhere.is_empty(), "{elsewhere:?}");
+    let start = {
+        let body = &source[source.find("pub(crate) async fn start_by_bundle(").unwrap()..];
+        &body[..body.find("\n    }\n").unwrap()]
+    };
+    assert_eq!(
+        start.matches("(VerifiedBundle, AcceptedSignature)").count(),
+        1
+    );
+    let load = "let (manifest, bytes) = starts.into_component();\n        \
+                let loaded = match manifest.asks.is_empty() {\n            \
+                true => component.load_admitted_sealed(bytes, manifest).await,\n            \
+                false => component.load_admitted(bytes, manifest).await,\n        };";
+    assert_eq!(start.matches(load).count(), 1);
 }
 
 /// The pins come off a manifest at one place in the server: where the start
