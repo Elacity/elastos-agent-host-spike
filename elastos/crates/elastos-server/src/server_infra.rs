@@ -2280,6 +2280,19 @@ mod tests {
         (temp, data_dir, binary)
     }
 
+    #[cfg(target_os = "linux")]
+    fn did_probe_failure(data_dir: &Path) -> String {
+        let path = data_dir.join("did/probe.error");
+        match fs::read_to_string(&path) {
+            Ok(report) => {
+                let mut lines: Vec<_> = report.lines().rev().take(8).collect();
+                lines.reverse();
+                format!("probe error (last lines): {}", lines.join("\n"))
+            }
+            Err(error) => format!("probe error unavailable at {}: {error}", path.display()),
+        }
+    }
+
     #[test]
     fn did_caller_has_one_confined_start_and_no_plain_spawn() {
         let source = include_str!("server_infra.rs");
@@ -2395,7 +2408,7 @@ mod tests {
         let registry = provider::ProviderRegistry::new();
         let bridge = start_did_provider(&data_dir, &registry, "fixture")
             .await
-            .unwrap()
+            .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
             .unwrap();
         assert!(registry
             .registration_for_uri("elastos://did/identity")
@@ -2451,7 +2464,11 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert!(error.to_string().contains("already registered"), "{error}");
+        assert!(
+            error.to_string().contains("already registered"),
+            "{error}; {}",
+            did_probe_failure(&data_dir)
+        );
         assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
         let pid: libc::pid_t = fs::read_to_string(data_dir.join("did/child.pid"))
             .unwrap()

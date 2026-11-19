@@ -1,11 +1,32 @@
 use std::io::{BufRead, Write};
+use std::os::raw::c_char;
 
 const ROOT: &str = "@@ROOT@@";
 
+unsafe extern "C" {
+    fn readlinkat(dirfd: i32, path: *const c_char, buf: *mut c_char, bufsiz: usize) -> isize;
+}
+
 fn main() {
-    // getpid is outside the DID seccomp grant; /proc/self names this child.
-    let pid = std::fs::read_link("/proc/self").unwrap();
-    std::fs::write(format!("{ROOT}/child.pid"), pid.to_str().unwrap()).unwrap();
+    std::panic::set_hook(Box::new(|info| {
+        let _ = std::fs::write(format!("{ROOT}/probe.error"), info.to_string());
+    }));
+    // getpid and readlink are outside the DID seccomp grant; readlinkat is allowed.
+    let mut target = [0u8; 32];
+    let count = unsafe {
+        readlinkat(
+            -100, // AT_FDCWD
+            c"/proc/self".as_ptr(),
+            target.as_mut_ptr().cast(),
+            target.len(),
+        )
+    };
+    if count < 0 {
+        panic!("readlinkat /proc/self: {}", std::io::Error::last_os_error());
+    }
+    let pid = std::str::from_utf8(&target[..count as usize]).unwrap();
+    assert!(pid.bytes().all(|byte| byte.is_ascii_digit()));
+    std::fs::write(format!("{ROOT}/child.pid"), pid).unwrap();
     let mut output = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
