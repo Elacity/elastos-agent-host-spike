@@ -691,6 +691,60 @@ fn pause_before_reap(pid: libc::pid_t) {
 #[cfg(not(test))]
 fn pause_before_reap(_pid: libc::pid_t) {}
 
+#[cfg(test)]
+static REAP_WAIT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn note_reap_wait() {
+    REAP_WAIT_STARTED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(not(test))]
+fn note_reap_wait() {}
+
+#[cfg(test)]
+struct HeldUnlinkSwap {
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+}
+
+#[cfg(test)]
+static HELD_UNLINK_SWAP: std::sync::Mutex<Option<HeldUnlinkSwap>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn arm_held_unlink_swap(aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+    *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = Some(HeldUnlinkSwap {
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+    });
+}
+
+/// Tests can move the live name aside and put another directory there before
+/// the remove. Production returns at once.
+#[cfg(test)]
+fn pause_before_held_unlink(parent: &OwnedFd, _directory: &OwnedFd, name: &std::ffi::CStr) {
+    let Some(swap) = HELD_UNLINK_SWAP.lock().expect("held unlink swap").take() else {
+        return;
+    };
+    unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        );
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        );
+    }
+}
+
+#[cfg(not(test))]
+fn pause_before_held_unlink(_parent: &OwnedFd, _directory: &OwnedFd, _name: &std::ffi::CStr) {}
+
 impl ForkChild {
     fn start(pid: libc::pid_t) -> Result<Self, BridgeError> {
         #[cfg(target_os = "linux")]
@@ -746,11 +800,42 @@ impl ForkChild {
     }
 }
 
+fn fresh_status() -> oneshot::Receiver<i32> {
+    let (_sender, status) = oneshot::channel();
+    status
+}
+
+/// `blocking_recv` panics on a runtime thread, so the wait runs on its own thread.
+fn wait_for_reaper(status: oneshot::Receiver<i32>) {
+    note_reap_wait();
+    let waiting = std::thread::spawn(move || {
+        let _ = status.blocking_recv();
+    });
+    let _ = waiting.join();
+}
+
 impl Drop for ForkChild {
     fn drop(&mut self) {
         // A received status means the waitpid task already reaped the pid.
-        if !self.reaped && self.status.try_recv().is_err() {
+        if self.reaped {
+            return;
+        }
+        let pending = match self.status.try_recv() {
+            Ok(_) => {
+                self.reaped = true;
+                false
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.reaped = true;
+                false
+            }
+            Err(oneshot::error::TryRecvError::Empty) => true,
+        };
+        if pending {
             self.force_kill();
+            let status = std::mem::replace(&mut self.status, fresh_status());
+            wait_for_reaper(status);
+            self.reaped = true;
         }
     }
 }
@@ -791,8 +876,21 @@ impl CreatedStorageRoot {
     }
 
     fn remove_opened_root(&self) {
-        remove_children(&self.directory);
         let _ = unlink_held_directory(&self.parent, &self.directory, Some(&self.name));
+    }
+}
+
+/// The bridge owns the child. Dropping it reaps that child before `root`
+/// removes the directory this start created.
+struct ConfinedStart {
+    bridge: Option<ProviderBridge>,
+    root: CreatedStorageRoot,
+}
+
+impl Drop for ConfinedStart {
+    fn drop(&mut self) {
+        // The child is reaped before the storage root is removed.
+        self.bridge.take();
     }
 }
 
@@ -924,13 +1022,10 @@ fn remove_children(directory: &OwnedFd) {
                 continue;
             };
             if stat_dev(&opened) == stat_dev(&info) && stat_ino(&opened) == stat_ino(&info) {
-                remove_children(&child);
                 let _ = unlink_held_directory(directory, &child, Some(&name));
             }
         } else {
-            unsafe {
-                libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0);
-            }
+            unlink_listed_file(directory, &name, &info);
         }
     }
 }
@@ -962,34 +1057,150 @@ fn held_directory_name(directory: &OwnedFd) -> Option<std::ffi::CString> {
     std::ffi::CString::new(bytes).ok()
 }
 
-/// Unlink `name` only when opening it still returns the held directory.
-fn unlink_name_if_held(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) -> bool {
-    let Ok(opened) = open_directory_at(parent, name) else {
-        return false;
-    };
-    let Ok(opened_info) = stat_fd(opened.as_raw_fd()) else {
-        return false;
-    };
-    let Ok(held) = stat_fd(directory.as_raw_fd()) else {
-        return false;
-    };
-    if stat_dev(&opened_info) != stat_dev(&held) || stat_ino(&opened_info) != stat_ino(&held) {
-        return false;
-    }
-    unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) == 0 }
+fn same_directory(left: &libc::stat, right: &libc::stat) -> bool {
+    stat_dev(left) == stat_dev(right) && stat_ino(left) == stat_ino(right)
 }
 
-/// Remove the directory this descriptor holds. The name comes from the
-/// descriptor. The remembered name is used only when it still opens as that
-/// same directory, so a different directory placed at the old name stays.
+fn fill_random(bytes: &mut [u8]) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let wrote = unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+        wrote == bytes.len() as isize
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) == 0 }
+    }
+}
+
+/// A sibling name that no caller chooses. The 16 hex digits come from the
+/// kernel random source.
+fn private_component() -> Option<std::ffi::CString> {
+    let mut bytes = [0u8; 8];
+    if !fill_random(&mut bytes) {
+        return None;
+    }
+    let mut name = *b".elastos-held-0000000000000000\0";
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (index, byte) in bytes.iter().enumerate() {
+        name[14 + index * 2] = HEX[(byte >> 4) as usize];
+        name[15 + index * 2] = HEX[(byte & 0xf) as usize];
+    }
+    std::ffi::CStr::from_bytes_with_nul(&name)
+        .ok()
+        .map(std::ffi::CString::from)
+}
+
+/// Rename without replacing a name that already exists.
+fn rename_exclusive(parent: &OwnedFd, from: &std::ffi::CStr, to: &std::ffi::CStr) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        const RENAME_NOREPLACE: libc::c_uint = 1;
+        unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                RENAME_NOREPLACE,
+            ) == 0
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        const RENAME_EXCL: libc::c_uint = 0x0004;
+        unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                RENAME_EXCL,
+            ) == 0
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (parent, from, to);
+        false
+    }
+}
+
+fn restore_name(parent: &OwnedFd, quarantine: &std::ffi::CStr, name: &std::ffi::CStr) {
+    if !rename_exclusive(parent, quarantine, name) {
+        unsafe {
+            libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), libc::AT_REMOVEDIR);
+        }
+    }
+}
+
+/// Move `name` to a private sibling, and remove that sibling only when it is
+/// the held directory. `unlinkat` on this kernel accepts `AT_REMOVEDIR` and
+/// rejects every other flag, so the last remove still names the private entry.
+/// The public name is not that argument.
+fn relocate_held_directory(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) -> bool {
+    let Some(quarantine) = private_component() else {
+        return false;
+    };
+    if !rename_exclusive(parent, name, &quarantine) {
+        return false;
+    }
+    let Ok(opened) = open_directory_at(parent, &quarantine) else {
+        restore_name(parent, &quarantine, name);
+        return false;
+    };
+    let (Ok(opened_info), Ok(held)) = (stat_fd(opened.as_raw_fd()), stat_fd(directory.as_raw_fd()))
+    else {
+        restore_name(parent, &quarantine, name);
+        return false;
+    };
+    if !same_directory(&opened_info, &held) {
+        restore_name(parent, &quarantine, name);
+        return false;
+    }
+    remove_children(directory);
+    unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), libc::AT_REMOVEDIR) == 0 }
+}
+
+/// Unlink a non-directory only when its dev and inode are still the listed ones.
+fn unlink_listed_file(parent: &OwnedFd, name: &std::ffi::CStr, listed: &libc::stat) -> bool {
+    let Some(quarantine) = private_component() else {
+        return false;
+    };
+    if !rename_exclusive(parent, name, &quarantine) {
+        return false;
+    }
+    let Ok(now) = lstat_at(parent, &quarantine) else {
+        restore_name(parent, &quarantine, name);
+        return false;
+    };
+    if !same_directory(&now, listed) {
+        restore_name(parent, &quarantine, name);
+        return false;
+    }
+    unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), 0) == 0 }
+}
+
+fn unlink_name_if_held(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) -> bool {
+    pause_before_held_unlink(parent, directory, name);
+    relocate_held_directory(parent, directory, name)
+}
+
+/// Remove the directory this descriptor holds. The current name is read twice
+/// so a test can move the directory aside between the reads. The remembered
+/// name is the last place to look. Each attempt removes only the directory
+/// this descriptor still holds.
 fn unlink_held_directory(
     parent: &OwnedFd,
     directory: &OwnedFd,
     remembered: Option<&std::ffi::CStr>,
 ) -> bool {
-    if let Some(name) = held_directory_name(directory) {
-        if unlink_name_if_held(parent, directory, &name) {
-            return true;
+    for _ in 0..2 {
+        if let Some(name) = held_directory_name(directory) {
+            if unlink_name_if_held(parent, directory, &name) {
+                return true;
+            }
         }
     }
     match remembered {
@@ -1087,15 +1298,14 @@ fn create_storage_root(storage_root: &Path) -> Result<CreatedStorageRoot, Bridge
         Ok(info) => info,
         Err(error) => {
             if created {
-                unlink_directory_at(&parent, &name_c);
+                let _ = unlink_held_directory(&parent, &directory, Some(&name_c));
             }
             return Err(BridgeError::Io(error));
         }
     };
     if info.st_uid != unsafe { libc::geteuid() } {
-        if created {
-            unlink_directory_at(&parent, &name_c);
-        }
+        // The opened directory is not ours. Removing `name` can delete a
+        // different directory, so both stay.
         return Err(refused(
             "provider start is refused: the storage root is not owned by the effective user",
         ));
@@ -1105,7 +1315,7 @@ fn create_storage_root(storage_root: &Path) -> Result<CreatedStorageRoot, Bridge
     {
         let error = std::io::Error::last_os_error();
         if created {
-            unlink_directory_at(&parent, &name_c);
+            let _ = unlink_held_directory(&parent, &directory, Some(&name_c));
         }
         return Err(BridgeError::Io(error));
     }
@@ -1214,7 +1424,7 @@ impl ProviderBridge {
                 "provider start is refused: component key \"{component_key}\" is not one of did-provider, wallet-provider, model-provider"
             )));
         };
-        let mut created_root = create_storage_root(storage_root)?;
+        let created_root = create_storage_root(storage_root)?;
         let (stdin_read, to_child) = pipe_pair()?;
         let (from_child, stdout_write) = pipe_pair()?;
         let stdio = super::os_entry::ChildStdio {
@@ -1265,8 +1475,22 @@ impl ProviderBridge {
             #[cfg(target_os = "macos")]
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         };
-        bridge.init_provider(config, INIT_TIMEOUT).await?;
-        created_root.disarm();
+        let mut start = ConfinedStart {
+            bridge: Some(bridge),
+            root: created_root,
+        };
+        let init_result = start
+            .bridge
+            .as_ref()
+            .expect("the confined start owns its bridge")
+            .init_provider(config, INIT_TIMEOUT)
+            .await;
+        init_result?;
+        start.root.disarm();
+        let bridge = start
+            .bridge
+            .take()
+            .expect("the confined start owns its bridge");
         Ok(Confined {
             bridge: Arc::new(bridge),
         })
@@ -4596,6 +4820,124 @@ mod tests {
         assert!(
             !opened.exists(),
             "cleanup removes the opened directory and leaves the directory now at its old name"
+        );
+    }
+
+    #[test]
+    fn a_swap_during_cleanup_keeps_the_name_and_removes_the_opened_directory() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        struct ClearSwap;
+        impl Drop for ClearSwap {
+            fn drop(&mut self) {
+                *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = None;
+            }
+        }
+        let _clear = ClearSwap;
+        arm_held_unlink_swap(c"root.opened", c"canary");
+        drop(guard);
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o755
+        );
+        assert!(
+            !temp.path().join("root.opened").exists(),
+            "a swap during cleanup removes the opened directory and leaves the directory now at its old name"
+        );
+        let leftover = std::fs::read_dir(temp.path()).unwrap().any(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| entry.file_name().into_string().ok())
+                .is_some_and(|name| name.starts_with(".elastos-held-"))
+        });
+        assert!(!leftover, "cleanup leaves no private name");
+    }
+
+    #[tokio::test]
+    async fn dropping_a_live_child_reaps_before_the_root_goes() {
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                loop {
+                    libc::sleep(30);
+                }
+            }
+        }
+        assert!(pid > 0, "fork");
+        struct Release(libc::pid_t);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if REAP_HOLD_PID.load(std::sync::atomic::Ordering::Acquire) == self.0 {
+                    REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+                    unsafe {
+                        libc::kill(self.0, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        REAP_HOLD_PID.store(pid, std::sync::atomic::Ordering::Release);
+        let release = Release(pid);
+        REAP_WAIT_STARTED.store(false, std::sync::atomic::Ordering::Release);
+        let fork = match ForkChild::start(pid) {
+            Ok(fork) => fork,
+            Err(error) => {
+                REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let mut status = 0;
+                let _ = unsafe { libc::waitpid(pid, &mut status, 0) };
+                panic!("the child could not be owned: {error}");
+            }
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let mut created = create_storage_root(&root).unwrap();
+        created.armed = true;
+        let bridge = ProviderBridge::from_io(
+            tokio::io::BufReader::new(tokio::io::empty()),
+            tokio::io::sink(),
+        );
+        *bridge.fork.lock().await = Some(fork);
+        let start = ConfinedStart {
+            bridge: Some(bridge),
+            root: created,
+        };
+        let root_path = root.clone();
+        let watcher = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            while !REAP_WAIT_STARTED.load(std::sync::atomic::Ordering::Acquire) {
+                if began.elapsed() > std::time::Duration::from_secs(5) {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let stayed = root_path.exists();
+            REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+            stayed
+        });
+        drop(start);
+        let stayed = watcher.join().expect("the watcher finishes");
+        REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+        drop(release);
+        assert!(stayed, "the root stays until the child is reaped");
+        assert!(!root.exists(), "the root goes after the child is reaped");
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(waited, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
         );
     }
 
