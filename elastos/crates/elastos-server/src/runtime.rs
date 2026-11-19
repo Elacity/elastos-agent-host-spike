@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
-use crate::resource_bridge::LaunchContent;
+use crate::resource_bridge::{BridgePrincipal, LaunchContent};
 use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
@@ -1009,7 +1009,7 @@ impl Runtime {
         self.run_signer(
             path,
             args,
-            principal_id,
+            (principal_id, None),
             None,
             LaunchMode::Bounded,
             (|_| {}, |_| {}),
@@ -1033,7 +1033,7 @@ impl Runtime {
         self.run_signer(
             path,
             args,
-            None,
+            (None, None),
             None,
             LaunchMode::Bounded,
             (before_folder_walk, after_folder_walk),
@@ -1050,11 +1050,12 @@ impl Runtime {
         path: &Path,
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+        grant_name: Option<&str>,
     ) -> Result<(CapsuleHandle, Signer)> {
         self.run_signer(
             path,
             args,
-            principal_id,
+            (principal_id, grant_name),
             None,
             LaunchMode::Detached,
             (|_| {}, |_| {}),
@@ -1107,7 +1108,7 @@ impl Runtime {
         self.run_signer(
             path,
             args,
-            Some(actor),
+            (Some(actor), None),
             Some((manifest, entrypoint, ceiling)),
             mode,
             (|_| {}, |_| {}),
@@ -1123,7 +1124,7 @@ impl Runtime {
         &self,
         path: &Path,
         args: Vec<String>,
-        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+        launch: (Option<BridgePrincipal>, Option<&str>),
         admitted: Option<(CapsuleManifest, Vec<u8>, u64)>,
         mode: LaunchMode,
         walk_hooks: (
@@ -1131,6 +1132,7 @@ impl Runtime {
             impl FnOnce(&CheckedBundle) + Send,
         ),
     ) -> Result<(CapsuleHandle, Signer)> {
+        let (principal_id, grant_name) = launch;
         let (before_folder_walk, after_folder_walk) = walk_hooks;
         let admitted_launch = admitted.is_some();
         if !admitted_launch {
@@ -1191,6 +1193,11 @@ impl Runtime {
         };
         if let Some(start) = &folder_start {
             manifest = start.manifest.clone();
+        }
+        if grant_name.is_some_and(|name| manifest.name != name) {
+            return Err(ElastosError::InvalidManifest(
+                "launch grant mismatch".into(),
+            ));
         }
 
         if let Some(ceiling) = admitted_ceiling {
@@ -3769,10 +3776,14 @@ pub(crate) mod tests {
         assert_eq!(handle.manifest.name, "installed-folder");
 
         let (_handle, signer) = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .expect("the route starts an installed folder");
         assert_eq!(signer, Signer::Key { did });
+        assert!(runtime
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, Some("another-capsule"))
+            .await
+            .is_err());
     }
 
     /// A folder signed by a trusted key that no install recorded and no
@@ -3889,7 +3900,7 @@ pub(crate) mod tests {
             .expect_err("the CLI refuses a folder no install recorded")
             .to_string();
         let route = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .map(|_| ())
             .expect_err("the route refuses a folder no install recorded")
@@ -3961,7 +3972,7 @@ pub(crate) mod tests {
             .expect_err("the CLI refuses it")
             .to_string();
         let route = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .map(|_| ())
             .expect_err("the route refuses it")
