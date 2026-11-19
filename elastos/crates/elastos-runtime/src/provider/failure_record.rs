@@ -5,10 +5,41 @@ use super::super::{landlock_plan, rights::AdmittedRights, rights_table::RuntimeP
 use super::preexec_installer;
 use std::{
     ffi::{CStr, CString},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     os::unix::ffi::OsStrExt,
     os::unix::fs::MetadataExt,
     path::Path,
 };
+
+#[cfg(test)]
+thread_local! {
+    static PRE_FORK_STORAGE_SWAP: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The next Linux start renames `canary` onto the storage root after the plan
+/// has recorded the root's device and inode and before the child opens it.
+#[cfg(test)]
+pub(crate) fn set_pre_fork_storage_swap(canary: Option<std::path::PathBuf>) {
+    PRE_FORK_STORAGE_SWAP.with(|slot| *slot.borrow_mut() = canary);
+}
+
+#[cfg(test)]
+fn apply_pre_fork_storage_swap(storage_root: &Path) {
+    let Some(canary) = PRE_FORK_STORAGE_SWAP.with(|slot| slot.borrow_mut().take()) else {
+        return;
+    };
+    let name = storage_root
+        .file_name()
+        .expect("the swapped storage root has a name");
+    let aside = storage_root.with_file_name(format!("{}.validated", name.to_string_lossy()));
+    std::fs::rename(storage_root, &aside).expect("the validated root moves aside");
+    std::fs::rename(&canary, storage_root).expect("the canary takes the storage root path");
+}
+
+/// Production starts leave the validated directory in place.
+#[cfg(not(test))]
+fn apply_pre_fork_storage_swap(_storage_root: &Path) {}
 
 const RECORD_LEN: usize = 12;
 const EXEC_TAG: u32 = 7;
@@ -42,7 +73,7 @@ pub(super) enum LaunchError {
 pub(super) fn start(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
-    storage_root: &Path,
+    storage: &landlock_plan::StorageRoot<'_>,
     executable: &Path,
     args: &[&CStr],
     stdin_read: Option<i32>,
@@ -57,11 +88,15 @@ pub(super) fn start(
         provider,
         admitted,
         &landlock_plan::Bindings {
-            storage_root: storage_root.to_path_buf(),
+            storage_root: storage.path.to_path_buf(),
             provider_executable: executable.to_path_buf(),
+            storage_dev: storage.dev,
+            storage_ino: storage.ino,
         },
     )
     .map_err(LaunchError::BeforeFork)?;
+    // A test may replace the validated directory after its identity is in the plan.
+    apply_pre_fork_storage_swap(storage.path);
     launch(
         &prepared,
         &path,
@@ -70,6 +105,30 @@ pub(super) fn start(
         stdin_read,
         stdout_write,
     )
+}
+
+fn open_dev_null() -> Result<OwnedFd, String> {
+    let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!(
+            "provider start is refused: /dev/null could not be opened: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if fd < 3 {
+        unsafe { libc::close(fd) };
+        return Err(
+            "provider start is refused: the standard error descriptor is below fd 3".into(),
+        );
+    }
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
+        unsafe { libc::close(fd) };
+        return Err(
+            "provider start is refused: the standard error descriptor lacks FD_CLOEXEC".into(),
+        );
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn launch(
@@ -120,6 +179,17 @@ fn launch(
             "provider start is refused: the report descriptor lacks FD_CLOEXEC".into(),
         ));
     }
+    let stderr_null = match open_dev_null() {
+        Ok(fd) => fd,
+        Err(reason) => {
+            unsafe {
+                libc::close(pipe[0]);
+                libc::close(pipe[1]);
+            }
+            return Err(LaunchError::BeforeFork(reason));
+        }
+    };
+    let stderr_fd = stderr_null.as_raw_fd();
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         let error = std::io::Error::last_os_error();
@@ -151,6 +221,13 @@ fn launch(
                 );
             }
         }
+        // Replace the inherited standard error before confinement. close_range closes this source.
+        if unsafe { libc::dup2(stderr_fd, 2) } < 0 {
+            write_record_and_exit(
+                pipe[1],
+                &error_record(DUP2_TAG, unsafe { *libc::__errno_location() }),
+            );
+        }
         child_test_hook(test_hook, pipe[1]);
         if let Err(failure) = unsafe { preexec_installer::install(prepared, pipe[1]) } {
             write_record_and_exit(pipe[1], &failure.record());
@@ -161,6 +238,7 @@ fn launch(
         let errno = unsafe { *libc::__errno_location() };
         write_record_and_exit(pipe[1], &error_record(EXEC_TAG, errno));
     }
+    drop(stderr_null);
     unsafe {
         libc::close(pipe[1]);
     }
@@ -340,6 +418,24 @@ mod tests {
         super::super::super::rights::admit_runtime_grant(RuntimeProviderId::Did)
     }
 
+    fn storage_for(path: &Path) -> landlock_plan::StorageRoot<'_> {
+        use std::os::unix::fs::MetadataExt;
+        let (dev, ino) = std::fs::symlink_metadata(path)
+            .map(|meta| (meta.dev(), meta.ino()))
+            .unwrap_or((0, 0));
+        landlock_plan::StorageRoot { path, dev, ino }
+    }
+
+    fn bindings_for(root: &Path, executable: &Path) -> landlock_plan::Bindings {
+        let storage = storage_for(root);
+        landlock_plan::Bindings {
+            storage_root: root.to_path_buf(),
+            provider_executable: executable.to_path_buf(),
+            storage_dev: storage.dev,
+            storage_ino: storage.ino,
+        }
+    }
+
     #[test]
     fn refused_before_fork_names_reason() {
         let bad = Path::new(std::ffi::OsStr::from_bytes(b"bad\0path"));
@@ -347,7 +443,7 @@ mod tests {
         let result = start(
             RuntimeProviderId::Did,
             &rows,
-            Path::new("/"),
+            &storage_for(Path::new("/")),
             bad,
             &[],
             None,
@@ -380,10 +476,7 @@ mod tests {
     fn installer_failure_crosses_pipe_and_child_is_reaped() {
         let root = tempfile::tempdir().unwrap();
         let path = CString::new("/bin/true").unwrap();
-        let bindings = landlock_plan::Bindings {
-            storage_root: root.path().to_path_buf(),
-            provider_executable: "/bin/true".into(),
-        };
+        let bindings = bindings_for(root.path(), Path::new("/bin/true"));
         let rows = did_rows();
         let expected_rule = landlock_plan::build(
             RuntimeProviderId::Did,
@@ -434,7 +527,7 @@ mod tests {
         let (pid, reason) = match start(
             RuntimeProviderId::Did,
             &rows,
-            root.path(),
+            &storage_for(root.path()),
             &executable,
             &[],
             None,
@@ -472,10 +565,7 @@ mod tests {
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
             &rows,
-            &landlock_plan::Bindings {
-                storage_root: root.path().to_path_buf(),
-                provider_executable: "/bin/true".into(),
-            },
+            &bindings_for(root.path(), Path::new("/bin/true")),
         )
         .unwrap();
         let (pid, reason) = match launch(
@@ -518,10 +608,7 @@ mod tests {
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
             &rows,
-            &landlock_plan::Bindings {
-                storage_root: root.path().to_path_buf(),
-                provider_executable: "/bin/true".into(),
-            },
+            &bindings_for(root.path(), Path::new("/bin/true")),
         )
         .unwrap();
         let (pid, reason) = match launch(&prepared, &path, &[], TestReport::ShortRecord, None, None)
@@ -557,10 +644,7 @@ mod tests {
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
             &rows,
-            &landlock_plan::Bindings {
-                storage_root: root.path().to_path_buf(),
-                provider_executable: "/bin/cat".into(),
-            },
+            &bindings_for(root.path(), Path::new("/bin/cat")),
         )
         .unwrap();
         let mut input = [-1; 2];

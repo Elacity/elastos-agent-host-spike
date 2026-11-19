@@ -610,14 +610,29 @@ impl Drop for BrokerTasks {
 /// `waitpid` task reaps the pid, so that task is the only reaper.
 struct ForkChild {
     pid: libc::pid_t,
+    /// Opened before the wait. A later signal names this process.
+    #[cfg(target_os = "linux")]
+    pidfd: Option<OwnedFd>,
     status: oneshot::Receiver<i32>,
     /// True once the status was received; the waitpid task has reaped the pid,
     /// so `Drop` must not signal it again.
     reaped: bool,
 }
 
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: libc::pid_t) -> Option<OwnedFd> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        None
+    } else {
+        Some(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    }
+}
+
 impl ForkChild {
     fn start(pid: libc::pid_t) -> Self {
+        #[cfg(target_os = "linux")]
+        let pidfd = open_pidfd(pid);
         let (sender, status) = oneshot::channel();
         tokio::task::spawn_blocking(move || {
             let mut word = 0;
@@ -635,8 +650,35 @@ impl ForkChild {
         });
         Self {
             pid,
+            #[cfg(target_os = "linux")]
+            pidfd,
             status,
             reaped: false,
+        }
+    }
+
+    fn force_kill(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            // The pid is kept for the wait. The signal names the pidfd opened
+            // for this process; a missing pidfd does not fall back to the pid.
+            let _ = self.pid;
+            if let Some(pidfd) = &self.pidfd {
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        pidfd.as_raw_fd(),
+                        libc::SIGKILL,
+                        0,
+                        0,
+                    );
+                }
+            }
+            return;
+        }
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
         }
     }
 }
@@ -645,9 +687,7 @@ impl Drop for ForkChild {
     fn drop(&mut self) {
         // A received status means the waitpid task already reaped the pid.
         if !self.reaped && self.status.try_recv().is_err() {
-            unsafe {
-                libc::kill(self.pid, libc::SIGKILL);
-            }
+            self.force_kill();
         }
     }
 }
@@ -672,60 +712,221 @@ impl std::fmt::Debug for Confined {
     }
 }
 
-/// Create `storage_root` at 0700 owned by the euid, open it and sync it.
-/// Returns whether this call created the directory.
-fn create_storage_root(storage_root: &Path) -> Result<bool, BridgeError> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    let created = match std::fs::DirBuilder::new().mode(0o700).create(storage_root) {
-        Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
-        Err(error) => return Err(BridgeError::Io(error)),
-    };
-    let cleanup = |error: BridgeError| {
-        if created {
-            let _ = std::fs::remove_dir(storage_root);
-        }
-        error
-    };
-    let metadata =
-        std::fs::metadata(storage_root).map_err(|error| cleanup(BridgeError::Io(error)))?;
-    if metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(cleanup(BridgeError::Refused(
-            "provider start is refused: the storage root is not owned by the effective user"
-                .to_string(),
-        )));
+/// A storage root this start created. Drop removes that tree unless the start
+/// returned `Confined`. A root that already existed stays.
+struct CreatedStorageRoot<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl CreatedStorageRoot<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
     }
-    std::fs::set_permissions(storage_root, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error| cleanup(BridgeError::Io(error)))?;
-    let directory =
-        std::fs::File::open(storage_root).map_err(|error| cleanup(BridgeError::Io(error)))?;
-    directory
-        .sync_all()
-        .map_err(|error| cleanup(BridgeError::Io(error)))?;
-    Ok(created)
+}
+
+impl Drop for CreatedStorageRoot<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(self.path);
+        }
+    }
+}
+
+fn refused(reason: &str) -> BridgeError {
+    BridgeError::Refused(reason.to_string())
+}
+
+fn open_directory(path: &Path) -> std::io::Result<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let fd = unsafe {
+        libc::open(
+            bytes.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn open_directory_at(parent: &OwnedFd, name: &std::ffi::CStr) -> std::io::Result<OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn stat_fd(fd: i32) -> std::io::Result<libc::stat> {
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, info.as_mut_ptr()) } < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { info.assume_init() })
+    }
+}
+
+fn create_directory_at(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<bool, BridgeError> {
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) {
+        Ok(false)
+    } else {
+        Err(BridgeError::Io(error))
+    }
+}
+
+fn unlink_directory_at(parent: &OwnedFd, name: &std::ffi::CStr) {
+    unsafe {
+        libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR);
+    }
+}
+
+fn name_is_symlink(parent: &OwnedFd, name: &std::ffi::CStr) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let rc = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc < 0 {
+        return false;
+    }
+    let info = unsafe { info.assume_init() };
+    info.st_mode & libc::S_IFMT == libc::S_IFLNK
+}
+
+/// Create `storage_root` at 0700 under a Runtime-owned parent, open it with
+/// `O_DIRECTORY | O_NOFOLLOW`, and return whether this call created it plus
+/// the device and inode of the directory that was opened.
+fn create_storage_root(storage_root: &Path) -> Result<(bool, u64, u64), BridgeError> {
+    use std::os::unix::ffi::OsStrExt;
+    let parent_path = storage_root
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            refused("provider start is refused: the storage root has no parent directory")
+        })?;
+    let name = storage_root.file_name().ok_or_else(|| {
+        refused("provider start is refused: the storage root has no directory name")
+    })?;
+    let parent = open_directory(parent_path).map_err(|error| {
+        let symlink = std::fs::symlink_metadata(parent_path)
+            .ok()
+            .is_some_and(|meta| meta.file_type().is_symlink());
+        if symlink || error.raw_os_error() == Some(libc::ELOOP) {
+            refused("provider start is refused: the storage root's parent is a symlink")
+        } else {
+            BridgeError::Io(error)
+        }
+    })?;
+    let parent_stat = stat_fd(parent.as_raw_fd()).map_err(BridgeError::Io)?;
+    if parent_stat.st_uid != unsafe { libc::geteuid() } {
+        return Err(refused(
+            "provider start is refused: the storage root's parent is not owned by the effective user",
+        ));
+    }
+    let name_c = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| refused("provider start is refused: the storage root name contains NUL"))?;
+    let created = create_directory_at(&parent, &name_c)?;
+    let directory = match open_directory_at(&parent, &name_c) {
+        Ok(directory) => directory,
+        Err(error) => {
+            if created {
+                unlink_directory_at(&parent, &name_c);
+            }
+            let symlink = name_is_symlink(&parent, &name_c);
+            return Err(match error.raw_os_error() {
+                _ if symlink || error.raw_os_error() == Some(libc::ELOOP) => {
+                    refused("provider start is refused: the storage root is a symlink")
+                }
+                Some(libc::ENOTDIR) => {
+                    refused("provider start is refused: the storage root is not a directory")
+                }
+                _ => BridgeError::Io(error),
+            });
+        }
+    };
+    let info = match stat_fd(directory.as_raw_fd()) {
+        Ok(info) => info,
+        Err(error) => {
+            if created {
+                unlink_directory_at(&parent, &name_c);
+            }
+            return Err(BridgeError::Io(error));
+        }
+    };
+    if info.st_uid != unsafe { libc::geteuid() } {
+        if created {
+            unlink_directory_at(&parent, &name_c);
+        }
+        return Err(refused(
+            "provider start is refused: the storage root is not owned by the effective user",
+        ));
+    }
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } < 0
+        || unsafe { libc::fsync(directory.as_raw_fd()) } < 0
+    {
+        let error = std::io::Error::last_os_error();
+        if created {
+            unlink_directory_at(&parent, &name_c);
+        }
+        return Err(BridgeError::Io(error));
+    }
+    Ok((created, info.st_dev as u64, info.st_ino as u64))
 }
 
 fn pipe_pair() -> Result<(OwnedFd, OwnedFd), BridgeError> {
     let mut fds = [-1; 2];
     #[cfg(target_os = "linux")]
-    let opened = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    {
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+            return Err(BridgeError::Spawn(std::io::Error::last_os_error()));
+        }
+    }
     #[cfg(not(target_os = "linux"))]
-    let opened = {
-        let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        if opened == 0 {
-            for fd in fds {
-                let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-                if flags < 0
-                    || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
-                {
-                    return Err(BridgeError::Spawn(std::io::Error::last_os_error()));
+    {
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+            return Err(BridgeError::Spawn(std::io::Error::last_os_error()));
+        }
+        for &fd in &fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+            {
+                let error = std::io::Error::last_os_error();
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
                 }
+                return Err(BridgeError::Spawn(error));
             }
         }
-        opened
-    };
-    if opened < 0 {
-        return Err(BridgeError::Spawn(std::io::Error::last_os_error()));
+    }
+    if fds[0] < 3 || fds[1] < 3 {
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        return Err(refused(
+            "provider start is refused: a pipe descriptor is below fd 3",
+        ));
     }
     unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
 }
@@ -771,9 +972,10 @@ impl ProviderBridge {
     /// Start a rights-declaring provider through the OS entry and return
     /// `Confined` only after `Init` succeeded.
     ///
-    /// The Runtime creates the fresh storage root, opens it and syncs it. The
-    /// child's stdin and stdout are fresh pipes. A refusal returns `Err` and
-    /// starts nothing; there is no fallback to the plain `spawn`.
+    /// The Runtime creates the fresh storage root under its parent, opens that
+    /// directory without following a symlink, and syncs it. The child's stdin
+    /// and stdout are fresh pipes. A refusal returns `Err` and starts nothing;
+    /// there is no fallback to the plain `spawn`.
     pub async fn spawn_confined(
         component_key: &str,
         authority: &ProviderAuthority,
@@ -788,29 +990,27 @@ impl ProviderBridge {
                 "provider start is refused: component key \"{component_key}\" is not one of did-provider, wallet-provider, model-provider"
             )));
         };
-        let created = create_storage_root(storage_root)?;
-        let discard_created_root = |error: BridgeError| {
-            if created {
-                let _ = std::fs::remove_dir(storage_root);
-            }
-            error
+        let (created, storage_dev, storage_ino) = create_storage_root(storage_root)?;
+        let mut created_root = CreatedStorageRoot {
+            path: storage_root,
+            armed: created,
         };
-        let (stdin_read, to_child) = pipe_pair().map_err(discard_created_root)?;
-        let (from_child, stdout_write) = pipe_pair().map_err(discard_created_root)?;
+        let (stdin_read, to_child) = pipe_pair()?;
+        let (from_child, stdout_write) = pipe_pair()?;
         let stdio = super::os_entry::ChildStdio {
             stdin: stdin_read.as_raw_fd(),
             stdout: stdout_write.as_raw_fd(),
             to_child,
             from_child,
         };
+        let storage = super::landlock_plan::StorageRoot {
+            path: storage_root,
+            dev: storage_dev,
+            ino: storage_ino,
+        };
         let launched =
-            super::os_entry::start_provider(provider, authority, binary_path, storage_root, stdio)
-                .map_err(|reason| {
-                    if created {
-                        let _ = std::fs::remove_dir(storage_root);
-                    }
-                    BridgeError::Refused(reason)
-                })?;
+            super::os_entry::start_provider(provider, authority, binary_path, &storage, stdio)
+                .map_err(BridgeError::Refused)?;
         // The child holds its copies; these are the parent's, and must close
         // so the child sees EOF on stdin and the parent sees EOF on stdout.
         drop(stdin_read);
@@ -842,12 +1042,8 @@ impl ProviderBridge {
             #[cfg(target_os = "macos")]
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         };
-        if let Err(error) = bridge.init_provider(config, INIT_TIMEOUT).await {
-            if created {
-                let _ = std::fs::remove_dir(storage_root);
-            }
-            return Err(error);
-        }
+        bridge.init_provider(config, INIT_TIMEOUT).await?;
+        created_root.disarm();
         Ok(Confined {
             bridge: Arc::new(bridge),
         })
@@ -1816,9 +2012,7 @@ impl ProviderBridge {
                         }
                     }
                     Err(_) => {
-                        unsafe {
-                            libc::kill(fork.pid, libc::SIGKILL);
-                        }
+                        fork.force_kill();
                         match tokio::time::timeout(self.shutdown_timeout, &mut fork.status).await {
                             Ok(status) => {
                                 fork.reaped = status.is_ok();
@@ -3727,12 +3921,23 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn build_confined_probe(root: &Path, pid_file: &Path, mode: &str) -> PathBuf {
+        build_confined_probe_reporting(root, pid_file, mode, "")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_confined_probe_reporting(
+        root: &Path,
+        pid_file: &Path,
+        mode: &str,
+        stderr_report: &str,
+    ) -> PathBuf {
         let source = root.join("confined-provider-probe.rs");
         let binary = root.join("confined-provider-probe");
         let pid = pid_file.to_str().unwrap();
         let text = include_str!("../../tests/fixtures/confined_provider_probe.rs")
             .replace("@@PID_FILE@@", pid)
-            .replace("@@MODE@@", mode);
+            .replace("@@MODE@@", mode)
+            .replace("@@STDERR_REPORT@@", stderr_report);
         std::fs::write(&source, text).unwrap();
         let built = std::process::Command::new("rustc")
             .args(["--edition", "2021", "-O"])
@@ -3806,6 +4011,12 @@ mod tests {
         assert_ne!(
             child_stdout, parent_stdout,
             "the child inherited the parent's stdout"
+        );
+        let child_stderr = std::fs::read_link(format!("/proc/{pid}/fd/2")).unwrap();
+        assert_eq!(
+            child_stderr,
+            Path::new("/dev/null"),
+            "the confined child's standard error is /dev/null"
         );
         // Row 1: Shutdown is answered, the child exits, and the pid is reaped.
         confined.bridge().shutdown().await.unwrap();
@@ -3951,6 +4162,7 @@ mod tests {
             )
             .await
             .unwrap_or_else(|error| panic!("start under {}: {error}", root.display()));
+            assert!(root.is_dir(), "root_a.is_dir()");
             let pid = fork_pid(confined.bridge());
             // The child writes under its own root, so a plan inherited from the
             // previous start would leave this file absent.
@@ -3984,6 +4196,231 @@ mod tests {
         assert_ne!(pids[0], pids[1]);
         assert_ne!(pids[1], pids[2]);
         assert!(root_a.is_dir() && root_b.is_dir());
+    }
+
+    #[tokio::test]
+    async fn symlink_at_the_storage_root_refuses_and_leaves_the_canary() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let root = temp.path().join("root");
+        std::os::unix::fs::symlink(&canary, &root).unwrap();
+        #[cfg(target_os = "linux")]
+        let binary = build_confined_probe(temp.path(), &canary.join("child.pid"), "ok");
+        #[cfg(not(target_os = "linux"))]
+        let binary = temp.path().join("never-runs");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            std::fs::metadata(&canary).unwrap().mode() & 0o777,
+            0o755,
+            "the canary and its permissions stay unchanged"
+        );
+        assert_eq!(std::fs::read(canary.join("kept")).unwrap(), b"kept");
+        assert!(
+            !canary.join("child.pid").exists(),
+            "the canary and its permissions stay unchanged"
+        );
+        assert!(
+            error.to_string().contains("symlink"),
+            "a symlink storage root must refuse: {error}"
+        );
+        assert!(std::fs::symlink_metadata(&root)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[tokio::test]
+    async fn swapped_storage_root_refuses_and_leaves_the_canary() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let binary = build_confined_probe(temp.path(), &root.join("child.pid"), "ok");
+        struct ClearSwap;
+        impl Drop for ClearSwap {
+            fn drop(&mut self) {
+                super::super::os_entry::set_pre_fork_storage_swap(None);
+            }
+        }
+        let _clear = ClearSwap;
+        super::super::os_entry::set_pre_fork_storage_swap(Some(canary));
+        let started = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await;
+        super::super::os_entry::set_pre_fork_storage_swap(None);
+        if let Ok(confined) = &started {
+            let _ = confined.bridge().shutdown().await;
+        }
+        let metadata = std::fs::metadata(&root).unwrap();
+        assert_eq!(
+            metadata.mode() & 0o777,
+            0o755,
+            "the canary and its permissions stay unchanged"
+        );
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+        assert!(
+            !root.join("child.pid").exists(),
+            "the canary and its permissions stay unchanged"
+        );
+        let error = started.expect_err("a swapped storage root must refuse");
+        assert!(
+            error.to_string().contains("could not be added"),
+            "a swapped storage root must refuse in the installer: {error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn confined_child_stderr_leaves_the_canary_unchanged() {
+        if std::env::var_os("ELASTOS_STDERR_HARNESS").is_some() {
+            let root = PathBuf::from(std::env::var("ELASTOS_STDERR_ROOT").unwrap());
+            let binary = PathBuf::from(std::env::var("ELASTOS_STDERR_BINARY").unwrap());
+            let confined = ProviderBridge::spawn_confined(
+                "did-provider",
+                &committed_authority("did"),
+                &binary,
+                &root,
+                ProviderConfig::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("confined start in the stderr harness: {error}"));
+            confined.bridge().shutdown().await.unwrap();
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let binary = build_confined_probe_reporting(
+            temp.path(),
+            Path::new(""),
+            "ok",
+            root.join("stderr-read").to_str().unwrap(),
+        );
+        let canary_path = temp.path().join("canary");
+        std::fs::write(&canary_path, b"CANARY").unwrap();
+        let canary = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&canary_path)
+            .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "provider::bridge::tests::confined_child_stderr_leaves_the_canary_unchanged",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env("ELASTOS_STDERR_HARNESS", "1")
+            .env("ELASTOS_STDERR_ROOT", &root)
+            .env("ELASTOS_STDERR_BINARY", &binary)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::from(canary))
+            .output()
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&canary_path).unwrap(),
+            b"CANARY",
+            "the canary stays unchanged; harness status {} stdout {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.status.success(),
+            "harness failed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report = std::fs::read(temp.path().join("root").join("stderr-read")).unwrap();
+        assert!(
+            report.starts_with(b"0\n"),
+            "the probe reads nothing from fd 2: {report:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_init_removes_the_root_a_child_wrote_into() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let binary = build_confined_probe(temp.path(), &root.join("child.pid"), "reject_init");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, BridgeError::InitFailed(_)), "{error}");
+        assert!(
+            !root.exists(),
+            "a failed Init removes the root this start created"
+        );
+    }
+
+    #[test]
+    fn an_armed_root_removes_the_tree_and_not_a_symlink_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"stay").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let swapped = temp.path().join("swapped");
+        std::os::unix::fs::symlink(&outside, &swapped).unwrap();
+        drop(CreatedStorageRoot {
+            path: &root,
+            armed: true,
+        });
+        drop(CreatedStorageRoot {
+            path: &swapped,
+            armed: true,
+        });
+        assert!(!root.exists(), "a failed start removes the created root");
+        assert!(!swapped.exists());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"stay");
+    }
+
+    #[test]
+    fn a_disarmed_root_stays() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let mut guard = CreatedStorageRoot {
+            path: &root,
+            armed: true,
+        };
+        guard.disarm();
+        drop(guard);
+        assert!(root.join("wrote").is_file());
     }
 
     #[tokio::test]
