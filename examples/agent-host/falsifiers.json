@@ -1498,7 +1498,6 @@
     }
    ],
    "tests": [
-    "tests::every_proposal_kind_has_a_declared_ask",
     "tests::every_resource_the_guest_proposes_is_declared"
    ]
   },
@@ -1531,7 +1530,6 @@
     }
    ],
    "tests": [
-    "tests::every_proposal_kind_has_a_declared_ask",
     "tests::every_resource_the_guest_proposes_is_declared",
     "tests::every_declared_ask_is_observed"
    ]

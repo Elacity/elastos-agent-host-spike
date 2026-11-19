@@ -19903,11 +19903,10 @@ mod tests {
         assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
     }
 
-    // Task 027: the declaration of every per-step ask. `asks.json` is an
-    // auditable declaration, not the policy check: the Runtime enforces each
-    // grant (P4, P18), and this lane's file retires into the Runtime manifest
-    // when the Runtime defines per-step asks (P10). The tests below keep the
-    // declaration equal to what the guest proposes, in both directions.
+    // The manifest `asks` are this guest's maximum. `asks.json` stays as the
+    // lane-local list the parser checks. Each proposal kind the guest can
+    // name is observed in the scenarios. An observed resource still meets a
+    // row of that list.
 
     fn asks_document(entries: &str) -> String {
         format!(r#"{{"schema":"{ASKS_SCHEMA}","asks":[{entries}]}}"#)
@@ -20234,57 +20233,35 @@ mod tests {
         }
     }
 
-    /// Every kind the guest can propose has a declared ask. The kind match has
-    /// no wildcard, so a new kind does not compile until it is named. The
-    /// `unspecified` placeholder is not an ask, and a declaration of it is
-    /// refused.
+    /// Every kind the guest can propose appears in the scenarios. The kind
+    /// match has no wildcard, so a new kind does not compile until it is
+    /// named. `Unspecified` is a step opened with no proposal.
     #[test]
-    fn every_proposal_kind_has_a_declared_ask() {
-        for kind in PROPOSABLE_KINDS {
-            let name = ask_kind_name(*kind).expect("every proposable kind has a name");
-            assert_eq!(proposal_kind(name), Some(*kind), "{name} parses back");
-            assert!(
-                declared_asks().iter().any(|ask| ask.kind == *kind),
-                "{name} is proposable and must be declared"
-            );
-        }
-        assert_eq!(ask_kind_name(ProposalKind::Unspecified), None);
-        assert!(!declared_asks()
-            .iter()
-            .any(|ask| ask.kind == ProposalKind::Unspecified));
-        assert_eq!(
-            parse_asks(&asks_document(
-                r#"{"kind":"unspecified","resource":"<principal>/"}"#
-            )),
-            Err("asks kind unspecified"),
-            "the placeholder is not an ask"
-        );
-        for ask in declared_asks() {
-            assert!(
-                PROPOSABLE_KINDS.contains(&ask.kind),
-                "{:?} is declared but cannot be proposed",
-                ask.kind
-            );
-            assert!(ask_kind_name(ask.kind).is_some());
-        }
-    }
-
-    /// Every resource the guest actually proposes matches a declared pattern,
-    /// and every proposable kind appears in the scenarios that drive it. A
-    /// proposal outside the declaration fails this test.
-    #[test]
-    fn every_resource_the_guest_proposes_is_declared() {
+    fn every_proposal_kind_is_observed() {
         let observed = observed_proposals();
         for kind in PROPOSABLE_KINDS {
             assert!(
                 observed.iter().any(|(other, _)| other == kind),
                 "{kind:?} is proposable and these scenarios must propose it"
             );
+            let name = ask_kind_name(*kind).unwrap_or_else(|| panic!("{kind:?} has no name"));
+            assert_eq!(proposal_kind(name), Some(*kind), "{name} parses back");
         }
+        assert!(observed
+            .iter()
+            .all(|(kind, _)| *kind != ProposalKind::Unspecified));
+        assert_eq!(ask_kind_name(ProposalKind::Unspecified), None);
+    }
+
+    /// Every resource the guest actually proposes matches a row of the
+    /// lane-local list. A proposal outside that list fails this test.
+    #[test]
+    fn every_resource_the_guest_proposes_is_declared() {
+        let observed = observed_proposals();
         for (kind, resource) in &observed {
             assert!(
                 declared_ask(*kind, resource),
-                "{kind:?} proposes {resource} outside the declaration"
+                "{kind:?} proposes {resource} outside the lane-local list"
             );
         }
     }

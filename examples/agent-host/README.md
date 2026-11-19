@@ -207,9 +207,9 @@ The declaration names no URL, no host route and no `Users/` path; the model
 resource is named, not routed. The manifest `asks` name `write` and `read` on
 `localhost://Users/self/.AppData/Agents/agent-host/*`. The Runtime reads that
 maximum. Approval and policy decide each request. Every routed pattern in this
-file names the launching principal, `Users/self`. The host tests keep this list
-equal to what the guest proposes, in both directions. This file stays until
-upstream confirms the manifest contract.
+file names the launching principal, `Users/self`. The scenarios observe every
+proposal kind. An observed resource still meets a row of this list. This file
+stays until upstream confirms the manifest contract.
 
 ## Build and test
 
