@@ -367,11 +367,11 @@ fn grant_view(stand_in: &StandInRuntime) -> Vec<Value> {
 fn standin_valid_signature_alone_yields_no_grant() {
     let published = publish_agent_host();
     let (mut stand_in, _) = signed_stand_in(&published);
-    // The manifest asks for a grant, so a launch that turned asks into grants
-    // would show here.
+    // The manifest's asks are a ceiling, so a launch that turned them into
+    // grants would show here.
     let manifest: Value =
         serde_json::from_slice(&read_fixture(&AGENT_HOST, "capsule.json")).expect("JSON");
-    assert!(manifest["capabilities"]
+    assert!(manifest["asks"]
         .as_array()
         .is_some_and(|asked| !asked.is_empty()));
 

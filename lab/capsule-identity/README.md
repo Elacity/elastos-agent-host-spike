@@ -354,7 +354,7 @@ local file (such as `.DS_Store`) never reaches a pin. The pins are in
 | `content-sample` | `capsule.json`, `sample.example` | `templates/capsules/viewer-content/content.capsule.json` and `sample.example`, byte for byte | `bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi` |
 | `web-app` | `capsule.json`, `browser/app.js`, `browser/index.html` | `templates/capsules/web-app/`, byte for byte | `bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q` |
 | `wc001-core` | `capsule.json` | written for this lab | not pinned (below) |
-| `agent-host` | `capsule.json`, `asks.json` | `examples/agent-host/capsule.json` (git blob `3395c59fab00816109d5dd471ccbceaf5d59e191`) and `examples/agent-host/asks.json` (git blob `3f004896c68aa7097d02505920afc6c178b065ff`) at `e11fdafce`, byte for byte; the module is not in the fixture (below) | `bafybeicesxlwcolv5hifwotsyafyyaclaq23gyzwl7esuvhwlownrhatym` |
+| `agent-host` | `capsule.json`, `asks.json` | manifest `asks`: `write` then `read` on `localhost://Users/self/.AppData/Agents/agent-host/*`; `asks.json` remains blob `3f004896c68aa7097d02505920afc6c178b065ff`; the module stays out of the fixture | `bafybeigo3bfjdgyjhwexdrpnsnazad6cfrq7jyjwnme22azsn4ea7mmatm` |
 | `provider` | `capsule.json`, `ipfs-provider` | the manifest's fields are those of the JSON in `test_parse_v1_manifest` (`elastos/crates/elastos-common/src/manifest.rs`, about lines 2443-2458); `ipfs-provider` is the ASCII `lab fixture` and a newline, a lab stand-in | `bafybeicmpw5zf373ogbziqix2mj2bagmn5imgj3hy7347nulpmx32kooxe` |
 | `model` | `capsule.json`, `weights.gguf`, `LICENSE`, `LICENSE.base`, `PROVENANCE.md` | the manifest's fields are those of `model_content_fixture` (same file, about lines 1265-1283; synthetic, not a published model package); the four other files are one line of ASCII each, lab stand-ins | `bafybeifh6dj5r5wc2j5kqxz6ukga74y3gi56woglqdzmmcdhqvy7qtljzq` |
 | `provider-variant-a` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture aarch64-darwin` and a newline, a lab stand-in | `bafybeig77gyxfd7lldgueo5qtn2o7sjvwdr6txm3f7fc4dl4pyjsuvgoc4` |
@@ -370,16 +370,19 @@ fields and values; the Runtime's own `CapsuleManifest` parses and validates
 both. No provider binary, rootfs, Kubo, GGUF, model URL or model hash is
 copied.
 
-`agent-host` holds the agent-host capsule's own manifest and its declared asks
-(M1 check B2). `git hash-object` of each copy equals the blob id in the table.
-The agent-host lane may change its files later; these copies stay as they are,
-so the pin holds. The manifest's entrypoint, `agent-host.component.wasm`, is
-build output and is never committed (HANDOFF rule 7), so the module is not in
-the fixture: this lab CID covers the two files only and is not the whole
-capsule's name. The lab never parses `asks.json`: to the lab CID it is one more
-payload file. The manifest is a component manifest, so the Runtime's
-`validate()` also requires its `wit_world_sha256` to equal the SHA-256 of
-`elastos/wit/elastos-bus-v1.wit`, which `elastos-common` compiles in
+`agent-host` holds the agent-host capsule's manifest and its declared asks
+(M1 check B2). The declared maximum is the manifest `asks`: `write`, then
+`read`, on `localhost://Users/self/.AppData/Agents/agent-host/*`. That manifest
+is this lab's copy. `asks.json` (blob
+`3f004896c68aa7097d02505920afc6c178b065ff`) stays in the bundle as a payload
+file until the launch handoff moves. The manifest's entrypoint,
+`agent-host.component.wasm`, is build output and is never committed (HANDOFF
+rule 7), so the module is not in the fixture: this lab CID covers the two
+files only and is not the whole capsule's name. The lab never parses
+`asks.json`: to the lab CID it is one more payload file. The manifest is a
+component manifest, so the Runtime's `validate()` also requires its
+`wit_world_sha256` to equal the SHA-256 of `elastos/wit/elastos-bus-v1.wit`,
+which `elastos-common` compiles in
 (`elastos/crates/elastos-common/src/manifest.rs:412` and `:794-800`).
 
 `wc001-core` holds only the manifest. Its entrypoint `capsule.wasm` is wc-001's
@@ -422,9 +425,9 @@ with the first lab CID passes before and after the change.
 | One byte inside a JSON string value of `capsule.json`; the manifest still parses and validates | `one_byte_change_in_the_manifest_changes_the_lab_cid` | F-CI1k |
 | One byte in each web-app payload file in turn, `browser/app.js` included, which is not the entrypoint | `one_byte_change_in_any_payload_file_changes_the_lab_cid` | F-CI1l |
 | A file is added (an empty one too) or removed | `adding_or_removing_a_payload_file_changes_the_lab_cid` | F-CI1l |
-| One byte inside a JSON string value of agent-host's `asks.json`; it is still JSON | `one_byte_change_in_asks_json_changes_the_lab_cid` | F-CI3i, F-CI1l |
+| One byte inside the manifest ask's resource; the manifest still parses and validates | `one_byte_change_in_a_manifest_ask_changes_the_lab_cid` | F-CI3g |
 
-So the asks a capsule declares in `asks.json` are inside its lab CID. After
+So the asks a capsule declares in its manifest are inside its lab CID. After
 each change, `check_name` with the old lab CID is refused with both values.
 
 **A claimed name is checked, never trusted.** A name that a URL, a Store row
@@ -976,13 +979,13 @@ lab's stand-in launcher, in test code, calls it
 ([below](#lab-stand-in-launcher-m1-check-b1)).
 
 What the tests show, on the `agent-host` fixture. Its manifest asks for a grant
-through `capabilities`, and it has its `asks.json`. A fresh in-memory test key
+through `asks`, and it still has its `asks.json`. A fresh in-memory test key
 signs it:
 
 - The signature is valid: `verify_name_signature` returns `Ok(())` when that
   key's DID is accepted.
 - After signing, and again after verifying, the bundle's lab CID is still
-  `bafybeices…hatym`, and the parent folder still holds only the bundle folder.
+  `bafybeigo3…mmatm`, and the parent folder still holds only the bundle folder.
   So no byte the lab CID covers changed, and no file appeared next to the
   bundle. The tests compare before and after. They cannot see a file that
   was written and then removed in between.
@@ -1551,7 +1554,7 @@ A valid signature alone yields no grant. The stand-in's grant view,
 `{"scope": "all_sessions_live", "capabilities": [...]}`, one entry per held
 grant with today's five keys (`request_id`, `resource`, `action`, `duration`,
 `granted_at`) and `session_id`. A launch adds no grant, although the
-`agent-host` manifest asks for one in `capabilities` and its record verifies.
+`agent-host` manifest's `asks` name a ceiling and its record verifies.
 The one way a grant exists is `seed_grant(session_id, resource, action,
 duration)`, a lab test seam, not a route: it holds one grant with the next
 `request_id` and `granted_at` from a counter. The seed is there only to show

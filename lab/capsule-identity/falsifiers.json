@@ -205,7 +205,7 @@
         "lab_cid_matches_the_pinned_value_for_each_fixture",
         "one_byte_change_in_any_payload_file_changes_the_lab_cid",
         "adding_or_removing_a_payload_file_changes_the_lab_cid",
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "three_kinds_share_the_package_rules"
       ]
     },
@@ -619,7 +619,7 @@
         "one_byte_change_in_the_manifest_changes_the_lab_cid",
         "one_byte_change_in_any_payload_file_changes_the_lab_cid",
         "adding_or_removing_a_payload_file_changes_the_lab_cid",
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "checked_name_check_judges_the_checked_bytes",
         "checked_name_check_refuses_a_mismatch"
       ]
@@ -653,7 +653,7 @@
         }
       ],
       "tests": [
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "lab_cid_matches_the_pinned_value_for_each_fixture"
       ]
     },

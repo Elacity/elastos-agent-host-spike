@@ -38,7 +38,7 @@ use tempfile::TempDir;
 pub const CONTENT_SAMPLE_LAB_CID: &str =
     "bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi";
 pub const WEB_APP_LAB_CID: &str = "bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q";
-pub const AGENT_HOST_LAB_CID: &str = "bafybeicesxlwcolv5hifwotsyafyyaclaq23gyzwl7esuvhwlownrhatym";
+pub const AGENT_HOST_LAB_CID: &str = "bafybeigo3bfjdgyjhwexdrpnsnazad6cfrq7jyjwnme22azsn4ea7mmatm";
 pub const PROVIDER_LAB_CID: &str = "bafybeicmpw5zf373ogbziqix2mj2bagmn5imgj3hy7347nulpmx32kooxe";
 pub const MODEL_LAB_CID: &str = "bafybeifh6dj5r5wc2j5kqxz6ukga74y3gi56woglqdzmmcdhqvy7qtljzq";
 pub const PROVIDER_VARIANT_A_LAB_CID: &str =
@@ -209,9 +209,9 @@ pub const WC001_CORE: Fixture = Fixture {
     files: &["capsule.json"],
 };
 
-/// The agent-host capsule's manifest and its declared asks, copied byte for
-/// byte from `examples/agent-host/`. Its entrypoint module is build output
-/// and is never committed, so it is not in the fixture.
+/// The agent-host manifest. Its declared maximum is `asks`: write, then read,
+/// on its journal. `asks.json` is still a payload file. The entrypoint module
+/// is build output and is never committed, so it is not in the fixture.
 pub const AGENT_HOST: Fixture = Fixture {
     name: "agent-host",
     files: &["capsule.json", "asks.json"],
