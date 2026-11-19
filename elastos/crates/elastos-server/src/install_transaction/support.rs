@@ -270,7 +270,16 @@ pub(super) fn require_original(tx: &InstallTransaction, entries: &[Entry]) -> an
 /// folder. A support path that is not a capsule folder keeps no record.
 pub(super) fn record_capsule_folders(tx: &InstallTransaction, entries: &[Entry]) {
     for entry in entries {
-        crate::setup::record_installed_capsule_folder(&tx.data_dir, &tx.data_dir.join(&entry.path));
+        let dest = tx.data_dir.join(&entry.path);
+        if entry.path == Path::new("capsules") {
+            if let Ok(children) = fs::read_dir(dest) {
+                for child in children.flatten() {
+                    crate::setup::record_installed_capsule_folder(&tx.data_dir, &child.path());
+                }
+            }
+        } else {
+            crate::setup::record_installed_capsule_folder(&tx.data_dir, &dest);
+        }
     }
 }
 

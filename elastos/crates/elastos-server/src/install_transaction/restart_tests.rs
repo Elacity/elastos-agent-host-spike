@@ -1362,17 +1362,14 @@ fn finished_restart_records_support_capsule_folders() {
     let fixture = RestartFixture::new();
     let destination = fixture.data.join("capsules/probe");
     let manifest = br#"{"schema":"elastos.capsule/v1","version":"0.1.0","name":"probe","role":"app","type":"wasm","entrypoint":"probe.wasm"}"#;
-    fs::create_dir_all(&destination).unwrap();
-    write_new(&destination.join("capsule.json"), manifest, 0o644).unwrap();
-    write_new(&destination.join("probe.wasm"), b"\0asm", 0o644).unwrap();
     let candidate = fixture.root.path().join("candidate-probe");
-    fs::create_dir_all(&candidate).unwrap();
-    write_new(&candidate.join("capsule.json"), manifest, 0o644).unwrap();
-    write_new(&candidate.join("probe.wasm"), b"\0asm\x01", 0o644).unwrap();
+    fs::create_dir_all(candidate.join("probe")).unwrap();
+    write_new(&candidate.join("probe/capsule.json"), manifest, 0o644).unwrap();
+    write_new(&candidate.join("probe/probe.wasm"), b"\0asm\x01", 0o644).unwrap();
     let writer = fixture.writer();
     prepare_release(&writer);
     writer
-        .prepare_support(&[(PathBuf::from("capsules/probe"), candidate)])
+        .prepare_support(&[(PathBuf::from("capsules"), candidate)])
         .unwrap();
     writer.prepare_restart(restart_plan()).unwrap();
     writer.commit_checked(|| Ok(())).unwrap();
