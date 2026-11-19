@@ -269,10 +269,22 @@ async fn start_wallet_provider_v2(
     status_timeout: Duration,
 ) -> anyhow::Result<()> {
     let bridge = Arc::clone(confined.bridge());
+    let wallet_provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::from_confined(confined, "wallet"));
+    check_and_register_wallet_provider_v2(registry, bridge, wallet_provider, status_timeout).await
+}
+
+/// Check the bounded status, then register the provider. A status or
+/// registration failure sends Shutdown, reaps the child, and reports both
+/// errors when the shutdown also fails.
+async fn check_and_register_wallet_provider_v2(
+    registry: &provider::ProviderRegistry,
+    bridge: Arc<provider::ProviderBridge>,
+    wallet_provider: Arc<dyn provider::Provider>,
+    status_timeout: Duration,
+) -> anyhow::Result<()> {
     let startup = async {
         check_wallet_provider_v2_status(&bridge, status_timeout).await?;
-        let wallet_provider: Arc<dyn provider::Provider> =
-            Arc::new(provider::CapsuleProvider::from_confined(confined, "wallet"));
         register_wallet_provider_v2(registry, wallet_provider).await
     }
     .await;
@@ -287,72 +299,80 @@ async fn start_wallet_provider_v2(
     Ok(())
 }
 
-/// Create and check the wallet storage parent the confined entry requires.
+/// The confined wallet entry has no spawn path on every OS but Linux, and the
+/// runtime refuses those starts before it opens any path. Return that refusal
+/// here first so a refused host leaves no `SystemServices` directory.
+fn wallet_confinement_refusal() -> Option<&'static str> {
+    #[cfg(all(target_os = "linux", not(elastos_unsupported_os_check)))]
+    {
+        None
+    }
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    {
+        Some("provider start on macos is refused: the Seatbelt profile has no spawn path yet")
+    }
+    #[cfg(any(
+        elastos_unsupported_os_check,
+        not(any(target_os = "macos", target_os = "linux"))
+    ))]
+    {
+        Some(
+            "provider start is refused: this operating system has no confinement, so the provider binary does not start",
+        )
+    }
+}
+
+/// Create the wallet storage parent at 0700 when missing, or tighten an
+/// existing directory of ours so the confined entry accepts it.
 ///
-/// `spawn_confined` creates `Wallet` only after opening an existing parent that
-/// is a non-symlink directory owned by the effective user with no group or
-/// other write permission. A fresh source Home creates only `ElastOS`, so the
-/// Runtime fills the `SystemServices` level here and refuses an existing parent
-/// it does not own or that others can write.
+/// `spawn_confined` creates `Wallet` at 0700 and opens its parent only when that
+/// parent is our non-symlink directory with no group or other write permission.
+/// A fresh source Home creates only `ElastOS`, while other services create
+/// `SystemServices` under the umask (0775 under umask 002), so the Runtime fills
+/// a missing level at 0700 and removes group and other write bits from an
+/// existing one, never widening anything. A non-directory is refused here; the
+/// ownership and permission checks stay in the confined entry.
 fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
     let parent = wallet_root
         .parent()
         .ok_or_else(|| anyhow::anyhow!("wallet storage root has no parent directory"))?;
     match std::fs::symlink_metadata(parent) {
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(parent).map_err(|err| {
-                anyhow::anyhow!(
-                    "cannot prepare wallet storage parent {}: {err}",
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() {
+                anyhow::bail!(
+                    "wallet storage parent is not a directory: {}",
                     parent.display()
-                )
-            })?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
-                    |err| {
+                );
+            }
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = metadata.permissions().mode();
+            if mode & 0o022 != 0 {
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(mode & !0o022))
+                    .map_err(|err| {
                         anyhow::anyhow!(
-                            "cannot set wallet storage parent {} to 0700: {err}",
+                            "cannot tighten wallet storage parent {}: {err}",
                             parent.display()
                         )
-                    },
-                )?;
+                    })?;
             }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(parent)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "cannot prepare wallet storage parent {}: {err}",
+                        parent.display()
+                    )
+                })?;
         }
         Err(err) => {
             return Err(anyhow::anyhow!(
                 "cannot inspect wallet storage parent {}: {err}",
                 parent.display()
             ))
-        }
-    }
-    let metadata = std::fs::symlink_metadata(parent).map_err(|err| {
-        anyhow::anyhow!(
-            "cannot inspect wallet storage parent {}: {err}",
-            parent.display()
-        )
-    })?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        anyhow::bail!(
-            "wallet storage parent is not a directory: {}",
-            parent.display()
-        );
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            anyhow::bail!(
-                "wallet storage parent is not owned by the effective user: {}",
-                parent.display()
-            );
-        }
-        if metadata.mode() & 0o022 != 0 {
-            anyhow::bail!(
-                "wallet storage parent is writable by group or other: {}",
-                parent.display()
-            );
         }
     }
     Ok(())
@@ -367,6 +387,9 @@ async fn start_wallet_provider(
     let Some(admitted) = binaries::AdmittedProvider::admit(data_dir, "wallet-provider")? else {
         return Ok(None);
     };
+    if let Some(refusal) = wallet_confinement_refusal() {
+        anyhow::bail!(refusal);
+    }
     let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
     prepare_wallet_storage_parent(&wallet_root)?;
     let wallet_config = provider::BridgeProviderConfig {
@@ -2502,18 +2525,42 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let data_dir = temp.path().join("data");
-        fs::create_dir_all(data_dir.join("ElastOS/SystemServices")).unwrap();
-        fs::set_permissions(
-            data_dir.join("ElastOS/SystemServices"),
-            fs::Permissions::from_mode(0o777),
-        )
-        .unwrap();
+        fs::create_dir_all(data_dir.join("ElastOS")).unwrap();
+        fs::write(data_dir.join("ElastOS/SystemServices"), b"not a directory").unwrap();
         let error = prepare_wallet_storage_parent(&data_dir.join("ElastOS/SystemServices/Wallet"))
             .unwrap_err();
-        assert!(
-            error.to_string().contains("writable by group or other"),
-            "{error}"
+        assert!(error.to_string().contains("not a directory"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn wallet_upgraded_home_with_group_writable_parent_still_starts() {
+        let (_temp, data_dir, _) = wallet_fixture();
+        let parent = data_dir.join("ElastOS/SystemServices");
+        // Another service creates the shared level with `create_dir_all` under umask 002.
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o775)).unwrap();
+        let wallet_root = parent.join("Wallet");
+        prepare_wallet_storage_parent(&wallet_root).unwrap();
+        let mode = fs::symlink_metadata(&parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "group and other write bits are removed and owner rwx is kept"
         );
+
+        #[cfg(target_os = "linux")]
+        {
+            let registry = provider::ProviderRegistry::new();
+            let bridge =
+                start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(registry
+                .registration_for_uri("elastos://wallet/status")
+                .await
+                .is_some());
+            bridge.shutdown().await.unwrap();
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -2572,17 +2619,13 @@ mod tests {
     async fn wallet_unsuitable_parent_leaves_route_absent() {
         let (_temp, data_dir, _) = wallet_fixture();
         let parent = data_dir.join("ElastOS/SystemServices");
-        fs::create_dir(&parent).unwrap();
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+        fs::write(&parent, b"not a directory").unwrap();
         let registry = provider::ProviderRegistry::new();
         let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
             .await
             .err()
             .unwrap();
-        assert!(
-            error.to_string().contains("writable by group or other"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("not a directory"), "{error}");
         assert!(registry
             .registration_for_uri("elastos://wallet/status")
             .await
@@ -2636,6 +2679,7 @@ mod tests {
             .is_none());
         assert!(!data_dir.join("marker").exists());
         assert!(!wallet_root.exists());
+        assert!(!data_dir.join("ElastOS/SystemServices").exists());
         assert!(!wallet_root.join("child.pid").exists());
         #[cfg(elastos_unsupported_os_check)]
         assert!(
@@ -3074,6 +3118,35 @@ mod tests {
 
             provider.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn wallet_provider_v2_status_failure_reaps_the_provider() {
+        let registry = provider::ProviderRegistry::new();
+        let (bridge, provider) =
+            test_provider_bridge(provider_status("wallet-provider", "1.0"), Duration::ZERO);
+        let wallet_provider: Arc<dyn provider::Provider> = Arc::new(
+            provider::CapsuleProvider::with_scheme(Arc::clone(&bridge), "wallet"),
+        );
+
+        let error = check_and_register_wallet_provider_v2(
+            &registry,
+            bridge,
+            wallet_provider,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported"), "{error}");
+        assert!(registry
+            .registration_for_uri("elastos://wallet/status")
+            .await
+            .is_none());
+        let requests = provider.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["op"], "status");
+        assert_eq!(requests[1]["op"], "shutdown");
     }
 
     #[tokio::test(start_paused = true)]
