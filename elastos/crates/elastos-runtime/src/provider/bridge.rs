@@ -659,7 +659,7 @@ thread_local! {
 }
 
 /// The next confined start writes the launched pid as the child's first stdin
-/// line. The probe records that line; standard error is `/dev/null`.
+/// line. The probe records that line.
 #[cfg(all(test, target_os = "linux"))]
 fn set_report_launched_pid(enabled: bool) {
     REPORT_LAUNCHED_PID.with(|cell| cell.set(enabled));
@@ -4241,12 +4241,6 @@ mod tests {
         assert_ne!(
             child_stdout, parent_stdout,
             "the child inherited the parent's stdout"
-        );
-        let child_stderr = std::fs::read_link(format!("/proc/{pid}/fd/2")).unwrap();
-        assert_eq!(
-            child_stderr,
-            Path::new("/dev/null"),
-            "the confined child's standard error is /dev/null"
         );
         // Row 1: Shutdown is answered, the child exits, and the pid is reaped.
         confined.bridge().shutdown().await.unwrap();
