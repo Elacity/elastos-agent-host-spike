@@ -127,11 +127,15 @@ fn agent_plan_step(plan: &Value) -> anyhow::Result<Value> {
     if let Some(field) = super::super::provider_proxy_runtime_metadata_field(&body) {
         anyhow::bail!("agent plan step request must not predeclare Runtime metadata field {field}");
     }
-    Ok(json!({
+    let canonical_step = json!({
         "scheme": scheme,
         "operation": operation,
         "request": body,
-    }))
+    });
+    if plan != &json!({ "steps": [canonical_step.clone()] }) {
+        anyhow::bail!("agent plan must match the typed step exactly");
+    }
+    Ok(canonical_step)
 }
 
 #[cfg(test)]
@@ -223,6 +227,26 @@ mod tests {
         assert!(pending_inspect_action_requests(dir.path(), PRINCIPAL)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn a15r_record_requires_the_exact_submitted_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = status_plan(json!({}));
+        plan["note"] = json!("plan note");
+        plan["steps"][0]["note"] = json!("step note");
+
+        let refused = create_pending_agent_plan_record(dir.path(), &context(), &plan, 11);
+        assert!(refused.is_err());
+        assert!(!dir.path().join("inspect-actions").exists());
+
+        let exact =
+            create_pending_agent_plan_record(dir.path(), &context(), &status_plan(json!({})), 11)
+                .unwrap();
+        assert!(dir
+            .path()
+            .join(format!("inspect-actions/{}.json", exact.request_id))
+            .is_file());
     }
 
     #[test]

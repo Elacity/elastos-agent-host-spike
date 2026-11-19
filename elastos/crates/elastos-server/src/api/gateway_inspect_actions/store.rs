@@ -91,6 +91,9 @@ pub(super) fn claim_pending_inspect_action_record(
 ) -> anyhow::Result<InspectActionRequestRecord> {
     let _guard = inspect_action_store_lock()?;
     let mut record = read_inspect_action_record_unlocked(data_dir, request_id)?;
+    if record.kind != INSPECT_ACTION_KIND {
+        anyhow::bail!("Inspector action request has a different kind");
+    }
     if record.status != "pending" {
         anyhow::bail!("Inspector action request is not pending");
     }
@@ -244,5 +247,45 @@ mod tests {
                 .status,
             "approving"
         );
+    }
+
+    #[test]
+    fn inspector_claim_selects_inspect_action_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = pending_record("agent-plan-test");
+        plan.kind = AGENT_PLAN_KIND.to_string();
+        plan.request_binding = Some(inspect_action_request_binding(
+            &plan.request_id,
+            &plan.principal_id,
+            &plan.id,
+            &plan.operation,
+            &plan.plan,
+            &plan.request,
+        ));
+        write_inspect_action_record(dir.path(), &plan).unwrap();
+
+        assert!(claim_pending_inspect_action_record(
+            dir.path(),
+            &plan.request_id,
+            &plan.principal_id,
+            "denied",
+            2,
+        )
+        .is_err());
+        let stored = read_inspect_action_record(dir.path(), &plan.request_id).unwrap();
+        assert_eq!(stored.status, "pending");
+        assert_eq!(stored.updated_at, 1);
+
+        let action = pending_record("inspect-action-test");
+        write_inspect_action_record(dir.path(), &action).unwrap();
+        let claimed = claim_pending_inspect_action_record(
+            dir.path(),
+            &action.request_id,
+            &action.principal_id,
+            "denied",
+            2,
+        )
+        .unwrap();
+        assert_eq!(claimed.status, "denied");
     }
 }
