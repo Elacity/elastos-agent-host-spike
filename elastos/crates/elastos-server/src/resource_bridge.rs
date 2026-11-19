@@ -4049,6 +4049,73 @@ mod tests {
         );
     }
 
+    /// A read grant allows localhost read and refuses localhost write.
+    /// The required right is the one `resource_invoke_dispatch` took from the
+    /// localhost row, checked by `CapabilityManager::validate`.
+    #[tokio::test]
+    async fn a_read_grant_refuses_a_localhost_write() {
+        let ctx = bridge_context();
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/a.md";
+        let read = resource_invoke_dispatch(
+            &serde_json::json!({
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "body": {}
+            }),
+            None,
+            None,
+        )
+        .expect("localhost read reaches the capability check");
+        let write = resource_invoke_dispatch(
+            &serde_json::json!({
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "write",
+                "body": {"content": "page"}
+            }),
+            None,
+            None,
+        )
+        .expect("localhost write reaches the capability check");
+        assert_eq!(read.resource, write.resource);
+
+        let token = ctx.capability_manager.grant(
+            &ctx.capsule_id,
+            ResourceId::new(&read.resource),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        ctx.capability_manager
+            .validate(
+                &token,
+                &ctx.capsule_id,
+                read.required_action,
+                &ResourceId::new(&read.resource),
+                None,
+            )
+            .await
+            .expect("a read grant allows localhost read");
+        let refused = ctx
+            .capability_manager
+            .validate(
+                &token,
+                &ctx.capsule_id,
+                write.required_action,
+                &ResourceId::new(&write.resource),
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(elastos_runtime::capability::manager::ValidationError::WrongAction { .. })
+            ),
+            "a read grant refuses localhost write: {refused:?}"
+        );
+    }
+
     #[test]
     fn resource_invoke_dispatch_rejects_unscoped_current_user_alias() {
         let result = resource_invoke_dispatch(
