@@ -23,13 +23,17 @@ use crate::runtime::tests::{
 };
 use crate::runtime::Runtime;
 use crate::stage_cmd::{bundle_cid, stage_bundle};
+use axum::body::Body;
+use axum::http::{header::AUTHORIZATION, Request, StatusCode};
 use elastos_bundle_identity::Budget;
 use elastos_runtime::capability::pending::{GrantDuration, PendingRequestStore};
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityStore, TokenConstraints};
 use elastos_runtime::primitives::audit::AuditLog;
 use elastos_runtime::primitives::metrics::MetricsManager;
 use elastos_runtime::provider::ProviderRegistry;
+use elastos_runtime::session::{SessionRegistry, SessionType};
 use std::time::Duration;
+use tower::ServiceExt;
 
 /// One call a component made to the bridge: the capsule's id, the principal
 /// it ran for, and the ceiling recorded for it at that moment.
@@ -209,6 +213,7 @@ struct RealBridge {
     dir: tempfile::TempDir,
     pending: Arc<PendingRequestStore>,
     capabilities: Arc<CapabilityManager>,
+    store: Arc<CapabilityStore>,
     provider: Arc<BusConformanceProvider>,
 }
 
@@ -228,8 +233,9 @@ impl RealBridge {
             Some(Arc::new(ComponentProvider::new())),
         ));
         let audit_log = Arc::new(AuditLog::new());
+        let store = Arc::new(CapabilityStore::new());
         let capabilities = Arc::new(CapabilityManager::new(
-            Arc::new(CapabilityStore::new()),
+            store.clone(),
             audit_log.clone(),
             Arc::new(MetricsManager::new()),
         ));
@@ -258,8 +264,24 @@ impl RealBridge {
             dir,
             pending,
             capabilities,
+            store,
             provider,
         }
+    }
+
+    /// Stage a bundle whose entrypoint is `bytes`, signed by `key`.
+    async fn staged_bytes(
+        &self,
+        name: &str,
+        manifest: &str,
+        bytes: &[u8],
+        key: &SigningKey,
+    ) -> String {
+        let folder = self.dir.path().join("source").join(name);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("capsule.json"), manifest).unwrap();
+        fs::write(folder.join(ENTRYPOINT), bytes).unwrap();
+        self.stage(&folder, key).await
     }
 
     fn data(&self) -> PathBuf {
@@ -424,6 +446,48 @@ fn calling_component() -> Vec<u8> {
             .join("../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"),
     )
     .unwrap()
+}
+
+/// One read of [`PROBE`], then the invoke of that read, for whatever principal
+/// the launch bound. The bus fixture returns before it calls unless it runs
+/// as [`PERSON`], and a Home token names this Home's device.
+fn probe_component() -> Vec<u8> {
+    // The model guest already asks and invokes once. Its resource is 22 bytes
+    // and its invoke names `offers_list`; the probe is 24 bytes and the read
+    // is the operation the test provider records.
+    assert_eq!(PROBE.len(), 24, "the length immediate below");
+    let source = include_str!("../../../tests/fixtures/components/non-agent-model.wat");
+    let source = source.replace("elastos://model/offers", PROBE);
+    let source = source.replace("i32.const 22", "i32.const 24");
+    let source = source.replace(
+        "i32.const 296\n      i32.const 11",
+        "i32.const 288\n      i32.const 4",
+    );
+    // A refused request is a bus error in the guest's memory. Returning that
+    // error is what puts its text in the open's body. The fixture traps
+    // instead, and a trap names neither the denial nor the seal.
+    let source = source.replace(
+        "i32.const 512\n      i32.load8_u\n      if unreachable end",
+        "i32.const 512\n      i32.load8_u\n      if\n        \
+         i32.const 900\n        i32.const 1\n        i32.store8\n        \
+         i32.const 904\n        i32.const 512\n        i32.load8_u offset=8\n        i32.store8\n        \
+         i32.const 908\n        i32.const 512\n        i32.load offset=12\n        i32.store\n        \
+         i32.const 912\n        i32.const 512\n        i32.load offset=16\n        i32.store\n        \
+         i32.const 900\n        return\n      end",
+    );
+    let source = source.replace(
+        "i32.const 768\n      i32.load8_u\n      if unreachable end",
+        "i32.const 768\n      i32.load8_u\n      if\n        \
+         i32.const 900\n        i32.const 1\n        i32.store8\n        \
+         i32.const 904\n        i32.const 768\n        i32.load8_u offset=4\n        i32.store8\n        \
+         i32.const 908\n        i32.const 768\n        i32.load offset=8\n        i32.store\n        \
+         i32.const 912\n        i32.const 768\n        i32.load offset=12\n        i32.store\n        \
+         i32.const 900\n        return\n      end",
+    );
+    assert_eq!(source.matches("i32.const 24").count(), 2);
+    assert!(source.contains("i32.const 288\n      i32.const 4"));
+    assert_eq!(source.matches("unreachable").count(), 0);
+    wat::parse_str(&source).expect("probe component")
 }
 
 fn code(result: Result<(String, String), BundleRefusal>) -> &'static str {
@@ -3942,4 +4006,308 @@ async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tamper
         String::from_utf8_lossy(&body)
     );
     assert_eq!(home.runtime.kept_launch_count(), 1, "nothing new kept");
+}
+
+/// One request to the router `elastos serve` builds.
+async fn http(
+    app: &axum::Router,
+    shell: &str,
+    method: &str,
+    uri: &str,
+    home: Option<&str>,
+    body: Option<&str>,
+) -> (StatusCode, String) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(AUTHORIZATION, format!("Bearer {shell}"));
+    if let Some(token) = home {
+        request = request.header("x-elastos-home-token", token);
+    }
+    let text = body.unwrap_or("");
+    if !text.is_empty() {
+        request = request.header("content-type", "application/json");
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::from(text.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `events` from `GET /api/audit?type=capability_grant`, kept when they name
+/// `session`. An empty session keeps every one: a grant with no pending
+/// request still has to show up here.
+fn grants_for(events: &[serde_json::Value], session: &str) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter(|event| session.is_empty() || event["capsule_id"] == session)
+        .cloned()
+        .collect()
+}
+
+/// The real bridge, a shell session, and the router `elastos serve` builds
+/// from those same stores, with the person's Home token.
+struct ServerHome {
+    bridge: RealBridge,
+    app: axum::Router,
+    shell_token: String,
+    shell_id: String,
+    home_token: String,
+}
+
+impl ServerHome {
+    async fn trusting(key: &SigningKey) -> ServerHome {
+        let bridge = RealBridge::trusting(&[key]).await;
+        let sessions = Arc::new(SessionRegistry::new(
+            bridge.capabilities.audit_log().clone(),
+        ));
+        let shell = sessions.create_session(SessionType::Shell, None).await;
+        let app = crate::api::server::tests::test_server(
+            bridge.runtime.clone(),
+            sessions,
+            bridge.capabilities.clone(),
+            bridge.store.clone(),
+            bridge.pending.clone(),
+            Some(bridge.data()),
+        );
+        let home_token = crate::api::routes::kept_launch_test_tokens::home(&bridge.data());
+        ServerHome {
+            bridge,
+            app,
+            shell_token: shell.token,
+            shell_id: shell.id.to_string(),
+            home_token,
+        }
+    }
+
+    async fn call(&self, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, String) {
+        http(&self.app, &self.shell_token, method, uri, None, body).await
+    }
+
+    async fn json(&self, method: &str, uri: &str) -> serde_json::Value {
+        let (status, text) = self.call(method, uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{method} {uri}: {text}");
+        serde_json::from_str(&text).unwrap_or_else(|_| panic!("{method} {uri}: {text}"))
+    }
+
+    async fn view(&self) -> Vec<serde_json::Value> {
+        let body = self
+            .json("GET", "/api/capability/list?scope=all_sessions_live")
+            .await;
+        body["capabilities"].as_array().cloned().unwrap_or_default()
+    }
+
+    async fn pending(&self) -> Vec<serde_json::Value> {
+        let body = self.json("GET", "/api/capability/pending").await;
+        body["requests"].as_array().cloned().unwrap_or_default()
+    }
+
+    async fn grants(&self) -> Vec<serde_json::Value> {
+        let body = self
+            .json("GET", "/api/audit?type=capability_grant&limit=100")
+            .await;
+        body["events"].as_array().cloned().unwrap_or_default()
+    }
+
+    fn spawn_open(&self, cid: &str) -> tokio::task::JoinHandle<(StatusCode, String)> {
+        let (app, shell, token) = (
+            self.app.clone(),
+            self.shell_token.clone(),
+            self.home_token.clone(),
+        );
+        let body = serde_json::json!({"cid": cid}).to_string();
+        tokio::spawn(async move {
+            http(
+                &app,
+                &shell,
+                "POST",
+                "/api/launch/open",
+                Some(&token),
+                Some(&body),
+            )
+            .await
+        })
+    }
+}
+
+/// Content whose core is `component` under `manifest`, signed by `key`.
+async fn stage_content(
+    bridge: &RealBridge,
+    key: &SigningKey,
+    label: &str,
+    manifest: &str,
+    component: &[u8],
+) -> String {
+    let core = bridge
+        .staged_bytes(&format!("{label}-core"), manifest, component, key)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = bridge
+        .staged_bytes(&format!("{label}-page"), &page, b"a page", key)
+        .await;
+    let content = content_manifest(label, &[("page", &page)]).to_string();
+    bridge
+        .staged_bytes(&format!("{label}-content"), &content, b"a picture", key)
+        .await
+}
+
+async fn wait_for_request(
+    home: &ServerHome,
+    open: &tokio::task::JoinHandle<(StatusCode, String)>,
+) -> Vec<serde_json::Value> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    loop {
+        let pending = home.pending().await;
+        let stopped = !pending.is_empty() || open.is_finished();
+        if stopped || std::time::Instant::now() >= deadline {
+            return pending;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// B1-R. A trusted publisher's signature admits a start by CID on the server
+/// Home and grants nothing. While the core waits on its one read of the
+/// probe, the live view is empty and the audit log has no grant for that
+/// session; the shell's denial leaves both empty and the provider unseen; a
+/// core that asks nothing stays sealed and files no request; the grant the
+/// shell then makes is the one grant the view lists, and the provider sees
+/// that one read.
+#[tokio::test]
+async fn a_valid_signature_grants_nothing_on_the_server_home() {
+    let publisher = key(104);
+    let home = ServerHome::trusting(&publisher).await;
+    let probe = probe_component();
+    let asks = serde_json::json!([{"resource": PROBE, "actions": ["read"]}]);
+    let asking = manifest_with("core", "asks", asks);
+    let asking = stage_content(&home.bridge, &publisher, "asking", &asking, &probe).await;
+    let sealed_manifest = manifest("core");
+    let sealed = stage_content(&home.bridge, &publisher, "sealed", &sealed_manifest, &probe).await;
+
+    let before = home.view().await;
+    assert!(
+        before.is_empty(),
+        "before the open the live view is empty: {before:?}"
+    );
+
+    let open = home.spawn_open(&asking);
+    let pending = wait_for_request(&home, &open).await;
+    let view = home.view().await;
+    assert!(
+        view.is_empty(),
+        "a signature grants nothing: the live view lists {view:?}"
+    );
+    let session = pending
+        .first()
+        .and_then(|row| row["session_id"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let grants = grants_for(&home.grants().await, &session);
+    assert!(
+        grants.is_empty(),
+        "a signature grants nothing: the audit log has a capability_grant {grants:?}"
+    );
+    assert_eq!(pending.len(), 1, "the core files one request: {pending:?}");
+    assert_eq!(pending[0]["resource"], PROBE);
+    assert_eq!(pending[0]["action"], "read");
+    assert_ne!(
+        pending[0]["session_id"].as_str(),
+        Some(home.shell_id.as_str()),
+        "the request is the core's, not the shell's"
+    );
+    assert!(
+        home.bridge.provider.requests.lock().await.is_empty(),
+        "the provider has seen nothing"
+    );
+    assert_eq!(
+        home.bridge.runtime.ceiling_of(&session),
+        Some(vec![format!("{PROBE} [read]")]),
+        "the ceiling is the manifest's asks"
+    );
+
+    let deny = serde_json::json!({
+        "request_id": pending[0]["request_id"],
+        "reason": "no"
+    })
+    .to_string();
+    let (status, text) = home.call("POST", "/api/capability/deny", Some(&deny)).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let (status, text) = tokio::time::timeout(Duration::from_secs(10), open)
+        .await
+        .expect("the denied open ends")
+        .unwrap();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(text.contains("denied"), "{text}");
+    let after = home.view().await;
+    assert!(
+        after.is_empty(),
+        "after the denial the live view stays empty: {after:?}"
+    );
+    let grants = grants_for(&home.grants().await, &session);
+    assert!(grants.is_empty(), "the denial writes no grant: {grants:?}");
+    assert!(
+        home.bridge.provider.requests.lock().await.is_empty(),
+        "the provider has still seen nothing"
+    );
+
+    let body = serde_json::json!({"cid": sealed}).to_string();
+    let (status, text) = http(
+        &home.app,
+        &home.shell_token,
+        "POST",
+        "/api/launch/open",
+        Some(&home.home_token),
+        Some(&body),
+    )
+    .await;
+    let pending = home.pending().await;
+    let view = home.view().await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(
+        pending.is_empty() && text.contains(SEALED_BRIDGE) && view.is_empty(),
+        "a capsule that asks nothing files no request and stays sealed: pending={pending:?} view={view:?} body={text}"
+    );
+
+    let open = home.spawn_open(&asking);
+    let pending = wait_for_request(&home, &open).await;
+    assert_eq!(
+        pending.len(),
+        1,
+        "the control files one request: {pending:?}"
+    );
+    let session = pending[0]["session_id"].as_str().unwrap().to_string();
+    let grant = serde_json::json!({
+        "request_id": pending[0]["request_id"],
+        "duration": "session"
+    })
+    .to_string();
+    let (status, text) = home
+        .call("POST", "/api/capability/grant", Some(&grant))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let (status, text) = tokio::time::timeout(Duration::from_secs(10), open)
+        .await
+        .expect("the granted open ends")
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let opened: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(opened["page"], "page");
+    let view = home.view().await;
+    assert_eq!(
+        view.len(),
+        1,
+        "the live view lists the shell's one grant: {view:?}"
+    );
+    assert_eq!(view[0]["session_id"], session);
+    assert_eq!(view[0]["resource"], PROBE);
+    assert_eq!(view[0]["action"], "read");
+    let seen = home.bridge.provider.requests.lock().await.clone();
+    assert_eq!(seen.len(), 1, "the provider sees one read: {seen:?}");
+    assert_eq!(seen[0]["op"], "read");
 }
