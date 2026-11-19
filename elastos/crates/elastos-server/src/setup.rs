@@ -1527,7 +1527,7 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
     let dest = data_dir.join(install_path);
     download_component(data_dir, &row, &dest, FirstPartyCarrierContext::Runtime).await?;
     write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)?;
-    record_install_cid(&dest, &dest);
+    record_install_cid(data_dir, &dest, &dest);
     drop(admitted);
 
     let installed_manifest = dest.join("capsule.json");
@@ -2705,8 +2705,7 @@ fn bare_sha256(checksum: &str) -> &str {
 /// Runtime's bundle walk gave for that folder when an install wrote it. It
 /// sits outside the folder, so a later walk of the folder names the same bytes.
 pub(crate) fn install_cid_record(dir: &Path) -> anyhow::Result<PathBuf> {
-    let name = dir
-        .file_name()
+    let name = folder_name(dir)
         .ok_or_else(|| anyhow::anyhow!("capsule folder {} has no name", dir.display()))?;
     let mut record = std::ffi::OsString::from(".");
     record.push(name);
@@ -2714,39 +2713,104 @@ pub(crate) fn install_cid_record(dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(dir.with_file_name(record))
 }
 
-/// The CID recorded beside `dir` by an install of it, if one was written.
-/// An absent or unreadable record, and one that holds no CID, give `None`.
-pub(crate) fn recorded_install_cid(dir: &Path) -> Option<String> {
-    let record = install_cid_record(dir).ok()?;
-    let text = fs::read_to_string(record).ok()?;
-    let cid = text.trim();
-    (!cid.is_empty()).then(|| cid.to_string())
+/// The last name of `dir`, with `.` and a trailing separator resolved, so a
+/// folder named as the current directory still has one.
+fn folder_name(dir: &Path) -> Option<std::ffi::OsString> {
+    fs::canonicalize(dir)
+        .ok()
+        .and_then(|canonical| canonical.file_name().map(|name| name.to_owned()))
+        .or_else(|| dir.file_name().map(|name| name.to_owned()))
+}
+
+/// The Home's own record of installed capsule folders: for each one, its
+/// canonical path and the walk CID its install recorded. The Home reads this
+/// file, not a file beside the folder, so the folder's parent directory alone
+/// cannot name an install.
+fn install_cid_ledger(data_dir: &Path) -> PathBuf {
+    data_dir.join("capsules").join("install-cids.json")
+}
+
+/// The canonical path of `dir`, whether or not it exists yet: a path whose
+/// last name does not exist is keyed under its canonical parent.
+fn canonical_install_folder(dir: &Path) -> Option<PathBuf> {
+    fs::canonicalize(dir).ok().or_else(|| {
+        let parent = fs::canonicalize(dir.parent()?).ok()?;
+        Some(parent.join(dir.file_name()?))
+    })
+}
+
+fn read_install_cid_ledger(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    fs::read_to_string(install_cid_ledger(data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// The CID an install of `dir` recorded in the Home at `data_dir`, matched on
+/// that Home's canonical path for the folder. An absent or unreadable ledger,
+/// and one with no row for the folder, give `None`.
+pub(crate) fn recorded_install_cid(data_dir: &Path, dir: &Path) -> Option<String> {
+    let key = canonical_install_folder(dir)?;
+    read_install_cid_ledger(data_dir)
+        .get(key.to_string_lossy().as_ref())
+        .cloned()
+}
+
+/// Points the Home's ledger row for `dir` at `cid`, or removes the row when
+/// `cid` is `None`. The file is written from a new, randomly named file in one
+/// rename, so a link at the path is replaced, not followed.
+fn write_install_cid_ledger(data_dir: &Path, dir: &Path, cid: Option<&str>) -> anyhow::Result<()> {
+    let path = install_cid_ledger(data_dir);
+    let parent = path.parent().context("install CID ledger has no parent")?;
+    fs::create_dir_all(parent)?;
+    let key = canonical_install_folder(dir)
+        .context("install CID ledger has no folder key")?
+        .to_string_lossy()
+        .into_owned();
+    let mut entries = read_install_cid_ledger(data_dir);
+    match cid {
+        Some(cid) => entries.insert(key, cid.to_string()),
+        None => entries.remove(&key),
+    };
+    let mut scratch = tempfile::Builder::new()
+        .prefix("install-cids.")
+        .tempfile_in(parent)?;
+    serde_json::to_writer_pretty(&mut scratch, &entries)?;
+    scratch.as_file().sync_all()?;
+    scratch.persist(&path).map_err(|err| err.error)?;
+    sync_path(parent)?;
+    Ok(())
 }
 
 /// Records the walk CID of `walked`, its extracted bytes and receipts, as the
-/// install CID of `dir`, the folder the install places them at. The install
-/// goes on when the record cannot be written, and then keeps no record.
-pub(crate) fn record_install_cid(walked: &Path, dir: &Path) {
-    if let Err(err) = write_install_cid(walked, dir) {
+/// install CID of `dir`, the folder the install places them at, in the Home at
+/// `data_dir`. The install goes on when the record cannot be written, and then
+/// keeps no record.
+pub(crate) fn record_install_cid(data_dir: &Path, walked: &Path, dir: &Path) {
+    if let Err(err) = write_install_cid(data_dir, walked, dir) {
         eprintln!("  No install CID record for {} ({err:#})", dir.display());
         if let Ok(record) = install_cid_record(dir) {
             let _ = fs::remove_file(record);
         }
+        let _ = write_install_cid_ledger(data_dir, dir, None);
     }
 }
 
-/// Writes the record from a new, randomly named file beside it in one rename,
-/// so a link at the record path is replaced, not followed. A folder the walk
-/// refuses keeps no record.
-pub(crate) fn write_install_cid(walked: &Path, dir: &Path) -> anyhow::Result<()> {
+/// Writes the Home's ledger row and the file beside the folder, the Home's
+/// record being the one a start reads. A folder the walk refuses keeps no
+/// record.
+pub(crate) fn write_install_cid(data_dir: &Path, walked: &Path, dir: &Path) -> anyhow::Result<()> {
     use crate::bundle_admission::BUNDLE_WALK_BUDGET;
     let record = install_cid_record(dir)?;
     let bundle = match elastos_bundle_identity::checked_bundle_within(walked, BUNDLE_WALK_BUDGET) {
         Ok(bundle) => bundle,
-        Err(_) => match fs::remove_file(&record) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
-            _ => return Ok(()),
-        },
+        Err(_) => {
+            match fs::remove_file(&record) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
+                _ => {}
+            }
+            return write_install_cid_ledger(data_dir, dir, None);
+        }
     };
     let parent = record
         .parent()
@@ -2760,7 +2824,7 @@ pub(crate) fn write_install_cid(walked: &Path, dir: &Path) -> anyhow::Result<()>
     scratch.as_file().sync_all()?;
     scratch.persist(&record).map_err(|err| err.error)?;
     sync_path(parent)?;
-    Ok(())
+    write_install_cid_ledger(data_dir, dir, Some(&bundle.cid().to_string()))
 }
 
 fn write_platform_cache_metadata(platform_info: &PlatformInfo, dest: &Path) -> anyhow::Result<()> {
@@ -7479,6 +7543,20 @@ pub(crate) mod tests {
         assert_eq!(
             fs::read(install_root.join("marketplace.wasm")).unwrap(),
             b"\0asm"
+        );
+    }
+
+    /// A folder named as the current directory still has the record path of
+    /// the folder it names, so a start in that directory can be recorded.
+    #[test]
+    fn install_cid_record_names_a_folder_named_as_the_current_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("capsules/marketplace");
+        fs::create_dir_all(&folder).unwrap();
+        let record = install_cid_record(&folder.join(".")).unwrap();
+        assert_eq!(
+            record,
+            tmp.path().join("capsules/.marketplace.elastos-install-cid")
         );
     }
 

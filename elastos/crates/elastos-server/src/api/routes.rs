@@ -1216,7 +1216,7 @@ pub(crate) mod tests {
             // The bytes are final: the folder the probe starts is the one an
             // install recorded here, and the stored host CID is the one walk
             // the Runtime makes of exactly these files.
-            crate::setup::record_install_cid(&capsule_dir, &capsule_dir);
+            crate::setup::record_install_cid(&data_dir, &capsule_dir, &capsule_dir);
             let probe_cid = crate::stage_cmd::bundle_cid(&capsule_dir)
                 .expect("the probe host bundle is walkable");
             let agents = names
@@ -6039,7 +6039,7 @@ pub(crate) mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        crate::setup::record_install_cid(&dir, &dir);
+        crate::setup::record_install_cid(&data_dir, &dir, &dir);
 
         let grants = grant_probe_requests(pending_store, capability_manager);
         let launched = tokio::time::timeout(

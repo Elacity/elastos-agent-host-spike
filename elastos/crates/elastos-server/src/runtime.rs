@@ -184,10 +184,12 @@ enum UnsignedCapsules {
 }
 
 /// A component folder start outside dev mode, as the folder gate's one walk
-/// read it: the CID that names the bytes, the entrypoint bytes from that same
-/// walk, and the data dir whose by-CID store may accept the CID. `None` for
-/// the data dir is a Runtime with no configured Home store.
+/// read it: the manifest that walk read from `capsule.json`, the CID that
+/// names the bytes, the entrypoint bytes from that same walk, and the data dir
+/// whose by-CID store may accept the CID. `None` for the data dir is a Runtime
+/// with no configured Home store.
 struct FolderStart {
+    manifest: CapsuleManifest,
     cid: LabCid,
     entrypoint: Vec<u8>,
     data_dir: Option<PathBuf>,
@@ -1004,18 +1006,28 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(CapsuleHandle, Signer)> {
-        self.run_signer(path, args, principal_id, None, LaunchMode::Bounded, |_| {})
-            .await
+        self.run_signer(
+            path,
+            args,
+            principal_id,
+            None,
+            LaunchMode::Bounded,
+            (|_| {}, |_| {}),
+        )
+        .await
     }
 
-    /// [`Self::run_local_with_signer`] with the moment after the folder
-    /// gate's one walk. Tests change the folder there, as another process
-    /// could, and show that the bytes that load are the walked ones.
+    /// [`Self::run_local_with_signer`] with the moments around the folder
+    /// gate's one walk. Tests change the folder before the walk, as another
+    /// process could, to show that the manifest the gate checks and the bytes
+    /// that load are the ones that one walk read; and after the walk to show
+    /// that nothing reads the folder again.
     #[cfg(test)]
     pub(crate) async fn run_local_with_signer_observed(
         &self,
         path: &Path,
         args: Vec<String>,
+        before_folder_walk: impl FnOnce(&Path) + Send,
         after_folder_walk: impl FnOnce(&CheckedBundle) + Send,
     ) -> Result<(CapsuleHandle, Signer)> {
         self.run_signer(
@@ -1024,7 +1036,7 @@ impl Runtime {
             None,
             None,
             LaunchMode::Bounded,
-            after_folder_walk,
+            (before_folder_walk, after_folder_walk),
         )
         .await
     }
@@ -1039,8 +1051,15 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(CapsuleHandle, Signer)> {
-        self.run_signer(path, args, principal_id, None, LaunchMode::Detached, |_| {})
-            .await
+        self.run_signer(
+            path,
+            args,
+            principal_id,
+            None,
+            LaunchMode::Detached,
+            (|_| {}, |_| {}),
+        )
+        .await
     }
 
     /// The same start for a launch that admitted its principal. `actor` is the
@@ -1091,7 +1110,7 @@ impl Runtime {
             Some(actor),
             Some((manifest, entrypoint, ceiling)),
             mode,
-            |_| {},
+            (|_| {}, |_| {}),
         )
         .await
     }
@@ -1107,8 +1126,12 @@ impl Runtime {
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
         admitted: Option<(CapsuleManifest, Vec<u8>, u64)>,
         mode: LaunchMode,
-        after_folder_walk: impl FnOnce(&CheckedBundle) + Send,
+        walk_hooks: (
+            impl FnOnce(&Path) + Send,
+            impl FnOnce(&CheckedBundle) + Send,
+        ),
     ) -> Result<(CapsuleHandle, Signer)> {
+        let (before_folder_walk, after_folder_walk) = walk_hooks;
         let admitted_launch = admitted.is_some();
         if !admitted_launch {
             crate::agent_admission::refuse_unadmitted_agent_principal(
@@ -1124,7 +1147,7 @@ impl Runtime {
             }
             None => (None, None, None),
         };
-        let manifest: CapsuleManifest = match manifest {
+        let mut manifest: CapsuleManifest = match manifest {
             Some(manifest) => {
                 manifest.validate().map_err(ElastosError::InvalidManifest)?;
                 manifest
@@ -1155,6 +1178,21 @@ impl Runtime {
                 manifest
             }
         };
+
+        // A component folder start outside dev mode makes one walk of the
+        // folder here. The manifest the checks below, the gate and the load
+        // use is the `capsule.json` that walk read, never a second read of
+        // the file. Dev mode walks nothing and keeps the manifest read above.
+        let folder_start = if manifest.is_component_capsule() && !admitted_launch {
+            self.walk_folder_start(path, before_folder_walk, after_folder_walk)
+                .await?
+        } else {
+            None
+        };
+        if let Some(start) = &folder_start {
+            manifest = start.manifest.clone();
+        }
+
         if let Some(ceiling) = admitted_ceiling {
             if manifest.resources.model_token_ceiling() != ceiling {
                 return Err(ElastosError::InvalidManifest(
@@ -1193,12 +1231,6 @@ impl Runtime {
         // import check and the compiler below all use these same bytes: the
         // walked ones for an admitted launch, and the ones the folder gate's
         // one walk read otherwise outside dev mode.
-        let folder_start = if manifest.is_component_capsule() && !admitted_launch {
-            self.walk_folder_start(path, &manifest, after_folder_walk)
-                .await?
-        } else {
-            None
-        };
         let (folder_cid, folder_data_dir) = match &folder_start {
             Some(start) => (Some(start.cid), start.data_dir.clone()),
             None => (None, None),
@@ -1232,9 +1264,10 @@ impl Runtime {
         }
 
         // A folder start outside dev mode starts only a component whose walk
-        // CID is one this Home already accepted: a by-CID slot staged from a
-        // signed bundle, or the CID an install recorded beside the folder.
-        // The signature check above names the signer; this names the bytes.
+        // CID is one this Home already admitted: a by-CID slot staged from a
+        // signed bundle, or the CID the Home's own install record holds for
+        // this folder. The signature check above names the signer; this names
+        // the bytes.
         if let Some(cid) = folder_cid {
             self.accept_folder_start(path, &manifest, &cid, folder_data_dir.as_deref())
                 .await?;
@@ -1290,12 +1323,13 @@ impl Runtime {
 
     /// The one walk a component folder start outside dev mode makes. In dev
     /// mode it returns `None`, and the caller reads the entrypoint as before.
-    /// The walk is the staging walk under the staging budget; the bytes it
-    /// read are the bytes the caller loads, so nothing reads the folder again.
+    /// The walk is the staging walk under the staging budget; the manifest it
+    /// read from `capsule.json` and the entrypoint bytes it read are what the
+    /// caller checks and loads, so nothing reads the folder again.
     async fn walk_folder_start(
         &self,
         path: &Path,
-        manifest: &CapsuleManifest,
+        before_walk: impl FnOnce(&Path),
         after_walk: impl FnOnce(&CheckedBundle),
     ) -> Result<Option<FolderStart>> {
         let data_dir = {
@@ -1306,16 +1340,30 @@ impl Runtime {
                 UnsignedCapsules::Refused(dir) => dir.clone(),
             }
         };
+        before_walk(path);
         let bundle = checked_bundle_within(path, bundle_admission::BUNDLE_WALK_BUDGET).map_err(
             |refusal| {
                 ElastosError::InvalidManifest(format!(
-                    "Capsule '{}' is not a bundle a folder start accepts: {}",
-                    manifest.name,
+                    "Folder {} is not a bundle a folder start accepts: {}",
+                    path.display(),
                     bundle_admission::walk_refusal(refusal)
                 ))
             },
         )?;
         after_walk(&bundle);
+        let manifest_bytes = bundle.entry("capsule.json").ok_or_else(|| {
+            ElastosError::InvalidManifest(format!("capsule.json not found in {}", path.display()))
+        })?;
+        let manifest: CapsuleManifest = serde_json::from_slice(manifest_bytes).map_err(|e| {
+            ElastosError::InvalidManifest(format!("Failed to parse capsule.json: {}", e))
+        })?;
+        manifest.validate().map_err(ElastosError::InvalidManifest)?;
+        if !manifest.is_component_capsule() {
+            return Err(ElastosError::InvalidManifest(format!(
+                "Capsule '{}' changed while its folder was walked: its manifest is no longer a component manifest",
+                manifest.name
+            )));
+        }
         let entrypoint = bundle.entry(&manifest.entrypoint).ok_or_else(|| {
             ElastosError::InvalidManifest(format!(
                 "Capsule '{}' entrypoint '{}' is not a file of its bundle",
@@ -1323,15 +1371,17 @@ impl Runtime {
             ))
         })?;
         Ok(Some(FolderStart {
+            manifest,
             cid: bundle.cid(),
             entrypoint: entrypoint.to_vec(),
             data_dir,
         }))
     }
 
-    /// Whether this Home already accepted the walk CID of a component folder
-    /// start: the CID an install recorded beside the folder, or a by-CID slot
-    /// staged from a bundle that passes the one bundle signature check.
+    /// Whether this Home already admitted the walk CID of a component folder
+    /// start: the CID its own install record holds for the folder's canonical
+    /// path and this walk, or a by-CID slot staged from a bundle that passes
+    /// the one bundle signature check.
     async fn accept_folder_start(
         &self,
         path: &Path,
@@ -1339,7 +1389,8 @@ impl Runtime {
         cid: &LabCid,
         data_dir: Option<&Path>,
     ) -> Result<()> {
-        let recorded = crate::setup::recorded_install_cid(path)
+        let recorded = data_dir
+            .and_then(|data_dir| crate::setup::recorded_install_cid(data_dir, path))
             .is_some_and(|recorded| recorded == cid.to_string());
         if !recorded {
             match data_dir {
@@ -3594,7 +3645,7 @@ pub(crate) mod tests {
             .unwrap();
         let capsule_dir = temp_dir.path().join("capsule");
         signed_component_folder(&capsule_dir, "walked-bytes", &key);
-        crate::setup::record_install_cid(&capsule_dir, &capsule_dir);
+        crate::setup::record_install_cid(temp_dir.path(), &capsule_dir, &capsule_dir);
 
         let reads = Arc::new(AtomicUsize::new(0));
         let counted = reads.clone();
@@ -3616,10 +3667,15 @@ pub(crate) mod tests {
         let walked = Arc::new(AtomicUsize::new(0));
         let seen = walked.clone();
         let launched = runtime
-            .run_local_with_signer_observed(&capsule_dir, Vec::new(), move |_bundle| {
-                seen.fetch_add(1, Ordering::SeqCst);
-                std::fs::write(&entrypoint, b"changed after the gate walk").unwrap();
-            })
+            .run_local_with_signer_observed(
+                &capsule_dir,
+                Vec::new(),
+                |_| {},
+                move |_bundle| {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    std::fs::write(&entrypoint, b"changed after the gate walk").unwrap();
+                },
+            )
             .await;
 
         assert_eq!(walked.load(Ordering::SeqCst), 1, "one gate walk");
@@ -3635,6 +3691,55 @@ pub(crate) mod tests {
         let (_, signer) = launched.expect("the walked bytes are the bytes that run");
         let did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
         assert_eq!(signer, Signer::Key { did });
+    }
+
+    /// The manifest the gate judges is the one the gate's walk read, not the
+    /// one the caller read before the walk. The test replaces `capsule.json`
+    /// right before the walk, as another process could, with a manifest of the
+    /// same key and entrypoint under another name: the refusal names the name
+    /// that walk read.
+    #[tokio::test]
+    async fn the_manifest_the_gate_checks_is_the_walked_one() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[78; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("two-manifests");
+        let component = signed_component_folder(&capsule_dir, "probe-manifest", &key);
+        let mut walked_manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("walked-manifest")).unwrap();
+        elastos_runtime::signature::sign_capsule(
+            &key,
+            &mut walked_manifest,
+            &elastos_runtime::signature::hash_content(&component),
+        )
+        .unwrap();
+        let walked_json = serde_json::to_vec(&walked_manifest).unwrap();
+        let manifest_path = capsule_dir.join("capsule.json");
+
+        let launched = runtime
+            .run_local_with_signer_observed(
+                &capsule_dir,
+                Vec::new(),
+                move |_path| {
+                    std::fs::write(&manifest_path, &walked_json).unwrap();
+                },
+                |_| {},
+            )
+            .await;
+        let error = launched
+            .expect_err("a folder no install recorded is refused")
+            .to_string();
+        assert!(error.contains("is not installed"), "{error}");
+        assert!(error.contains("'walked-manifest'"), "{error}");
+        assert!(!error.contains("'probe-manifest'"), "{error}");
+        assert!(runtime.list_capsules().await.is_empty(), "nothing started");
     }
 
     /// An installed folder starts from both entrances: the CLI's bounded
@@ -3653,7 +3758,7 @@ pub(crate) mod tests {
             .unwrap();
         let capsule_dir = temp_dir.path().join("installed");
         signed_component_folder(&capsule_dir, "installed-folder", &key);
-        crate::setup::record_install_cid(&capsule_dir, &capsule_dir);
+        crate::setup::record_install_cid(temp_dir.path(), &capsule_dir, &capsule_dir);
         let did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
 
         let (handle, signer) = runtime
@@ -3739,7 +3844,7 @@ pub(crate) mod tests {
             .unwrap();
         let capsule_dir = temp_dir.path().join("changed");
         signed_component_folder(&capsule_dir, "changed-folder", &key);
-        crate::setup::record_install_cid(&capsule_dir, &capsule_dir);
+        crate::setup::record_install_cid(temp_dir.path(), &capsule_dir, &capsule_dir);
         // A file the manifest does not name and the signature does not cover:
         // the walk names different bytes, and the signature still passes.
         std::fs::write(capsule_dir.join("added-after-install.txt"), b"later").unwrap();
@@ -3749,6 +3854,49 @@ pub(crate) mod tests {
             .await
             .expect_err("a folder changed after its install is refused");
         assert!(error.to_string().contains("is not installed"), "{error}");
+        assert!(runtime.list_capsules().await.is_empty(), "nothing started");
+    }
+
+    /// A folder with a file beside it that holds its own walk CID is still not
+    /// installed: the gate reads this Home's install record, which no install
+    /// wrote here, so both entries refuse it.
+    #[tokio::test]
+    async fn a_sidecar_beside_the_folder_does_not_record_an_install() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[79; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("sidecar-only");
+        signed_component_folder(&capsule_dir, "sidecar-only", &key);
+        let cid = crate::stage_cmd::bundle_cid(&capsule_dir).unwrap();
+        // The file slice 4's install also writes, filled in here without one.
+        std::fs::write(
+            crate::setup::install_cid_record(&capsule_dir).unwrap(),
+            format!("{cid}\n"),
+        )
+        .unwrap();
+
+        let cli = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .map(|_| ())
+            .expect_err("the CLI refuses a folder no install recorded")
+            .to_string();
+        let route = runtime
+            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .map(|_| ())
+            .expect_err("the route refuses a folder no install recorded")
+            .to_string();
+        assert!(cli.contains("is not installed"), "{cli}");
+        assert!(cli.contains(&cid), "{cli}");
+        assert_eq!(cli, route);
         assert!(runtime.list_capsules().await.is_empty(), "nothing started");
     }
 
