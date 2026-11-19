@@ -429,7 +429,9 @@ fn renames(old: &StoredAgent, new: &StoredAgent) -> bool {
     let mut expected = old.clone();
     expected.record.display_name = new.record.display_name.clone();
     expected.record.updated_at = new.record.updated_at;
-    old.record.display_name != new.record.display_name && expected == *new
+    old.record.retired_at.is_none()
+        && old.record.display_name != new.record.display_name
+        && expected == *new
 }
 
 /// `new` is `old` with `retired_at` set for the first time and `updated_at`
@@ -867,8 +869,9 @@ const NO_SUCH_AGENT: &str = "the caller owns no agent with that id";
 const ALREADY_RETIRED: &str = "agent is already retired";
 
 /// Renames one of the caller's agents. The display name and `updated_at`
-/// are the only fields that change. The same name writes nothing. Another
-/// person's agent gives the same refusal as an unknown id.
+/// are the only fields that change. The same name writes nothing. A retired
+/// agent is refused. Another person's agent gives the same refusal as an
+/// unknown id.
 pub(crate) fn rename(
     data_dir: &Path,
     caller: &Caller<'_>,
@@ -900,6 +903,9 @@ fn rename_in_any_build(
     else {
         return refused(NO_SUCH_AGENT);
     };
+    if agent.record.retired_at.is_some() {
+        return refused(ALREADY_RETIRED);
+    }
     if !is_display_name(display_name) {
         return refused(BAD_REQUEST);
     }

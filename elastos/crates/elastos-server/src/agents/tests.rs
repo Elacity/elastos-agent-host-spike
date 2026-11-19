@@ -1543,6 +1543,17 @@ fn rename_is_owner_only() {
         rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 11).unwrap();
     assert_eq!(renamed.display_name, "Helper 2");
     assert_eq!(loaded(&home).agents[0].record.principal_id, agent.agent_id);
+
+    retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 12).unwrap();
+    let tombstone = home.agent_bytes();
+    let after_retire =
+        rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "After", 13);
+    assert_eq!(refusal_of(after_retire), ALREADY_RETIRED);
+    assert_eq!(
+        home.agent_bytes(),
+        tombstone,
+        "a retired agent is not renamed"
+    );
 }
 
 #[test]
