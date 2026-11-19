@@ -361,6 +361,9 @@ pub(crate) mod tests {
         let mut manifest: CapsuleManifest =
             serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
         manifest.name = AGENT_HOST.to_string();
+        manifest.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
         manifest.signature = None;
         let key = |value: u8| elastos_runtime::signature::SigningKey::from_bytes(&[value; 32]);
         let mut sign = |value: u8| {
