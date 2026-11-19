@@ -3,6 +3,9 @@
 //! HTTP host adapters and the resource bridge must derive the same capability
 //! resource from the same provider request. Keeping that logic here prevents
 //! local and capsule-kernel calls from drifting.
+//!
+//! Localhost operations live in one table in this file. The resource builder
+//! and the action map both read that table. Webspace reads the same actions.
 
 use crate::resource_bridge::{LAUNCH_CONTENT, LAUNCH_CONTENT_PATTERN, LAUNCH_OUTPUT};
 use elastos_common::localhost::rooted_localhost_uri;
@@ -192,13 +195,161 @@ pub fn provider_operation_action(scheme: &str, op: &str) -> Option<Action> {
     }
 }
 
-fn localhost_op_required_action(op: &str) -> Option<Action> {
-    match op {
-        "read" | "list" | "stat" | "exists" | "resolve" | "ping" => Some(Action::Read),
-        "write" | "mkdir" => Some(Action::Write),
-        "delete" => Some(Action::Delete),
-        _ => None,
+/// What a localhost operation may change. This is the consequence class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalhostConsequence {
+    /// The call reports state and leaves that state as it was.
+    Observe,
+    /// The call writes bytes at the path, replacing them or appending.
+    WriteBytes,
+    /// The call creates a directory at the path.
+    CreateDirectory,
+    /// The call removes the path.
+    Remove,
+}
+
+/// Whether repeating the operation is the same effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalhostIdempotency {
+    /// Repeating the call leaves the same state.
+    Idempotent,
+    /// A repeat can act again, so retry needs a durable effect id.
+    NeedsEffectId,
+}
+
+/// Consequence class plus idempotency, beside the capability action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LocalhostEffect {
+    consequence: LocalhostConsequence,
+    idempotency: LocalhostIdempotency,
+}
+
+/// One localhost operation. The resource builder and the action map both
+/// read this table. The table stays in this process.
+struct LocalhostOperation {
+    name: &'static str,
+    inputs: &'static [&'static str],
+    outputs: &'static [&'static str],
+    right: Action,
+    effect: LocalhostEffect,
+}
+
+const fn localhost_op(
+    name: &'static str,
+    inputs: &'static [&'static str],
+    outputs: &'static [&'static str],
+    right: Action,
+    consequence: LocalhostConsequence,
+    idempotency: LocalhostIdempotency,
+) -> LocalhostOperation {
+    LocalhostOperation {
+        name,
+        inputs,
+        outputs,
+        right,
+        effect: LocalhostEffect {
+            consequence,
+            idempotency,
+        },
     }
+}
+
+const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
+    localhost_op(
+        "read",
+        &["path", "offset", "length"],
+        &["status", "content", "size"],
+        Action::Read,
+        LocalhostConsequence::Observe,
+        LocalhostIdempotency::Idempotent,
+    ),
+    localhost_op(
+        "write",
+        &["path", "content", "append"],
+        &["status", "bytes_written"],
+        Action::Write,
+        LocalhostConsequence::WriteBytes,
+        LocalhostIdempotency::NeedsEffectId,
+    ),
+    localhost_op(
+        "list",
+        &["path"],
+        &["status", "entries"],
+        Action::Read,
+        LocalhostConsequence::Observe,
+        LocalhostIdempotency::Idempotent,
+    ),
+    localhost_op(
+        "delete",
+        &["path", "recursive"],
+        &["status"],
+        Action::Delete,
+        LocalhostConsequence::Remove,
+        LocalhostIdempotency::NeedsEffectId,
+    ),
+    localhost_op(
+        "stat",
+        &["path"],
+        &["status", "is_dir", "size", "modified"],
+        Action::Read,
+        LocalhostConsequence::Observe,
+        LocalhostIdempotency::Idempotent,
+    ),
+    localhost_op(
+        "mkdir",
+        &["path", "parents"],
+        &["status"],
+        Action::Write,
+        LocalhostConsequence::CreateDirectory,
+        LocalhostIdempotency::NeedsEffectId,
+    ),
+    localhost_op(
+        "exists",
+        &["path"],
+        &["status", "exists"],
+        Action::Read,
+        LocalhostConsequence::Observe,
+        LocalhostIdempotency::Idempotent,
+    ),
+    localhost_op(
+        "resolve",
+        &["path"],
+        &["status", "handle"],
+        Action::Read,
+        LocalhostConsequence::Observe,
+        LocalhostIdempotency::Idempotent,
+    ),
+    localhost_op(
+        "ping",
+        &["path"],
+        &["status", "pong"],
+        Action::Read,
+        LocalhostConsequence::Observe,
+        LocalhostIdempotency::Idempotent,
+    ),
+];
+
+/// A Read right is an observation, and an observation can be repeated.
+/// A consequence that changes state does not take a Read right.
+/// Every row names a path input and at least one output.
+fn localhost_row_effect_agrees(row: &LocalhostOperation) -> bool {
+    let observes = matches!(row.effect.consequence, LocalhostConsequence::Observe);
+    let read = matches!(row.right, Action::Read);
+    let idempotent = matches!(row.effect.idempotency, LocalhostIdempotency::Idempotent);
+    observes == read
+        && (!observes || idempotent)
+        && row.inputs.contains(&"path")
+        && !row.outputs.is_empty()
+}
+
+fn localhost_operation(name: &str) -> Option<&'static LocalhostOperation> {
+    LOCALHOST_OPERATIONS
+        .iter()
+        .find(|row| row.name == name && localhost_row_effect_agrees(row))
+}
+
+fn localhost_op_required_action(op: &str) -> Option<Action> {
+    localhost_operation(op).map(|row| row.right)
 }
 
 fn execute_op_required_action(op: &str) -> Option<Action> {
@@ -461,13 +612,9 @@ pub(crate) fn agents_area_refusal(
 }
 
 fn localhost_resource(op: &str, request: &Value) -> Result<String, String> {
-    ensure_supported_operation(
-        "localhost",
-        op,
-        &[
-            "read", "write", "list", "delete", "stat", "mkdir", "exists", "resolve", "ping",
-        ],
-    )?;
+    if localhost_operation(op).is_none() {
+        return Err(format!("Unsupported localhost provider operation: {op}"));
+    }
     match request
         .get("path")
         .and_then(|value| value.as_str())
@@ -860,6 +1007,117 @@ mod tests {
             build_capability_resource("localhost", "delete", &full).unwrap(),
             "localhost://MyWebSite/Documents/demo.md"
         );
+    }
+
+    /// The nine localhost rows are the only list. The resource builder and
+    /// the action map, for localhost and for webspace, read those rows.
+    #[test]
+    fn localhost_rows_are_the_one_source_for_both_deciders() {
+        let body =
+            serde_json::json!({"path": "localhost://Local/SharedByLocalUsersAndBots/Home/a.md"});
+        let rooted = "localhost://Local/SharedByLocalUsersAndBots/Home/a.md";
+        assert_eq!(
+            LOCALHOST_OPERATIONS
+                .iter()
+                .map(|row| row.name)
+                .collect::<Vec<_>>(),
+            ["read", "write", "list", "delete", "stat", "mkdir", "exists", "resolve", "ping",]
+        );
+        for row in LOCALHOST_OPERATIONS {
+            let (right, consequence, idempotency, inputs, outputs) =
+                expected_localhost_row(row.name);
+            assert_eq!(row.right, right, "{}", row.name);
+            assert_eq!(row.effect.consequence, consequence, "{}", row.name);
+            assert_eq!(row.effect.idempotency, idempotency, "{}", row.name);
+            assert_eq!(row.inputs, inputs, "{}", row.name);
+            assert_eq!(row.outputs, outputs, "{}", row.name);
+            assert!(
+                localhost_row_effect_agrees(row),
+                "{}: a read right is an observation, and a state change does not take Read",
+                row.name
+            );
+            assert_eq!(
+                provider_operation_action("localhost", row.name),
+                Some(row.right),
+                "{}",
+                row.name
+            );
+            assert_eq!(
+                provider_operation_action("webspace", row.name),
+                Some(row.right),
+                "{}",
+                row.name
+            );
+            assert_eq!(
+                build_capability_resource("localhost", row.name, &body).unwrap(),
+                rooted,
+                "{}",
+                row.name
+            );
+        }
+        assert!(localhost_operation("raw_storage").is_none());
+        assert!(provider_operation_action("localhost", "raw_storage").is_none());
+        assert!(provider_operation_action("webspace", "raw_storage").is_none());
+        assert!(build_capability_resource("localhost", "raw_storage", &body).is_err());
+        assert_eq!(
+            build_capability_resource("webspace", "read", &body).unwrap_err(),
+            "Unsupported provider scheme: webspace"
+        );
+    }
+
+    fn expected_localhost_row(
+        name: &str,
+    ) -> (
+        Action,
+        LocalhostConsequence,
+        LocalhostIdempotency,
+        &'static [&'static str],
+        &'static [&'static str],
+    ) {
+        use LocalhostConsequence::{CreateDirectory, Observe, Remove, WriteBytes};
+        use LocalhostIdempotency::{Idempotent, NeedsEffectId};
+        match name {
+            "read" => (
+                Action::Read,
+                Observe,
+                Idempotent,
+                &["path", "offset", "length"],
+                &["status", "content", "size"],
+            ),
+            "list" | "exists" | "resolve" | "ping" | "stat" => {
+                let outputs: &'static [&'static str] = match name {
+                    "list" => &["status", "entries"],
+                    "stat" => &["status", "is_dir", "size", "modified"],
+                    "exists" => &["status", "exists"],
+                    "resolve" => &["status", "handle"],
+                    "ping" => &["status", "pong"],
+                    _ => &[],
+                };
+                (Action::Read, Observe, Idempotent, &["path"], outputs)
+            }
+            "write" => (
+                Action::Write,
+                WriteBytes,
+                NeedsEffectId,
+                &["path", "content", "append"],
+                &["status", "bytes_written"],
+            ),
+            "mkdir" => (
+                Action::Write,
+                CreateDirectory,
+                NeedsEffectId,
+                &["path", "parents"],
+                &["status"],
+            ),
+            "delete" => (
+                Action::Delete,
+                Remove,
+                NeedsEffectId,
+                &["path", "recursive"],
+                &["status"],
+            ),
+            other => panic!("unknown localhost operation {other}"),
+        }
     }
 
     #[test]
