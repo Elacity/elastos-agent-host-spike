@@ -256,11 +256,13 @@ const fn localhost_op(
     }
 }
 
+// A success response serializes as `status` and `data`. Payload fields
+// such as `content` and `bytes_written` sit inside `data`.
 const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "read",
         &["path", "encoding", "offset", "length"],
-        &["status", "content", "encoding", "size"],
+        &["status", "data"],
         Action::Read,
         LocalhostConsequence::Observe,
         LocalhostIdempotency::Idempotent,
@@ -268,7 +270,7 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "write",
         &["path", "content", "append"],
-        &["status", "bytes_written"],
+        &["status", "data"],
         Action::Write,
         LocalhostConsequence::WriteBytes,
         LocalhostIdempotency::NeedsEffectId,
@@ -284,7 +286,7 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "delete",
         &["path", "recursive"],
-        &["status"],
+        &["status", "data"],
         Action::Delete,
         LocalhostConsequence::Remove,
         LocalhostIdempotency::NeedsEffectId,
@@ -292,9 +294,7 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "stat",
         &["path"],
-        &[
-            "status", "path", "is_file", "is_dir", "size", "readonly", "modified", "created",
-        ],
+        &["status", "data"],
         Action::Read,
         LocalhostConsequence::Observe,
         LocalhostIdempotency::Idempotent,
@@ -302,7 +302,7 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "mkdir",
         &["path", "parents"],
-        &["status"],
+        &["status", "data"],
         Action::Write,
         LocalhostConsequence::CreateDirectory,
         LocalhostIdempotency::NeedsEffectId,
@@ -310,7 +310,7 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "exists",
         &["path"],
-        &["status", "exists"],
+        &["status", "data"],
         Action::Read,
         LocalhostConsequence::Observe,
         LocalhostIdempotency::Idempotent,
@@ -328,7 +328,7 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "ping",
         &[],
-        &["status", "pong"],
+        &["status", "data"],
         Action::Read,
         LocalhostConsequence::Observe,
         LocalhostIdempotency::Idempotent,
@@ -336,15 +336,23 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
 ];
 
 /// A Read right is an observation, and an observation can be repeated.
-/// A consequence that changes state does not take a Read right.
-/// A file operation names a path input. Ping's provider request has no
-/// fields, so that row names no path. Every row names at least one output.
+/// Write and mkdir take Write. Delete takes Delete. Admin does not stand
+/// in their place. A file operation names a path input. Ping's provider
+/// request has no fields, so that row names no path. Every row names at
+/// least one output.
 fn localhost_row_effect_agrees(row: &LocalhostOperation) -> bool {
-    let observes = matches!(row.effect.consequence, LocalhostConsequence::Observe);
-    let read = matches!(row.right, Action::Read);
+    let consequence = row.effect.consequence;
+    let observes = matches!(consequence, LocalhostConsequence::Observe);
     let idempotent = matches!(row.effect.idempotency, LocalhostIdempotency::Idempotent);
     let names_a_file = row.name != "ping";
-    observes == read
+    let right_ok = match consequence {
+        LocalhostConsequence::Observe => matches!(row.right, Action::Read),
+        LocalhostConsequence::WriteBytes | LocalhostConsequence::CreateDirectory => {
+            matches!(row.right, Action::Write)
+        }
+        LocalhostConsequence::Remove => matches!(row.right, Action::Delete),
+    };
+    right_ok
         && (!observes || idempotent)
         && row.inputs.contains(&"path") == names_a_file
         && !row.outputs.is_empty()
@@ -1096,90 +1104,93 @@ mod tests {
         }
     }
 
-    /// Inputs and outputs come from the provider text, not from a second copy
-    /// of the row. `token` is left out: the runtime attaches it.
+    /// Inputs come from the provider text, not from a second copy of the
+    /// row. `token` is left out: the runtime attaches it. Outputs are the
+    /// keys of a serialized success response.
     fn localhost_protocol_shapes() -> std::collections::BTreeMap<String, (Vec<String>, Vec<String>)>
     {
         let provider = include_str!("../../../capsules/localhost-provider/src/main.rs");
         let webspace = include_str!("../../../../capsules/webspace-provider/src/main.rs");
         let requests = enum_fields(provider, "pub enum ProviderRequest {");
-        let arms = match_arms(provider, "pub fn handle_request", "ProviderRequest::");
+        let outputs = serialized_success_keys(Some(serde_json::json!({})));
         let mut shapes = std::collections::BTreeMap::new();
         for name in ["read", "write", "list", "delete", "stat", "mkdir", "exists"] {
             let fields = requests
                 .get(name)
                 .unwrap_or_else(|| panic!("missing {name}"));
-            let inputs = without_token(fields);
-            let outputs = provider_outputs(
-                provider,
-                arms.get(name)
-                    .unwrap_or_else(|| panic!("missing arm {name}")),
-            );
-            shapes.insert(name.to_string(), (inputs, outputs));
+            shapes.insert(name.to_string(), (without_token(fields), outputs.clone()));
         }
         let web_requests = enum_fields(webspace, "enum Request {");
         let ping_inputs = without_token(web_requests.get("ping").expect("webspace ping"));
         let resolve_inputs = without_token(web_requests.get("resolve").expect("webspace resolve"));
-        let ping_arm = arm_until(webspace, "Request::Ping", "Request::");
         let resolve_arm = arm_until(webspace, "Request::Resolve", "Request::");
         assert!(
             resolve_arm.contains("to_value(handle)"),
             "resolve returns the handle object in data"
         );
-        shapes.insert(
-            "ping".to_string(),
-            (ping_inputs, status_and(json_keys(&ping_arm))),
-        );
-        shapes.insert(
-            "resolve".to_string(),
-            (
-                resolve_inputs,
-                vec!["status".to_string(), "data".to_string()],
-            ),
-        );
+        shapes.insert("ping".to_string(), (ping_inputs, outputs.clone()));
+        shapes.insert("resolve".to_string(), (resolve_inputs, outputs));
         shapes
     }
 
     fn assert_provider_shapes_match_the_capsule(
         shapes: &std::collections::BTreeMap<String, (Vec<String>, Vec<String>)>,
     ) {
-        let (read_inputs, read_outputs) = &shapes["read"];
+        let (read_inputs, _) = &shapes["read"];
         assert!(
             read_inputs.iter().any(|key| key == "encoding"),
             "read request has encoding"
         );
-        assert!(
-            read_outputs.iter().any(|key| key == "encoding"),
-            "utf8 read response has encoding"
-        );
+        assert_eq!(shapes["read"].1, ["status", "data"]);
         assert_eq!(shapes["list"].1, ["status", "data"]);
         assert!(shapes["ping"].0.is_empty(), "ping request has no fields");
-        assert_eq!(shapes["ping"].1, ["status", "pong"]);
+        assert_eq!(shapes["ping"].1, ["status", "data"]);
         assert_eq!(shapes["resolve"].0, ["path", "moniker"]);
         assert_eq!(shapes["resolve"].1, ["status", "data"]);
     }
 
-    fn provider_outputs(provider: &str, arm: &str) -> Vec<String> {
-        if arm.contains("to_value(entries)") {
-            return vec!["status".to_string(), "data".to_string()];
-        }
-        if arm.contains("to_value(stat)") {
-            return status_and(struct_fields(provider, "pub struct FileStat {"));
-        }
-        if arm.contains("read_response_data") {
-            let body = function_body(provider, "fn read_response_data");
-            return status_and(json_keys(&body));
-        }
-        if arm.contains("data: None") && !arm.contains("json!") {
-            return vec!["status".to_string()];
-        }
-        status_and(json_keys(arm))
+    /// The capsule's success response. The tag and the `data` field match
+    /// `ProviderResponse::Ok` in the localhost provider.
+    #[derive(serde::Serialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    enum LocalhostSuccess {
+        Ok { data: Option<serde_json::Value> },
     }
 
-    fn status_and(keys: Vec<String>) -> Vec<String> {
-        let mut outputs = vec!["status".to_string()];
-        outputs.extend(keys);
-        outputs
+    fn serialized_success_text(data: Option<serde_json::Value>) -> String {
+        serde_json::to_string(&LocalhostSuccess::Ok { data }).expect("success serializes")
+    }
+
+    fn serialized_success_keys(data: Option<serde_json::Value>) -> Vec<String> {
+        top_level_keys(&serialized_success_text(data))
+    }
+
+    /// Keys of one JSON object, in the order `to_string` writes them.
+    /// A `Value` map sorts keys, so it is not the provider's line.
+    fn top_level_keys(text: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut depth = 0;
+        let mut rest = text;
+        while let Some(index) = rest.find(['{', '}', '[', ']', '"']) {
+            let ch = rest[index..].chars().next().expect("matched char");
+            if ch == '"' {
+                let after = &rest[index + 1..];
+                let end = after.find('"').expect("closing quote");
+                let tail = after[end + 1..].trim_start();
+                if depth == 1 && tail.starts_with(':') {
+                    keys.push(after[..end].to_string());
+                }
+                rest = &after[end + 1..];
+                continue;
+            }
+            if matches!(ch, '{' | '[') {
+                depth += 1;
+            } else {
+                depth -= 1;
+            }
+            rest = &rest[index + ch.len_utf8()..];
+        }
+        keys
     }
 
     fn without_token(fields: &[String]) -> Vec<String> {
@@ -1275,24 +1286,6 @@ mod tests {
         out
     }
 
-    fn match_arms(
-        source: &str,
-        function: &str,
-        tag: &str,
-    ) -> std::collections::BTreeMap<String, String> {
-        let start = source
-            .find(function)
-            .unwrap_or_else(|| panic!("missing {function}"));
-        let rest = &source[start..];
-        let end = rest.find("\nfn ").unwrap_or(rest.len());
-        let mut map = std::collections::BTreeMap::new();
-        for part in rest[..end].split(tag).skip(1) {
-            let ident = leading_ident(part);
-            map.insert(snake(ident), part.to_string());
-        }
-        map
-    }
-
     fn arm_until(source: &str, marker: &str, next: &str) -> String {
         let start = source
             .find(marker)
@@ -1302,62 +1295,9 @@ mod tests {
         rest[..end].to_string()
     }
 
-    fn function_body(source: &str, header: &str) -> String {
-        let start = source
-            .find(header)
-            .unwrap_or_else(|| panic!("missing {header}"));
-        let rest = &source[start..];
-        let end = rest[header.len()..]
-            .find("\nfn ")
-            .unwrap_or(rest.len() - header.len())
-            + header.len();
-        rest[..end].to_string()
-    }
-
-    fn json_keys(text: &str) -> Vec<String> {
-        let mut keys = Vec::new();
-        let mut rest = text;
-        while let Some(start) = rest.find('"') {
-            let after = &rest[start + 1..];
-            let Some(end) = after.find('"') else {
-                break;
-            };
-            let key = &after[..end];
-            let tail = after[end + 1..].trim_start();
-            if tail.starts_with(':')
-                && !key.is_empty()
-                && key.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_')
-                && !keys.iter().any(|found| found == key)
-            {
-                keys.push(key.to_string());
-            }
-            rest = &after[end + 1..];
-        }
-        keys
-    }
-
-    fn struct_fields(source: &str, header: &str) -> Vec<String> {
-        let start = source
-            .find(header)
-            .unwrap_or_else(|| panic!("missing {header}"));
-        let rest = &source[start + header.len()..];
-        let end = rest
-            .find("\n}")
-            .unwrap_or_else(|| panic!("struct {header} does not close"));
-        let mut fields = Vec::new();
-        for line in rest[..end].lines() {
-            let Some(stripped) = line.trim().strip_prefix("pub ") else {
-                continue;
-            };
-            if let Some(name) = field_ident(stripped) {
-                fields.push(name.to_string());
-            }
-        }
-        fields
-    }
-
     /// A literal in the action map that copies the row's right still agrees
-    /// with the walk. The map's own text is the check.
+    /// with the walk. The map's own text is that check. The agreement tests
+    /// execute the rule.
     #[test]
     fn localhost_action_map_has_no_second_action_literal() {
         let source = include_str!("provider_resource.rs");
@@ -1371,6 +1311,7 @@ mod tests {
     }
 
     /// The effect is read only while deciding whether the row stands.
+    /// `localhost_read_right_on_a_write_effect_does_not_stand` executes that rule.
     #[test]
     fn localhost_effect_gates_the_row_only() {
         let source = include_str!("provider_resource.rs");
@@ -1380,6 +1321,110 @@ mod tests {
         let body = &prod[agree..next];
         assert_eq!(body.matches(".effect").count(), 2);
         assert_eq!(prod.matches(".effect").count(), 2);
+    }
+
+    /// Each row's outputs are the keys of one serialized success response.
+    /// Payload fields stay inside `data`.
+    #[test]
+    fn a_serialized_localhost_response_matches_its_row() {
+        let samples = [
+            (
+                "read",
+                Some(serde_json::json!({"content": [104], "size": 1})),
+            ),
+            ("write", Some(serde_json::json!({"bytes_written": 2}))),
+            ("list", Some(serde_json::json!([]))),
+            ("delete", None),
+            (
+                "stat",
+                Some(serde_json::json!({"path": "a", "is_file": true})),
+            ),
+            ("mkdir", None),
+            ("exists", Some(serde_json::json!({"exists": true}))),
+            (
+                "resolve",
+                Some(serde_json::json!({"handle_uri": "localhost://Local/a"})),
+            ),
+            ("ping", Some(serde_json::json!({"pong": true}))),
+        ];
+        for (name, data) in samples {
+            let capsule = serialized_success_text(data.clone());
+            let runtime =
+                serde_json::to_string(&elastos_runtime::provider::bridge::ProviderResponse::Ok {
+                    data,
+                })
+                .expect("runtime success");
+            assert_eq!(capsule, runtime, "{name}");
+            let keys = top_level_keys(&capsule);
+            let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+            assert_eq!(
+                localhost_operation(name).unwrap().outputs,
+                key_refs.as_slice(),
+                "{name}"
+            );
+            for inner in ["content", "bytes_written", "pong", "exists", "encoding"] {
+                assert!(!key_refs.contains(&inner), "{name} {inner}");
+            }
+        }
+        let utf8 = serialized_success_text(Some(serde_json::json!({
+            "content": "hi",
+            "encoding": "utf8",
+            "size": 2,
+        })));
+        assert!(!top_level_keys(&utf8).iter().any(|key| key == "encoding"));
+        let parsed: serde_json::Value = serde_json::from_str(&utf8).expect("utf8 read");
+        assert_eq!(parsed["data"]["encoding"], "utf8");
+    }
+
+    #[test]
+    fn localhost_read_right_on_a_write_effect_does_not_stand() {
+        let row = localhost_op(
+            "read",
+            &["path", "encoding", "offset", "length"],
+            &["status", "data"],
+            Action::Read,
+            LocalhostConsequence::WriteBytes,
+            LocalhostIdempotency::Idempotent,
+        );
+        assert!(!localhost_row_effect_agrees(&row));
+        assert_eq!(localhost_op_required_action("read"), Some(Action::Read));
+        assert_eq!(localhost_op_required_action("write"), Some(Action::Write));
+    }
+
+    #[test]
+    fn localhost_state_change_refuses_an_admin_right() {
+        let cases = [
+            (
+                "write",
+                &["path", "content", "append"][..],
+                LocalhostConsequence::WriteBytes,
+            ),
+            (
+                "mkdir",
+                &["path", "parents"][..],
+                LocalhostConsequence::CreateDirectory,
+            ),
+            (
+                "delete",
+                &["path", "recursive"][..],
+                LocalhostConsequence::Remove,
+            ),
+        ];
+        for (name, inputs, consequence) in cases {
+            let row = localhost_op(
+                name,
+                inputs,
+                &["status", "data"],
+                Action::Admin,
+                consequence,
+                LocalhostIdempotency::NeedsEffectId,
+            );
+            assert!(!localhost_row_effect_agrees(&row), "{name}");
+            assert!(
+                localhost_row_effect_agrees(localhost_operation(name).unwrap()),
+                "{name}"
+            );
+        }
     }
 
     #[test]
