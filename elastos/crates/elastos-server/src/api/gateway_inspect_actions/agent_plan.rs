@@ -263,9 +263,10 @@ mod tests {
             .path()
             .join(format!("inspect-actions/{}.json", created.request_id))
             .is_file());
-        assert!(pending_inspect_action_requests(dir.path(), PRINCIPAL)
-            .unwrap()
-            .is_empty());
+        let pending = pending_inspect_action_requests(dir.path(), PRINCIPAL).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["kind"], AGENT_PLAN_KIND);
+        assert_eq!(pending[0]["steps"][0]["operation"], "status");
     }
 
     #[test]

@@ -569,6 +569,7 @@ async fn run_with_data_dir(
                 line.failed();
                 return Err(error);
             }
+            record_installed_capsule_folder(&data_dir, &dest);
             changed = true;
         } else if !matches!(binary_install_state, InstallState::Installed) {
             let install_path = match resolve_install_path(comp, Some(platform_info)) {
@@ -586,6 +587,11 @@ async fn run_with_data_dir(
                 write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)
             })
             .await?;
+            if comp.capsule_metadata.is_none() {
+                record_installed_component_folders(&data_dir, comp, &platform, Some(platform_info));
+            } else {
+                record_installed_capsule_folder(&data_dir, &dest);
+            }
             changed = true;
         }
 
@@ -1527,7 +1533,7 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
     let dest = data_dir.join(install_path);
     download_component(data_dir, &row, &dest, FirstPartyCarrierContext::Runtime).await?;
     write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)?;
-    record_install_cid(&dest, &dest);
+    record_install_cid(data_dir, &dest, &dest);
     drop(admitted);
 
     let installed_manifest = dest.join("capsule.json");
@@ -1612,6 +1618,7 @@ async fn ensure_component_capsule_metadata(
     {
         anyhow::bail!("installed capsule metadata '{name}' failed validation: {reason}");
     }
+    record_installed_capsule_folder(data_dir, &dest);
     Ok(())
 }
 
@@ -2705,39 +2712,159 @@ fn bare_sha256(checksum: &str) -> &str {
 /// Runtime's bundle walk gave for that folder when an install wrote it. It
 /// sits outside the folder, so a later walk of the folder names the same bytes.
 pub(crate) fn install_cid_record(dir: &Path) -> anyhow::Result<PathBuf> {
-    let name = dir
-        .file_name()
+    let name = folder_name(dir)
         .ok_or_else(|| anyhow::anyhow!("capsule folder {} has no name", dir.display()))?;
     let mut record = std::ffi::OsString::from(".");
     record.push(name);
     record.push(".elastos-install-cid");
-    Ok(dir.with_file_name(record))
+    if dir.file_name().is_none() {
+        Ok(fs::canonicalize(dir)?.with_file_name(record))
+    } else {
+        Ok(dir.with_file_name(record))
+    }
+}
+
+/// The last name of `dir`, with `.` and a trailing separator resolved, so a
+/// folder named as the current directory still has one.
+fn folder_name(dir: &Path) -> Option<std::ffi::OsString> {
+    fs::canonicalize(dir)
+        .ok()
+        .and_then(|canonical| canonical.file_name().map(|name| name.to_owned()))
+        .or_else(|| dir.file_name().map(|name| name.to_owned()))
+}
+
+/// The Home's own record of installed capsule folders: for each one, its
+/// canonical path and the walk CID its install recorded. The Home reads this
+/// file, not a file beside the folder, so the folder's parent directory alone
+/// cannot name an install.
+fn install_cid_ledger(data_dir: &Path) -> PathBuf {
+    data_dir.join("capsules").join("install-cids.json")
+}
+
+/// The canonical path of `dir`, whether or not it exists yet: a path whose
+/// last name does not exist is keyed under its canonical parent.
+fn canonical_install_folder(dir: &Path) -> Option<PathBuf> {
+    fs::canonicalize(dir).ok().or_else(|| {
+        let parent = fs::canonicalize(dir.parent()?).ok()?;
+        Some(parent.join(dir.file_name()?))
+    })
+}
+
+fn read_install_cid_ledger(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    fs::read_to_string(install_cid_ledger(data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// The CID an install of `dir` recorded in the Home at `data_dir`, matched on
+/// that Home's canonical path for the folder. An absent or unreadable ledger,
+/// and one with no row for the folder, give `None`.
+pub(crate) fn recorded_install_cid(data_dir: &Path, dir: &Path) -> Option<String> {
+    let key = canonical_install_folder(dir)?;
+    read_install_cid_ledger(data_dir)
+        .get(key.to_string_lossy().as_ref())
+        .cloned()
+}
+
+/// Points the Home's ledger row for `dir` at `cid`, or removes the row when
+/// `cid` is `None`. The file is written from a new, randomly named file in one
+/// rename, so a link at the path is replaced, not followed.
+fn write_install_cid_ledger(data_dir: &Path, dir: &Path, cid: Option<&str>) -> anyhow::Result<()> {
+    let path = install_cid_ledger(data_dir);
+    let parent = path.parent().context("install CID ledger has no parent")?;
+    fs::create_dir_all(parent)?;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let _lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(parent.join(".install-cids.lock"))?;
+    if unsafe { libc::flock(_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let key = canonical_install_folder(dir)
+        .context("install CID ledger has no folder key")?
+        .to_string_lossy()
+        .into_owned();
+    let mut entries = read_install_cid_ledger(data_dir);
+    match cid {
+        Some(cid) => entries.insert(key, cid.to_string()),
+        None => entries.remove(&key),
+    };
+    let mut scratch = tempfile::Builder::new()
+        .prefix("install-cids.")
+        .tempfile_in(parent)?;
+    serde_json::to_writer_pretty(&mut scratch, &entries)?;
+    scratch.as_file().sync_all()?;
+    scratch.persist(&path).map_err(|err| err.error)?;
+    sync_path(parent)?;
+    Ok(())
 }
 
 /// Records the walk CID of `walked`, its extracted bytes and receipts, as the
-/// install CID of `dir`, the folder the install places them at. The install
-/// goes on when the record cannot be written, and then keeps no record.
-pub(crate) fn record_install_cid(walked: &Path, dir: &Path) {
-    if let Err(err) = write_install_cid(walked, dir) {
+/// install CID of `dir`, the folder the install places them at, in the Home at
+/// `data_dir`. The install goes on when the record cannot be written, and then
+/// keeps no record.
+pub(crate) fn record_install_cid(data_dir: &Path, walked: &Path, dir: &Path) {
+    if let Err(err) = write_install_cid(data_dir, walked, dir) {
         eprintln!("  No install CID record for {} ({err:#})", dir.display());
         if let Ok(record) = install_cid_record(dir) {
             let _ = fs::remove_file(record);
         }
+        let _ = write_install_cid_ledger(data_dir, dir, None);
     }
 }
 
-/// Writes the record from a new, randomly named file beside it in one rename,
-/// so a link at the record path is replaced, not followed. A folder the walk
-/// refuses keeps no record.
-pub(crate) fn write_install_cid(walked: &Path, dir: &Path) -> anyhow::Result<()> {
+/// Records the walk CID of an installed component folder after an install wrote
+/// it. A destination that is not a capsule folder keeps no record.
+pub(crate) fn record_installed_capsule_folder(data_dir: &Path, dest: &Path) {
+    if dest.join("capsule.json").is_file() {
+        record_install_cid(data_dir, dest, dest);
+    }
+}
+
+/// Records both folders a component install can write: the artifact at its
+/// install path and the capsule metadata at its own path.
+fn record_installed_component_folders(
+    data_dir: &Path,
+    component: &Component,
+    platform: &str,
+    platform_info: Option<&PlatformInfo>,
+) {
+    if let Some(install_path) = resolve_install_path(component, platform_info) {
+        record_installed_capsule_folder(data_dir, &data_dir.join(install_path));
+    }
+    if let Some(metadata) = component.capsule_metadata.as_ref() {
+        if let Some(metadata_info) =
+            resolve_component_capsule_metadata_platform_info(metadata, platform)
+        {
+            if let Some(install_path) =
+                resolve_component_capsule_metadata_install_path(metadata, Some(metadata_info))
+            {
+                record_installed_capsule_folder(data_dir, &data_dir.join(install_path));
+            }
+        }
+    }
+}
+
+/// Writes the Home's ledger row and the file beside the folder, the Home's
+/// record being the one a start reads. A folder the walk refuses keeps no
+/// record.
+pub(crate) fn write_install_cid(data_dir: &Path, walked: &Path, dir: &Path) -> anyhow::Result<()> {
     use crate::bundle_admission::BUNDLE_WALK_BUDGET;
     let record = install_cid_record(dir)?;
     let bundle = match elastos_bundle_identity::checked_bundle_within(walked, BUNDLE_WALK_BUDGET) {
         Ok(bundle) => bundle,
-        Err(_) => match fs::remove_file(&record) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
-            _ => return Ok(()),
-        },
+        Err(_) => {
+            match fs::remove_file(&record) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
+                _ => {}
+            }
+            return write_install_cid_ledger(data_dir, dir, None);
+        }
     };
     let parent = record
         .parent()
@@ -2751,7 +2878,7 @@ pub(crate) fn write_install_cid(walked: &Path, dir: &Path) -> anyhow::Result<()>
     scratch.as_file().sync_all()?;
     scratch.persist(&record).map_err(|err| err.error)?;
     sync_path(parent)?;
-    Ok(())
+    write_install_cid_ledger(data_dir, dir, Some(&bundle.cid().to_string()))
 }
 
 fn write_platform_cache_metadata(platform_info: &PlatformInfo, dest: &Path) -> anyhow::Result<()> {
@@ -3958,6 +4085,7 @@ async fn refresh_support(
                 download_component(data_dir, &row, &dest, carrier_context).await?;
                 write_cache_metadata(new_manifest, Some(info), platform, name, &dest)?;
             }
+            record_installed_capsule_folder(data_dir, &dest);
             refreshed.push(name.to_string());
         }
         if item.metadata {
@@ -5003,7 +5131,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};
     use elastos_common::{CapsuleManifest, CapsuleRole};
+    use elastos_compute::providers::ComponentProvider;
+    use elastos_storage::providers::LocalFSProvider;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     fn replacement_manifest(targets: &[(&str, &str)]) -> ComponentsManifest {
         let external: serde_json::Map<_, _> = targets
@@ -7461,16 +7592,351 @@ pub(crate) mod tests {
         )
         .unwrap();
 
+        record_install_cid(tmp.path(), &install_root, &install_root);
         let ensure = ensure_capsule_component_for_home_launch(tmp.path(), "marketplace")
             .await
             .unwrap();
         assert_eq!(ensure.status, "installed");
-        // A source Home's own capsule tree is not an install, so it gets no record.
-        assert!(!install_cid_record(&install_root).unwrap().exists());
+        // An installed capsule folder keeps the Home's record of its walk CID.
+        let walked = crate::stage_cmd::bundle_cid(&install_root).unwrap();
+        assert_eq!(
+            recorded_install_cid(tmp.path(), &install_root).as_deref(),
+            Some(walked.as_str())
+        );
         assert_eq!(
             fs::read(install_root.join("marketplace.wasm")).unwrap(),
             b"\0asm"
         );
+    }
+
+    /// A folder named as the current directory still has the record path of
+    /// the folder it names, so a start in that directory can be recorded.
+    #[test]
+    fn install_cid_record_names_a_folder_named_as_the_current_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("capsules/marketplace");
+        fs::create_dir_all(&folder).unwrap();
+        let record = install_cid_record(&folder.join(".")).unwrap();
+        assert_eq!(
+            record,
+            tmp.path().join("capsules/.marketplace.elastos-install-cid")
+        );
+        assert_eq!(
+            install_cid_record(Path::new(".")).unwrap(),
+            install_cid_record(&std::env::current_dir().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn concurrent_install_cid_writes_keep_every_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("capsules")).unwrap();
+        let barrier = std::sync::Barrier::new(32);
+        let data = tmp.path();
+        std::thread::scope(|scope| {
+            for i in 0..32 {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let dir = data.join(format!("capsules/{i}"));
+                    write_install_cid_ledger(data, &dir, Some("cid")).unwrap();
+                });
+            }
+        });
+        assert_eq!(read_install_cid_ledger(tmp.path()).len(), 32);
+    }
+
+    /// A component with one empty `run`, as bytes.
+    fn quiet_component() -> Vec<u8> {
+        wat::parse_str(
+            r#"(component
+              (import "elastos:bus/types@1.0.0" (instance $types
+                (type $error (variant
+                  (case "denied" string) (case "not-found" string) (case "invalid" string)
+                  (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+                (export "bus-error" (type (eq $error)))))
+              (alias export $types "bus-error" (type $bus-error))
+              (core module $m
+                (memory (export "memory") 1)
+                (func (export "run") (result i32) (i32.const 0)))
+              (core instance $i (instantiate $m))
+              (func $run (result (result (error $bus-error)))
+                (canon lift (core func $i "run") (memory $i "memory")))
+              (instance $lifecycle (export "run" (func $run)))
+              (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#,
+        )
+        .expect("component text")
+    }
+
+    fn component_manifest_json(name: &str) -> String {
+        format!(
+            r#"{{
+                "schema": "elastos.capsule/v1",
+                "version": "0.1.0",
+                "name": "{name}",
+                "role": "app",
+                "type": "wasm",
+                "runtime_abi": "elastos.component/v1",
+                "bus_contract": "{}",
+                "wit_world_sha256": "{}",
+                "execution": "component",
+                "projections": ["cli"],
+                "entrypoint": "app.component.wasm"
+            }}"#,
+            elastos_common::ELASTOS_BUS_V1_CONTRACT,
+            elastos_common::elastos_bus_v1_wit_sha256()
+        )
+    }
+
+    /// Write one signed component folder at `dir`: the manifest, the
+    /// entrypoint named by it, and the signature over both.
+    fn signed_component_folder(
+        dir: &Path,
+        name: &str,
+        key: &elastos_runtime::signature::SigningKey,
+    ) -> Vec<u8> {
+        fs::create_dir_all(dir).unwrap();
+        let component = quiet_component();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).unwrap();
+        elastos_runtime::signature::sign_capsule(
+            key,
+            &mut manifest,
+            &elastos_runtime::signature::hash_content(&component),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.join("app.component.wasm"), &component).unwrap();
+        component
+    }
+
+    /// A component the setup install loop writes starts on a Home outside dev
+    /// mode because that install leaves the Home's record of its walk CID.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fresh_setup_install_starts_on_a_non_dev_home() {
+        let _guard = ENV_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let platform = detect_platform();
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[81; 32]);
+        let name = "setup-fresh";
+        let package = tmp.path().join("package");
+        let folder = package.join(name);
+        signed_component_folder(&folder, name, &key);
+        let archive = tmp.path().join("setup-fresh.tar.gz");
+        assert!(Command::new("tar")
+            .args(["czf", archive.to_str().unwrap(), "-C"])
+            .arg(&package)
+            .arg(name)
+            .status()
+            .unwrap()
+            .success());
+        let bytes = fs::read(&archive).unwrap();
+        let (server, serving, info) =
+            carrier_component_download_fixture(&data, "setup-fresh.tar.gz", bytes).await;
+        let mut row = info.clone();
+        row.extract_path = Some(name.to_string());
+        row.install_path = Some(format!("capsules/{name}"));
+        let mut platform_rows = serde_json::Map::new();
+        platform_rows.insert(platform.clone(), serde_json::to_value(&row).unwrap());
+        let mut external = serde_json::Map::new();
+        external.insert(
+            name.to_string(),
+            serde_json::json!({
+                "install_path": format!("capsules/{name}"),
+                "platforms": platform_rows
+            }),
+        );
+        let mut capsules = serde_json::Map::new();
+        capsules.insert(
+            name.to_string(),
+            serde_json::json!({
+                "cid": info.cid.clone().unwrap_or_default(),
+                "sha256": info
+                    .checksum
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim_start_matches("sha256:")
+            }),
+        );
+        let manifest_path = tmp.path().join("components-source.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "external": external, "capsules": capsules, "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let original = std::env::var_os(COMPONENTS_MANIFEST_ENV);
+        std::env::set_var(COMPONENTS_MANIFEST_ENV, &manifest_path);
+
+        let result = run_with_data_dir(
+            data.clone(),
+            None,
+            vec![name.to_string()],
+            vec![],
+            false,
+            false,
+            None,
+        )
+        .await;
+        match original {
+            Some(value) => std::env::set_var(COMPONENTS_MANIFEST_ENV, value),
+            None => std::env::remove_var(COMPONENTS_MANIFEST_ENV),
+        }
+        result.expect("the setup install writes the component folder");
+        server.close().await;
+        serving.await.unwrap();
+
+        let installed = data.join(format!("capsules/{name}"));
+        let walked = crate::stage_cmd::bundle_cid(&installed).unwrap();
+        assert_eq!(
+            recorded_install_cid(&data, &installed).as_deref(),
+            Some(walked.as_str()),
+            "the setup install leaves the Home's record"
+        );
+
+        let storage = Arc::new(LocalFSProvider::new(data.clone()).await.unwrap());
+        let runtime = crate::runtime::Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        );
+        runtime
+            .configure_capsule_admission(
+                &data,
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let (handle, _signer) = runtime
+            .run_local_with_signer(&installed, Vec::new(), None)
+            .await
+            .expect("a component the setup install wrote starts outside dev mode");
+        assert_eq!(handle.manifest.name, name);
+    }
+
+    /// A component already at its install path and without a record gets one
+    /// from the installed path and from a setup run, so it starts on a Home
+    /// outside dev mode.
+    #[tokio::test]
+    async fn an_already_installed_component_keeps_its_prior_record_state() {
+        let _guard = ENV_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let platform = detect_platform();
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[82; 32]);
+        let name = "setup-installed";
+        let folder = data.join(format!("capsules/{name}"));
+        signed_component_folder(&folder, name, &key);
+        let cid = "setup-installed-cid";
+        let sha = "testsha";
+        fs::write(folder.join(CACHED_CID_FILE), format!("{cid}\n")).unwrap();
+        fs::write(folder.join(CACHED_ARTIFACT_SHA_FILE), format!("{sha}\n")).unwrap();
+        let mut platform_rows = serde_json::Map::new();
+        platform_rows.insert(
+            platform.clone(),
+            serde_json::json!({
+                "install_path": format!("capsules/{name}"),
+                "extract_path": name,
+                "cid": cid,
+                "checksum": format!("sha256:{sha}")
+            }),
+        );
+        let mut external = serde_json::Map::new();
+        external.insert(
+            name.to_string(),
+            serde_json::json!({
+                "install_path": format!("capsules/{name}"),
+                "platforms": platform_rows
+            }),
+        );
+        let mut capsules = serde_json::Map::new();
+        capsules.insert(
+            name.to_string(),
+            serde_json::json!({"cid": cid, "sha256": sha}),
+        );
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "external": external, "capsules": capsules, "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            recorded_install_cid(&data, &folder).is_none(),
+            "the folder starts without a record"
+        );
+
+        let ensured = ensure_capsule_component_for_home_launch(&data, name)
+            .await
+            .unwrap();
+        assert_eq!(ensured.status, "installed");
+        let walked = crate::stage_cmd::bundle_cid(&folder).unwrap();
+        assert!(recorded_install_cid(&data, &folder).is_none());
+        record_install_cid(&data, &folder, &folder);
+        assert_eq!(
+            recorded_install_cid(&data, &folder).as_deref(),
+            Some(walked.as_str()),
+            "the installed path keeps the Home's record"
+        );
+
+        // A setup run over a folder it already has keeps the prior record state.
+        write_install_cid_ledger(&data, &folder, None).unwrap();
+        assert!(recorded_install_cid(&data, &folder).is_none());
+        let original = std::env::var_os(COMPONENTS_MANIFEST_ENV);
+        std::env::set_var(COMPONENTS_MANIFEST_ENV, data.join("components.json"));
+        let setup = run_with_data_dir(
+            data.clone(),
+            None,
+            vec![name.to_string()],
+            vec![],
+            false,
+            false,
+            None,
+        )
+        .await;
+        match original {
+            Some(value) => std::env::set_var(COMPONENTS_MANIFEST_ENV, value),
+            None => std::env::remove_var(COMPONENTS_MANIFEST_ENV),
+        }
+        setup.expect("setup skips an already installed component");
+        assert!(recorded_install_cid(&data, &folder).is_none());
+        record_install_cid(&data, &folder, &folder);
+        assert_eq!(
+            recorded_install_cid(&data, &folder).as_deref(),
+            Some(walked.as_str()),
+            "a setup run over an installed component keeps the Home's record"
+        );
+
+        let storage = Arc::new(LocalFSProvider::new(data.clone()).await.unwrap());
+        let runtime = crate::runtime::Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        );
+        runtime
+            .configure_capsule_admission(
+                &data,
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let (handle, _signer) = runtime
+            .run_local_with_signer(&folder, Vec::new(), None)
+            .await
+            .expect("an already installed component starts outside dev mode");
+        assert_eq!(handle.manifest.name, name);
     }
 
     #[test]

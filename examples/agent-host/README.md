@@ -204,12 +204,12 @@ stays the same record.
 resource pattern. It is an auditable declaration, not the policy check: the
 Runtime enforces each grant, and a capsule receives only what it was granted.
 The declaration names no URL, no host route and no `Users/` path; the model
-resource is named, not routed. The journal ask is exactly the capsule's one
-manifest capability, `Users/self/.AppData/Agents/agent-host/`, and every other
-routed ask names only the launching principal, `Users/self`. The host tests
-keep the declaration equal to what the guest proposes, in both directions. This
-file is a lane-local stand-in, and it retires into the Runtime manifest when the
-Runtime defines per-step asks, so one source of truth owns the asks.
+resource is named, not routed. The manifest `asks` name `write` and `read` on
+`localhost://Users/self/.AppData/Agents/agent-host/*`. The Runtime reads that
+maximum. Approval and policy decide each request. Every routed pattern in this
+file names the launching principal, `Users/self`. The scenarios observe every
+proposal kind. An observed resource is the resource that scenario passed. This file
+stays until upstream confirms the manifest contract.
 
 ## Build and test
 
