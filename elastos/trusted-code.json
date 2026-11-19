@@ -72,6 +72,7 @@
     "elastos/crates/elastos-server/src/api/gateway_transaction_effects.rs",
     "elastos/crates/elastos-server/src/api/gateway_inspect_actions.rs",
     "elastos/crates/elastos-server/src/api/gateway_inspect_actions/store.rs",
+    "elastos/crates/elastos-server/src/api/gateway_inspect_actions/agent_plan.rs",
     "elastos/crates/elastos-server/src/api/gateway_home_system.rs",
     "elastos/crates/elastos-server/src/api/gateway_home_terminal.rs",
     "elastos/crates/elastos-server/src/api/gateway_inbox.rs",

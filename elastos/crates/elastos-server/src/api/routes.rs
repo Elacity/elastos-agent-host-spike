@@ -6109,6 +6109,86 @@ pub(crate) mod tests {
         assert_eq!(model.requests()[0]["op"], "offers_list");
     }
 
+    /// A plan's `send` line reads the body file the host wrote under the
+    /// agent's own root and sends its bytes as the request body: the provider
+    /// records the file's own object and only the Runtime's `op`. The `invoke`
+    /// line beside it still sends `{"path": …}`, so the wrapper the fixture
+    /// has always sent is unchanged.
+    #[tokio::test]
+    async fn a_plan_send_line_sends_the_body_files_own_bytes() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(16)).await;
+        let root = home.root(&agent);
+        let body_uri = format!("{root}/memory/body.json");
+        let body_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &body_uri).unwrap();
+        let body = r#"{"model_tokens":3,"pad":"send body ✓ 𝄞","task":{"text":"name it"}}"#;
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            &agent,
+            &root,
+            &body_uri,
+            &body_path,
+            body.as_bytes(),
+        )
+        .unwrap();
+
+        let offers = "elastos://model/offers";
+        home.plan(
+            &agent,
+            &[
+                format!("invoke\t{offers}\t{offers}\toffers_list\tread\t{body_uri}"),
+                format!("send\t{offers}\t{offers}\toffers_list\tread\t{body_uri}"),
+            ],
+        );
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let launched = home.launch_from(&dir, &agent).await.unwrap().0;
+        assert_eq!(launched.status, "starting");
+        let end = home.wait_ended(&launched.id).await;
+        assert_eq!(end.cause.as_deref(), Some("completed"));
+        grants.abort();
+
+        let results = home.results(&agent);
+        assert_eq!(results.len(), 2, "{results:?}");
+        assert!(
+            plan_outcome(&results, 0).starts_with("ok"),
+            "{}",
+            results[0]
+        );
+        assert!(
+            plan_outcome(&results, 1).starts_with("ok"),
+            "{}",
+            results[1]
+        );
+
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(
+            requests[0],
+            serde_json::json!({"path": body_uri, "op": "offers_list"}),
+            "the invoke line still sends the path wrapper"
+        );
+        let mut expected = serde_json::from_slice::<serde_json::Value>(body.as_bytes())
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        expected.insert("op".to_string(), serde_json::json!("offers_list"));
+        assert_eq!(
+            requests[1],
+            serde_json::Value::Object(expected),
+            "the send line delivers the body file's own object, unwrapped"
+        );
+        assert_eq!(
+            requests[1]["pad"],
+            serde_json::json!("send body ✓ 𝄞"),
+            "the body file's text arrives intact"
+        );
+    }
+
     /// A signed component that declares no agent has no ceiling entry, and
     /// its model invoke still reaches the provider. One call is recorded.
     #[tokio::test]

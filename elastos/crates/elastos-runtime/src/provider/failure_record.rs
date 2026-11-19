@@ -5,10 +5,41 @@ use super::super::{landlock_plan, rights::AdmittedRights, rights_table::RuntimeP
 use super::preexec_installer;
 use std::{
     ffi::{CStr, CString},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     os::unix::ffi::OsStrExt,
     os::unix::fs::MetadataExt,
     path::Path,
 };
+
+#[cfg(test)]
+thread_local! {
+    static PRE_FORK_STORAGE_SWAP: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The next Linux start renames `canary` onto the storage root after the plan
+/// has recorded that directory's device and inode and before the child opens it.
+#[cfg(test)]
+fn set_pre_fork_storage_swap(canary: Option<std::path::PathBuf>) {
+    PRE_FORK_STORAGE_SWAP.with(|slot| *slot.borrow_mut() = canary);
+}
+
+#[cfg(test)]
+fn apply_pre_fork_storage_swap(storage_root: &Path) {
+    let Some(canary) = PRE_FORK_STORAGE_SWAP.with(|slot| slot.borrow_mut().take()) else {
+        return;
+    };
+    let name = storage_root
+        .file_name()
+        .expect("the swapped storage root has a name");
+    let aside = storage_root.with_file_name(format!("{}.validated", name.to_string_lossy()));
+    std::fs::rename(storage_root, &aside).expect("the validated root moves aside");
+    std::fs::rename(&canary, storage_root).expect("the canary takes the storage root path");
+}
+
+/// Production starts leave the opened directory in place.
+#[cfg(not(test))]
+fn apply_pre_fork_storage_swap(_storage_root: &Path) {}
 
 const RECORD_LEN: usize = 12;
 const EXEC_TAG: u32 = 7;
@@ -51,16 +82,72 @@ pub(super) fn start(
             "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL".into(),
         )
     })?;
+    let (dev, ino) = directory_identity(storage_root).map_err(LaunchError::BeforeFork)?;
+    let storage = landlock_plan::StorageRoot {
+        path: storage_root,
+        dev,
+        ino,
+    };
     let prepared = preexec_installer::prepare(
         provider,
         admitted,
         &landlock_plan::Bindings {
-            storage_root: storage_root.to_path_buf(),
+            storage_root: storage.path.to_path_buf(),
             provider_executable: executable.to_path_buf(),
+            storage_dev: storage.dev,
+            storage_ino: storage.ino,
         },
     )
     .map_err(LaunchError::BeforeFork)?;
+    // A test may replace the opened directory after its identity is in the plan.
+    apply_pre_fork_storage_swap(storage.path);
     launch(&prepared, &path, args, NORMAL_TEST_HOOK, None, None)
+}
+
+fn directory_identity(path: &Path) -> Result<(u64, u64), String> {
+    let name = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| "provider start is refused: the storage root path contains NUL".to_string())?;
+    let fd = unsafe {
+        libc::open(
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "provider start is refused: the storage root could not be opened: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let file = unsafe { std::fs::File::from(OwnedFd::from_raw_fd(fd)) };
+    let meta = file.metadata().map_err(|error| {
+        format!("provider start is refused: the storage root could not be stated: {error}")
+    })?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+fn open_dev_null() -> Result<OwnedFd, String> {
+    let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!(
+            "provider start is refused: /dev/null could not be opened: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if fd < 3 {
+        unsafe { libc::close(fd) };
+        return Err(
+            "provider start is refused: the standard error descriptor is below fd 3".into(),
+        );
+    }
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
+        unsafe { libc::close(fd) };
+        return Err(
+            "provider start is refused: the standard error descriptor lacks FD_CLOEXEC".into(),
+        );
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn launch(
@@ -111,6 +198,17 @@ fn launch(
             "provider start is refused: the report descriptor lacks FD_CLOEXEC".into(),
         ));
     }
+    let stderr_null = match open_dev_null() {
+        Ok(fd) => fd,
+        Err(reason) => {
+            unsafe {
+                libc::close(pipe[0]);
+                libc::close(pipe[1]);
+            }
+            return Err(LaunchError::BeforeFork(reason));
+        }
+    };
+    let stderr_fd = stderr_null.as_raw_fd();
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         let error = std::io::Error::last_os_error();
@@ -142,6 +240,13 @@ fn launch(
                 );
             }
         }
+        // Replace the inherited standard error before confinement. close_range closes this source.
+        if unsafe { libc::dup2(stderr_fd, 2) } < 0 {
+            write_record_and_exit(
+                pipe[1],
+                &error_record(DUP2_TAG, unsafe { *libc::__errno_location() }),
+            );
+        }
         child_test_hook(test_hook, pipe[1]);
         if let Err(failure) = unsafe { preexec_installer::install(prepared, pipe[1]) } {
             write_record_and_exit(pipe[1], &failure.record());
@@ -152,6 +257,7 @@ fn launch(
         let errno = unsafe { *libc::__errno_location() };
         write_record_and_exit(pipe[1], &error_record(EXEC_TAG, errno));
     }
+    drop(stderr_null);
     unsafe {
         libc::close(pipe[1]);
     }
@@ -326,9 +432,20 @@ fn decode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
 
     fn did_rows() -> super::super::super::rights::AdmittedRights {
         super::super::super::rights::admit_runtime_grant(RuntimeProviderId::Did)
+    }
+
+    fn bindings_for(root: &Path, executable: &Path) -> landlock_plan::Bindings {
+        let meta = std::fs::symlink_metadata(root).unwrap();
+        landlock_plan::Bindings {
+            storage_root: root.to_path_buf(),
+            provider_executable: executable.to_path_buf(),
+            storage_dev: meta.dev(),
+            storage_ino: meta.ino(),
+        }
     }
 
     #[test]
@@ -363,10 +480,7 @@ mod tests {
     fn installer_failure_crosses_pipe_and_child_is_reaped() {
         let root = tempfile::tempdir().unwrap();
         let path = CString::new("/bin/true").unwrap();
-        let bindings = landlock_plan::Bindings {
-            storage_root: root.path().to_path_buf(),
-            provider_executable: "/bin/true".into(),
-        };
+        let bindings = bindings_for(root.path(), Path::new("/bin/true"));
         let rows = did_rows();
         let expected_rule = landlock_plan::build(
             RuntimeProviderId::Did,
@@ -448,10 +562,7 @@ mod tests {
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
             &rows,
-            &landlock_plan::Bindings {
-                storage_root: root.path().to_path_buf(),
-                provider_executable: "/bin/true".into(),
-            },
+            &bindings_for(root.path(), Path::new("/bin/true")),
         )
         .unwrap();
         let (pid, reason) = match launch(
@@ -494,10 +605,7 @@ mod tests {
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
             &rows,
-            &landlock_plan::Bindings {
-                storage_root: root.path().to_path_buf(),
-                provider_executable: "/bin/true".into(),
-            },
+            &bindings_for(root.path(), Path::new("/bin/true")),
         )
         .unwrap();
         let (pid, reason) = match launch(&prepared, &path, &[], TestReport::ShortRecord, None, None)
@@ -533,10 +641,7 @@ mod tests {
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
             &rows,
-            &landlock_plan::Bindings {
-                storage_root: root.path().to_path_buf(),
-                provider_executable: "/bin/cat".into(),
-            },
+            &bindings_for(root.path(), Path::new("/bin/cat")),
         )
         .unwrap();
         let mut input = [-1; 2];
@@ -581,6 +686,12 @@ mod tests {
                     .unwrap()
             })
             .collect::<Vec<_>>();
+        let stderr = std::fs::read_link(format!("/proc/{pid}/fd/2")).unwrap_or_default();
+        assert_eq!(
+            stderr,
+            Path::new("/dev/null"),
+            "the confined child standard error is /dev/null"
+        );
         unsafe {
             libc::close(input[1]);
             libc::close(output[0]);
@@ -593,5 +704,80 @@ mod tests {
             std::os::fd::AsRawFd::as_raw_fd(&marker)
         );
         assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn swapped_storage_root_refuses_and_leaves_the_canary() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rows = did_rows();
+        let abi =
+            landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
+        let index = landlock_plan::build(
+            RuntimeProviderId::Did,
+            &rows,
+            &bindings_for(&root, Path::new("/bin/true")),
+            abi,
+        )
+        .unwrap()
+        .rules
+        .iter()
+        .position(|rule| rule.0 == "STORAGE_ROOT")
+        .expect("storage rule");
+        struct ResetSwap;
+        impl Drop for ResetSwap {
+            fn drop(&mut self) {
+                set_pre_fork_storage_swap(None);
+            }
+        }
+        let _reset = ResetSwap;
+        set_pre_fork_storage_swap(Some(canary));
+        let result = start(
+            RuntimeProviderId::Did,
+            &rows,
+            &root,
+            Path::new("/bin/true"),
+            &[],
+        );
+        let kept = std::fs::read(root.join("kept"))
+            .unwrap_or_else(|_| panic!("the canary and its permissions stay unchanged"));
+        assert_eq!(
+            kept, b"kept",
+            "the canary and its permissions stay unchanged"
+        );
+        let mode = std::fs::symlink_metadata(&root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "the canary and its permissions stay unchanged");
+        match result {
+            Err(LaunchError::ChildFailed { reason, .. }) => {
+                assert_eq!(
+                    reason,
+                    format!(
+                        "landlock install refused: the path rule {index} could not be added with errno {}",
+                        libc::ESTALE
+                    ),
+                    "a swapped storage root must refuse"
+                );
+            }
+            Ok(pid) => {
+                let mut status = 0;
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+                    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                        break;
+                    }
+                }
+                panic!("a swapped storage root must refuse");
+            }
+            other => panic!("a swapped storage root must refuse: {other:?}"),
+        }
     }
 }
