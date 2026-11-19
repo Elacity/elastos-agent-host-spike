@@ -40,7 +40,7 @@ impl LaunchProbe {
         operation: &str,
         body: String,
     ) -> Result<(String, Vec<u8>), elastos::bus::types::BusError> {
-        Self::call_with(resource, resource, operation, operation, body)
+        Self::call_with(resource, resource, operation, operation, body.into_bytes())
     }
 
     /// A call whose grant is asked for `grant_resource`, which may differ from
@@ -51,13 +51,13 @@ impl LaunchProbe {
         resource: &str,
         operation: &str,
         action: &str,
-        body: String,
+        body: Vec<u8>,
     ) -> Result<(String, Vec<u8>), elastos::bus::types::BusError> {
         let grant = Self::grant(grant_resource, action)?;
         let response = elastos::bus::providers::invoke(&elastos::bus::types::InvokeRequest {
             resource: resource.to_string(),
             operation: operation.to_string(),
-            body: body.into_bytes(),
+            body,
             grant: Some(grant),
         })?;
         Ok((response.status, response.body))
@@ -156,9 +156,13 @@ impl LaunchProbe {
     ///
     /// - `request <resource> <action>`
     /// - `invoke <grant resource> <uri> <operation> <action> <body path>`
+    /// - `send <grant resource> <uri> <operation> <action> <body path>`
     /// - `write <grant resource> <uri> <action> <text>`
     ///
-    /// Fields are tab-separated; an empty body path means no body. A missing
+    /// Fields are tab-separated; an empty body path means no body. An `invoke`
+    /// line sends `{"path": <body path>}`. A `send` line reads the object at
+    /// `<body path>` over the bridge and sends its bytes as they are, which is
+    /// how a body the host wrote reaches the provider unwrapped. A missing
     /// plan leaves the probe's original behaviour untouched.
     fn plan() -> Result<(), elastos::bus::types::BusError> {
         let Ok(bytes) = Self::read(PLAN) else {
@@ -179,7 +183,24 @@ impl LaunchProbe {
                     } else {
                         format!("{{\"path\":\"{body_path}\"}}")
                     };
-                    match Self::call_with(grant_resource, resource, operation, action, body) {
+                    match Self::call_with(
+                        grant_resource,
+                        resource,
+                        operation,
+                        action,
+                        body.into_bytes(),
+                    ) {
+                        Ok((status, response)) => {
+                            format!("{status} {}", String::from_utf8_lossy(&response))
+                        }
+                        Err(err) => format!("{err:?}"),
+                    }
+                }
+                ["send", grant_resource, resource, operation, action, body_path] => {
+                    let sent = Self::read(body_path).and_then(|body| {
+                        Self::call_with(grant_resource, resource, operation, action, body)
+                    });
+                    match sent {
                         Ok((status, response)) => {
                             format!("{status} {}", String::from_utf8_lossy(&response))
                         }
@@ -188,7 +209,13 @@ impl LaunchProbe {
                 }
                 ["write", grant_resource, resource, action, text] => {
                     let body = format!("{{\"content\":[{}]}}", numbers(text.as_bytes()));
-                    match Self::call_with(grant_resource, resource, "write", action, body) {
+                    match Self::call_with(
+                        grant_resource,
+                        resource,
+                        "write",
+                        action,
+                        body.into_bytes(),
+                    ) {
                         Ok((status, response)) => {
                             format!("{status} {}", String::from_utf8_lossy(&response))
                         }
