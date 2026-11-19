@@ -15,14 +15,24 @@ lists=/var/cache/apt/ci-lists
 marker=/var/cache/apt/ci-mirror
 manifest=/var/cache/apt/ci-packages
 sources="$(mktemp -d)"
+docker_clean=/etc/apt/apt.conf.d/docker-clean
+docker_clean_saved="$sources/docker-clean"
 # ShellCheck does not track functions called by EXIT traps.
 # shellcheck disable=SC2329
 finish() {
+    if [[ -e "$docker_clean_saved" || -L "$docker_clean_saved" ]]; then
+        as_root mv "$docker_clean_saved" "$docker_clean"
+    fi
     rm -rf "$sources"
     echo "apt: mirror=${mirror_used}, elapsed=$((SECONDS - started))s"
 }
 trap finish EXIT
 mkdir -p "$sources/default" "$sources/fallback"
+# The Ubuntu container removes cached .debs in these APT hooks. Restore the
+# configuration on exit; host runners without docker-clean are unchanged.
+if [[ -f "$docker_clean" ]]; then
+    as_root mv "$docker_clean" "$docker_clean_saved"
+fi
 # Read only Ubuntu sources. Runner-added repositories stay outside this step.
 for file in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
     if [[ -f "$file" ]]; then
@@ -94,17 +104,23 @@ verify_archives() {
 verify_cached_lists() {
     # APT may store Packages as local LZ4; apt-helper expands it to the bytes
     # whose SHA-256 appears in the verified InRelease.
-    local inrelease base package_file suffix component rest arch expected digest actual matched
+    local inrelease verified_file base package_file suffix component rest arch expected digest actual matched i
     local inreleases=("$lists"/*_InRelease) package_files=("$lists"/*_Packages*)
+    local verified_inreleases=()
     [[ -f "${inreleases[0]}" && -f "${package_files[0]}" ]] || return 1
     for inrelease in "${inreleases[@]}"; do
         [[ -f "$inrelease" && ! -L "$inrelease" ]] || return 1
-        as_root gpgv --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg "$inrelease" >/dev/null 2>&1 || return 1
+        verified_file=$(mktemp "$sources/verified-inrelease.XXXXXX") || return 1
+        as_root gpgv --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg \
+            --output "$verified_file" "$inrelease" >/dev/null 2>&1 || return 1
+        verified_inreleases+=("$verified_file")
     done
     for package_file in "${package_files[@]}"; do
         [[ -f "$package_file" && ! -L "$package_file" ]] || return 1
         matched=false
-        for inrelease in "${inreleases[@]}"; do
+        for i in "${!inreleases[@]}"; do
+            inrelease=${inreleases[i]}
+            verified_file=${verified_inreleases[i]}
             base=${inrelease%_InRelease}
             [[ "$package_file" == "$base"_* ]] || continue
             suffix=${package_file#"$base"_}
@@ -119,7 +135,7 @@ verify_cached_lists() {
                 section && /^[A-Za-z0-9-]+:/ { exit }
                 section && $3 == path { print $1; count++ }
                 END { if (count != 1) exit 1 }
-            ' "$inrelease") || return 1
+            ' "$verified_file") || return 1
             actual=$(as_root /usr/lib/apt/apt-helper cat-file "$package_file" | sha256sum | awk '{ print $1 }') || return 1
             [[ "$actual" == "$digest" ]] || return 1
             matched=true
