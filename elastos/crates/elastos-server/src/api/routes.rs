@@ -1278,7 +1278,7 @@ pub(crate) mod tests {
         }
 
         /// Writes a second signed Agent Host folder whose manifest adds
-        /// `claims` to its asks (read and write), exactly as the stored host is
+        /// `claims` to its capabilities, exactly as the stored host is
         /// written, and returns the folder and the CID the Runtime's walk
         /// gives it. The extra claims name another agent's root; admission
         /// still binds the agent the request names.
@@ -1296,15 +1296,7 @@ pub(crate) mod tests {
             let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
             let mut manifest: elastos_common::CapsuleManifest =
                 serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
-            manifest
-                .asks
-                .extend(claims.iter().map(|claim| elastos_common::ManifestAsk {
-                    resource: claim.clone(),
-                    actions: vec![
-                        elastos_common::AskAction::Read,
-                        elastos_common::AskAction::Write,
-                    ],
-                }));
+            manifest.capabilities.extend_from_slice(claims);
             sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
             std::fs::write(
                 dir.join("capsule.json"),
@@ -1330,10 +1322,7 @@ pub(crate) mod tests {
             let wasm = std::fs::read(dir.join("a5-launch-probe.component.wasm")).unwrap();
             let mut manifest: elastos_common::CapsuleManifest =
                 serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap();
-            manifest.asks.push(elastos_common::ManifestAsk {
-                resource: "elastos://model/*".to_string(),
-                actions: vec![elastos_common::AskAction::Read],
-            });
+            manifest.capabilities.push("elastos://model/*".to_string());
             manifest.resources.model_tokens = tokens;
             sign_capsule(&key, &mut manifest, &hash_content(&wasm)).unwrap();
             std::fs::write(
