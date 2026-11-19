@@ -35,17 +35,15 @@ pub(super) fn create_pending_agent_plan_record(
     plan: &Value,
     now: u64,
 ) -> anyhow::Result<InspectActionRequestRecord> {
+    for value in [context.principal_id, context.capsule_id, context.session_id] {
+        if value.is_empty() || value.trim() != value {
+            anyhow::bail!("agent plan context requires a trimmed principal, capsule and session");
+        }
+    }
     let step = agent_plan_step(plan)?;
-    let scheme = step
-        .get("scheme")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let operation = step
-        .get("operation")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let body = step.get("request").cloned().unwrap_or_else(|| json!({}));
-    let gate_preview = plan_scheme(operation, scheme, &body);
+    let scheme = step["scheme"].as_str().unwrap_or_default();
+    let operation = step["operation"].as_str().unwrap_or_default();
+    let gate_preview = plan_scheme(operation, scheme, &step["request"]);
     if gate_preview.get("status").and_then(Value::as_str) != Some("ok") {
         anyhow::bail!(
             "{}",
@@ -183,6 +181,7 @@ mod tests {
         assert_eq!(stored.request_binding.as_ref(), Some(&expected));
         let binding = stored.request_binding.unwrap();
         assert_eq!(binding.principal, PRINCIPAL);
+        assert_eq!(stored.principal_id, PRINCIPAL);
         assert_eq!(binding.capsule, CAPSULE);
         assert_eq!(binding.method, "status");
         assert_eq!(
@@ -263,6 +262,25 @@ mod tests {
         assert!(create_pending_agent_plan_record(dir.path(), &context(), &two_steps, 1).is_err());
         let metadata = status_plan(json!({ "_runtime_invocation": {} }));
         assert!(create_pending_agent_plan_record(dir.path(), &context(), &metadata, 1).is_err());
+        assert!(!dir.path().join("inspect-actions").exists());
+    }
+
+    #[test]
+    fn a15r_record_refuses_an_empty_or_padded_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = status_plan(json!({}));
+        let padded = AgentPlanContext {
+            principal_id: " person:owner",
+            ..context()
+        };
+        let empty = AgentPlanContext {
+            session_id: "",
+            ..context()
+        };
+        for bad in [padded, empty] {
+            let refused = create_pending_agent_plan_record(dir.path(), &bad, &plan, 1).unwrap_err();
+            assert!(refused.to_string().contains("trimmed principal"));
+        }
         assert!(!dir.path().join("inspect-actions").exists());
     }
 }
