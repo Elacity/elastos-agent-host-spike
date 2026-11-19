@@ -73,7 +73,7 @@ pub(super) enum LaunchError {
 pub(super) fn start(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
-    storage_root: &Path,
+    checked: super::CheckedDirectory<'_>,
     executable: &Path,
     args: &[&CStr],
     stdin_read: Option<i32>,
@@ -84,9 +84,15 @@ pub(super) fn start(
             "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL".into(),
         )
     })?;
-    let (dev, ino) = directory_identity(storage_root).map_err(LaunchError::BeforeFork)?;
+    let (dev, ino) = directory_identity(checked.path).map_err(LaunchError::BeforeFork)?;
+    if dev != checked.dev || ino != checked.ino {
+        return Err(LaunchError::BeforeFork(
+            "provider start is refused: the reopened storage root is not the checked directory"
+                .to_string(),
+        ));
+    }
     let storage = landlock_plan::StorageRoot {
-        path: storage_root,
+        path: checked.path,
         dev,
         ino,
     };
@@ -447,6 +453,11 @@ mod tests {
         super::super::super::rights::admit_runtime_grant(RuntimeProviderId::Did)
     }
 
+    fn opened_directory(path: &Path) -> super::super::CheckedDirectory<'_> {
+        let (dev, ino) = super::directory_identity(path).expect("the storage root opens");
+        super::super::CheckedDirectory { path, dev, ino }
+    }
+
     fn bindings_for(root: &Path, executable: &Path) -> landlock_plan::Bindings {
         let meta = std::fs::symlink_metadata(root).unwrap();
         landlock_plan::Bindings {
@@ -464,7 +475,7 @@ mod tests {
         let result = start(
             RuntimeProviderId::Did,
             &rows,
-            Path::new("/"),
+            opened_directory(Path::new("/")),
             bad,
             &[],
             None,
@@ -548,7 +559,7 @@ mod tests {
         let (pid, reason) = match start(
             RuntimeProviderId::Did,
             &rows,
-            root.path(),
+            opened_directory(root.path()),
             &executable,
             &[],
             None,
@@ -764,7 +775,7 @@ mod tests {
         let result = start(
             RuntimeProviderId::Did,
             &rows,
-            &root,
+            opened_directory(&root),
             Path::new("/bin/true"),
             &[],
             None,

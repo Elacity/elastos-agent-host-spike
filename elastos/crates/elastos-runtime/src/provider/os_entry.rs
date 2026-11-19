@@ -2,7 +2,10 @@
 //!
 //! `start_provider` is that entry. It resolves rights first. Linux (x86_64 or
 //! aarch64) installs the admitted rows through the failure-record launcher.
-//! macOS renders those rows as a Seatbelt profile and stops without spawning.
+//! The caller passes the device and inode of the directory it opened. Linux
+//! opens the path again and refuses when that directory is different, before
+//! the plan and the fork. macOS renders those rows as a Seatbelt profile and
+//! stops without spawning.
 //! Every other OS refuses before creating a process. The launcher and the
 //! Linux installer are private children of this module. The server does not
 //! call this entry. The child path between fork and exec stays in
@@ -13,6 +16,14 @@ use super::rights_table::{self, RuntimeProviderId};
 use elastos_common::ProviderAuthority;
 use std::os::fd::OwnedFd;
 use std::path::Path;
+
+/// A directory the caller opened, with the device and inode of that open.
+#[derive(Clone, Copy)]
+pub(super) struct CheckedDirectory<'a> {
+    pub path: &'a Path,
+    pub dev: u64,
+    pub ino: u64,
+}
 
 /// The descriptors the caller created for the child's fd 0 and fd 1 (the
 /// child ends), plus the parent ends that are returned in `Launched`.
@@ -78,7 +89,7 @@ pub(super) fn start_provider(
     provider: RuntimeProviderId,
     authority: &ProviderAuthority,
     executable: &Path,
-    storage_root: &Path,
+    checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
     let admitted = super::rights::check_rights_against_runtime_templates(
@@ -86,7 +97,7 @@ pub(super) fn start_provider(
         authority,
         rights_table::RIGHTS,
     )?;
-    dispatch(provider, &admitted, executable, storage_root, stdio)
+    dispatch(provider, &admitted, executable, checked, stdio)
 }
 
 #[allow(dead_code)] // Only the OS arms call this, and those arms have no server caller yet.
@@ -107,17 +118,18 @@ fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     executable: &Path,
-    storage_root: &Path,
+    checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
     require_grant(admitted)?;
-    // `start` builds the plan from `admitted`, then forks. Allocation finishes
-    // before the fork. This function adds nothing between fork and exec.
+    // `start` compares the reopened path with this directory, builds the plan,
+    // then forks. Allocation finishes before the fork. This function adds
+    // nothing between fork and exec.
     let args: &[&std::ffi::CStr] = &[];
     let pid = failure_record::start(
         provider,
         admitted,
-        storage_root,
+        checked,
         executable,
         args,
         Some(stdio.stdin),
@@ -140,7 +152,7 @@ fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     executable: &Path,
-    storage_root: &Path,
+    checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
     require_grant(admitted)?;
@@ -151,7 +163,7 @@ fn dispatch(
                 .to_string(),
         );
     }
-    let _ = (executable, storage_root, stdio);
+    let _ = (executable, checked.path, checked.dev, checked.ino, stdio);
     Err(MACOS_NO_SPAWN.to_string())
 }
 
@@ -175,11 +187,18 @@ fn refuse_unsupported_os(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     executable: &Path,
-    storage_root: &Path,
+    checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
     require_grant(admitted)?;
-    let _ = (provider, executable, storage_root, stdio);
+    let _ = (
+        provider,
+        executable,
+        checked.path,
+        checked.dev,
+        checked.ino,
+        stdio,
+    );
     Err(UNSUPPORTED_OS.to_string())
 }
 
@@ -198,10 +217,10 @@ fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     executable: &Path,
-    storage_root: &Path,
+    checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
-    refuse_unsupported_os(provider, admitted, executable, storage_root, stdio)
+    refuse_unsupported_os(provider, admitted, executable, checked, stdio)
 }
 
 #[cfg(test)]
@@ -219,6 +238,16 @@ mod tests {
         let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
         assert_eq!(opened, 0);
         (fds[0], fds[1])
+    }
+
+    fn checked_directory(path: &Path) -> CheckedDirectory<'_> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).expect("the storage directory opens");
+        CheckedDirectory {
+            path,
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }
     }
 
     fn stdio() -> ChildStdio {
@@ -280,7 +309,7 @@ mod tests {
             RuntimeProviderId::Did,
             &admitted,
             &program,
-            dir.path(),
+            checked_directory(dir.path()),
             stdio(),
         )
         .unwrap_err();
@@ -294,7 +323,7 @@ mod tests {
     #[test]
     fn unsupported_dispatch_only_calls_the_refusal() {
         let production = production_source();
-        let call = "refuse_unsupported_os(provider, admitted, executable, storage_root, stdio)";
+        let call = "refuse_unsupported_os(provider, admitted, executable, checked, stdio)";
         assert_eq!(production.matches(call).count(), 1);
         let at = production.find(call).unwrap();
         let head = production[..at].rfind("fn dispatch").unwrap();
@@ -390,7 +419,7 @@ mod tests {
         assert!(!production.contains("applied_rows"));
         let normalised: String = production.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(normalised.contains(
-            "failure_record::start( provider, admitted, storage_root, executable, args, Some(stdio.stdin), Some(stdio.stdout), )"
+            "failure_record::start( provider, admitted, checked, executable, args, Some(stdio.stdin), Some(stdio.stdout), )"
         ));
         assert!(production.contains("render_macos_profile(provider, admitted)"));
         assert!(
@@ -501,7 +530,7 @@ mod tests {
                 RuntimeProviderId::Did,
                 &authority,
                 &program,
-                dir.path(),
+                checked_directory(dir.path()),
                 stdio(),
             )
             .map(|_| ()),
@@ -525,7 +554,7 @@ mod tests {
                 RuntimeProviderId::Did,
                 &authority,
                 &program,
-                dir.path(),
+                checked_directory(dir.path()),
                 stdio(),
             )
             .unwrap_err(),

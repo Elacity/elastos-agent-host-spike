@@ -1149,6 +1149,75 @@ impl Drop for CreatedStorageRoot {
     }
 }
 
+#[cfg(test)]
+struct CheckedLaunchSwap {
+    dev: u64,
+    ino: u64,
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+}
+
+#[cfg(test)]
+static CHECKED_LAUNCH_SWAP: std::sync::Mutex<Option<CheckedLaunchSwap>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "linux"))]
+fn arm_checked_launch_swap(dev: u64, ino: u64, aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+    *CHECKED_LAUNCH_SWAP.lock().expect("checked launch") = Some(CheckedLaunchSwap {
+        dev,
+        ino,
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+    });
+}
+
+/// Tests can place another directory at the storage root after this start has
+/// opened it and before the launcher opens that path. The placement is for one
+/// directory. Production returns at once.
+#[cfg(test)]
+fn pause_before_launcher(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) {
+    let Ok(info) = stat_fd(directory.as_raw_fd()) else {
+        return;
+    };
+    let swap = {
+        let mut slot = CHECKED_LAUNCH_SWAP.lock().expect("checked launch");
+        let matches = slot
+            .as_ref()
+            .is_some_and(|swap| swap.dev == stat_dev(&info) && swap.ino == stat_ino(&info));
+        if !matches {
+            return;
+        }
+        slot.take()
+    };
+    let Some(swap) = swap else {
+        return;
+    };
+    let aside = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        )
+    };
+    let canary = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    assert_eq!(
+        (aside, canary),
+        (0, 0),
+        "the checked directory could not be set aside"
+    );
+}
+
+#[cfg(not(test))]
+fn pause_before_launcher(_parent: &OwnedFd, _directory: &OwnedFd, _name: &std::ffi::CStr) {}
+
 fn refused(reason: &str) -> BridgeError {
     BridgeError::Refused(reason.to_string())
 }
@@ -1686,9 +1755,12 @@ impl ProviderBridge {
     /// `Confined` only after `Init` succeeded.
     ///
     /// The Runtime creates the fresh storage root under its parent, opens that
-    /// directory without following a symlink, and syncs it. The child's stdin
-    /// and stdout are fresh pipes. A refusal returns `Err` and starts nothing;
-    /// there is no fallback to the plain `spawn`.
+    /// directory without following a symlink, and syncs it. The launcher
+    /// receives that directory's device and inode, opens the path again, and
+    /// refuses when the directory is different. That comparison happens before
+    /// the plan and the fork. The child's stdin and stdout are fresh pipes. A
+    /// refusal returns `Err` and starts nothing; there is no fallback to the
+    /// plain `spawn`.
     pub async fn spawn_confined(
         component_key: &str,
         authority: &ProviderAuthority,
@@ -1704,6 +1776,17 @@ impl ProviderBridge {
             )));
         };
         let created_root = create_storage_root(storage_root)?;
+        let info = stat_fd(created_root.directory.as_raw_fd()).map_err(BridgeError::Io)?;
+        let checked = super::os_entry::CheckedDirectory {
+            path: storage_root,
+            dev: stat_dev(&info),
+            ino: stat_ino(&info),
+        };
+        pause_before_launcher(
+            &created_root.parent,
+            &created_root.directory,
+            &created_root.name,
+        );
         let (stdin_read, to_child) = pipe_pair()?;
         let (from_child, stdout_write) = pipe_pair()?;
         let stdio = super::os_entry::ChildStdio {
@@ -1713,7 +1796,7 @@ impl ProviderBridge {
             from_child,
         };
         let launched =
-            super::os_entry::start_provider(provider, authority, binary_path, storage_root, stdio)
+            super::os_entry::start_provider(provider, authority, binary_path, checked, stdio)
                 .map_err(BridgeError::Refused)?;
         // The child holds its copies; these are the parent's, and must close
         // so the child sees EOF on stdin and the parent sees EOF on stdout.
@@ -4844,6 +4927,67 @@ mod tests {
             "provider right \"storage\" rule text differs from the Runtime template"
         );
         assert!(!marker.exists(), "the provider binary never runs");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_reopened_storage_root_that_differs_from_the_checked_directory_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let marker = root.join("started");
+        let program = temp.path().join("mark.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = open_directory(&root).unwrap();
+        let info = stat_fd(directory.as_raw_fd()).unwrap();
+        arm_checked_launch_swap(stat_dev(&info), stat_ino(&info), c"root.checked", c"canary");
+        drop(directory);
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *CHECKED_LAUNCH_SWAP.lock().expect("checked launch") = None;
+            }
+        }
+        let _clear = Clear;
+        let error = match ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &program,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        {
+            Ok(confined) => {
+                let _ = confined.bridge().shutdown().await;
+                panic!(
+                    "a reopened storage root that differs from the checked directory is refused"
+                );
+            }
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: the reopened storage root is not the checked directory",
+            "a reopened storage root that differs from the checked directory is refused"
+        );
+        assert!(!marker.exists(), "the provider does not start");
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o755,
+            "the canary stays unchanged"
+        );
     }
 
     #[cfg(target_os = "linux")]
