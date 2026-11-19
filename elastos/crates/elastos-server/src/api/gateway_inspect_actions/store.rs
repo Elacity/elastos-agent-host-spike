@@ -5,12 +5,22 @@ use super::binding::inspect_action_request_binding;
 use crate::esp_binding::EspRequestBinding;
 
 pub(super) const INSPECT_ACTION_SCHEMA: &str = "elastos.inspect.action-request/v1";
+/// Kind of an Inspector action request; the only kind the Inbox can approve.
+pub(super) const INSPECT_ACTION_KIND: &str = "inspect_action";
+/// Kind of a pending agent plan: a record of an exact plan with no effect.
+pub(super) const AGENT_PLAN_KIND: &str = "agent_plan";
 const INSPECT_ACTIONS_DIR: &str = "inspect-actions";
 static INSPECT_ACTION_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn default_record_kind() -> String {
+    INSPECT_ACTION_KIND.to_string()
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct InspectActionRequestRecord {
     pub(super) schema: String,
+    #[serde(default = "default_record_kind")]
+    pub(super) kind: String,
     pub(super) request_id: String,
     pub(super) principal_id: String,
     pub(super) session_id: String,
@@ -37,7 +47,11 @@ pub(super) fn pending_inspect_action_requests(
     records.sort_by_key(|record| record.created_at);
     Ok(records
         .into_iter()
-        .filter(|record| record.status == "pending" && record.principal_id == principal_id)
+        .filter(|record| {
+            record.status == "pending"
+                && record.principal_id == principal_id
+                && record.kind == INSPECT_ACTION_KIND
+        })
         .map(|record| {
             serde_json::json!({
                 "schema": record.schema,
@@ -174,6 +188,7 @@ mod tests {
     fn pending_record(request_id: &str) -> InspectActionRequestRecord {
         InspectActionRequestRecord {
             schema: INSPECT_ACTION_SCHEMA.to_string(),
+            kind: INSPECT_ACTION_KIND.to_string(),
             request_id: request_id.to_string(),
             principal_id: "person:test".to_string(),
             session_id: "session:test".to_string(),

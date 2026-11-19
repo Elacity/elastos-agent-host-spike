@@ -30,31 +30,7 @@ pub(super) async fn plan(source: &Arc<dyn InspectSource>, request: &Value) -> Va
 
     if let Some(scheme) = request.get("scheme").and_then(Value::as_str) {
         let body = request.get("request").cloned().unwrap_or_else(|| json!({}));
-        return match build_capability_resource(scheme, operation, &body) {
-            Ok(resource) => {
-                let action = provider_operation_action(scheme, operation);
-                if let Some(action) = action {
-                    if let Err(message) = ensure_generic_wallet_capability(&resource, action) {
-                        return error("invalid_request", &message);
-                    }
-                }
-                ok(json!({
-                    "schema": "elastos.inspect.gate-preview/v1",
-                    "mode": "provider_resource",
-                    "provider": scheme,
-                    "operation": operation,
-                    "capabilities": [{
-                        "resource": resource,
-                        "actions": action
-                            .map(|action| vec![action.to_string()])
-                            .unwrap_or_default(),
-                    }],
-                    "execution": preview_execution_policy(),
-                    "dispatch": false,
-                }))
-            }
-            Err(message) => error("invalid_request", &message),
-        };
+        return plan_scheme(operation, scheme, &body);
     }
 
     let id = request
@@ -102,5 +78,36 @@ pub(super) async fn plan(source: &Arc<dyn InspectSource>, request: &Value) -> Va
             &format!("unknown declared action: {action}"),
         ),
         Err(_) => error("invalid_authority", "invalid authority metadata"),
+    }
+}
+
+/// Effect-free gate preview for one typed provider step. It derives the
+/// capability resource with the same `build_capability_resource` that provider
+/// invocation uses and performs no provider call.
+pub(crate) fn plan_scheme(operation: &str, scheme: &str, body: &Value) -> Value {
+    match build_capability_resource(scheme, operation, body) {
+        Ok(resource) => {
+            let action = provider_operation_action(scheme, operation);
+            if let Some(action) = action {
+                if let Err(message) = ensure_generic_wallet_capability(&resource, action) {
+                    return error("invalid_request", &message);
+                }
+            }
+            ok(json!({
+                "schema": "elastos.inspect.gate-preview/v1",
+                "mode": "provider_resource",
+                "provider": scheme,
+                "operation": operation,
+                "capabilities": [{
+                    "resource": resource,
+                    "actions": action
+                        .map(|action| vec![action.to_string()])
+                        .unwrap_or_default(),
+                }],
+                "execution": preview_execution_policy(),
+                "dispatch": false,
+            }))
+        }
+        Err(message) => error("invalid_request", &message),
     }
 }
