@@ -4466,6 +4466,12 @@ mod tests {
             child_stdout, parent_stdout,
             "the child inherited the parent's stdout"
         );
+        let child_stderr = std::fs::read_link(format!("/proc/{pid}/fd/2")).unwrap();
+        assert_eq!(
+            child_stderr,
+            Path::new("/dev/null"),
+            "the confined child's standard error is /dev/null"
+        );
         // Row 1: Shutdown is answered, the child exits, and the pid is reaped.
         confined.bridge().shutdown().await.unwrap();
         for _ in 0..250 {
@@ -4705,22 +4711,6 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
-    }
-
-    #[test]
-    fn this_branch_does_not_carry_the_launcher_identity() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider");
-        for name in [
-            "landlock_plan.rs",
-            "preexec_installer.rs",
-            "failure_record.rs",
-        ] {
-            let text = std::fs::read_to_string(root.join(name)).unwrap();
-            assert!(
-                !text.contains("storage_dev") && !text.contains("dup2(stderr_fd"),
-                "the launcher identity stays on the launcher branch"
-            );
-        }
     }
 
     #[cfg(target_os = "linux")]

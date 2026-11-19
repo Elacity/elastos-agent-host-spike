@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
-use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal};
+use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
 use crate::resource_bridge::LaunchContent;
 use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
@@ -30,9 +30,121 @@ pub const CAPSULE_FAILED: &str = "failed";
 pub const CAUSE_COMPLETED: &str = "completed";
 
 /// How long an ended activation stays listed, so its session, status and cause
-/// can still be read after the response that started it has long gone. The
-/// entry leaves on the first listing after this, not on a timer.
+/// can still be read after the response that started it has long gone. The end
+/// hands the entry's removal at this instant to the [`RETENTION_SWEEPER`]; a
+/// listing also prunes an entry this old.
 pub const ENDED_CAPSULE_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The registry map the Runtime and every activation's end share.
+type CapsuleRegistry = RwLock<HashMap<String, RunningCapsuleInfo>>;
+
+/// One ended entry the sweeper removes at its deadline, if the entry still
+/// records this end. The registry is held weakly: a Runtime that has gone
+/// takes its registry with it, and its removals are then nothing.
+struct DueRemoval {
+    registry: std::sync::Weak<CapsuleRegistry>,
+    id: String,
+    ended_at: std::time::Instant,
+}
+
+/// The sweeper's deadline queue, ordered by deadline and then by arrival.
+struct RetentionQueue {
+    due: std::collections::BTreeMap<(std::time::Instant, u64), DueRemoval>,
+    arrivals: u64,
+    /// Whether the sweeper thread runs. It is started by the first end that
+    /// schedules a removal, and by a later one if that start failed.
+    sweeping: bool,
+}
+
+/// The one retention sweeper of the process: a plain thread, outside every
+/// tokio runtime, so no runtime's shutdown can cancel a removal. It waits on
+/// [`RetentionSweeper::wake`] until the earliest deadline, with the queue's
+/// lock released while it waits, and takes the registry lock only after the
+/// deadline has come.
+struct RetentionSweeper {
+    queue: StdMutex<RetentionQueue>,
+    wake: std::sync::Condvar,
+}
+
+static RETENTION_SWEEPER: RetentionSweeper = RetentionSweeper {
+    queue: StdMutex::new(RetentionQueue {
+        due: std::collections::BTreeMap::new(),
+        arrivals: 0,
+        sweeping: false,
+    }),
+    wake: std::sync::Condvar::new(),
+};
+
+impl RetentionSweeper {
+    /// Removes `id` from `registry` at `deadline` if the entry still records
+    /// the end at `ended_at`. A thread that cannot be started is logged; a
+    /// listing still prunes the entry, and the next end tries the start again.
+    fn schedule(
+        &'static self,
+        registry: &Arc<CapsuleRegistry>,
+        id: &str,
+        ended_at: std::time::Instant,
+        deadline: std::time::Instant,
+    ) {
+        let mut queue = self.queue.lock().unwrap_or_else(|err| err.into_inner());
+        let arrival = queue.arrivals;
+        queue.arrivals += 1;
+        queue.due.insert(
+            (deadline, arrival),
+            DueRemoval {
+                registry: Arc::downgrade(registry),
+                id: id.to_string(),
+                ended_at,
+            },
+        );
+        if !queue.sweeping {
+            let started = std::thread::Builder::new()
+                .name("ended-capsule-retention".into())
+                .spawn(move || self.sweep());
+            match started {
+                Ok(_) => queue.sweeping = true,
+                Err(error) => {
+                    tracing::error!(%error, "activation {id}: no thread for its retention")
+                }
+            }
+        }
+        drop(queue);
+        self.wake.notify_one();
+    }
+
+    /// The sweeper thread: one removal at a time, each at its deadline.
+    fn sweep(&'static self) {
+        loop {
+            let due = self.next_due();
+            if let Some(registry) = due.registry.upgrade() {
+                let mut capsules = registry.blocking_write();
+                remove_ended_entry(&mut capsules, &due.id, due.ended_at);
+            }
+        }
+    }
+
+    /// Waits until the earliest deadline has come and takes that removal.
+    fn next_due(&self) -> DueRemoval {
+        let mut queue = self.queue.lock().unwrap_or_else(|err| err.into_inner());
+        loop {
+            let now = std::time::Instant::now();
+            let wait = match queue.due.first_entry() {
+                Some(first) if first.key().0 <= now => return first.remove(),
+                Some(first) => Some(first.key().0.saturating_duration_since(now)),
+                None => None,
+            };
+            queue = match wait {
+                Some(wait) => {
+                    self.wake
+                        .wait_timeout(queue, wait)
+                        .unwrap_or_else(|err| err.into_inner())
+                        .0
+                }
+                None => self.wake.wait(queue).unwrap_or_else(|err| err.into_inner()),
+            };
+        }
+    }
+}
 
 /// Information about a running capsule (for API responses and lifecycle management)
 #[derive(Debug, Clone)]
@@ -249,10 +361,16 @@ struct ActivationContextHeld {
     manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
     model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
     activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
+    /// The launch contents, by capsule id: a content launch's program reads
+    /// its content from here until its end, and no other activation does.
+    launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
     /// This activation's stop request, the same value the bridge and the stop
     /// route hold.
     stop: Arc<ActivationStop>,
     authority: Option<InstanceAuthority>,
+    /// How long the ended entry stays before the sweeper removes it:
+    /// [`ENDED_CAPSULE_RETENTION`], which only a unit row shortens.
+    retention: std::time::Duration,
     /// The end is owed until the registry entry records it.
     armed: bool,
     owed: OwedEnd,
@@ -285,9 +403,11 @@ impl ActivationContextHeld {
             handle: handle.clone(),
             component,
             registry: runtime.running_capsules.clone(),
+            retention: ENDED_CAPSULE_RETENTION,
             manifest_capabilities: runtime.bridge_manifest_capabilities.clone(),
             model_token_ceilings: runtime.bridge_model_token_ceilings.clone(),
             activation_stops: runtime.activation_stops.clone(),
+            launch_contents: runtime.launch_contents.clone(),
             stop,
             authority,
             armed: true,
@@ -307,14 +427,23 @@ impl ActivationContextHeld {
         self.stop.cancelled()
     }
 
-    /// Takes away what the start put in place: the bridge principal, the
-    /// manifest ceiling and the model-token ceiling.
+    /// Takes away what the start put in place: the provider's activation
+    /// entry and the principal the guest ran for, the manifest ceiling, the
+    /// model-token ceiling and the launch content. It is called at the one
+    /// end of every detached activation, before the entry records the end,
+    /// so nothing of the instance is left for a reader or a late bridge call.
+    /// The stop request is not this method's: the entry's end takes it away
+    /// after the write, so a racing stop still finds it.
     async fn release(&mut self) {
-        self.component.clear_bridge_principal(&self.id).await;
+        self.component.forget_instance(&self.id).await;
         if let Ok(mut bounds) = self.manifest_capabilities.write() {
             bounds.remove(&self.id.0);
         }
         self.model_token_ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id.0);
+        self.launch_contents
             .write()
             .unwrap_or_else(|err| err.into_inner())
             .remove(&self.id.0);
@@ -328,7 +457,10 @@ impl ActivationContextHeld {
     /// of the activation is left. A revoke the store could not save ends the
     /// entry `failed`, with a cause that names it. The stop request is taken
     /// away only after the entry records the end, so a stop that finds the
-    /// entry not ended also finds its request.
+    /// entry not ended also finds its request. Its retention is timed from
+    /// that write: the entry's removal goes to the [`RETENTION_SWEEPER`]
+    /// here, so it happens at its 60 s even if nothing lists or registers
+    /// again and every tokio runtime has shut down.
     async fn end_instance(mut self, status: &str, cause: &str) {
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
@@ -368,20 +500,43 @@ impl ActivationContextHeld {
                 .capsule_stop(&self.id.0, stop_reason(&status, &cause));
             self.audited = true;
         }
+        let ended_at = std::time::Instant::now();
         let mut capsules = self.registry.write().await;
-        if let Some(info) = capsules.get_mut(&self.id.0) {
+        let recorded = if let Some(info) = capsules.get_mut(&self.id.0) {
             if info.ended_at.is_none() {
-                info.status = status;
-                info.cause = Some(cause);
-                info.ended_at = Some(std::time::Instant::now());
+                info.status = status.to_string();
+                info.cause = Some(cause.to_string());
+                info.ended_at = Some(ended_at);
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
         drop(capsules);
+
+        // The stop request is taken away only after the entry records the
+        // end, so a stop that finds the entry not ended also finds its
+        // request.
         self.activation_stops
             .write()
             .unwrap_or_else(|err| err.into_inner())
             .remove(&self.id.0);
         self.armed = false;
+
+        // The sweeper removes the entry at its retention, whichever runtime
+        // ran the end and whether or not the start runtime still lives. A
+        // reader that pruned it first, or an entry a later start replaced,
+        // leaves the removal a no-op: only this end's own `ended_at` goes.
+        if recorded {
+            RETENTION_SWEEPER.schedule(
+                &self.registry,
+                &self.id.0,
+                ended_at,
+                ended_at + self.retention,
+            );
+        }
     }
 
     /// This guard's owed end, moved into a new guard; this one is left
@@ -393,9 +548,11 @@ impl ActivationContextHeld {
             handle: self.handle.clone(),
             component: self.component.clone(),
             registry: self.registry.clone(),
+            retention: self.retention,
             manifest_capabilities: self.manifest_capabilities.clone(),
             model_token_ceilings: self.model_token_ceilings.clone(),
             activation_stops: self.activation_stops.clone(),
+            launch_contents: self.launch_contents.clone(),
             stop: self.stop.clone(),
             authority: self.authority.clone(),
             armed: true,
@@ -403,6 +560,14 @@ impl ActivationContextHeld {
             settled: self.settled.take(),
             audited: self.audited,
         }
+    }
+
+    /// Test only: a retention short enough for a row to wait out in real
+    /// time, since the sweeper runs on the real clock.
+    #[cfg(test)]
+    fn retained_for(mut self, retention: std::time::Duration) -> Self {
+        self.retention = retention;
+        self
     }
 }
 
@@ -465,6 +630,109 @@ impl Drop for ActivationContextHeld {
             }
         }
     }
+}
+
+/// The only place a by-CID start can build a [`VerifiedBundle`].
+///
+/// The struct's fields are private to this module. A struct literal written
+/// outside it, including one shaped `Ok(VerifiedBundle { ... })`, does not
+/// compile. [`VerifiedBundle::check`] is the function here that builds one.
+mod verified_bundle {
+    use std::path::Path;
+
+    use elastos_bundle_identity::{CheckedBundle, LabCid};
+    use elastos_common::CapsuleManifest;
+    use elastos_runtime::signature::SignatureVerifier;
+
+    use crate::bundle_admission::{
+        self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal,
+    };
+
+    /// A bundle the by-CID start has checked. The walked CID is the one asked
+    /// for, a publisher this Home trusts signed it, and the manifest was
+    /// admitted. A program loads from [`VerifiedBundle::into_component`].
+    /// The signature this start reports is the [`AcceptedSignature`] returned
+    /// beside the bundle, not a field of the bundle.
+    pub(crate) struct VerifiedBundle {
+        cid: LabCid,
+        admitted: AdmittedBundle,
+    }
+
+    impl VerifiedBundle {
+        /// Builds the bundle the start keeps. The walked CID equals `asked`,
+        /// the signature verifies under `trust`, the manifest is admitted,
+        /// and a program's imports pass.
+        pub(crate) fn check(
+            bundle: &CheckedBundle,
+            asked: &LabCid,
+            signature: &Path,
+            trust: &SignatureVerifier,
+        ) -> std::result::Result<(Self, AcceptedSignature), BundleRefusal> {
+            if bundle.cid() != *asked {
+                return Err(BundleRefusal::CidMismatch {
+                    asked: asked.to_string(),
+                    computed: bundle.cid().to_string(),
+                });
+            }
+            let accepted = bundle_admission::check_bundle_signature(signature, asked, trust)?;
+            let admitted = bundle_admission::admit_bundle_manifest(bundle)?;
+            if admitted.kind == BundleKind::Program {
+                crate::component::validate_component_imports_for_manifest(
+                    &admitted.component,
+                    &admitted.manifest,
+                )
+                .map_err(BundleRefusal::NotAComponent)?;
+            }
+            Ok((
+                VerifiedBundle {
+                    cid: *asked,
+                    admitted,
+                },
+                accepted,
+            ))
+        }
+
+        pub(crate) fn cid(&self) -> &LabCid {
+            &self.cid
+        }
+
+        pub(crate) fn kind(&self) -> BundleKind {
+            self.admitted.kind
+        }
+
+        pub(crate) fn manifest(&self) -> &CapsuleManifest {
+            &self.admitted.manifest
+        }
+
+        pub(crate) fn pins(&self) -> &[(String, String)] {
+            &self.admitted.pins
+        }
+
+        pub(crate) fn take_pins(&mut self) -> Vec<(String, String)> {
+            std::mem::take(&mut self.admitted.pins)
+        }
+
+        pub(crate) fn take_files(&mut self) -> std::collections::BTreeMap<String, Vec<u8>> {
+            std::mem::take(&mut self.admitted.files)
+        }
+
+        /// The manifest and the entrypoint bytes the loader compiles.
+        pub(crate) fn into_component(self) -> (CapsuleManifest, Vec<u8>) {
+            (self.admitted.manifest, self.admitted.component)
+        }
+    }
+}
+
+use verified_bundle::VerifiedBundle;
+
+/// Test only: the four tables the installed bridge host call reads for one
+/// capsule id, so a row can make a late call under exactly what an end left.
+#[cfg(test)]
+pub(crate) struct BridgeTables {
+    pub manifest_capabilities: Vec<AuthorityBound>,
+    pub launch: Option<Arc<LaunchContent>>,
+    pub model_token_ceiling: Option<u64>,
+    pub stop: Option<Arc<crate::resource_bridge::ActivationStopFlag>>,
 }
 
 impl Runtime {
@@ -549,12 +817,16 @@ impl Runtime {
                     .unwrap_or_default();
                 // The content this caller was launched with, if it is the
                 // program of a content launch: looked up by its own id, as
-                // its ceiling is, and nobody else's.
-                // A poisoned lock still holds the table, as for the guard.
+                // its ceiling is, and nobody else's. A poisoned lock still
+                // holds the table, as for the guard. The read guard ends with
+                // this statement: it is not held across the call below, so an
+                // activation's end can take the content away while another
+                // guest is inside the bridge.
                 let launch = host_launch_contents
                     .read()
-                    .unwrap_or_else(|it| it.into_inner());
-                let launch = launch.get(capsule_id).cloned();
+                    .unwrap_or_else(|it| it.into_inner())
+                    .get(capsule_id)
+                    .cloned();
                 let model_token_ceiling = host_model_token_ceilings
                     .read()
                     .unwrap_or_else(|it| it.into_inner())
@@ -1059,14 +1331,14 @@ impl Runtime {
         // until the last of them is judged: trust cannot change between two
         // bundles of one start. It is let go before anything is loaded.
         let trust = self.signature_verifier.read().await;
-        let (mut admitted, accepted) = self
+        let (mut admitted, accepted): (VerifiedBundle, AcceptedSignature) = self
             .admit_closure_member(data_dir, &asked, &trust, &mut left, &mut after_walk)
             .await?;
         // What may sit below the bundle asked for follows from what it is. A
         // program pins programs. Content pins exactly one bundle, its
         // viewer, which must be a page. A page is reached through the
         // content that pins it and is not started by its own CID.
-        let below_root = match (admitted.kind, admitted.pins.len()) {
+        let below_root = match (admitted.kind(), admitted.pins().len()) {
             (BundleKind::Program, _) => BundleKind::Program,
             (BundleKind::Content, 1) => BundleKind::Page,
             (BundleKind::Content, pins) => return Err(BundleRefusal::ContentRequiresInvalid(pins)),
@@ -1086,29 +1358,29 @@ impl Runtime {
         // this walk has just read, held for the launch. A content whose
         // listing would be too long to serve is refused here, before
         // anything it pins is read.
-        let launch = match admitted.kind {
+        let launch = match admitted.kind() {
             BundleKind::Content => {
-                let content = LaunchContent::new(std::mem::take(&mut admitted.files));
+                let content = LaunchContent::new(admitted.take_files());
                 Some(Arc::new(
                     content.map_err(BundleRefusal::ContentListingTooLong)?,
                 ))
             }
             BundleKind::Program | BundleKind::Page => None,
         };
-        let pins = std::mem::take(&mut admitted.pins);
+        let pins = admitted.take_pins();
         // Every bundle admitted so far, by its CID: the name it carries, the
         // deepest place a pin has reached it at, and its own pins. The
         // bundle asked for is kept with its pins like any other: a cycle of
         // pins back to it cannot be built, and if one were, the measuring
         // would go round until the depth limit refused it.
-        let root = (admitted.manifest.name.clone(), 1, pins.clone());
-        let mut seen = HashMap::from([(asked.to_string(), root)]);
+        let root = (admitted.manifest().name.clone(), 1, pins.clone());
+        let mut seen = HashMap::from([(admitted.cid().to_string(), root)]);
         let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
         // The page a content pins, by its name: the one the launch is for.
         let mut kept_page = None;
         // What starts: the program asked for or, under content, the core.
-        let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
+        let mut starts = (admitted.kind() == BundleKind::Program).then_some(admitted);
         while let Some((depth, expected, core, name, pin)) = pending.pop() {
             let refused = |refusal| BundleRefusal::Requirement {
                 name: name.clone(),
@@ -1150,13 +1422,13 @@ impl Runtime {
                 .admit_closure_member(data_dir, &pinned, &trust, &mut left, &mut after_walk)
                 .await
                 .map_err(refused)?;
-            if member.manifest.name != name {
+            if member.manifest().name != name {
                 return Err(refused(BundleRefusal::RequirementMismatch(
-                    member.manifest.name,
+                    member.manifest().name.clone(),
                 )));
             }
-            if member.kind != expected {
-                let found = member.kind;
+            if member.kind() != expected {
+                let found = member.kind();
                 return Err(refused(match core {
                     true => BundleRefusal::ViewerCoreInvalid(format!(
                         "the viewer pins {}, not a program",
@@ -1167,13 +1439,13 @@ impl Runtime {
             }
             // A page pins exactly one bundle, its program. Whatever a
             // program pins is a program.
-            let pins = std::mem::take(&mut member.pins);
-            let page = member.kind == BundleKind::Page;
+            let pins = member.take_pins();
+            let page = member.kind() == BundleKind::Page;
             if page {
                 kept_page = Some(crate::page_launch::Page {
-                    name: member.manifest.name.clone(),
-                    entrypoint: member.manifest.entrypoint.clone(),
-                    files: std::mem::take(&mut member.files),
+                    name: member.manifest().name.clone(),
+                    entrypoint: member.manifest().entrypoint.clone(),
+                    files: member.take_files(),
                 });
             }
             if page && pins.len() != 1 {
@@ -1182,7 +1454,7 @@ impl Runtime {
                     pins.len()
                 ))));
             }
-            let known = (member.manifest.name.clone(), depth, pins.clone());
+            let known = (member.manifest().name.clone(), depth, pins.clone());
             seen.insert(pinned.to_string(), known);
             pending.extend(below(depth, BundleKind::Program, page, pins));
             if core {
@@ -1210,7 +1482,7 @@ impl Runtime {
                 "no program was found under the viewer".to_string(),
             ));
         };
-        let (bytes, manifest) = (starts.component, starts.manifest);
+        let (manifest, bytes) = starts.into_component();
         let loaded = match manifest.asks.is_empty() {
             true => component.load_admitted_sealed(bytes, manifest).await,
             false => component.load_admitted(bytes, manifest).await,
@@ -1246,9 +1518,11 @@ impl Runtime {
     /// The checks every bundle of a start by CID passes, the one asked for
     /// and each pinned one alike, in this order: the store has a slot for
     /// `cid`; one walk of it, inside what is `left` of the closure's budget;
-    /// the files recompute to `cid`; the signature beside it is accepted
-    /// under `trust`, the start's one reading of who is trusted; and only
-    /// then this start judges its manifest and its component's imports.
+    /// and then [`VerifiedBundle::check`], which builds the value this start
+    /// keeps. That function requires the files to recompute to `cid`, accepts
+    /// the signature beside the slot under `trust` (the start's one reading
+    /// of who is trusted), and only then judges the manifest and a program's
+    /// imports. Its fields are private to the module that defines the struct.
     /// What the walk took in comes off `left`.
     ///
     /// The walk is not blind to the manifest: to name a bundle it parses
@@ -1264,7 +1538,7 @@ impl Runtime {
         trust: &SignatureVerifier,
         left: &mut Budget,
         after_walk: &mut impl FnMut(&LabCid),
-    ) -> std::result::Result<(AdmittedBundle, AcceptedSignature), BundleRefusal> {
+    ) -> std::result::Result<(VerifiedBundle, AcceptedSignature), BundleRefusal> {
         let slot = bundle_admission::bundle_slot(data_dir, asked);
         match std::fs::symlink_metadata(&slot) {
             Ok(_) => {}
@@ -1285,23 +1559,8 @@ impl Runtime {
         let bytes: u64 = files.iter().map(|file| file.content.len() as u64).sum();
         left.max_entries = left.max_entries.saturating_sub(files.len());
         left.max_total_bytes = left.max_total_bytes.saturating_sub(bytes);
-        if bundle.cid() != *asked {
-            return Err(BundleRefusal::CidMismatch {
-                asked: asked.to_string(),
-                computed: bundle.cid().to_string(),
-            });
-        }
         let signature = bundle_admission::bundle_signature_path(data_dir, asked);
-        let accepted = bundle_admission::check_bundle_signature(&signature, asked, trust)?;
-        let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
-        if admitted.kind == BundleKind::Program {
-            crate::component::validate_component_imports_for_manifest(
-                &admitted.component,
-                &admitted.manifest,
-            )
-            .map_err(BundleRefusal::NotAComponent)?;
-        }
-        Ok((admitted, accepted))
+        VerifiedBundle::check(&bundle, asked, &signature, trust)
     }
 
     /// Test only: whether who is trusted could be replaced at this moment.
@@ -1342,6 +1601,93 @@ impl Runtime {
         let ceilings = self.bridge_manifest_capabilities.read().unwrap();
         let ceiling = ceilings.get(id);
         ceiling.map(|ceiling| ceiling.iter().map(ToString::to_string).collect())
+    }
+
+    /// Test only: what an end left in this Runtime's own tables, by the name
+    /// of each that still holds the instance's id. Empty is A12-R's "nothing
+    /// remains": no manifest ceiling, model-token ceiling, launch content or
+    /// stop request. The compute provider's activation entry and principal
+    /// are its tables: `provider_entry_for_test` reads the entry, and the
+    /// provider's own row proves `forget_instance` takes the principal away.
+    #[cfg(test)]
+    pub(crate) async fn context_left_for_test(&self, id: &str) -> Vec<&'static str> {
+        let mut left = Vec::new();
+        if table_holds(&self.bridge_manifest_capabilities, id) {
+            left.push("manifest ceiling");
+        }
+        if table_holds(&self.bridge_model_token_ceilings, id) {
+            left.push("model-token ceiling");
+        }
+        if table_holds(&self.launch_contents, id) {
+            left.push("launch content");
+        }
+        if table_holds(&self.activation_stops, id) {
+            left.push("stop request");
+        }
+        left
+    }
+
+    /// Test only: whether the compute provider still holds an activation
+    /// entry for this handle. `status` is the provider's own answer: an entry
+    /// is a status, a forgotten one is not found.
+    #[cfg(test)]
+    pub(crate) async fn provider_entry_for_test(&self, handle: &CapsuleHandle) -> bool {
+        match &self.component_provider {
+            Some(component) => component.status(handle).await.is_ok(),
+            None => false,
+        }
+    }
+
+    /// Test only: the principal the compute provider holds for this handle's
+    /// activation; `Some(None)` for an activation bound to no principal, `None`
+    /// when it holds no binding.
+    #[cfg(test)]
+    pub(crate) async fn provider_principal_for_test(
+        &self,
+        handle: &CapsuleHandle,
+    ) -> Option<Option<String>> {
+        match &self.component_provider {
+            Some(component) => component.bridge_principal(&handle.id).await,
+            None => None,
+        }
+    }
+
+    /// Test only: the tables the installed bridge host call reads for a call
+    /// from `id`, as it reads them: the manifest ceiling, the launch content,
+    /// the model-token ceiling and the stop request. A row builds the context
+    /// from these, so a late call is judged by exactly what the end left.
+    #[cfg(test)]
+    pub(crate) fn bridge_tables_for_test(&self, id: &str) -> BridgeTables {
+        let manifest_capabilities = self
+            .bridge_manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(id).cloned())
+            .unwrap_or_default();
+        let launch = self
+            .launch_contents
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .cloned();
+        let model_token_ceiling = self
+            .bridge_model_token_ceilings
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .copied();
+        let stop = self
+            .activation_stops
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .map(|stop| stop.flag.clone());
+        BridgeTables {
+            manifest_capabilities,
+            launch,
+            model_token_ceiling,
+            stop,
+        }
     }
 
     /// The end of every start, and the one place in this file that fills a
@@ -1846,15 +2192,42 @@ impl Runtime {
     }
 }
 
+/// Takes an ended entry away only if it is still this end's: a reader may have
+/// pruned it first, or a later start may have replaced it, and neither is this
+/// end's to remove.
+fn remove_ended_entry(
+    capsules: &mut HashMap<String, RunningCapsuleInfo>,
+    id: &str,
+    ended_at: std::time::Instant,
+) {
+    if capsules
+        .get(id)
+        .is_some_and(|info| info.ended_at == Some(ended_at))
+    {
+        capsules.remove(id);
+    }
+}
+
 /// Removes the entries whose activation ended at least
-/// [`ENDED_CAPSULE_RETENTION`] before `now`. The registry has no timer: an
-/// ended entry lives until a reader prunes it, so no sleeping task is needed
-/// and a test can ask for a later `now`.
+/// [`ENDED_CAPSULE_RETENTION`] before `now`. The end schedules its own
+/// removal with the [`RETENTION_SWEEPER`]; a reader still
+/// prunes, so the boundary can be read at an injected instant and an entry
+/// registered already ended cannot outlive its retention either.
 fn prune_ended(capsules: &mut HashMap<String, RunningCapsuleInfo>, now: std::time::Instant) {
     capsules.retain(|_, info| match info.ended_at {
         Some(ended_at) => now.duration_since(ended_at) < ENDED_CAPSULE_RETENTION,
         None => true,
     });
+}
+
+/// Whether a table still holds this id. A poisoned lock still holds its map,
+/// as every reader here assumes.
+#[cfg(test)]
+fn table_holds<T>(table: &StdRwLock<HashMap<String, T>>, id: &str) -> bool {
+    table
+        .read()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains_key(id)
 }
 
 #[cfg(test)]
@@ -2365,6 +2738,279 @@ pub(crate) mod tests {
         );
         assert_eq!(calls.lock().unwrap().len(), 1, "no call without the person");
         assert!(none_left(), "no ceiling is left after that start either");
+    }
+
+    /// A12-R at the one end, in this Runtime's tables: the manifest ceiling,
+    /// the model-token ceiling, the launch content and the stop request all
+    /// go. No agent launch holds content; a content start does, under its
+    /// program's own id, and the end takes it away, so nothing a later bridge
+    /// call could be held to or read survives.
+    #[tokio::test]
+    async fn the_one_end_leaves_nothing_in_the_tables_the_start_filled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let manifest: CapsuleManifest = serde_json::from_str(&component_manifest_json("ended"))
+            .expect("the component manifest");
+        let handle = CapsuleHandle {
+            id: CapsuleId::new("component-ended"),
+            manifest,
+            args: Vec::new(),
+        };
+        let id = handle.id.0.clone();
+        runtime.launch_contents.write().unwrap().insert(
+            id.clone(),
+            Arc::new(
+                crate::resource_bridge::LaunchContent::new(std::collections::BTreeMap::new())
+                    .expect("an empty content"),
+            ),
+        );
+        runtime
+            .bridge_manifest_capabilities
+            .write()
+            .unwrap()
+            .insert(id.clone(), handle.manifest.resource_authority_bounds());
+        runtime
+            .bridge_model_token_ceilings
+            .write()
+            .unwrap()
+            .insert(id.clone(), 7);
+
+        let held = ActivationContextHeld::new(&runtime, &handle, component);
+        let mut filled = runtime.context_left_for_test(&id).await;
+        filled.sort_unstable();
+        assert_eq!(
+            filled,
+            [
+                "launch content",
+                "manifest ceiling",
+                "model-token ceiling",
+                "stop request",
+            ],
+            "the start filled the tables"
+        );
+
+        held.end_instance(CAPSULE_FAILED, "test end").await;
+        assert_eq!(
+            runtime.context_left_for_test(&id).await,
+            Vec::<&str>::new(),
+            "the one end leaves nothing"
+        );
+    }
+
+    /// The retention the sweeper rows give their activation. The sweeper runs
+    /// on the real clock, so each row waits this out in real time.
+    const ROW_RETENTION: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// A Runtime with a component provider and no compute providers, for the
+    /// sweeper rows.
+    async fn retention_runtime(temp_dir: &tempfile::TempDir) -> (Runtime, Arc<ComponentProvider>) {
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        (runtime, component)
+    }
+
+    /// Registers an entry as a start does and makes its context, with
+    /// [`ROW_RETENTION`], on the runtime this is awaited on: the activation's
+    /// start runtime.
+    async fn retained_activation(
+        runtime: &Runtime,
+        component: Arc<ComponentProvider>,
+        name: &str,
+    ) -> (ActivationContextHeld, String) {
+        let manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).expect("the component manifest");
+        let handle = CapsuleHandle {
+            id: CapsuleId::new(format!("component-{name}")),
+            manifest,
+            args: Vec::new(),
+        };
+        let id = handle.id.0.clone();
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: name.to_string(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: None,
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        let held =
+            ActivationContextHeld::new(runtime, &handle, component).retained_for(ROW_RETENTION);
+        (held, id)
+    }
+
+    /// The instant the end recorded, read from the registry map itself: a
+    /// listing would prune.
+    async fn recorded_end(runtime: &Runtime, id: &str) -> std::time::Instant {
+        runtime
+            .running_capsules
+            .read()
+            .await
+            .get(id)
+            .and_then(|info| info.ended_at)
+            .expect("the ended entry is kept at its end")
+    }
+
+    /// Reads the registry map itself, never a listing that would prune, until
+    /// the entry is gone, and answers the instant it saw that; `None` if the
+    /// entry is still there well after its retention. It polls with
+    /// `tokio::time::sleep`, so the runtime it is awaited on stays free.
+    async fn swept_at(runtime: &Runtime, id: &str) -> Option<std::time::Instant> {
+        let cap = std::time::Instant::now() + ROW_RETENTION + std::time::Duration::from_secs(5);
+        loop {
+            if !runtime.running_capsules.read().await.contains_key(id) {
+                return Some(std::time::Instant::now());
+            }
+            if std::time::Instant::now() >= cap {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The entry went at its retention and not before it.
+    fn assert_swept(swept: Option<std::time::Instant>, ended_at: std::time::Instant, row: &str) {
+        let swept = swept.unwrap_or_else(|| {
+            panic!("{row}: the ended entry is gone at its retention, with nothing reading it")
+        });
+        assert!(
+            swept >= ended_at + ROW_RETENTION,
+            "{row}: the ended entry is kept until its retention"
+        );
+    }
+
+    /// A3-R S6 fix 4, row (a): the start runtime lives throughout. The end
+    /// runs on it and the row waits on it, so a removal that needed that
+    /// runtime could run; the sweeper takes the entry at its retention with
+    /// nothing listing or registering again. F-nosweep (the sweeper skips the
+    /// removal) leaves the entry there and reddens the row.
+    #[tokio::test]
+    async fn an_ended_entry_is_removed_at_its_retention_without_a_reader() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (runtime, component) = retention_runtime(&temp_dir).await;
+        let (held, id) = retained_activation(&runtime, component, "retained").await;
+        held.end_instance(CAPSULE_FAILED, "test end").await;
+        let ended_at = recorded_end(&runtime, &id).await;
+        assert_swept(
+            swept_at(&runtime, &id).await,
+            ended_at,
+            "live start runtime",
+        );
+    }
+
+    /// A3-R S6 fix 4, row (a) through the fallback: the start runtime lives,
+    /// and the end runs on a throwaway current-thread runtime, the way `Drop`
+    /// hands a lost end to a thread, which closes when the end returns. The
+    /// sweeper belongs to neither runtime. F-nosweep reddens the row.
+    #[tokio::test]
+    async fn a_fallback_end_removes_its_entry_at_retention_without_a_registry_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (runtime, component) = retention_runtime(&temp_dir).await;
+        let (held, id) = retained_activation(&runtime, component, "fallback-retained").await;
+        std::thread::spawn(move || {
+            let end_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the fallback end");
+            end_runtime.block_on(held.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+        })
+        .join()
+        .expect("the fallback end runs");
+        let ended_at = recorded_end(&runtime, &id).await;
+        assert_swept(swept_at(&runtime, &id).await, ended_at, "fallback end");
+    }
+
+    /// A3-R S6 fix 4, row (b): the start runtime is dropped before the end.
+    /// The S3 lost-task shape: the runtime the activation started on goes
+    /// away, and the end then runs from a thread on a runtime of its own,
+    /// which closes when the end returns. The row waits on a third runtime.
+    /// F-nosweep reddens the row.
+    #[test]
+    fn a_lost_end_removes_its_entry_at_retention_without_a_registry_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the activation starts on");
+        let (runtime, held, id) = start.block_on(async {
+            let (runtime, component) = retention_runtime(&temp_dir).await;
+            let (held, id) = retained_activation(&runtime, component, "lost-retained").await;
+            (runtime, held, id)
+        });
+        drop(start);
+        std::thread::spawn(move || {
+            let end_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the lost end");
+            end_runtime.block_on(held.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+        })
+        .join()
+        .expect("the lost end runs");
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the row reads on");
+        after.block_on(async {
+            let ended_at = recorded_end(&runtime, &id).await;
+            assert_swept(swept_at(&runtime, &id).await, ended_at, "lost end");
+        });
+    }
+
+    /// A3-R S6 fix 4, row (c), the round-4 sequence: the end runs on the
+    /// start runtime while it lives, and that runtime is dropped after the
+    /// end but before the entry's deadline. A removal that runtime ran would
+    /// be cancelled with it; the sweeper's is not. The row waits on another
+    /// runtime. F-nosweep reddens the row.
+    #[test]
+    fn an_end_whose_start_runtime_shuts_down_before_the_deadline_removes_its_entry() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the activation starts and ends on");
+        let (runtime, id, ended_at) = start.block_on(async {
+            let (runtime, component) = retention_runtime(&temp_dir).await;
+            let (held, id) = retained_activation(&runtime, component, "shutdown-retained").await;
+            held.end_instance(CAPSULE_FAILED, "test end").await;
+            let ended_at = recorded_end(&runtime, &id).await;
+            (runtime, id, ended_at)
+        });
+        drop(start);
+        assert!(
+            std::time::Instant::now() < ended_at + ROW_RETENTION,
+            "the start runtime is gone before the entry's deadline"
+        );
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the row reads on");
+        after.block_on(async {
+            assert_swept(
+                swept_at(&runtime, &id).await,
+                ended_at,
+                "start runtime shut down after the end",
+            );
+        });
     }
 
     pub(crate) async fn test_runtime() -> (Runtime, tempfile::TempDir) {

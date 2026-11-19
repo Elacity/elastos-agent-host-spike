@@ -146,7 +146,7 @@ pub(crate) fn shell_capability_routes(
         .with_state(capability_state)
 }
 
-/// Start the HTTP API server with full session and capability support
+/// Build the full API router with session and capability support
 ///
 /// This is the Phase 5+ server configuration that includes:
 /// - Session token authentication
@@ -154,7 +154,10 @@ pub(crate) fn shell_capability_routes(
 /// - Shell-only endpoints for permission management
 /// - Namespace API for content-addressed storage
 /// - File-backed localhost API (localhost://<root>/...)
-pub async fn start_server_with_sessions(config: ServerConfig) -> anyhow::Result<()> {
+///
+/// `start_server_with_sessions` serves this router, and the test server
+/// builds it too, so tests reach the routes `elastos serve` serves.
+pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
     let ServerConfig {
         runtime,
         session_registry,
@@ -171,11 +174,10 @@ pub async fn start_server_with_sessions(config: ServerConfig) -> anyhow::Result<
         data_dir,
         tls_config,
         supervisor,
-        ready_tx,
+        ready_tx: _,
         attach_secret,
-        host_helpers,
+        host_helpers: _,
     } = config;
-    let _host_helpers = host_helpers;
     // Runtime keeps this control API on its own configured origin.
     // Browser capsules use the gateway launch boundary.
     let control_origin = url::Url::parse(&format!(
@@ -545,6 +547,15 @@ pub async fn start_server_with_sessions(config: ServerConfig) -> anyhow::Result<
     if has_capsule {
         app = app.layer(axum_middleware::from_fn(cross_origin_isolation));
     }
+    Ok(app)
+}
+
+/// Start the HTTP API server on the router `build_router` makes from `config`.
+pub async fn start_server_with_sessions(mut config: ServerConfig) -> anyhow::Result<()> {
+    let _host_helpers = std::mem::take(&mut config.host_helpers);
+    let (ready_tx, tls_config) = (config.ready_tx.take(), config.tls_config.clone());
+    let (addr, has_capsule) = (config.addr.clone(), config.capsule_dir.is_some());
+    let app = build_router(config)?;
 
     // Start server with or without TLS
     if let Some(tls_config) = tls_config {
@@ -581,9 +592,149 @@ fn runtime_api_origin_allowed(origin: &HeaderValue, control_origin: &str) -> boo
 }
 
 #[cfg(test)]
-mod tests {
-    use super::runtime_api_origin_allowed;
+pub(crate) mod tests {
+    use super::*;
     use axum::http::HeaderValue;
+
+    /// The test server: the router `elastos serve` builds, on the given
+    /// Runtime, sessions and capability state, with no optional route group.
+    pub(crate) fn test_server(
+        runtime: Arc<Runtime>,
+        session_registry: Arc<SessionRegistry>,
+        capability_manager: Arc<CapabilityManager>,
+        capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
+        pending_store: Arc<PendingRequestStore>,
+        data_dir: Option<PathBuf>,
+    ) -> Router {
+        build_router(ServerConfig {
+            runtime,
+            session_registry,
+            capability_manager,
+            capability_store,
+            pending_store,
+            namespace_store: None,
+            provider_registry: None,
+            audit_log: None,
+            identity_state: None,
+            docs_dir: None,
+            addr: "127.0.0.1:0".to_string(),
+            capsule_dir: None,
+            data_dir,
+            tls_config: None,
+            supervisor: None,
+            ready_tx: None,
+            attach_secret: None,
+            host_helpers: Vec::new(),
+        })
+        .expect("the test server's router builds")
+    }
+
+    #[test]
+    fn serve_and_the_test_server_build_one_router() {
+        let source = include_str!("server.rs");
+        let (production, tests) = source.split_once("\n#[cfg(test)]\n").unwrap();
+        let serve = production
+            .split_once("fn start_server_with_sessions(")
+            .unwrap();
+        let serve = serve.1.split_once("\n}\n").unwrap().0;
+        let mut wrong = Vec::new();
+        for never in "Router .route .merge .layer .nest .fallback .with_state".split(' ') {
+            if serve.contains(never) {
+                wrong.push(format!("serve adds {never} after the builder"));
+            }
+        }
+        for once in [
+            "let app = build_router(config)?;",
+            ".serve(app.into_make_service())",
+            "axum::serve(listener, app)",
+        ] {
+            if serve.matches(once).count() != 1 {
+                wrong.push(format!("serve does not have {once} once"));
+            }
+        }
+        let words = serve.split(|c: char| !c.is_alphanumeric() && c != '_');
+        let app_uses = words.filter(|word| *word == "app").count();
+        if app_uses != 3 {
+            wrong.push(format!("serve names the router {app_uses} times, not 3"));
+        }
+        let test_call = ["build_router", "(ServerConfig {"].concat();
+        for (part, text, needle, want) in [
+            ("production", production, "build_router(", 2),
+            ("tests", tests, test_call.as_str(), 1),
+        ] {
+            let got = text.matches(needle).count();
+            if got != want {
+                wrong.push(format!("{part} names {needle} {got} times, not {want}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[tokio::test]
+    async fn the_test_server_serves_the_capability_routes_of_serve() {
+        use axum::{body::Body, http::header::AUTHORIZATION, http::StatusCode};
+        use elastos_runtime::session::SessionType;
+        use elastos_runtime::{capability::CapabilityStore, primitives::metrics::MetricsManager};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
+        let storage = Arc::new(storage.await.unwrap());
+        let runtime = Runtime::with_providers_and_component(storage, Vec::new(), None);
+        let audit = Arc::new(AuditLog::new());
+        let sessions = Arc::new(SessionRegistry::new(audit.clone()));
+        let shell = sessions.create_session(SessionType::Shell, None).await;
+        let client = sessions.create_session(SessionType::Capsule, None).await;
+        let (store, metrics) = (
+            Arc::new(CapabilityStore::new()),
+            Arc::new(MetricsManager::new()),
+        );
+        let manager = Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            metrics,
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit));
+        let app = test_server(Arc::new(runtime), sessions, manager, store, pending, None);
+        let pending_route = "/api/capability/pending";
+        // Without the debug-build route, a request falls to the fallback that the
+        // last merged group wraps in auth and shell-only: 401, then 404 for the shell.
+        let test_route = |release| [release, StatusCode::OK][cfg!(debug_assertions) as usize];
+        let create_session = "/api/test/create-session";
+        let mut wrong = Vec::new();
+        for (method, uri, who, want) in [
+            ("GET", "/api/health", "nobody", StatusCode::OK),
+            ("GET", pending_route, "nobody", StatusCode::UNAUTHORIZED),
+            ("GET", pending_route, "client", StatusCode::FORBIDDEN),
+            ("GET", pending_route, "shell", StatusCode::OK),
+            ("GET", "/api/capsules", "shell", StatusCode::OK),
+            (
+                "POST",
+                create_session,
+                "nobody",
+                test_route(StatusCode::UNAUTHORIZED),
+            ),
+            (
+                "POST",
+                create_session,
+                "shell",
+                test_route(StatusCode::NOT_FOUND),
+            ),
+        ] {
+            let mut request = Request::builder().method(method).uri(uri);
+            let token = [("shell", &shell.token), ("client", &client.token)];
+            if let Some((_, token)) = token.iter().find(|(name, _)| *name == who) {
+                request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+            }
+            let request = request.header("content-type", "application/json");
+            let response = app.clone().oneshot(request.body(Body::from("{}")).unwrap());
+            let got = response.await.unwrap().status();
+            if got != want {
+                wrong.push(format!("{method} {uri} as {who}: {got}, expected {want}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 
     #[test]
     fn runtime_control_api_keeps_only_its_exact_origin() {

@@ -62,10 +62,24 @@ pub(super) struct Plan {
     pub abi: u32,
     pub handled: u64,
     pub rules: Vec<PathRule>,
+    /// Device and inode of the storage directory opened before launch.
+    pub storage_dev: u64,
+    pub storage_ino: u64,
 }
+
+/// The storage directory opened before launch, with that directory's identity.
+#[cfg(target_os = "linux")]
+pub(super) struct StorageRoot<'a> {
+    pub path: &'a std::path::Path,
+    pub dev: u64,
+    pub ino: u64,
+}
+
 pub(super) struct Bindings {
     pub storage_root: PathBuf,
     pub provider_executable: PathBuf,
+    pub storage_dev: u64,
+    pub storage_ino: u64,
 }
 
 pub(super) fn require_abi(reported: io::Result<u32>) -> Result<u32, String> {
@@ -141,6 +155,8 @@ fn build_for_arch(
         abi,
         handled: HANDLED,
         rules,
+        storage_dev: bindings.storage_dev,
+        storage_ino: bindings.storage_ino,
     })
 }
 
@@ -275,9 +291,39 @@ mod tests {
         assert_eq!(query_abi().unwrap_err().kind(), io::ErrorKind::Unsupported);
     }
 
+    #[rustfmt::skip]
+    fn landlock_blocks(src: &str) -> String {
+        let mut out = String::new();
+        for marker in ["const SHARED_RULES:", "const LANDLOCK_RULE_RIGHTS:", "const LANDLOCK_RIGHT_ABI:", "fn landlock_loader_paths", "const LANDLOCK_LOADER_PATHS:", "const LIBM_"] {
+            let mut rest = src;
+            while let Some(at) = rest.find(marker) {
+                let slice = &rest[at..];
+                let end = if marker.starts_with("fn") { slice.find("\n}").expect("pin d0dd5693 loader") + 2 } else { slice.find("];").expect("pin d0dd5693 table") + 2 };
+                out.push_str(&slice[..end]); out.push('\n');
+                if !(marker.contains("LOADER_PATHS") || marker.contains("LIBM_")) { break; }
+                rest = &slice[end..];
+            }
+        }
+        for line in src.lines().filter(|line| line.starts_with("const LANDLOCK_ACCESS_FS_")) { out.push_str(line); out.push('\n'); }
+        out
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn landlock_tables_match_pin_d0dd5693() {
+        let spec = "d0dd5693:capsules/wallet-provider/tests/confine.rs";
+        let out = crate::provider::rights::git_show(spec);
+        assert!(out.status.success(), "pin {spec} missing: {}", String::from_utf8_lossy(&out.stderr));
+        let pinned = String::from_utf8(out.stdout).expect("pin d0dd5693");
+        assert_eq!(landlock_blocks(LAB), landlock_blocks(&pinned), "moved Landlock tables at pin d0dd5693");
+    }
+
+    #[rustfmt::skip]
     #[test]
     fn provider_plans_match_lab_file_rows() {
         let (masks, handled) = lab_masks();
+        // Same Bindings both sides. Paths stay unchanged: no canonicalization.
+        // Projections are separate and in order: paths, masks, then handled.
         for provider in [Did, Wallet, Model] {
             let name = match provider {
                 Did => "did-provider",
@@ -293,11 +339,14 @@ mod tests {
             let bindings = Bindings {
                 storage_root: format!("/provider/{provider:?}").into(),
                 provider_executable: format!("/bin/{provider:?}").into(),
+                storage_dev: 7,
+                storage_ino: 9,
             };
-            let admitted = super::super::rights::admit_runtime_grant(provider);
+            let admitted = super::super::rights::admit_committed(provider);
             for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
                 let plan = build_for_arch(provider, &admitted, &bindings, arch, 5).unwrap();
-                assert_eq!((plan.abi, plan.handled), (5, handled));
+                assert_eq!(plan.abi, 5, "{name} {arch:?} abi");
+                assert_eq!((plan.storage_dev, plan.storage_ino), (bindings.storage_dev, bindings.storage_ino), "the plan keeps the storage identity");
                 let mut expected = Vec::new();
                 for claim in declared["rights"].as_array().unwrap() {
                     for form in claim["rules"].as_array().unwrap() {
@@ -320,7 +369,9 @@ mod tests {
                 for path in lab_loaders(provider, arch) {
                     expected.push(PathRule("LANDLOCK_LOADER_PATHS", path, executable_mask));
                 }
-                assert_eq!(plan.rules, expected, "{name} {arch:?}");
+                assert_eq!(plan.rules.iter().map(|rule| (rule.0, rule.1.clone())).collect::<Vec<_>>(), expected.iter().map(|rule| (rule.0, rule.1.clone())).collect::<Vec<_>>(), "{name} {arch:?} paths");
+                assert_eq!(plan.rules.iter().map(|rule| (rule.0, rule.2)).collect::<Vec<_>>(), expected.iter().map(|rule| (rule.0, rule.2)).collect::<Vec<_>>(), "{name} {arch:?} masks");
+                assert_eq!(plan.handled, handled, "{name} {arch:?} handled");
                 if std::mem::discriminant(&arch) == std::mem::discriminant(&LoaderArch::host()) {
                     assert_eq!(
                         build(provider, &admitted, &bindings, 5).unwrap().rules,

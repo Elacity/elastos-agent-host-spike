@@ -440,6 +440,8 @@ mod tests {
         let bindings = super::super::landlock_plan::Bindings {
             storage_root: PathBuf::from("/provider/did"),
             provider_executable: PathBuf::from("/bin/did"),
+            storage_dev: 0,
+            storage_ino: 0,
         };
         let narrow =
             super::super::landlock_plan::build(RuntimeProviderId::Did, &admitted, &bindings, 5)

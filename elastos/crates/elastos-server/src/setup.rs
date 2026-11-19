@@ -1527,6 +1527,7 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
     let dest = data_dir.join(install_path);
     download_component(data_dir, &row, &dest, FirstPartyCarrierContext::Runtime).await?;
     write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)?;
+    record_install_cid(&dest, &dest);
     drop(admitted);
 
     let installed_manifest = dest.join("capsule.json");
@@ -2698,6 +2699,59 @@ pub(crate) fn read_artifact_sha256_receipt(dir: &Path) -> std::io::Result<String
 
 fn bare_sha256(checksum: &str) -> &str {
     checksum.strip_prefix("sha256:").unwrap_or(checksum)
+}
+
+/// The file beside the installed capsule folder `dir` that holds the CID the
+/// Runtime's bundle walk gave for that folder when an install wrote it. It
+/// sits outside the folder, so a later walk of the folder names the same bytes.
+pub(crate) fn install_cid_record(dir: &Path) -> anyhow::Result<PathBuf> {
+    let name = dir
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("capsule folder {} has no name", dir.display()))?;
+    let mut record = std::ffi::OsString::from(".");
+    record.push(name);
+    record.push(".elastos-install-cid");
+    Ok(dir.with_file_name(record))
+}
+
+/// Records the walk CID of `walked`, its extracted bytes and receipts, as the
+/// install CID of `dir`, the folder the install places them at. The install
+/// goes on when the record cannot be written, and then keeps no record.
+pub(crate) fn record_install_cid(walked: &Path, dir: &Path) {
+    if let Err(err) = write_install_cid(walked, dir) {
+        eprintln!("  No install CID record for {} ({err:#})", dir.display());
+        if let Ok(record) = install_cid_record(dir) {
+            let _ = fs::remove_file(record);
+        }
+    }
+}
+
+/// Writes the record from a new, randomly named file beside it in one rename,
+/// so a link at the record path is replaced, not followed. A folder the walk
+/// refuses keeps no record.
+pub(crate) fn write_install_cid(walked: &Path, dir: &Path) -> anyhow::Result<()> {
+    use crate::bundle_admission::BUNDLE_WALK_BUDGET;
+    let record = install_cid_record(dir)?;
+    let bundle = match elastos_bundle_identity::checked_bundle_within(walked, BUNDLE_WALK_BUDGET) {
+        Ok(bundle) => bundle,
+        Err(_) => match fs::remove_file(&record) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
+            _ => return Ok(()),
+        },
+    };
+    let parent = record
+        .parent()
+        .context("install CID record has no parent")?;
+    let mut prefix = record.file_name().unwrap_or_default().to_os_string();
+    prefix.push(".");
+    let mut scratch = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)?;
+    writeln!(scratch, "{}", bundle.cid())?;
+    scratch.as_file().sync_all()?;
+    scratch.persist(&record).map_err(|err| err.error)?;
+    sync_path(parent)?;
+    Ok(())
 }
 
 fn write_platform_cache_metadata(platform_info: &PlatformInfo, dest: &Path) -> anyhow::Result<()> {
@@ -7411,6 +7465,12 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(ensure.status, "installed");
+        // A source Home's own capsule tree is not an install, so it gets no record.
+        assert!(!install_cid_record(&install_root).unwrap().exists());
+        assert_eq!(
+            fs::read(install_root.join("marketplace.wasm")).unwrap(),
+            b"\0asm"
+        );
     }
 
     #[test]
