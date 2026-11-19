@@ -1407,8 +1407,23 @@ fn private_component() -> Option<std::ffi::CString> {
         .map(std::ffi::CString::from)
 }
 
-/// Rename without replacing a name that already exists.
+/// A parent of a storage root or of a cleanup entry is owned by the effective
+/// user and has no group or other write permission.
+fn parent_is_private(info: &libc::stat) -> bool {
+    info.st_uid == unsafe { libc::geteuid() } && info.st_mode & 0o022 == 0
+}
+
+fn held_parent_is_private(parent: &OwnedFd) -> bool {
+    stat_fd(parent.as_raw_fd()).is_ok_and(|info| parent_is_private(&info))
+}
+
+/// Rename without replacing a name that already exists. A parent that is not
+/// owned by the effective user, or that is writable by group or other, stays
+/// as it is.
 fn rename_exclusive(parent: &OwnedFd, from: &std::ffi::CStr, to: &std::ffi::CStr) -> bool {
+    if !held_parent_is_private(parent) {
+        return false;
+    }
     #[cfg(target_os = "linux")]
     {
         const RENAME_NOREPLACE: libc::c_uint = 1;
@@ -1470,8 +1485,10 @@ fn entry_matches(
     same_directory(&info, expected)
 }
 
-/// Remove the private name only when it is still `expected`. A mismatch is
-/// renamed back and left in place.
+/// Remove the private name only when it is still `expected` and the parent is
+/// owned by the effective user with no group or other write permission. A
+/// mismatch is renamed back and left in place. A parent that fails that check
+/// is left in place.
 fn release_private_name(
     parent: &OwnedFd,
     quarantine: &std::ffi::CStr,
@@ -1482,6 +1499,9 @@ fn release_private_name(
     pause_before_private_unlink(parent, expected, quarantine);
     if !entry_matches(parent, quarantine, flags, expected) {
         restore_name(parent, quarantine, original);
+        return false;
+    }
+    if !held_parent_is_private(parent) {
         return false;
     }
     unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), flags) == 0 }
@@ -1589,7 +1609,8 @@ fn name_is_symlink(parent: &OwnedFd, name: &std::ffi::CStr) -> bool {
     info.st_mode & libc::S_IFMT == libc::S_IFLNK
 }
 
-/// Create `storage_root` at 0700 under a Runtime-owned parent and open it with
+/// Create `storage_root` at 0700 under a parent owned by the effective user
+/// with no group or other write permission, and open it with
 /// `O_DIRECTORY | O_NOFOLLOW`. The returned guard holds that descriptor.
 fn create_storage_root(storage_root: &Path) -> Result<CreatedStorageRoot, BridgeError> {
     use std::os::unix::ffi::OsStrExt;
@@ -1613,9 +1634,13 @@ fn create_storage_root(storage_root: &Path) -> Result<CreatedStorageRoot, Bridge
         }
     })?;
     let parent_stat = stat_fd(parent.as_raw_fd()).map_err(BridgeError::Io)?;
-    if parent_stat.st_uid != unsafe { libc::geteuid() } {
+    if !parent_is_private(&parent_stat) {
         return Err(refused(
-            "provider start is refused: the storage root's parent is not owned by the effective user",
+            if parent_stat.st_uid != unsafe { libc::geteuid() } {
+                "provider start is refused: the storage root's parent is not owned by the effective user"
+            } else {
+                "provider start is refused: the storage root's parent is writable by group or other"
+            },
         ));
     }
     let name_c = std::ffi::CString::new(name.as_bytes())
@@ -1754,7 +1779,8 @@ impl ProviderBridge {
     /// Start a rights-declaring provider through the OS entry and return
     /// `Confined` only after `Init` succeeded.
     ///
-    /// The Runtime creates the fresh storage root under its parent, opens that
+    /// The Runtime creates the fresh storage root under a parent owned by the
+    /// effective user with no group or other write permission, opens that
     /// directory without following a symlink, and syncs it. The launcher
     /// receives that directory's device and inode, opens the path again, and
     /// refuses when the directory is different. That comparison happens before
@@ -5172,6 +5198,56 @@ mod tests {
         drop(guard);
         assert!(!root.exists(), "a failed start removes the created root");
         assert_eq!(std::fs::read(&outside).unwrap(), b"stay");
+    }
+
+    #[test]
+    fn a_group_writable_parent_is_refused_and_a_writable_root_keeps_its_canary() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let root = parent.join("root");
+        match create_storage_root(&root) {
+            Ok(guard) => {
+                drop(guard);
+                panic!("a group-writable parent is refused before the storage root is created");
+            }
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "provider start is refused: the storage root's parent is writable by group or other",
+                "a group-writable parent is refused before the storage root is created"
+            ),
+        }
+        assert!(
+            !root.exists(),
+            "a group-writable parent is refused before the storage root is created"
+        );
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let guard = create_storage_root(&root).unwrap();
+        assert!(guard.armed, "this start creates the root");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o770)).unwrap();
+        std::fs::write(root.join("canary"), b"kept").unwrap();
+        let info = stat_fd(guard.directory.as_raw_fd()).unwrap();
+        drop(guard);
+        let kept = std::fs::read_dir(&parent).unwrap().any(|entry| {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            let Ok(opened) = open_directory(&entry.path()) else {
+                return false;
+            };
+            let Ok(found) = stat_fd(opened.as_raw_fd()) else {
+                return false;
+            };
+            same_directory(&found, &info)
+                && std::fs::read(entry.path().join("canary")).ok().as_deref()
+                    == Some(b"kept".as_slice())
+        });
+        assert!(
+            kept,
+            "cleanup preserves the canary inside a group-writable root"
+        );
     }
 
     #[test]
