@@ -217,7 +217,9 @@ enum LocalhostIdempotency {
     NeedsEffectId,
 }
 
-/// Consequence class plus idempotency, beside the capability action.
+/// Consequence class plus idempotency. This field decides whether the row
+/// stands. The action map reads the right. Dispatch, retry, and audit do
+/// not read this field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LocalhostEffect {
     consequence: LocalhostConsequence,
@@ -257,8 +259,8 @@ const fn localhost_op(
 const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "read",
-        &["path", "offset", "length"],
-        &["status", "content", "size"],
+        &["path", "encoding", "offset", "length"],
+        &["status", "content", "encoding", "size"],
         Action::Read,
         LocalhostConsequence::Observe,
         LocalhostIdempotency::Idempotent,
@@ -274,7 +276,7 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "list",
         &["path"],
-        &["status", "entries"],
+        &["status", "data"],
         Action::Read,
         LocalhostConsequence::Observe,
         LocalhostIdempotency::Idempotent,
@@ -290,7 +292,9 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     localhost_op(
         "stat",
         &["path"],
-        &["status", "is_dir", "size", "modified"],
+        &[
+            "status", "path", "is_file", "is_dir", "size", "readonly", "modified", "created",
+        ],
         Action::Read,
         LocalhostConsequence::Observe,
         LocalhostIdempotency::Idempotent,
@@ -313,15 +317,17 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
     ),
     localhost_op(
         "resolve",
-        &["path"],
-        &["status", "handle"],
+        &["path", "moniker"],
+        &["status", "data"],
         Action::Read,
         LocalhostConsequence::Observe,
         LocalhostIdempotency::Idempotent,
     ),
+    // The provider request has no fields. The capability resource is still
+    // the rooted path: the builder names that path for every operation.
     localhost_op(
         "ping",
-        &["path"],
+        &[],
         &["status", "pong"],
         Action::Read,
         LocalhostConsequence::Observe,
@@ -331,14 +337,16 @@ const LOCALHOST_OPERATIONS: &[LocalhostOperation] = &[
 
 /// A Read right is an observation, and an observation can be repeated.
 /// A consequence that changes state does not take a Read right.
-/// Every row names a path input and at least one output.
+/// A file operation names a path input. Ping's provider request has no
+/// fields, so that row names no path. Every row names at least one output.
 fn localhost_row_effect_agrees(row: &LocalhostOperation) -> bool {
     let observes = matches!(row.effect.consequence, LocalhostConsequence::Observe);
     let read = matches!(row.right, Action::Read);
     let idempotent = matches!(row.effect.idempotency, LocalhostIdempotency::Idempotent);
+    let names_a_file = row.name != "ping";
     observes == read
         && (!observes || idempotent)
-        && row.inputs.contains(&"path")
+        && row.inputs.contains(&"path") == names_a_file
         && !row.outputs.is_empty()
 }
 
@@ -1023,14 +1031,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["read", "write", "list", "delete", "stat", "mkdir", "exists", "resolve", "ping",]
         );
+        let shapes = localhost_protocol_shapes();
+        assert_provider_shapes_match_the_capsule(&shapes);
         for row in LOCALHOST_OPERATIONS {
-            let (right, consequence, idempotency, inputs, outputs) =
-                expected_localhost_row(row.name);
+            let (right, consequence, idempotency) = expected_localhost_row(row.name);
+            let (inputs, outputs) = &shapes[row.name];
             assert_eq!(row.right, right, "{}", row.name);
             assert_eq!(row.effect.consequence, consequence, "{}", row.name);
             assert_eq!(row.effect.idempotency, idempotency, "{}", row.name);
-            assert_eq!(row.inputs, inputs, "{}", row.name);
-            assert_eq!(row.outputs, outputs, "{}", row.name);
+            let inputs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+            let outputs: Vec<&str> = outputs.iter().map(String::as_str).collect();
+            assert_eq!(row.inputs, inputs.as_slice(), "{}", row.name);
+            assert_eq!(row.outputs, outputs.as_slice(), "{}", row.name);
             assert!(
                 localhost_row_effect_agrees(row),
                 "{}: a read right is an observation, and a state change does not take Read",
@@ -1055,6 +1067,11 @@ mod tests {
                 row.name
             );
         }
+        assert!(
+            build_capability_resource("localhost", "ping", &serde_json::json!({})).is_err(),
+            "ping still names its capability resource with a rooted path"
+        );
+        assert!(localhost_operation("ping").unwrap().inputs.is_empty());
         assert!(localhost_operation("raw_storage").is_none());
         assert!(provider_operation_action("localhost", "raw_storage").is_none());
         assert!(provider_operation_action("webspace", "raw_storage").is_none());
@@ -1065,59 +1082,304 @@ mod tests {
         );
     }
 
-    fn expected_localhost_row(
-        name: &str,
-    ) -> (
-        Action,
-        LocalhostConsequence,
-        LocalhostIdempotency,
-        &'static [&'static str],
-        &'static [&'static str],
-    ) {
+    fn expected_localhost_row(name: &str) -> (Action, LocalhostConsequence, LocalhostIdempotency) {
         use LocalhostConsequence::{CreateDirectory, Observe, Remove, WriteBytes};
         use LocalhostIdempotency::{Idempotent, NeedsEffectId};
         match name {
-            "read" => (
-                Action::Read,
-                Observe,
-                Idempotent,
-                &["path", "offset", "length"],
-                &["status", "content", "size"],
-            ),
-            "list" | "exists" | "resolve" | "ping" | "stat" => {
-                let outputs: &'static [&'static str] = match name {
-                    "list" => &["status", "entries"],
-                    "stat" => &["status", "is_dir", "size", "modified"],
-                    "exists" => &["status", "exists"],
-                    "resolve" => &["status", "handle"],
-                    "ping" => &["status", "pong"],
-                    _ => &[],
-                };
-                (Action::Read, Observe, Idempotent, &["path"], outputs)
+            "read" | "list" | "exists" | "resolve" | "ping" | "stat" => {
+                (Action::Read, Observe, Idempotent)
             }
-            "write" => (
-                Action::Write,
-                WriteBytes,
-                NeedsEffectId,
-                &["path", "content", "append"],
-                &["status", "bytes_written"],
-            ),
-            "mkdir" => (
-                Action::Write,
-                CreateDirectory,
-                NeedsEffectId,
-                &["path", "parents"],
-                &["status"],
-            ),
-            "delete" => (
-                Action::Delete,
-                Remove,
-                NeedsEffectId,
-                &["path", "recursive"],
-                &["status"],
-            ),
+            "write" => (Action::Write, WriteBytes, NeedsEffectId),
+            "mkdir" => (Action::Write, CreateDirectory, NeedsEffectId),
+            "delete" => (Action::Delete, Remove, NeedsEffectId),
             other => panic!("unknown localhost operation {other}"),
         }
+    }
+
+    /// Inputs and outputs come from the provider text, not from a second copy
+    /// of the row. `token` is left out: the runtime attaches it.
+    fn localhost_protocol_shapes() -> std::collections::BTreeMap<String, (Vec<String>, Vec<String>)>
+    {
+        let provider = include_str!("../../../capsules/localhost-provider/src/main.rs");
+        let webspace = include_str!("../../../../capsules/webspace-provider/src/main.rs");
+        let requests = enum_fields(provider, "pub enum ProviderRequest {");
+        let arms = match_arms(provider, "pub fn handle_request", "ProviderRequest::");
+        let mut shapes = std::collections::BTreeMap::new();
+        for name in ["read", "write", "list", "delete", "stat", "mkdir", "exists"] {
+            let fields = requests
+                .get(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            let inputs = without_token(fields);
+            let outputs = provider_outputs(
+                provider,
+                arms.get(name)
+                    .unwrap_or_else(|| panic!("missing arm {name}")),
+            );
+            shapes.insert(name.to_string(), (inputs, outputs));
+        }
+        let web_requests = enum_fields(webspace, "enum Request {");
+        let ping_inputs = without_token(web_requests.get("ping").expect("webspace ping"));
+        let resolve_inputs = without_token(web_requests.get("resolve").expect("webspace resolve"));
+        let ping_arm = arm_until(webspace, "Request::Ping", "Request::");
+        let resolve_arm = arm_until(webspace, "Request::Resolve", "Request::");
+        assert!(
+            resolve_arm.contains("to_value(handle)"),
+            "resolve returns the handle object in data"
+        );
+        shapes.insert(
+            "ping".to_string(),
+            (ping_inputs, status_and(json_keys(&ping_arm))),
+        );
+        shapes.insert(
+            "resolve".to_string(),
+            (
+                resolve_inputs,
+                vec!["status".to_string(), "data".to_string()],
+            ),
+        );
+        shapes
+    }
+
+    fn assert_provider_shapes_match_the_capsule(
+        shapes: &std::collections::BTreeMap<String, (Vec<String>, Vec<String>)>,
+    ) {
+        let (read_inputs, read_outputs) = &shapes["read"];
+        assert!(
+            read_inputs.iter().any(|key| key == "encoding"),
+            "read request has encoding"
+        );
+        assert!(
+            read_outputs.iter().any(|key| key == "encoding"),
+            "utf8 read response has encoding"
+        );
+        assert_eq!(shapes["list"].1, ["status", "data"]);
+        assert!(shapes["ping"].0.is_empty(), "ping request has no fields");
+        assert_eq!(shapes["ping"].1, ["status", "pong"]);
+        assert_eq!(shapes["resolve"].0, ["path", "moniker"]);
+        assert_eq!(shapes["resolve"].1, ["status", "data"]);
+    }
+
+    fn provider_outputs(provider: &str, arm: &str) -> Vec<String> {
+        if arm.contains("to_value(entries)") {
+            return vec!["status".to_string(), "data".to_string()];
+        }
+        if arm.contains("to_value(stat)") {
+            return status_and(struct_fields(provider, "pub struct FileStat {"));
+        }
+        if arm.contains("read_response_data") {
+            let body = function_body(provider, "fn read_response_data");
+            return status_and(json_keys(&body));
+        }
+        if arm.contains("data: None") && !arm.contains("json!") {
+            return vec!["status".to_string()];
+        }
+        status_and(json_keys(arm))
+    }
+
+    fn status_and(keys: Vec<String>) -> Vec<String> {
+        let mut outputs = vec!["status".to_string()];
+        outputs.extend(keys);
+        outputs
+    }
+
+    fn without_token(fields: &[String]) -> Vec<String> {
+        fields
+            .iter()
+            .filter(|field| field.as_str() != "token" && field.as_str() != "_token")
+            .cloned()
+            .collect()
+    }
+
+    fn enum_fields(source: &str, header: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+        let start = source
+            .find(header)
+            .unwrap_or_else(|| panic!("missing {header}"));
+        let rest = &source[start + header.len()..];
+        let end = rest
+            .find("\n}")
+            .unwrap_or_else(|| panic!("enum {header} does not close"));
+        let mut map = std::collections::BTreeMap::new();
+        let mut name: Option<String> = None;
+        let mut fields = Vec::new();
+        for line in rest[..end].lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+                continue;
+            }
+            if name.is_none() {
+                let ident = leading_ident(trimmed);
+                if ident.is_empty() {
+                    continue;
+                }
+                if trimmed.contains('{') && trimmed.contains('}') {
+                    map.insert(snake(ident), fields_in_braces(trimmed));
+                } else if trimmed.contains('{') {
+                    name = Some(snake(ident));
+                    fields = Vec::new();
+                } else {
+                    map.insert(snake(ident), Vec::new());
+                }
+            } else if trimmed.starts_with('}') {
+                map.insert(
+                    name.take().expect("open variant"),
+                    std::mem::take(&mut fields),
+                );
+            } else if let Some(field) = field_ident(trimmed) {
+                fields.push(field.to_string());
+            }
+        }
+        map
+    }
+
+    fn fields_in_braces(trimmed: &str) -> Vec<String> {
+        let inner = trimmed
+            .split_once('{')
+            .and_then(|(_, after)| after.rsplit_once('}'))
+            .map(|(body, _)| body)
+            .unwrap_or("");
+        inner
+            .split(',')
+            .filter_map(|part| field_ident(part.trim()).map(str::to_string))
+            .collect()
+    }
+
+    fn field_ident(trimmed: &str) -> Option<&str> {
+        let ident = leading_ident(trimmed);
+        let rest = trimmed[ident.len()..].trim_start();
+        if ident.is_empty() || !rest.starts_with(':') {
+            None
+        } else {
+            Some(ident)
+        }
+    }
+
+    fn leading_ident(text: &str) -> &str {
+        let end = text
+            .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .unwrap_or(text.len());
+        &text[..end]
+    }
+
+    fn snake(name: &str) -> String {
+        let mut out = String::new();
+        for (index, ch) in name.chars().enumerate() {
+            if ch.is_ascii_uppercase() {
+                if index > 0 {
+                    out.push('_');
+                }
+                out.push(ch.to_ascii_lowercase());
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    fn match_arms(
+        source: &str,
+        function: &str,
+        tag: &str,
+    ) -> std::collections::BTreeMap<String, String> {
+        let start = source
+            .find(function)
+            .unwrap_or_else(|| panic!("missing {function}"));
+        let rest = &source[start..];
+        let end = rest.find("\nfn ").unwrap_or(rest.len());
+        let mut map = std::collections::BTreeMap::new();
+        for part in rest[..end].split(tag).skip(1) {
+            let ident = leading_ident(part);
+            map.insert(snake(ident), part.to_string());
+        }
+        map
+    }
+
+    fn arm_until(source: &str, marker: &str, next: &str) -> String {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing {marker}"));
+        let rest = &source[start + marker.len()..];
+        let end = rest.find(next).unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    fn function_body(source: &str, header: &str) -> String {
+        let start = source
+            .find(header)
+            .unwrap_or_else(|| panic!("missing {header}"));
+        let rest = &source[start..];
+        let end = rest[header.len()..]
+            .find("\nfn ")
+            .unwrap_or(rest.len() - header.len())
+            + header.len();
+        rest[..end].to_string()
+    }
+
+    fn json_keys(text: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find('"') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('"') else {
+                break;
+            };
+            let key = &after[..end];
+            let tail = after[end + 1..].trim_start();
+            if tail.starts_with(':')
+                && !key.is_empty()
+                && key.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_')
+                && !keys.iter().any(|found| found == key)
+            {
+                keys.push(key.to_string());
+            }
+            rest = &after[end + 1..];
+        }
+        keys
+    }
+
+    fn struct_fields(source: &str, header: &str) -> Vec<String> {
+        let start = source
+            .find(header)
+            .unwrap_or_else(|| panic!("missing {header}"));
+        let rest = &source[start + header.len()..];
+        let end = rest
+            .find("\n}")
+            .unwrap_or_else(|| panic!("struct {header} does not close"));
+        let mut fields = Vec::new();
+        for line in rest[..end].lines() {
+            let Some(stripped) = line.trim().strip_prefix("pub ") else {
+                continue;
+            };
+            if let Some(name) = field_ident(stripped) {
+                fields.push(name.to_string());
+            }
+        }
+        fields
+    }
+
+    /// A literal in the action map that copies the row's right still agrees
+    /// with the walk. The map's own text is the check.
+    #[test]
+    fn localhost_action_map_has_no_second_action_literal() {
+        let source = include_str!("provider_resource.rs");
+        let start = source.find("fn localhost_op_required_action").unwrap();
+        let rest = &source[start..];
+        let end = rest.find("\nfn execute_op_required_action").unwrap();
+        assert!(
+            !rest[..end].contains("Action::"),
+            "the action map reads the row"
+        );
+    }
+
+    /// The effect is read only while deciding whether the row stands.
+    #[test]
+    fn localhost_effect_gates_the_row_only() {
+        let source = include_str!("provider_resource.rs");
+        let prod = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let agree = prod.find("fn localhost_row_effect_agrees").unwrap();
+        let next = prod.find("fn localhost_operation").unwrap();
+        let body = &prod[agree..next];
+        assert_eq!(body.matches(".effect").count(), 2);
+        assert_eq!(prod.matches(".effect").count(), 2);
     }
 
     #[test]
