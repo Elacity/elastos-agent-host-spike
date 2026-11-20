@@ -1,0 +1,8 @@
+id: H5-refusal
+file: elastos/crates/elastos-server/src/api/handlers/provider.rs
+test: hook5_user_approval_is_not_read_from_the_manifest_today
+--- old
+            format!("Unsupported provider operation action mapping: {scheme}/{op}"),
+--- new
+            format!("Unmapped provider operation action mapping: {scheme}/{op}"),
+--- end

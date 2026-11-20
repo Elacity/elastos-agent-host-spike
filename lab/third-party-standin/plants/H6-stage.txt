@@ -1,0 +1,8 @@
+id: H6-stage
+file: elastos/crates/elastos-server/src/stage_cmd.rs
+test: hook6_stage_bundle_exists_and_starts_nothing_today
+--- old
+//! Staging starts nothing; a later start checks the slot again and trusts
+--- new
+//! Staging starts no guest; a later start checks the slot again and trusts
+--- end

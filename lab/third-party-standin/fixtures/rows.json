@@ -1,0 +1,36 @@
+{
+  "rows": [
+    {
+      "id": "H1",
+      "state": "missing-today"
+    },
+    {
+      "id": "H1b",
+      "state": "open"
+    },
+    {
+      "id": "H2",
+      "state": "missing-today"
+    },
+    {
+      "id": "H3",
+      "state": "missing-today"
+    },
+    {
+      "id": "H4",
+      "state": "missing-today"
+    },
+    {
+      "id": "H5",
+      "state": "missing-today"
+    },
+    {
+      "id": "H6",
+      "state": "open"
+    },
+    {
+      "id": "network-right",
+      "state": "waiting"
+    }
+  ]
+}

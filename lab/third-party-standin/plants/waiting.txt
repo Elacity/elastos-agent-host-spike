@@ -1,0 +1,18 @@
+id: waiting
+file: lab/third-party-standin/fixtures/rows.json
+test: hook_network_right_is_waiting
+--- old
+    {
+      "id": "H6",
+      "state": "open"
+    },
+    {
+      "id": "network-right",
+      "state": "waiting"
+    }
+--- new
+    {
+      "id": "H6",
+      "state": "open"
+    }
+--- end

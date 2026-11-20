@@ -1,0 +1,8 @@
+id: H3-internet
+file: elastos/crates/elastos-server/src/api/gateway_browser_wallet_reads.rs
+test: hook3_chain_reads_require_browser_internet_permission_today
+--- old
+                "Browser internet permission is required".into(),
+--- new
+                "Browser internet permission is needed".into(),
+--- end

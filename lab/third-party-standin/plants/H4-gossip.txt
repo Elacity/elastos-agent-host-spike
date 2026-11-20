@@ -1,0 +1,8 @@
+id: H4-gossip
+file: elastos/crates/elastos-server/src/carrier.rs
+test: hook4_carrier_message_limit_is_one_constant_today
+--- old
+const GOSSIP_WIRE_MESSAGE_MAX_BYTES: usize = 192 * 1024;
+--- new
+const GOSSIP_WIRE_MESSAGE_MAX_BYTES: usize = 191 * 1024;
+--- end

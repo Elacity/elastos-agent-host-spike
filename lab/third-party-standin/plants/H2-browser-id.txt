@@ -1,0 +1,9 @@
+id: H2-browser-id
+file: elastos/crates/elastos-server/src/api/gateway_browser_wallet.rs
+test: hook2_wallet_bridge_admits_a_fixed_browser_id_today
+note: the first slice in browser_app_wallet_bridge only
+--- old
+        match require_runtime_wallet_authority(&state.data_dir, &headers, &[BROWSER_CAPSULE_ID]) {
+--- new
+        match require_runtime_wallet_authority(&state.data_dir, &headers, &[]) {
+--- end
