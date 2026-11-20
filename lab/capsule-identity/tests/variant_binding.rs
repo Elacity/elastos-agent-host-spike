@@ -1217,11 +1217,7 @@ fn wasm_variant_refusal_order_is_stable() {
     let bundle = assemble(&AGENT_HOST);
     let other = assemble(&AGENT_HOST);
     let mut manifest = read_fixture(&AGENT_HOST, "capsule.json");
-    let at = manifest
-        .windows(7)
-        .position(|window| window == b"Journal")
-        .expect("the description");
-    manifest[at] ^= 0x20;
+    flip_one_manifest_ask_byte(&mut manifest);
     write_file(other.path(), "capsule.json", &manifest);
     let other_cid = named(other.path()).to_string();
     assert_ne!(other_cid, AGENT_HOST_LAB_CID);

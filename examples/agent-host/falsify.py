@@ -324,7 +324,7 @@ def load(path=DATA):
 #   in F-WC3-LANE-FILES-QUOTED. tools/src/lab_name.rs is gone
 #   from the tree and keeps its line because two entries of the model list
 #   anchor on it.
-# - examples/agent-host/falsifiers.json: falsify.py and src/lib.rs,
+# - examples/agent-host/falsifiers.json: capsule.json, falsify.py and src/lib.rs,
 #   all under examples/agent-host, which this runner's own search restores, so
 #   the tuple needs no line for it.
 # - lab/agent-conformance/falsifiers.json: the 20 files its entries edit,
@@ -506,7 +506,8 @@ class Mutation:
         texts = {}
         for name, edits in by_file.items():
             path = self.base / name
-            # One path rule: an edit names a file under examples/agent-host,
+            # One path rule: an edit names a file under examples/agent-host.
+            # A declaration edit names capsule.json, the signed manifest,
             # and this decides on the tree as it stands when the entry starts.
             # An absolute name, a folder that resolves outside REPO and a
             # symbolic link each get a reason before any link or write (P11).

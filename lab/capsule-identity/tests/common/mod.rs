@@ -38,7 +38,7 @@ use tempfile::TempDir;
 pub const CONTENT_SAMPLE_LAB_CID: &str =
     "bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi";
 pub const WEB_APP_LAB_CID: &str = "bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q";
-pub const AGENT_HOST_LAB_CID: &str = "bafybeibictatmmm2izchdebpslsaybdul2gkvhd7udldcx2g2ghnhmuzhe";
+pub const AGENT_HOST_LAB_CID: &str = "bafybeigc7v64singgkd4kgnvd63kvqx6nqrpcce6ckoh4odm7mdqw6dnxq";
 pub const PROVIDER_LAB_CID: &str = "bafybeicmpw5zf373ogbziqix2mj2bagmn5imgj3hy7347nulpmx32kooxe";
 pub const MODEL_LAB_CID: &str = "bafybeifh6dj5r5wc2j5kqxz6ukga74y3gi56woglqdzmmcdhqvy7qtljzq";
 pub const PROVIDER_VARIANT_A_LAB_CID: &str =
@@ -209,8 +209,9 @@ pub const WC001_CORE: Fixture = Fixture {
     files: &["capsule.json"],
 };
 
-/// The agent-host capsule's manifest. Its entrypoint module is build output
-/// and is never committed, so it is not in the fixture.
+/// The agent-host manifest. Its declared maximum is `asks`: write, then read,
+/// on its journal. The entrypoint module is build output and is never
+/// committed, so the fixture is the manifest alone.
 pub const AGENT_HOST: Fixture = Fixture {
     name: "agent-host",
     files: &["capsule.json"],
@@ -274,6 +275,17 @@ pub fn variant_recipe() -> Vec<u8> {
 /// This lane's root: the folder holding `Cargo.toml` and `fixtures/`.
 pub fn lane_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Flip one byte of the manifest ask resource. The manifest stays valid.
+pub fn flip_one_manifest_ask_byte(bytes: &mut [u8]) {
+    let marker = b"localhost://Users/self/.AppData/Agents/agent-host/*";
+    let at = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("ask")
+        + 12;
+    bytes[at] ^= 0x20;
 }
 
 /// The committed bytes of one fixture file.
@@ -1490,10 +1502,10 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// modelled; a grant exists only through the test seam
 /// [`StandInRuntime::seed_grant`].
 ///
-/// A launched instance is handed its asks only as the `sidecar` bytes of
-/// the checked bundle it was launched from, read through the test seam
+/// A launched instance is handed the typed asks of the checked manifest,
+/// read through the test seam
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
-/// it. The bytes are never parsed, and #309 has no asks field. A change on
+/// it. #309 has no asks field. A change on
 /// disk between the walk and the launch does not reach it either, shown
 /// through the test seam [`StandInRuntime::set_after_walk`].
 pub struct StandInRuntime {
@@ -1510,9 +1522,8 @@ struct Instance {
     id: String,
     name: String,
     session_id: String,
-    /// The content of the `sidecar` entry of the checked bundle it was
-    /// launched from, or `None` when that bundle has none. Set once, at
-    /// launch.
+    /// The typed asks of the checked manifest, or `None` when it asks for
+    /// nothing. Set once, at launch.
     asks: Option<Vec<u8>>,
 }
 
@@ -1618,10 +1629,9 @@ impl StandInRuntime {
     }
 
     /// Lab test seam, not a route: the asks the instance of `session_id` was
-    /// handed at launch, the `sidecar` bytes of the checked, signed bundle
-    /// it was launched from. `None` when that bundle has no `sidecar`, or
-    /// when no instance has that session. #309 has no asks field on any
-    /// route, and nothing here parses the bytes.
+    /// handed at launch, the typed asks of the checked manifest. `None` when
+    /// that manifest asks for nothing, or when no instance has that session.
+    /// #309 has no asks field on any route.
     pub fn asks_of(&self, session_id: &str) -> Option<Vec<u8>> {
         self.instances
             .iter()
@@ -1644,7 +1654,7 @@ impl StandInRuntime {
     /// bytes, (f) a package record for that CID, (g) the one record check.
     /// (a), (b) and (c) come before the CID check. The answer is the stored
     /// manifest's `name`, from [`CheckedBundle::manifest_name`], and the
-    /// bundle's `sidecar` bytes, both from the one checked bundle that
+    /// typed asks, both from the one checked bundle that
     /// passed every check. The hook of [`StandInRuntime::set_after_walk`], if
     /// set, runs on the stored folder right after (d); no check after (d)
     /// and no part of the answer reads the folder.
@@ -1732,16 +1742,18 @@ fn said(refusal: Refusal) -> String {
     refusal.to_string()
 }
 
-/// The retired sidecar name. A test that proves the walk hands bytes through
-/// writes this name into a temp bundle. The committed fixture has none.
-pub const ASKS_FILE: &str = concat!("asks", ".json");
-
-/// The content of the checked bundle's sidecar entry, or `None` when it
-/// has none: the bytes the walk read, never read from the folder again.
+/// The checked manifest's typed `asks`, or `None` when it asks for nothing.
+/// Taken from the walk's `capsule.json`, never from the folder again.
 fn signed_asks(checked: &CheckedBundle) -> Option<Vec<u8>> {
-    checked
+    let manifest = checked
         .entries()
         .iter()
-        .find(|entry| entry.path == ASKS_FILE)
-        .map(|entry| entry.content.clone())
+        .find(|entry| entry.path == capsule_identity::MANIFEST_FILE)?;
+    let parsed: elastos_common::CapsuleManifest =
+        serde_json::from_slice(&manifest.content).expect("the walk accepted capsule.json");
+    if parsed.asks.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_vec(&parsed.asks).expect("typed asks encode"))
+    }
 }
