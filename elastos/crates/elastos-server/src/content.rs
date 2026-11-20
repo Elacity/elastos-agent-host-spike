@@ -3753,7 +3753,7 @@ impl ContentProvider {
                     .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?,
                 ContentFetchPayload::Stream(stream) => provider_stream_payload_bytes(stream)?,
             };
-            if !verify_exact_content_cid(registry, cid, &bytes).await? {
+            if !verify_carrier_content_cid(cid, &bytes)? {
                 return Err(ProviderError::Provider("availability CID mismatch".into()));
             }
         }
@@ -9191,12 +9191,135 @@ fn provider_response_ok(response: &Value, operation: &str) -> Result<(), Provide
     Ok(())
 }
 
-pub(crate) async fn verify_exact_content_cid(
-    registry: &ProviderRegistry,
-    cid: &str,
-    bytes: &[u8],
-) -> Result<bool, ProviderError> {
-    verify_exact_content_cid_with_filename(registry, cid, bytes, "content.bin").await
+// Carrier-only Homes have no local IPFS provider. Check Kubo's legacy file
+// import profiles used by Content from the received bytes, before returning
+// them to the caller. A CID with another codec or import recipe fails closed.
+pub(crate) fn verify_carrier_content_cid(cid: &str, bytes: &[u8]) -> Result<bool, ProviderError> {
+    if bytes.len() > IMPORT_EXACT_MAX_BYTES {
+        return Err(ProviderError::Provider(
+            "content exceeds exact-CID read limit".into(),
+        ));
+    }
+    let requested = cid::Cid::try_from(cid)
+        .map_err(|err| ProviderError::Provider(format!("invalid content CID: {err}")))?;
+    if requested.to_string() != cid {
+        return Ok(false);
+    }
+    if requested.hash().code() != 0x12 || requested.hash().digest().len() != 32 {
+        return Ok(false);
+    }
+    match (requested.version(), requested.codec()) {
+        (cid::Version::V1, 0x55) => Ok(file_cid(bytes, cid::Version::V1, true) == requested),
+        (cid::Version::V0, 0x70) => Ok(file_cid(bytes, cid::Version::V0, false) == requested),
+        (cid::Version::V1, 0x70) => Ok(file_cid(bytes, cid::Version::V1, true) == requested
+            || file_cid(bytes, cid::Version::V1, false) == requested),
+        _ => Ok(false),
+    }
+}
+
+const UNIXFS_CHUNK_BYTES: usize = 262_144;
+const UNIXFS_FILE_LINKS: usize = 174;
+
+struct FileCidNode {
+    cid: cid::Cid,
+    file_size: u64,
+    dag_size: u64,
+}
+
+fn pb_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 128 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn pb_number(out: &mut Vec<u8>, field: u64, value: u64) {
+    pb_varint(out, field << 3);
+    pb_varint(out, value);
+}
+
+fn pb_bytes(out: &mut Vec<u8>, field: u64, value: &[u8]) {
+    pb_varint(out, (field << 3) | 2);
+    pb_varint(out, value.len() as u64);
+    out.extend_from_slice(value);
+}
+
+fn hashed_cid(block: &[u8], version: cid::Version, codec: u64) -> cid::Cid {
+    let digest = sha2::Sha256::digest(block);
+    let hash = cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice())
+        .expect("SHA-256 fits a multihash");
+    match version {
+        cid::Version::V0 => cid::Cid::new_v0(hash).expect("CIDv0 uses dag-pb SHA-256"),
+        cid::Version::V1 => cid::Cid::new_v1(codec, hash),
+    }
+}
+
+fn file_leaf(chunk: &[u8], version: cid::Version, raw: bool) -> FileCidNode {
+    if raw {
+        return FileCidNode {
+            cid: hashed_cid(chunk, cid::Version::V1, 0x55),
+            file_size: chunk.len() as u64,
+            dag_size: chunk.len() as u64,
+        };
+    }
+    let mut unixfs = Vec::with_capacity(chunk.len() + 16);
+    pb_number(&mut unixfs, 1, 2); // UnixFS File
+    if !chunk.is_empty() {
+        pb_bytes(&mut unixfs, 2, chunk);
+    }
+    pb_number(&mut unixfs, 3, chunk.len() as u64);
+    let mut block = Vec::with_capacity(unixfs.len() + 8);
+    pb_bytes(&mut block, 1, &unixfs);
+    FileCidNode {
+        cid: hashed_cid(&block, version, 0x70),
+        file_size: chunk.len() as u64,
+        dag_size: block.len() as u64,
+    }
+}
+
+fn file_parent(children: &[FileCidNode], version: cid::Version) -> FileCidNode {
+    let file_size = children.iter().map(|node| node.file_size).sum();
+    let mut unixfs = Vec::with_capacity(children.len() * 5 + 16);
+    pb_number(&mut unixfs, 1, 2);
+    pb_number(&mut unixfs, 3, file_size);
+    for child in children {
+        pb_number(&mut unixfs, 4, child.file_size);
+    }
+    // Kubo's legacy PBNode field order is Links, then Data. An empty Name is
+    // serialized on each link, and Tsize is the child's cumulative DAG size.
+    let mut block = Vec::with_capacity(children.len() * 70 + unixfs.len());
+    for child in children {
+        let mut link = Vec::with_capacity(64);
+        pb_bytes(&mut link, 1, &child.cid.to_bytes());
+        pb_bytes(&mut link, 2, b"");
+        pb_number(&mut link, 3, child.dag_size);
+        pb_bytes(&mut block, 2, &link);
+    }
+    pb_bytes(&mut block, 1, &unixfs);
+    FileCidNode {
+        cid: hashed_cid(&block, version, 0x70),
+        file_size,
+        dag_size: block.len() as u64 + children.iter().map(|node| node.dag_size).sum::<u64>(),
+    }
+}
+
+fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
+    let mut level: Vec<FileCidNode> = if bytes.is_empty() {
+        vec![file_leaf(bytes, version, raw)]
+    } else {
+        bytes
+            .chunks(UNIXFS_CHUNK_BYTES)
+            .map(|chunk| file_leaf(chunk, version, raw))
+            .collect()
+    };
+    while level.len() > 1 {
+        level = level
+            .chunks(UNIXFS_FILE_LINKS)
+            .map(|children| file_parent(children, version))
+            .collect();
+    }
+    level.pop().expect("file has one root").cid
 }
 
 async fn verify_exact_content_cid_with_filename(
@@ -9864,18 +9987,69 @@ mod tests {
 
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
-    fn fetch_receipt(result: FetchResult, verified: bool, attempt: u8) -> FetchReceipt {
-        let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
-        FetchReceipt::new(
-            TEST_CID,
-            &peer_did,
-            42,
-            verified,
-            result,
-            attempt,
-            1_700_000_000,
+    #[test]
+    fn carrier_cid_check_matches_isolated_kubo_file_imports() {
+        // Kubo 0.40.1 `add --only-hash`, using its legacy profile and the
+        // workflow's explicit CIDv1 option. These pins cover raw leaves,
+        // dag-pb parents, and the empty CIDv0 file special case.
+        let small = b"carrier provider bytes";
+        assert!(verify_carrier_content_cid(
+            "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp",
+            small,
         )
-        .unwrap()
+        .unwrap());
+        assert!(verify_carrier_content_cid(
+            "bafkreiermf3pekqicqpks77bbjoszjblcapl7vgvdaafl7qbn6enegjo5e",
+            small,
+        )
+        .unwrap());
+        assert!(
+            verify_carrier_content_cid("QmbFMke1KXqnYyBBWxB74N4c5SBnJMVAiMNRcGu6x1AwQH", b"",)
+                .unwrap()
+        );
+        let generic = [
+            sha2::Sha256::digest(b"issue89 generic file").repeat(65_536),
+            b"complete".to_vec(),
+        ]
+        .concat();
+        let generic_cid = "bafybeihkdt7gm3dap774urwmlqcnymhfvhtctkvnzb6vdcxmmad3cnbawy";
+        assert!(verify_carrier_content_cid(generic_cid, &generic).unwrap());
+        assert!(verify_carrier_content_cid(
+            "QmbBXPq7tPW63A7hTYFJXKVZaRxXd4u1TRtQRvr3mmd4LF",
+            &generic,
+        )
+        .unwrap());
+        let mut changed = generic;
+        changed[0] ^= 1;
+        assert!(!verify_carrier_content_cid(generic_cid, &changed).unwrap());
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_above_one_file_link_layer() {
+        let mut bytes = Vec::with_capacity(175 * UNIXFS_CHUNK_BYTES + 1);
+        for index in 0..175 {
+            bytes.extend(std::iter::repeat_n((index % 251) as u8, UNIXFS_CHUNK_BYTES));
+        }
+        bytes.push(b'X');
+        assert!(verify_carrier_content_cid(
+            "bafybeicxfrgbvn3264uulnvvg77cnxxobo3nggiylvggg66em3mvrdlmzu",
+            &bytes,
+        )
+        .unwrap());
+    }
+
+    fn fetch_receipt(result: FetchResult, verified: bool, attempt: u8) -> FetchReceipt {
+        fetch_receipt_for(TEST_CID, result, verified, attempt)
+    }
+
+    fn fetch_receipt_for(
+        cid: &str,
+        result: FetchResult,
+        verified: bool,
+        attempt: u8,
+    ) -> FetchReceipt {
+        let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
+        FetchReceipt::new(cid, &peer_did, 42, verified, result, attempt, 1_700_000_000).unwrap()
     }
 
     #[test]
@@ -10047,11 +10221,15 @@ mod tests {
     }
 
     fn two_verified_holder_receipts() -> Vec<FetchReceipt> {
+        two_verified_holder_receipts_for(TEST_CID)
+    }
+
+    fn two_verified_holder_receipts_for(cid: &str) -> Vec<FetchReceipt> {
         let (_, second_peer) = elastos_identity::derive_did(&[22; 32]);
         vec![
-            fetch_receipt(FetchResult::Ok, true, 1),
+            fetch_receipt_for(cid, FetchResult::Ok, true, 1),
             FetchReceipt::new(
-                TEST_CID,
+                cid,
                 &second_peer,
                 42,
                 true,
@@ -10303,6 +10481,7 @@ mod tests {
     #[tokio::test]
     async fn distinct_holder_answer_carries_a_requester_signed_set() {
         let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let cid = fixture_file_cid(b"carrier bytes");
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(provider_ok(json!({
@@ -10314,7 +10493,7 @@ mod tests {
                     "distinct_holders": 2,
                     "required_distinct_holders": 2,
                     "receipt_attestation": "self",
-                    "receipts": two_verified_holder_receipts(),
+                    "receipts": two_verified_holder_receipts_for(&cid),
                 }
             }))),
         });
@@ -10331,7 +10510,7 @@ mod tests {
             Some(data_dir.path()),
             &registry,
             "content-provider",
-            TEST_CID,
+            &cid,
             "",
             &transfer,
             Some(json!(2)),
@@ -10452,7 +10631,11 @@ mod tests {
         assert!(matches!(err, ProviderError::Io(_)));
     }
 
-    fn two_holder_availability_body(bytes: &[u8]) -> Value {
+    fn fixture_file_cid(bytes: &[u8]) -> String {
+        file_cid(bytes, cid::Version::V1, true).to_string()
+    }
+
+    fn two_holder_availability_body(bytes: &[u8], cid: &str) -> Value {
         provider_ok(json!({
             "data": base64::engine::general_purpose::STANDARD.encode(bytes),
             "availability": {
@@ -10462,7 +10645,7 @@ mod tests {
                 "distinct_holders": 2,
                 "required_distinct_holders": 2,
                 "receipt_attestation": "self",
-                "receipts": two_verified_holder_receipts(),
+                "receipts": two_verified_holder_receipts_for(cid),
             }
         }))
     }
@@ -10471,16 +10654,21 @@ mod tests {
     /// holders still produce their receipts and the signed set.
     #[tokio::test]
     async fn local_copy_with_distinct_holders_returns_holder_receipts() {
-        let (data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
+        let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let cid = fixture_file_cid(b"carrier bytes");
+        ipfs.cat_files
+            .lock()
+            .await
+            .insert(String::new(), b"carrier bytes".to_vec());
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
-            response: Mutex::new(two_holder_availability_body(b"carrier bytes")),
+            response: Mutex::new(two_holder_availability_body(b"carrier bytes", &cid)),
         });
         registry.register(availability.clone()).await;
         let response = content
             .send_raw(&json!({
                 "op": "fetch",
-                "cid": TEST_CID,
+                "cid": cid,
                 "min_distinct_holders": 2,
             }))
             .await
@@ -10542,7 +10730,7 @@ mod tests {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
-            response: Mutex::new(two_holder_availability_body(b"carrier bytes")),
+            response: Mutex::new(two_holder_availability_body(b"carrier bytes", TEST_CID)),
         });
         registry.register(availability.clone()).await;
         let response = content
@@ -10622,7 +10810,24 @@ mod tests {
         Arc<MockAvailabilityProvider>,
         Result<Value, ProviderError>,
     ) {
-        let (data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
+        content_fetch_against_bridge_for_cid(TEST_CID, body).await
+    }
+
+    async fn content_fetch_against_bridge_for_cid(
+        cid: &str,
+        body: Value,
+    ) -> (
+        tempfile::TempDir,
+        Arc<MockAvailabilityProvider>,
+        Result<Value, ProviderError>,
+    ) {
+        let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        if cid != TEST_CID {
+            ipfs.cat_files
+                .lock()
+                .await
+                .insert(String::new(), BRIDGE_BYTES.to_vec());
+        }
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(body),
@@ -10631,7 +10836,7 @@ mod tests {
         let response = content
             .send_raw(&json!({
                 "op": "fetch",
-                "cid": TEST_CID,
+                "cid": cid,
                 "min_distinct_holders": 2,
             }))
             .await;
@@ -10642,14 +10847,17 @@ mod tests {
     /// stay unreturned, including the local copy.
     #[tokio::test]
     async fn availability_success_without_receipts_returns_no_bytes() {
-        let (_data_dir, availability, response) =
-            content_fetch_against_bridge(bridge_success(json!({
+        let cid = fixture_file_cid(BRIDGE_BYTES);
+        let (_data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
                 "status": "network_available",
                 "provider": "bridge",
                 "distinct_holders": 9,
                 "required_distinct_holders": 2,
-            })))
-            .await;
+            })),
+        )
+        .await;
         assert_eq!(availability.requests.lock().await.len(), 1);
         let err = response.expect_err("a success with no receipts must not return bytes");
         let text = err.to_string();
@@ -10661,15 +10869,18 @@ mod tests {
     /// answer's own count fields say the requirement is met.
     #[tokio::test]
     async fn availability_success_with_one_holder_when_two_are_required_is_refused() {
-        let (data_dir, availability, response) =
-            content_fetch_against_bridge(bridge_success(json!({
+        let cid = fixture_file_cid(BRIDGE_BYTES);
+        let (data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
                 "status": "network_available",
                 "provider": "bridge",
                 "distinct_holders": 9,
                 "required_distinct_holders": 1,
-                "receipts": [fetch_receipt(FetchResult::Ok, true, 1)],
-            })))
-            .await;
+                "receipts": [fetch_receipt_for(&cid, FetchResult::Ok, true, 1)],
+            })),
+        )
+        .await;
         assert_eq!(availability.requests.lock().await.len(), 1);
         let response = response.expect("the refusal is an error answer, not a transport failure");
         assert_eq!(response["status"], "error", "{response}");
@@ -10687,7 +10898,7 @@ mod tests {
         let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
         assert_eq!(receipts.len(), 1);
-        assert_eq!(signed.payload.requested_cid, TEST_CID);
+        assert_eq!(signed.payload.requested_cid, cid);
         assert_eq!(signed.payload.required_distinct_holders, 2);
         assert_eq!(signed.payload.observed_distinct_holders, 1);
     }
@@ -10788,19 +10999,22 @@ mod tests {
     /// Two verified receipts for another CID do not prove this CID.
     #[tokio::test]
     async fn availability_success_for_another_cid_is_refused() {
+        let cid = fixture_file_cid(BRIDGE_BYTES);
         let receipts = vec![
             verified_receipt_for(OTHER_CID, [7; 32], 1, 1_700_000_000),
             verified_receipt_for(OTHER_CID, [22; 32], 2, 1_700_000_001),
         ];
-        let (data_dir, availability, response) =
-            content_fetch_against_bridge(bridge_success(json!({
+        let (data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
                 "status": "network_available",
                 "provider": "bridge",
                 "distinct_holders": 9,
                 "required_distinct_holders": 1,
                 "receipts": receipts,
-            })))
-            .await;
+            })),
+        )
+        .await;
         assert_eq!(availability.requests.lock().await.len(), 1);
         let response = response.expect("another CID is a refusal, not a transport failure");
         assert_eq!(response["status"], "error", "{response}");
@@ -10815,7 +11029,7 @@ mod tests {
         let verified = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
         assert_eq!(verified.len(), 2);
         assert_eq!(signed.payload.requested_cid, OTHER_CID);
-        assert_ne!(signed.payload.requested_cid, TEST_CID);
+        assert_ne!(signed.payload.requested_cid, cid);
         assert_eq!(signed.payload.required_distinct_holders, 2);
         assert_eq!(signed.payload.observed_distinct_holders, 2);
     }
@@ -13989,6 +14203,35 @@ mod tests {
         assert_eq!(requests[0]["uri"], format!("elastos://{cid}"));
         assert!(requests[0].get("path").is_none());
         assert_eq!(requests[1]["path"], "remote.md");
+    }
+
+    #[tokio::test]
+    async fn carrier_only_content_fetch_verifies_without_local_ipfs() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let content =
+            ContentProvider::new(data_dir.path().to_path_buf(), Arc::downgrade(&registry));
+        registry
+            .register(Arc::new(MockAvailabilityProvider {
+                requests: Mutex::new(Vec::new()),
+                response: Mutex::new(provider_ok(json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(b"remote content"),
+                }))),
+            }))
+            .await;
+        let response = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["data"]["availability"]["cid_verified"], true);
+        assert_eq!(
+            response["data"]["data"],
+            base64::engine::general_purpose::STANDARD.encode(b"remote content")
+        );
     }
 
     #[tokio::test]
