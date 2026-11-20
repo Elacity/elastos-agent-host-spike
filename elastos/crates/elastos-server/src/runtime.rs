@@ -4478,17 +4478,27 @@ pub(crate) mod tests {
 
     async fn next_pending(
         store: &elastos_runtime::capability::pending::PendingRequestStore,
+        launch: &mut tokio::task::JoinHandle<
+            elastos_common::Result<elastos_compute::CapsuleHandle>,
+        >,
     ) -> elastos_runtime::capability::pending::PendingCapabilityRequest {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if let Some(request) = store.list_pending().await.into_iter().next() {
                     break request;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                tokio::select! {
+                    result = &mut *launch => match result {
+                        Ok(Ok(_)) => panic!("the agent host finished before its grant ask"),
+                        Ok(Err(error)) => panic!("the agent host stopped before its grant ask: {error:#}"),
+                        Err(error) => panic!("the agent host launch task failed: {error}"),
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
             }
         })
         .await
-        .expect("the agent host must ask for a journal grant")
+        .expect("the agent host must ask for a grant")
     }
 
     fn component_invoke_outcomes(audit_log: &AuditLog) -> Vec<(String, String)> {
@@ -4511,18 +4521,16 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// The whole S3 route in one process: the guest asks for its two grants,
-    /// the shell (this test) grants them, the guest writes its journal through
-    /// the real bridge with a revision precondition, and reads it back.
+    /// The guest journals its activation before asking to submit a plan.
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_writes_and_reads_its_journal_through_the_real_bridge() {
         let fx = agent_host_runtime().await;
         let (root, journal) = agent_host_journal();
-        let launch = launch_agent_host(&fx);
+        let mut launch = launch_agent_host(&fx);
         let mut asked = Vec::new();
-        for _ in 0..2 {
-            let pending = next_pending(&fx.pending_store).await;
+        for _ in 0..3 {
+            let pending = next_pending(&fx.pending_store, &mut launch).await;
             asked.push((pending.resource.as_str().to_string(), pending.action));
             let token = fx.capability_manager.grant(
                 pending.session_id.as_str(),
@@ -4546,6 +4554,10 @@ pub(crate) mod tests {
             vec![
                 (journal.clone(), elastos_runtime::capability::Action::Write),
                 (journal.clone(), elastos_runtime::capability::Action::Read),
+                (
+                    "elastos://inspect/submit_agent_plan".to_string(),
+                    elastos_runtime::capability::Action::Write,
+                ),
             ]
         );
         assert!(fx.pending_store.list_pending().await.is_empty());
@@ -4627,9 +4639,11 @@ pub(crate) mod tests {
             &old,
         )
         .unwrap();
-        let launch = launch_agent_host(&fx);
+        let mut launch = launch_agent_host(&fx);
+        let mut asked = Vec::new();
         for _ in 0..2 {
-            let pending = next_pending(&fx.pending_store).await;
+            let pending = next_pending(&fx.pending_store, &mut launch).await;
+            asked.push((pending.resource.as_str().to_string(), pending.action));
             let token = fx.capability_manager.grant(
                 pending.session_id.as_str(),
                 pending.resource.clone(),
@@ -4642,6 +4656,14 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         }
+        assert_eq!(
+            asked,
+            vec![
+                (journal.clone(), elastos_runtime::capability::Action::Write),
+                (journal.clone(), elastos_runtime::capability::Action::Read),
+            ],
+            "a format 1 journal stops before the submit ask"
+        );
         let error = tokio::time::timeout(std::time::Duration::from_secs(10), launch)
             .await
             .expect("the agent host must finish")
@@ -4664,16 +4686,16 @@ pub(crate) mod tests {
         assert_eq!(stored, old, "the old object is not touched");
     }
 
-    /// The shell denies both requests: the guest finishes, sends no resource
-    /// call, and nothing is stored.
+    /// The shell denies both journal requests: the guest finishes before a
+    /// submit ask, sends no resource call, and stores nothing.
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_stores_nothing_when_its_journal_grants_are_denied() {
         let fx = agent_host_runtime().await;
         let (_root, journal) = agent_host_journal();
-        let launch = launch_agent_host(&fx);
+        let mut launch = launch_agent_host(&fx);
         for _ in 0..2 {
-            let pending = next_pending(&fx.pending_store).await;
+            let pending = next_pending(&fx.pending_store, &mut launch).await;
             assert_eq!(pending.resource.as_str(), journal);
             fx.pending_store
                 .deny_request_by(pending.id.as_str(), "not now", Settler::Shell)
@@ -4688,6 +4710,7 @@ pub(crate) mod tests {
         let path =
             elastos_common::localhost::rooted_localhost_fs_path(&fx.data_dir, &journal).unwrap();
         assert!(!path.exists());
+        assert!(fx.pending_store.list_pending().await.is_empty());
         assert!(component_invoke_outcomes(&fx.audit_log).is_empty());
     }
 

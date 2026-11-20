@@ -7367,8 +7367,8 @@ mod tests {
         assert_eq!(outcomes, vec!["error".to_string()]);
     }
 
-    /// The Agent Host as shipped: its own manifest, and only the two grants it
-    /// asks for. Neither can delete `.AppData`, the person's root, or the journal.
+    /// The shipped Agent Host asks for two journal grants and one plan submit
+    /// grant. These grants cannot delete `.AppData`, the root, or the journal.
     #[tokio::test]
     async fn the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root() {
         let manifest: elastos_common::CapsuleManifest =
@@ -7379,13 +7379,19 @@ mod tests {
             .expect("the agent host manifest validates");
         assert_eq!(
             manifest.resource_authority_bounds(),
-            vec![elastos_common::AuthorityBound {
-                resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
-                actions: Some(vec![
-                    elastos_common::AskAction::Write,
-                    elastos_common::AskAction::Read,
-                ]),
-            }]
+            vec![
+                elastos_common::AuthorityBound {
+                    resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
+                    actions: Some(vec![
+                        elastos_common::AskAction::Write,
+                        elastos_common::AskAction::Read,
+                    ]),
+                },
+                elastos_common::AuthorityBound {
+                    resource: "elastos://inspect/submit_agent_plan".to_string(),
+                    actions: Some(vec![elastos_common::AskAction::Write]),
+                },
+            ]
         );
         let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
         ctx.manifest_capabilities = manifest.resource_authority_bounds();
@@ -8121,12 +8127,12 @@ mod tests {
         serde_json::from_slice(&std::fs::read(path).expect("stored record")).unwrap()
     }
 
-    /// The probe Agent Host's manifest as it is on disk, unsigned; only its
-    /// ceiling is read here.
+    /// The shipped Agent Host manifest as it is on disk; the bridge checks
+    /// its exact resource ceiling.
     fn submit_plan_host_manifest() -> elastos_common::CapsuleManifest {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/components/a5-launch-probe/capsule.json");
-        serde_json::from_slice(&std::fs::read(path).expect("probe test manifest")).unwrap()
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host/capsule.json");
+        serde_json::from_slice(&std::fs::read(path).expect("Agent Host manifest")).unwrap()
     }
 
     /// The submitted plan: one exact typed step plus whatever the row adds.
@@ -8163,7 +8169,7 @@ mod tests {
         .to_string()
     }
 
-    /// The probe Agent Host's bridge over `data_dir`, acting as `principal`.
+    /// The Agent Host bridge over `data_dir`, acting as `principal`.
     async fn submit_plan_bridge(
         data_dir: &Path,
         principal: &str,
@@ -8335,6 +8341,66 @@ mod tests {
         other_activation.session_id = "different-session".to_string();
         let refused = submit_with_write(&other_activation, 80, &query).await;
         assert_eq!(refused["response"]["code"], "agent_plan_result_refused");
+    }
+
+    #[tokio::test]
+    #[ignore = "reads Agent Host preview bytes; run examples/agent-host/run-e2e.sh"]
+    async fn a15r_june_plan_stores_and_shows_the_document_step_bytes() {
+        let Some((home, ctx, provider, _requester, owner)) = submit_agent_plan_context().await
+        else {
+            return assert_refused_without_agents_built().await;
+        };
+        let proposed = std::fs::read(std::path::PathBuf::from(
+            std::env::var_os("A15R_PREVIEW_STEP_PATH")
+                .expect("Agent Host preview step path from run-e2e.sh"),
+        ))
+        .expect("Agent Host preview step bytes");
+        let step: serde_json::Value =
+            serde_json::from_slice(&proposed).expect("Agent Host serialized step");
+        // This shape is the product contract. The bytes above come from the
+        // planner itself, so a planner-only shape change fails this row.
+        assert_eq!(
+            step,
+            serde_json::json!({
+                "scheme": "localhost",
+                "operation": "write",
+                "request": {
+                    "path": "localhost://Users/self/Documents/note.txt",
+                    "content": b"three lines",
+                },
+            })
+        );
+        assert_eq!(serde_json::to_vec(&step).unwrap(), proposed);
+        let plan = serde_json::json!({"steps": [step]});
+        let response = submit_with_write(&ctx, 81, &plan).await;
+        let data = &response["response"]["result"]["data"];
+        assert_eq!(data["status"], "pending", "{response}");
+        let request_id = data["request_id"].as_str().unwrap();
+        let stored = read_submit_record(home.path(), request_id);
+        assert_eq!(serde_json::to_vec(&stored["request"]).unwrap(), proposed);
+        let cards = crate::api::gateway::inbox_request_entries_for_test(
+            home.path(),
+            &owner,
+            Some(&home.owner.proof_binding_id),
+            crate::auth::PrincipalKind::Human,
+        )
+        .await;
+        let (_, kind, body) = cards
+            .iter()
+            .find(|(_, kind, _)| kind == "agent_plan")
+            .unwrap();
+        assert_eq!(kind, "agent_plan");
+        let shown = body
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Step 1: ")
+            .unwrap();
+        assert_eq!(shown.as_bytes(), proposed);
+        assert!(
+            provider.requests().await.is_empty(),
+            "preview has no effect"
+        );
     }
 
     #[tokio::test]
