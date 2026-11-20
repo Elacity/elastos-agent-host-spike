@@ -183,18 +183,11 @@ This citation is design input for A3. `lab/capsule-identity/src/lib.rs::variant_
 Reference: `lab/capsule-identity/tests/variant_binding.rs:699` `variant_binding_stays_outside_the_bundles`.
 Reference: `lab/capsule-identity/tests/variant_binding.rs:476` `variant_binding_signed_under_another_domain_is_refused`.
 
-The asks file is the declaration and the Runtime enforces each grant.
+The declaration is not the policy check. The Runtime enforces each grant.
 
-`examples/agent-host/src/lib.rs:8149` states that the Runtime enforces each grant. The declared per-step asks are compiled in from asks.json. That file is an auditable declaration.
+`examples/agent-host/src/lib.rs:8149` states that the Runtime enforces each grant.
 
-    /// The declared per-step asks, compiled in from `asks.json` in this lane. The
-    /// file is an auditable declaration, not the policy check: the Runtime
     /// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
-    /// manifest and retires into that one place when the Runtime defines per-step
-    /// asks (P10). It is read by this module's tests only, so the shipped guest
-    /// keeps no new production path.
-    #[cfg(test)]
-    const ASKS_JSON: &str = include_str!("../asks.json");
 
 The guest denies a step with no grant id and does not mint one.
 
@@ -385,7 +378,7 @@ The guest proposes. `examples/agent-host/src/lib.rs::propose_hosted` records a h
         Ok(id)
     }
 
-The asks file declares two hosted resources. `examples/agent-host/asks.json:10` declares `Models/`. `examples/agent-host/asks.json:11` declares `<principal>/.AppData/Models/`.
+The pinned manifest's capability list names the journal resource. Hosted model paths stay outside that list.
 
 The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect_request` is the one function that chooses the URL. A present `runtime_socket` uses `RUNTIME_HOSTED_EFFECT_URL`. The other branch uses `direct_url`. `capsules/model-provider/src/adapters.rs:44` sets that constant to `http://runtime.invalid/v1/hosted-effect`. `capsules/model-provider/src/adapters.rs:58` is `RUNTIME_HOSTED_EFFECT_URL`. The `direct_url` arm is `capsules/model-provider/src/adapters.rs:60`. That branch is request construction.
 
@@ -628,11 +621,11 @@ This section is design input for B2. B2 stays open.
 
 The proposal is the guest's record of the step. Admission is the Runtime's grant. Allowance is the Runtime's budget.
 
-The asks file declares three file asks. Each resource pattern is `<principal>/`. `examples/agent-host/asks.json:4` declares read. `examples/agent-host/asks.json:5` declares edit. `examples/agent-host/asks.json:6` declares restore.
+The pinned manifest names the journal resource in its capability list. The checker quotes that pinned commit. `examples/agent-host/capsule.json:15` opens the list. `examples/agent-host/capsule.json:16` is the journal resource. `examples/agent-host/capsule.json:17` closes the list.
 
-        {"kind": "read", "resource": "<principal>/"},
-        {"kind": "edit", "resource": "<principal>/"},
-        {"kind": "restore", "resource": "<principal>/"},
+      "capabilities": [
+        "localhost://Users/self/.AppData/Agents/agent-host/*"
+      ],
 
 `examples/agent-host/src/lib.rs::ask_kind_name` names Read as `read`, Edit as `edit`, and Restore as `restore`. `examples/agent-host/src/lib.rs:8187` is the Read arm. `examples/agent-host/src/lib.rs:8188` is the Edit arm. `examples/agent-host/src/lib.rs:8190` is the Restore arm.
 
@@ -655,7 +648,7 @@ The asks file declares three file asks. Each resource pattern is `<principal>/`.
         }
     }
 
-`examples/agent-host/src/lib.rs::declared_ask` is true when the kind matches and ask_covers is true. `examples/agent-host/src/lib.rs:8488` is that condition. ask_covers applies the declared pattern to the resource. The three patterns are `<principal>/`.
+`examples/agent-host/src/lib.rs::declared_ask` is true when the kind matches and ask_covers is true. `examples/agent-host/src/lib.rs:8488` is that condition. ask_covers applies the declared pattern to the resource.
 
     /// The declaration's answer for one proposal. `Unspecified` matches nothing.
     #[cfg(test)]
@@ -898,11 +891,12 @@ The extension B2 leaves open is the guest body's operation. The guest body carri
 
 This group is design input for B2. B2 stays open.
 
-The asks file declares three project asks. Each resource pattern is `<principal>/Projects/`. `examples/agent-host/asks.json:7` declares run. `examples/agent-host/asks.json:8` declares child. `examples/agent-host/asks.json:9` declares init.
+The pinned manifest names its resource budget. The checker quotes that pinned commit. `examples/agent-host/capsule.json:18` opens the budget. `examples/agent-host/capsule.json:19` is the memory budget. `examples/agent-host/capsule.json:20` is the cpu budget. `examples/agent-host/capsule.json:21` is the gpu flag.
 
-        {"kind": "run", "resource": "<principal>/Projects/"},
-        {"kind": "child", "resource": "<principal>/Projects/"},
-        {"kind": "init", "resource": "<principal>/Projects/"},
+      "resources": {
+        "memory_mb": 16,
+        "cpu_shares": 10,
+        "gpu": false
 
 ask_kind_name names Run as `run`, Child as `child`, and Init as `init`. `examples/agent-host/src/lib.rs:8189` is the Run arm.
 
@@ -916,7 +910,7 @@ ask_kind_name names Run as `run`, Child as `child`, and Init as `init`. `example
 
             ProposalKind::Init => Some("init"),
 
-declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. The three patterns are `<principal>/Projects/`.
+The Run, Child, and Init arms name those three proposal kinds.
 
 Run records a step. `examples/agent-host/src/lib.rs::propose_run` sets the kind to Run, stores the resource and the argv, and sets the seat to `microvm`. The body sets `step.kind = ProposalKind::Run`, `step.resource = resource.to_string()`, `step.argv = argv.to_vec()`, and `step.seat = "microvm".to_string();`. The body returns `Err("host path")` when the resource does not start with `localhost://`, when the resource contains whitespace, or when the resource or an argument is a host path. `examples/agent-host/src/lib.rs:2958` says `This does not start a process.` `examples/agent-host/src/lib.rs:2981` is the seat line.
 
@@ -1184,7 +1178,7 @@ The two hosted asks point at section 4. ask_kind_name names Hosted as `hosted`. 
 
             ProposalKind::Hosted => Some("hosted"),
 
-The two resources are `Models/` and `<principal>/.AppData/Models/`. propose_hosted records the hosted step. declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. Section 4 already maps those asks: the guest records a hosted step and the Runtime grants the call and carries it. The hosted rows point at section 4 and do not restate it.
+That arm names the hosted kind. Section 4 maps the hosted call: the guest records a hosted step and the Runtime grants the call and carries it. The hosted row points at section 4 and does not restate it.
 
 On the `model` scheme, provider_operation_action maps `offers_list`, `runs_get`, and `runs_events` to `Action::Read`, and `runs_create` and `runs_cancel` to `Action::Execute`. `elastos/crates/elastos-server/src/provider_resource.rs:163` is the read arm. `elastos/crates/elastos-server/src/provider_resource.rs:164` is the execute arm. `elastos/crates/elastos-server/src/provider_resource.rs:165` is the `_ => None` that closes the model match. MODEL_OPERATIONS names those five strings. Section 4 names those five strings. The ask name is `hosted`. localhost_resource holds the supported-operation list. localhost_op_required_action maps a name on that list to an action. The localhost operation list section 6 already quoted has no `hosted`.
 
@@ -1192,11 +1186,7 @@ On the `model` scheme, provider_operation_action maps `offers_list`, `runs_get`,
                 "runs_create" | "runs_cancel" => Some(Action::Execute),
                 _ => None,
 
-The journal-append ask writes the whole encoding. `examples/agent-host/asks.json:12` is that row.
-
-        {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}
-
-ask_kind_name names JournalAppend as `journal-append`. `examples/agent-host/src/lib.rs:8194` is that match arm. declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. The pattern is `<principal>/.AppData/Agents/agent-host/`.
+ask_kind_name names JournalAppend as `journal-append`. `examples/agent-host/src/lib.rs:8194` is that match arm.
 
             ProposalKind::JournalAppend => Some("journal-append"),
 
@@ -1345,7 +1335,7 @@ Reference: `lab/grant-binding/src/ops.rs:787` `model_forged_instance_does_not_mo
 Reference: `lab/grant-binding/src/ops.rs:824` `model_forged_session_does_not_move_the_child_path`.
 Reference: `lab/grant-binding/src/ops.rs:309` `model_append_and_overwrite_do_not_permit_child_journal`.
 Reference: `lab/grant-binding/src/ops.rs:380` `model_child_journal_under_the_owned_root_is_allowed`.
-Reference: `lab/capsule-identity/tests/bytes.rs:132` `one_byte_change_in_asks_json_changes_the_lab_cid`.
+Reference: `lab/capsule-identity/tests/bytes.rs:132` `one_byte_change_in_a_manifest_ask_changes_the_lab_cid`.
 
 ## 7. Open questions
 `lab/grant-binding/README.md:12` says the crate is a reference model, not the Runtime.

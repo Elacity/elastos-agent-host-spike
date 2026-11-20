@@ -7,9 +7,11 @@
 //! - Metrics and audit logging
 //! - Memory clearing on termination (security)
 
+mod entrypoint;
 mod fetched_launch;
 mod manager;
 
+pub use entrypoint::check_entrypoint_file;
 pub use fetched_launch::{prepare_fetched_capsule, PreparedFetchedCapsule};
 #[allow(unused_imports)]
 pub use manager::{CapsuleId, CapsuleInfo, CapsuleManager, CapsuleState};

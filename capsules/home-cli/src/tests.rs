@@ -2124,7 +2124,7 @@ fn inbox_selected_index_controls_mark_dismiss_and_open() {
 }
 
 #[test]
-fn unresolved_inbox_review_request_surfaces_desktop_handoff() {
+fn unresolved_inbox_review_requests_surface_desktop_handoff() {
     let mut snapshot = sample_snapshot();
     snapshot.notifications.unread_count = 1;
     snapshot.notifications.attention_count = 1;
@@ -2173,6 +2173,16 @@ fn unresolved_inbox_review_request_surfaces_desktop_handoff() {
     assert!(buf.contains("Action     Open Inbox on Desktop"));
     assert!(buf.contains("ActionUse  ready"));
     assert!(buf.contains("Enter      open Desktop Inbox for review"));
+
+    snapshot.notifications.entries[0].id = "agent-plan-request:plan-1".to_string();
+    snapshot.notifications.entries[0].action_ref = Some(NotificationActionRefStatus {
+        app: "inbox".to_string(),
+        action_id: "agent-plan-approve-request:plan-1".to_string(),
+    });
+    let action = selected_notification_action(&snapshot, 0).expect("agent-plan Inbox handoff");
+    assert_eq!(action.id, "inbox-review-notification:agent-plan-request:plan-1");
+    assert!(action.ready);
+    assert_eq!(state.activate(&snapshot), Some(action.id));
 }
 
 #[test]
