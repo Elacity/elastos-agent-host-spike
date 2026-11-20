@@ -460,6 +460,7 @@ impl ActivationContextHeld {
     /// The stop request is not this method's: the entry's end takes it away
     /// after the write, so a racing stop still finds it.
     async fn release(&mut self) {
+        crate::resource_bridge::forget_agent_plan_dispatch_authority(&self.id.0);
         self.component.forget_instance(&self.id).await;
         if let Ok(mut bounds) = self.manifest_capabilities.write() {
             bounds.remove(&self.id.0);
