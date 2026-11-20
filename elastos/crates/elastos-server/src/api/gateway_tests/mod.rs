@@ -1150,6 +1150,8 @@ mod browser_reconciliation;
 mod collaboration_presence;
 mod content_sandbox;
 mod documents;
+mod home_authority_inventory;
+
 mod esp;
 mod frontdoor;
 #[path = "../gateway_browser_route_tests.rs"]
