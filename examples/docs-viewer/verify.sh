@@ -6,6 +6,12 @@ REPO_ROOT="$(cd "${VIEWER_DIR}/../.." && pwd)"
 MANIFEST="${VIEWER_DIR}/capsule.json"
 WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+if [[ $# -gt 0 && ( $# -ne 1 || "$1" != "--recorded-hash-only" ) ]]; then
+    echo "usage: $0 [--recorded-hash-only]" >&2
+    exit 2
+fi
+HASH_ONLY=0
+[[ $# -eq 1 ]] && HASH_ONLY=1
 
 # A part of this gate that could not run is never reported as "OK". Each such
 # part is noted here and named in the last line. With
@@ -39,6 +45,9 @@ hash_gate() { python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" docs-viewer
 
 hash_gate docs-viewer --artifact "${HASH_ARTIFACT}"
+if [[ $HASH_ONLY -eq 1 ]]; then
+    exit 0
+fi
 hash_gate docs-viewer --artifact "${HASH_ARTIFACT}" --falsify
 
 # Check and restore the gate falsifier before Bash reads the branch below.
