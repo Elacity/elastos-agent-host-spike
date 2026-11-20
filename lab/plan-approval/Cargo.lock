@@ -42,6 +42,7 @@ name = "agent-conformance"
 version = "0.1.0"
 dependencies = [
  "capsule-identity",
+ "elastos-common",
  "grant-binding",
  "rustix",
  "serde",
@@ -695,6 +696,7 @@ dependencies = [
  "agent-conformance",
  "capsule-identity",
  "ed25519-dalek",
+ "elastos-common",
  "elastos-identity",
  "rand",
  "serde_json",

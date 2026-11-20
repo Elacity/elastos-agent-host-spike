@@ -833,6 +833,7 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route("/api/apps/system/agents/create", post(agents_create))
         .route("/api/apps/system/agents/retire", post(agents_retire))
         .route("/api/apps/system/agents/rename", post(agents_rename))
+        .route("/api/apps/system/agents/activate", post(agents_activate))
         .route(
             "/api/apps/system/community",
             get(system_community_membership_get).post(system_community_membership_update),

@@ -174,6 +174,7 @@ fn submit(
             data_dir: Some(dir.to_path_buf()),
             launch: None,
             model_token_ceiling: Some(16),
+            model_budget: None,
             stop: None,
         };
         crate::resource_bridge::retain_agent_plan_dispatch_authority(

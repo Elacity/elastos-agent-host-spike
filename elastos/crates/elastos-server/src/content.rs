@@ -28,6 +28,7 @@ use sha2::Digest;
 
 const AVAILABILITY_RECEIPT_SCHEMA: &str = "elastos.content.availability.receipt/v1";
 const AVAILABILITY_RECEIPT_DOMAIN: &str = "elastos.content.availability.receipt.v1";
+pub const MAX_FETCH_RECEIPT_ATTEMPTS: u8 = 8;
 const AVAILABILITY_DASHBOARD_SCHEMA: &str = "elastos.content.availability.dashboard/v1";
 const CONTENT_ADMISSION_DOMAIN: &str = "elastos.content.admission.v1";
 const CONTENT_ACCOUNTING_SCHEMA: &str = "elastos.content.accounting/v1";
@@ -3591,13 +3592,29 @@ impl ContentProvider {
         if transfer.bounded_read {
             check_bounded_availability_payload(&response, transfer)?;
         }
-        let availability = response
+        let payload = provider_response_payload(&response, "availability provider", transfer)?;
+        let whole_object = path.is_empty() && !transfer.bounded_read && transfer.range.is_none();
+        if whole_object {
+            let bytes = match &payload {
+                ContentFetchPayload::Bytes(data) => base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?,
+                ContentFetchPayload::Stream(stream) => provider_stream_payload_bytes(stream)?,
+            };
+            if !verify_exact_content_cid(registry, cid, &bytes).await? {
+                return Err(ProviderError::Provider("availability CID mismatch".into()));
+            }
+        }
+        let mut availability = response
             .get("data")
             .and_then(|data| data.get("availability"))
-            .cloned();
+            .cloned()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        availability["cid_verified"] = Value::Bool(whole_object);
         Ok(Some(ContentFetchResult {
-            payload: provider_response_payload(&response, "availability provider", transfer)?,
-            availability,
+            payload,
+            availability: Some(availability),
             transfer: provider_transfer_value(&response),
         }))
     }
@@ -3974,27 +3991,7 @@ impl ContentProvider {
             .filter(|filename| !filename.trim().is_empty())
             .unwrap_or("content.bin");
         let registry = self.registry()?;
-        let ipfs_response = self
-            .invoke_provider(
-                &registry,
-                "ipfs",
-                "add_bytes",
-                json!({
-                    "op": "add_bytes",
-                    "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    "filename": filename,
-                    // Pin only after the CID is checked, so a wrong
-                    // expected CID never changes an existing pin.
-                    "pin": false,
-                }),
-                ProviderTransfer::Bytes,
-            )
-            .await?;
-        provider_response_ok(&ipfs_response, "content import_exact")?;
-        let imported_cid = provider_response_cid(&ipfs_response).map_err(|err| {
-            ProviderError::Provider(format!("content import_exact missing imported CID: {err}"))
-        })?;
-        if imported_cid != cid {
+        if !verify_exact_content_cid_with_filename(&registry, cid, &bytes, filename).await? {
             return Ok(provider_error(
                 "cid_mismatch",
                 "content import_exact produced a different CID; exact-CID import requires block-level compatible bytes",
@@ -5953,6 +5950,127 @@ pub struct SignedAvailabilityReceipt {
     pub payload: AvailabilityReceipt,
     pub signature: String,
     pub signer_did: String,
+}
+
+/// One bounded attempt to fetch the requested CID from an authenticated peer.
+/// The caller records `verified` only after checking the received bytes against
+/// that CID. `time` is Unix time in seconds. This type carries facts, not the
+/// fetched content or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FetchReceipt {
+    requested_cid: String,
+    peer_did: String,
+    bytes_received: u64,
+    verified: bool,
+    result: FetchResult,
+    attempt: u8,
+    time: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "reason_code", rename_all = "kebab-case")]
+pub enum FetchResult {
+    Ok,
+    RefusedCorrupt,
+    Failed(FetchFailureReason),
+}
+
+/// Closed reason codes keep peer-provided error text and secrets out of receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchFailureReason {
+    Timeout,
+    PeerUnavailable,
+    PeerRefused,
+    Transport,
+    InvalidResponse,
+    ResponseTooLarge,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchReceiptWire {
+    requested_cid: String,
+    peer_did: String,
+    bytes_received: u64,
+    verified: bool,
+    result: FetchResult,
+    attempt: u8,
+    time: u64,
+}
+
+impl FetchReceipt {
+    pub fn new(
+        requested_cid: &str,
+        peer_did: &str,
+        bytes_received: u64,
+        verified: bool,
+        result: FetchResult,
+        attempt: u8,
+        time: u64,
+    ) -> Result<Self, String> {
+        let cid = cid::Cid::try_from(requested_cid)
+            .map_err(|_| "fetch receipt requires a valid requested CID".to_string())?;
+        if cid.to_string() != requested_cid {
+            return Err("fetch receipt requires a canonical requested CID".into());
+        }
+        // Content CIDs use SHA2-256. Other multihashes can carry caller-chosen
+        // bytes in their digest, including credentials under the identity code.
+        if cid.hash().code() != 0x12 || cid.hash().digest().len() != 32 {
+            return Err("fetch receipt requires a SHA2-256 requested CID".into());
+        }
+        elastos_identity::decode_did_key(peer_did)
+            .map_err(|_| "fetch receipt requires a valid peer DID".to_string())?;
+        if !(1..=MAX_FETCH_RECEIPT_ATTEMPTS).contains(&attempt) {
+            return Err("fetch receipt attempt exceeds the request limit".into());
+        }
+        if time == 0 {
+            return Err("fetch receipt requires a time".into());
+        }
+        match &result {
+            FetchResult::Ok if !verified || bytes_received == 0 => {
+                return Err("successful fetch requires verified bytes".into());
+            }
+            FetchResult::RefusedCorrupt if verified || bytes_received == 0 => {
+                return Err("corrupt fetch requires unverified bytes".into());
+            }
+            FetchResult::Failed(_) if verified => {
+                return Err("failed fetch cannot be verified".into());
+            }
+            _ => {}
+        }
+        Ok(Self {
+            requested_cid: requested_cid.into(),
+            peer_did: peer_did.into(),
+            bytes_received,
+            verified,
+            result,
+            attempt,
+            time,
+        })
+    }
+
+    pub fn encode_canonical(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn decode_canonical(encoded: &[u8]) -> Result<Self, String> {
+        let wire: FetchReceiptWire = serde_json::from_slice(encoded)
+            .map_err(|_| "fetch receipt contains invalid JSON or fields".to_string())?;
+        let receipt = Self::new(
+            &wire.requested_cid,
+            &wire.peer_did,
+            wire.bytes_received,
+            wire.verified,
+            wire.result,
+            wire.attempt,
+            wire.time,
+        )?;
+        if receipt.encode_canonical().map_err(|err| err.to_string())? != encoded {
+            return Err("fetch receipt is not canonically encoded".into());
+        }
+        Ok(receipt)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8635,6 +8753,46 @@ fn provider_response_ok(response: &Value, operation: &str) -> Result<(), Provide
     Ok(())
 }
 
+pub(crate) async fn verify_exact_content_cid(
+    registry: &ProviderRegistry,
+    cid: &str,
+    bytes: &[u8],
+) -> Result<bool, ProviderError> {
+    verify_exact_content_cid_with_filename(registry, cid, bytes, "content.bin").await
+}
+
+async fn verify_exact_content_cid_with_filename(
+    registry: &ProviderRegistry,
+    cid: &str,
+    bytes: &[u8],
+    filename: &str,
+) -> Result<bool, ProviderError> {
+    if bytes.len() > IMPORT_EXACT_MAX_BYTES {
+        return Err(ProviderError::Provider(
+            "content exceeds exact-CID read limit".into(),
+        ));
+    }
+    let response = registry
+        .invoke_provider(ProviderInvocation {
+            source: "content-provider".into(),
+            target: "ipfs".into(),
+            op: "add_bytes".into(),
+            request: json!({
+                "op": "add_bytes",
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                "filename": filename,
+                "pin": false,
+            }),
+            transfer: ProviderTransfer::Bytes,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Local,
+        })
+        .await?;
+    provider_response_ok(&response, "content exact-CID check")?;
+    Ok(provider_response_cid(&response)? == cid)
+}
+
 fn provider_response_data(response: &Value, provider_name: &str) -> Result<String, ProviderError> {
     response
         .get("data")
@@ -9268,6 +9426,188 @@ mod tests {
 
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
+    fn fetch_receipt(result: FetchResult, verified: bool, attempt: u8) -> FetchReceipt {
+        let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
+        FetchReceipt::new(
+            TEST_CID,
+            &peer_did,
+            42,
+            verified,
+            result,
+            attempt,
+            1_700_000_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fetch_receipt_canonical_round_trip() {
+        for (result, verified, status) in [
+            (FetchResult::Ok, true, "ok"),
+            (FetchResult::RefusedCorrupt, false, "refused-corrupt"),
+            (
+                FetchResult::Failed(FetchFailureReason::Timeout),
+                false,
+                "failed",
+            ),
+        ] {
+            let receipt = fetch_receipt(result, verified, 1);
+            let encoded = receipt.encode_canonical().unwrap();
+            assert_eq!(FetchReceipt::decode_canonical(&encoded).unwrap(), receipt);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&encoded).unwrap()["result"]["status"],
+                status
+            );
+            let mut padded = encoded.clone();
+            padded.push(b' ');
+            assert!(FetchReceipt::decode_canonical(&padded).is_err());
+        }
+    }
+
+    #[test]
+    fn fetch_receipt_accepts_only_sha2_256_content_cids() {
+        let token = "sk_live_peer_token_1234567890abcdef";
+        assert_eq!(token.len(), 35);
+        let cid_with = |code, digest: &[u8]| {
+            cid::Cid::new_v1(
+                0x55,
+                cid::multihash::Multihash::<64>::wrap(code, digest).unwrap(),
+            )
+            .to_string()
+        };
+        let token_cid = cid_with(0x00, token.as_bytes());
+        assert_eq!(
+            cid::Cid::try_from(token_cid.as_str())
+                .unwrap()
+                .hash()
+                .digest(),
+            token.as_bytes()
+        );
+        let rows = [
+            ("normal content CID", TEST_CID.to_string(), true),
+            ("identity multihash", cid_with(0x00, &[7; 32]), false),
+            ("identity with redaction token", token_cid, false),
+            ("unsupported hash code", cid_with(0x1e, &[7; 32]), false),
+            ("short SHA2-256 digest", cid_with(0x12, &[7; 31]), false),
+        ];
+        let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
+        let canonical = String::from_utf8(
+            fetch_receipt(FetchResult::Ok, true, 1)
+                .encode_canonical()
+                .unwrap(),
+        )
+        .unwrap();
+        for (label, requested_cid, accepted) in rows {
+            let parsed = cid::Cid::try_from(requested_cid.as_str()).unwrap();
+            assert_eq!(parsed.to_string(), requested_cid, "{label}");
+            let result = FetchReceipt::new(
+                &requested_cid,
+                &peer_did,
+                42,
+                true,
+                FetchResult::Ok,
+                1,
+                1_700_000_000,
+            );
+            assert_eq!(result.is_ok(), accepted, "{label}");
+            let encoded = canonical.replace(TEST_CID, &requested_cid);
+            assert_eq!(
+                FetchReceipt::decode_canonical(encoded.as_bytes()).is_ok(),
+                accepted,
+                "decode: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_receipt_refuses_unknown_fields() {
+        let receipt = fetch_receipt(FetchResult::Failed(FetchFailureReason::Timeout), false, 1);
+        let mut value = serde_json::to_value(receipt).unwrap();
+        value["token"] = json!("secret");
+        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+        value.as_object_mut().unwrap().remove("token");
+        value["result"]["peer_message"] = json!("secret");
+        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn fetch_receipt_caps_attempts_and_uses_closed_reason_codes() {
+        assert!(FetchReceipt::new(
+            TEST_CID,
+            &elastos_identity::derive_did(&[7; 32]).1,
+            42,
+            true,
+            FetchResult::Ok,
+            MAX_FETCH_RECEIPT_ATTEMPTS + 1,
+            1_700_000_000,
+        )
+        .is_err());
+        assert!(FetchReceipt::new(
+            TEST_CID,
+            &elastos_identity::derive_did(&[7; 32]).1,
+            42,
+            true,
+            FetchResult::Ok,
+            0,
+            1_700_000_000,
+        )
+        .is_err());
+        assert!(FetchReceipt::new(
+            TEST_CID,
+            &elastos_identity::derive_did(&[7; 32]).1,
+            42,
+            true,
+            FetchResult::Ok,
+            MAX_FETCH_RECEIPT_ATTEMPTS,
+            1_700_000_000,
+        )
+        .is_ok());
+        for reason in [
+            FetchFailureReason::Timeout,
+            FetchFailureReason::PeerUnavailable,
+            FetchFailureReason::PeerRefused,
+            FetchFailureReason::Transport,
+            FetchFailureReason::InvalidResponse,
+            FetchFailureReason::ResponseTooLarge,
+        ] {
+            let code = serde_json::to_value(reason).unwrap();
+            assert!(code.as_str().unwrap().len() <= 32);
+        }
+        let mut value = serde_json::to_value(fetch_receipt(FetchResult::Ok, true, 1)).unwrap();
+        value["attempt"] = json!(MAX_FETCH_RECEIPT_ATTEMPTS + 1);
+        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn fetch_receipt_refuses_token_like_peer_facts() {
+        let token = "sk_live_peer_token_1234567890abcdef";
+        let mut value = serde_json::to_value(fetch_receipt(
+            FetchResult::Failed(FetchFailureReason::Transport),
+            false,
+            1,
+        ))
+        .unwrap();
+        value["result"]["reason_code"] = json!(token);
+        let err = FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(!err.contains(token));
+        assert!(FetchReceipt::new(
+            TEST_CID,
+            token,
+            42,
+            false,
+            FetchResult::Failed(FetchFailureReason::Transport),
+            1,
+            1_700_000_000,
+        )
+        .is_err());
+        let safe = fetch_receipt(FetchResult::Failed(FetchFailureReason::Transport), false, 1)
+            .encode_canonical()
+            .unwrap();
+        assert!(!safe
+            .windows(token.len())
+            .any(|window| window == token.as_bytes()));
+    }
+
     fn signed_test_availability_receipt(cid: &str, legacy: bool) -> Value {
         let (signing_key, _) = elastos_runtime::signature::generate_keypair();
         let signer_did = crate::crypto::encode_signing_key_did(&signing_key);
@@ -9417,7 +9757,15 @@ mod tests {
                         .unwrap_or_default()
                         .to_string();
                     self.added_files.lock().await.push(filename);
-                    Ok(provider_ok(json!({ "cid": TEST_CID })))
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(request["data"].as_str().unwrap())
+                        .unwrap();
+                    let cid = if bytes == b"remote content" {
+                        "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw"
+                    } else {
+                        TEST_CID
+                    };
+                    Ok(provider_ok(json!({ "cid": cid })))
                 }
                 Some("cat") => {
                     let path = request
@@ -12211,11 +12559,9 @@ mod tests {
 
     #[tokio::test]
     async fn content_fetch_uses_availability_provider_when_local_backend_misses() {
+        let cid = "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw";
         let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
-        ipfs.missing_paths
-            .lock()
-            .await
-            .push("remote.md".to_string());
+        ipfs.missing_paths.lock().await.push(String::new());
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(provider_ok(json!({
@@ -12233,8 +12579,7 @@ mod tests {
         let response = content
             .send_raw(&json!({
                 "op": "fetch",
-                "cid": TEST_CID,
-                "path": "remote.md",
+                "cid": cid,
             }))
             .await
             .unwrap();
@@ -12252,13 +12597,43 @@ mod tests {
             response["data"]["availability"]["status"],
             "network_available"
         );
+        assert_eq!(response["data"]["availability"]["cid_verified"], true);
+
+        ipfs.missing_paths.lock().await.push("remote.md".into());
+        let path_response = content
+            .send_raw(&json!({ "op": "fetch", "cid": cid, "path": "remote.md" }))
+            .await
+            .unwrap();
+        assert_eq!(path_response["data"]["availability"]["cid_verified"], false);
 
         let requests = availability.requests.lock().await;
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["op"], "fetch");
-        assert_eq!(requests[0]["cid"], TEST_CID);
-        assert_eq!(requests[0]["uri"], format!("elastos://{TEST_CID}"));
-        assert_eq!(requests[0]["path"], "remote.md");
+        assert_eq!(requests[0]["cid"], cid);
+        assert_eq!(requests[0]["uri"], format!("elastos://{cid}"));
+        assert!(requests[0].get("path").is_none());
+        assert_eq!(requests[1]["path"], "remote.md");
+    }
+
+    #[tokio::test]
+    async fn content_fetch_refuses_availability_bytes_for_a_different_cid() {
+        let cid = "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw";
+        let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        ipfs.missing_paths.lock().await.push(String::new());
+        registry
+            .register(Arc::new(MockAvailabilityProvider {
+                requests: Mutex::new(Vec::new()),
+                response: Mutex::new(provider_ok(json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(b"other bytes"),
+                }))),
+            }))
+            .await;
+        let err = content
+            .send_raw(&json!({ "op": "fetch", "cid": cid }))
+            .await
+            .expect_err("different bytes must be refused");
+        assert!(err.to_string().contains("CID mismatch"));
+        assert!(ipfs.pinned.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -12433,6 +12808,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response["data"]["data"], encode(b"89ab"));
+        assert_eq!(response["data"]["availability"]["cid_verified"], false);
         assert_eq!(
             response["data"]["availability"]["provider"],
             "mock-availability"

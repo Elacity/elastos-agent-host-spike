@@ -9,6 +9,7 @@ const DISABLE: &str = "/api/apps/system/agents/disable";
 const CREATE: &str = "/api/apps/system/agents/create";
 const RETIRE: &str = "/api/apps/system/agents/retire";
 const RENAME: &str = "/api/apps/system/agents/rename";
+const ACTIVATE: &str = "/api/apps/system/agents/activate";
 const LIST: &str = "/api/apps/system/agents";
 
 /// Sends one request and returns its status and body text.
@@ -83,6 +84,10 @@ mod off {
             (
                 RENAME,
                 Some(json!({ "agent_id": &agent_id, "display_name": "Helper 2" })),
+            ),
+            (
+                ACTIVATE,
+                Some(json!({ "agent_id": &agent_id, "active": true })),
             ),
         ];
         for (path, body) in routes {
@@ -298,6 +303,11 @@ mod on {
         let (_, listed) = call(&app, LIST, token, None).await;
         let listed: Value = serde_json::from_str(&listed).unwrap();
         assert_eq!(listed, json!({ "agents": [created] }));
+        assert_eq!(
+            listed["agents"][0]["active"],
+            json!(false),
+            "the_list_returns_whether_each_agent_is_on"
+        );
 
         // A body with a missing or unknown field, and an Agent Host the
         // signed release does not list.
@@ -450,5 +460,225 @@ mod on {
         )
         .unwrap()
         .is_some());
+    }
+
+    async fn create_agent(installed: &InstalledHome, request_id: &str) -> String {
+        let token = &installed.owner.system_token;
+        assert_eq!(
+            call(&installed.app, ENABLE, token, None).await.0,
+            StatusCode::OK
+        );
+        let (status, body) =
+            call(&installed.app, CREATE, token, Some(create_body(request_id))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<Value>(&body).unwrap()["agent_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn new_agent_off_until_owner_activation() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "off-1").await;
+        let data = &installed.home.data;
+        let owner = installed.owner.principal_id.as_str();
+        let dir = data.join("capsules").join(AGENT_HOST);
+        let launch = |id: &str| {
+            crate::agent_admission::admit_launch(
+                data,
+                data,
+                Some(owner),
+                Some(id),
+                crate::agent_admission::walk_launch(&dir).unwrap(),
+            )
+        };
+        assert_eq!(
+            launch(&agent_id).unwrap_err().to_string(),
+            crate::agents::NOT_ACTIVE
+        );
+        let on = json!({ "agent_id": &agent_id, "active": true });
+        assert_eq!(
+            call(
+                &installed.app,
+                ACTIVATE,
+                &installed.owner.system_token,
+                Some(on)
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(launch(&agent_id).unwrap().unwrap().actor(), agent_id);
+    }
+
+    #[tokio::test]
+    async fn another_admin_cannot_turn_on_someone_elses_agent() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "other-admin").await;
+        let data = &installed.home.data;
+        let other = passkey_authority_with_name_role_credential(
+            data,
+            Some("Other Admin"),
+            crate::auth::RuntimePrincipalRole::Admin,
+            "gateway-test-other-admin-passkey",
+        );
+        crate::auth::store_test_principal_root_protection(data, &other.principal_id);
+        let stored =
+            crate::auth::load_principal_for_proof_binding(data, &other.proof_binding_id).unwrap();
+        assert!(crate::auth::is_admin(&stored));
+        assert_ne!(stored.principal_id, installed.owner.principal_id);
+        let owner = installed.owner.principal_id.as_str();
+        let dir = data.join("capsules").join(AGENT_HOST);
+        let launch = || {
+            crate::agent_admission::admit_launch(
+                data,
+                data,
+                Some(owner),
+                Some(&agent_id),
+                crate::agent_admission::walk_launch(&dir).unwrap(),
+            )
+        };
+        let on = json!({ "agent_id": &agent_id, "active": true });
+        let answer = call(&installed.app, ACTIVATE, &other.system_token, Some(on)).await;
+        let launch_text = match launch() {
+            Ok(_) => "launch admitted".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(
+            (answer.0, answer.1, launch_text),
+            (
+                StatusCode::CONFLICT,
+                "the caller owns no agent with that id".to_string(),
+                crate::agents::NOT_ACTIVE.to_string(),
+            ),
+            "another_admin_cannot_turn_on_someone_elses_agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_turns_agent_off_again() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "off-again").await;
+        let data = &installed.home.data;
+        let owner = installed.owner.principal_id.as_str();
+        let dir = data.join("capsules").join(AGENT_HOST);
+        let launch = |id: &str| {
+            crate::agent_admission::admit_launch(
+                data,
+                data,
+                Some(owner),
+                Some(id),
+                crate::agent_admission::walk_launch(&dir).unwrap(),
+            )
+        };
+        let token = &installed.owner.system_token;
+        assert_eq!(
+            call(
+                &installed.app,
+                ACTIVATE,
+                token,
+                Some(json!({ "agent_id": &agent_id, "active": true }))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(launch(&agent_id).unwrap().unwrap().actor(), agent_id);
+        let (_, listed_on) = call(&installed.app, LIST, token, None).await;
+        let listed_on: Value = serde_json::from_str(&listed_on).unwrap();
+        assert_eq!(
+            listed_on["agents"][0]["active"],
+            json!(true),
+            "the_list_returns_whether_each_agent_is_on"
+        );
+        let on_file: Value =
+            serde_json::from_slice(&std::fs::read(agent_file(data)).unwrap()).unwrap();
+        assert!(on_file["agents"][0].get("active").is_none());
+        assert_eq!(
+            call(
+                &installed.app,
+                ACTIVATE,
+                token,
+                Some(json!({ "agent_id": &agent_id, "active": false }))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            launch(&agent_id).unwrap_err().to_string(),
+            crate::agents::NOT_ACTIVE,
+            "owner_turns_agent_off_again"
+        );
+        let off_file: Value =
+            serde_json::from_slice(&std::fs::read(agent_file(data)).unwrap()).unwrap();
+        assert_eq!(off_file["agents"][0]["active"], json!(false));
+        let (_, listed_off) = call(&installed.app, LIST, token, None).await;
+        let listed_off: Value = serde_json::from_str(&listed_off).unwrap();
+        assert_eq!(
+            listed_off["agents"][0]["active"],
+            json!(false),
+            "the_list_returns_whether_each_agent_is_on"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_cannot_activate_itself() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "self-1").await;
+        let data = &installed.home.data;
+        let root = crate::auth::principal_kind_localhost_root(
+            &agent_id,
+            crate::auth::PrincipalKind::Agent,
+        );
+        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
+            .unwrap()
+            .unwrap()
+            .record
+            .proof_binding_id;
+        let now = now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{}", uuid_like_token()),
+            session_id: format!("auth:{}", uuid_like_token()),
+            principal_id: agent_id.clone(),
+            proof_binding_id: binding,
+            issued_at: now,
+            expires_at: now + 3600,
+            apps: vec![SYSTEM_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(data, grant.clone()).unwrap();
+        let agent_token =
+            issue_home_launch_token_for_auth_grant(data, SYSTEM_CAPSULE_ID, &grant).unwrap();
+        // The front door refuses every agent principal before a route runs.
+        // This calls the activate handler, so the refusal is the route's own
+        // owner check. Dropping that check is what turns this assertion red.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("localhost:61180"),
+        );
+        headers.insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("null"),
+        );
+        headers.insert(
+            "x-elastos-home-token",
+            axum::http::HeaderValue::from_str(&agent_token).unwrap(),
+        );
+        let response = super::super::super::gateway_agents::agents_activate(
+            axum::extract::State(installed.state.clone()),
+            headers,
+            axum::body::Bytes::from(json!({"agent_id": &agent_id, "active": true}).to_string()),
+        )
+        .await;
+        assert_eq!(answer(response).await, admin_required());
+        assert_eq!(
+            crate::agents::stored_agent(data, &installed.owner.principal_id, &agent_id)
+                .unwrap_err()
+                .to_string(),
+            crate::agents::NOT_ACTIVE
+        );
     }
 }

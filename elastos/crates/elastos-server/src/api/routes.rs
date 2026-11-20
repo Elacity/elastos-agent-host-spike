@@ -11,6 +11,7 @@ use axum::{
 use elastos_runtime::primitives::audit::{AuditLog, TrustLevel};
 use serde::{Deserialize, Serialize};
 
+use crate::resource_bridge::BridgePrincipal;
 use crate::runtime::Runtime;
 
 const SERVER_VERSION: &str = env!("ELASTOS_VERSION");
@@ -104,16 +105,16 @@ pub async fn launch_capsule(
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     let path = std::path::Path::new(&req.path);
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
-    let (launcher, admission) = match req.agent_id.as_deref() {
-        None => (
-            principal_from_launch_request(
+    let (launcher, admission, grant_name) = match req.agent_id.as_deref() {
+        None => {
+            let (launcher, grant_name) = principal_from_launch_request(
                 data_dir.as_deref(),
                 path,
                 req.principal_id,
                 req.launch_grant,
-            )?,
-            None,
-        ),
+            )?;
+            (launcher, None, grant_name)
+        }
         Some(agent_id) => {
             let data_dir = data_dir.as_deref().ok_or((
                 StatusCode::BAD_REQUEST,
@@ -142,7 +143,7 @@ pub async fn launch_capsule(
                     .map(crate::resource_bridge::BridgePrincipal::principal_str),
                 agent_id,
             )?;
-            (launcher, Some(admission))
+            (launcher, Some(admission), None)
         }
     };
     // An admitted agent launch starts through the one entry that may hand the
@@ -156,7 +157,7 @@ pub async fn launch_capsule(
         Some(admission) => runtime.start_local_admitted(path, vec![], admission).await,
         None => {
             runtime
-                .start_local_with_signer(path, vec![], launcher)
+                .start_local_with_signer(path, vec![], launcher, grant_name.as_deref())
                 .await
         }
     };
@@ -261,18 +262,20 @@ fn principal_from_capsule_name(
     Ok(Some(principal))
 }
 
+type LaunchGrantBinding = (Option<BridgePrincipal>, Option<String>);
+
 fn principal_from_launch_request(
     data_dir: Option<&std::path::Path>,
     capsule_dir: &std::path::Path,
     principal_id: Option<String>,
     launch_grant: Option<String>,
-) -> Result<Option<crate::resource_bridge::BridgePrincipal>, (StatusCode, String)> {
+) -> Result<LaunchGrantBinding, (StatusCode, String)> {
     reject_raw_launch_principal_id(principal_id.as_deref())?;
     let launch_grant = launch_grant
         .map(|grant| grant.trim().to_string())
         .filter(|grant| !grant.is_empty());
     if launch_grant.is_none() {
-        return Ok(None);
+        return Ok((None, None));
     }
     if data_dir.is_none() {
         return Err((
@@ -281,7 +284,8 @@ fn principal_from_launch_request(
         ));
     }
     let capsule_name = launch_capsule_name(capsule_dir)?;
-    principal_from_capsule_name(data_dir, &capsule_name, launch_grant)
+    let principal = principal_from_capsule_name(data_dir, &capsule_name, launch_grant)?;
+    Ok((principal, Some(capsule_name)))
 }
 
 fn launch_capsule_name(capsule_dir: &std::path::Path) -> Result<String, (StatusCode, String)> {
@@ -426,7 +430,7 @@ pub(crate) mod tests {
         let principal =
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, None).unwrap();
 
-        assert_eq!(principal, None);
+        assert_eq!(principal, (None, None));
     }
 
     #[test]
@@ -482,9 +486,10 @@ pub(crate) mod tests {
             gateway::issue_home_launch_token_with_context(dir.path(), "chat-wasm", &context)
                 .unwrap();
 
-        let principal =
+        let (principal, name) =
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, Some(grant))
                 .unwrap();
+        assert_eq!(name.as_deref(), Some("chat-wasm"));
 
         assert_eq!(
             principal
@@ -837,6 +842,8 @@ pub(crate) mod tests {
         requests: std::sync::Mutex<Vec<serde_json::Value>>,
         ceilings_at_call: std::sync::Mutex<Vec<Vec<(String, u64)>>>,
         runtime: std::sync::Mutex<Option<Arc<Runtime>>>,
+        revision: std::sync::Mutex<Option<String>>,
+        reject_next_valid_create: std::sync::Mutex<bool>,
     }
 
     impl CapturingModelProvider {
@@ -846,6 +853,10 @@ pub(crate) mod tests {
 
         fn watch(&self, runtime: Arc<Runtime>) {
             *self.runtime.lock().unwrap() = Some(runtime);
+        }
+
+        fn raise_revision_after_rejection(&self) {
+            *self.reject_next_valid_create.lock().unwrap() = true;
         }
 
         fn ceilings_at_call(&self) -> Vec<Vec<(String, u64)>> {
@@ -885,6 +896,41 @@ pub(crate) mod tests {
                 self.ceilings_at_call.lock().unwrap().push(held);
             }
             self.requests.lock().unwrap().push(request.clone());
+            if request["op"] == "offers_list" {
+                let revision = self
+                    .revision
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "sha256:fixture".into());
+                return Ok(serde_json::json!({
+                    "status": "ok", "data": {
+                        "offers": [{
+                            "id": "offer:fixture", "operation": "text.generate",
+                            "policy": {"input_bytes_limit": 100, "inline_output_bytes_limit": 64}
+                        }, {
+                            "id": "offer:large", "operation": "text.generate",
+                            "policy": {"input_bytes_limit": 300, "inline_output_bytes_limit": 64}
+                        }],
+                        "offer_revisions": {"offer:fixture": revision, "offer:large": "sha256:large"}
+                    }
+                }));
+            }
+            if request["operation"] != "text.generate" {
+                return Err(elastos_runtime::provider::ProviderError::Provider(
+                    "requested operation does not match configured offer".into(),
+                ));
+            }
+            let reject_valid_create = {
+                let mut reject = self.reject_next_valid_create.lock().unwrap();
+                std::mem::take(&mut *reject)
+            };
+            if reject_valid_create {
+                *self.revision.lock().unwrap() = Some("sha256:raised".into());
+                return Err(elastos_runtime::provider::ProviderError::Provider(
+                    "fixture rejects first valid create".into(),
+                ));
+            }
             Ok(serde_json::json!({"status": "ok", "data": {"ok": true}}))
         }
     }
@@ -1244,7 +1290,10 @@ pub(crate) mod tests {
                     .unwrap()
                     .agent_id
                 })
-                .collect();
+                .collect::<Vec<String>>();
+            for id in &agents {
+                agents::set_active(&data_dir, &caller, id, true, 1).unwrap();
+            }
             // A person's Home launch token is a projection under the Home
             // capsule's authority (`gateway_home_runtime.rs:149`), which is
             // the app the person's sign-in grant authorizes. The Runtime-local
@@ -1346,7 +1395,7 @@ pub(crate) mod tests {
                 proof_binding_id: &record.proof_binding_id,
                 session_id: "session:a5-launch",
             };
-            agents::create(
+            let agent_id = agents::create(
                 &self.data_dir,
                 &caller,
                 &agents::CreateRequest {
@@ -1366,7 +1415,9 @@ pub(crate) mod tests {
                 2,
             )
             .unwrap()
-            .agent_id
+            .agent_id;
+            agents::set_active(&self.data_dir, &caller, &agent_id, true, 2).unwrap();
+            agent_id
         }
 
         /// Writes a signed copy of the probe whose guest spins in `run` and
@@ -2273,8 +2324,8 @@ pub(crate) mod tests {
     /// then each is launched by that stored id through `launch_capsule`. Each
     /// running instance is bound to its own stored id and record, neither
     /// instance is the other agent's id, and both run the one installed host.
-    /// This base has no per-agent "starts off" gate, so create leaves an agent
-    /// launchable.
+    /// A created agent starts off, so the owner turns each one on through
+    /// `POST /api/apps/system/agents/activate` before it launches.
     #[tokio::test]
     async fn two_route_created_ids_one_host() {
         if crate::agents::require_build().is_err() {
@@ -2355,6 +2406,16 @@ pub(crate) mod tests {
             rows[0]["record"]["localhost_root"], rows[1]["record"]["localhost_root"],
             "each stored record owns its own root"
         );
+        for id in [&a_id, &b_id] {
+            let (status, body) = post_system(
+                &app,
+                "/api/apps/system/agents/activate",
+                &token,
+                Some(serde_json::json!({ "agent_id": id, "active": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
 
         let launch_grant = gateway::issue_home_projection_launch_token_with_context(
             &data_dir,
@@ -3880,6 +3941,7 @@ pub(crate) mod tests {
             data_dir: Some(home.data_dir.clone()),
             launch: tables.launch,
             model_token_ceiling: tables.model_token_ceiling,
+            model_budget: None,
             stop: tables.stop,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
@@ -5026,6 +5088,7 @@ pub(crate) mod tests {
             data_dir: Some(home.data_dir.clone()),
             launch: None,
             model_token_ceiling: None,
+            model_budget: None,
             stop: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
@@ -5674,6 +5737,7 @@ pub(crate) mod tests {
         )
         .unwrap()
         .agent_id;
+        agents::set_active(&data_dir, &caller, &agent, true, 1).unwrap();
 
         // The forged capsule: the stored manifest name and the stored CID in
         // its own `.elastos-cid`, signed by a trusted key, over other code.
@@ -6421,6 +6485,320 @@ pub(crate) mod tests {
         assert_eq!(end.cause.as_deref(), Some("completed"));
         grants.abort();
         home.results(agent).join("\n")
+    }
+
+    fn model_create_line(request_id: &str, extra: &str) -> String {
+        model_create_line_for(request_id, "offer:fixture", "text.generate", extra)
+    }
+
+    fn model_create_line_for(
+        request_id: &str,
+        offer_id: &str,
+        operation: &str,
+        extra: &str,
+    ) -> String {
+        let resource = crate::provider_resource::build_capability_resource(
+            "model",
+            "runs_create",
+            &serde_json::json!({"offer_id": offer_id}),
+        )
+        .unwrap();
+        let body = format!(
+            "\",\"offer_id\":\"{offer_id}\",\"operation\":\"{operation}\",\"request_id\":\"{request_id}\",\"input\":{{\"schema\":\"elastos.model.input.text/v1\",\"prompt\":\"hi\"}}{extra},\"pad\":\""
+        );
+        format!("invoke\t{resource}\t{resource}\truns_create\texecute\t{body}")
+    }
+
+    async fn run_model_plan(
+        home: &ProbeLaunch,
+        dir: &std::path::Path,
+        agent: &str,
+        creates: &[(&str, &str)],
+    ) -> String {
+        let mut lines = vec![
+            "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t"
+                .to_string(),
+        ];
+        lines.extend(
+            creates
+                .iter()
+                .map(|(id, extra)| model_create_line(id, extra)),
+        );
+        run_model_lines(home, dir, agent, &lines).await
+    }
+
+    async fn run_model_lines(
+        home: &ProbeLaunch,
+        dir: &std::path::Path,
+        agent: &str,
+        lines: &[String],
+    ) -> String {
+        home.plan(agent, lines);
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let launched = home.launch_from(dir, agent).await.unwrap().0;
+        assert_eq!(launched.status, "starting");
+        let end = home.wait_ended(&launched.id).await;
+        assert_eq!(end.cause.as_deref(), Some("completed"));
+        grants.abort();
+        home.results(agent).join("\n")
+    }
+
+    fn create_calls(model: &CapturingModelProvider) -> Vec<serde_json::Value> {
+        model
+            .requests()
+            .into_iter()
+            .filter(|request| request["op"] == "runs_create")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn over_cap_refused_before_dispatch() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let outcome = run_model_plan(
+            &home,
+            &dir,
+            &agent,
+            &[("request:first", ""), ("request:second", "")],
+        )
+        .await;
+        assert_eq!(
+            create_calls(&model).len(),
+            1,
+            "only the reserved run reaches Runtime dispatch"
+        );
+        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+    }
+
+    #[tokio::test]
+    async fn resident_create_after_launch_returns_is_reserved() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        home.plan(
+            &agent,
+            &[
+                "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t"
+                    .into(),
+                model_create_line("request:resident-first", ""),
+                model_create_line("request:resident-second", ""),
+            ],
+        );
+        let launched = home.launch_from(&dir, &agent).await.unwrap().0;
+        assert_eq!(launched.status, "starting");
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let end = home.wait_ended(&launched.id).await;
+        grants.abort();
+        assert_eq!(end.cause.as_deref(), Some("completed"));
+        let outcome = home.results(&agent).join("\n");
+        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+        assert_eq!(create_calls(&model).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_not_double_charged() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let outcome = run_model_plan(
+            &home,
+            &dir,
+            &agent,
+            &[
+                ("request:retry", ""),
+                ("request:retry", ""),
+                ("request:new", ""),
+            ],
+        )
+        .await;
+        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+        let calls = create_calls(&model);
+        assert_eq!(calls.len(), 2, "same request id reuses its hold");
+        assert_eq!(
+            calls[0]["runtime_binding"]["request_id"],
+            calls[1]["runtime_binding"]["request_id"]
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_offer_retry_refused_before_dispatch() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let lines = vec![
+            "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
+            model_create_line_for("request:swap", "offer:fixture", "wrong.operation", ""),
+            model_create_line_for("request:swap", "offer:large", "text.generate", ""),
+        ];
+        let outcome = run_model_lines(&home, &dir, &agent, &lines).await;
+        assert!(
+            outcome.contains("Provider operation failed"),
+            "first create must fail at provider: {outcome}"
+        );
+        let calls = create_calls(&model);
+        assert_eq!(
+            calls.len(),
+            1,
+            "the large offer must be refused before dispatch"
+        );
+        assert!(
+            outcome.contains("request_id conflicts with an existing model hold"),
+            "{outcome}"
+        );
+        assert_eq!(calls[0]["offer_id"], "offer:fixture");
+    }
+
+    #[tokio::test]
+    async fn changed_revision_retry_refused_before_dispatch() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        model.raise_revision_after_rejection();
+        let create = model_create_line("request:revision", "");
+        let lines = vec![
+            "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
+            create.clone(),
+            "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
+            create,
+        ];
+        let retry = run_model_lines(&home, &dir, &agent, &lines).await;
+        assert!(retry.contains("Provider operation failed"), "{retry}");
+        assert!(
+            retry.contains("request_id conflicts with an existing model hold"),
+            "{retry}"
+        );
+        let calls = create_calls(&model);
+        assert_eq!(
+            calls.len(),
+            1,
+            "changed revision must be refused before dispatch"
+        );
+        assert_eq!(calls[0]["operation"], "text.generate");
+        assert_eq!(
+            calls[0]["expected_execution_binding_hash"],
+            "sha256:fixture"
+        );
+        assert_eq!(
+            model
+                .requests()
+                .iter()
+                .filter(|request| request["op"] == "offers_list")
+                .count(),
+            2,
+            "the retry must follow a fresh offer listing"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_creates_share_cap() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let _ = ask_model(&home, &dir, &agent, None).await;
+        home.plan(&agent, &[model_create_line("request:concurrent", "")]);
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let (first, second) = tokio::join!(
+            home.launch_from(&dir, &agent),
+            home.launch_from(&dir, &agent)
+        );
+        let first = first.unwrap().0;
+        let second = second.unwrap().0;
+        assert_eq!(first.status, "starting");
+        assert_eq!(second.status, "starting");
+        assert_eq!(
+            home.wait_ended(&first.id).await.cause.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            home.wait_ended(&second.id).await.cause.as_deref(),
+            Some("completed")
+        );
+        grants.abort();
+        assert_eq!(
+            create_calls(&model).len(),
+            1,
+            "two creates share the admitted agent ceiling"
+        );
+        let run_events: Vec<_> = crate::auth::load_auth_state(&home.data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type == "component.invoke.completed")
+            .filter(|event| event.principal_id.as_deref() == Some(agent.as_str()))
+            .filter(|event| event.reason.contains("elastos://model/offers/sha256/"))
+            .collect();
+        assert_eq!(run_events.len(), 2, "both creates reached the bridge");
+        assert_eq!(
+            run_events
+                .iter()
+                .filter(|event| event.result == "denied")
+                .count(),
+            1,
+            "the shared account refused one create"
+        );
+    }
+
+    #[tokio::test]
+    async fn b_unaffected_by_a_exhaustion() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.model_host("model-host", Some(1_140));
+        let a = home.create_agent_for_host("model-a", &cid);
+        let b = home.create_agent_for_host("model-b", &cid);
+        let model = Arc::new(CapturingModelProvider::default());
+        let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+        registry.register(model.clone()).await;
+        registry.register(home.provider.clone()).await;
+        home.runtime
+            .set_provider_registry(
+                registry,
+                home.capability_manager.clone(),
+                home.pending_store.clone(),
+                home.data_dir.clone(),
+            )
+            .await;
+        model.watch(home.runtime.clone());
+        let a_outcome =
+            run_model_plan(&home, &dir, &a, &[("request:a1", ""), ("request:a2", "")]).await;
+        assert!(a_outcome.contains("model_budget_exceeded"), "{a_outcome}");
+        let b_outcome = run_model_plan(&home, &dir, &b, &[("request:b1", "")]).await;
+        assert!(!b_outcome.contains("model_budget_exceeded"), "{b_outcome}");
+        let calls = create_calls(&model);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["runtime_binding"]["principal_id"], a);
+        assert_eq!(calls[1]["runtime_binding"]["principal_id"], b);
+    }
+
+    #[tokio::test]
+    async fn guest_cannot_raise_cap() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let forged = ",\"model_tokens\":999999999";
+        let outcome = run_model_plan(
+            &home,
+            &dir,
+            &agent,
+            &[("request:guest1", forged), ("request:guest2", forged)],
+        )
+        .await;
+        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+        let calls = create_calls(&model);
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].get("model_tokens").is_none());
     }
 
     /// An admitted agent whose signed manifest asks for no model tokens cannot
