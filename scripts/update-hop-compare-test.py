@@ -1393,6 +1393,38 @@ class CliFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "DID helper manifest is absent"):
             observer.cli_admit_setup(self.root, missing)
 
+    def test_cli_initial_home_admission_requires_did_manifest_mapping(self):
+        self.setup_fixture(initial_home=True)
+        target = "capsules/did-provider/capsule.json"
+        missing = copy.deepcopy(self.manifest)
+        del missing["consumer"]["files"][target]
+        with self.assertRaisesRegex(ValueError, "installed DID helper manifest is absent from Home support"):
+            observer.cli_admit_home_support(self.root, missing)
+
+    def test_cli_old_support_view_never_inherits_new_did_manifest(self):
+        target = "capsules/did-provider/capsule.json"
+        manifest = {
+            "consumer": {"files": {
+                target: "new-did",
+                "capsules/home/browser/index.html": "new-home",
+                "state/value": "shared",
+            }},
+            "previous": {
+                "setup": {"artifacts": {}},
+                "support": {"capsules/home/browser/index.html": "old-home"},
+                "qualified_capsules": "old-qualified-capsules",
+            },
+            "publications": {"old": {"release": "old-release"}},
+        }
+        old = observer.cli_support_view(manifest, "old")
+        self.assertNotIn(target, old["consumer"]["files"])
+        self.assertEqual(old["consumer"]["files"]["capsules/home/browser/index.html"], "old-home")
+        self.assertEqual(old["consumer"]["files"]["state/value"], "shared")
+
+        manifest["previous"]["support"][target] = "old-did"
+        old = observer.cli_support_view(manifest, "old")
+        self.assertEqual(old["consumer"]["files"][target], "old-did")
+
     def test_setup_admission_refuses_incomplete_or_unmodeled_artifacts(self):
         self.setup_fixture()
         components_path = self.root / self.manifest["publications"]["old"]["components"]

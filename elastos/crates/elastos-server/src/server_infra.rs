@@ -659,6 +659,15 @@ async fn start_did_provider(
     let Some(admitted) = binaries::AdmittedProvider::admit(data_dir, "did-provider")? else {
         return Ok(None);
     };
+    let data_dir_metadata = std::fs::symlink_metadata(data_dir).with_context(|| {
+        format!(
+            "failed to inspect DID provider data root {}",
+            data_dir.display()
+        )
+    })?;
+    if data_dir_metadata.file_type().is_symlink() {
+        anyhow::bail!("provider start is refused: the storage root's parent is a symlink");
+    }
     let confined_data_dir = std::fs::canonicalize(data_dir).with_context(|| {
         format!(
             "failed to resolve DID provider data root {}",
@@ -2370,6 +2379,33 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("checksum"), "{error}");
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        assert!(!data_dir.join("did").exists());
+        assert!(!data_dir.join("marker").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn did_data_dir_symlink_is_refused_before_storage_creation() {
+        let (temp, data_dir, _) = did_fixture();
+        let linked_data_dir = temp.path().join("linked-data");
+        std::os::unix::fs::symlink(&data_dir, &linked_data_dir).unwrap();
+        let registry = provider::ProviderRegistry::new();
+        let error = match start_did_provider(&linked_data_dir, &registry, "fixture").await {
+            Err(error) => error,
+            Ok(Some(bridge)) => {
+                bridge.shutdown().await.unwrap();
+                panic!("a symlinked data directory started the DID provider");
+            }
+            Ok(None) => panic!("the admitted DID provider row was not found"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: the storage root's parent is a symlink"
+        );
         assert!(registry
             .registration_for_uri("elastos://did/identity")
             .await

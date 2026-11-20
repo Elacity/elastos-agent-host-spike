@@ -1316,7 +1316,7 @@ def cli_admit_home_support(root, manifest):
          and CLI_OPENER in expected and "capsules/home/capsule.json" in expected and fixture["entrypoint"] in expected,
          "initial Home support closure is incomplete")
     if CLI_DID_SETUP:
-        need("capsules/did-provider/capsule.json" in expected,
+        need("capsules/did-provider/capsule.json" in mapping,
              "installed DID helper manifest is absent from Home support")
     # Without a previous release, one support set persists across the update.
     need("previous" in manifest or all(any(target == path or target.startswith(path + "/") for path in manifest["preserve"]["support"])
@@ -1448,11 +1448,12 @@ def cli_support_view(manifest, release):
     if "previous" not in manifest:
         return manifest
     previous, setup_files = manifest["previous"], cli_setup_files(manifest)
+    did_files = {"capsules/did-provider/capsule.json"} if CLI_DID_SETUP else set()
     if release == "old":
-        shared = {target: relative for target, relative in manifest["consumer"]["files"].items() if target not in setup_files}
+        shared = {target: relative for target, relative in manifest["consumer"]["files"].items()
+                  if target not in setup_files and target not in did_files}
         return {**manifest, "support_of": "old", "setup": previous["setup"], "consumer": {"files": {**shared, **previous["support"]}},
                 "qualified_capsules": previous["qualified_capsules"], "publications": {"old": manifest["publications"]["old"]}}
-    did_files = {"capsules/did-provider/capsule.json"} if CLI_DID_SETUP else set()
     return {**manifest, "support_of": "new", "initial_home": {**manifest["initial_home"], "files": sorted({*setup_files, *did_files, CLI_OPENER})},
             "publications": {name: value for name, value in manifest["publications"].items() if name != "old"}}
 
