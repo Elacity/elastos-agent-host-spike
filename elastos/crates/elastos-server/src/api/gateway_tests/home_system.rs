@@ -1311,6 +1311,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),
@@ -1318,7 +1319,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1333,7 +1334,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
     );
     let _principal = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
     );
     let _session = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
@@ -1353,7 +1354,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["authority"]["signed_in"], true);
-    assert_eq!(payload["authority"]["principal_id"], context.principal_id);
+    assert_eq!(payload["authority"]["principal_id"], context.principal_id());
 }
 
 #[tokio::test]
@@ -1368,6 +1369,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),
@@ -1375,7 +1377,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1406,6 +1408,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),
@@ -1413,7 +1416,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1428,7 +1431,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
     );
     let _principal = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
     );
     let _session = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
@@ -1702,7 +1705,7 @@ async fn test_home_summary_reports_identity_and_launch_targets() {
     } else {
         assert!(
             browser.is_none(),
-            "Browser is hidden on hosts without a local Engine"
+            "Browser is hidden on unsupported platforms"
         );
     }
     assert!(targets
@@ -2313,6 +2316,7 @@ async fn services_contact_fixture(
             provider_requests: Arc::new(TokioMutex::new(Vec::new())),
             pending_capabilities: Arc::new(TokioMutex::new(HashMap::new())),
             capabilities_start_pending: false,
+            kept_launch_reads: runtime.kept_launch_reads.clone(),
         },
         send_failure: Arc::new(TokioMutex::new(String::new())),
     };
@@ -3209,6 +3213,7 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
         anonymous_dir.path(),
         receipt.clone(),
         anonymous.endpoint().as_ref(),
+        gateway_browser_internet::transport_fixture(),
     )
     .await
     .unwrap();
@@ -3252,9 +3257,14 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
         socket.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
     });
-    let attached = browser_attach_runtime_stream_path(left.path(), receipt, Some(&endpoint))
-        .await
-        .unwrap();
+    let attached = browser_attach_runtime_stream_path(
+        left.path(),
+        receipt,
+        Some(&endpoint),
+        gateway_browser_internet::transport_fixture(),
+    )
+    .await
+    .unwrap();
     let runtime_path = std::path::PathBuf::from(
         attached["adapter_ipc"]["runtime_stream_path"]
             .as_str()
@@ -4756,7 +4766,7 @@ async fn damaged_home_state_file_leaves_shell_and_summaries_answering() {
 }
 
 /// #447 N1: System → Appearance upload and reset never delete a damaged
-/// background image; both are refused with the notice that names it.
+/// background image; both are refused with a message that names the image.
 #[tokio::test]
 async fn damaged_background_image_survives_upload_and_reset() {
     let dir = tempfile::tempdir().unwrap();
@@ -4806,14 +4816,383 @@ async fn damaged_background_image_survives_upload_and_reset() {
         let text = String::from_utf8_lossy(&text);
         assert!(!status.is_success(), "{method}: {text}");
         assert!(
-            text.contains(&format!(
-                ".AppData/ElastOS/Home/{file} does not carry the label"
-            )),
+            text.contains("background image background-image.jpg could not be read"),
             "{method}: {text}"
+        );
+        assert!(
+            !text.contains(dir.path().to_string_lossy().as_ref()),
+            "{method}: the answer leaves out the data folder: {text}"
         );
         assert_eq!(std::fs::read(&path).unwrap(), damaged, "{method}");
         assert!(!uploaded.exists(), "{method}");
     }
+}
+
+const APPEARANCE_IMAGE_FOLDER: &str = ".AppData/ElastOS/Home/Appearance";
+
+fn appearance_image_folder(dir: &std::path::Path, principal_id: &str) -> std::path::PathBuf {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let uri = format!("{localhost_root}/{APPEARANCE_IMAGE_FOLDER}");
+    elastos_common::localhost::rooted_localhost_fs_path(dir, &uri).unwrap()
+}
+
+fn appearance_image_uri(principal_id: &str, file_name: &str) -> String {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    format!("{localhost_root}/{APPEARANCE_IMAGE_FOLDER}/{file_name}")
+}
+
+/// Seeds one protected background image under the authority's root. `damage`
+/// corrupts the stored envelope label, which is what the notice names.
+fn seed_protected_background_image(
+    dir: &std::path::Path,
+    principal_id: &str,
+    file_name: &str,
+    bytes: &[u8],
+    damage: bool,
+) -> std::path::PathBuf {
+    let folder = appearance_image_folder(dir, principal_id);
+    crate::auth::create_owner_only_dir_all(dir, &folder).unwrap();
+    let uri = appearance_image_uri(principal_id, file_name);
+    let path = folder.join(file_name);
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    crate::auth::write_principal_root_object(
+        dir,
+        principal_id,
+        &localhost_root,
+        &uri,
+        &path,
+        bytes,
+    )
+    .unwrap();
+    if damage {
+        let mut damaged = std::fs::read(&path).unwrap();
+        damaged[9] = 0xff;
+        std::fs::write(&path, &damaged).unwrap();
+    }
+    path
+}
+
+fn read_protected_background_image(
+    dir: &std::path::Path,
+    principal_id: &str,
+    file_name: &str,
+) -> Vec<u8> {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let uri = appearance_image_uri(principal_id, file_name);
+    let path = appearance_image_folder(dir, principal_id).join(file_name);
+    crate::auth::read_principal_root_object(dir, principal_id, &localhost_root, &uri, &path)
+        .unwrap()
+}
+
+/// The names in the image folder, sorted, so a test can prove no temporary or
+/// extra image was left behind.
+fn appearance_image_names(dir: &std::path::Path, principal_id: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(appearance_image_folder(dir, principal_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+async fn upload_background_image(
+    app: &axum::Router,
+    token: &str,
+    content_type: &str,
+    body: &str,
+) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/apps/system/appearance/background-image")
+                .header("x-elastos-home-token", token)
+                .header(CONTENT_TYPE, content_type)
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let text = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&text).into_owned())
+}
+
+/// An upload that names the current image, while a sibling of another format
+/// is damaged, is refused before anything is written: the current image keeps
+/// its bytes and the refusal names the damaged file.
+#[tokio::test]
+async fn same_name_image_upload_with_a_damaged_sibling_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let current = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"current image",
+        false,
+    );
+    let sibling = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.jpg",
+        b"damaged sibling",
+        true,
+    );
+    let current_before = std::fs::read(&current).unwrap();
+    let sibling_before = std::fs::read(&sibling).unwrap();
+
+    let (status, text) = upload_background_image(
+        &app,
+        &authority.system_token,
+        "image/png",
+        "replacement image",
+    )
+    .await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains("background image background-image.jpg could not be read"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert_eq!(std::fs::read(&current).unwrap(), current_before);
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"current image"
+    );
+    assert_eq!(std::fs::read(&sibling).unwrap(), sibling_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.jpg", "background-image.png"]
+    );
+}
+
+/// An upload whose destination is itself damaged is refused before the write,
+/// so the damaged image stays byte for byte rather than being replaced.
+#[tokio::test]
+async fn same_name_image_upload_over_a_damaged_image_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let damaged = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"damaged image",
+        true,
+    );
+    let damaged_before = std::fs::read(&damaged).unwrap();
+
+    let (status, text) = upload_background_image(
+        &app,
+        &authority.system_token,
+        "image/png",
+        "replacement image",
+    )
+    .await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains("background image background-image.png could not be read"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert_eq!(std::fs::read(&damaged).unwrap(), damaged_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.png"]
+    );
+}
+
+/// A same-name upload over a readable image succeeds: one image remains and
+/// it holds the new bytes.
+#[tokio::test]
+async fn same_name_image_upload_replaces_the_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"first image",
+        false,
+    );
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/png", "second image").await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        payload["background_image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("/api/apps/home/appearance/background-image?scope="),
+        "{text}"
+    );
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.png"]
+    );
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"second image"
+    );
+}
+
+/// An upload of another format while a sibling is damaged is refused before
+/// anything is written or removed: both images keep their bytes and the new
+/// name does not appear.
+#[tokio::test]
+async fn different_name_image_upload_with_a_damaged_sibling_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let current = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"current image",
+        false,
+    );
+    let sibling = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.jpg",
+        b"damaged sibling",
+        true,
+    );
+    let current_before = std::fs::read(&current).unwrap();
+    let sibling_before = std::fs::read(&sibling).unwrap();
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/webp", "new webp").await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains("background image background-image.jpg could not be read"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert_eq!(std::fs::read(&current).unwrap(), current_before);
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"current image"
+    );
+    assert_eq!(std::fs::read(&sibling).unwrap(), sibling_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.jpg", "background-image.png"]
+    );
+}
+
+/// A GET of an image this process cannot open answers with the fixed sentence
+/// naming the image file. The read error carries the file path, which holds the
+/// data folder and the person id, so the answer must leave both out.
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_background_image_get_answers_only_the_file_name() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let path = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"locked image",
+        false,
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/home/appearance/background-image")
+                .header("x-elastos-home-token", authority.home_token.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert!(
+        !text.contains(&authority.principal_id),
+        "the answer leaves out the person id: {text}"
+    );
+    assert!(
+        text.contains("background image background-image.png could not be read"),
+        "{text}"
+    );
+}
+
+/// An upload whose image folder cannot be created answers one fixed sentence.
+/// The creation error names the folder, which holds the data folder and the
+/// person's root, so the answer leaves both out.
+#[tokio::test]
+async fn blocked_image_folder_upload_answers_one_fixed_sentence() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let folder = appearance_image_folder(dir.path(), &authority.principal_id);
+    crate::auth::create_owner_only_dir_all(dir.path(), folder.parent().unwrap()).unwrap();
+    std::fs::write(&folder, b"not a folder").unwrap();
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/png", "new image").await;
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert!(
+        !text.contains(&authority.principal_id),
+        "the answer leaves out the person id: {text}"
+    );
+    assert_eq!(text, "background image could not be saved");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(std::fs::read(&folder).unwrap(), b"not a folder");
 }
 
 #[tokio::test]
@@ -5439,7 +5818,7 @@ async fn test_home_summary_and_events_include_browser_wallet_approvals() {
     let summary_json: serde_json::Value = serde_json::from_slice(&summary_body).unwrap();
     assert_eq!(summary_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        summary_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&summary_json["notifications"], "wallet_approval_request")[0]["title"],
         "Transaction approval request"
     );
 
@@ -9150,7 +9529,7 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
         &[CHAT_ROOM_CAPSULE_ID],
     )
     .expect("runtime launch grant validates for chat-room");
-    assert_eq!(grant_context.principal_id, authority.principal_id);
+    assert_eq!(grant_context.principal_id(), authority.principal_id);
 
     let summary = app
         .clone()
@@ -10834,6 +11213,7 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     .is_err());
     // Exercise the actual Browser summary caller with a consumer that has no local Engine.
     let mut consumer_state = test_state(left.path());
+    consumer_state.browser_internet = granted_browser_internet(left.path());
     consumer_state.provider_registry = Some(consumer_registry.clone());
     consumer_state.carrier_endpoint = Some(endpoint.clone());
     consumer_state.collaboration_discovery_service = Some(
@@ -11091,15 +11471,8 @@ fn p2a_i_b_local_model_offer_unshared_for_provider_without_stored_record() {
             "updated_at": 0,
             "local_offer_ids": [MODEL_LOCAL_OFFER],
         });
-        crate::auth::write_principal_root_object(
-            dir.path(),
-            principal_id,
-            &localhost_root,
-            &object_uri,
-            &path,
-            &serde_json::to_vec_pretty(&state).unwrap(),
-        )
-        .unwrap();
+        // Plant the legacy path; the provider id has no stored record.
+        std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["local_offer_ids"], json!([MODEL_LOCAL_OFFER]));
@@ -13328,7 +13701,7 @@ async fn gateway_context_resolves_a_person_stored_in_the_auth_store() {
         None,
         "grant:home-cli-test",
     );
-    assert_eq!(context.unwrap().principal_id, "person:home-cli-test");
+    assert_eq!(context.unwrap().principal_id(), "person:home-cli-test");
 }
 
 /// Proof-bound row (Rong 0344 L-1499-1): with a proof binding, the active
@@ -13367,7 +13740,7 @@ async fn gateway_context_checks_a_proof_bound_grant_in_the_auth_store() {
         .contains("auth session not found"));
     crate::auth::store_session_grant(auth.path(), grant).unwrap();
     let context = context_from().unwrap();
-    assert_eq!(context.principal_id, "person:home-cli-test");
+    assert_eq!(context.principal_id(), "person:home-cli-test");
     assert_eq!(
         context.proof_binding_id.as_deref(),
         Some("proof:passkey:home-cli-test")

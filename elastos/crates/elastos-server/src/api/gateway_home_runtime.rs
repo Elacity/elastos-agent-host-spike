@@ -1,9 +1,47 @@
 use super::*;
 
+/// Home launch migrates the legacy Services peer-contacts object before it
+/// serves the target. A person whose stored record is kept on another Runtime
+/// reaches that write with no protection here, so the migration refuses and
+/// the launch continues with the legacy file in place. Every other migration
+/// error still fails the launch.
+fn migrate_legacy_services_peer_contacts_for_launch(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<()> {
+    match super::gateway_home_system::migrate_legacy_services_peer_contacts(data_dir, context) {
+        Ok(()) => Ok(()),
+        Err(err)
+            if err
+                .chain()
+                .any(|cause| cause.is::<crate::auth::ProtectedRecordKeptElsewhere>()) =>
+        {
+            tracing::warn!(
+                error = %err,
+                "Home launch skipped the legacy Services peer contacts migration"
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn home_projection_token_error(err: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
+    if err.to_string() == "home launch token auth session is not active" {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid or expired session" })),
+        )
+    } else {
+        gateway_internal_error(err)
+    }
+}
+
 pub(super) async fn home_launch(
     State(state): State<GatewayState>,
     headers: HeaderMap,
     Json(req): Json<HomeLaunchRequest>,
+    platform: &str,
 ) -> Result<Json<HomeLaunchResponse>, (StatusCode, Json<serde_json::Value>)> {
     let context = require_home_launch_token_context(&state.data_dir, &headers, HOME_CAPSULE_ID)
         .map_err(|err| {
@@ -26,7 +64,7 @@ pub(super) async fn home_launch(
         ));
     }
 
-    let mut target_summary = home_launch_target(&state.data_dir, target);
+    let mut target_summary = home_launch_target_for_platform(&state.data_dir, target, platform);
     if target_summary.is_none() || state.data_dir.join("capsules").join(target).exists() {
         ensure_home_target_package(&state.data_dir, target, target_summary.is_none())
             .await
@@ -36,7 +74,7 @@ pub(super) async fn home_launch(
                     Json(serde_json::json!({ "error": err })),
                 )
             })?;
-        target_summary = home_launch_target(&state.data_dir, target);
+        target_summary = home_launch_target_for_platform(&state.data_dir, target, platform);
     }
 
     let Some(target_summary) = target_summary else {
@@ -57,10 +95,7 @@ pub(super) async fn home_launch(
     let provider_registry = state.provider_registry.clone();
     let sync_services = target_summary.target == INBOX_CAPSULE_ID;
     let services_sync_error = tokio::task::spawn_blocking(move || {
-        super::gateway_home_system::migrate_legacy_services_peer_contacts(
-            &data_dir,
-            &launch_context,
-        )?;
+        migrate_legacy_services_peer_contacts_for_launch(&data_dir, &launch_context)?;
         Ok::<_, anyhow::Error>(sync_services.then(|| {
             super::gateway_home_system::home_services_sync_access_requests(
                 &data_dir,
@@ -111,15 +146,22 @@ pub(super) async fn home_launch(
         .viewer
         .as_deref()
         .unwrap_or(target_summary.target.as_str());
-    let route = append_home_launch_token(
+    let token = issue_home_projection_launch_token_with_context(
         &state.data_dir,
-        &target_summary.route,
         &target_summary.target,
         executable_actor,
-        &req.query,
         &context,
     )
-    .map_err(gateway_internal_error)?;
+    .map_err(home_projection_token_error)?;
+    let expires_at = gateway_home_token::require_carried_home_launch_token(
+        &state.data_dir,
+        &token,
+        &[executable_actor],
+    )
+    .map_err(gateway_internal_error)?
+    .expires_at;
+    let route = append_home_launch_token_to_route(&target_summary.route, &req.query, &token)
+        .map_err(gateway_internal_error)?;
     let route =
         crate::api::browser_capsules::canonical_browser_capsule_route(&route).map_err(|error| {
             (
@@ -129,6 +171,7 @@ pub(super) async fn home_launch(
         })?;
 
     Ok(Json(HomeLaunchResponse {
+        expires_at,
         target: target_summary.target,
         window_policy: target_summary.window_policy,
         title: target_summary.title,
@@ -276,7 +319,14 @@ pub(super) fn home_targets_from_catalog(
 }
 
 pub(super) fn home_launch_targets(data_dir: &std::path::Path) -> Vec<HomeTargetSummary> {
-    let mut targets = home_browser_targets(data_dir, false);
+    home_launch_targets_for_platform(data_dir, &crate::setup::detect_platform())
+}
+
+fn home_launch_targets_for_platform(
+    data_dir: &std::path::Path,
+    platform: &str,
+) -> Vec<HomeTargetSummary> {
+    let mut targets = home_browser_targets(data_dir, false, platform);
     targets.extend(home_viewer_targets(data_dir));
     targets.sort_by(|left, right| left.title.cmp(&right.title));
     targets
@@ -286,14 +336,26 @@ pub(super) fn home_launch_target(
     data_dir: &std::path::Path,
     target: &str,
 ) -> Option<HomeTargetSummary> {
-    home_launch_targets(data_dir)
+    home_launch_target_for_platform(data_dir, target, &crate::setup::detect_platform())
+}
+
+fn home_launch_target_for_platform(
+    data_dir: &std::path::Path,
+    target: &str,
+    platform: &str,
+) -> Option<HomeTargetSummary> {
+    home_launch_targets_for_platform(data_dir, platform)
         .into_iter()
         .find(|candidate| candidate.target == target)
 }
 
-fn home_browser_targets(data_dir: &std::path::Path, visible_only: bool) -> Vec<HomeTargetSummary> {
+fn home_browser_targets(
+    data_dir: &std::path::Path,
+    visible_only: bool,
+    platform: &str,
+) -> Vec<HomeTargetSummary> {
     let mut targets: Vec<_> =
-        crate::api::browser_capsules::list_launchable_browser_capsules(data_dir)
+        crate::api::browser_capsules::list_launchable_browser_capsules_for(data_dir, platform)
             .into_iter()
             .filter(|app| app.name != HOME_CAPSULE_ID && app.name != "home-agent")
             .filter(|app| {
@@ -1742,6 +1804,7 @@ struct HomeCapsulesResponse {
 #[derive(Deserialize)]
 struct HomeCapsuleInfo {
     name: String,
+    status: Option<String>,
 }
 
 pub(super) async fn home_runtime_summary(data_dir: &std::path::Path) -> HomeRuntimeSummary {
@@ -1812,7 +1875,7 @@ pub(super) async fn ensure_home_runtime(data_dir: &std::path::Path) -> HomeRunti
     }
 }
 
-pub(super) async fn load_live_runtime_coords(
+pub(in crate::api) async fn load_live_runtime_coords(
     data_dir: &std::path::Path,
 ) -> Option<crate::runtime_control::RuntimeCoords> {
     let path = crate::runtime_control::home_runtime_coord_path(data_dir);
@@ -1827,7 +1890,7 @@ pub(super) async fn home_attach_shell(
     gateway_attach_runtime_token(client, api_url, attach_secret, "shell").await
 }
 
-pub(super) async fn gateway_attach_runtime_token(
+pub(in crate::api) async fn gateway_attach_runtime_token(
     client: &reqwest::Client,
     api_url: &str,
     attach_secret: &str,
@@ -1863,6 +1926,7 @@ async fn home_list_runtime_capsules(
     let mut names = response
         .capsules
         .into_iter()
+        .filter(|capsule| !matches!(capsule.status.as_deref(), Some("stopped" | "failed")))
         .map(|capsule| capsule.name)
         .collect::<Vec<_>>();
     names.sort();
@@ -1872,6 +1936,214 @@ async fn home_list_runtime_capsules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_token_projection_lapsed_grant_returns_unauthorized() {
+        let data = tempfile::tempdir().unwrap();
+        let context = HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "auth:alice",
+            Some("proof:alice".into()),
+            "grant:alice",
+            crate::auth::PrincipalKind::Human,
+        );
+        let now = now_ts();
+        let mut grant = elastos_runtime::auth::AuthSessionGrantV1 {
+            schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.into(),
+            principal_id: context.principal_id().to_string(),
+            session_id: context.session_id.clone(),
+            proof_binding_id: context.proof_binding_id.clone().unwrap(),
+            grant_id: context.grant_id.clone(),
+            issued_at: now,
+            expires_at: now.saturating_add(300),
+            apps: vec![HOME_CAPSULE_ID.into()],
+        };
+        // The verifier reads the principal's stored root; give the fixture one.
+        crate::auth::store_test_human_principal(data.path(), context.principal_id());
+        crate::auth::store_session_grant(data.path(), grant.clone()).unwrap();
+        let token =
+            issue_home_launch_token_with_context(data.path(), HOME_CAPSULE_ID, &context).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        headers.insert("x-elastos-home-token", token.parse().unwrap());
+        let validated =
+            require_home_launch_token_context(data.path(), &headers, HOME_CAPSULE_ID).unwrap();
+        // Expire the stored grant after frame validation, before projection
+        // minting. A fixed past stamp cannot be revived by a backward clock
+        // step between this write and the verifier's own read.
+        grant.expires_at = 0;
+        crate::auth::store_session_grant(data.path(), grant).unwrap();
+        let (status, Json(body)) = issue_home_projection_launch_token_with_context(
+            data.path(),
+            CHAT_ROOM_CAPSULE_ID,
+            CHAT_ROOM_CAPSULE_ID,
+            &validated,
+        )
+        .map_err(home_projection_token_error)
+        .unwrap_err();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "invalid or expired session");
+    }
+
+    #[test]
+    fn home_token_projection_internal_error_keeps_server_status() {
+        let (status, Json(body)) =
+            home_projection_token_error(anyhow::anyhow!("failed to load signing key"));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "failed to load signing key");
+    }
+
+    /// A child reaches Home launch with a legacy Services peer-contacts object
+    /// in its own folder. The person's record is kept on the parent, so the
+    /// migration's write refuses; launch proceeds and the legacy file stays,
+    /// with no new object beside it.
+    #[test]
+    fn a_refused_legacy_contacts_migration_does_not_fail_launch() {
+        use super::super::gateway_tests::r8d_passkey_rows::passkey_person;
+
+        let person = passkey_person(SERVICES_CAPSULE_ID);
+        let child = person.child.path();
+        let root = person.ctx.root().localhost_root();
+        let legacy_uri = format!("{root}/.AppData/ElastOS/Home/people-contacts.json");
+        let legacy_path =
+            elastos_common::localhost::rooted_localhost_fs_path(child, &legacy_uri).unwrap();
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "schema": "elastos.people.contacts-state/v1",
+            "principal_id": person.ctx.principal_id(),
+            "localhost_root": root,
+            "updated_at": 7,
+        }))
+        .unwrap();
+        std::fs::write(&legacy_path, &legacy).unwrap();
+        let (warnings, _guard) = capture_launch_warnings();
+        migrate_legacy_services_peer_contacts_for_launch(child, &person.ctx)
+            .expect("launch proceeds past a refused migration");
+        let log = String::from_utf8(warnings.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            log.matches("Home launch skipped the legacy Services peer contacts migration")
+                .count(),
+            1,
+            "{log}"
+        );
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy);
+        let current_uri = format!("{root}/.AppData/ElastOS/Home/services-peer-contacts.json");
+        let current_path =
+            elastos_common::localhost::rooted_localhost_fs_path(child, &current_uri).unwrap();
+        assert!(
+            !current_path.exists(),
+            "the refused migration wrote an object"
+        );
+        let relative = legacy_path
+            .strip_prefix(child)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        person.assert_child_holds_only(&[relative.as_str()]);
+    }
+
+    #[derive(Clone)]
+    struct LaunchWarningWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LaunchWarningWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Collects the warnings one test emits, on this test's own thread.
+    fn capture_launch_warnings() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = LaunchWarningWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        (output, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// A legacy Services peer-contacts object the migration cannot read is not
+    /// the typed refusal, so the wrapper keeps the error and the launch fails.
+    #[test]
+    fn a_legacy_contacts_migration_error_other_than_the_refusal_fails_launch() {
+        use super::super::gateway_tests::r8d_passkey_rows::passkey_person;
+        use std::os::unix::fs::PermissionsExt;
+
+        let person = passkey_person(SERVICES_CAPSULE_ID);
+        let child = person.child.path();
+        let root = person.ctx.root().localhost_root();
+        let legacy_uri = format!("{root}/.AppData/ElastOS/Home/people-contacts.json");
+        let legacy_path =
+            elastos_common::localhost::rooted_localhost_fs_path(child, &legacy_uri).unwrap();
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, b"legacy contacts").unwrap();
+        std::fs::set_permissions(&legacy_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let error = migrate_legacy_services_peer_contacts_for_launch(child, &person.ctx)
+            .expect_err("an unreadable migration fails the launch");
+        assert!(
+            error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+            }),
+            "{error:#}"
+        );
+    }
+
+    /// Home's launch of an installed capsule whose manifest pins a
+    /// requirement: Home's reader finds no manifest, so there is no Runtime
+    /// launch and nothing is started or written for one. (There is no
+    /// control here: the same capsule without the pin would start a real
+    /// Runtime from this test.)
+    #[tokio::test]
+    async fn a_pinned_manifest_gets_no_runtime_launch_from_home() {
+        use crate::runtime::tests::{write_fixture_capsule, PINNED_MANIFEST};
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path();
+        write_fixture_capsule(&data_dir.join("capsules"), PINNED_MANIFEST);
+        std::fs::write(
+            data_dir.join("components.json"),
+            serde_json::json!({
+                "external": { "pinned-fixture": {
+                    "install_path": "capsules/pinned-fixture", "platforms": {}
+                } },
+                "capsules": {}, "profiles": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let context = HomeLaunchTokenContext::for_test(
+            "fixture",
+            "fixture",
+            None,
+            "fixture",
+            crate::auth::PrincipalKind::Human,
+        );
+        // The cause, and not only the outcome: Home's reader finds no
+        // manifest in the installed folder.
+        let installed = data_dir.join("capsules/pinned-fixture");
+        assert!(installed.join("capsule.json").is_file());
+        assert!(
+            crate::api::capsule_inventory::load_capsule_manifest(&installed, "pinned-fixture")
+                .is_none()
+        );
+        let outcome = launch_runtime_backed_home_target(data_dir, "pinned-fixture", &context).await;
+        assert!(outcome.is_none());
+        assert!(!crate::runtime_control::home_runtime_coord_path(data_dir).exists());
+        assert!(!data_dir.join("managed-runtimes").exists());
+    }
 
     #[tokio::test]
     async fn native_shell_metadata_refuses_generic_home_launch_before_runtime_start() {
@@ -1893,7 +2165,13 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let context = HomeLaunchTokenContext::for_test("fixture", "fixture", None, "fixture");
+        let context = HomeLaunchTokenContext::for_test(
+            "fixture",
+            "fixture",
+            None,
+            "fixture",
+            crate::auth::PrincipalKind::Human,
+        );
         let outcome = launch_runtime_backed_home_target(data_dir, "shell", &context)
             .await
             .unwrap();

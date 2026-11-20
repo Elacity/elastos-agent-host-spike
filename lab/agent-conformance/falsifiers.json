@@ -255,9 +255,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/agent-conformance/tests/common/operator.rs",
-          "old": "    if count == 0 || !api_seen {",
-          "new": "    if false && (count == 0 || !api_seen) {"
+          "file": "../../lab/agent-conformance/src/census.rs",
+          "old": "    if files.is_empty() || !api_seen {",
+          "new": "    if false && (files.is_empty() || !api_seen) {"
         }
       ],
       "tests": [
@@ -325,7 +325,7 @@
         }
       ],
       "tests": [
-        "ungranted_network_is_refused"
+        "undeclared_network_manifest_is_refused"
       ]
     },
     {
@@ -497,8 +497,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/src/report.rs",
-          "old": "probe\n            .bundle_lab_cid\n            .parse::<capsule_identity::LabCid>()\n            .is_ok()",
-          "new": "(!probe.bundle_lab_cid.is_empty())"
+          "old": "probe\n            .bundle_lab_cid\n            .parse::<capsule_identity::LabCid>()\n            .is_err()",
+          "new": "probe.bundle_lab_cid.is_empty()"
         }
       ],
       "tests": [
@@ -659,8 +659,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/common/grants.rs",
-          "old": "    if !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))",
-          "new": "    if false && !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))"
+          "old": "    if status != 200 && status != 403 {",
+          "new": "    if false && status != 200 && status != 403 {"
         }
       ],
       "tests": [
@@ -793,8 +793,8 @@
         },
         {
           "file": "../../lab/agent-conformance/probe/capsule.json",
-          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\"]",
-          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
         }
       ],
       "tests": [
@@ -842,8 +842,8 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
-          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         }
       ],
       "tests": [
@@ -858,13 +858,18 @@
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
-          "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
+          "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);",
+          "new": "    let mut _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"120\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());\n    let mut finished = operator.finish_check(sampled);"
         },
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    if require_live_grants {",
-          "new": "    drop(_leftover);\n    if require_live_grants {"
+          "new": "    _leftover.stop().unwrap();\n    drop(_leftover);\n    if require_live_grants {"
+        },
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "        home.finish().unwrap();\n        return;",
+          "new": "        _leftover.stop().unwrap();\n        drop(_leftover);\n        home.finish().unwrap();\n        return;"
         }
       ],
       "tests": [
@@ -1579,35 +1584,35 @@
       ]
     },
     {
-      "id": "F-net-undeclared",
-      "title": "stage the declared manifest for the undeclared network refusal",
+      "id": "F-net-declared",
+      "title": "declare the system-only network capability in the probe manifest",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/probe/capsule.json",
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\"]"
+        }
+      ],
+      "tests": [
+        "declared_network_manifest_is_refused"
+      ]
+    },
+    {
+      "id": "F-net-declared-stage",
+      "title": "stage the shipped manifest where the declaring manifest belongs",
       "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/agent-conformance/tests/effects.rs",
-          "old": "agent_conformance::identity::stage_probe(&home, &bytes, manifest, label)",
-          "new": "agent_conformance::identity::stage_probe(&home, &bytes, MANIFEST, label)"
+          "old": "    capabilities.retain(|capability| capability.as_str() != Some(\"elastos://net/stream\"));\n    capabilities.push(json!(\"elastos://net/stream\"));",
+          "new": "    capabilities.retain(|capability| capability.as_str() != Some(\"elastos://net/stream\"));"
         }
       ],
       "tests": [
-        "undeclared_network_manifest_is_refused"
-      ]
-    },
-    {
-      "id": "F-net-reason",
-      "title": "give the declared network request the read denial reason",
-      "command": "agent-conformance",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/agent-conformance/tests/common/grants.rs",
-          "old": "                let reason = if field(request, \"resource\")? == \"elastos://net/stream\" {\n                    \"fixture denies unlisted elastos://net/stream\".to_owned()\n                } else {\n                    self.fixture.deny_reason.clone()\n                };",
-          "new": "                let reason = self.fixture.deny_reason.clone();"
-        }
-      ],
-      "tests": [
-        "ungranted_network_is_refused"
+        "declared_network_manifest_is_refused"
       ]
     }
   ]

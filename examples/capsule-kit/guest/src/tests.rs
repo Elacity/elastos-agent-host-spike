@@ -1,0 +1,863 @@
+//! The kit's own tests: the Bus answers, the write, the refusals and their
+//! `bus-error`, the reads, the URI check, the input list, the text checks and
+//! the fake. Moved here from the photo and documents viewers, which had a copy
+//! each.
+
+use serde_json::{json, Value};
+
+use crate::bus::{digest, read_window, write_body, Digest};
+use crate::fake::{Call, FakeBus};
+use crate::list::{self, ListRules};
+use crate::text::{check_head, check_whole, TextError};
+use crate::uri::check_object_uri;
+use crate::*;
+
+const A: &str = "localhost://Users/self/Pictures/a.png";
+const OUT: &str = "localhost://Users/self/.AppData/App/kit/out.json";
+/// A launch content file: the one scheme R3-1 answers a digest for
+/// (`elastos-server/src/provider_resource.rs:341-369` at cde4c8b1).
+const CONTENT: &str = "elastos://launch/content/ucity.gba";
+/// The bare content name, which asks for the listing.
+const CONTENT_LISTING: &str = "elastos://launch/content/";
+/// A launch output name: kept for the launch, and never digested.
+const LAUNCH_OUT: &str = "elastos://launch/output/out.json";
+const APP: App = App {
+    name: "kit-test",
+    input: "list",
+    max_input_bytes: 4096,
+};
+
+/// A Runtime that grants everything and answers every call with `self.0`.
+struct OddAnswers(Value);
+
+impl Bus for OddAnswers {
+    fn request(&mut self, _: &str, _: &str, _: &str) -> Result<String, BusFailure> {
+        Ok("grant".into())
+    }
+
+    fn invoke(&mut self, _: &str, _: &str, _: &[u8], _: &str) -> Result<InvokeReply, BusFailure> {
+        Ok(InvokeReply {
+            status: "ok".into(),
+            body: serde_json::to_vec(&self.0).unwrap(),
+        })
+    }
+}
+
+/// A Runtime that refuses every call with `self.0`.
+struct Refuses(BusFailure);
+
+impl Bus for Refuses {
+    fn request(&mut self, _: &str, _: &str, _: &str) -> Result<String, BusFailure> {
+        Err(self.0.clone())
+    }
+
+    fn invoke(&mut self, _: &str, _: &str, _: &[u8], _: &str) -> Result<InvokeReply, BusFailure> {
+        Err(self.0.clone())
+    }
+}
+
+/// A Runtime that grants, then refuses every invoke with `self.0`.
+struct RefusesInvoke(BusFailure);
+
+impl Bus for RefusesInvoke {
+    fn request(&mut self, _: &str, _: &str, _: &str) -> Result<String, BusFailure> {
+        Ok("grant".into())
+    }
+
+    fn invoke(&mut self, _: &str, _: &str, _: &[u8], _: &str) -> Result<InvokeReply, BusFailure> {
+        Err(self.0.clone())
+    }
+}
+
+/// A Runtime that grants, records every invoke, and answers `self.answer`.
+struct Records {
+    answer: Value,
+    calls: Vec<(String, String, Value)>,
+}
+
+impl Bus for Records {
+    fn request(&mut self, _: &str, _: &str, _: &str) -> Result<String, BusFailure> {
+        Ok("grant".into())
+    }
+
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        _: &str,
+    ) -> Result<InvokeReply, BusFailure> {
+        self.calls.push((
+            resource.to_string(),
+            operation.to_string(),
+            serde_json::from_slice(body).unwrap(),
+        ));
+        Ok(InvokeReply {
+            status: "ok".into(),
+            body: serde_json::to_vec(&self.answer).unwrap(),
+        })
+    }
+}
+
+fn digest_answer(path: &str, size: u64, algorithm: &str, sha256: &str) -> Value {
+    json!({
+        "status": "ok",
+        "data": {
+            "path": path,
+            "size": size,
+            "algorithm": algorithm,
+            "sha256": sha256,
+        },
+    })
+}
+
+const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+fn readable(bytes: &[u8]) -> FakeBus {
+    FakeBus::default()
+        .object(A, bytes.to_vec())
+        .allow(A, "read")
+}
+
+// --- Bus answers -----------------------------------------------------------------------
+
+#[test]
+fn an_answer_without_byte_content_stops_the_run() {
+    for answer in [
+        json!({ "status": "ok" }),
+        json!({ "status": "ok", "data": {} }),
+        json!({ "status": "ok", "data": { "content": "AAEC" } }),
+        json!({ "status": "ok", "data": { "content": [1, 2, 300] } }),
+        json!({ "status": "pending" }),
+    ] {
+        let err = read_at(&mut OddAnswers(answer.clone()), A, "grant", 0, 8).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Refusal::Call {
+                    error: CallError::Shape(_),
+                    ..
+                }
+            ),
+            "{answer}: {err:?}"
+        );
+        assert!(matches!(err.to_bus_failure(&APP), BusFailure::Internal(_)));
+    }
+}
+
+#[test]
+fn an_error_answer_that_also_carries_data_is_still_an_error() {
+    let answer = json!({
+        "status": "error",
+        "code": "read_failed",
+        "message": "partial",
+        "data": { "content": [0x89, 0x50] },
+    });
+    let err = read_at(&mut OddAnswers(answer), A, "grant", 0, 8).unwrap_err();
+    assert!(
+        matches!(&err, Refusal::Call { error: CallError::Provider { code, .. }, .. } if code == "read_failed"),
+        "{err:?}"
+    );
+    assert!(matches!(
+        err.to_bus_failure(&APP),
+        BusFailure::Unavailable(_)
+    ));
+}
+
+#[test]
+fn a_write_answer_without_data_is_refused() {
+    // A read with no data is caught by its missing content; a write has no
+    // content to miss, so the answer itself must be refused.
+    for answer in [json!({ "status": "ok" }), json!({ "status": "pending" })] {
+        let err =
+            bus::write_bytes(&mut OddAnswers(answer.clone()), OUT, "grant", b"x").unwrap_err();
+        assert!(matches!(err, CallError::Shape(_)), "{answer}: {err:?}");
+    }
+}
+
+#[test]
+fn a_read_answer_longer_than_asked_is_refused() {
+    let answer = json!({ "status": "ok", "data": { "content": [1, 2, 3, 4] } });
+    let err = read_window(&mut OddAnswers(answer), A, "grant", 0, 3).unwrap_err();
+    assert!(matches!(err, CallError::Shape(_)), "{err:?}");
+}
+
+// --- The digest ------------------------------------------------------------------------
+
+#[test]
+fn k1_the_digest_body_is_exactly_the_path_and_the_operation_is_digest() {
+    let mut bus = Records {
+        answer: digest_answer(A, 3, "sha256", SHA256_ABC),
+        calls: Vec::new(),
+    };
+    let answer = digest(&mut bus, A, "grant").unwrap();
+    assert_eq!(
+        bus.calls,
+        [(A.to_string(), "digest".to_string(), json!({ "path": A }))]
+    );
+    assert_eq!(answer.path, A);
+}
+
+#[test]
+fn k2_the_digest_answer_names_path_size_algorithm_and_sha256() {
+    // A digest is a launch-content operation (R3-1
+    // `provider_resource.rs:341-369` at cde4c8b1); the fake answers no other.
+    let mut bus = FakeBus::default()
+        .object(CONTENT, b"abc".to_vec())
+        .allow(CONTENT, "read");
+    let id = grant(&mut bus, CONTENT, "read", "").unwrap();
+    assert_eq!(
+        digest(&mut bus, CONTENT, &id).unwrap(),
+        Digest {
+            path: CONTENT.into(),
+            size: 3,
+            algorithm: "sha256".into(),
+            sha256: SHA256_ABC.into(),
+        }
+    );
+}
+
+#[test]
+fn k3_a_digest_answer_naming_another_path_is_refused() {
+    let mut bus = Records {
+        answer: digest_answer(OUT, 3, "sha256", SHA256_ABC),
+        calls: Vec::new(),
+    };
+    assert_eq!(
+        digest(&mut bus, A, "grant"),
+        Err(CallError::Shape(format!(
+            "digest answer names {OUT}, asked {A}"
+        )))
+    );
+}
+
+#[test]
+fn k4_a_digest_answer_without_data_or_with_a_string_size_is_refused() {
+    for answer in [
+        json!({ "status": "ok" }),
+        json!({
+            "status": "ok",
+            "data": { "path": A, "size": "3", "algorithm": "sha256", "sha256": SHA256_ABC },
+        }),
+    ] {
+        let mut bus = Records {
+            answer: answer.clone(),
+            calls: Vec::new(),
+        };
+        let result = digest(&mut bus, A, "grant");
+        assert!(
+            matches!(result, Err(CallError::Shape(_))),
+            "{answer}: {result:?}"
+        );
+    }
+}
+
+/// A digest invoke on `resource` with `body`, answered as JSON.
+fn digest_reply(bus: &mut FakeBus, resource: &str, body: Value) -> Value {
+    let id = grant(bus, resource, "read", "").unwrap();
+    let reply = bus
+        .invoke(resource, "digest", body.to_string().as_bytes(), &id)
+        .unwrap();
+    serde_json::from_slice(&reply.body).unwrap()
+}
+
+/// R3-1 ignores `offset` and `length` on a digest and hashes the whole file
+/// (`elastos-server/src/resource_bridge.rs:206-218` at cde4c8b1).
+#[test]
+fn k5a_a_digest_body_with_offset_and_length_is_answered_with_the_whole_file() {
+    let mut bus = FakeBus::default()
+        .object(CONTENT, b"abc".to_vec())
+        .allow(CONTENT, "read");
+    let answer = digest_reply(
+        &mut bus,
+        CONTENT,
+        json!({ "path": CONTENT, "offset": 1, "length": 1 }),
+    );
+    assert_eq!(answer["status"], "ok", "{answer}");
+    assert_eq!(answer["data"]["path"], CONTENT, "{answer}");
+    assert_eq!(answer["data"]["size"], 3, "{answer}");
+    assert_eq!(
+        answer["data"]["sha256"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "{answer}"
+    );
+}
+
+/// R3-1 refuses a digest of the launch output before the launch is
+/// consulted (`elastos-server/src/provider_resource.rs:347-355` at
+/// cde4c8b1); the bridge answers `invalid_resource_invoke`
+/// (`resource_bridge.rs:584-592`).
+#[test]
+fn k5b_a_digest_on_a_launch_output_name_is_refused() {
+    let mut bus = FakeBus::default()
+        .object(LAUNCH_OUT, b"abc".to_vec())
+        .allow(LAUNCH_OUT, "read");
+    let answer = digest_reply(&mut bus, LAUNCH_OUT, json!({ "path": LAUNCH_OUT }));
+    assert_eq!(answer["status"], "error", "{answer}");
+    assert_eq!(answer["code"], "invalid_resource_invoke", "{answer}");
+    assert_eq!(
+        answer["message"], "a digest names content, not the output",
+        "{answer}"
+    );
+}
+
+/// The bare content name asks for the listing, which has no digest
+/// (`elastos-server/src/provider_resource.rs:363-366` at cde4c8b1).
+#[test]
+fn k5c_a_digest_on_the_bare_content_listing_is_refused() {
+    let mut bus = FakeBus::default()
+        .object(CONTENT_LISTING, b"listing".to_vec())
+        .allow(CONTENT_LISTING, "read");
+    let answer = digest_reply(
+        &mut bus,
+        CONTENT_LISTING,
+        json!({ "path": CONTENT_LISTING }),
+    );
+    assert_eq!(answer["status"], "error", "{answer}");
+    assert_eq!(answer["code"], "invalid_resource_invoke", "{answer}");
+    assert_eq!(
+        answer["message"],
+        "a digest names one file of a launch's content, under elastos://launch/content/, not its listing",
+        "{answer}"
+    );
+}
+
+/// A content file the launch does not hold is `not_found`, as R3-1 answers
+/// (`elastos-server/src/resource_bridge.rs:212-217` at cde4c8b1).
+#[test]
+fn k5d_a_digest_of_a_missing_content_file_answers_not_found() {
+    let missing = "elastos://launch/content/missing.gba";
+    let mut bus = FakeBus::default().allow(missing, "read");
+    let answer = digest_reply(&mut bus, missing, json!({ "path": missing }));
+    assert_eq!(answer["status"], "error", "{answer}");
+    assert_eq!(answer["code"], "not_found", "{answer}");
+    assert_eq!(
+        answer["message"], "no content launch binds this name for this capsule",
+        "{answer}"
+    );
+}
+
+/// The fake's own rule, stricter than R3-1: a digest body may name only
+/// `path`, `offset` and `length`, and every other key is refused with
+/// `invalid_request`. R3-1 ignores other keys on a digest
+/// (`elastos-server/src/resource_bridge.rs:202,206-218` at cde4c8b1), so
+/// this refusal is the fake's alone.
+#[test]
+fn k5e_a_digest_body_with_a_key_other_than_path_offset_length_is_refused() {
+    let mut bus = FakeBus::default()
+        .object(CONTENT, b"abc".to_vec())
+        .allow(CONTENT, "read");
+    let taken = digest_reply(&mut bus, CONTENT, json!({ "path": CONTENT }));
+    assert_eq!(taken["status"], "ok", "{taken}");
+    for (body, problem) in [
+        (
+            json!({ "path": CONTENT, "encoding": "utf8" }),
+            "unknown field `encoding`",
+        ),
+        (json!({ "path": CONTENT, "x": 1 }), "unknown field `x`"),
+    ] {
+        let answer = digest_reply(&mut bus, CONTENT, body);
+        assert_eq!(answer["status"], "error", "{answer}");
+        assert_eq!(answer["code"], "invalid_request", "{answer}");
+        assert_eq!(answer["message"], problem, "{answer}");
+    }
+}
+
+#[test]
+fn a_runtime_denial_of_an_invoke_is_reported_as_denied() {
+    let denied = BusFailure::Denied("Capability validation failed".into());
+    let err = read_at(&mut RefusesInvoke(denied), A, "grant", 0, 8).unwrap_err();
+    assert!(matches!(err.to_bus_failure(&APP), BusFailure::Denied(_)));
+}
+
+// --- The write -------------------------------------------------------------------------
+
+#[test]
+fn the_write_body_is_the_json_the_provider_takes() {
+    let content: Vec<u8> = (0..=255).collect();
+    let uri = "localhost://Users/self/Documents/\"q\".md";
+    let body = write_body(uri, &content);
+    let parsed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        parsed,
+        json!({ "path": uri, "content": content, "append": false })
+    );
+    assert_eq!(
+        body,
+        parsed.to_string(),
+        "the same bytes as json!, keys sorted"
+    );
+    assert_eq!(
+        write_body("u", b""),
+        r#"{"append":false,"content":[],"path":"u"}"#
+    );
+}
+
+#[test]
+fn the_write_is_one_byte_array_with_append_false() {
+    let mut bus = FakeBus::default().allow(OUT, "write");
+    let id = grant(&mut bus, OUT, "write", "write").unwrap();
+    bus::write_bytes(&mut bus, OUT, &id, b"[1]").unwrap();
+    let writes: Vec<&Value> = bus
+        .calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Invoke {
+                operation, body, ..
+            } if operation == "write" => Some(body),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        writes,
+        [&json!({ "path": OUT, "content": b"[1]", "append": false })]
+    );
+    assert_eq!(bus.written[OUT], "[1]");
+}
+
+// --- Refusals --------------------------------------------------------------------------
+
+#[test]
+fn every_refusal_names_the_app_and_maps_to_its_bus_error() {
+    let failure = |make: fn(String) -> BusFailure| make("why".into());
+    let call = |error: CallError| Refusal::Call {
+        resource: A.into(),
+        error,
+    };
+    let cases = [
+        (
+            Refusal::NoGrant {
+                resource: A.into(),
+                failure: failure(BusFailure::NotFound),
+            },
+            "denied",
+        ),
+        (call(CallError::Bus(failure(BusFailure::Denied))), "denied"),
+        (
+            call(CallError::Bus(failure(BusFailure::NotFound))),
+            "not_found",
+        ),
+        (
+            call(CallError::Bus(failure(BusFailure::Timeout))),
+            "timeout",
+        ),
+        (
+            call(CallError::Bus(failure(BusFailure::Unavailable))),
+            "unavailable",
+        ),
+        (
+            call(CallError::Bus(failure(BusFailure::Invalid))),
+            "invalid",
+        ),
+        (
+            call(CallError::Bus(failure(BusFailure::Internal))),
+            "internal",
+        ),
+        (
+            call(CallError::Provider {
+                code: "read_failed".into(),
+                message: "disk gone".into(),
+            }),
+            "unavailable",
+        ),
+        (call(CallError::Shape("odd".into())), "internal"),
+        (Refusal::InputTooLarge, "invalid"),
+        (Refusal::Input("bad".into()), "invalid"),
+    ];
+    for (refusal, kind) in cases {
+        let message = refusal.message(&APP);
+        assert!(message.starts_with("kit-test "), "{message}");
+        let mapped = match refusal.to_bus_failure(&APP) {
+            BusFailure::Denied(m) => ("denied", m),
+            BusFailure::NotFound(m) => ("not_found", m),
+            BusFailure::Invalid(m) => ("invalid", m),
+            BusFailure::Unavailable(m) => ("unavailable", m),
+            BusFailure::Timeout(m) => ("timeout", m),
+            BusFailure::Internal(m) => ("internal", m),
+        };
+        assert_eq!(mapped, (kind, message), "{refusal:?}");
+    }
+    assert_eq!(
+        Refusal::InputTooLarge.message(&APP),
+        "kit-test list is larger than 4096 bytes"
+    );
+    assert!(call(CallError::Provider {
+        code: "read_failed".into(),
+        message: "disk gone".into(),
+    })
+    .message(&APP)
+    .contains("disk gone"));
+}
+
+#[test]
+fn a_refused_grant_is_no_grant_for_that_resource() {
+    let err = grant(
+        &mut Refuses(BusFailure::Denied("no".into())),
+        A,
+        "read",
+        "why",
+    )
+    .unwrap_err();
+    assert!(matches!(&err, Refusal::NoGrant { resource, .. } if resource == A));
+    assert!(err.message(&APP).contains(A));
+}
+
+// --- Reads -----------------------------------------------------------------------------
+
+#[test]
+fn a_bounded_read_takes_an_exact_fit_and_refuses_one_byte_more() {
+    for size in [
+        0,
+        1,
+        READ_CHUNK_BYTES as usize,
+        3 * READ_CHUNK_BYTES as usize + 5,
+    ] {
+        let bytes: Vec<u8> = (0..size).map(|n| n as u8).collect();
+        let mut bus = readable(&bytes);
+        let id = grant(&mut bus, A, "read", "").unwrap();
+        let limit = size as u64;
+        assert_eq!(
+            read_bounded(&mut bus, A, &id, Vec::new(), limit).unwrap(),
+            Some(bytes.clone()),
+            "{size}"
+        );
+        if size > 0 {
+            assert_eq!(
+                read_bounded(&mut bus, A, &id, Vec::new(), limit - 1).unwrap(),
+                None,
+                "{size}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_bounded_read_goes_on_from_what_it_was_given() {
+    let bytes: Vec<u8> = (0..100u8).collect();
+    let mut bus = readable(&bytes);
+    let id = grant(&mut bus, A, "read", "").unwrap();
+    let head = read_at(&mut bus, A, &id, 0, 10).unwrap();
+    assert_eq!(
+        read_bounded(&mut bus, A, &id, head, 100).unwrap(),
+        Some(bytes)
+    );
+    assert_eq!(bus.bytes_served(A), 100, "the head is not read again");
+}
+
+#[test]
+fn every_read_names_a_window_of_at_most_one_chunk() {
+    let mut bus = readable(&vec![7; 5 * READ_CHUNK_BYTES as usize]);
+    let id = grant(&mut bus, A, "read", "").unwrap();
+    read_bounded(&mut bus, A, &id, Vec::new(), 8 * READ_CHUNK_BYTES).unwrap();
+    for call in bus.invokes_on(A) {
+        let Call::Invoke { body, .. } = call else {
+            continue;
+        };
+        let length = body["length"].as_u64().expect("every read names a length");
+        assert!(length <= READ_CHUNK_BYTES, "{body}");
+    }
+}
+
+#[test]
+fn a_counted_read_takes_what_it_returned_off_the_budget() {
+    let mut bus = readable(b"0123456789");
+    let id = grant(&mut bus, A, "read", "").unwrap();
+    let mut left = 32;
+    assert_eq!(
+        read_counted(&mut bus, A, &id, &mut left, 0, 4).unwrap(),
+        b"0123"
+    );
+    assert_eq!(left, 28);
+    // A short answer takes off only what came back.
+    assert_eq!(
+        read_counted(&mut bus, A, &id, &mut left, 8, 16).unwrap(),
+        b"89"
+    );
+    assert_eq!(left, 26);
+    assert_eq!(
+        read_counted(&mut bus, A, &id, &mut left, 10, 4).unwrap(),
+        b""
+    );
+    assert_eq!(left, 26);
+}
+
+#[test]
+#[should_panic(expected = "a read past what the run may read")]
+fn a_counted_read_never_asks_past_what_is_left() {
+    let mut bus = readable(b"0123456789");
+    let id = grant(&mut bus, A, "read", "").unwrap();
+    let mut left = 3;
+    let _ = read_counted(&mut bus, A, &id, &mut left, 0, 4);
+}
+
+// --- The URI check ---------------------------------------------------------------------
+
+#[test]
+fn an_input_uri_names_one_object_under_its_folder() {
+    let prefix = "localhost://Users/self/Pictures/";
+    assert_eq!(check_object_uri(A, prefix), Ok(()));
+    assert_eq!(
+        check_object_uri("localhost://Users/self/Pictures/trip/b.jpg", prefix),
+        Ok(())
+    );
+    for bad in [
+        "localhost://Users/self/Documents/a.png",
+        "localhost://Users/other/Pictures/a.png",
+        "elastos://object/read",
+        "localhost://Users/self/Pictures/",
+        "localhost://Users/self/Pictures/trip/",
+        "localhost://Users/self/Pictures/../.ssh/id",
+        "localhost://Users/self/Pictures/./a.png",
+        "localhost://Users/self/Pictures/a//b.png",
+        "localhost://Users/self/Pictures/a.png?x=1",
+        "localhost://Users/self/Pictures/a.png#x",
+        "localhost://Users/self/Pictures/a\\b.png",
+        "localhost://Users/self/Pictures/a\nb.png",
+    ] {
+        assert!(check_object_uri(bad, prefix).is_err(), "{bad}");
+    }
+}
+
+// --- The input list --------------------------------------------------------------------
+
+// The kit's own literals: no viewer constant is in reach here, and the shelf
+// rules (noun, schema, cap 8, prefix) are what pins "shelf has 9 items, the
+// limit is 8".
+const ALBUM_PREFIX: &str = "localhost://Users/self/Pictures/";
+const SHELF_PREFIX: &str = "localhost://Users/self/Documents/";
+const DOC: &str = "localhost://Users/self/Documents/a.md";
+
+const ALBUM_RULES: ListRules = ListRules {
+    noun: "album",
+    schema: "elastos.photo-viewer.album/v1",
+    limit: 3,
+    prefix: ALBUM_PREFIX,
+    item_fields: &["duration_ms"],
+};
+const SHELF_RULES: ListRules = ListRules {
+    noun: "shelf",
+    schema: "elastos.docs-viewer.shelf/v1",
+    limit: 8,
+    prefix: SHELF_PREFIX,
+    item_fields: &[],
+};
+
+fn album(items: Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "schema": ALBUM_RULES.schema, "items": items })).unwrap()
+}
+
+fn album_uris(bytes: &[u8]) -> Result<Vec<String>, String> {
+    list::parse(bytes, &ALBUM_RULES, |_, uri| Ok(uri.to_string()))
+}
+
+#[test]
+fn a_list_with_an_unknown_top_level_field_is_refused() {
+    let bytes = serde_json::to_vec(&json!({
+        "schema": ALBUM_RULES.schema,
+        "items": [{ "uri": A }],
+        "x": 1,
+    }))
+    .unwrap();
+    assert_eq!(
+        album_uris(&bytes).unwrap_err(),
+        r#"album has unknown field "x""#
+    );
+}
+
+#[test]
+fn a_list_with_another_schema_is_refused() {
+    let bytes = serde_json::to_vec(&json!({
+        "schema": "other/v1",
+        "items": [{ "uri": A }],
+    }))
+    .unwrap();
+    assert_eq!(
+        album_uris(&bytes).unwrap_err(),
+        "album schema must be elastos.photo-viewer.album/v1"
+    );
+}
+
+#[test]
+fn a_list_whose_items_is_not_a_list_is_refused() {
+    let bytes = serde_json::to_vec(&json!({
+        "schema": ALBUM_RULES.schema,
+        "items": 3,
+    }))
+    .unwrap();
+    assert_eq!(
+        album_uris(&bytes).unwrap_err(),
+        "album items must be a list"
+    );
+}
+
+#[test]
+fn a_list_with_no_items_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([]))).unwrap_err(),
+        "album has no items"
+    );
+}
+
+#[test]
+fn a_list_takes_its_cap_and_refuses_one_item_more() {
+    let at_cap: Vec<Value> = (0..SHELF_RULES.limit)
+        .map(|_| json!({ "uri": DOC }))
+        .collect();
+    let bytes =
+        serde_json::to_vec(&json!({ "schema": SHELF_RULES.schema, "items": at_cap })).unwrap();
+    let items = list::parse(&bytes, &SHELF_RULES, |_, uri| Ok(uri.to_string())).unwrap();
+    assert_eq!(items.len(), 8, "the cap is the most items a list may have");
+    let over: Vec<Value> = (0..=SHELF_RULES.limit)
+        .map(|_| json!({ "uri": DOC }))
+        .collect();
+    let bytes =
+        serde_json::to_vec(&json!({ "schema": SHELF_RULES.schema, "items": over })).unwrap();
+    assert_eq!(
+        list::parse(&bytes, &SHELF_RULES, |_, uri| Ok(uri.to_string())).unwrap_err(),
+        "shelf has 9 items, the limit is 8"
+    );
+}
+
+#[test]
+fn an_item_that_is_not_an_object_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([{ "uri": A }, 7]))).unwrap_err(),
+        "album item 1: must be a JSON object"
+    );
+}
+
+#[test]
+fn an_item_with_an_unknown_field_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([{ "uri": A }, { "uri": A, "token": "t" }]))).unwrap_err(),
+        r#"album item 1: unknown field "token""#
+    );
+}
+
+#[test]
+fn an_item_whose_uri_is_not_a_string_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([{ "uri": A }, { "uri": 7 }]))).unwrap_err(),
+        "album item 1: uri must be a string"
+    );
+}
+
+#[test]
+fn an_item_uri_under_another_folder_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([{ "uri": A }, { "uri": DOC }]))).unwrap_err(),
+        "album item 1: uri must start with localhost://Users/self/Pictures/"
+    );
+}
+
+#[test]
+fn an_item_takes_the_fields_its_caller_allows() {
+    let items = list::parse(
+        &album(json!([{ "uri": A, "duration_ms": 5 }])),
+        &ALBUM_RULES,
+        |item, uri| {
+            Ok((
+                uri.to_string(),
+                item.get("duration_ms").and_then(Value::as_u64),
+            ))
+        },
+    )
+    .unwrap();
+    assert_eq!(items, [(A.to_string(), Some(5))]);
+}
+
+// --- Text ------------------------------------------------------------------------------
+
+#[test]
+fn text_is_utf8_with_no_control_character_but_tab_and_line_ends() {
+    assert_eq!(check_whole(b"a\tb\r\nc\n"), Ok("a\tb\r\nc\n"));
+    assert_eq!(
+        check_whole("caf\u{e9} \u{1f600}".as_bytes()),
+        Ok("caf\u{e9} \u{1f600}")
+    );
+    assert_eq!(
+        check_whole(b"\xEF\xBB\xBFtitle"),
+        Ok("title"),
+        "a UTF-8 BOM goes"
+    );
+    assert_eq!(check_whole(b"a\0b"), Err(TextError::Control));
+    assert_eq!(check_whole(b"a\x1bb"), Err(TextError::Control), "escape");
+    assert_eq!(check_whole(b"a\x0cb"), Err(TextError::Control), "form feed");
+    assert_eq!(
+        check_whole("a\u{85}b".as_bytes()),
+        Err(TextError::Control),
+        "C1"
+    );
+    assert_eq!(check_whole(b"a\xffb"), Err(TextError::NotUtf8));
+    assert_eq!(check_whole(b"\xFF\xFEa\0"), Err(TextError::OtherEncoding));
+    assert_eq!(check_whole(b"\xFE\xFF\0a"), Err(TextError::OtherEncoding));
+    assert_eq!(
+        check_whole(b"\x00\x00\xFE\xFF"),
+        Err(TextError::OtherEncoding)
+    );
+}
+
+#[test]
+fn a_head_may_end_inside_a_character_only_if_the_document_goes_on() {
+    let text = "ab\u{e9}".as_bytes();
+    let cut = &text[..text.len() - 1];
+    assert_eq!(check_head(cut, true), Ok(()));
+    assert_eq!(check_head(cut, false), Err(TextError::NotUtf8));
+    assert_eq!(
+        check_head(b"a\xffb", true),
+        Err(TextError::NotUtf8),
+        "bad in the middle"
+    );
+    assert_eq!(check_head(b"ab\0", true), Err(TextError::Control));
+}
+
+#[test]
+fn a_head_in_another_encoding_is_refused() {
+    assert_eq!(
+        check_head(b"\xFF\xFEa", true),
+        Err(TextError::OtherEncoding)
+    );
+}
+
+// --- The fake --------------------------------------------------------------------------
+
+#[test]
+fn the_fake_refuses_bodies_the_localhost_provider_refuses() {
+    let mut bus = FakeBus::default()
+        .object(A, vec![1, 2, 3])
+        .allow(OUT, "write")
+        .allow(A, "read");
+    let write = bus.request(OUT, "write", "").unwrap();
+    let read = bus.request(A, "read", "").unwrap();
+    // The same read without the extra field is taken, so each refusal below
+    // is for its body alone.
+    let good = json!({ "path": A, "offset": 0, "length": 1 });
+    let reply = bus
+        .invoke(A, "read", good.to_string().as_bytes(), &read)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reply.body).unwrap()["status"],
+        "ok"
+    );
+    for (uri, operation, grant, body) in [
+        (
+            OUT,
+            "write",
+            &write,
+            json!({ "path": OUT, "content": "text", "append": false }),
+        ),
+        (OUT, "write", &write, json!({ "path": OUT, "content": [1] })),
+        (A, "read", &read, json!({ "path": A, "offset": 0 })),
+        (
+            A,
+            "read",
+            &read,
+            json!({ "path": A, "offset": 0, "length": 1, "token": "t" }),
+        ),
+    ] {
+        let reply = bus
+            .invoke(uri, operation, body.to_string().as_bytes(), grant)
+            .unwrap();
+        assert_eq!(reply.status, "error", "{body}");
+    }
+}

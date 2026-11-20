@@ -1820,21 +1820,17 @@ fn validate_stored_terminal_state(path: &Path, run: &StoredRun) -> Result<(), Pr
     }
 
     match run.status {
-        RunStatus::Prepared => {
-            if run.backend_state.is_some() {
-                return Err(ProviderFault::corrupt_journal(format!(
-                    "model run journal prepared state retains backend state at {}",
-                    path.display()
-                )));
-            }
+        RunStatus::Prepared if run.backend_state.is_some() => {
+            return Err(ProviderFault::corrupt_journal(format!(
+                "model run journal prepared state retains backend state at {}",
+                path.display()
+            )));
         }
-        RunStatus::Running | RunStatus::Reconciling => {
-            if run.backend_state.is_none() {
-                return Err(ProviderFault::corrupt_journal(format!(
-                    "model run journal running state is missing backend state at {}",
-                    path.display()
-                )));
-            }
+        RunStatus::Running | RunStatus::Reconciling if run.backend_state.is_none() => {
+            return Err(ProviderFault::corrupt_journal(format!(
+                "model run journal running state is missing backend state at {}",
+                path.display()
+            )));
         }
         _ => {}
     }

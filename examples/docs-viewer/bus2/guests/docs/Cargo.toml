@@ -1,0 +1,15 @@
+[package]
+name = "docs-bus2-guest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The resident documents reader, built against the DRAFT elastos:bus@2.0.0 world.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+docs-model = { path = "../../../model" }
+wit-bindgen = { version = "=0.60.0", default-features = false, features = ["macros", "async", "realloc"] }

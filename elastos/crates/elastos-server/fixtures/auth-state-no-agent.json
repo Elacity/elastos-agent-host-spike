@@ -1,0 +1,10 @@
+{
+  "schema": "elastos.auth.state/v1",
+  "challenges": [],
+  "principals": [],
+  "sessions": [],
+  "principal_root_protections": [],
+  "audit": [],
+  "audit_chain": [],
+  "guest_registration_enabled": false
+}

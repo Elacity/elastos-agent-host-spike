@@ -734,4 +734,38 @@ mod tests {
             "Tampered resource must fail signature"
         );
     }
+
+    /// A manifest's `asks` use the Runtime's action words. The manifest crate
+    /// cannot name `Action` (this crate depends on it, not the other way), so
+    /// it spells the six words itself; this test fails if the lists differ.
+    /// The `match` has no wildcard arm: a new `Action` stops it compiling.
+    #[test]
+    fn manifest_ask_actions_are_exactly_the_runtime_actions() {
+        use elastos_common::AskAction;
+        let ask_word = |action: Action| match action {
+            Action::Read => AskAction::Read,
+            Action::Write => AskAction::Write,
+            Action::Execute => AskAction::Execute,
+            Action::Message => AskAction::Message,
+            Action::Delete => AskAction::Delete,
+            Action::Admin => AskAction::Admin,
+        };
+        let runtime_actions = [
+            Action::Read,
+            Action::Write,
+            Action::Execute,
+            Action::Message,
+            Action::Delete,
+            Action::Admin,
+        ];
+        assert_eq!(runtime_actions.len(), AskAction::ALL.len());
+        for (action, expected) in runtime_actions.into_iter().zip(AskAction::ALL) {
+            assert_eq!(ask_word(action), expected);
+            let on_the_wire = serde_json::to_string(&action).unwrap();
+            assert_eq!(on_the_wire, format!("\"{}\"", expected.as_str()));
+            assert_eq!(on_the_wire, serde_json::to_string(&expected).unwrap());
+            let parsed: AskAction = serde_json::from_str(&on_the_wire).unwrap();
+            assert_eq!(parsed, expected);
+        }
+    }
 }

@@ -1,0 +1,13 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: Canvas; color: CanvasText; }
+main { display: grid; grid-template-columns: minmax(10rem, 16rem) 1fr; gap: 1rem; padding: 1rem; max-width: 72rem; margin: 0 auto; }
+nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.25rem; }
+nav button { width: 100%; text-align: start; }
+nav button[aria-current="page"] { font-weight: 600; }
+article { min-width: 0; line-height: 1.5; }
+article p { white-space: pre-wrap; }
+article pre { overflow-x: auto; padding: 0.75rem; background: color-mix(in srgb, CanvasText 6%, Canvas); }
+article blockquote { margin-inline: 0; padding-inline-start: 1rem; border-inline-start: 0.25rem solid color-mix(in srgb, CanvasText 25%, Canvas); }
+#status:empty { display: none; }
+#status, section { grid-column: 1 / -1; }
+#skipped { font-size: 0.875rem; }

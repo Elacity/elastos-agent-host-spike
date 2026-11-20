@@ -1532,18 +1532,18 @@ mod tests {
     /// A5-S3c-0b: Documents resolves the Agent root from the stored record.
     #[test]
     fn a_stored_agents_documents_root_is_under_its_usersai_root() {
-        use crate::auth::r4_fixture::{AGENT_ROOT, ID};
+        use crate::auth::r4_fixture::{AGENT_ID, AGENT_ROOT};
         let data_dir = r6_document_home(crate::auth::PrincipalKind::Agent);
         let rooted = format!(
             "{}/Documents",
             AGENT_ROOT.strip_prefix("localhost://").unwrap()
         );
         let want = rooted_localhost_fs_path(data_dir.path(), &rooted).unwrap();
-        assert_eq!(documents_root(data_dir.path(), ID).unwrap(), want);
+        assert_eq!(documents_root(data_dir.path(), AGENT_ID).unwrap(), want);
     }
 
     fn r6_document_home(kind: crate::auth::PrincipalKind) -> tempfile::TempDir {
-        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT};
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), kind);
         let root = if kind == crate::auth::PrincipalKind::Agent {
@@ -1551,7 +1551,11 @@ mod tests {
         } else {
             HUMAN_ROOT
         };
-        crate::auth::store_test_principal_root_protection_for(dir.path(), ID, root);
+        crate::auth::store_test_principal_root_protection_for(
+            dir.path(),
+            crate::auth::r4_fixture::principal_id(kind),
+            root,
+        );
         dir
     }
 
@@ -1563,7 +1567,8 @@ mod tests {
             (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
         ] {
             let dir = r6_document_home(kind);
-            let result = documents_root(dir.path(), ID).unwrap();
+            let result =
+                documents_root(dir.path(), crate::auth::r4_fixture::principal_id(kind)).unwrap();
             assert_eq!(
                 result,
                 rooted_localhost_fs_path(
@@ -1588,7 +1593,11 @@ mod tests {
             (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
         ] {
             let dir = r6_document_home(kind);
-            let result = documents_create_local(dir.path(), ID, Some("R6"));
+            let result = documents_create_local(
+                dir.path(),
+                crate::auth::r4_fixture::principal_id(kind),
+                Some("R6"),
+            );
             assert!(result.is_ok(), "stored {kind:?} body write: {result:?}");
             assert_eq!(
                 result.unwrap().working_copy_uri,
@@ -1610,8 +1619,17 @@ mod tests {
             (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
         ] {
             let dir = r6_document_home(kind);
-            let created = documents_create_local(dir.path(), ID, Some("R6")).unwrap();
-            let result = documents_load_document(dir.path(), ID, &created.doc_did);
+            let created = documents_create_local(
+                dir.path(),
+                crate::auth::r4_fixture::principal_id(kind),
+                Some("R6"),
+            )
+            .unwrap();
+            let result = documents_load_document(
+                dir.path(),
+                crate::auth::r4_fixture::principal_id(kind),
+                &created.doc_did,
+            );
             assert!(result.is_ok(), "stored {kind:?} body read: {result:?}");
             assert_eq!(
                 result.unwrap().working_copy_uri,

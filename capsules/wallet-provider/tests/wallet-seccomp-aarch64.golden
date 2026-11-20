@@ -1,0 +1,84 @@
+# The wallet provider's final seccomp program on aarch64, one classic-BPF
+# instruction per line: code jt jf k, then a comment naming the syscall or the
+# architecture check. seccomp_wallet_program_equals_its_golden_copy renders the
+# program through the one builder on every OS and requires it to equal these
+# lines. The list is the declared rights plus the measured launch set and the
+# wallet store replace: renameat on aarch64 and rename on x86-64. A change to the
+# filter changes this file in the same diff.
+0x0020  0  0 0x00000004  # load seccomp_data.arch
+0x0015  1  0 0xc00000b7  # arch == AUDIT_ARCH_AARCH64? skip the deny
+0x0006  0  0 0x0005000d  # deny: another audit architecture
+0x0020  0  0 0x00000000  # load seccomp_data.nr
+0x0035  0  1 0x40000000  # nr >= 0x40000000, the x32 space?
+0x0006  0  0 0x0005000d  # deny: an x32 number
+0x0015  0  1 0x00000039  # SYS_close
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x000000dd  # SYS_execve
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000119  # SYS_execveat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x0000005e  # SYS_exit_group
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000030  # SYS_faccessat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000034  # SYS_fchmod
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000053  # SYS_fdatasync
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000050  # SYS_fstat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000052  # SYS_fsync
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x0000002e  # SYS_ftruncate
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x0000003d  # SYS_getdents64
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000116  # SYS_getrandom
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000025  # SYS_linkat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x0000003e  # SYS_lseek
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000022  # SYS_mkdirat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x000000de  # SYS_mmap
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x000000e2  # SYS_mprotect
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x0000004f  # SYS_newfstatat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000038  # SYS_openat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x000001b5  # SYS_openat2
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000049  # SYS_ppoll
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000043  # SYS_pread64
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000044  # SYS_pwrite64
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x0000003f  # SYS_read
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x0000004e  # SYS_readlinkat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000041  # SYS_readv
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000026  # SYS_renameat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000114  # SYS_renameat2
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000086  # SYS_rt_sigaction
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000123  # SYS_statx
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x000000b3  # SYS_sysinfo
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x000000a0  # SYS_uname
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000023  # SYS_unlinkat
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000040  # SYS_write
+0x0006  0  0 0x7fff0000  # allow
+0x0015  0  1 0x00000042  # SYS_writev
+0x0006  0  0 0x7fff0000  # allow
+0x0006  0  0 0x0005000d  # deny: an x32 number

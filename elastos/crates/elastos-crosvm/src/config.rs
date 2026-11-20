@@ -424,6 +424,7 @@ mod tests {
                 memory_mb: 256,
                 cpu_shares: 100,
                 gpu: false,
+                model_tokens: None,
             },
             permissions: Default::default(),
             microvm: Some(MicroVmConfig {
@@ -443,6 +444,7 @@ mod tests {
             window_policy: None,
             model_content: None,
             agent: None,
+            asks: Vec::new(),
             signature: None,
         };
 
@@ -508,6 +510,7 @@ mod tests {
             window_policy: None,
             model_content: None,
             agent: None,
+            asks: Vec::new(),
             signature: None,
         };
 

@@ -117,7 +117,8 @@ assert.ok(gateway.includes("gateway_assistant::principal_root_protected_object_i
 assert.ok(gatewayAssistant.includes("principal_root_protected_object_inventory("));
 assert.ok(gatewayWorkspace.includes('const RELATIVE_PATH: &str = ".AppData/ElastOS/Assistant/workspace-v2.json"'));
 assert.ok(gatewayWorkspace.includes('require_home_launch_token_context(&state.data_dir, &headers, "assistant")'));
-assert.ok(gatewayWorkspace.includes("write_protected_principal_root_object("));
+// R8: the workspace write takes the verified launch root, not an id and a root string.
+assert.ok(gatewayWorkspace.includes("write_protected_principal_root_object_resolved("));
 assert.ok(gatewayWorkspace.includes("#[serde(deny_unknown_fields)]"));
 assert.ok(harnessHost.includes("migrateLegacyWorkspaces(saved.legacy)"), "legacy sources enter the canonical workspace");
 assert.ok(harnessHost.includes("mergeWorkspaceDocuments(lastSnapshot || {}, local, remote || {})"), "conflicts retain both writers");

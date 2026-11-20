@@ -1354,6 +1354,37 @@ fn staged_support_recovers_interrupted_activation_and_preserves_owner_data() {
     }
 }
 
+/// A support folder that is a component capsule keeps the Home's record of
+/// the walk CID of the bytes the transaction verified, so a start after the
+/// update reads an accepted folder.
+#[test]
+fn finished_restart_records_support_capsule_folders() {
+    let fixture = RestartFixture::new();
+    let destination = fixture.data.join("capsules/probe");
+    let manifest = br#"{"schema":"elastos.capsule/v1","version":"0.1.0","name":"probe","role":"app","type":"wasm","entrypoint":"probe.wasm"}"#;
+    let candidate = fixture.root.path().join("candidate-probe");
+    fs::create_dir_all(candidate.join("probe")).unwrap();
+    write_new(&candidate.join("probe/capsule.json"), manifest, 0o644).unwrap();
+    write_new(&candidate.join("probe/probe.wasm"), b"\0asm\x01", 0o644).unwrap();
+    let writer = fixture.writer();
+    prepare_release(&writer);
+    writer
+        .prepare_support(&[(PathBuf::from("capsules"), candidate)])
+        .unwrap();
+    writer.prepare_restart(restart_plan()).unwrap();
+    writer.commit_checked(|| Ok(())).unwrap();
+    let candidate_start = started(&writer, false);
+    writer
+        .record_ready(&candidate_start.generation, CANDIDATE_PID)
+        .unwrap();
+    writer.finish_restart().unwrap();
+    assert_eq!(
+        crate::setup::recorded_install_cid(&fixture.data, &destination),
+        Some(crate::stage_cmd::bundle_cid(&destination).unwrap()),
+        "the finished update leaves the Home's record of the installed folder"
+    );
+}
+
 #[test]
 fn staged_support_refuses_paths_outside_owned_assets_and_overlapping_runtime() {
     for path in [
@@ -1428,4 +1459,202 @@ fn staged_support_removal_of_an_uninstalled_component_keeps_its_parents_absent()
         .unwrap();
     writer.finish_restart().unwrap();
     assert_no_transaction_scratch(&writer);
+}
+
+#[test]
+fn support_copies_preserve_mtime_and_modes() {
+    let fixture = RestartFixture::new();
+    let source = fixture.root.path().join("copy-source");
+    fs::create_dir(&source).unwrap();
+    let file = source.join("module.py");
+    write_new(&file, b"value = 1\n", 0o640).unwrap();
+    let times = fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH);
+    fs::File::open(&file).unwrap().set_times(times).unwrap();
+    fs::File::open(&source).unwrap().set_times(times).unwrap();
+    std::os::unix::fs::symlink("module.py", source.join("alias.py")).unwrap();
+    fs::File::open(&source).unwrap().set_times(times).unwrap();
+    let destination = fixture.root.path().join("copy-destination");
+    support::copy_tree(&source, &destination).unwrap();
+    for relative in ["", "module.py", "alias.py"] {
+        let before = fs::symlink_metadata(source.join(relative)).unwrap();
+        let after = fs::symlink_metadata(destination.join(relative)).unwrap();
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(before.mode(), after.mode());
+    }
+}
+
+#[test]
+fn pending_python_support_recovers_cache_drift_and_cleans_up() {
+    for damage in ["new cache", "old cache", "source", "link", "scratch"] {
+        let fixture = RestartFixture::new();
+        let writer = fixture.writer();
+        let relative = PathBuf::from("libexec/python");
+        let destination = fixture.data.join(&relative);
+        fs::create_dir_all(destination.join("__pycache__")).unwrap();
+        write_new(&destination.join("module.py"), b"old source", 0o644).unwrap();
+        write_new(
+            &destination.join("__pycache__/module.cpython-312.pyc"),
+            b"old cache",
+            0o644,
+        )
+        .unwrap();
+        let candidate = fixture.root.path().join("python-candidate");
+        fs::create_dir(&candidate).unwrap();
+        write_new(&candidate.join("module.py"), b"new source", 0o644).unwrap();
+        prepare_release(&writer);
+        writer.prepare_support(&[(relative, candidate)]).unwrap();
+        writer.prepare_restart(restart_plan()).unwrap();
+        writer.commit_checked(|| Ok(())).unwrap();
+        assert_eq!(
+            fs::read(
+                fixture
+                    .data
+                    .join(support::SCRATCH)
+                    .join("stage-0/module.py")
+            )
+            .unwrap(),
+            b"new source"
+        );
+        assert_eq!(
+            fs::read(
+                fixture
+                    .data
+                    .join(support::SCRATCH)
+                    .join("rollback-0/module.py")
+            )
+            .unwrap(),
+            b"old source"
+        );
+        if damage == "old cache" {
+            writer.restore_for_restart().unwrap();
+            fs::write(
+                destination.join("__pycache__/module.cpython-312.pyc"),
+                b"rewritten cache",
+            )
+            .unwrap();
+        } else if damage == "source" {
+            fs::write(destination.join("module.py"), b"foreign source").unwrap();
+        } else {
+            fs::create_dir(destination.join("__pycache__")).unwrap();
+            let cache = destination.join("__pycache__/module.cpython-312.pyc");
+            if damage == "link" {
+                std::os::unix::fs::symlink("../module.py", cache).unwrap();
+            } else {
+                write_new(&cache, b"generated cache", 0o644).unwrap();
+            }
+        }
+        if damage == "scratch" {
+            fs::write(
+                fixture
+                    .data
+                    .join(support::SCRATCH)
+                    .join("stage-0/module.py"),
+                b"changed scratch source",
+            )
+            .unwrap();
+        }
+        if matches!(damage, "source" | "link" | "scratch") {
+            let before = fixture.snapshot();
+            assert!(writer.restore_for_restart().is_err());
+            assert_eq!(fixture.snapshot(), before);
+            continue;
+        }
+        writer.restore_for_restart().unwrap();
+        writer.verify_support(true).unwrap();
+        assert_eq!(
+            fs::read(destination.join("__pycache__/module.cpython-312.pyc")).unwrap(),
+            b"old cache"
+        );
+        let previous = started(&writer, true);
+        writer
+            .record_ready(&previous.generation, PREVIOUS_PID)
+            .unwrap();
+        writer.finish_restart().unwrap();
+        assert_no_transaction_scratch(&writer);
+        assert!(!fixture.data.join(support::SCRATCH).exists());
+    }
+}
+
+#[test]
+fn ready_python_support_repairs_exact_candidate_then_allows_undo() {
+    for damage in ["cache", "source", "link"] {
+        let fixture = RestartFixture::new();
+        let writer = fixture.writer();
+        let relative = PathBuf::from("libexec/python");
+        let destination = fixture.data.join(&relative);
+        fs::create_dir_all(&destination).unwrap();
+        write_new(&destination.join("module.py"), b"old source", 0o644).unwrap();
+        let original = fixture.root.path().join("python-original");
+        support::copy_tree(&destination, &original).unwrap();
+        let candidate = fixture.root.path().join("python-candidate");
+        fs::create_dir(&candidate).unwrap();
+        write_new(&candidate.join("module.py"), b"new source", 0o644).unwrap();
+        prepare_release(&writer);
+        writer
+            .prepare_support(&[(relative.clone(), candidate)])
+            .unwrap();
+        writer.prepare_restart(restart_plan()).unwrap();
+        writer.commit_checked(|| Ok(())).unwrap();
+        let running = started(&writer, false);
+        writer
+            .record_ready(&running.generation, CANDIDATE_PID)
+            .unwrap();
+        fs::create_dir(destination.join("__pycache__")).unwrap();
+        write_new(
+            &destination.join("__pycache__/module.cpython-312.pyc"),
+            b"cache",
+            0o644,
+        )
+        .unwrap();
+        assert!(
+            writer.verify_support(false).is_err(),
+            "full candidate digest detects cache drift"
+        );
+        if damage == "source" {
+            fs::write(destination.join("module.py"), b"changed source").unwrap();
+        } else if damage == "link" {
+            let cache = destination.join("__pycache__/module.cpython-312.pyc");
+            fs::remove_file(&cache).unwrap();
+            std::os::unix::fs::symlink("../module.py", cache).unwrap();
+        }
+        // The recovery owner has stopped the claimed process before this call.
+        if damage != "cache" {
+            let before = fixture.snapshot();
+            assert!(writer.repair_restart_support(false).is_err());
+            assert_eq!(fixture.snapshot(), before);
+            continue;
+        }
+        writer.repair_restart_support(false).unwrap();
+        writer.verify_support(false).unwrap();
+        writer.finish_restart().unwrap();
+        assert_no_transaction_scratch(&writer);
+
+        // Undo is a new transaction after recovery has retired the pending journal.
+        let files = ReleaseFile::ALL.map(|id| (id, old_bytes(id)));
+        let borrowed = files.each_ref().map(|(id, bytes)| (*id, bytes.as_slice()));
+        writer.prepare(&borrowed).unwrap();
+        writer.prepare_support(&[(relative, original)]).unwrap();
+        writer.commit_checked(|| Ok(())).unwrap();
+        for id in ReleaseFile::ALL {
+            // Undo installs the old bytes as a new candidate. Candidate binaries
+            // receive executable mode 0755, rather than the fixture's old 0750.
+            let mode = if id == ReleaseFile::RuntimeBinary {
+                0o755
+            } else {
+                old_mode(id)
+            };
+            assert!(state_matches(
+                &file_state(&writer.destinations[&id]).unwrap(),
+                Some(&sha256(&old_bytes(id))),
+                Some(mode)
+            ));
+        }
+        assert_eq!(
+            fs::read(destination.join("module.py")).unwrap(),
+            b"old source"
+        );
+        assert!(!destination.join("__pycache__").exists());
+        assert_no_transaction_scratch(&writer);
+        assert!(!fixture.data.join(support::SCRATCH).exists());
+    }
 }

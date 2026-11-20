@@ -177,7 +177,7 @@ async fn test_system_token_can_review_and_reject_wallet_approvals() {
             "reason": "Publish document revision",
             "account_id": "wallet:eip155:20:0xabc",
             "address": "0xabc",
-            "principal_id": context.principal_id.clone(),
+            "principal_id": context.principal_id(),
             "created_at": 10,
             "expires_at": 20
         })]),
@@ -1239,6 +1239,7 @@ fn p1j_t1_token(dir: &std::path::Path, app: &str) -> (String, (String, String)) 
         grant.session_id.clone(),
         Some(grant.proof_binding_id),
         grant.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     let token = issue_home_launch_token_with_context(dir, app, &context).unwrap();
     (token, (ids.principal_id, ids.session_id))

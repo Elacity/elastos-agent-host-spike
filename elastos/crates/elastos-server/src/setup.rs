@@ -16,7 +16,12 @@ use std::process::Command;
 
 mod browser_config;
 pub use browser_config::browser_available;
+pub(crate) use browser_config::linux_host_setup_message;
+pub(crate) use browser_config::repair_browser_host_components_for_open;
+mod browser_linux;
 mod browser_vm_image;
+pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
+pub(crate) use browser_vm_image::verified_seed_identity as verified_browser_vm_seed_identity;
 #[cfg(unix)]
 mod local_model_engine_receipt;
 mod progress;
@@ -32,6 +37,8 @@ const PROVIDER_ICON_SIZES: [u16; 4] = [32, 64, 128, 256];
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct ComponentsManifest {
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
     /// Setup-materialized artifacts: external tools, provider binaries, and
     /// first-party app bundles installed into the runtime data directory.
     pub external: HashMap<String, Component>,
@@ -93,14 +100,17 @@ where
 /// and local-copy strategies.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Component {
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_mb: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_runtime: Option<ProviderRuntime>,
@@ -111,7 +121,9 @@ pub struct Component {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct ComponentCapsuleMetadata {
-    #[serde(default)]
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_path: Option<String>,
     pub platforms: HashMap<String, PlatformInfo>,
 }
@@ -156,6 +168,8 @@ pub enum ProviderRuntimeExecution {
 /// Consumed by supervisor in M2+ (ensure_capsule, launch_capsule).
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CapsuleEntry {
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
     pub cid: String,
     pub sha256: String,
     #[serde(default)]
@@ -168,29 +182,41 @@ pub struct CapsuleEntry {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PlatformInfo {
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
     /// Legacy artifact hint; setup never fetches this URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// IPFS CID for content-addressed downloads (used instead of url).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_path: Option<String>,
     /// Executable path inside a directory-valued extracted bundle.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
     /// Local filesystem path to copy from (for "local-copy" strategy).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Profile {
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub components: Vec<String>,
 }
@@ -237,6 +263,11 @@ pub fn validate_provider_runtime<'a>(
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
+
+/// Explicit Linux Browser opt-in; normal setup keeps the image on demand.
+pub async fn enable_browser() -> anyhow::Result<()> {
+    browser_linux::enable(&data_dir()?, &detect_platform()).await
+}
 
 pub async fn run(
     profile: Option<String>,
@@ -538,6 +569,7 @@ async fn run_with_data_dir(
                 line.failed();
                 return Err(error);
             }
+            record_installed_capsule_folder(&data_dir, &dest);
             changed = true;
         } else if !matches!(binary_install_state, InstallState::Installed) {
             let install_path = match resolve_install_path(comp, Some(platform_info)) {
@@ -555,6 +587,11 @@ async fn run_with_data_dir(
                 write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)
             })
             .await?;
+            if comp.capsule_metadata.is_none() {
+                record_installed_component_folders(&data_dir, comp, &platform, Some(platform_info));
+            } else {
+                record_installed_capsule_folder(&data_dir, &dest);
+            }
             changed = true;
         }
 
@@ -1067,7 +1104,7 @@ fn installed_component_entry(
     })
 }
 
-/// Verify an installed binary whose bytes carry the signed checksum. A binary
+/// Verify an installed program whose bytes carry the signed checksum. A program
 /// extracted from a signed archive is refused: its checksum names the archive.
 pub fn verify_installed_component_binary(
     data_dir: &Path,
@@ -1205,6 +1242,13 @@ fn write_archive_executable_receipt(
 }
 
 fn installed_component_root_for_path(data_dir: &Path, name: &str, path: &Path) -> Option<PathBuf> {
+    // Browser host setup executes this exact release-owned script through Python.
+    if name == "browser-vm-linux-network"
+        && path == data_dir.join("scripts/browser-vm-linux-network.py")
+    {
+        return Some(data_dir.to_path_buf());
+    }
+
     let installed_bin = data_dir.join("bin").join(name);
     if path == installed_bin {
         return Some(data_dir.to_path_buf());
@@ -1489,6 +1533,7 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
     let dest = data_dir.join(install_path);
     download_component(data_dir, &row, &dest, FirstPartyCarrierContext::Runtime).await?;
     write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)?;
+    record_install_cid(data_dir, &dest, &dest);
     drop(admitted);
 
     let installed_manifest = dest.join("capsule.json");
@@ -1573,6 +1618,7 @@ async fn ensure_component_capsule_metadata(
     {
         anyhow::bail!("installed capsule metadata '{name}' failed validation: {reason}");
     }
+    record_installed_capsule_folder(data_dir, &dest);
     Ok(())
 }
 
@@ -1984,25 +2030,7 @@ fn installed_component_capsule_metadata_stale_reason(
     }
     if component.provider_runtime.is_none() {
         // Content metadata describes bytes, not a provider or an execution grant.
-        if manifest.role != elastos_common::CapsuleRole::Content
-            || manifest.capsule_type != elastos_common::CapsuleType::Data
-            || manifest.runtime_abi.is_some()
-            || manifest.execution.is_some()
-            || manifest.bus_contract.is_some()
-            || manifest.wit_world_sha256.is_some()
-            || manifest.viewer.is_some()
-            || manifest.microvm.is_some()
-            || manifest.providers.is_some()
-            || manifest.authority.is_some()
-            || manifest.provides.is_some()
-            || !manifest.requires.is_empty()
-            || !manifest.capabilities.is_empty()
-            || !manifest.interfaces.is_empty()
-            || manifest.permissions.host_process
-            || manifest.permissions.guest_network
-            || !manifest.permissions.storage.is_empty()
-            || !manifest.permissions.messaging.is_empty()
-        {
+        if !manifest.active_fields().is_empty() {
             return Some("capsule metadata must be passive content/data".to_string());
         }
         if let Err(err) = elastos_common::validate_model_content_path(&manifest.entrypoint) {
@@ -2678,6 +2706,179 @@ pub(crate) fn read_artifact_sha256_receipt(dir: &Path) -> std::io::Result<String
 
 fn bare_sha256(checksum: &str) -> &str {
     checksum.strip_prefix("sha256:").unwrap_or(checksum)
+}
+
+/// The file beside the installed capsule folder `dir` that holds the CID the
+/// Runtime's bundle walk gave for that folder when an install wrote it. It
+/// sits outside the folder, so a later walk of the folder names the same bytes.
+pub(crate) fn install_cid_record(dir: &Path) -> anyhow::Result<PathBuf> {
+    let name = folder_name(dir)
+        .ok_or_else(|| anyhow::anyhow!("capsule folder {} has no name", dir.display()))?;
+    let mut record = std::ffi::OsString::from(".");
+    record.push(name);
+    record.push(".elastos-install-cid");
+    if dir.file_name().is_none() {
+        Ok(fs::canonicalize(dir)?.with_file_name(record))
+    } else {
+        Ok(dir.with_file_name(record))
+    }
+}
+
+/// The last name of `dir`, with `.` and a trailing separator resolved, so a
+/// folder named as the current directory still has one.
+fn folder_name(dir: &Path) -> Option<std::ffi::OsString> {
+    fs::canonicalize(dir)
+        .ok()
+        .and_then(|canonical| canonical.file_name().map(|name| name.to_owned()))
+        .or_else(|| dir.file_name().map(|name| name.to_owned()))
+}
+
+/// The Home's own record of installed capsule folders: for each one, its
+/// canonical path and the walk CID its install recorded. The Home reads this
+/// file, not a file beside the folder, so the folder's parent directory alone
+/// cannot name an install.
+fn install_cid_ledger(data_dir: &Path) -> PathBuf {
+    data_dir.join("capsules").join("install-cids.json")
+}
+
+/// The canonical path of `dir`, whether or not it exists yet: a path whose
+/// last name does not exist is keyed under its canonical parent.
+fn canonical_install_folder(dir: &Path) -> Option<PathBuf> {
+    fs::canonicalize(dir).ok().or_else(|| {
+        let parent = fs::canonicalize(dir.parent()?).ok()?;
+        Some(parent.join(dir.file_name()?))
+    })
+}
+
+fn read_install_cid_ledger(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    fs::read_to_string(install_cid_ledger(data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// The CID an install of `dir` recorded in the Home at `data_dir`, matched on
+/// that Home's canonical path for the folder. An absent or unreadable ledger,
+/// and one with no row for the folder, give `None`.
+pub(crate) fn recorded_install_cid(data_dir: &Path, dir: &Path) -> Option<String> {
+    let key = canonical_install_folder(dir)?;
+    read_install_cid_ledger(data_dir)
+        .get(key.to_string_lossy().as_ref())
+        .cloned()
+}
+
+/// Points the Home's ledger row for `dir` at `cid`, or removes the row when
+/// `cid` is `None`. The file is written from a new, randomly named file in one
+/// rename, so a link at the path is replaced, not followed.
+fn write_install_cid_ledger(data_dir: &Path, dir: &Path, cid: Option<&str>) -> anyhow::Result<()> {
+    let path = install_cid_ledger(data_dir);
+    let parent = path.parent().context("install CID ledger has no parent")?;
+    fs::create_dir_all(parent)?;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let _lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(parent.join(".install-cids.lock"))?;
+    if unsafe { libc::flock(_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let key = canonical_install_folder(dir)
+        .context("install CID ledger has no folder key")?
+        .to_string_lossy()
+        .into_owned();
+    let mut entries = read_install_cid_ledger(data_dir);
+    match cid {
+        Some(cid) => entries.insert(key, cid.to_string()),
+        None => entries.remove(&key),
+    };
+    let mut scratch = tempfile::Builder::new()
+        .prefix("install-cids.")
+        .tempfile_in(parent)?;
+    serde_json::to_writer_pretty(&mut scratch, &entries)?;
+    scratch.as_file().sync_all()?;
+    scratch.persist(&path).map_err(|err| err.error)?;
+    sync_path(parent)?;
+    Ok(())
+}
+
+/// Records the walk CID of `walked`, its extracted bytes and receipts, as the
+/// install CID of `dir`, the folder the install places them at, in the Home at
+/// `data_dir`. The install goes on when the record cannot be written, and then
+/// keeps no record.
+pub(crate) fn record_install_cid(data_dir: &Path, walked: &Path, dir: &Path) {
+    if let Err(err) = write_install_cid(data_dir, walked, dir) {
+        eprintln!("  No install CID record for {} ({err:#})", dir.display());
+        if let Ok(record) = install_cid_record(dir) {
+            let _ = fs::remove_file(record);
+        }
+        let _ = write_install_cid_ledger(data_dir, dir, None);
+    }
+}
+
+/// Records the walk CID of an installed component folder after an install wrote
+/// it. A destination that is not a capsule folder keeps no record.
+pub(crate) fn record_installed_capsule_folder(data_dir: &Path, dest: &Path) {
+    if dest.join("capsule.json").is_file() {
+        record_install_cid(data_dir, dest, dest);
+    }
+}
+
+/// Records both folders a component install can write: the artifact at its
+/// install path and the capsule metadata at its own path.
+fn record_installed_component_folders(
+    data_dir: &Path,
+    component: &Component,
+    platform: &str,
+    platform_info: Option<&PlatformInfo>,
+) {
+    if let Some(install_path) = resolve_install_path(component, platform_info) {
+        record_installed_capsule_folder(data_dir, &data_dir.join(install_path));
+    }
+    if let Some(metadata) = component.capsule_metadata.as_ref() {
+        if let Some(metadata_info) =
+            resolve_component_capsule_metadata_platform_info(metadata, platform)
+        {
+            if let Some(install_path) =
+                resolve_component_capsule_metadata_install_path(metadata, Some(metadata_info))
+            {
+                record_installed_capsule_folder(data_dir, &data_dir.join(install_path));
+            }
+        }
+    }
+}
+
+/// Writes the Home's ledger row and the file beside the folder, the Home's
+/// record being the one a start reads. A folder the walk refuses keeps no
+/// record.
+pub(crate) fn write_install_cid(data_dir: &Path, walked: &Path, dir: &Path) -> anyhow::Result<()> {
+    use crate::bundle_admission::BUNDLE_WALK_BUDGET;
+    let record = install_cid_record(dir)?;
+    let bundle = match elastos_bundle_identity::checked_bundle_within(walked, BUNDLE_WALK_BUDGET) {
+        Ok(bundle) => bundle,
+        Err(_) => {
+            match fs::remove_file(&record) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
+                _ => {}
+            }
+            return write_install_cid_ledger(data_dir, dir, None);
+        }
+    };
+    let parent = record
+        .parent()
+        .context("install CID record has no parent")?;
+    let mut prefix = record.file_name().unwrap_or_default().to_os_string();
+    prefix.push(".");
+    let mut scratch = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)?;
+    writeln!(scratch, "{}", bundle.cid())?;
+    scratch.as_file().sync_all()?;
+    scratch.persist(&record).map_err(|err| err.error)?;
+    sync_path(parent)?;
+    write_install_cid_ledger(data_dir, dir, Some(&bundle.cid().to_string()))
 }
 
 fn write_platform_cache_metadata(platform_info: &PlatformInfo, dest: &Path) -> anyhow::Result<()> {
@@ -3884,6 +4085,7 @@ async fn refresh_support(
                 download_component(data_dir, &row, &dest, carrier_context).await?;
                 write_cache_metadata(new_manifest, Some(info), platform, name, &dest)?;
             }
+            record_installed_capsule_folder(data_dir, &dest);
             refreshed.push(name.to_string());
         }
         if item.metadata {
@@ -4929,7 +5131,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};
     use elastos_common::{CapsuleManifest, CapsuleRole};
+    use elastos_compute::providers::ComponentProvider;
+    use elastos_storage::providers::LocalFSProvider;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     fn replacement_manifest(targets: &[(&str, &str)]) -> ComponentsManifest {
         let external: serde_json::Map<_, _> = targets
@@ -6299,6 +6504,7 @@ pub(crate) mod tests {
     fn test_component_install_state() {
         let tmp = tempfile::tempdir().unwrap();
         let comp = Component {
+            extra: Default::default(),
             version: None,
             install_path: Some("bin/test".to_string()),
             repository: None,
@@ -6335,6 +6541,7 @@ pub(crate) mod tests {
         platforms.insert(
             "x86_64-linux".to_string(),
             PlatformInfo {
+                extra: Default::default(),
                 url: None,
                 cid: Some("QmSiteProvider".to_string()),
                 release_path: Some("site-provider-linux-amd64".to_string()),
@@ -6352,6 +6559,7 @@ pub(crate) mod tests {
             },
         );
         let comp = Component {
+            extra: Default::default(),
             version: Some("0.20.0-rc30".to_string()),
             install_path: Some("bin/site-provider".to_string()),
             repository: None,
@@ -6381,6 +6589,7 @@ pub(crate) mod tests {
         let binary = bundle.join("llama-server");
         fs::write(&binary, b"llama-server").unwrap();
         let platform_info = PlatformInfo {
+            extra: Default::default(),
             url: None,
             cid: None,
             release_path: None,
@@ -6794,6 +7003,7 @@ pub(crate) mod tests {
         platforms.insert(
             "linux-amd64".to_string(),
             PlatformInfo {
+                extra: Default::default(),
                 url: None,
                 cid: Some("QmNewHomeCli".to_string()),
                 release_path: Some("home-cli.tar.gz".to_string()),
@@ -6808,6 +7018,7 @@ pub(crate) mod tests {
             },
         );
         let component = Component {
+            extra: Default::default(),
             version: Some("0.1.0".to_string()),
             install_path: Some("capsules/home-cli".to_string()),
             repository: None,
@@ -6855,6 +7066,7 @@ pub(crate) mod tests {
         platforms.insert(
             "linux-amd64".to_string(),
             PlatformInfo {
+                extra: Default::default(),
                 url: None,
                 cid: None,
                 release_path: Some("object-provider-linux-amd64".to_string()),
@@ -6872,6 +7084,7 @@ pub(crate) mod tests {
         capsule_platforms.insert(
             "*".to_string(),
             PlatformInfo {
+                extra: Default::default(),
                 url: None,
                 cid: Some(
                     "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".to_string(),
@@ -6891,6 +7104,7 @@ pub(crate) mod tests {
             },
         );
         Component {
+            extra: Default::default(),
             version: None,
             install_path: Some("bin/object-provider".to_string()),
             repository: None,
@@ -6905,6 +7119,7 @@ pub(crate) mod tests {
                 runtime_only: false,
             }),
             capsule_metadata: Some(ComponentCapsuleMetadata {
+                extra: Default::default(),
                 install_path: Some("capsules/object-provider".to_string()),
                 platforms: capsule_platforms,
             }),
@@ -6973,6 +7188,37 @@ pub(crate) mod tests {
         );
     }
 
+    /// Installed content states no asks: the same metadata that is admitted
+    /// without one is refused as not passive with one, and for that reason,
+    /// not because the ask itself is malformed.
+    #[test]
+    fn installed_content_metadata_with_an_ask_is_not_passive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut component = provider_component_with_capsule_metadata();
+        component.provider_runtime = None;
+        let mut manifest = serde_json::json!({
+            "schema": "elastos.capsule/v1", "name": "kubo", "version": "0.40.1",
+            "role": "content", "type": "data", "projections": ["content"],
+            "entrypoint": "ipfs"
+        });
+        fs::write(tmp.path().join("ipfs"), b"packaged kubo").unwrap();
+        let reason = |manifest: &serde_json::Value| {
+            fs::write(
+                tmp.path().join("capsule.json"),
+                serde_json::to_vec(manifest).unwrap(),
+            )
+            .unwrap();
+            installed_component_capsule_metadata_stale_reason("kubo", &component, tmp.path())
+        };
+        assert_eq!(reason(&manifest), None);
+        manifest["asks"] =
+            serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]);
+        assert_eq!(
+            reason(&manifest).as_deref(),
+            Some("capsule metadata must be passive content/data")
+        );
+    }
+
     #[test]
     fn provider_capsule_metadata_keeps_role_and_icon_admission() {
         let tmp = tempfile::tempdir().unwrap();
@@ -7030,6 +7276,7 @@ pub(crate) mod tests {
         fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
         fs::write(&binary_path, b"object-provider").unwrap();
         let manifest = ComponentsManifest {
+            extra: Default::default(),
             model_catalog: None,
             collaboration_network: None,
             external: HashMap::new(),
@@ -7120,6 +7367,7 @@ pub(crate) mod tests {
         ));
 
         let old_manifest = ComponentsManifest {
+            extra: Default::default(),
             model_catalog: None,
             collaboration_network: None,
             external: HashMap::from([("object-provider".to_string(), old_component)]),
@@ -7127,6 +7375,7 @@ pub(crate) mod tests {
             profiles: HashMap::new(),
         };
         let new_manifest = ComponentsManifest {
+            extra: Default::default(),
             model_catalog: None,
             collaboration_network: None,
             external: HashMap::from([("object-provider".to_string(), new_component)]),
@@ -7153,6 +7402,7 @@ pub(crate) mod tests {
         let mut old_component = new_component.clone();
         old_component.capsule_metadata = None;
         let old_manifest = ComponentsManifest {
+            extra: Default::default(),
             model_catalog: None,
             collaboration_network: None,
             external: HashMap::from([("object-provider".to_string(), old_component)]),
@@ -7160,6 +7410,7 @@ pub(crate) mod tests {
             profiles: HashMap::new(),
         };
         let new_manifest = ComponentsManifest {
+            extra: Default::default(),
             model_catalog: None,
             collaboration_network: None,
             external: HashMap::from([("object-provider".to_string(), new_component)]),
@@ -7341,10 +7592,351 @@ pub(crate) mod tests {
         )
         .unwrap();
 
+        record_install_cid(tmp.path(), &install_root, &install_root);
         let ensure = ensure_capsule_component_for_home_launch(tmp.path(), "marketplace")
             .await
             .unwrap();
         assert_eq!(ensure.status, "installed");
+        // An installed capsule folder keeps the Home's record of its walk CID.
+        let walked = crate::stage_cmd::bundle_cid(&install_root).unwrap();
+        assert_eq!(
+            recorded_install_cid(tmp.path(), &install_root).as_deref(),
+            Some(walked.as_str())
+        );
+        assert_eq!(
+            fs::read(install_root.join("marketplace.wasm")).unwrap(),
+            b"\0asm"
+        );
+    }
+
+    /// A folder named as the current directory still has the record path of
+    /// the folder it names, so a start in that directory can be recorded.
+    #[test]
+    fn install_cid_record_names_a_folder_named_as_the_current_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("capsules/marketplace");
+        fs::create_dir_all(&folder).unwrap();
+        let record = install_cid_record(&folder.join(".")).unwrap();
+        assert_eq!(
+            record,
+            tmp.path().join("capsules/.marketplace.elastos-install-cid")
+        );
+        assert_eq!(
+            install_cid_record(Path::new(".")).unwrap(),
+            install_cid_record(&std::env::current_dir().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn concurrent_install_cid_writes_keep_every_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("capsules")).unwrap();
+        let barrier = std::sync::Barrier::new(32);
+        let data = tmp.path();
+        std::thread::scope(|scope| {
+            for i in 0..32 {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let dir = data.join(format!("capsules/{i}"));
+                    write_install_cid_ledger(data, &dir, Some("cid")).unwrap();
+                });
+            }
+        });
+        assert_eq!(read_install_cid_ledger(tmp.path()).len(), 32);
+    }
+
+    /// A component with one empty `run`, as bytes.
+    fn quiet_component() -> Vec<u8> {
+        wat::parse_str(
+            r#"(component
+              (import "elastos:bus/types@1.0.0" (instance $types
+                (type $error (variant
+                  (case "denied" string) (case "not-found" string) (case "invalid" string)
+                  (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+                (export "bus-error" (type (eq $error)))))
+              (alias export $types "bus-error" (type $bus-error))
+              (core module $m
+                (memory (export "memory") 1)
+                (func (export "run") (result i32) (i32.const 0)))
+              (core instance $i (instantiate $m))
+              (func $run (result (result (error $bus-error)))
+                (canon lift (core func $i "run") (memory $i "memory")))
+              (instance $lifecycle (export "run" (func $run)))
+              (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#,
+        )
+        .expect("component text")
+    }
+
+    fn component_manifest_json(name: &str) -> String {
+        format!(
+            r#"{{
+                "schema": "elastos.capsule/v1",
+                "version": "0.1.0",
+                "name": "{name}",
+                "role": "app",
+                "type": "wasm",
+                "runtime_abi": "elastos.component/v1",
+                "bus_contract": "{}",
+                "wit_world_sha256": "{}",
+                "execution": "component",
+                "projections": ["cli"],
+                "entrypoint": "app.component.wasm"
+            }}"#,
+            elastos_common::ELASTOS_BUS_V1_CONTRACT,
+            elastos_common::elastos_bus_v1_wit_sha256()
+        )
+    }
+
+    /// Write one signed component folder at `dir`: the manifest, the
+    /// entrypoint named by it, and the signature over both.
+    fn signed_component_folder(
+        dir: &Path,
+        name: &str,
+        key: &elastos_runtime::signature::SigningKey,
+    ) -> Vec<u8> {
+        fs::create_dir_all(dir).unwrap();
+        let component = quiet_component();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).unwrap();
+        elastos_runtime::signature::sign_capsule(
+            key,
+            &mut manifest,
+            &elastos_runtime::signature::hash_content(&component),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.join("app.component.wasm"), &component).unwrap();
+        component
+    }
+
+    /// A component the setup install loop writes starts on a Home outside dev
+    /// mode because that install leaves the Home's record of its walk CID.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fresh_setup_install_starts_on_a_non_dev_home() {
+        let _guard = ENV_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let platform = detect_platform();
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[81; 32]);
+        let name = "setup-fresh";
+        let package = tmp.path().join("package");
+        let folder = package.join(name);
+        signed_component_folder(&folder, name, &key);
+        let archive = tmp.path().join("setup-fresh.tar.gz");
+        assert!(Command::new("tar")
+            .args(["czf", archive.to_str().unwrap(), "-C"])
+            .arg(&package)
+            .arg(name)
+            .status()
+            .unwrap()
+            .success());
+        let bytes = fs::read(&archive).unwrap();
+        let (server, serving, info) =
+            carrier_component_download_fixture(&data, "setup-fresh.tar.gz", bytes).await;
+        let mut row = info.clone();
+        row.extract_path = Some(name.to_string());
+        row.install_path = Some(format!("capsules/{name}"));
+        let mut platform_rows = serde_json::Map::new();
+        platform_rows.insert(platform.clone(), serde_json::to_value(&row).unwrap());
+        let mut external = serde_json::Map::new();
+        external.insert(
+            name.to_string(),
+            serde_json::json!({
+                "install_path": format!("capsules/{name}"),
+                "platforms": platform_rows
+            }),
+        );
+        let mut capsules = serde_json::Map::new();
+        capsules.insert(
+            name.to_string(),
+            serde_json::json!({
+                "cid": info.cid.clone().unwrap_or_default(),
+                "sha256": info
+                    .checksum
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim_start_matches("sha256:")
+            }),
+        );
+        let manifest_path = tmp.path().join("components-source.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "external": external, "capsules": capsules, "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let original = std::env::var_os(COMPONENTS_MANIFEST_ENV);
+        std::env::set_var(COMPONENTS_MANIFEST_ENV, &manifest_path);
+
+        let result = run_with_data_dir(
+            data.clone(),
+            None,
+            vec![name.to_string()],
+            vec![],
+            false,
+            false,
+            None,
+        )
+        .await;
+        match original {
+            Some(value) => std::env::set_var(COMPONENTS_MANIFEST_ENV, value),
+            None => std::env::remove_var(COMPONENTS_MANIFEST_ENV),
+        }
+        result.expect("the setup install writes the component folder");
+        server.close().await;
+        serving.await.unwrap();
+
+        let installed = data.join(format!("capsules/{name}"));
+        let walked = crate::stage_cmd::bundle_cid(&installed).unwrap();
+        assert_eq!(
+            recorded_install_cid(&data, &installed).as_deref(),
+            Some(walked.as_str()),
+            "the setup install leaves the Home's record"
+        );
+
+        let storage = Arc::new(LocalFSProvider::new(data.clone()).await.unwrap());
+        let runtime = crate::runtime::Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        );
+        runtime
+            .configure_capsule_admission(
+                &data,
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let (handle, _signer) = runtime
+            .run_local_with_signer(&installed, Vec::new(), None)
+            .await
+            .expect("a component the setup install wrote starts outside dev mode");
+        assert_eq!(handle.manifest.name, name);
+    }
+
+    /// A component already at its install path and without a record gets one
+    /// from the installed path and from a setup run, so it starts on a Home
+    /// outside dev mode.
+    #[tokio::test]
+    async fn an_already_installed_component_keeps_its_prior_record_state() {
+        let _guard = ENV_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let platform = detect_platform();
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[82; 32]);
+        let name = "setup-installed";
+        let folder = data.join(format!("capsules/{name}"));
+        signed_component_folder(&folder, name, &key);
+        let cid = "setup-installed-cid";
+        let sha = "testsha";
+        fs::write(folder.join(CACHED_CID_FILE), format!("{cid}\n")).unwrap();
+        fs::write(folder.join(CACHED_ARTIFACT_SHA_FILE), format!("{sha}\n")).unwrap();
+        let mut platform_rows = serde_json::Map::new();
+        platform_rows.insert(
+            platform.clone(),
+            serde_json::json!({
+                "install_path": format!("capsules/{name}"),
+                "extract_path": name,
+                "cid": cid,
+                "checksum": format!("sha256:{sha}")
+            }),
+        );
+        let mut external = serde_json::Map::new();
+        external.insert(
+            name.to_string(),
+            serde_json::json!({
+                "install_path": format!("capsules/{name}"),
+                "platforms": platform_rows
+            }),
+        );
+        let mut capsules = serde_json::Map::new();
+        capsules.insert(
+            name.to_string(),
+            serde_json::json!({"cid": cid, "sha256": sha}),
+        );
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "external": external, "capsules": capsules, "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            recorded_install_cid(&data, &folder).is_none(),
+            "the folder starts without a record"
+        );
+
+        let ensured = ensure_capsule_component_for_home_launch(&data, name)
+            .await
+            .unwrap();
+        assert_eq!(ensured.status, "installed");
+        let walked = crate::stage_cmd::bundle_cid(&folder).unwrap();
+        assert!(recorded_install_cid(&data, &folder).is_none());
+        record_install_cid(&data, &folder, &folder);
+        assert_eq!(
+            recorded_install_cid(&data, &folder).as_deref(),
+            Some(walked.as_str()),
+            "the installed path keeps the Home's record"
+        );
+
+        // A setup run over a folder it already has keeps the prior record state.
+        write_install_cid_ledger(&data, &folder, None).unwrap();
+        assert!(recorded_install_cid(&data, &folder).is_none());
+        let original = std::env::var_os(COMPONENTS_MANIFEST_ENV);
+        std::env::set_var(COMPONENTS_MANIFEST_ENV, data.join("components.json"));
+        let setup = run_with_data_dir(
+            data.clone(),
+            None,
+            vec![name.to_string()],
+            vec![],
+            false,
+            false,
+            None,
+        )
+        .await;
+        match original {
+            Some(value) => std::env::set_var(COMPONENTS_MANIFEST_ENV, value),
+            None => std::env::remove_var(COMPONENTS_MANIFEST_ENV),
+        }
+        setup.expect("setup skips an already installed component");
+        assert!(recorded_install_cid(&data, &folder).is_none());
+        record_install_cid(&data, &folder, &folder);
+        assert_eq!(
+            recorded_install_cid(&data, &folder).as_deref(),
+            Some(walked.as_str()),
+            "a setup run over an installed component keeps the Home's record"
+        );
+
+        let storage = Arc::new(LocalFSProvider::new(data.clone()).await.unwrap());
+        let runtime = crate::runtime::Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        );
+        runtime
+            .configure_capsule_admission(
+                &data,
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let (handle, _signer) = runtime
+            .run_local_with_signer(&folder, Vec::new(), None)
+            .await
+            .expect("an already installed component starts outside dev mode");
+        assert_eq!(handle.manifest.name, name);
     }
 
     #[test]
@@ -7371,6 +7963,7 @@ pub(crate) mod tests {
         platforms.insert(
             "*".to_string(),
             PlatformInfo {
+                extra: Default::default(),
                 url: None,
                 cid: None,
                 release_path: Some("marketplace.tar.gz".to_string()),
@@ -7385,6 +7978,7 @@ pub(crate) mod tests {
             },
         );
         let component = Component {
+            extra: Default::default(),
             version: None,
             install_path: Some("capsules/marketplace".to_string()),
             repository: None,
@@ -7395,6 +7989,7 @@ pub(crate) mod tests {
             platforms,
         };
         let manifest = ComponentsManifest {
+            extra: Default::default(),
             model_catalog: None,
             collaboration_network: None,
             external: HashMap::new(),
@@ -7452,6 +8047,7 @@ pub(crate) mod tests {
     #[test]
     fn validate_capsule_package_identity_accepts_direct_asset_metadata() {
         let platform_info = PlatformInfo {
+            extra: Default::default(),
             url: None,
             cid: Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".to_string()),
             release_path: Some("marketplace.tar.gz".to_string()),
@@ -7799,6 +8395,128 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_write_installed_manifest_preserves_source_home_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = tmp.path().join("bin/vmlinux");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, b"local-kernel").unwrap();
+        let source: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../components.json")).unwrap();
+        let kubo = source["external"]["kubo"].clone();
+        for platform in ["darwin-arm64", "linux-arm64"] {
+            assert!(
+                kubo["platforms"].get(platform).is_some(),
+                "missing Kubo platform {platform}"
+            );
+            let mut kubo = kubo.clone();
+            kubo["platforms"][platform]["checksum"] =
+                serde_json::json!(format!("sha256:{}", "a".repeat(64)));
+            kubo["platforms"][platform]["size"] = serde_json::json!(12345);
+            kubo["capsule_metadata"] = serde_json::json!({
+                "role": "content",
+                "type": "data",
+                "install_path": "capsules/kubo",
+                "platforms": {platform: {
+                    "checksum": format!("sha256:{}", "b".repeat(64)),
+                    "extract_path": "kubo",
+                    "install_path": "capsules/kubo",
+                    "release_path": format!("kubo-{platform}.tar.gz"),
+                    "size": 37212060
+                }}
+            });
+            let input = serde_json::json!({
+                "schema": source["schema"],
+                "external": {
+                    "kubo": kubo,
+                    "vmlinux": {"platforms": {platform: {
+                        "strategy": "local-copy",
+                        "source": "source/Image",
+                        "install_path": "bin/vmlinux",
+                        "checksum": "sha256:stale",
+                        "size": 1
+                    }}}
+                },
+                // Match stamp-source-home-capsule-metadata.py's Kubo source entry.
+                "capsules": {"kubo": {
+                    "cid": "",
+                    "sha256": "",
+                    "size": 0,
+                    "platforms": [platform],
+                    "install_path": "capsules/kubo",
+                    "entrypoint": "ipfs",
+                    "entrypoint_sha256": format!("sha256:{}", "a".repeat(64)),
+                    "entrypoint_size": 12345,
+                    "runtime_abi": null,
+                    "execution": null,
+                    "bus_contract": null,
+                    "wit_world_sha256": null,
+                    "projections": ["content"],
+                    "role": "content",
+                    "type": "data",
+                    "viewer": null,
+                    "browser_assets": []
+                }},
+                "profiles": {"source-home": {
+                    "components": ["kubo", "vmlinux"]
+                }}
+            });
+            let manifest: ComponentsManifest = serde_json::from_value(input.clone()).unwrap();
+            let stamped = write_installed_manifest(tmp.path(), &manifest, platform).unwrap();
+            assert_eq!(stamped, vec!["vmlinux"]);
+            let installed: serde_json::Value =
+                serde_json::from_slice(&fs::read(tmp.path().join("components.json")).unwrap())
+                    .unwrap();
+            let mut expected = input;
+            expected["external"]["vmlinux"]["platforms"][platform]["checksum"] =
+                serde_json::json!(compute_sha256_checksum(&binary).unwrap());
+            expected["external"]["vmlinux"]["platforms"][platform]["size"] =
+                serde_json::json!(b"local-kernel".len());
+            assert_eq!(installed, expected, "platform {platform}");
+        }
+    }
+
+    #[test]
+    fn test_write_installed_manifest_preserves_kubo_receipt_platform_fields() {
+        let receipt = serde_json::json!({
+            "checksum": format!("sha256:{}", "a".repeat(64)),
+            "extract_path": "kubo",
+            "install_path": "capsules/kubo",
+            "release_path": "kubo-linux-arm64.tar.gz",
+            "size": 37212060
+        });
+        let native = serde_json::json!({
+            "checksum": format!("sha256:{}", "b".repeat(64)),
+            "install_path": "bin/kubo",
+            "release_path": "kubo-linux-arm64",
+            "size": 12345
+        });
+        let manifest: ComponentsManifest = serde_json::from_value(serde_json::json!({
+            "external": {"kubo": {
+                "install_path": "bin/kubo",
+                "platforms": {"linux-arm64": native},
+                "capsule_metadata": {
+                    "install_path": "capsules/kubo",
+                    "platforms": {"linux-arm64": receipt}
+                }
+            }},
+            "profiles": {}
+        }))
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        write_installed_manifest(tmp.path(), &manifest, "linux-arm64").unwrap();
+        let installed: serde_json::Value =
+            serde_json::from_slice(&fs::read(tmp.path().join("components.json")).unwrap()).unwrap();
+        let kubo = &installed["external"]["kubo"];
+        let metadata = &kubo["capsule_metadata"]["platforms"]["linux-arm64"];
+        assert_eq!(
+            metadata.as_object().unwrap().keys().collect::<Vec<_>>(),
+            receipt.as_object().unwrap().keys().collect::<Vec<_>>()
+        );
+        assert_eq!(metadata, &receipt);
+        assert_eq!(kubo["platforms"]["linux-arm64"], native);
+    }
+
+    #[test]
     fn test_write_installed_manifest_stamps_local_copy_checksum() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
@@ -7868,6 +8586,7 @@ pub(crate) mod tests {
         platforms.insert(
             "linux-amd64".to_string(),
             PlatformInfo {
+                extra: Default::default(),
                 url: None,
                 cid: None,
                 release_path: None,
@@ -7885,6 +8604,7 @@ pub(crate) mod tests {
             },
         );
         let comp = Component {
+            extra: Default::default(),
             version: None,
             install_path: Some("bin/vmlinux".to_string()),
             repository: None,
@@ -8329,16 +9049,31 @@ pub(crate) mod tests {
                 .any(|name| name == browser_vm_image::NAME));
         }
         let platforms = &manifest.external[browser_vm_image::NAME].platforms;
-        // Linux ARM64 offers no Browser image until #90; a record names one platform.
-        assert!(!platforms.contains_key("linux-arm64") && !platforms.contains_key("linux-amd64"));
-        let info = &platforms["darwin-arm64"];
-        assert_eq!(info.strategy.as_deref(), Some(browser_vm_image::NAME));
-        assert_eq!(
-            info.install_path.as_deref(),
-            Some(browser_vm_image::INSTALL_PATH)
-        );
-        assert!(info.release_path.as_ref().unwrap().ends_with(".tar.gz"));
+        // Both ARM64 hosts install the one shared guest (#90). A capsule record names
+        // one platform, so each row has its own release_path for the same bytes.
+        assert!(!platforms.contains_key("linux-amd64"));
+        for (platform, release_path) in [
+            ("darwin-arm64", "browser-vm-image-arm64.tar.gz"),
+            ("linux-arm64", "browser-vm-image-linux-arm64.tar.gz"),
+        ] {
+            let info = &platforms[platform];
+            assert_eq!(info.strategy.as_deref(), Some(browser_vm_image::NAME));
+            assert_eq!(
+                info.install_path.as_deref(),
+                Some(browser_vm_image::INSTALL_PATH)
+            );
+            assert_eq!(info.release_path.as_deref(), Some(release_path));
+            assert_eq!(
+                browser_vm_image::component_info(&manifest, platform)
+                    .err()
+                    .expect("an unstamped image row is refused")
+                    .to_string(),
+                "Browser image release package requires a stamped lowercase SHA-256 checksum",
+                "{platform} resolves its own unstamped image row"
+            );
+        }
         assert!(admit_release_components(&manifest, "darwin-arm64").is_err());
+        assert!(admit_release_components(&manifest, "linux-arm64").is_err());
     }
 
     #[test]
@@ -8397,6 +9132,7 @@ pub(crate) mod tests {
     #[test]
     fn verify_checksum_requires_release_artifact_checksum() {
         let info = PlatformInfo {
+            extra: Default::default(),
             url: None,
             cid: None,
             release_path: Some("shell-linux-amd64".to_string()),
@@ -8418,6 +9154,7 @@ pub(crate) mod tests {
     fn verify_checksum_accepts_stamped_release_artifact_checksum() {
         let bytes = b"shell-bytes";
         let info = PlatformInfo {
+            extra: Default::default(),
             url: None,
             cid: None,
             release_path: Some("shell-linux-amd64".to_string()),
@@ -8441,6 +9178,7 @@ pub(crate) mod tests {
     fn release_bytes_must_also_match_the_signed_size() {
         let bytes = b"shell-bytes";
         let info = |size| PlatformInfo {
+            extra: Default::default(),
             url: None,
             cid: None,
             release_path: Some("shell-linux-amd64".to_string()),
@@ -8466,6 +9204,7 @@ pub(crate) mod tests {
     fn release_artifact_checksum_requirement_keeps_dev_escape_hatches() {
         for strategy in ["source-build", "local-copy"] {
             let info = PlatformInfo {
+                extra: Default::default(),
                 url: None,
                 cid: None,
                 release_path: Some("shell-linux-amd64".to_string()),
@@ -8488,6 +9227,7 @@ pub(crate) mod tests {
     async fn download_component_rejects_unstamped_release_artifact_before_fetch() {
         let tmp = tempfile::tempdir().unwrap();
         let info = PlatformInfo {
+            extra: Default::default(),
             url: None,
             cid: None,
             release_path: Some("shell-linux-amd64".to_string()),

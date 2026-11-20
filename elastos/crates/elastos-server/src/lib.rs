@@ -4,10 +4,15 @@
 //! This crate provides the transport layer (HTTP) and binary entry point.
 //! The security-critical runtime logic lives in `elastos-runtime`.
 
+pub(crate) mod agent_admission;
+pub(crate) mod agents;
 pub mod api;
 pub mod auth;
 pub mod binaries;
 pub mod browser_app_hosts;
+pub mod bundle_admission;
+#[cfg(test)]
+mod bundle_start_tests;
 pub(crate) mod capsule_record;
 pub mod carrier;
 pub mod carrier_service;
@@ -40,6 +45,12 @@ pub mod collaboration_release_network;
 pub mod collaboration_startup;
 pub(crate) mod collaboration_transport;
 pub(crate) mod component;
+#[cfg(test)]
+mod start_census_tests;
+// The Runtime's component admission check and its import table, for callers
+// outside this crate: the capsule kit's host tests call them (kit item A2) so
+// there is one owner and no copy to drift.
+pub use component::{validate_component_imports, ALLOWED_BUS_IMPORTS};
 pub mod content;
 pub mod crypto;
 pub mod documents;
@@ -55,9 +66,11 @@ pub mod ipfs;
 pub(crate) mod jev_approval_lens;
 pub mod library;
 pub mod local_http;
+pub(crate) mod model_budget;
 pub mod notifications;
 pub mod operator_control;
 pub mod ownership;
+pub(crate) mod page_launch;
 pub mod protected_content_config;
 pub mod protected_content_runtime;
 pub mod provider_resource;
@@ -69,7 +82,10 @@ pub mod runtime_control;
 pub mod setup;
 pub mod shares;
 pub mod sources;
+pub mod stage_cmd;
 pub mod supervisor;
+#[cfg(test)]
+mod test_clock;
 #[cfg(all(test, unix))]
 mod test_support;
 pub mod update;

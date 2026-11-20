@@ -1,0 +1,88 @@
+{
+  "schema": "elastos.auth.state/v1",
+  "challenges": [],
+  "principals": [
+    {
+      "principal_id": "person:local:4c3e95d6c70aa3673561f8bff2b4f870",
+      "proof_binding_id": "proof:passkey:elastos.elacitylabs.com:fd3b864fa9f8a7924b7599619d8bf2c9",
+      "proof_binding": {
+        "kind": "passkey_web_authn",
+        "subject": "credential-1",
+        "chain_id": null,
+        "verified_at": 10,
+        "passkey": {
+          "credential_id": "credential-1",
+          "public_key": "public-key",
+          "sign_count": 1,
+          "user_verified": true,
+          "origin": "https://elastos.elacitylabs.com",
+          "rp_id": "elastos.elacitylabs.com",
+          "created_at": 10,
+          "last_used_at": 10
+        }
+      },
+      "role": "guest",
+      "localhost_root": "localhost://Users/1a2dfc76f6f51d0d566e1c37",
+      "kind": "human",
+      "created_at": 10,
+      "updated_at": 10
+    }
+  ],
+  "sessions": [
+    {
+      "grant": {
+        "schema": "elastos.auth.session-grant/v1",
+        "grant_id": "grant:older",
+        "session_id": "auth:older",
+        "principal_id": "person:local:4c3e95d6c70aa3673561f8bff2b4f870",
+        "proof_binding_id": "proof:passkey:elastos.elacitylabs.com:fd3b864fa9f8a7924b7599619d8bf2c9",
+        "issued_at": 10,
+        "expires_at": 4000000000,
+        "apps": [
+          "home",
+          "system"
+        ]
+      },
+      "revoked_at": null
+    }
+  ],
+  "principal_root_protections": [],
+  "audit": [
+    {
+      "schema": "elastos.audit.event/v1",
+      "event_id": "audit:test:1",
+      "event_type": "test.audit",
+      "principal_id": "person:local:test",
+      "proof_binding_id": null,
+      "session_id": "session:test",
+      "challenge_id": null,
+      "capsule_id": "system",
+      "result": "allowed",
+      "reason": "test event 1",
+      "occurred_at": 1,
+      "signer_did": "did:key:z6MktZ9Vy8nxp9E14xEixkCxVWSbJqvPiuMRzwfsD5fHfx6B",
+      "signature": "7fbfa372e71af5844978ea207521d96e61e42937f4f2bbf733d36b243cca95053aa6075bd74bcd1da44dc2275cd61ab34b9065d29906fe737740da630a5fe003"
+    }
+  ],
+  "audit_chain": [
+    {
+      "schema": "elastos.audit.chain-link/v1",
+      "sequence": 1,
+      "event_id": "audit:test:1",
+      "previous_hash": "sha256:genesis",
+      "event_hash": "sha256:6a2b432d0d4375df0757800bb384a942f75488a55107fb6826d1f074ba0a1482",
+      "chain_hash": "sha256:d0bdb0fac0d3cee5cfbdca96991a8947323be10da5cc38c86ae65beaa6db8969",
+      "signer_did": "did:key:z6MktZ9Vy8nxp9E14xEixkCxVWSbJqvPiuMRzwfsD5fHfx6B",
+      "signature": "898b32e1faa8d037c39f05f370c221eeffaa5dfd1152072bea26d98a43d8c0661d2ff990d52e3ce571cdf2cc733505470f6668e13027b07a42e9f18efb999505"
+    }
+  ],
+  "audit_chain_state": {
+    "schema": "elastos.audit.chain-state/v1",
+    "activated_at": 1794349674,
+    "head_sequence": 1,
+    "head_hash": "sha256:d0bdb0fac0d3cee5cfbdca96991a8947323be10da5cc38c86ae65beaa6db8969",
+    "signer_did": "did:key:z6MktZ9Vy8nxp9E14xEixkCxVWSbJqvPiuMRzwfsD5fHfx6B",
+    "signature": "3deb22bf4059e60e4fc3e1942a059d599edc6e806e71e03aeb4da441874a8f11230f122532df1375bf98e5e381fb95cd734c0516b59cfaa128976f260c548109"
+  },
+  "guest_registration_enabled": false
+}

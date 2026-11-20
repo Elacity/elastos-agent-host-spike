@@ -1,0 +1,14 @@
+{
+  "schema": "elastos.capsule/v1",
+  "version": "0.1.0",
+  "name": "asks-nothing",
+  "description": "Test-only Component fixture that asks the Runtime for nothing and ends well.",
+  "author": "ElastOS",
+  "role": "app",
+  "type": "wasm",
+  "runtime_abi": "elastos.component/v1",
+  "bus_contract": "elastos:bus@v1",
+  "wit_world_sha256": "7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2",
+  "execution": "component",
+  "entrypoint": "asks-nothing.component.wasm"
+}

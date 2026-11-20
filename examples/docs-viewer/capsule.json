@@ -1,0 +1,26 @@
+{
+  "schema": "elastos.capsule/v1",
+  "name": "docs-viewer",
+  "version": "0.1.0",
+  "description": "Read a shelf of markdown and text documents by grant, check that each is text and within its size, parse it into typed blocks, and write the pages. Read-only; no display of its own.",
+  "author": "local-development",
+  "role": "app",
+  "type": "wasm",
+  "runtime_abi": "elastos.component/v1",
+  "bus_contract": "elastos:bus@v1",
+  "wit_world_sha256": "7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2",
+  "execution": "component",
+  "projections": ["facts"],
+  "entrypoint": "docs-viewer.component.wasm",
+  "permissions": {
+    "storage": [
+      "localhost://Users/self/Documents/*",
+      "localhost://Users/self/.AppData/App/docs-viewer/*"
+    ]
+  },
+  "resources": {
+    "memory_mb": 16,
+    "cpu_shares": 10,
+    "gpu": false
+  }
+}
