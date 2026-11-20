@@ -6480,11 +6480,20 @@ pub(crate) mod tests {
         home.results(agent).join("\n")
     }
 
-    fn model_create_line(request_id: &str, extra: &str) -> String {
-        model_create_line_for(request_id, "offer:fixture", "text.generate", extra)
+    fn model_create_line(home: &ProbeLaunch, agent: &str, request_id: &str, extra: &str) -> String {
+        model_create_line_for(
+            home,
+            agent,
+            request_id,
+            "offer:fixture",
+            "text.generate",
+            extra,
+        )
     }
 
     fn model_create_line_for(
+        home: &ProbeLaunch,
+        agent: &str,
         request_id: &str,
         offer_id: &str,
         operation: &str,
@@ -6497,9 +6506,23 @@ pub(crate) mod tests {
         )
         .unwrap();
         let body = format!(
-            "\",\"offer_id\":\"{offer_id}\",\"operation\":\"{operation}\",\"request_id\":\"{request_id}\",\"input\":{{\"schema\":\"elastos.model.input.text/v1\",\"prompt\":\"hi\"}}{extra},\"pad\":\""
+            "{{\"offer_id\":\"{offer_id}\",\"operation\":\"{operation}\",\"input\":{{\"schema\":\"elastos.model.input.text/v1\",\"prompt\":\"hi with fixture padding\"}},\"request_id\":\"{request_id}\"{extra}}}"
         );
-        format!("invoke\t{resource}\t{resource}\truns_create\texecute\t{body}")
+        let root = home.root(agent);
+        let hash = hex::encode(elastos_runtime::signature::hash_content(body.as_bytes()));
+        let body_uri = format!("{root}/memory/model-create-{hash}.json");
+        let body_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &body_uri).unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            agent,
+            &root,
+            &body_uri,
+            &body_path,
+            body.as_bytes(),
+        )
+        .unwrap();
+        format!("send\t{resource}\t{resource}\truns_create\texecute\t{body_uri}")
     }
 
     async fn run_model_plan(
@@ -6515,7 +6538,7 @@ pub(crate) mod tests {
         lines.extend(
             creates
                 .iter()
-                .map(|(id, extra)| model_create_line(id, extra)),
+                .map(|(id, extra)| model_create_line(home, agent, id, extra)),
         );
         run_model_lines(home, dir, agent, &lines).await
     }
@@ -6577,8 +6600,8 @@ pub(crate) mod tests {
             &[
                 "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t"
                     .into(),
-                model_create_line("request:resident-first", ""),
-                model_create_line("request:resident-second", ""),
+                model_create_line(&home, &agent, "request:resident-first", ""),
+                model_create_line(&home, &agent, "request:resident-second", ""),
             ],
         );
         let launched = home.launch_from(&dir, &agent).await.unwrap().0;
@@ -6627,8 +6650,22 @@ pub(crate) mod tests {
         let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
         let lines = vec![
             "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
-            model_create_line_for("request:swap", "offer:fixture", "wrong.operation", ""),
-            model_create_line_for("request:swap", "offer:large", "text.generate", ""),
+            model_create_line_for(
+                &home,
+                &agent,
+                "request:swap",
+                "offer:fixture",
+                "wrong.operation",
+                "",
+            ),
+            model_create_line_for(
+                &home,
+                &agent,
+                "request:swap",
+                "offer:large",
+                "text.generate",
+                "",
+            ),
         ];
         let outcome = run_model_lines(&home, &dir, &agent, &lines).await;
         assert!(
@@ -6655,7 +6692,7 @@ pub(crate) mod tests {
         }
         let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
         model.raise_revision_after_rejection();
-        let create = model_create_line("request:revision", "");
+        let create = model_create_line(&home, &agent, "request:revision", "");
         let lines = vec![
             "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
             create.clone(),
@@ -6697,7 +6734,10 @@ pub(crate) mod tests {
         }
         let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
         let _ = ask_model(&home, &dir, &agent, None).await;
-        home.plan(&agent, &[model_create_line("request:concurrent", "")]);
+        home.plan(
+            &agent,
+            &[model_create_line(&home, &agent, "request:concurrent", "")],
+        );
         let grants =
             grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
         let (first, second) = tokio::join!(
@@ -6788,10 +6828,15 @@ pub(crate) mod tests {
             &[("request:guest1", forged), ("request:guest2", forged)],
         )
         .await;
-        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+        assert!(
+            outcome.contains("unknown field `model_tokens`"),
+            "{outcome}"
+        );
         let calls = create_calls(&model);
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].get("model_tokens").is_none());
+        assert!(
+            calls.is_empty(),
+            "the unknown field is refused before dispatch"
+        );
     }
 
     /// An admitted agent whose signed manifest asks for no model tokens cannot

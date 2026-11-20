@@ -1251,10 +1251,11 @@ fn reserve_model_create(
     token: &CapabilityToken,
 ) -> Result<serde_json::Value, serde_json::Value> {
     let invalid = |message: &str| resource_error_response("invalid_resource_invoke", message);
+    // The Bus normalizer keeps the request ID in its stamped binding.
     let (Some(offer_id), Some(operation), Some(request_id), Some(input)) = (
         request["offer_id"].as_str(),
         request["operation"].as_str(),
-        request["request_id"].as_str(),
+        request["runtime_binding"]["request_id"].as_str(),
         request.get("input"),
     ) else {
         return Err(invalid(
