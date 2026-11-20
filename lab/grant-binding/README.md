@@ -74,7 +74,9 @@ verifier, no second name parser and no second plant runner.
 
 ## Checks
 
+From `lab/grant-binding`, run:
+
 ```bash
-cargo fmt --manifest-path lab/grant-binding/Cargo.toml -- --check
-cargo test --locked --offline --manifest-path lab/grant-binding/Cargo.toml
+cargo fmt -- --check
+cargo test --locked --offline
 ```

@@ -245,7 +245,7 @@ else
     printf 'launch record contents: \n'
 fi
 printf 'process_isolation rows: process isolation, not capsule isolation; diagnostic results only\n'
-printf 'instance rows: two_instances_overlap_with_separate_grants and instance_grant_does_not_authorise_sibling each run one shared journey; process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9\n'
+printf 'instance row: two_instances_overlap_with_separate_grants checks the shared journey and sibling refusal; process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9\n'
 # The receipt goes to its own folder, made now that the suite has exited and
 # outside every path the suite was given. A folder the suite can write could
 # hold a prepared receipt; this one it never saw.

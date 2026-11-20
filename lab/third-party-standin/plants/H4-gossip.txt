@@ -1,0 +1,9 @@
+id: H4-gossip
+file: elastos/crates/elastos-server/src/carrier.rs
+test: hook4_carrier_wire_limit_uses_are_the_known_set_today
+note: the wire maximum itself
+--- old
+const GOSSIP_WIRE_MESSAGE_MAX_BYTES: usize = 192 * 1024;
+--- new
+const GOSSIP_WIRE_MESSAGE_MAX_BYTES: usize = 191 * 1024;
+--- end
