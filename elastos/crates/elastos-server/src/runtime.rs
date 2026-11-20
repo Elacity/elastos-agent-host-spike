@@ -881,6 +881,11 @@ impl Runtime {
                     capability_manager: host_cap_mgr.clone(),
                     pending_store: host_pending.clone(),
                     capsule_id: capsule_id.to_string(),
+                    // The provider minted this id for the one activation, so
+                    // the Runtime session is the activation, taken here from
+                    // the Runtime's own hostcall and never from the Bus
+                    // identity field the guest reads.
+                    session_id: capsule_id.to_string(),
                     principal_id: principal_id.map(ToOwned::to_owned),
                     manifest_capabilities,
                     data_dir: Some(host_data_dir.clone()),
@@ -4964,6 +4969,7 @@ pub(crate) mod tests {
             capability_manager: capability_manager.clone(),
             pending_store: pending_store.clone(),
             capsule_id: b_session.clone(),
+            session_id: b_session.clone(),
             principal_id: Some(agents[1].clone()),
             manifest_capabilities: manifest.resource_authority_bounds(),
             data_dir: Some(data_dir.clone()),

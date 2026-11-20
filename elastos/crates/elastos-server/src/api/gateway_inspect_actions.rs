@@ -15,6 +15,42 @@ use store::{
     InspectActionRequestRecord, AGENT_PLAN_KIND, INSPECT_ACTION_KIND, INSPECT_ACTION_SCHEMA,
 };
 
+/// The one entry point an agent's Bus submission uses: write the pending
+/// agent plan record and return it. The record's principal is the owner, so
+/// it is the owner's to read and decide; the agent is its requester. Every
+/// identity is the caller's Runtime context; the submitted plan cannot name
+/// one. Nothing here runs a step.
+pub(crate) fn submit_pending_agent_plan(
+    data_dir: &FsPath,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+    plan: &serde_json::Value,
+    now: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let context = agent_plan::AgentPlanContext {
+        principal_id: owner_id,
+        requester_id,
+        capsule_id,
+        session_id,
+    };
+    let record = agent_plan::create_pending_agent_plan_record(data_dir, &context, plan, now)?;
+    Ok(serde_json::json!({
+        "schema": INSPECT_ACTION_SCHEMA,
+        "status": "pending",
+        "request_id": record.request_id,
+        "id": record.id,
+        "operation": record.operation,
+        "request": record.request,
+        "plan": record.plan,
+        "request_binding": record.request_binding,
+        "principal_id": record.principal_id,
+        "requester_id": record.requester_id,
+        "created_at": record.created_at,
+    }))
+}
+
 pub(super) async fn gateway_inspect_action_request(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
@@ -635,6 +671,7 @@ async fn create_inspect_action_request(
         kind: INSPECT_ACTION_KIND.to_string(),
         request_id,
         principal_id: context.principal_id().to_string(),
+        requester_id: None,
         session_id: context.session_id().to_string(),
         id: id.to_string(),
         operation: operation.to_string(),
@@ -738,13 +775,16 @@ mod tests {
     }
 
     const PLAN_PRINCIPAL: &str = "person:owner";
+    const PLAN_REQUESTER: &str = "agent:v2:planrequester";
     const PLAN_CAPSULE: &str = "capsule:agent-host";
+    const PLAN_SESSION: &str = "session:agent-1";
 
     fn plan_context() -> agent_plan::AgentPlanContext<'static> {
         agent_plan::AgentPlanContext {
             principal_id: PLAN_PRINCIPAL,
+            requester_id: PLAN_REQUESTER,
             capsule_id: PLAN_CAPSULE,
-            session_id: "session:agent-1",
+            session_id: PLAN_SESSION,
         }
     }
 
@@ -772,7 +812,12 @@ mod tests {
             None,
             "status",
             ["elastos://availability/status".to_string()],
-            &stored_step(request),
+            &serde_json::json!({
+                "owner": PLAN_PRINCIPAL,
+                "requester": PLAN_REQUESTER,
+                "session": PLAN_SESSION,
+                "step": stored_step(request),
+            }),
         )
     }
 
