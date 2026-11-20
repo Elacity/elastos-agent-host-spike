@@ -177,7 +177,7 @@ mod tests {
                 // The fixed paths and one GPU family regex. Another path fails this equality.
                 assert_eq!(
                     literals,
-                    BTreeSet::from(["/dev/null", "/dev/urandom", "/usr/lib", r"^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"]),
+                    BTreeSet::from(["/dev/null", "/dev/urandom", "/usr/lib", r"^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"]),
                     "{name} fixed paths"
                 );
             } else {
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(
             row.rules,
             [
-                r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#,
+                r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#,
                 r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
                 r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
             ]
@@ -245,16 +245,36 @@ mod tests {
             .strip_prefix("(allow file-read* (regex \"")
             .and_then(|rule| rule.strip_suffix("\"))"))
             .expect("model-gpu must use one regex read rule");
-        let regex = Regex::new(pattern).expect("model-gpu regex must compile");
+        // SBPL parses the double-quoted string before the regex compiler sees it.
+        let mut sbpl_pattern = String::new();
+        let mut chars = pattern.chars();
+        while let Some(character) = chars.next() {
+            if character == '\\' {
+                let escaped = chars.next().expect("complete SBPL string escape");
+                sbpl_pattern.push(match escaped {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+            } else {
+                sbpl_pattern.push(character);
+            }
+        }
+        let regex = Regex::new(&sbpl_pattern).expect("model-gpu regex must compile");
         for path in [
             "/System/Library/Extensions/AGXMetalG17X.bundle",
             "/System/Library/Extensions/AGXMetalG13X.bundle/Contents/Info.plist",
+            "/System/Library/Extensions/AGXMetal13_3.bundle",
+            "/System/Library/Extensions/AGXMetalG15G_B0.bundle",
+            "/System/Library/Extensions/AGXMetalG15G_B0.bundle/Contents/Info.plist",
         ] {
             assert!(regex.is_match(path), "AGXMetal bundle refused: {path}");
         }
         for path in [
             "/System/Library/Extensions/Other.bundle",
             "/System/Library/Extensions/IOGraphicsFamily.kext",
+            "/System/Library/Extensions/AGXMetalG17XXbundle",
             "/System/Library/Extensions/AGXMetalG17X.bundle-extra",
             "/System/Library/Extensions/AGXMetalG17X.bundle-other/Contents",
         ] {

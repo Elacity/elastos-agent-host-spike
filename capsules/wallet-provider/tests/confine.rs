@@ -7518,7 +7518,7 @@ const MODEL_ROOT_READ_RULE: &str = r#"(allow file-read-data (literal "/"))"#;
 fn measured_model_form(form: &str) -> bool {
     if [
         MODEL_ROOT_READ_RULE,
-        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#,
+        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#,
         r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
         r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
         "(allow process-fork)",
@@ -7578,7 +7578,7 @@ const PINNED_RULES: &[(&str, &str)] = &[
     (STARTUP_RULES[0], "startup-root-directory"),
     (STARTUP_RULES[1], "startup-sysctl"),
     (
-        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#,
+        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#,
         "model-gpu",
     ),
     (

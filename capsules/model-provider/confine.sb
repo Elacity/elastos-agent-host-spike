@@ -28,7 +28,7 @@
 
 ;; X4 measured AGXMetalG17X on M5. The AGXMetal bundle family is the narrowest
 ;; rule that also starts the engine on other Apple GPUs; X5 and X6 stay exact.
-(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))
+(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))
 (allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))
 (allow mach-lookup (global-name "com.apple.MTLCompilerService"))
 ;; Probe X2 and proposal rows 2, 4 and 5: process and artifact inputs.
