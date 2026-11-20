@@ -2294,7 +2294,7 @@ class CliFixtureTests(unittest.TestCase):
                     "old": {"version": pinned}, "new": {"version": "0.8.0-alpha.9"},
                     "previous_release": {"version": pinned},
                     "paths": {"m1-install": {"checks": {**refusals, "initial-home": {
-                        "system": {"provider_warnings": {"new": []},
+                        "system": {"did_provider_started": True, "provider_warnings": {"new": []},
                                    "published_system": {"phase": "updated", "from": pinned, "to": "0.8.0-alpha.9"},
                                    "installer_required": {"phase": "failed", "home_kept": True, "support_unchanged": True},
                                    "stages": {"refused": {"current_version": "0.8.0-alpha.9"},
@@ -2339,6 +2339,7 @@ class CliFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "System did not install the release with changed support"):
                 observer.cli_check_result(value, linux)
         faults = {"failed run": lambda value: value.update(status="failed", failure="System did not update"),
+                  "DID helper skipped": lambda value: home(value)["system"].update(did_provider_started=False),
                   "new provider warning": lambda value: home(value)["system"]["provider_warnings"].update(new=["provider refused"]),
                   "same-build hop": lambda value: value.pop("previous_release"),
                   "other old release": lambda value: value["old"].update(version="0.8.0-alpha.7"),

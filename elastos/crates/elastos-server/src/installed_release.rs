@@ -180,6 +180,27 @@ pub(crate) fn read_signed_release(
     repair_version: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     require_no_pending(binary)?;
+    read_signed_release_checked(data, binary, source, repair_version)
+}
+
+/// A controller-claimed Home may read its signed inputs during the update hop.
+/// The ordinary migration reader keeps its pending-recovery fence.
+pub(crate) fn read_signed_release_for_host_start(
+    data: &Path,
+    binary: &Path,
+    source: &TrustedSource,
+    repair_version: bool,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    crate::install_transaction::authorize_host_start(data, binary)?;
+    read_signed_release_checked(data, binary, source, repair_version)
+}
+
+fn read_signed_release_checked(
+    data: &Path,
+    binary: &Path,
+    source: &TrustedSource,
+    repair_version: bool,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     require_current_source(data, source)?;
     let private = consumed_present(data)?;
     let (head, release) = if private {

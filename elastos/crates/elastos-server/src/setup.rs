@@ -1413,8 +1413,9 @@ pub(crate) fn installed_release_signers(
         return Ok(Default::default());
     };
     let binary = fs::canonicalize(&source.install_path)?;
-    let (release, components) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+    let (release, components) = crate::installed_release::read_signed_release_for_host_start(
+        data_dir, &binary, &source, false,
+    )?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
         &source.publisher_dids,

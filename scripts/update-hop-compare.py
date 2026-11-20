@@ -3311,6 +3311,8 @@ def cli_home_system_journey(processes, manifest, home_path, publish, root):
 
     reached("up-to-date", 240, "installed Home sign-up or up-to-date System state failed")
     warnings_before = cli_provider_warnings(home_path)
+    runtime_log = home_path / CLI_DATA / "update-controller/runtime.log"
+    log_before = runtime_log.read_text(errors="replace")
     # The published release's System installs a release whose support changed (#246): it
     # stages it while Home runs, restarts Home once and the page reconnects the same account.
     publish("new")
@@ -3325,6 +3327,10 @@ def cli_home_system_journey(processes, manifest, home_path, publish, root):
     # alpha.6: the updated Runtime refused the installed protected-content providers
     # while System said "up to date". check-result requires `new` to be empty.
     warnings_after = cli_provider_warnings(home_path)
+    log_after = runtime_log.read_text(errors="replace")
+    new_log = log_after[len(log_before):] if log_after.startswith(log_before) else log_after
+    need("did-provider capsule from " in new_log,
+         "the updated Home did not start the DID helper")
     # This source's System refuses a tampered offer: the controller records the failure
     # while staging and the same Home process and generation keep running.
     home_before = {key: cli_private_json(coords_path)[key] for key in ("pid", "generation")}
@@ -3373,6 +3379,7 @@ def cli_home_system_journey(processes, manifest, home_path, publish, root):
             "published_system": {"phase": published["phase"], "from": manifest["old"]["version"],
                                  "to": published["current_version"], "host": published_host},
             "installer_required": installer_required,
+            "did_provider_started": True,
             "provider_warnings": {"before": warnings_before, "after": warnings_after,
                                   "new": sorted(set(warnings_after) - set(warnings_before))}}, browser
 
@@ -3777,6 +3784,8 @@ def cli_check_result(result, platform):
     need(result.get("schema") == "elastos.update-hop.result/v1" and result.get("status") == "passed",
          "update hop failed: " + str(result.get("failure", "status " + str(result.get("status")))))
     home = result["paths"]["m1-install"]["checks"]["initial-home"]
+    need(home["system"].get("did_provider_started") is True,
+         "the updated Home did not start the DID helper")
     new = home["system"]["provider_warnings"]["new"]
     need(not new, "the update added provider warnings: " + "; ".join(new))
     previous = result.get("previous_release")

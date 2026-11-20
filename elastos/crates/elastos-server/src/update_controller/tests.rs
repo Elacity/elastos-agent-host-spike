@@ -4054,6 +4054,15 @@ async fn restart_home_fixture() {
     child::watch_parent().unwrap();
     crate::install_transaction::authorize_host_start(&data, &data.join("installed-runtime"))
         .unwrap();
+    // DID admission reads release signers while the update journal still owns
+    // this Home. The installed update-hop checks the real helper's startup log.
+    if restarting {
+        assert!(
+            crate::binaries::AdmittedProvider::admit(&data, "did-provider")
+                .unwrap()
+                .is_none()
+        );
+    }
     // The signed shell wrapper execs this test harness. Hold the real host lock using
     // the wrapper's admitted identity and this child's PID, rather than current_exe.
     let mut host_lock = OpenOptions::new()
