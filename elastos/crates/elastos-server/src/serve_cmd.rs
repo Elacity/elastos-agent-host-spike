@@ -63,8 +63,8 @@ pub async fn run_serve(
     if let Some(capsule_dir) = capsule_dir {
         let manifest_path = capsule_dir.join("capsule.json");
         if manifest_path.exists() {
-            let manifest_data = tokio::fs::read_to_string(&manifest_path).await?;
-            let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_data)?;
+            let manifest_data = elastos_common::capsule_manifest_file::read(&manifest_path)?;
+            let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&manifest_data)?;
             manifest
                 .validate()
                 .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;

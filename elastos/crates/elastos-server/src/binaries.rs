@@ -241,7 +241,7 @@ impl AdmittedProvider {
         };
         let manifest_path = data_dir.join("capsules").join(key).join("capsule.json");
         let invalid = |err: String| anyhow::anyhow!("cannot admit '{}': {}", key, err);
-        let bytes = std::fs::read(&manifest_path)
+        let bytes = elastos_common::capsule_manifest_file::read(&manifest_path)
             .map_err(|err| invalid(format!("read {}: {err}", manifest_path.display())))?;
         let manifest: CapsuleManifest = serde_json::from_slice(&bytes)
             .map_err(|err| invalid(format!("{}: {err}", manifest_path.display())))?;

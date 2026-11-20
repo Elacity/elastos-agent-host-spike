@@ -1198,21 +1198,23 @@ impl Runtime {
             }
             None => {
                 let manifest_path = path.join("capsule.json");
-                let manifest_data =
-                    tokio::fs::read_to_string(&manifest_path)
-                        .await
-                        .map_err(|e| {
-                            if e.kind() == std::io::ErrorKind::NotFound {
-                                ElastosError::InvalidManifest(format!(
-                                    "capsule.json not found in {}",
-                                    path.display()
-                                ))
-                            } else {
-                                ElastosError::Io(e)
-                            }
-                        })?;
+                let manifest_data = tokio::task::spawn_blocking(move || {
+                    elastos_common::capsule_manifest_file::read(&manifest_path)
+                })
+                .await
+                .map_err(|err| ElastosError::Io(std::io::Error::other(err)))?
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        ElastosError::InvalidManifest(format!(
+                            "capsule.json not found in {}",
+                            path.display()
+                        ))
+                    } else {
+                        ElastosError::Io(e)
+                    }
+                })?;
                 let manifest: CapsuleManifest =
-                    serde_json::from_str(&manifest_data).map_err(|e| {
+                    serde_json::from_slice(&manifest_data).map_err(|e| {
                         ElastosError::InvalidManifest(format!(
                             "Failed to parse capsule.json: {}",
                             e
