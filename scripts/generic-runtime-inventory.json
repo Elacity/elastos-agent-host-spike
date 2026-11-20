@@ -613,6 +613,26 @@
       "slice": 3
     },
     {
+      "file": "elastos/crates/elastos-server/src/loader_census_tests.rs",
+      "name": "custody-provider",
+      "slice": 3
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/loader_census_tests.rs",
+      "name": "decrypt-provider",
+      "slice": 3
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/loader_census_tests.rs",
+      "name": "protect-provider",
+      "slice": 3
+    },
+    {
+      "file": "elastos/crates/elastos-server/src/loader_census_tests.rs",
+      "name": "protected-content",
+      "slice": 3
+    },
+    {
       "file": "elastos/crates/elastos-server/src/main.rs",
       "name": "custody-provider",
       "slice": 3
