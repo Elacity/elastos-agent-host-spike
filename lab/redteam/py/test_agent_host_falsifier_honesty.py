@@ -62,6 +62,7 @@ FIELDS = (("id", str), ("title", str), ("command", str), ("expect", str),
 # One edit of ASK_FILE points the probe at the retired sidecar and the live
 # row goes red: that file's rows are kind and resource, not actions.
 ASK_FILE = "capsule.json"
+PLAN_SUBMIT_RESOURCE = "elastos://inspect/submit_agent_plan"
 ASK_ACTIONS = ("read", "write", "execute", "message", "delete", "admin")
 CAPSULE_SCHEMA = "elastos.capsule/v1"
 MANIFEST_KEYS = set("schema name version description author role type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources".split())
@@ -83,6 +84,7 @@ PROBES = (
     "test_every_edit_old_string_occurs_exactly_once",
     "test_asks_json_conforms_to_schema",
     "test_manifest_asks_conforms_to_schema",
+    "test_plan_submit_ask_is_exact",
     "test_source_pin_matches_snapshot",
     "test_clean_report_pins_commit_and_merge",
     "test_probe_refusal_reasons",
@@ -234,7 +236,8 @@ def asks_problems(read):
 
     The capsule has only its declared manifest fields and schema. ``asks`` is
     a non-empty list of closed resource/action entries. Resources stay under
-    the principal's localhost area, and actions are Runtime ask actions.
+    the principal's localhost area or name the exact plan submit operation.
+    Actions are Runtime ask actions.
     """
     def problem(entry, reason):
         return Problem("asks", entry, ASK_FILE, reason)
@@ -285,11 +288,12 @@ def ask_reason(ask):
     resource = ask["resource"]
     if not isinstance(resource, str) or not resource:
         return f"resource {resource!r} is not a non-empty string"
-    if not resource.startswith("localhost://"):
+    if resource != PLAN_SUBMIT_RESOURCE and not resource.startswith("localhost://"):
         return "resource is not a localhost ask"
-    boundary = manifest_resource_reason(resource)
-    if boundary is not None:
-        return boundary
+    if resource != PLAN_SUBMIT_RESOURCE:
+        boundary = manifest_resource_reason(resource)
+        if boundary is not None:
+            return boundary
     actions = ask["actions"]
     if not isinstance(actions, list):
         return "actions is not a list"
@@ -302,6 +306,8 @@ def ask_reason(ask):
         if action in seen:
             return f"the ask for {resource!r} repeats the action {action!r}"
         seen.add(action)
+    if resource == PLAN_SUBMIT_RESOURCE and actions != ["write"]:
+        return "plan submit ask requires write only"
     return None
 
 
@@ -572,6 +578,19 @@ class AgentHostFalsifierHonesty(unittest.TestCase):
         document["asks"][0]["resource"] = "localhost://Users/other/private/*"
         self.assertEqual(planted({ASK_FILE: json.dumps(document).encode()})["asks"], [Problem(
             "asks", "ask 0", ASK_FILE, "asks users path")])
+
+    def test_plan_submit_ask_is_exact(self):
+        """Only the plan submit resource with write is a valid system ask."""
+        ask = {"resource": PLAN_SUBMIT_RESOURCE, "actions": ["write"]}
+        self.assertIsNone(ask_reason(ask))
+        for changed, expected in (
+            ({"actions": ["read"]}, "plan submit ask requires write only"),
+            ({"actions": ["write", "read"]}, "plan submit ask requires write only"),
+            ({"resource": PLAN_SUBMIT_RESOURCE + "/extra"},
+             "resource is not a localhost ask"),
+        ):
+            with self.subTest(changed=changed):
+                self.assertEqual(ask_reason(dict(ask, **changed)), expected)
 
     def test_source_pin_matches_snapshot(self):
         snapshot = merged_base()[0]
