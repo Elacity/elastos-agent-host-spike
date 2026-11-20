@@ -889,6 +889,15 @@ impl Runtime {
         }
     }
 
+    /// The admitted ceiling held for a running capsule. An attached bridge
+    /// uses this value so a folder selector cannot supply a different manifest.
+    pub fn bridge_bounds_for_capsule(&self, id: &str) -> Option<Vec<AuthorityBound>> {
+        self.bridge_manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|bounds| bounds.get(id).cloned())
+    }
+
     /// Find a compute provider that supports the given capsule type
     fn get_provider(&self, capsule_type: &CapsuleType) -> Option<Arc<dyn ComputeProvider>> {
         self.compute_providers
@@ -3013,6 +3022,12 @@ pub(crate) mod tests {
             .unwrap()
             .insert(id.clone(), 7);
 
+        assert_eq!(
+            runtime.bridge_bounds_for_capsule(&id),
+            Some(handle.manifest.resource_authority_bounds()),
+            "the attached bridge reads the active manifest ceiling"
+        );
+
         let held = ActivationContextHeld::new(&runtime, &handle, component);
         let mut filled = runtime.context_left_for_test(&id).await;
         filled.sort_unstable();
@@ -3033,6 +3048,7 @@ pub(crate) mod tests {
             Vec::<&str>::new(),
             "the one end leaves nothing"
         );
+        assert_eq!(runtime.bridge_bounds_for_capsule(&id), None);
     }
 
     /// The retention the sweeper rows give their activation. The sweeper runs

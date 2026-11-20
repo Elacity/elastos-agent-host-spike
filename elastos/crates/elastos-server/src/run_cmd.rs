@@ -1,4 +1,47 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Route an admitted Component's bus calls through the operator Runtime.
+/// The ceiling comes from the active instance, after bundle admission.
+fn configure_component_bridge(runtime: &Arc<elastos_server::runtime::Runtime>, data_dir: &Path) {
+    let bridge_runtime = Arc::downgrade(runtime);
+    let audit_data_dir = data_dir.to_path_buf();
+    let hostcall_handle = tokio::runtime::Handle::current();
+    let session = tokio::sync::OnceCell::<(String, String)>::new();
+    runtime.set_bridge_hostcall(Arc::new(move |line, capsule_id, principal_id| {
+        let runtime = bridge_runtime
+            .upgrade()
+            .ok_or_else(|| "Component Runtime has ended".to_string())?;
+        let manifest_capabilities = runtime
+            .bridge_bounds_for_capsule(capsule_id)
+            .ok_or_else(|| "Component has no admitted bridge ceiling".to_string())?;
+        let response = hostcall_handle.block_on(async {
+            let (api_url, client_token) = session
+                .get_or_try_init(|| async {
+                    let coords = operator_runtime_coords()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let tokens = crate::runtime_control::attach_to_runtime(&coords)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((coords.api_url, tokens.client_token))
+                })
+                .await?;
+            elastos_server::resource_bridge::handle_remote_request_with_audit_dir(
+                line,
+                api_url,
+                client_token,
+                capsule_id,
+                &manifest_capabilities,
+                principal_id,
+                Some(audit_data_dir.as_path()),
+            )
+            .await
+            .map_err(|error| error.to_string())
+        })?;
+        serde_json::to_string(&response).map_err(|error| error.to_string())
+    }));
+}
 
 pub async fn run_capsule(
     path: Option<PathBuf>,
@@ -221,7 +264,8 @@ async fn is_component_bundle(capsule_dir: &Path) -> anyhow::Result<bool> {
 
 async fn run_staged_component(capsule_dir: &Path, capsule_args: Vec<String>) -> anyhow::Result<()> {
     let data_dir = crate::default_data_dir();
-    let runtime = crate::create_runtime(data_dir.join("storage")).await?;
+    let runtime = Arc::new(crate::create_runtime(data_dir.join("storage")).await?);
+    configure_component_bridge(&runtime, &data_dir);
     let _term_env = crate::capsule_cmd::ScopedTerminalEnv::capture();
     let _saved_termios = crate::runtime_control::enable_host_raw_mode_pub();
     let (handle, _) = elastos_server::stage_cmd::run_staged_folder(
@@ -245,7 +289,9 @@ async fn run_unsigned_development_component(
     capsule_dir: &Path,
     capsule_args: Vec<String>,
 ) -> anyhow::Result<()> {
-    let runtime = crate::create_runtime(crate::default_data_dir().join("storage")).await?;
+    let data_dir = crate::default_data_dir();
+    let runtime = Arc::new(crate::create_runtime(data_dir.join("storage")).await?);
+    configure_component_bridge(&runtime, &data_dir);
     let _term_env = crate::capsule_cmd::ScopedTerminalEnv::capture();
     let _saved_termios = crate::runtime_control::enable_host_raw_mode_pub();
     let handle = runtime
