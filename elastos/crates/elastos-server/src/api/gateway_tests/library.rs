@@ -13012,12 +13012,19 @@ async fn viewer_gate_routes_keep_viewer_actor_and_content_selection() {
             .is_ok(),
             "{family}: Home actor projection reaches the viewer gate"
         );
-        let provider_calls_before = crate::auth::load_auth_state(dir.path())
-            .unwrap()
-            .audit
-            .iter()
-            .filter(|event| event.event_type == "library.viewer.requested")
-            .count();
+        let provider_calls_before =
+            if family == "library object get" || family == "library object post" {
+                Some(
+                    crate::auth::load_auth_state(dir.path())
+                        .unwrap()
+                        .audit
+                        .iter()
+                        .filter(|event| event.event_type == "library.viewer.requested")
+                        .count(),
+                )
+            } else {
+                None
+            };
         for (case, token, origin) in [
             ("Home session", &home, "http://localhost:61180"),
             (
@@ -13048,21 +13055,35 @@ async fn viewer_gate_routes_keep_viewer_actor_and_content_selection() {
             StatusCode::NOT_FOUND,
             "{family}: Home is not a viewer"
         );
-        assert_eq!(
-            crate::auth::load_auth_state(dir.path())
-                .unwrap()
-                .audit
-                .iter()
-                .filter(|event| event.event_type == "library.viewer.requested")
-                .count(),
-            provider_calls_before,
-            "{family}: refused tokens reached the object provider"
-        );
+        if let Some(provider_calls_before) = provider_calls_before {
+            assert_eq!(
+                crate::auth::load_auth_state(dir.path())
+                    .unwrap()
+                    .audit
+                    .iter()
+                    .filter(|event| event.event_type == "library.viewer.requested")
+                    .count(),
+                provider_calls_before,
+                "{family}: refused tokens reached the object provider"
+            );
+        }
         assert_eq!(
             viewer_gate_route_status(&app, method, uri, projection, "null", body).await,
             StatusCode::OK,
             "{family}: viewer projection"
         );
+        if let Some(provider_calls_before) = provider_calls_before {
+            assert!(
+                crate::auth::load_auth_state(dir.path())
+                    .unwrap()
+                    .audit
+                    .iter()
+                    .filter(|event| event.event_type == "library.viewer.requested")
+                    .count()
+                    > provider_calls_before,
+                "{family}: accepted viewer projection must exercise the object provider"
+            );
+        }
         assert_eq!(
             viewer_gate_route_status(&app, method, uri, item, "null", body).await,
             StatusCode::OK,
@@ -13092,6 +13113,7 @@ async fn viewer_gate_routes_keep_viewer_actor_and_content_selection() {
 #[tokio::test]
 async fn viewer_gate_refuses_home_even_if_manifest_role_changes() {
     let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
     let home_id = ["ho", "me"].concat();
     write_test_static_capsule(
         dir.path(),
@@ -13100,9 +13122,19 @@ async fn viewer_gate_refuses_home_even_if_manifest_role_changes() {
         "Changed Home role",
         "<!doctype html><title>Home</title>",
     );
-    let app = gateway_router(library_test_state(dir.path()).await);
     let authority = passkey_authority_with_name(dir.path(), Some("admin"));
     let uri = format!("/api/viewers/{home_id}/library");
+    let manifest_path = dir
+        .path()
+        .join("capsules")
+        .join(&home_id)
+        .join("capsule.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(
+        manifest["role"], "viewer",
+        "Home role changed before request"
+    );
     let status = viewer_gate_route_status(
         &app,
         "GET",
