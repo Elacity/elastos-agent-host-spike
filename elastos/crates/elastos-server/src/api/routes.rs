@@ -1244,7 +1244,10 @@ pub(crate) mod tests {
                     .unwrap()
                     .agent_id
                 })
-                .collect();
+                .collect::<Vec<String>>();
+            for id in &agents {
+                agents::set_active(&data_dir, &caller, id, true, 1).unwrap();
+            }
             // A person's Home launch token is a projection under the Home
             // capsule's authority (`gateway_home_runtime.rs:149`), which is
             // the app the person's sign-in grant authorizes. The Runtime-local
@@ -1346,7 +1349,7 @@ pub(crate) mod tests {
                 proof_binding_id: &record.proof_binding_id,
                 session_id: "session:a5-launch",
             };
-            agents::create(
+            let agent_id = agents::create(
                 &self.data_dir,
                 &caller,
                 &agents::CreateRequest {
@@ -1366,7 +1369,9 @@ pub(crate) mod tests {
                 2,
             )
             .unwrap()
-            .agent_id
+            .agent_id;
+            agents::set_active(&self.data_dir, &caller, &agent_id, true, 2).unwrap();
+            agent_id
         }
 
         /// Writes a signed copy of the probe whose guest spins in `run` and
@@ -2273,8 +2278,8 @@ pub(crate) mod tests {
     /// then each is launched by that stored id through `launch_capsule`. Each
     /// running instance is bound to its own stored id and record, neither
     /// instance is the other agent's id, and both run the one installed host.
-    /// This base has no per-agent "starts off" gate, so create leaves an agent
-    /// launchable.
+    /// A created agent starts off, so the owner turns each one on through
+    /// `POST /api/apps/system/agents/activate` before it launches.
     #[tokio::test]
     async fn two_route_created_ids_one_host() {
         if crate::agents::require_build().is_err() {
@@ -2355,6 +2360,16 @@ pub(crate) mod tests {
             rows[0]["record"]["localhost_root"], rows[1]["record"]["localhost_root"],
             "each stored record owns its own root"
         );
+        for id in [&a_id, &b_id] {
+            let (status, body) = post_system(
+                &app,
+                "/api/apps/system/agents/activate",
+                &token,
+                Some(serde_json::json!({ "agent_id": id, "active": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
 
         let launch_grant = gateway::issue_home_projection_launch_token_with_context(
             &data_dir,
@@ -5674,6 +5689,7 @@ pub(crate) mod tests {
         )
         .unwrap()
         .agent_id;
+        agents::set_active(&data_dir, &caller, &agent, true, 1).unwrap();
 
         // The forged capsule: the stored manifest name and the stored CID in
         // its own `.elastos-cid`, signed by a trusted key, over other code.
