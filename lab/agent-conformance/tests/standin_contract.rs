@@ -37,10 +37,14 @@ fn assert_keys(value: &Value, expected: &[&str], message: &str) {
 /// Changes one payload byte of the signed bundle, so its bytes name another
 /// lab CID and the admitted signature no longer covers it.
 fn change_one_byte(bundle: &SignedBundle) {
-    let asks = bundle.path().join("asks.json");
-    let mut bytes = std::fs::read(&asks).expect("read asks.json");
-    bytes[0] ^= 0x01;
-    std::fs::write(&asks, &bytes).expect("flip one byte of asks.json");
+    let path = bundle.path().join("capsule.json");
+    let mut bytes = std::fs::read(&path).expect("read capsule.json");
+    let at = bytes
+        .windows(b"Journal".len())
+        .position(|window| window == b"Journal")
+        .expect("the manifest description names the journal");
+    bytes[at] ^= 0x20;
+    std::fs::write(&path, &bytes).expect("flip one byte of the manifest description");
 }
 
 fn request_ids(body: &Value) -> BTreeSet<String> {
@@ -1066,18 +1070,11 @@ fn fixture_writer_declares_the_requested_read() {
 }
 
 /// The admitted manifest ask keeps its resource after that manifest changes.
-/// `asks.json` names another resource and is not the ceiling.
 #[test]
 fn admitted_ask_keeps_its_resource_after_the_manifest_changes() {
-    const FILE_RESOURCE: &str = "localhost://Public/resident-instances/from-file.txt";
     let mut standin = StandIn::new();
     let shared = SignedBundle::new();
     declare_asks(&shared, &[(ASK_RESOURCE, "read")]);
-    let asks_path = shared.path().join("asks.json");
-    let file = std::fs::read_to_string(&asks_path).expect("read asks.json");
-    let pointed = file.replacen(ASK_RESOURCE, FILE_RESOURCE, 1);
-    assert_ne!(pointed, file, "asks.json names the admitted resource");
-    std::fs::write(&asks_path, pointed).expect("point asks.json at another resource");
     let session = launched_guest(&mut standin, &shared);
     let manifest = shared.path().join("capsule.json");
     let text = std::fs::read_to_string(&manifest).expect("read capsule.json");
@@ -1095,13 +1092,11 @@ fn admitted_ask_keeps_its_resource_after_the_manifest_changes() {
         Ok(json!({ "status": "pending", "request_id": "request-1" })),
         "the admitted ask keeps the resource from admission"
     );
-    for resource in [FILE_RESOURCE, later.as_str()] {
-        let refused = standin.post_capability_request(owner, &ask(resource));
-        assert!(
-            matches!(&refused, Err((403, reason)) if reason.ends_with(&format!("{resource} read"))),
-            "a later resource is not the admitted ask: {refused:?}"
-        );
-    }
+    let refused = standin.post_capability_request(owner, &ask(&later));
+    assert!(
+        matches!(&refused, Err((403, reason)) if reason.ends_with(&format!("{later} read"))),
+        "a later resource is not the admitted ask: {refused:?}"
+    );
 }
 
 /// M1 check B2. The signed bundle declares one ask: a read of `ASK_RESOURCE`.
@@ -1112,19 +1107,8 @@ const ASK_PATH: &str = "localhost://Users/self/.AppData/Agents/agent-host/tasks/
 const OTHER_PATH: &str = "localhost://Users/self/.AppData/Agents/agent-host/other/journal";
 
 /// Replaces the fixture's asks with exactly `asks`, before signing. The
-/// manifest gets the typed rows. `asks.json` stays in the signed bytes and
-/// is not the ceiling.
+/// manifest gets the typed rows.
 fn declare_asks(shared: &SignedBundle, asks: &[(&str, &str)]) {
-    let listed = asks
-        .iter()
-        .map(|(resource, kind)| json!({ "kind": kind, "resource": resource }))
-        .collect::<Vec<_>>();
-    let file = json!({ "schema": "elastos.agent-host.asks/v1", "asks": listed });
-    std::fs::write(
-        shared.path().join("asks.json"),
-        serde_json::to_vec_pretty(&file).expect("encode the fixture asks"),
-    )
-    .expect("write the fixture asks");
     write_typed_manifest_asks(shared.path(), asks);
 }
 
@@ -1235,8 +1219,6 @@ fn standin_refuses_to_launch_a_bundle_whose_signed_asks_changed() {
         "the stand-in admits the bundle whose signed asks declare the read"
     );
     let manifest_path = shared.path().join("capsule.json");
-    let asks_path = shared.path().join("asks.json");
-    let asks_before = std::fs::read(&asks_path).expect("read asks.json");
     let text = std::fs::read_to_string(&manifest_path).expect("read capsule.json");
     assert_eq!(
         text.matches(ASK_RESOURCE).count(),
@@ -1259,11 +1241,6 @@ fn standin_refuses_to_launch_a_bundle_whose_signed_asks_changed() {
         manifest.asks
     );
     std::fs::write(&manifest_path, &changed).expect("change the declared resource in capsule.json");
-    assert_eq!(
-        std::fs::read(&asks_path).expect("read asks.json"),
-        asks_before,
-        "asks.json stays as signed; the changed ask is the typed manifest ask"
-    );
     let body = json!({ "cid": claimed });
     let launch = standin.post_capsules(Caller::Shell, &body);
     let expected = capsule_identity::Refusal::NameMismatch {
@@ -1273,11 +1250,10 @@ fn standin_refuses_to_launch_a_bundle_whose_signed_asks_changed() {
     }
     .to_string();
     // The changed bytes are the typed ask's resource in capsule.json.
-    // asks.json is unchanged. Every changed byte leaves the bundle under a
-    // new lab CID, so the signature's name check refuses the launch here
-    // (B1's reason). No instance starts carrying the admitted asks, which is
-    // what the request route's check needs; the launch never reaches the
-    // asks compare.
+    // Every changed byte leaves the bundle under a new lab CID, so the
+    // signature's name check refuses the launch here (B1's reason). No
+    // instance starts carrying the admitted asks, which is what the request
+    // route's check needs; the launch never reaches the asks compare.
     assert!(
         matches!(&launch, Err((403, reason)) if reason == &expected),
         "the stand-in refuses changed bytes at launch with the B1 name-mismatch reason: {launch:?}"

@@ -4251,7 +4251,7 @@
     },
     {
       "id": "F-CI35c",
-      "title": "a bundle with no asks.json is handed Some(Vec::new()), not None",
+      "title": "a bundle that asks for nothing is handed Some(Vec::new()), not None",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
