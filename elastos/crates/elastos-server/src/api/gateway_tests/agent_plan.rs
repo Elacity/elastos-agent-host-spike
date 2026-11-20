@@ -180,10 +180,19 @@ fn submit(
             record["request_id"].as_str().unwrap(),
             owner,
             &ctx,
+            &record["request"],
         )
         .unwrap();
     }
     record
+}
+
+async fn grant_admin_for_record(record: &serde_json::Value) {
+    crate::resource_bridge::grant_agent_plan_capability_for_test(
+        record["request_id"].as_str().unwrap(),
+        &record["request"],
+    )
+    .await;
 }
 
 fn approve_body(
@@ -284,15 +293,15 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
-    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
-    let created = submit(
+    let agent_id = crate::agents::tests::plant_for_dispatch(
         dir.path(),
         &owner.principal_id,
-        "agent:v2:plan-requester",
-        read_plan(),
-        51,
+        &owner.principal_id,
     );
+    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), 51);
     let request_id = created["request_id"].as_str().unwrap();
+    grant_admin_for_record(&created).await;
     let card = owner_card(&app, &token, request_id).await;
     assert_eq!(card["request_binding"], created["request_binding"]);
 
@@ -653,15 +662,15 @@ async fn a15r_double_clicks_claim_one_plan() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
-    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
-    let created = submit(
+    let agent_id = crate::agents::tests::plant_for_dispatch(
         dir.path(),
         &owner.principal_id,
-        "agent:v2:plan-requester",
-        read_plan(),
-        81,
+        &owner.principal_id,
     );
+    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), 81);
     let request_id = created["request_id"].as_str().unwrap();
+    grant_admin_for_record(&created).await;
     let card = owner_card(&app, &token, request_id).await;
     let passkey = || {
         step_up_token_for_app_context(
@@ -712,17 +721,17 @@ async fn a15r_dispatch_once_stored_body_receipt_and_audit() {
     let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
     let app = gateway_router(state.clone());
     let owner = passkey_authority(dir.path());
+    let agent_id = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        &owner.principal_id,
+        &owner.principal_id,
+    );
     let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let plan = json!({"steps": [{"scheme": "availability", "operation": "status",
         "request": {"literal": "stored-body"}}]});
-    let created = submit(
-        dir.path(),
-        &owner.principal_id,
-        "agent:v2:requester",
-        plan,
-        91,
-    );
+    let created = submit(dir.path(), &owner.principal_id, &agent_id, plan, 91);
     let request_id = created["request_id"].as_str().unwrap();
+    grant_admin_for_record(&created).await;
     let card = owner_card(&app, &token, request_id).await;
     let passkey = step_up_token_for_app_context(
         dir.path(),
@@ -746,7 +755,7 @@ async fn a15r_dispatch_once_stored_body_receipt_and_audit() {
         dir.path(),
         request_id,
         &owner.principal_id,
-        "agent:v2:requester",
+        &agent_id,
         "capsule:agent-host",
         "session:agent-1",
     )
@@ -777,11 +786,32 @@ async fn approve_plan_for_row(
     requester: &str,
     plan: serde_json::Value,
 ) -> (String, serde_json::Value) {
+    approve_plan_for_row_with_grant(dir, state, requester, plan, true).await
+}
+
+async fn approve_plan_for_row_with_grant(
+    dir: &Path,
+    state: GatewayState,
+    requester: &str,
+    plan: serde_json::Value,
+    admin_grant: bool,
+) -> (String, serde_json::Value) {
     let app = gateway_router(state);
     let owner = passkey_authority(dir);
+    let agent_id = if crate::agents::stored_agent(dir, &owner.principal_id, requester).is_ok() {
+        requester.to_string()
+    } else {
+        crate::agents::tests::plant_for_dispatch(dir, &owner.principal_id, &owner.principal_id)
+    };
     let token = app_token_for_authority(dir, INBOX_CAPSULE_ID, &owner);
-    let created = submit(dir, &owner.principal_id, requester, plan, 190);
+    let created = submit(dir, &owner.principal_id, &agent_id, plan, 190);
     let request_id = created["request_id"].as_str().unwrap();
+    if requester == "agent:narrow" {
+        crate::resource_bridge::narrow_agent_plan_manifest_for_test(request_id);
+    }
+    if admin_grant && created["request"]["scheme"] == "availability" {
+        grant_admin_for_record(&created).await;
+    }
     let card = owner_card(&app, &token, request_id).await;
     let passkey = step_up_token_for_app_context(
         dir,
@@ -811,7 +841,8 @@ async fn a15r_cross_person_zero_provider_calls() {
         crate::auth::RuntimePrincipalRole::Guest,
     );
     let a = passkey_authority(dir.path());
-    let agent = crate::auth::valid_agent::plant_for_owner(dir.path(), &a.principal_id);
+    let agent_id =
+        crate::agents::tests::plant_for_dispatch(dir.path(), &a.principal_id, &a.principal_id);
     let b_uri = format!(
         "{}/Documents/notes.md",
         crate::auth::principal_localhost_root(&b.principal_id)
@@ -822,7 +853,7 @@ async fn a15r_cross_person_zero_provider_calls() {
     let (id, record) = approve_plan_for_row(
         dir.path(),
         state,
-        &agent.principal_id,
+        &agent_id,
         json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
             "path": b_uri,
             "content": [99, 104, 97, 110, 103, 101]
@@ -847,13 +878,30 @@ async fn a15r_cross_person_zero_provider_calls() {
 async fn a15r_protected_root_zero_provider_calls() {
     let dir = tempfile::tempdir().unwrap();
     let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
-    let agent = crate::auth::valid_agent::plant(dir.path());
+    crate::auth::store_test_human_principal(dir.path(), crate::auth::valid_agent::OWNER_ID);
+    let agent_id = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        crate::auth::valid_agent::OWNER_ID,
+        crate::auth::valid_agent::OWNER_ID,
+    );
+    let root = crate::auth::principal_stored_localhost_root(Some(dir.path()), &agent_id).unwrap();
+    let target = format!("{root}/Documents/plan.md");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &target).unwrap();
+    crate::auth::write_principal_root_object(
+        dir.path(),
+        &agent_id,
+        &root,
+        &target,
+        &path,
+        b"already exists",
+    )
+    .unwrap();
     let created = submit(
         dir.path(),
         crate::auth::valid_agent::OWNER_ID,
-        &agent.principal_id,
+        &agent_id,
         json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
-            "path": "localhost://UsersAI/self/Documents/plan.md",
+            "path": target,
             "content": [112, 108, 97, 110], "create_only": true
         }}]}),
         191,
@@ -868,10 +916,12 @@ async fn a15r_protected_root_zero_provider_calls() {
     .await
     .unwrap();
     let record = read_record(dir.path(), id);
-    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["status"], "failed", "{record}");
+    assert_eq!(record["result"]["code"], "provider_result_error");
     assert_eq!(
-        record["result"]["code"],
-        "principal_root_protection_required"
+        crate::auth::read_principal_root_object(dir.path(), &agent_id, &root, &target, &path,)
+            .unwrap(),
+        b"already exists"
     );
     assert!(calls.lock().await.is_empty());
 }
@@ -883,6 +933,151 @@ async fn a15r_manifest_ceiling_zero_provider_calls() {
     let (_, record) = approve_plan_for_row(dir.path(), state, "agent:narrow", read_plan()).await;
     assert_eq!(record["status"], "refused", "{record}");
     assert_eq!(record["result"]["code"], "manifest_capability_denied");
+    assert!(calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_shared_resource_requires_admin_grant() {
+    for granted in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+        let app = gateway_router(state);
+        let admin = passkey_authority(dir.path());
+        let owner = passkey_authority_with_name_role(
+            dir.path(),
+            Some("Agent owner"),
+            crate::auth::RuntimePrincipalRole::Guest,
+        );
+        let agent_id = crate::agents::tests::plant_for_dispatch(
+            dir.path(),
+            &owner.principal_id,
+            &admin.principal_id,
+        );
+        let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+        let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), 199);
+        if granted {
+            grant_admin_for_record(&created).await;
+        }
+        let id = created["request_id"].as_str().unwrap();
+        let card = owner_card(&app, &token, id).await;
+        let passkey = step_up_token_for_app_context(
+            dir.path(),
+            INBOX_CAPSULE_ID,
+            &token,
+            "agent_plan.approve",
+            &json!({"request_id": id}),
+        );
+        let (status, body) = post_action(
+            &app,
+            &token,
+            approve_body(id, &card["request_binding"], Some(&passkey)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let record = read_record(dir.path(), id);
+        if granted {
+            assert_eq!(record["status"], "completed", "{record}");
+            assert_eq!(calls.lock().await.len(), 1);
+        } else {
+            assert_eq!(record["status"], "refused", "{record}");
+            assert_eq!(record["result"]["code"], "needs_admin_grant");
+            assert!(calls.lock().await.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn a15r_agent_standing_rechecked_at_dispatch() {
+    for disable in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+        let owner = passkey_authority(dir.path());
+        let agent_id = crate::agents::tests::plant_for_dispatch(
+            dir.path(),
+            &owner.principal_id,
+            &owner.principal_id,
+        );
+        let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), 201);
+        grant_admin_for_record(&created).await;
+        let id = created["request_id"].as_str().unwrap();
+        set_approved(dir.path(), id);
+        crate::agents::tests::stop_dispatch_agent(
+            dir.path(),
+            &owner.principal_id,
+            &agent_id,
+            disable,
+        );
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state,
+            &dispatch_context(&owner.principal_id),
+            id,
+        )
+        .await
+        .unwrap();
+        let record = read_record(dir.path(), id);
+        assert_eq!(record["status"], "refused", "{record}");
+        assert_eq!(record["result"]["code"], "agent_inactive");
+        assert!(calls.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a15r_approved_own_root_write_completes_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let owner = passkey_authority(dir.path());
+    let agent_id = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        &owner.principal_id,
+        &owner.principal_id,
+    );
+    let root = crate::auth::principal_stored_localhost_root(Some(dir.path()), &agent_id).unwrap();
+    let target = format!("{root}/Documents/approved.md");
+    let app = gateway_router(state.clone());
+    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let created = submit(
+        dir.path(),
+        &owner.principal_id,
+        &agent_id,
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": target, "content": [112, 108, 97, 110]
+        }}]}),
+        200,
+    );
+    let id = created["request_id"].as_str().unwrap();
+    let card = owner_card(&app, &token, id).await;
+    let passkey = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({"request_id": id}),
+    );
+    let (status, body) = post_action(
+        &app,
+        &token,
+        approve_body(id, &card["request_binding"], Some(&passkey)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(read_record(dir.path(), id)["status"], "completed");
+    assert!(crate::resource_bridge::own_root_token_replay_refused_for_test(id).await);
+    assert!(calls.lock().await.is_empty());
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &target).unwrap();
+    assert_eq!(
+        crate::auth::read_principal_root_object(dir.path(), &agent_id, &root, &target, &path,)
+            .unwrap(),
+        b"plan"
+    );
+    assert!(
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state,
+            &dispatch_context(&owner.principal_id),
+            id,
+        )
+        .await
+        .is_err()
+    );
     assert!(calls.lock().await.is_empty());
 }
 
@@ -933,16 +1128,23 @@ async fn a15r_unapproved_zero_provider_calls() {
 async fn a15r_replay_zero_after_restart_and_cancelled_request() {
     let dir = tempfile::tempdir().unwrap();
     let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    crate::auth::store_test_human_principal(dir.path(), crate::auth::valid_agent::OWNER_ID);
+    let agent_id = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        crate::auth::valid_agent::OWNER_ID,
+        crate::auth::valid_agent::OWNER_ID,
+    );
     let created = submit(
         dir.path(),
-        "person:owner",
-        "agent:requester",
+        crate::auth::valid_agent::OWNER_ID,
+        &agent_id,
         read_plan(),
         93,
     );
     let id = created["request_id"].as_str().unwrap();
+    grant_admin_for_record(&created).await;
     set_approved(dir.path(), id);
-    let context = dispatch_context("person:owner");
+    let context = dispatch_context(crate::auth::valid_agent::OWNER_ID);
     super::gateway_inspect_actions::dispatch_approved_agent_plan(&state, &context, id)
         .await
         .unwrap();
@@ -958,13 +1160,14 @@ async fn a15r_replay_zero_after_restart_and_cancelled_request() {
 
     let unknown = submit(
         dir.path(),
-        "person:owner",
-        "agent:requester",
+        crate::auth::valid_agent::OWNER_ID,
+        &agent_id,
         json!({"steps": [{"scheme": "availability", "operation": "status",
             "request": {"hang": true}}]}),
         94,
     );
     let unknown_id = unknown["request_id"].as_str().unwrap();
+    grant_admin_for_record(&unknown).await;
     set_approved(dir.path(), unknown_id);
     let id_for_task = unknown_id.to_string();
     let state_for_task = state.clone();

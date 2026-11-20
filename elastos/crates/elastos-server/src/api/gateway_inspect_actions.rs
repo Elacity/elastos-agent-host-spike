@@ -441,10 +441,6 @@ pub(super) async fn dispatch_approved_agent_plan(
     context: &HomeLaunchTokenContext,
     request_id: &str,
 ) -> anyhow::Result<String> {
-    state
-        .provider_registry
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("agent plan provider registry unavailable"))?;
     let record = match store::claim_approved_agent_plan_for_dispatch(
         &state.data_dir,
         request_id,
@@ -453,7 +449,7 @@ pub(super) async fn dispatch_approved_agent_plan(
     ) {
         Ok(record) => record,
         Err(err) => {
-            if err.to_string().contains("binding or gate changed") {
+            if err.is::<store::AgentPlanClaimStale>() {
                 let record = read_inspect_action_record(&state.data_dir, request_id)?;
                 append_agent_plan_dispatch_audit(&state.data_dir, &record, "stale")?;
             }
@@ -465,8 +461,8 @@ pub(super) async fn dispatch_approved_agent_plan(
         settle_agent_plan_dispatch(
             &data_dir,
             record,
-            "unknown",
-            serde_json::json!({"status": "unknown", "code": "claim_audit_error"}),
+            "not_sent",
+            serde_json::json!({"status": "not_sent", "code": "claim_audit_error"}),
         )?;
         return Err(err);
     }
@@ -487,7 +483,9 @@ pub(super) async fn dispatch_approved_agent_plan(
         let (status, result) = match response {
             Ok(response)
                 if response["type"] == "resource_result"
-                    && response["result"]["status"] == "ok" =>
+                    && response["result"]["status"]
+                        .as_str()
+                        .is_none_or(|status| status == "ok") =>
             {
                 ("completed", response["result"].clone())
             }
@@ -538,6 +536,7 @@ fn append_agent_plan_dispatch_audit(
         "completed" => "agent_plan.dispatch.completed",
         "failed" => "agent_plan.dispatch.failed",
         "refused" => "agent_plan.dispatch.refused",
+        "not_sent" => "agent_plan.dispatch.not_sent",
         "stale" => "agent_plan.dispatch.stale",
         _ => "agent_plan.dispatch.unknown",
     };

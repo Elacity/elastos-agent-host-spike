@@ -4,6 +4,68 @@
 use super::*;
 use serde_json::{json, Value};
 
+static DISPATCH_FIXTURES: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn dispatch_fixture_enabled(data_dir: &Path) -> bool {
+    DISPATCH_FIXTURES
+        .get()
+        .is_some_and(|homes| homes.lock().unwrap().contains(data_dir))
+}
+
+pub(crate) fn plant_for_dispatch(data_dir: &Path, owner_id: &str, admin_id: &str) -> String {
+    crate::auth::store_test_principal_root_protection(data_dir, owner_id);
+    make_admin(data_dir, admin_id);
+    let admin = crate::auth::stored_principal_record(data_dir, admin_id)
+        .unwrap()
+        .unwrap();
+    let admin_caller = Caller {
+        principal_id: admin_id,
+        proof_binding_id: &admin.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    set_enabled_in_any_build(data_dir, &admin_caller, true, 9).unwrap();
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let owner_caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    let id = create_in_any_build(
+        data_dir,
+        &owner_caller,
+        &request("request-dispatch"),
+        admit,
+        10,
+    )
+    .unwrap()
+    .agent_id;
+    DISPATCH_FIXTURES
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(data_dir.to_path_buf());
+    id
+}
+
+pub(crate) fn stop_dispatch_agent(data_dir: &Path, owner_id: &str, agent_id: &str, disable: bool) {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    if disable {
+        set_enabled_in_any_build(data_dir, &caller, false, 20).unwrap();
+    } else {
+        retire_in_any_build(data_dir, &caller, agent_id, 20).unwrap();
+    }
+}
+
 #[path = "frozen_audit_v2_0_1.rs"]
 mod frozen_audit;
 

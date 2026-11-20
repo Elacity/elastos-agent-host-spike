@@ -183,6 +183,17 @@ pub(super) fn claim_pending_agent_plan_for_owner(
 
 /// A durable one-way claim. A stranded dispatching record has an unknown
 /// outcome and cannot be sent again after a restart.
+#[derive(Debug)]
+pub(super) struct AgentPlanClaimStale;
+
+impl std::fmt::Display for AgentPlanClaimStale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("agent plan binding or gate changed before dispatch")
+    }
+}
+
+impl std::error::Error for AgentPlanClaimStale {}
+
 pub(super) fn claim_approved_agent_plan_for_dispatch(
     data_dir: &Path,
     request_id: &str,
@@ -215,7 +226,7 @@ pub(super) fn claim_approved_agent_plan_for_dispatch(
         record.error = Some("agent plan binding or gate changed before dispatch".to_string());
         record.updated_at = updated_at;
         write_inspect_action_record_unlocked(data_dir, &record)?;
-        anyhow::bail!("agent plan binding or gate changed before dispatch");
+        return Err(AgentPlanClaimStale.into());
     }
     record.status = "dispatching".to_string();
     record.updated_at = updated_at;

@@ -327,11 +327,41 @@ pub struct BridgeContext {
 struct AgentPlanDispatchAuthority {
     owner_id: String,
     context: BridgeContext,
+    scheme: String,
+    operation: String,
+    body_hash: Vec<u8>,
 }
 
 static AGENT_PLAN_DISPATCH_AUTHORITIES: OnceLock<
     Mutex<HashMap<String, AgentPlanDispatchAuthority>>,
 > = OnceLock::new();
+
+#[cfg(test)]
+type AgentPlanOneUseTokens = Mutex<HashMap<String, (Arc<CapabilityManager>, CapabilityToken)>>;
+
+#[cfg(test)]
+static AGENT_PLAN_ONE_USE_TOKENS: OnceLock<AgentPlanOneUseTokens> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) async fn own_root_token_replay_refused_for_test(request_id: &str) -> bool {
+    let token = AGENT_PLAN_ONE_USE_TOKENS
+        .get()
+        .and_then(|tokens| tokens.lock().unwrap().remove(request_id));
+    let Some((manager, token)) = token else {
+        return false;
+    };
+    token.constraints().max_uses() == Some(1)
+        && manager
+            .validate(
+                &token,
+                token.capsule(),
+                token.action(),
+                token.resource(),
+                None,
+            )
+            .await
+            .is_err()
+}
 
 fn plan_authorities() -> &'static Mutex<HashMap<String, AgentPlanDispatchAuthority>> {
     AGENT_PLAN_DISPATCH_AUTHORITIES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -341,7 +371,9 @@ pub(crate) fn retain_agent_plan_dispatch_authority(
     request_id: &str,
     owner_id: &str,
     context: &BridgeContext,
+    step: &serde_json::Value,
 ) -> Result<()> {
+    let body_hash = Sha256::digest(serde_json::to_vec(&step["request"])?).to_vec();
     let mut authorities = plan_authorities()
         .lock()
         .map_err(|_| anyhow::anyhow!("agent plan authority lock is poisoned"))?;
@@ -350,6 +382,9 @@ pub(crate) fn retain_agent_plan_dispatch_authority(
         AgentPlanDispatchAuthority {
             owner_id: owner_id.to_string(),
             context: context.clone(),
+            scheme: step["scheme"].as_str().unwrap_or_default().to_string(),
+            operation: step["operation"].as_str().unwrap_or_default().to_string(),
+            body_hash,
         },
     );
     Ok(())
@@ -359,6 +394,70 @@ pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
     if let Ok(mut authorities) = plan_authorities().lock() {
         authorities.retain(|_, held| held.context.capsule_id != capsule_id);
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn grant_agent_plan_capability_for_test(
+    request_id: &str,
+    step: &serde_json::Value,
+) {
+    let (manager, store, capsule_id, principal_id, data_dir) = {
+        let authorities = plan_authorities().lock().unwrap();
+        let held = authorities.get(request_id).unwrap();
+        (
+            held.context.capability_manager.clone(),
+            held.context.pending_store.clone(),
+            held.context.capsule_id.clone(),
+            held.context.principal_id.clone(),
+            held.context.data_dir.clone(),
+        )
+    };
+    let scheme = step["scheme"].as_str().unwrap();
+    let operation = step["operation"].as_str().unwrap();
+    let body = &step["request"];
+    let uri = build_capability_resource(scheme, operation, body).unwrap();
+    let dispatch = resource_invoke_dispatch(
+        &serde_json::json!({"uri": uri, "operation": operation, "body": body}),
+        principal_id.as_deref(),
+        data_dir.as_deref(),
+    )
+    .unwrap();
+    let resource = ResourceId::new(&dispatch.resource);
+    let pending = store
+        .create_request(
+            elastos_runtime::session::SessionId(capsule_id.clone()),
+            resource.clone(),
+            dispatch.required_action,
+        )
+        .await;
+    let token = manager.grant(
+        &capsule_id,
+        resource,
+        dispatch.required_action,
+        elastos_runtime::capability::TokenConstraints::default(),
+        None,
+    );
+    store
+        .grant_request(
+            pending.id.as_str(),
+            token,
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+pub(crate) fn narrow_agent_plan_manifest_for_test(request_id: &str) {
+    let mut authorities = plan_authorities().lock().unwrap();
+    authorities
+        .get_mut(request_id)
+        .unwrap()
+        .context
+        .manifest_capabilities = vec![AuthorityBound {
+        resource: "elastos://did/*".to_string(),
+        actions: None,
+    }];
 }
 
 /// Submit an approved stored step through the same normalization, authority
@@ -391,6 +490,16 @@ pub(crate) async fn dispatch_agent_plan_step(
     let scheme = step["scheme"].as_str().unwrap_or_default();
     let operation = step["operation"].as_str().unwrap_or_default();
     let body = &step["request"];
+    if scheme != held.scheme
+        || operation != held.operation
+        || Sha256::digest(serde_json::to_vec(body).unwrap_or_default()).as_slice() != held.body_hash
+    {
+        return resource_error_response("admission_mismatch", "agent plan step changed");
+    }
+    match acting_agent_owner(data_dir, requester_id) {
+        Ok(current_owner) if current_owner == owner_id => {}
+        _ => return resource_error_response("agent_inactive", "agent can no longer dispatch"),
+    }
     let uri = match build_capability_resource(scheme, operation, body) {
         Ok(uri) => uri,
         Err(_) => return resource_error_response("invalid_step", "agent plan step is invalid"),
@@ -410,15 +519,60 @@ pub(crate) async fn dispatch_agent_plan_step(
             )
         }
     };
-    // Approval grants exactly the resource and action derived by the bridge.
-    // The bridge still validates the token and every other authority at send.
-    let token = ctx.capability_manager.grant(
-        &ctx.capsule_id,
-        ResourceId::new(&dispatch.resource),
-        dispatch.required_action,
-        elastos_runtime::capability::TokenConstraints::default(),
-        None,
-    );
+    let own_root = crate::auth::principal_stored_localhost_root(Some(data_dir), requester_id)
+        .ok()
+        .is_some_and(|root| {
+            dispatch.scheme == "localhost"
+                && (dispatch.resource == root || dispatch.resource.starts_with(&format!("{root}/")))
+        });
+    let token = if own_root {
+        // The retained record binds this one-use grant to its exact approved
+        // scheme, operation and body hash; the bridge consumes it on send.
+        let token = ctx.capability_manager.grant(
+            &ctx.capsule_id,
+            ResourceId::new(&dispatch.resource),
+            dispatch.required_action,
+            elastos_runtime::capability::TokenConstraints::new(0, false, None, Some(1)),
+            None,
+        );
+        #[cfg(test)]
+        AGENT_PLAN_ONE_USE_TOKENS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .insert(
+                request_id.to_string(),
+                (ctx.capability_manager.clone(), token.clone()),
+            );
+        token
+    } else {
+        let mut granted = None;
+        for request in ctx.pending_store.list_requests().await {
+            if request.session_id.0 != ctx.capsule_id {
+                continue;
+            }
+            let Some(token) = request.granted_token() else {
+                continue;
+            };
+            if token.action() == dispatch.required_action
+                && ResourceId::new(&dispatch.resource).matches(token.resource())
+                && ctx
+                    .capability_manager
+                    .can_still_validate_for_caller(token, &ctx.capsule_id)
+                    .await
+            {
+                granted = Some(token.clone());
+                break;
+            }
+        }
+        let Some(token) = granted else {
+            return resource_error_response(
+                "needs_admin_grant",
+                "agent needs an admin capability grant for this resource",
+            );
+        };
+        token
+    };
     let request = serde_json::json!({
         "uri": uri,
         "operation": operation,
@@ -980,9 +1134,12 @@ fn submit_agent_plan_response(
     ) {
         Ok(record) => {
             let request_id = record["request_id"].as_str().unwrap_or_default();
-            if let Err(err) =
-                retain_agent_plan_dispatch_authority(request_id, &owner_id, bridge_ctx)
-            {
+            if let Err(err) = retain_agent_plan_dispatch_authority(
+                request_id,
+                &owner_id,
+                bridge_ctx,
+                &record["request"],
+            ) {
                 return resource_error_response("submit_agent_plan_refused", &err.to_string());
             }
             serde_json::json!({
