@@ -7093,13 +7093,19 @@ mod tests {
             .expect("the agent host manifest validates");
         assert_eq!(
             manifest.resource_authority_bounds(),
-            vec![elastos_common::AuthorityBound {
-                resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
-                actions: Some(vec![
-                    elastos_common::AskAction::Write,
-                    elastos_common::AskAction::Read,
-                ]),
-            }]
+            vec![
+                elastos_common::AuthorityBound {
+                    resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
+                    actions: Some(vec![
+                        elastos_common::AskAction::Write,
+                        elastos_common::AskAction::Read,
+                    ]),
+                },
+                elastos_common::AuthorityBound {
+                    resource: "elastos://inspect/submit_agent_plan".to_string(),
+                    actions: Some(vec![elastos_common::AskAction::Write]),
+                },
+            ]
         );
         let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
         ctx.manifest_capabilities = manifest.resource_authority_bounds();
@@ -8022,6 +8028,54 @@ mod tests {
         assert!(
             ctx.pending_store.list_pending().await.is_empty(),
             "a submission asks for no grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn a15r_june_plan_stores_and_shows_the_document_step_bytes() {
+        let Some((home, ctx, provider, _requester, owner)) = submit_agent_plan_context().await
+        else {
+            return assert_refused_without_agents_built().await;
+        };
+        // Agent Host's observed "two lines" edit replaces "two" with "three".
+        let step = serde_json::json!({
+            "scheme": "localhost",
+            "operation": "write",
+            "request": {
+                "path": "localhost://Users/self/Documents/note.txt",
+                "content": b"three lines",
+            },
+        });
+        let proposed = serde_json::to_vec(&step).unwrap();
+        let plan = serde_json::json!({"steps": [step]});
+        let response = submit_with_write(&ctx, 81, &plan).await;
+        let data = &response["response"]["result"]["data"];
+        assert_eq!(data["status"], "pending", "{response}");
+        let request_id = data["request_id"].as_str().unwrap();
+        let stored = read_submit_record(home.path(), request_id);
+        assert_eq!(serde_json::to_vec(&stored["request"]).unwrap(), proposed);
+        let cards = crate::api::gateway::inbox_request_entries_for_test(
+            home.path(),
+            &owner,
+            Some(&home.owner.proof_binding_id),
+            crate::auth::PrincipalKind::Human,
+        )
+        .await;
+        let (_, kind, body) = cards
+            .iter()
+            .find(|(_, kind, _)| kind == "agent_plan")
+            .unwrap();
+        assert_eq!(kind, "agent_plan");
+        let shown = body
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Step 1: ")
+            .unwrap();
+        assert_eq!(shown.as_bytes(), proposed);
+        assert!(
+            provider.requests().await.is_empty(),
+            "preview has no effect"
         );
     }
 
