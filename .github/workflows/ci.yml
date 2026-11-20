@@ -508,7 +508,10 @@ jobs:
           cargo test --locked --lib
           cargo test --locked --test standin_contract
       - name: prepare stand-in probe component
-        run: bash scripts/build-component-capsule.sh lab/agent-conformance/probe
+        run: |
+          bash scripts/build-component-capsule.sh lab/agent-conformance/probe
+          # The effects rows build the elastos binary offline; fetch its workspace first.
+          cargo fetch --locked --manifest-path elastos/Cargo.toml
       # Rong's re-check gate (CI-LS1, 29 Oct): the stand-in effects journeys, plan approval,
       # and the model-provider process tests that include the stand-in must build on Linux.
       # The cleanup census runs the operator's lsof at /usr/sbin/lsof (src/census.rs); Ubuntu ships /usr/bin/lsof.
