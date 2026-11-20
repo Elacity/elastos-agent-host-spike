@@ -519,11 +519,7 @@ jobs:
         run: test -x /usr/sbin/lsof || sudo ln -s "$(command -v lsof)" /usr/sbin/lsof
       - name: stand-in effects journeys
         working-directory: lab/agent-conformance
-        run: |
-          cargo test --locked --test effects standin_
-          cargo test --locked --test effects cancelled_instance_settles_with_reason_sibling_completes
-          cargo test --locked --test effects killed_worker_settlement_recorded_without_retry
-          cargo test --locked --test effects two_instances_overlap_with_separate_grants
+        run: cargo test --locked --test effects standin_
       - name: stand-in sibling rule falsifier rows
         working-directory: lab/agent-conformance
         run: |
@@ -547,6 +543,41 @@ jobs:
       - name: model-provider process tests build
         working-directory: capsules/model-provider
         run: cargo test --locked --test process --no-run
+
+  lab-operator-effects-macos:
+    name: lab-operator-effects-macos
+    runs-on: macos-15
+    timeout-minutes: 45
+    needs: fork-gate
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - name: prepare operator probe and offline Runtime inputs
+        run: |
+          bash scripts/build-component-capsule.sh lab/agent-conformance/probe
+          cargo fetch --locked --manifest-path elastos/Cargo.toml
+      - name: operator effects journeys
+        working-directory: lab/agent-conformance
+        run: |
+          set -euo pipefail
+          for name in \
+            cancelled_instance_settles_with_reason_sibling_completes \
+            killed_worker_settlement_recorded_without_retry \
+            two_instances_overlap_with_separate_grants
+          do
+            log="${RUNNER_TEMP}/operator-effects-${name}.log"
+            cargo test --locked --test effects "$name" -- --exact | tee "$log"
+            grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
+              || { echo "::error::${name} selected no test, was skipped or failed"; exit 1; }
+            if grep -qF 'SKIPPED ' "$log"; then
+              echo "::error::${name} reported SKIPPED"
+              exit 1
+            fi
+          done
 
   lab-wasm-capsule:
     name: lab-wasm-capsule
@@ -1990,7 +2021,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
     steps:
       - name: every job passed or was skipped by its own guard
         env:
