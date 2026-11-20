@@ -735,6 +735,7 @@ async function runInboxHomeChromeSmoke() {
       assert.equal(stepUpRequests[0].origin, "http://localhost:61180");
       assert.equal(approvals[0].step_up_token, "agent-plan-step-up");
     } finally {
+      context.fetch = previousFetch;
       context.window.top = previousTop;
       context.window.setTimeout = previousSetTimeout;
       context.window.clearTimeout = previousClearTimeout;
