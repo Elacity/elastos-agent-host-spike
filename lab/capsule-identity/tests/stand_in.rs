@@ -2,8 +2,8 @@
 //! `common`: a launch names the bundle by its lab CID only, and the stand-in
 //! recomputes the CID from the stored bytes and checks the publisher's
 //! signed package record before anything is launched. A launched instance is
-//! handed only the `asks.json` bytes of the checked, signed bundle (M1 check
-//! B2, the part with no schema and no parse). The stand-in is a lab
+//! handed only the typed asks of the checked, signed manifest (M1 check B2).
+//! The stand-in is a lab
 //! stand-in for the Runtime's launch route, not the Runtime: it runs nothing,
 //! and these tests say nothing about what the Runtime does.
 mod common;
@@ -202,14 +202,11 @@ fn standin_refuses_an_unsigned_or_mismatched_bundle_before_launch() {
         .to_string();
     assert_refused(&mut stand_in, &launch_body(), &walk, "(d)");
 
-    // (e) One byte of asks.json changed after publish: the name compare's own
-    // refusal, which names the published CID and the CID the bytes give now.
+    // (e) One byte of the manifest ask changed after publish: the name
+    // compare's own refusal, which names the published CID and the CID now.
     let published = publish_agent_host();
     let (mut stand_in, _) = signed_stand_in(&published);
-    let asks = published.folder.join("asks.json");
-    let mut bytes = fs::read(&asks).expect("read asks.json");
-    bytes[0] ^= 1;
-    fs::write(&asks, &bytes).expect("write asks.json");
+    change_stored_asks(&published.folder);
     let now = named(&published.folder).to_string();
     assert_ne!(now, AGENT_HOST_LAB_CID);
     let compare = checked(&published.folder)
@@ -367,11 +364,11 @@ fn grant_view(stand_in: &StandInRuntime) -> Vec<Value> {
 fn standin_valid_signature_alone_yields_no_grant() {
     let published = publish_agent_host();
     let (mut stand_in, _) = signed_stand_in(&published);
-    // The manifest asks for a grant, so a launch that turned asks into grants
-    // would show here.
+    // The manifest's asks are a ceiling, so a launch that turned them into
+    // grants would show here.
     let manifest: Value =
         serde_json::from_slice(&read_fixture(&AGENT_HOST, "capsule.json")).expect("JSON");
-    assert!(manifest["capabilities"]
+    assert!(manifest["asks"]
         .as_array()
         .is_some_and(|asked| !asked.is_empty()));
 
@@ -509,12 +506,22 @@ fn standin_grant_view_lists_every_held_grant_of_every_session() {
     assert_eq!(listed_instances(&stand_in).len(), 2);
 }
 
-/// Change one byte of the stored `asks.json` in `folder`; the changed bytes.
+/// The typed asks of `manifest`, or `None` when it asks for nothing.
+fn typed_asks(manifest: &[u8]) -> Option<Vec<u8>> {
+    let parsed: elastos_common::CapsuleManifest =
+        serde_json::from_slice(manifest).expect("manifest");
+    if parsed.asks.is_empty() {
+        return None;
+    }
+    Some(serde_json::to_vec(&parsed.asks).expect("typed asks"))
+}
+
+/// Change one byte of the stored manifest ask in `folder`; the changed file.
 fn change_stored_asks(folder: &Path) -> Vec<u8> {
-    let asks = folder.join("asks.json");
-    let mut bytes = fs::read(&asks).expect("read asks.json");
-    bytes[0] ^= 1;
-    fs::write(&asks, &bytes).expect("write asks.json");
+    let path = folder.join("capsule.json");
+    let mut bytes = fs::read(&path).expect("read capsule.json");
+    flip_one_manifest_ask_byte(&mut bytes);
+    fs::write(&path, &bytes).expect("write capsule.json");
     bytes
 }
 
@@ -522,17 +529,17 @@ fn change_stored_asks(folder: &Path) -> Vec<u8> {
 fn standin_hands_an_instance_only_its_signed_asks_bytes() {
     let published = publish_agent_host();
     let (mut stand_in, _) = signed_stand_in(&published);
-    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let signed = typed_asks(&read_fixture(&AGENT_HOST, "capsule.json")).expect("agent-host asks");
 
     let answer = launched(&mut stand_in);
     let session = answer["session_id"].as_str().expect("a session id");
     assert_eq!(
         stand_in.asks_of(session),
         Some(signed.clone()),
-        "the instance is handed the committed asks.json bytes"
+        "the instance is handed the checked manifest asks"
     );
 
-    // One byte of the stored asks.json changes after the launch.
+    // One byte of the stored manifest ask changes after the launch.
     let changed = change_stored_asks(&published.folder);
     assert_ne!(changed, signed);
     assert_eq!(
@@ -559,7 +566,7 @@ fn standin_hands_an_instance_only_its_signed_asks_bytes() {
     assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
 }
 
-/// The stand-in's after-walk hook: change one byte of the stored `asks.json`.
+/// The stand-in's after-walk hook: change one byte of the stored manifest ask.
 fn change_stored_asks_after_the_walk(folder: &Path) {
     change_stored_asks(folder);
 }
@@ -568,7 +575,7 @@ fn change_stored_asks_after_the_walk(folder: &Path) {
 fn standin_takes_the_asks_from_the_walk_not_the_folder() {
     let published = publish_agent_host();
     let (mut stand_in, _) = signed_stand_in(&published);
-    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let signed = typed_asks(&read_fixture(&AGENT_HOST, "capsule.json")).expect("agent-host asks");
     stand_in.set_after_walk(change_stored_asks_after_the_walk);
 
     // The walk read the signed bytes, so the name compare and the record
@@ -577,12 +584,12 @@ fn standin_takes_the_asks_from_the_walk_not_the_folder() {
     assert_eq!(answer["status"], "launched");
     let session = answer["session_id"].as_str().expect("a session id");
 
-    // The hook ran: the stored asks.json changed between the walk and the
-    // launch.
-    let on_disk = fs::read(published.folder.join("asks.json")).expect("read asks.json");
+    // The hook ran: the stored manifest changed between the walk and the launch.
+    let on_disk = fs::read(published.folder.join("capsule.json")).expect("read capsule.json");
     assert_ne!(
-        on_disk, signed,
-        "the hook must have changed the stored asks.json"
+        on_disk,
+        read_fixture(&AGENT_HOST, "capsule.json"),
+        "the hook must have changed the stored manifest"
     );
 
     // The instance is handed the bytes the walk read, not the folder's.
@@ -604,13 +611,10 @@ fn standin_gives_each_session_its_own_asks() {
     let web_entry = published(&web_app);
     assert_eq!(web_entry.0, WEB_APP_LAB_CID, "the fixture's pin");
     assert!(
-        checked(&web_app)
-            .entries()
-            .iter()
-            .all(|entry| entry.path != "asks.json"),
-        "web-app has no asks.json"
+        typed_asks(&read_fixture(&WEB_APP, "capsule.json")).is_none(),
+        "web-app declares no asks"
     );
-    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let signed = typed_asks(&read_fixture(&AGENT_HOST, "capsule.json")).expect("agent-host asks");
 
     for order in [
         [AGENT_HOST_LAB_CID, WEB_APP_LAB_CID],
@@ -645,12 +649,12 @@ fn standin_gives_each_session_its_own_asks() {
         assert_eq!(
             stand_in.asks_of(&session_of(AGENT_HOST_LAB_CID)),
             Some(signed.clone()),
-            "{case}: agent-host's session answers its own asks.json bytes"
+            "{case}: agent-host's session answers its own manifest asks"
         );
         assert_eq!(
             stand_in.asks_of(&session_of(WEB_APP_LAB_CID)),
             None,
-            "{case}: web-app has no asks.json, so its session answers none"
+            "{case}: web-app declares no asks, so its session answers none"
         );
         assert_eq!(
             stand_in.asks_of("no-such-session"),

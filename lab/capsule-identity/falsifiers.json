@@ -191,21 +191,21 @@
     },
     {
       "id": "F-CI1l",
-      "title": "name only the manifest and its entrypoint, leaving browser/app.js out",
+      "title": "name only the manifest and its entrypoint, leaving browser/app.js out, and replace the manifest asks array with an empty array",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entrypoint = serde_json::from_slice::<CapsuleManifest>(&manifest.content)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?\n        .entrypoint;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .collect();\n    encode_entries(&entries)\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    let entrypoint = {\n        let text = String::from_utf8_lossy(&manifest.content).into_owned();\n        let key = \"\\\"entrypoint\\\": \\\"\";\n        let at = text.find(key).expect(\"an entrypoint\");\n        let start = at + key.len();\n        let end = text[start..].find('\"').expect(\"an entrypoint\");\n        text[start..start + end].to_owned()\n    };\n    fn without_asks(bytes: &[u8]) -> Vec<u8> {\n        let Ok(text) = std::str::from_utf8(bytes) else {\n            return bytes.to_vec();\n        };\n        let key = \"\\\"asks\\\"\";\n        let Some(key_at) = text.find(key) else {\n            return bytes.to_vec();\n        };\n        let after_key = key_at + key.len();\n        let Some(rel) = text[after_key..].find('[') else {\n            return bytes.to_vec();\n        };\n        let open = after_key + rel;\n        let mut depth = 0usize;\n        let mut end = None;\n        for (index, ch) in text[open..].char_indices() {\n            match ch {\n                '[' => depth += 1,\n                ']' => {\n                    depth -= 1;\n                    if depth == 0 {\n                        end = Some(open + index);\n                        break;\n                    }\n                }\n                _ => {}\n            }\n        }\n        let Some(end) = end else {\n            return bytes.to_vec();\n        };\n        let mut out = String::new();\n        out.push_str(&text[..open]);\n        out.push_str(\"[]\");\n        out.push_str(&text[end + 1..]);\n        out.into_bytes()\n    }\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .map(|mut entry| {\n            if entry.path == MANIFEST_FILE {\n                entry.content = without_asks(&entry.content);\n            }\n            entry\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
         "lab_cid_matches_the_pinned_value_for_each_fixture",
         "one_byte_change_in_any_payload_file_changes_the_lab_cid",
         "adding_or_removing_a_payload_file_changes_the_lab_cid",
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "three_kinds_share_the_package_rules"
       ]
     },
@@ -619,7 +619,7 @@
         "one_byte_change_in_the_manifest_changes_the_lab_cid",
         "one_byte_change_in_any_payload_file_changes_the_lab_cid",
         "adding_or_removing_a_payload_file_changes_the_lab_cid",
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "checked_name_check_judges_the_checked_bytes",
         "checked_name_check_refuses_a_mismatch"
       ]
@@ -642,18 +642,18 @@
     },
     {
       "id": "F-CI3i",
-      "title": "leave asks.json out of the stream (it is still read)",
+      "title": "replace the manifest asks array with an empty array before the name; the manifest is still read",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"asks.json\")\n        .collect();\n    encode_entries(&entries)\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    fn without_asks(bytes: &[u8]) -> Vec<u8> {\n        let Ok(text) = std::str::from_utf8(bytes) else {\n            return bytes.to_vec();\n        };\n        let key = \"\\\"asks\\\"\";\n        let Some(key_at) = text.find(key) else {\n            return bytes.to_vec();\n        };\n        let after_key = key_at + key.len();\n        let Some(rel) = text[after_key..].find('[') else {\n            return bytes.to_vec();\n        };\n        let open = after_key + rel;\n        let mut depth = 0usize;\n        let mut end = None;\n        for (index, ch) in text[open..].char_indices() {\n            match ch {\n                '[' => depth += 1,\n                ']' => {\n                    depth -= 1;\n                    if depth == 0 {\n                        end = Some(open + index);\n                        break;\n                    }\n                }\n                _ => {}\n            }\n        }\n        let Some(end) = end else {\n            return bytes.to_vec();\n        };\n        let mut out = String::new();\n        out.push_str(&text[..open]);\n        out.push_str(\"[]\");\n        out.push_str(&text[end + 1..]);\n        out.into_bytes()\n    }\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|mut entry| {\n            if entry.path == MANIFEST_FILE {\n                entry.content = without_asks(&entry.content);\n            }\n            entry\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "lab_cid_matches_the_pinned_value_for_each_fixture"
       ]
     },
@@ -4170,14 +4170,14 @@
     },
     {
       "id": "F-CI33a",
-      "title": "a launch gives the instance one grant for each capabilities entry of its manifest, so a valid signature alone yields a grant",
+      "title": "a launch gives the instance one grant for each action of each ask in its manifest, so a valid signature alone yields a grant",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        Ok(self.launch(name, asks))\n",
-          "new": "        let answer = self.launch(name, asks);\n        let session_id = answer[\"session_id\"].as_str().expect(\"a session id\").to_owned();\n        let folder = self.store[body[\"cid\"].as_str().expect(\"a cid\")].clone();\n        let manifest: elastos_common::CapsuleManifest =\n            serde_json::from_slice(&fs::read(folder.join(capsule_identity::MANIFEST_FILE)).expect(\"the manifest\"))\n                .expect(\"a manifest\");\n        for capability in manifest.capabilities {\n            self.seed_grant(&session_id, &capability, \"*\", \"session\");\n        }\n        Ok(answer)\n"
+          "new": "        let answer = self.launch(name, asks);\n        let session_id = answer[\"session_id\"].as_str().expect(\"a session id\").to_owned();\n        let folder = self.store[body[\"cid\"].as_str().expect(\"a cid\")].clone();\n        let manifest: elastos_common::CapsuleManifest =\n            serde_json::from_slice(&fs::read(folder.join(capsule_identity::MANIFEST_FILE)).expect(\"the manifest\"))\n                .expect(\"a manifest\");\n        for ask in manifest.asks {\n            for action in &ask.actions {\n                self.seed_grant(&session_id, &ask.resource, action.as_str(), \"session\");\n            }\n        }\n        Ok(answer)\n"
         }
       ],
       "tests": [
@@ -4219,14 +4219,14 @@
     },
     {
       "id": "F-CI35a",
-      "title": "the planted accept-anything stub: asks_of reads asks.json from the stored folder at call time, so a change on disk after launch reaches the instance",
+      "title": "the planted accept-anything stub: asks_of reads the manifest asks from the stored folder at call time, so a change on disk after launch reaches the instance",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "            .and_then(|instance| instance.asks.clone())\n",
-          "new": "            .and_then(|_| fs::read(self.store.values().next()?.join(ASKS_FILE)).ok())\n"
+          "new": "            .and_then(|_| {\n                let bytes = fs::read(self.store.values().next()?.join(capsule_identity::MANIFEST_FILE)).ok()?;\n                let parsed: elastos_common::CapsuleManifest = serde_json::from_slice(&bytes).ok()?;\n                if parsed.asks.is_empty() {\n                    None\n                } else {\n                    serde_json::to_vec(&parsed.asks).ok()\n                }\n            })\n"
         }
       ],
       "tests": [
@@ -4257,8 +4257,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        .map(|entry| entry.content.clone())\n",
-          "new": "        .map(|entry| entry.content.clone())\n        .or(Some(Vec::new()))\n"
+          "old": "    if parsed.asks.is_empty() {\n        None\n    } else {\n",
+          "new": "    if parsed.asks.is_empty() {\n        return Some(Vec::new());\n    } else {\n"
         }
       ],
       "tests": [
@@ -4348,14 +4348,14 @@
     },
     {
       "id": "F-CI44a",
-      "title": "the 041 review's stub: checked_launch reads asks.json from the stored folder at launch, after the walk, instead of taking it from the checked entries",
+      "title": "the 041 review's stub: checked_launch reads the manifest asks from the stored folder at launch, after the walk, instead of taking them from the checked entries",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))\n",
-          "new": "        Ok((checked.manifest_name().to_owned(), fs::read(folder.join(ASKS_FILE)).ok()))\n"
+          "new": "        let on_disk = fs::read(folder.join(capsule_identity::MANIFEST_FILE)).ok().and_then(|bytes| {\n            let parsed: elastos_common::CapsuleManifest = serde_json::from_slice(&bytes).ok()?;\n            if parsed.asks.is_empty() {\n                None\n            } else {\n                serde_json::to_vec(&parsed.asks).ok()\n            }\n        });\n        Ok((checked.manifest_name().to_owned(), on_disk))\n"
         }
       ],
       "tests": [
