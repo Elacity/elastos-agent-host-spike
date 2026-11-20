@@ -4364,6 +4364,40 @@ class CitationCheckTests(unittest.TestCase):
         got = check.problems(self._draft(body, files))
         self.assertEqual(got, [])
 
+    def test_code_shaped_span_without_a_citation_is_refused(self):
+        body = "The body calls `verifier.reserve(4)`.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        expected = (
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `verifier.reserve(4)`" % line
+        )
+        self._assert_one(body, {}, expected)
+
+    def test_code_shaped_span_with_a_citation_on_its_line_passes(self):
+        body = "The body calls `verifier.reserve(4)` at `pkg/kept.rs:1`.\n"
+        files = {"pkg/kept.rs": b"one\n"}
+        got = check.problems(self._draft(body, files))
+        self.assertEqual(got, [])
+
+    def test_plain_backtick_words_pass(self):
+        body = "The guest keeps `PRINCIPAL_MARKER` and the file `capsule.json`.\n"
+        got = check.problems(self._draft(body, {}))
+        self.assertEqual(got, [])
+
+    def test_dotted_call_without_a_citation_is_refused(self):
+        body = "`self.adapters.dispatch` carries the call.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        expected = (
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `self.adapters.dispatch`" % line
+        )
+        self._assert_one(body, {}, expected)
+
+    def test_indented_code_line_is_not_prose(self):
+        body = "    let held = verifier.reserve(4);\n"
+        got = check.problems(self._draft(body, {}))
+        self.assertEqual(got, [])
+
     def test_missing_path_is_refused(self):
         expected = "refuse: path does not exist: missing/no-such.rs"
         self._assert_one("See `missing/no-such.rs:1`.\n", {}, expected)

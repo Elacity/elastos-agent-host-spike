@@ -20,6 +20,26 @@ CITATION = re.compile(
 
 DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
 
+# A prose backtick span that looks like code is a claim: the same line must
+# hold a path:line citation. These marks, a dotted chain and a keyword are code
+# shapes. A plain identifier and a file name are not.
+CODE_MARKS = ("::", "->", "=", "(", ")")
+DOTTED_CHAIN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+FILE_NAME = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}")
+FILE_EXTENSIONS = frozenset(
+    ("rs", "json", "toml", "md", "wit", "py", "js", "mjs", "html", "css", "txt",
+     "yaml", "yml", "lock", "sh", "wasm", "example", "pb", "bin", "ts", "c", "h")
+)
+CODE_WORDS = frozenset(
+    ("fn", "let", "mut", "pub", "impl", "struct", "enum", "trait", "const",
+     "static", "use", "mod", "match", "if", "else", "for", "while", "loop",
+     "return", "self", "super", "crate", "as", "in", "where", "dyn", "ref",
+     "move", "unsafe", "async", "await", "type", "interface", "world",
+     "resource", "record", "variant", "flags", "tuple", "list", "option",
+     "result", "future", "stream", "func", "include", "export", "import",
+     "constructor")
+)
+
 # Section 0 states each core-call proposal once. Each group starts with a
 # heading, and its propose lines stand under that heading.
 SECTION_0 = "## 0. What this proposes"
@@ -1409,6 +1429,63 @@ def pin_allows_structural_reads(pin_reason, pinned):
     return pin_reason is None and pinned
 
 
+def _indent_width(line):
+    """Return the column width of LINE's leading spaces and tabs."""
+    return sum(
+        4 if char == "\t" else 1
+        for char in line[:len(line) - len(line.lstrip(" \t"))]
+    )
+
+
+def _file_name(span):
+    """True when SPAN is a file name with a known extension."""
+    if FILE_NAME.fullmatch(span) is None:
+        return False
+    return span.rsplit(".", 1)[1] in FILE_EXTENSIONS
+
+
+def code_shaped(span):
+    """True when SPAN looks like code rather than one identifier or file name."""
+    if any(mark in span for mark in CODE_MARKS):
+        return True
+    if _file_name(span):
+        return False
+    if DOTTED_CHAIN.fullmatch(span) is not None:
+        return True
+    return span in CODE_WORDS
+
+
+def code_span_refusals(text):
+    """Return one refusal per code-shaped prose span with no line citation.
+
+    A prose line holds its own evidence: a code-shaped span on a line that also
+    holds a path:line citation is supported. An indented line quotes source and
+    is not prose, a fence and an HTML comment hold no prose, and a heading is
+    not checked. A plain identifier and a file name are not code-shaped.
+    """
+    refusals = []
+    lines = text.splitlines()
+    try:
+        records = classify_lines(lines)
+    except ValueError:
+        # The structural refusal owns a malformed draft; proposal_refusals
+        # reports that one reason.
+        return refusals
+    for index, (kind, _, visible) in enumerate(records):
+        if kind != TEXT or _indent_width(lines[index]) > 3:
+            continue
+        spans = _spans(visible)
+        if any(CITATION.fullmatch(span) for span in spans):
+            continue
+        for span in spans:
+            if CITATION.fullmatch(span) is None and code_shaped(span):
+                refusals.append(
+                    "refuse: line %d has a code-shaped span and no path:line "
+                    "citation: `%s`" % (index + 1, span)
+                )
+    return refusals
+
+
 def problems(root):
     """Return one refusal per bad pin, citation or section 0 rule, pin first.
 
@@ -1442,6 +1519,7 @@ def problems(root):
             if reason is not None:
                 refusals.append(reason)
                 refused_spans.add(span)
+        refusals.extend(code_span_refusals(text))
         refusals.extend(_quote_refusals(root, text, sha, refused_spans))
         refusals.extend(a3_claim_refusals(text))
     refusals.extend(proposal_refusals(text))
