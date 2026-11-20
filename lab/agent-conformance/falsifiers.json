@@ -1630,6 +1630,22 @@
       "tests": [
         "fixture_writer_declares_the_requested_read"
       ]
+    },
+    {
+      "id": "F-ac-u10-s10",
+      "title": "change the admitted ask resource by reading the manifest again after admission",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "        let asks = self.admit_row(cid)?.asks.clone();\n",
+          "new": "        let bundle = self.admit_row(cid)?.bundle.clone();\n        let asks = admitted_asks(&checked_bundle(&bundle).map_err(|refusal| (400, said(&refusal)))?)?;\n"
+        }
+      ],
+      "tests": [
+        "admitted_ask_keeps_its_resource_after_the_manifest_changes"
+      ]
     }
   ]
 }

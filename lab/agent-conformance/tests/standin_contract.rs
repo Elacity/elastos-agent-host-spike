@@ -1064,6 +1064,45 @@ fn fixture_writer_declares_the_requested_read() {
     );
 }
 
+/// The admitted manifest ask keeps its resource after that manifest changes.
+/// `asks.json` names another resource and is not the ceiling.
+#[test]
+fn admitted_ask_keeps_its_resource_after_the_manifest_changes() {
+    const FILE_RESOURCE: &str = "localhost://Public/resident-instances/from-file.txt";
+    let mut standin = StandIn::new();
+    let shared = SignedBundle::new();
+    declare_asks(&shared, &[(ASK_RESOURCE, "read")]);
+    let asks_path = shared.path().join("asks.json");
+    let file = std::fs::read_to_string(&asks_path).expect("read asks.json");
+    let pointed = file.replacen(ASK_RESOURCE, FILE_RESOURCE, 1);
+    assert_ne!(pointed, file, "asks.json names the admitted resource");
+    std::fs::write(&asks_path, pointed).expect("point asks.json at another resource");
+    let session = launched_guest(&mut standin, &shared);
+    let manifest = shared.path().join("capsule.json");
+    let text = std::fs::read_to_string(&manifest).expect("read capsule.json");
+    let later = format!("{ASK_RESOURCE}-later");
+    let changed = text.replacen(ASK_RESOURCE, &later, 1);
+    assert_ne!(changed, text, "the admitted manifest names the resource");
+    std::fs::write(&manifest, changed).expect("change the resource after admission");
+    let owner = Caller::Client {
+        session_id: &session,
+    };
+    let ask =
+        |resource: &str| json!({ "resource": resource, "action": "read", "reason": "journey" });
+    assert_eq!(
+        standin.post_capability_request(owner, &ask(ASK_RESOURCE)),
+        Ok(json!({ "status": "pending", "request_id": "request-1" })),
+        "the admitted ask keeps the resource from admission"
+    );
+    for resource in [FILE_RESOURCE, later.as_str()] {
+        let refused = standin.post_capability_request(owner, &ask(resource));
+        assert!(
+            matches!(&refused, Err((403, reason)) if reason.ends_with(&format!("{resource} read"))),
+            "a later resource is not the admitted ask: {refused:?}"
+        );
+    }
+}
+
 /// M1 check B2. The signed bundle declares one ask: a read of `ASK_RESOURCE`.
 const ASK_RESOURCE: &str = "localhost://Users/self/.AppData/Agents/agent-host/tasks";
 /// A path under `ASK_RESOURCE`. No ask names it.
