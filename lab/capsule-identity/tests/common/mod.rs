@@ -634,9 +634,13 @@ pub fn wc001_module(out_dir: &Path) -> Vec<u8> {
         .parent()
         .expect("lab/ holds this lane")
         .join("wasm-capsule/tools/build");
+    // rustup passes this test's own toolchain down as RUSTUP_TOOLCHAIN, which would
+    // override wc-001's rust-toolchain.toml (1.91.0 + wasm32). Clear it so the build
+    // runs on the toolchain its receipt names, from any caller.
     let output = Command::new("bash")
         .arg(&script)
         .arg(out_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
         .output()
         .expect("spawn wc-001 tools/build");
     assert!(

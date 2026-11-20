@@ -691,6 +691,7 @@ class WasmCapsuleReceiptProbe(unittest.TestCase):
         for build in self.builds:
             assert_linked_layout(self, build.source)
         lane_root = LANE_DIR.resolve()
+        before_status = git("status", "--porcelain", "--", *REAL_TREES)
         side_effects = _lane_side_effects()
         root = Path(tempfile.mkdtemp(prefix="redteam-008-real-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
@@ -704,7 +705,7 @@ class WasmCapsuleReceiptProbe(unittest.TestCase):
             wrote_into_lane = True
         self.assertFalse(wrote_into_lane, f"{real.out} is inside {lane_root}")
         self.assertEqual(_lane_side_effects(), side_effects)
-        self.assertEqual(git("status", "--porcelain", "--", *REAL_TREES), "")
+        self.assertEqual(git("status", "--porcelain", "--", *REAL_TREES), before_status)
         first = self.builds[0]
         a, b = first.wasm.read_bytes(), real.wasm.read_bytes()
         if a != b:
@@ -1431,7 +1432,7 @@ class WasmCapsuleReceiptProbeChecks(unittest.TestCase):
         # An ordinary plant edits a file inside the copy. Traversal and a
         # symlink that leave the copy are refused, and their sentinel bytes
         # stay put. The real lane, capsule-identity and elastos stay clean.
-        self.assertEqual(git("status", "--porcelain", "--", *REAL_TREES), "")
+        before_status = git("status", "--porcelain", "--", *REAL_TREES)
         watched = (
             LANE_DIR / "tools" / "build",
             REPO_ROOT / "lab" / "capsule-identity" / "Cargo.toml",
@@ -1463,7 +1464,7 @@ class WasmCapsuleReceiptProbeChecks(unittest.TestCase):
         for path, original in before.items():
             self.assertEqual(path.read_bytes(), original, path)
         status = git("status", "--porcelain", "--", *REAL_TREES)
-        self.assertEqual(status, "", status)
+        self.assertEqual(status, before_status, status)
 
     def _assert_escape_refused(self, source, sentinel, *, traversal):
         sentinel.write_bytes(b"disposable-sentinel\n")
