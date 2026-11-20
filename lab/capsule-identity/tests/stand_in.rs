@@ -2,7 +2,7 @@
 //! `common`: a launch names the bundle by its lab CID only, and the stand-in
 //! recomputes the CID from the stored bytes and checks the publisher's
 //! signed package record before anything is launched. A launched instance is
-//! handed only the `asks.json` bytes of the checked, signed bundle (M1 check
+//! handed only the sidecar bytes of the checked, signed bundle (M1 check
 //! B2, the part with no schema and no parse). The stand-in is a lab
 //! stand-in for the Runtime's launch route, not the Runtime: it runs nothing,
 //! and these tests say nothing about what the Runtime does.
@@ -41,6 +41,22 @@ fn publish_agent_host() -> Published {
     }
 }
 
+/// The fixture plus a sidecar written only in this temp bundle. The committed
+/// fixture has no sidecar, so this name is not the pin.
+fn publish_agent_host_with_sidecar() -> Published {
+    let parent = temp_dir();
+    let folder = parent.path().join("agent-host");
+    assemble_at(&AGENT_HOST, &folder);
+    fs::write(folder.join(ASKS_FILE), b"{\"note\":\"sidecar\"}\n").expect("write the sidecar");
+    let entry = published(&folder);
+    assert_ne!(entry.0, AGENT_HOST_LAB_CID, "a sidecar changes the name");
+    Published {
+        parent,
+        folder,
+        entry,
+    }
+}
+
 fn did_of(key: &SigningKey) -> String {
     elastos_identity::encode_signing_key_did(key)
 }
@@ -65,6 +81,12 @@ fn signed_stand_in(published: &Published) -> (StandInRuntime, PackageRecord) {
 
 fn launch_body() -> Value {
     json!({ "cid": AGENT_HOST_LAB_CID })
+}
+
+fn launched_cid(stand_in: &mut StandInRuntime, cid: &str) -> Value {
+    stand_in
+        .post_capsules(&json!({ "cid": cid }))
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"))
 }
 
 /// The stand-in lists no instance.
@@ -202,14 +224,18 @@ fn standin_refuses_an_unsigned_or_mismatched_bundle_before_launch() {
         .to_string();
     assert_refused(&mut stand_in, &launch_body(), &walk, "(d)");
 
-    // (e) One byte of asks.json changed after publish: the name compare's own
+    // (e) One byte of the manifest changed after publish: the name compare's own
     // refusal, which names the published CID and the CID the bytes give now.
     let published = publish_agent_host();
     let (mut stand_in, _) = signed_stand_in(&published);
-    let asks = published.folder.join("asks.json");
-    let mut bytes = fs::read(&asks).expect("read asks.json");
-    bytes[0] ^= 1;
-    fs::write(&asks, &bytes).expect("write asks.json");
+    let manifest = published.folder.join("capsule.json");
+    let mut bytes = fs::read(&manifest).expect("read the manifest");
+    let at = bytes
+        .windows(7)
+        .position(|window| window == b"Journal")
+        .expect("the description");
+    bytes[at] ^= 0x20;
+    fs::write(&manifest, &bytes).expect("write the manifest");
     let now = named(&published.folder).to_string();
     assert_ne!(now, AGENT_HOST_LAB_CID);
     let compare = checked(&published.folder)
@@ -509,30 +535,31 @@ fn standin_grant_view_lists_every_held_grant_of_every_session() {
     assert_eq!(listed_instances(&stand_in).len(), 2);
 }
 
-/// Change one byte of the stored `asks.json` in `folder`; the changed bytes.
+/// Change one byte of the stored sidecar in `folder`; the changed bytes.
 fn change_stored_asks(folder: &Path) -> Vec<u8> {
-    let asks = folder.join("asks.json");
-    let mut bytes = fs::read(&asks).expect("read asks.json");
+    let asks = folder.join(ASKS_FILE);
+    let mut bytes = fs::read(&asks).expect("read the sidecar");
     bytes[0] ^= 1;
-    fs::write(&asks, &bytes).expect("write asks.json");
+    fs::write(&asks, &bytes).expect("write the sidecar");
     bytes
 }
 
 #[test]
 fn standin_hands_an_instance_only_its_signed_asks_bytes() {
-    let published = publish_agent_host();
+    let published = publish_agent_host_with_sidecar();
     let (mut stand_in, _) = signed_stand_in(&published);
-    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let signed = fs::read(published.folder.join(ASKS_FILE)).expect("read the sidecar");
+    let cid = published.entry.0.clone();
 
-    let answer = launched(&mut stand_in);
+    let answer = launched_cid(&mut stand_in, &cid);
     let session = answer["session_id"].as_str().expect("a session id");
     assert_eq!(
         stand_in.asks_of(session),
         Some(signed.clone()),
-        "the instance is handed the committed asks.json bytes"
+        "the instance is handed the walked sidecar bytes"
     );
 
-    // One byte of the stored asks.json changes after the launch.
+    // One byte of the stored sidecar changes after the launch.
     let changed = change_stored_asks(&published.folder);
     assert_ne!(changed, signed);
     assert_eq!(
@@ -544,14 +571,14 @@ fn standin_hands_an_instance_only_its_signed_asks_bytes() {
     // A second launch of the same CID is refused by case (e), the name
     // compare's own refusal, and leaves no new instance and no grant.
     let now = named(&published.folder).to_string();
-    assert_ne!(now, AGENT_HOST_LAB_CID);
+    assert_ne!(now, cid);
     let compare = checked(&published.folder)
-        .check_name(AGENT_HOST_LAB_CID)
+        .check_name(&cid)
         .expect_err("the bytes changed")
         .to_string();
-    assert!(compare.contains(AGENT_HOST_LAB_CID) && compare.contains(&now));
+    assert!(compare.contains(&cid) && compare.contains(&now));
     assert_eq!(
-        stand_in.post_capsules(&launch_body()),
+        stand_in.post_capsules(&json!({ "cid": cid })),
         Err((400, compare)),
         "(e) after the change"
     );
@@ -559,30 +586,31 @@ fn standin_hands_an_instance_only_its_signed_asks_bytes() {
     assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
 }
 
-/// The stand-in's after-walk hook: change one byte of the stored `asks.json`.
+/// The stand-in's after-walk hook: change one byte of the stored sidecar.
 fn change_stored_asks_after_the_walk(folder: &Path) {
     change_stored_asks(folder);
 }
 
 #[test]
 fn standin_takes_the_asks_from_the_walk_not_the_folder() {
-    let published = publish_agent_host();
+    let published = publish_agent_host_with_sidecar();
     let (mut stand_in, _) = signed_stand_in(&published);
-    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let signed = fs::read(published.folder.join(ASKS_FILE)).expect("read the sidecar");
+    let cid = published.entry.0.clone();
     stand_in.set_after_walk(change_stored_asks_after_the_walk);
 
     // The walk read the signed bytes, so the name compare and the record
     // check pass, and the launch goes on.
-    let answer = launched(&mut stand_in);
+    let answer = launched_cid(&mut stand_in, &cid);
     assert_eq!(answer["status"], "launched");
     let session = answer["session_id"].as_str().expect("a session id");
 
-    // The hook ran: the stored asks.json changed between the walk and the
+    // The hook ran: the stored sidecar changed between the walk and the
     // launch.
-    let on_disk = fs::read(published.folder.join("asks.json")).expect("read asks.json");
+    let on_disk = fs::read(published.folder.join(ASKS_FILE)).expect("read the sidecar");
     assert_ne!(
         on_disk, signed,
-        "the hook must have changed the stored asks.json"
+        "the hook must have changed the stored sidecar"
     );
 
     // The instance is handed the bytes the walk read, not the folder's.
@@ -597,7 +625,8 @@ fn standin_takes_the_asks_from_the_walk_not_the_folder() {
 
 #[test]
 fn standin_gives_each_session_its_own_asks() {
-    let agent_host = publish_agent_host();
+    let agent_host = publish_agent_host_with_sidecar();
+    let agent_cid = agent_host.entry.0.clone();
     let parent = temp_dir();
     let web_app = parent.path().join("web-app");
     assemble_at(&WEB_APP, &web_app);
@@ -607,14 +636,14 @@ fn standin_gives_each_session_its_own_asks() {
         checked(&web_app)
             .entries()
             .iter()
-            .all(|entry| entry.path != "asks.json"),
-        "web-app has no asks.json"
+            .all(|entry| entry.path != ASKS_FILE),
+        "web-app has no sidecar"
     );
-    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let signed = fs::read(agent_host.folder.join(ASKS_FILE)).expect("read the sidecar");
 
     for order in [
-        [AGENT_HOST_LAB_CID, WEB_APP_LAB_CID],
-        [WEB_APP_LAB_CID, AGENT_HOST_LAB_CID],
+        [agent_cid.as_str(), WEB_APP_LAB_CID],
+        [WEB_APP_LAB_CID, agent_cid.as_str()],
     ] {
         let case = format!("launched in the order {order:?}");
         let key = fresh_signing_key();
@@ -643,14 +672,14 @@ fn standin_gives_each_session_its_own_asks() {
                 .expect("launched")
         };
         assert_eq!(
-            stand_in.asks_of(&session_of(AGENT_HOST_LAB_CID)),
+            stand_in.asks_of(&session_of(agent_cid.as_str())),
             Some(signed.clone()),
-            "{case}: agent-host's session answers its own asks.json bytes"
+            "{case}: the sidecar bundle's session answers its own bytes"
         );
         assert_eq!(
             stand_in.asks_of(&session_of(WEB_APP_LAB_CID)),
             None,
-            "{case}: web-app has no asks.json, so its session answers none"
+            "{case}: web-app has no sidecar, so its session answers none"
         );
         assert_eq!(
             stand_in.asks_of("no-such-session"),

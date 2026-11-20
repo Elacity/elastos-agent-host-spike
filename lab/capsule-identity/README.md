@@ -354,7 +354,7 @@ local file (such as `.DS_Store`) never reaches a pin. The pins are in
 | `content-sample` | `capsule.json`, `sample.example` | `templates/capsules/viewer-content/content.capsule.json` and `sample.example`, byte for byte | `bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi` |
 | `web-app` | `capsule.json`, `browser/app.js`, `browser/index.html` | `templates/capsules/web-app/`, byte for byte | `bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q` |
 | `wc001-core` | `capsule.json` | written for this lab | not pinned (below) |
-| `agent-host` | `capsule.json`, `asks.json` | `examples/agent-host/capsule.json` (git blob `3395c59fab00816109d5dd471ccbceaf5d59e191`) and `examples/agent-host/asks.json` (git blob `3f004896c68aa7097d02505920afc6c178b065ff`) at `e11fdafce`, byte for byte; the module is not in the fixture (below) | `bafybeicesxlwcolv5hifwotsyafyyaclaq23gyzwl7esuvhwlownrhatym` |
+| `agent-host` | `capsule.json` | the committed `fixtures/agent-host/capsule.json`; the module is not in the fixture (below) | `bafybeibictatmmm2izchdebpslsaybdul2gkvhd7udldcx2g2ghnhmuzhe` |
 | `provider` | `capsule.json`, `ipfs-provider` | the manifest's fields are those of the JSON in `test_parse_v1_manifest` (`elastos/crates/elastos-common/src/manifest.rs`, about lines 2443-2458); `ipfs-provider` is the ASCII `lab fixture` and a newline, a lab stand-in | `bafybeicmpw5zf373ogbziqix2mj2bagmn5imgj3hy7347nulpmx32kooxe` |
 | `model` | `capsule.json`, `weights.gguf`, `LICENSE`, `LICENSE.base`, `PROVENANCE.md` | the manifest's fields are those of `model_content_fixture` (same file, about lines 1265-1283; synthetic, not a published model package); the four other files are one line of ASCII each, lab stand-ins | `bafybeifh6dj5r5wc2j5kqxz6ukga74y3gi56woglqdzmmcdhqvy7qtljzq` |
 | `provider-variant-a` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture aarch64-darwin` and a newline, a lab stand-in | `bafybeig77gyxfd7lldgueo5qtn2o7sjvwdr6txm3f7fc4dl4pyjsuvgoc4` |
@@ -370,14 +370,13 @@ fields and values; the Runtime's own `CapsuleManifest` parses and validates
 both. No provider binary, rootfs, Kubo, GGUF, model URL or model hash is
 copied.
 
-`agent-host` holds the agent-host capsule's own manifest and its declared asks
-(M1 check B2). `git hash-object` of each copy equals the blob id in the table.
-The agent-host lane may change its files later; these copies stay as they are,
-so the pin holds. The manifest's entrypoint, `agent-host.component.wasm`, is
-build output and is never committed (HANDOFF rule 7), so the module is not in
-the fixture: this lab CID covers the two files only and is not the whole
-capsule's name. The lab never parses `asks.json`: to the lab CID it is one more
-payload file. The manifest is a component manifest, so the Runtime's
+`agent-host` holds the agent-host capsule's manifest. The agent-host lane may
+change its files later; this copy stays as it is, so the pin holds. The
+manifest's entrypoint, `agent-host.component.wasm`, is build output and is
+never committed (HANDOFF rule 7), so the module is not in the fixture: this
+lab CID covers the manifest only and is not the whole capsule's name. The lab
+names every byte of that manifest and does not parse an ask list out of it. The
+manifest is a component manifest, so the Runtime's
 `validate()` also requires its `wit_world_sha256` to equal the SHA-256 of
 `elastos/wit/elastos-bus-v1.wit`, which `elastos-common` compiles in
 (`elastos/crates/elastos-common/src/manifest.rs:412` and `:794-800`).
@@ -422,9 +421,9 @@ with the first lab CID passes before and after the change.
 | One byte inside a JSON string value of `capsule.json`; the manifest still parses and validates | `one_byte_change_in_the_manifest_changes_the_lab_cid` | F-CI1k |
 | One byte in each web-app payload file in turn, `browser/app.js` included, which is not the entrypoint | `one_byte_change_in_any_payload_file_changes_the_lab_cid` | F-CI1l |
 | A file is added (an empty one too) or removed | `adding_or_removing_a_payload_file_changes_the_lab_cid` | F-CI1l |
-| One byte inside a JSON string value of agent-host's `asks.json`; it is still JSON | `one_byte_change_in_asks_json_changes_the_lab_cid` | F-CI3i, F-CI1l |
+| One byte inside a JSON string value of the agent-host manifest; it is still JSON | `one_byte_change_in_asks_json_changes_the_lab_cid` | F-CI3i, F-CI1l |
 
-So the asks a capsule declares in `asks.json` are inside its lab CID. After
+So the bytes of that manifest are inside its lab CID. After
 each change, `check_name` with the old lab CID is refused with both values.
 
 **A claimed name is checked, never trusted.** A name that a URL, a Store row
@@ -976,13 +975,13 @@ lab's stand-in launcher, in test code, calls it
 ([below](#lab-stand-in-launcher-m1-check-b1)).
 
 What the tests show, on the `agent-host` fixture. Its manifest asks for a grant
-through `capabilities`, and it has its `asks.json`. A fresh in-memory test key
+through `capabilities`. A fresh in-memory test key
 signs it:
 
 - The signature is valid: `verify_name_signature` returns `Ok(())` when that
   key's DID is accepted.
 - After signing, and again after verifying, the bundle's lab CID is still
-  `bafybeices…hatym`, and the parent folder still holds only the bundle folder.
+  `bafybeibic…muzhe`, and the parent folder still holds only the bundle folder.
   So no byte the lab CID covers changed, and no file appeared next to the
   bundle. The tests compare before and after. They cannot see a file that
   was written and then removed in between.
@@ -1516,7 +1515,7 @@ one name compare and one record check, never a copy (P10):
 | (b) `pre-CID, not B1 evidence` | `cid` does not parse as `LabCid` (`impl FromStr for LabCid`) | the parse's own reason | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (c) `pre-CID, not B1 evidence` | the store holds no bundle under that CID | "no bundle is stored under" the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (d) | `checked_bundle` of the stored folder refuses (here: `capsule.json` removed after publish) | the walk's own refusal | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
-| (e) | `CheckedBundle::check_name(cid)` refuses: the stored bytes changed after publish (here: one byte of `asks.json`) | the compare's own refusal, naming both CIDs | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+| (e) | `CheckedBundle::check_name(cid)` refuses: the stored bytes changed after publish (here: one byte of the manifest) | the compare's own refusal, naming both CIDs | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (f) | no record's `cid` equals the requested CID | starts "unsigned:" and names the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (g) | `verify_checked_package_record` refuses every record that binds the CID: a signer not accepted, an empty accepted list, a flipped signature byte | the first such record's own refusal, in store order | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_launch_does_not_depend_on_record_order` |
 
@@ -1616,12 +1615,12 @@ memory.
 
 ### Asks come only from the signed bytes (M1 check B2, no-schema part)
 
-A launched instance is handed its asks only as the `asks.json` bytes of the
+A launched instance is handed its asks only as the sidecar bytes of the
 checked bundle that passed every check above. `checked_launch` takes the
 manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
-`asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
+sidecar entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
 the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
-the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
+the bundle has no sidecar. Nothing reads the folder again. Task 044 shows
 that for the launch itself: `set_after_walk`, a lab test seam, not a route,
 gives `checked_launch` a hook that it calls once on the stored folder, right
 after the one walk and before (e), so a test can change the bytes on disk
@@ -1631,35 +1630,35 @@ any route), answers that instance's bytes, and `None` for an unknown session.
 The launch answer, the `get_capsules` entry and the grant view keep exactly
 the keys above, with no asks key, and the launch body stays `{"cid"}`.
 
-`standin_hands_an_instance_only_its_signed_asks_bytes` launches the signed
-`agent-host` bundle as in the journey above: its session answers the
-committed `fixtures/agent-host/asks.json` bytes. Then one byte of the stored
-`asks.json` changes. The session still answers the signed bytes, and a second
-launch of the same CID is refused by (e), the name compare's own refusal, with
-no new instance and an empty grant view.
-`standin_gives_each_session_its_own_asks` launches `agent-host` and `web-app`
-(which has no `asks.json`), each signed by a fresh test key, in both orders:
-the `agent-host` session answers its bytes, the `web-app` session answers
+`standin_hands_an_instance_only_its_signed_asks_bytes` launches a signed temp
+bundle that holds a sidecar the committed fixture does not: its session answers
+the bytes the walk read. Then one byte of the stored sidecar changes. The
+session still answers the walked bytes, and a second launch of the same CID is
+refused by (e), the name compare's own refusal, with no new instance and an
+empty grant view.
+`standin_gives_each_session_its_own_asks` launches that sidecar bundle and
+`web-app` (which has no sidecar), each signed by a fresh test key, in both
+orders: the sidecar session answers its bytes, the `web-app` session answers
 `None`, and so does an unknown session.
 `standin_takes_the_asks_from_the_walk_not_the_folder` launches the same signed
-bundle with a hook that changes one byte of the stored `asks.json`: the launch
-answers `launched`, the stored `asks.json` no longer equals the committed
-fixture bytes (so the hook ran), and the session answers the committed fixture
-bytes, which the test reads itself. Before task 044, a launch that read
-`asks.json` from the folder after the walk passed both tests above, because
-neither changes the folder between the walk and the launch.
+bundle with a hook that changes one byte of the stored sidecar: the launch
+answers `launched`, the stored sidecar no longer equals the bytes written
+before publish (so the hook ran), and the session answers those walked bytes.
+The committed fixture has no sidecar. A launch that read the sidecar from the
+folder after the walk would still pass a test that never changes the folder
+between the walk and the launch.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
-| The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
+| The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads the sidecar from the stored folder at call time) |
 | Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
-| A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
-| A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
+| A bundle with no sidecar is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no sidecar) |
+| A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads the sidecar from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
 
 Not shown:
 
 - No ask schema, provisional or not, and no parse or field read of
-  `asks.json`: to the stand-in it is bytes.
+  the sidecar: to the stand-in it is bytes.
 - No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
   this lane writes no B2 encoding.
 - No grant from an ask: a launch still adds none (the grant view above).
@@ -1802,7 +1801,7 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          launcher (StandInRuntime)
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's
                          reader decides; the scan writes nothing
-tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
+tests/bytes.rs           every byte is the name: manifest, payload, sidecar, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/claims.rs          the claim stays "Kubo v0.40.1 profile, computed by the lab"
@@ -1826,7 +1825,7 @@ tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
 tests/stand_in.rs        the lab stand-in launches by CID after the publisher check;
                          a valid signature alone yields no grant; an instance
-                         is handed only its signed asks.json bytes
+                         is handed only its signed sidecar bytes
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests

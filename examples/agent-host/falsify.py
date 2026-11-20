@@ -324,7 +324,7 @@ def load(path=DATA):
 #   in F-WC3-LANE-FILES-QUOTED. tools/src/lab_name.rs is gone
 #   from the tree and keeps its line because two entries of the model list
 #   anchor on it.
-# - examples/agent-host/falsifiers.json: asks.json, falsify.py and src/lib.rs,
+# - examples/agent-host/falsifiers.json: falsify.py and src/lib.rs,
 #   all under examples/agent-host, which this runner's own search restores, so
 #   the tuple needs no line for it.
 # - lab/agent-conformance/falsifiers.json: the 20 files its entries edit,

@@ -1492,7 +1492,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n",
      "new": ""
     }
@@ -1508,7 +1508,7 @@
    "expect": "survives",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
      "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},\n    {\"kind\": \"read\", \"resource\": \"Archive/\"},"
     }
@@ -1525,7 +1525,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
      "new": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n    {\"kind\": \"unspecified\", \"resource\": \"<principal>/\"},"
     }
@@ -1575,7 +1575,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/agent-host/\"}",
      "new": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/\"}"
     }
@@ -1655,7 +1655,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
      "new": "    {\"kind\": \"hosted\", \"resource\": \"https://api.example.com/\"},"
     }
@@ -1671,7 +1671,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
      "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/sk-live-abc/\"},"
     }
@@ -1687,7 +1687,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
      "new": "    {\"kind\": \"read\", \"resource\": \"Users/self/\"},"
     }
@@ -1703,7 +1703,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"run\", \"resource\": \"<principal>/Projects/\"},",
      "new": "    {\"kind\": \"run\", \"resource\": \"/tmp/projects/\"},"
     }
@@ -1719,7 +1719,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
      "new": "    {\"kind\": \"hosted\", \"resource\": \"https://example.invalid/\", \"resource\": \"Models/\"},"
     }
@@ -2279,7 +2279,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
      "new": "    {\"kind\": \"hosted\", \"resource\": \"file:/tmp/\"},"
     }
@@ -2295,7 +2295,7 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
+     "file": "src/lib.rs",
      "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
      "new": "    {\"kind\": \"hosted\", \"resource\": \"data:text/plain,x/\"},"
     }

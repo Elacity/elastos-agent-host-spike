@@ -8144,14 +8144,26 @@ export!(AgentHost);
 #[cfg(test)]
 const RENDERING_FORMAT: u16 = 2;
 
-/// The declared per-step asks, compiled in from `asks.json` in this lane. The
-/// file is an auditable declaration, not the policy check: the Runtime
-/// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
-/// manifest and retires into that one place when the Runtime defines per-step
-/// asks (P10). It is read by this module's tests only, so the shipped guest
-/// keeps no new production path.
+/// The declared per-step asks. The text is an auditable declaration, not the
+/// policy check: the Runtime enforces each grant (P4, P18). It is a lane-local
+/// stand-in for the Runtime manifest. Tests read it here; the shipped guest
+/// keeps no separate declaration file.
 #[cfg(test)]
-const ASKS_JSON: &str = include_str!("../asks.json");
+const ASKS_JSON: &str = r#"{
+  "schema": "elastos.agent-host.asks/v1",
+  "asks": [
+    {"kind": "read", "resource": "<principal>/"},
+    {"kind": "edit", "resource": "<principal>/"},
+    {"kind": "restore", "resource": "<principal>/"},
+    {"kind": "run", "resource": "<principal>/Projects/"},
+    {"kind": "child", "resource": "<principal>/Projects/"},
+    {"kind": "init", "resource": "<principal>/Projects/"},
+    {"kind": "hosted", "resource": "Models/"},
+    {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
+    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}
+  ]
+}
+"#;
 
 #[cfg(test)]
 const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
@@ -19903,9 +19915,9 @@ mod tests {
         assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
     }
 
-    // The manifest `asks` are this guest's maximum. `asks.json` stays as the
-    // lane-local list the parser checks. Each proposal kind the guest can
-    // name is observed in the scenarios. Each observed resource is the
+    // The manifest `asks` are this guest's maximum. The declaration above
+    // stays as the lane-local list the parser checks. Each proposal kind the
+    // guest can name is observed in the scenarios. Each observed resource is the
     // resource that scenario passed.
 
     fn asks_document(entries: &str) -> String {

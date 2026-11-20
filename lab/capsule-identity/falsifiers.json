@@ -642,14 +642,14 @@
     },
     {
       "id": "F-CI3i",
-      "title": "leave asks.json out of the stream (it is still read)",
+      "title": "leave the manifest out of the stream (it is still read)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"asks.json\")\n        .collect();\n    encode_entries(&entries)\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != MANIFEST_FILE)\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -4219,7 +4219,7 @@
     },
     {
       "id": "F-CI35a",
-      "title": "the planted accept-anything stub: asks_of reads asks.json from the stored folder at call time, so a change on disk after launch reaches the instance",
+      "title": "the planted accept-anything stub: asks_of reads sidecar from the stored folder at call time, so a change on disk after launch reaches the instance",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
@@ -4251,7 +4251,7 @@
     },
     {
       "id": "F-CI35c",
-      "title": "a bundle with no asks.json is handed Some(Vec::new()), not None",
+      "title": "a bundle with no sidecar is handed Some(Vec::new()), not None",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
@@ -4348,7 +4348,7 @@
     },
     {
       "id": "F-CI44a",
-      "title": "the 041 review's stub: checked_launch reads asks.json from the stored folder at launch, after the walk, instead of taking it from the checked entries",
+      "title": "the 041 review's stub: checked_launch reads sidecar from the stored folder at launch, after the walk, instead of taking it from the checked entries",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [

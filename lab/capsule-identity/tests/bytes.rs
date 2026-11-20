@@ -1,5 +1,5 @@
 //! Every byte of a bundle is its identity (PRINCIPLES 13): one byte changed
-//! in the manifest, in any payload file or in agent-host's `asks.json`, or a
+//! in the manifest, in any payload file, or a
 //! file added or removed, changes the lab CID. Each test names a bundle
 //! before and after one change, so a byte the name leaves out cannot hide
 //! behind a pin that differs anyway; then `check_name` refuses the old name
@@ -130,19 +130,20 @@ fn adding_or_removing_a_payload_file_changes_the_lab_cid() {
 
 #[test]
 fn one_byte_change_in_asks_json_changes_the_lab_cid() {
-    // M1 check B2: the asks a capsule declares are inside its name. The lab
-    // never parses asks.json; to the lab CID it is one more payload file.
+    // M1 check B2: the bytes a capsule declares are inside its name. The lab
+    // never parses the manifest's ask list; one byte of the manifest still
+    // changes the lab CID.
     let bundle = assemble(&AGENT_HOST);
     let before = named(bundle.path());
-    let asks = read_fixture(&AGENT_HOST, "asks.json");
-    let at = inside_string_value(&asks, "Models/");
-    let changed = change_one_byte(bundle.path(), "asks.json", at);
-    serde_json::from_slice::<serde_json::Value>(&changed).expect("asks.json is still JSON");
+    let manifest = read_fixture(&AGENT_HOST, "capsule.json");
+    let at = inside_string_value(&manifest, "local-development");
+    let changed = change_one_byte(bundle.path(), "capsule.json", at);
+    serde_json::from_slice::<serde_json::Value>(&changed).expect("the manifest is still JSON");
     let after = named(bundle.path());
 
     assert_ne!(
         after, before,
-        "a one-byte change in asks.json did not change the lab CID"
+        "a one-byte change in the manifest did not change the lab CID"
     );
     assert_eq!(before.to_string(), AGENT_HOST_LAB_CID);
     assert_ne!(after.to_string(), AGENT_HOST_LAB_CID);

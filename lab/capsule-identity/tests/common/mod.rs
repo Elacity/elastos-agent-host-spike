@@ -38,7 +38,7 @@ use tempfile::TempDir;
 pub const CONTENT_SAMPLE_LAB_CID: &str =
     "bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi";
 pub const WEB_APP_LAB_CID: &str = "bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q";
-pub const AGENT_HOST_LAB_CID: &str = "bafybeicesxlwcolv5hifwotsyafyyaclaq23gyzwl7esuvhwlownrhatym";
+pub const AGENT_HOST_LAB_CID: &str = "bafybeibictatmmm2izchdebpslsaybdul2gkvhd7udldcx2g2ghnhmuzhe";
 pub const PROVIDER_LAB_CID: &str = "bafybeicmpw5zf373ogbziqix2mj2bagmn5imgj3hy7347nulpmx32kooxe";
 pub const MODEL_LAB_CID: &str = "bafybeifh6dj5r5wc2j5kqxz6ukga74y3gi56woglqdzmmcdhqvy7qtljzq";
 pub const PROVIDER_VARIANT_A_LAB_CID: &str =
@@ -209,12 +209,11 @@ pub const WC001_CORE: Fixture = Fixture {
     files: &["capsule.json"],
 };
 
-/// The agent-host capsule's manifest and its declared asks, copied byte for
-/// byte from `examples/agent-host/`. Its entrypoint module is build output
+/// The agent-host capsule's manifest. Its entrypoint module is build output
 /// and is never committed, so it is not in the fixture.
 pub const AGENT_HOST: Fixture = Fixture {
     name: "agent-host",
-    files: &["capsule.json", "asks.json"],
+    files: &["capsule.json"],
 };
 
 /// A provider manifest with the fields of the Runtime's own
@@ -1491,7 +1490,7 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// modelled; a grant exists only through the test seam
 /// [`StandInRuntime::seed_grant`].
 ///
-/// A launched instance is handed its asks only as the `asks.json` bytes of
+/// A launched instance is handed its asks only as the `sidecar` bytes of
 /// the checked bundle it was launched from, read through the test seam
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
 /// it. The bytes are never parsed, and #309 has no asks field. A change on
@@ -1511,7 +1510,7 @@ struct Instance {
     id: String,
     name: String,
     session_id: String,
-    /// The content of the `asks.json` entry of the checked bundle it was
+    /// The content of the `sidecar` entry of the checked bundle it was
     /// launched from, or `None` when that bundle has none. Set once, at
     /// launch.
     asks: Option<Vec<u8>>,
@@ -1619,8 +1618,8 @@ impl StandInRuntime {
     }
 
     /// Lab test seam, not a route: the asks the instance of `session_id` was
-    /// handed at launch, the `asks.json` bytes of the checked, signed bundle
-    /// it was launched from. `None` when that bundle has no `asks.json`, or
+    /// handed at launch, the `sidecar` bytes of the checked, signed bundle
+    /// it was launched from. `None` when that bundle has no `sidecar`, or
     /// when no instance has that session. #309 has no asks field on any
     /// route, and nothing here parses the bytes.
     pub fn asks_of(&self, session_id: &str) -> Option<Vec<u8>> {
@@ -1645,7 +1644,7 @@ impl StandInRuntime {
     /// bytes, (f) a package record for that CID, (g) the one record check.
     /// (a), (b) and (c) come before the CID check. The answer is the stored
     /// manifest's `name`, from [`CheckedBundle::manifest_name`], and the
-    /// bundle's `asks.json` bytes, both from the one checked bundle that
+    /// bundle's `sidecar` bytes, both from the one checked bundle that
     /// passed every check. The hook of [`StandInRuntime::set_after_walk`], if
     /// set, runs on the stored folder right after (d); no check after (d)
     /// and no part of the answer reads the folder.
@@ -1733,10 +1732,11 @@ fn said(refusal: Refusal) -> String {
     refusal.to_string()
 }
 
-/// The asks file of a bundle, which the lab never parses.
-const ASKS_FILE: &str = "asks.json";
+/// The retired sidecar name. A test that proves the walk hands bytes through
+/// writes this name into a temp bundle. The committed fixture has none.
+pub const ASKS_FILE: &str = concat!("asks", ".json");
 
-/// The content of the checked bundle's `asks.json` entry, or `None` when it
+/// The content of the checked bundle's sidecar entry, or `None` when it
 /// has none: the bytes the walk read, never read from the folder again.
 fn signed_asks(checked: &CheckedBundle) -> Option<Vec<u8>> {
     checked

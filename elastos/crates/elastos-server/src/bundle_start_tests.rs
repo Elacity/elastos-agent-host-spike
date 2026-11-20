@@ -3835,9 +3835,10 @@ async fn ceiling_is_signed() {
     );
 }
 
-/// A start by CID takes asks from the signed manifest. An empty manifest
-/// starts sealed. The same ask declared in `capsule.json` reaches the shell
-/// and, once granted, the provider.
+/// A start by CID takes asks from the signed manifest. A stray sidecar in
+/// the same bundle is walked as bytes and is not applied: the admitted asks
+/// stay empty and the start stays sealed. The same ask declared in
+/// `capsule.json` reaches the shell and, once granted, the provider.
 #[tokio::test]
 async fn a_start_by_cid_takes_asks_from_the_signed_manifest() {
     use crate::bundle_admission::admit_bundle_manifest;
@@ -3845,12 +3846,23 @@ async fn a_start_by_cid_takes_asks_from_the_signed_manifest() {
     let publisher = key(102);
     let home = Home::trusting(&[&publisher]).await;
     let folder = home.bundle("lab-asks", &manifest("lab-asks"), &calling_component());
+    let sidecar = concat!("asks", ".json");
+    let stray = br#"[{"resource":"elastos://test/bus/probe","actions":["read"]}]"#;
+    fs::write(folder.join(sidecar), stray).unwrap();
     let cid = home.stage(&folder, &publisher).await;
 
     let slot = bundle_slot(&home.data(), &cid.parse().unwrap());
     let checked = walk(&slot, BUNDLE_WALK_BUDGET).unwrap();
     let admitted = admit_bundle_manifest(&checked).unwrap();
-    assert!(admitted.manifest.asks.is_empty());
+    assert_eq!(
+        checked.entry(sidecar),
+        Some(stray.as_slice()),
+        "the sidecar is bytes in the walked bundle"
+    );
+    assert!(
+        admitted.manifest.asks.is_empty(),
+        "a sidecar is not a reader"
+    );
     assert_eq!(
         admitted.manifest.resource_authority_bounds(),
         Vec::<String>::new()
@@ -3877,13 +3889,12 @@ async fn a_start_by_cid_takes_asks_from_the_signed_manifest() {
     );
 }
 
-/// The retired sidecar name stays with the two owners this stack does not
-/// retire, and with the one Rust include those owners still compile. A third
-/// file of that name, another `include_str` or `include_bytes` of it, or a
-/// production server source that names it as its own path, fails here.
+/// No file in this repo carries the retired sidecar name, and no Rust
+/// source compiles that name with `include_str` or `include_bytes`. A
+/// production server source that names it as its own path fails here.
 #[test]
 fn census_retired_ask_filename_stays_with_its_owners() {
-    let name = "asks.json";
+    let name = concat!("asks", ".json");
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(3)
@@ -3907,14 +3918,11 @@ fn census_retired_ask_filename_stays_with_its_owners() {
     }
     named.sort();
     includes.sort();
-    assert_eq!(
-        named,
-        vec![
-            "examples/agent-host/asks.json".to_string(),
-            "lab/capsule-identity/fixtures/agent-host/asks.json".to_string(),
-        ]
+    assert!(named.is_empty(), "the retired sidecar is back: {named:?}");
+    assert!(
+        includes.is_empty(),
+        "a Rust source compiles the retired sidecar: {includes:?}"
     );
-    assert_eq!(includes, vec!["examples/agent-host/src/lib.rs".to_string()]);
 
     let server = repo.join("elastos/crates/elastos-server/src");
     let mut sidecar = Vec::new();
