@@ -1763,24 +1763,34 @@ pub(crate) mod tests {
 
     /// Every file under `dir` as (relative path, SHA-256 of its bytes), sorted.
     /// Two calls that return the same vector mean the tree's names and bytes
-    /// did not change.
+    /// did not change. Any part of the tree the walk cannot read fails the
+    /// caller by name: a census that skips a subtree cannot prove a claim
+    /// about the whole tree.
     pub(crate) fn tree_hashes(dir: &std::path::Path) -> Vec<(String, String)> {
         use sha2::{Digest, Sha256};
         fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()));
             for entry in entries {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
+                let entry = entry.unwrap_or_else(|err| {
+                    panic!("cannot read an entry of {}: {err}", dir.display())
+                });
+                let path = entry.path();
+                let is_dir = std::fs::metadata(&path)
+                    .unwrap_or_else(|err| panic!("cannot stat {}: {err}", path.display()))
+                    .is_dir();
+                if is_dir {
                     walk(root, &path, out);
                 } else {
                     let relative = path
                         .strip_prefix(root)
-                        .unwrap()
+                        .unwrap_or_else(|err| {
+                            panic!("{} is outside {}: {err}", path.display(), root.display())
+                        })
                         .to_string_lossy()
                         .into_owned();
-                    let bytes = std::fs::read(&path).unwrap();
+                    let bytes = std::fs::read(&path)
+                        .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
                     let digest = format!("{:x}", Sha256::digest(&bytes));
                     out.push((relative, digest));
                 }
