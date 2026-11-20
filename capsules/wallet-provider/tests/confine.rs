@@ -17152,14 +17152,13 @@ fn read_bridge_source() -> Result<String, String> {
 }
 
 /// The production region of a Rust source: the text before its top-level
-/// `#[cfg(test)]` / `mod tests {` pair, or a refusal that names `source_name`
-/// when that pair is absent.
+/// `#[cfg(test)]` / `mod tests {` pair, with earlier test-only items removed.
 ///
 /// An attribute on a test-only helper or in a nested module does not cut the
 /// region. A source with no top-level test module is a refusal, never a silent
 /// read of the whole file, because a whole-file read would let a test's own
 /// launch answer for the shipped policy.
-fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a str, String> {
+fn rust_production_region(source_name: &str, source: &str) -> Result<String, String> {
     let mut cut = 0;
     let mut lines = source.split_inclusive('\n').peekable();
     while let Some(line) = lines.next() {
@@ -17168,7 +17167,7 @@ fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a 
                 .peek()
                 .is_some_and(|next| next.trim_end_matches(['\n', '\r']) == TEST_MODULE_DECLARATION)
         {
-            return Ok(&source[..cut]);
+            return Ok(rust_without_test_items(&source[..cut]));
         }
         cut += line.len();
     }
@@ -17177,6 +17176,185 @@ fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a 
          {TEST_MODULE_DECLARATION} pair that starts its test module; found none, so its \
          production region cannot be cut"
     ))
+}
+
+/// Remove items compiled only for tests. A source claim cannot be
+/// satisfied by an earlier test hook merely because it precedes `mod tests`.
+fn rust_without_test_items(source: &str) -> String {
+    let code = rust_code_mask(source);
+    let mut result = String::new();
+    let mut cursor = 0;
+    for (start, line) in code.split_inclusive('\n').scan(0, |offset, line| {
+        let start = *offset;
+        *offset += line.len();
+        Some((start, line))
+    }) {
+        if start < cursor || !rust_test_only_cfg(line.trim()) {
+            continue;
+        }
+        result.push_str(&source[cursor..start]);
+        cursor = rust_item_end(code.as_bytes(), start + line.len());
+    }
+    result.push_str(&source[cursor..]);
+    result
+}
+
+fn rust_test_only_cfg(line: &str) -> bool {
+    if line == TEST_MODULE_ATTRIBUTE {
+        return true;
+    }
+    let Some(inner) = line
+        .strip_prefix("#[cfg(all(")
+        .and_then(|value| value.strip_suffix("))]"))
+    else {
+        return false;
+    };
+    let mut depth = 0i32;
+    let mut begin = 0;
+    for (index, byte) in inner.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 0 => {
+                if inner[begin..index].trim() == "test" {
+                    return true;
+                }
+                begin = index + 1;
+            }
+            _ => {}
+        }
+    }
+    inner[begin..].trim() == "test"
+}
+
+/// Mask comments and literals while preserving byte positions and newlines.
+fn rust_code_mask(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut code = bytes.to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        if bytes[index..].starts_with(b"//") {
+            index = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |offset| index + offset + 1);
+        } else if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            let mut depth = 1;
+            while index + 1 < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+        } else {
+            let raw = if bytes[index] == b'r' {
+                Some(index)
+            } else if bytes[index..].starts_with(b"br") {
+                Some(index + 1)
+            } else {
+                None
+            };
+            let mut hashes = 0;
+            if let Some(raw) = raw {
+                while bytes.get(raw + 1 + hashes) == Some(&b'#') {
+                    hashes += 1;
+                }
+                if bytes.get(raw + 1 + hashes) == Some(&b'"') {
+                    index = raw + 2 + hashes;
+                    while index < bytes.len() {
+                        if bytes[index] == b'"'
+                            && (0..hashes).all(|count| bytes.get(index + 1 + count) == Some(&b'#'))
+                        {
+                            index += 1 + hashes;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+            }
+            if index == start && (bytes[index] == b'"' || bytes[index..].starts_with(b"b\"")) {
+                index += if bytes[index] == b'b' { 2 } else { 1 };
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                    } else if bytes[index] == b'"' {
+                        index += 1;
+                        break;
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            if index == start && bytes[index] == b'\'' {
+                let close = if bytes.get(index + 1) == Some(&b'\\') {
+                    index + 3
+                } else {
+                    index + 2
+                };
+                if bytes.get(close) == Some(&b'\'') {
+                    index = close + 1;
+                }
+            }
+        }
+        if index == start {
+            index += 1;
+        } else {
+            for byte in &mut code[start..index.min(bytes.len())] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+        }
+    }
+    String::from_utf8(code).expect("mask preserves UTF-8")
+}
+
+fn rust_item_end(code: &[u8], from: usize) -> usize {
+    let mut index = from;
+    loop {
+        while index < code.len() && code[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if code.get(index..index + 2) == Some(b"#[") {
+            index = rust_skip_pair(code, index + 1, b'[', b']');
+        } else {
+            break;
+        }
+    }
+    let mut parens = 0i32;
+    while index < code.len() {
+        match code[index] {
+            b'(' | b'[' => parens += 1,
+            b')' | b']' => parens -= 1,
+            b'{' if parens <= 0 => return rust_skip_pair(code, index, b'{', b'}'),
+            b';' | b',' if parens <= 0 => return index + 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    code.len()
+}
+
+fn rust_skip_pair(code: &[u8], open: usize, left: u8, right: u8) -> usize {
+    let mut depth = 0i32;
+    for (index, byte) in code.iter().enumerate().skip(open) {
+        if *byte == left {
+            depth += 1;
+        } else if *byte == right {
+            depth -= 1;
+            if depth == 0 {
+                return index + 1;
+            }
+        }
+    }
+    code.len()
 }
 
 /// Every backtick-delimited span in `text`, in order.
@@ -24326,8 +24504,7 @@ impl ModelInlineProfile {
             .unwrap_or_else(|err| panic!("{err}"));
         let source = read_bridge_source().unwrap_or_else(|err| panic!("{err}"));
         let region = rust_production_region(BRIDGE_SOURCE_PATH, &source)
-            .unwrap_or_else(|err| panic!("{err}"))
-            .to_string();
+            .unwrap_or_else(|err| panic!("{err}"));
         let did_section =
             section_under_one_heading(DID_PROVIDER, &did_document, MODEL_INLINE_HEADING)
                 .unwrap_or_else(|refusals| panic!("{}", refusals.join("\n")));
@@ -24639,12 +24816,38 @@ fn model_inline_profile_check_refuses_each_bad_section() {
         ),
         "a source with no test module is a refusal that names the file"
     );
+    let production_code = rust_code_mask(&inline.region);
     assert!(
-        !inline.region.contains(&format!(
-            "\n{TEST_MODULE_ATTRIBUTE}\n{TEST_MODULE_DECLARATION}"
-        )),
-        "the production region must stop before the test module"
+        !inline
+            .region
+            .contains(&format!("\n{TEST_MODULE_ATTRIBUTE}"))
+            && !production_code.contains(TEST_MODULE_ATTRIBUTE)
+            && !production_code.contains("#[cfg(all(test,"),
+        "the production region must exclude every test-only item"
     );
+    let planted = r#"fn live_before() {}
+#[cfg(test)]
+fn test_hook() { let answer = "arg(\"-p\")"; }
+#[cfg(all(test, target_os = "linux"))]
+fn linux_test_hook() { let answer = "(deny default)"; }
+struct Example;
+impl Example {
+    #[cfg(test)]
+    fn nested_test_hook() { let answer = "(param \""; }
+    fn live_method() {}
+}
+fn live_after() {}
+#[cfg(test)]
+mod tests {
+}
+"#;
+    let filtered = rust_production_region(BRIDGE_SOURCE_PATH, planted).unwrap();
+    assert!(
+        filtered.contains("fn live_before()")
+            && filtered.contains("fn live_after()")
+            && filtered.contains("fn live_method()")
+    );
+    assert!(!filtered.contains("test_hook") && !filtered.contains("(deny default)"));
 
     for (label, document, region, expected) in inline.bad_cases() {
         assert_eq!(
