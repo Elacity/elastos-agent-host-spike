@@ -479,7 +479,7 @@ fn assert_no_topology(answer: &Value, carrier: &dyn CarrierUnderTest) {
     carrier.assert_private_answer(answer);
 }
 
-// dKMS is planned over Carrier (PRINCIPLES 15). This verb carries opaque bytes.
+// Remote key-service traffic is planned over Carrier (PRINCIPLES 15). This verb carries opaque bytes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContractRow {
     R1,
