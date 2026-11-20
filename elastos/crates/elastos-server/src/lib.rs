@@ -15,6 +15,8 @@ pub mod bundle_admission;
 mod bundle_start_tests;
 pub(crate) mod capsule_record;
 pub mod carrier;
+#[cfg(test)]
+mod carrier_contract_tests;
 pub mod carrier_service;
 pub mod collaboration_carrier;
 pub mod collaboration_config;
