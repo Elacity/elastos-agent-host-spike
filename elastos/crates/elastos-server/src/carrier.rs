@@ -62,7 +62,7 @@ use elastos_runtime::provider::{
     ResourceResponse,
 };
 
-use crate::content::{FetchReceipt, FetchResult};
+use crate::content::{FetchFailureReason, FetchReceipt, FetchResult};
 use crate::operator_control::{
     load_operator_control, OperatorHandler, OperatorRuntimeContext, OPERATOR_ALPN,
 };
@@ -4727,6 +4727,9 @@ impl CarrierAvailabilityProvider {
 
         let deadline = tokio::time::Instant::now() + self.discovery_wait;
         let mut tried = HashSet::new();
+        // Counts every pass that selects a candidate, including one the filter
+        // hands back again. The distinct-DID set alone does not bound that.
+        let mut fetch_attempts = 0usize;
         let mut errors = Vec::new();
         // Every holder failed in transit (deadline, connect, lost stream) and
         // none refused or answered badly: the caller may try the read again.
@@ -4764,23 +4767,39 @@ impl CarrierAvailabilityProvider {
                 .into_iter()
                 .find(|replica| !tried.contains(&replica.node_did));
             if let Some(mut replica) = next {
-                if tried.len() >= MAX_CARRIER_REPLICATION_CANDIDATES {
+                // Checked on every pass, including after "not enough holders
+                // yet". A filter that does not use the tried key cannot spin.
+                if fetch_walk_should_stop(
+                    fetch_attempts,
+                    tried.len(),
+                    tried.contains(&replica.node_did),
+                    required_distinct,
+                    deadline,
+                ) {
                     break;
                 }
+                fetch_attempts += 1;
                 tried.insert(replica.node_did.clone());
                 let attempt = tried.len() as u8;
-                match fetch_content_via_carrier_provider_invocation(
-                    &registry,
-                    &replica.node_did,
-                    &replica.connect_ticket,
-                    cid,
-                    path,
-                    bound,
-                )
-                .await
-                {
+                match holder_answer_or_empty_failure(
+                    required_distinct,
+                    fetch_content_via_carrier_provider_invocation(
+                        &registry,
+                        &replica.node_did,
+                        &replica.connect_ticket,
+                        cid,
+                        path,
+                        bound,
+                    )
+                    .await,
+                ) {
                     Ok((bytes, remote_transfer)) => {
-                        self.record_peer_reputation(&replica.node_did, true).await;
+                        // Mode off marks the holder and returns before any receipt.
+                        // The record call writes nothing in that mode.
+                        let mode_off = required_distinct == 0;
+                        if mode_off {
+                            self.record_peer_reputation(&replica.node_did, true).await;
+                        }
                         let enough = match record_holder_answer(
                             &mut holder_receipts,
                             required_distinct,
@@ -4791,10 +4810,18 @@ impl CarrierAvailabilityProvider {
                             attempt,
                         ) {
                             Ok(enough) => enough,
-                            Err(err) => {
-                                return Ok(carrier_availability_error("invalid_request", err))
+                            Err(_) => {
+                                // A holder answer that the receipt type cannot
+                                // hold is that holder's failure, not a caller error.
+                                self.record_peer_reputation(&replica.node_did, false).await;
+                                only_transit_failures = false;
+                                errors.push("holder answer could not be recorded".to_string());
+                                continue;
                             }
                         };
+                        if !mode_off {
+                            self.record_peer_reputation(&replica.node_did, true).await;
+                        }
                         if !enough {
                             continue;
                         }
@@ -4814,20 +4841,14 @@ impl CarrierAvailabilityProvider {
                             "Carrier availability fetch from holder failed"
                         );
                         if let Some(corrupt) = err.downcast_ref::<CarrierHolderCorruptBytes>() {
-                            if let Err(record_err) = record_holder_answer(
+                            record_corrupt_holder(
                                 &mut holder_receipts,
                                 required_distinct,
                                 cid,
                                 &replica.node_did,
-                                FetchResult::RefusedCorrupt,
                                 corrupt.bytes_received,
                                 attempt,
-                            ) {
-                                return Ok(carrier_availability_error(
-                                    "invalid_request",
-                                    record_err,
-                                ));
-                            }
+                            );
                         }
                         let mut final_err = err.to_string();
                         let mut in_transit = carrier_read_failed_in_transit(&err);
@@ -4841,19 +4862,27 @@ impl CarrierAvailabilityProvider {
                             {
                                 TrustedSourceBootstrapRefresh::Fresh(live_ticket) => {
                                     replica.connect_ticket = live_ticket;
-                                    match fetch_content_via_carrier_provider_invocation(
-                                        &registry,
-                                        &replica.node_did,
-                                        &replica.connect_ticket,
-                                        cid,
-                                        path,
-                                        bound,
-                                    )
-                                    .await
-                                    {
+                                    match holder_answer_or_empty_failure(
+                                        required_distinct,
+                                        fetch_content_via_carrier_provider_invocation(
+                                            &registry,
+                                            &replica.node_did,
+                                            &replica.connect_ticket,
+                                            cid,
+                                            path,
+                                            bound,
+                                        )
+                                        .await,
+                                    ) {
                                         Ok((bytes, remote_transfer)) => {
-                                            self.record_peer_reputation(&replica.node_did, true)
+                                            let mode_off = required_distinct == 0;
+                                            if mode_off {
+                                                self.record_peer_reputation(
+                                                    &replica.node_did,
+                                                    true,
+                                                )
                                                 .await;
+                                            }
                                             let enough = match record_holder_answer(
                                                 &mut holder_receipts,
                                                 required_distinct,
@@ -4864,13 +4893,27 @@ impl CarrierAvailabilityProvider {
                                                 attempt,
                                             ) {
                                                 Ok(enough) => enough,
-                                                Err(err) => {
-                                                    return Ok(carrier_availability_error(
-                                                        "invalid_request",
-                                                        err,
-                                                    ))
+                                                Err(_) => {
+                                                    self.record_peer_reputation(
+                                                        &replica.node_did,
+                                                        false,
+                                                    )
+                                                    .await;
+                                                    only_transit_failures = false;
+                                                    errors.push(
+                                                        "holder answer could not be recorded"
+                                                            .to_string(),
+                                                    );
+                                                    continue;
                                                 }
                                             };
+                                            if !mode_off {
+                                                self.record_peer_reputation(
+                                                    &replica.node_did,
+                                                    true,
+                                                )
+                                                .await;
+                                            }
                                             if !enough {
                                                 continue;
                                             }
@@ -4892,20 +4935,14 @@ impl CarrierAvailabilityProvider {
                                             if let Some(corrupt) = retry_err
                                                 .downcast_ref::<CarrierHolderCorruptBytes>(
                                             ) {
-                                                if let Err(record_err) = record_holder_answer(
+                                                record_corrupt_holder(
                                                     &mut holder_receipts,
                                                     required_distinct,
                                                     cid,
                                                     &replica.node_did,
-                                                    FetchResult::RefusedCorrupt,
                                                     corrupt.bytes_received,
                                                     attempt,
-                                                ) {
-                                                    return Ok(carrier_availability_error(
-                                                        "invalid_request",
-                                                        record_err,
-                                                    ));
-                                                }
+                                                );
                                             }
                                             final_err = retry_err.to_string();
                                             // Any refusal for this holder keeps it permanent.
@@ -5003,6 +5040,67 @@ fn distinct_holder_count(receipts: &[FetchReceipt]) -> usize {
         .filter_map(|receipt| receipt.peer_did_verified())
         .collect::<std::collections::BTreeSet<_>>()
         .len()
+}
+
+/// Stops one pass of the holder walk. The cap counts passes, not only new
+/// peer DIDs, so a filter that keeps returning one holder cannot spin. The
+/// deadline is checked on every pass while the mode is on, and on a repeated
+/// candidate in either mode. Mode off still walks each new holder.
+fn fetch_walk_should_stop(
+    fetch_attempts: usize,
+    tried_len: usize,
+    candidate_already_tried: bool,
+    required_distinct: u8,
+    deadline: tokio::time::Instant,
+) -> bool {
+    if fetch_attempts >= MAX_CARRIER_REPLICATION_CANDIDATES
+        || tried_len >= MAX_CARRIER_REPLICATION_CANDIDATES
+    {
+        return true;
+    }
+    (candidate_already_tried || required_distinct > 0) && tokio::time::Instant::now() >= deadline
+}
+
+/// A verified empty answer cannot be recorded: `FetchReceipt::Ok` requires
+/// bytes, and a failed receipt cannot say the bytes were verified. Fail the
+/// holder instead. Mode off keeps the empty answer as an ordinary success.
+fn holder_answer_or_empty_failure(
+    required_distinct: u8,
+    result: Result<(Vec<u8>, Option<serde_json::Value>)>,
+) -> Result<(Vec<u8>, Option<serde_json::Value>)> {
+    match result {
+        Ok((bytes, _)) if required_distinct > 0 && bytes.is_empty() => {
+            Err(anyhow::anyhow!("holder returned an empty answer"))
+        }
+        other => other,
+    }
+}
+
+/// Records a CID mismatch. Zero bytes are not `RefusedCorrupt` (that variant
+/// requires unverified bytes), so they are an invalid response: unverified,
+/// empty, and a closed reason. A record failure does not abort the fetch.
+fn record_corrupt_holder(
+    receipts: &mut Vec<FetchReceipt>,
+    required: u8,
+    cid: &str,
+    node_did: &str,
+    bytes_received: u64,
+    attempt: u8,
+) {
+    let result = if bytes_received == 0 {
+        FetchResult::Failed(FetchFailureReason::InvalidResponse)
+    } else {
+        FetchResult::RefusedCorrupt
+    };
+    let _ = record_holder_answer(
+        receipts,
+        required,
+        cid,
+        node_did,
+        result,
+        bytes_received,
+        attempt,
+    );
 }
 
 /// Adds one holder answer to the requester's receipts and reports whether the
@@ -9946,6 +10044,8 @@ pub(crate) mod tests {
         /// Connect tickets whose bounded fetch fails in transit.
         transit_tickets: StdMutex<Vec<String>>,
         wrong_tickets: Vec<String>,
+        /// Connect tickets whose fetch answer is zero bytes.
+        empty_tickets: Vec<String>,
         reject_admission: bool,
         omit_admission_receipt: bool,
     }
@@ -9989,7 +10089,9 @@ pub(crate) mod tests {
                         "mock answer deadline passed",
                     )));
                 }
-                let bytes: &[u8] = if self.wrong_tickets.iter().any(|bad| bad == ticket) {
+                let bytes: &[u8] = if self.empty_tickets.iter().any(|empty| empty == ticket) {
+                    b""
+                } else if self.wrong_tickets.iter().any(|bad| bad == ticket) {
                     b"wrong holder bytes"
                 } else {
                     b"carrier provider bytes"
@@ -15672,6 +15774,12 @@ pub(crate) mod tests {
                     base64::engine::general_purpose::STANDARD.encode(b"carrier provider bytes")
                 );
                 assert_eq!(response["data"]["availability"]["cid_verified"], true);
+                let availability = &response["data"]["availability"];
+                assert!(
+                    availability.get("receipts").is_none()
+                        && availability.get("receipt_attestation").is_none(),
+                    "mode off keeps the ordinary answer: {availability}"
+                );
                 assert_eq!(reputation[&second_did].successes, 1);
             }
             endpoint.close().await;
@@ -15685,6 +15793,20 @@ pub(crate) mod tests {
         cid: &str,
         messages: Vec<GossipMessage>,
         invoker: Arc<MockCarrierProviderPlaneInvoker>,
+    ) -> (
+        CarrierAvailabilityProvider,
+        Arc<ProviderRegistry>,
+        iroh::Endpoint,
+    ) {
+        distinct_holder_fetch_fixture_with_ipfs(seed, cid, messages, invoker, None).await
+    }
+
+    async fn distinct_holder_fetch_fixture_with_ipfs(
+        seed: u8,
+        cid: &str,
+        messages: Vec<GossipMessage>,
+        invoker: Arc<MockCarrierProviderPlaneInvoker>,
+        ipfs: Option<Arc<dyn Provider>>,
     ) -> (
         CarrierAvailabilityProvider,
         Arc<ProviderRegistry>,
@@ -15722,7 +15844,10 @@ pub(crate) mod tests {
         let registry = Arc::new(ProviderRegistry::new());
         registry.set_carrier_invoker(invoker).await;
         registry
-            .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+            .register_sub_provider(
+                "ipfs",
+                ipfs.unwrap_or_else(|| Arc::new(MockCarrierIpfsProvider) as Arc<dyn Provider>),
+            )
             .await
             .unwrap();
         let provider =
@@ -15779,6 +15904,8 @@ pub(crate) mod tests {
                 && receipt["bytes_received"] == 22
                 && receipt["result"]["status"] == "ok"
         }));
+        assert_eq!(receipts[0]["attempt"], 1);
+        assert_eq!(receipts[1]["attempt"], 2);
         assert_eq!(invoker.requests.lock().await.len(), 2);
         endpoint.close().await;
     }
@@ -15797,14 +15924,17 @@ pub(crate) mod tests {
         let (provider, _registry, endpoint) =
             distinct_holder_fetch_fixture(85, cid, vec![first, second], invoker.clone()).await;
 
-        let response = provider
-            .send_raw(&serde_json::json!({
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            provider.send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
                 "min_distinct_holders": 2
-            }))
-            .await
-            .unwrap();
+            })),
+        )
+        .await
+        .expect("a repeated candidate must not spin the fetch")
+        .unwrap();
 
         assert_eq!(response["status"], "error", "{response}");
         assert_eq!(response["code"], "carrier_fetch_distinct_holders");
@@ -15870,6 +16000,377 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(invoker.requests.lock().await.len(), 2);
+        endpoint.close().await;
+    }
+
+    #[test]
+    fn test_fetch_walk_stops_a_repeated_candidate() {
+        let ahead = tokio::time::Instant::now() + Duration::from_secs(60);
+        let past = tokio::time::Instant::now() - Duration::from_millis(1);
+        assert!(!fetch_walk_should_stop(0, 0, false, 2, ahead));
+        assert!(
+            !fetch_walk_should_stop(1, 1, true, 2, ahead),
+            "one repeat is still inside the attempt cap"
+        );
+        assert!(fetch_walk_should_stop(
+            MAX_CARRIER_REPLICATION_CANDIDATES,
+            1,
+            true,
+            2,
+            ahead,
+        ));
+        assert!(fetch_walk_should_stop(1, 1, true, 2, past));
+        // Mode off keeps walking a new holder after the deadline.
+        assert!(!fetch_walk_should_stop(1, 1, false, 0, past));
+        // The same holder handed back again stops, in either mode.
+        assert!(fetch_walk_should_stop(1, 1, true, 0, past));
+        assert!(fetch_walk_should_stop(1, 1, false, 2, past));
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_succeeds_past_an_empty_holder() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (first, first_did) =
+            signed_content_availability_message(cid, [91; 32], "ticket:honest-a", "", now);
+        let (empty, empty_did) =
+            signed_content_availability_message(cid, [92; 32], "ticket:empty", "", now - 1);
+        let (third, third_did) =
+            signed_content_availability_message(cid, [93; 32], "ticket:honest-b", "", now - 2);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            empty_tickets: vec!["ticket:empty".into()],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(94, cid, vec![first, empty, third], invoker.clone())
+                .await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "ok", "{response}");
+        let availability = &response["data"]["availability"];
+        assert_eq!(availability["distinct_holders"], 2);
+        let receipts = availability["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 3, "{availability}");
+        assert_eq!(receipts[0]["peer_did"], first_did);
+        assert_eq!(receipts[0]["attempt"], 1);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        assert_eq!(receipts[1]["peer_did"], empty_did);
+        assert_eq!(receipts[1]["attempt"], 2);
+        assert_eq!(receipts[1]["bytes_received"], 0);
+        assert_eq!(receipts[1]["verified"], false);
+        assert_eq!(receipts[1]["result"]["status"], "failed");
+        assert_eq!(receipts[1]["result"]["reason_code"], "invalid_response");
+        assert_eq!(receipts[2]["peer_did"], third_did);
+        assert_eq!(receipts[2]["attempt"], 3);
+        assert_eq!(receipts[2]["verified"], true);
+        assert_eq!(receipts[2]["result"]["status"], "ok");
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| receipt["verified"] == true)
+                .count(),
+            2
+        );
+        let reputation = provider.peer_reputation.lock().await;
+        assert_eq!(reputation[&empty_did].failures, 1);
+        assert_eq!(reputation[&empty_did].successes, 0);
+        assert_eq!(reputation[&first_did].successes, 1);
+        assert_eq!(reputation[&third_did].successes, 1);
+        assert_eq!(invoker.requests.lock().await.len(), 3);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_keeps_honest_receipt_when_holder_is_empty() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (honest, honest_did) =
+            signed_content_availability_message(cid, [95; 32], "ticket:honest", "", now);
+        let (empty, empty_did) =
+            signed_content_availability_message(cid, [96; 32], "ticket:empty", "", now - 1);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            empty_tickets: vec!["ticket:empty".into()],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(97, cid, vec![honest, empty], invoker.clone()).await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], "carrier_fetch_distinct_holders");
+        assert_ne!(response["code"], "invalid_request");
+        assert_eq!(response["data"]["distinct_holders"], 1);
+        let receipts = response["data"]["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 2, "{response}");
+        assert_eq!(receipts[0]["peer_did"], honest_did);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        assert_eq!(receipts[1]["peer_did"], empty_did);
+        assert_eq!(receipts[1]["bytes_received"], 0);
+        assert_eq!(receipts[1]["verified"], false);
+        assert_eq!(receipts[1]["result"]["reason_code"], "invalid_response");
+        let reputation = provider.peer_reputation.lock().await;
+        assert_eq!(reputation[&honest_did].successes, 1);
+        assert_eq!(reputation[&empty_did].failures, 1);
+        assert_eq!(reputation[&empty_did].successes, 0);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_succeeds_after_a_lie_with_two_more_holders() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (liar, liar_did) =
+            signed_content_availability_message(cid, [98; 32], "ticket:liar", "", now);
+        let (second, second_did) =
+            signed_content_availability_message(cid, [99; 32], "ticket:second", "", now - 1);
+        let (third, third_did) =
+            signed_content_availability_message(cid, [100; 32], "ticket:third", "", now - 2);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            wrong_tickets: vec!["ticket:liar".into()],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(101, cid, vec![liar, second, third], invoker.clone())
+                .await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "ok", "{response}");
+        let availability = &response["data"]["availability"];
+        assert_eq!(availability["distinct_holders"], 2);
+        let receipts = availability["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 3, "{availability}");
+        assert_eq!(receipts[0]["peer_did"], liar_did);
+        assert_eq!(receipts[0]["verified"], false);
+        assert_eq!(receipts[0]["result"]["status"], "refused-corrupt");
+        assert_eq!(receipts[1]["peer_did"], second_did);
+        assert_eq!(receipts[1]["verified"], true);
+        assert_eq!(receipts[1]["result"]["status"], "ok");
+        assert_eq!(receipts[2]["peer_did"], third_did);
+        assert_eq!(receipts[2]["verified"], true);
+        assert_eq!(receipts[2]["result"]["status"], "ok");
+        assert_eq!(invoker.requests.lock().await.len(), 3);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_refuses_min_distinct_holders_out_of_range() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(102, cid, Vec::new(), invoker.clone()).await;
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(9),
+            serde_json::json!("2"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            let response = provider
+                .send_raw(&serde_json::json!({
+                    "op": "fetch",
+                    "cid": cid,
+                    "min_distinct_holders": value,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(response["status"], "error", "{value}: {response}");
+            assert_eq!(response["code"], "invalid_request", "{value}: {response}");
+            assert!(
+                response["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("between 1 and 8"),
+                "{response}"
+            );
+        }
+        assert!(invoker.requests.lock().await.is_empty());
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_refuses_partial_read_when_mode_is_on() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let (provider, _registry, endpoint) = distinct_holder_fetch_fixture(
+            103,
+            cid,
+            Vec::new(),
+            Arc::new(MockCarrierProviderPlaneInvoker::default()),
+        )
+        .await;
+        for request in [
+            serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "path": "notes.txt",
+                "min_distinct_holders": 2
+            }),
+            serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2,
+                "bounded_read": true,
+                "range": { "start": 0, "end": 3 }
+            }),
+        ] {
+            let response = provider.send_raw(&request).await.unwrap();
+            assert_eq!(response["code"], "invalid_request", "{response}");
+            assert!(
+                response["message"].as_str().unwrap().contains("whole-CID"),
+                "{response}"
+            );
+        }
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_accepts_one_required_holder() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (holder, holder_did) =
+            signed_content_availability_message(cid, [104; 32], "ticket:only", "", now);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(105, cid, vec![holder], invoker.clone()).await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 1
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "ok", "{response}");
+        let receipts = response["data"]["availability"]["receipts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(receipts.len(), 1, "{response}");
+        assert_eq!(receipts[0]["peer_did"], holder_did);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["attempt"], 1);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        assert_eq!(response["data"]["availability"]["distinct_holders"], 1);
+        assert_eq!(invoker.requests.lock().await.len(), 1);
+        endpoint.close().await;
+    }
+
+    struct LocalMissCarrierIpfs;
+
+    #[async_trait::async_trait]
+    impl Provider for LocalMissCarrierIpfs {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider(
+                "mock ipfs provider only supports raw operations".into(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "local-miss-carrier-ipfs"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            if request.get("op").and_then(|value| value.as_str()) == Some("add_bytes") {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(request["data"].as_str().unwrap())
+                    .unwrap();
+                let cid = if bytes == b"carrier provider bytes" {
+                    "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp"
+                } else {
+                    "QmRSEtAyq7Xgr5YCFVWuYsBdqbR5X9fJDsdpNQuvm9yaic"
+                };
+                return Ok(serde_json::json!({ "status": "ok", "data": { "cid": cid } }));
+            }
+            Err(ProviderError::Provider("mock content path missing".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_content_fetch_refuses_malformed_min_distinct_holders() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (honest, _) =
+            signed_content_availability_message(cid, [106; 32], "ticket:honest", "", now);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, registry, endpoint) = distinct_holder_fetch_fixture_with_ipfs(
+            107,
+            cid,
+            vec![honest],
+            invoker.clone(),
+            Some(Arc::new(LocalMissCarrierIpfs) as Arc<dyn Provider>),
+        )
+        .await;
+        let provider: Arc<dyn Provider> = Arc::new(provider);
+        registry
+            .register_sub_provider("availability", provider)
+            .await
+            .unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let content = crate::content::ContentProvider::new(
+            data_dir.path().to_path_buf(),
+            Arc::downgrade(&registry),
+        );
+        for malformed in [
+            serde_json::json!("2"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            let err = content
+                .send_raw(&serde_json::json!({
+                    "op": "fetch",
+                    "cid": cid,
+                    "min_distinct_holders": malformed,
+                }))
+                .await
+                .expect_err("a malformed distinct-holder value must be refused");
+            let text = err.to_string();
+            assert!(
+                text.contains("invalid_request"),
+                "malformed {malformed} was treated as an ordinary fetch: {text}"
+            );
+            assert!(text.contains("between 1 and 8"), "{text}");
+        }
+        assert_eq!(
+            invoker.requests.lock().await.len(),
+            0,
+            "the refusal happens before any holder fetch"
+        );
         endpoint.close().await;
     }
 
@@ -16060,6 +16561,7 @@ pub(crate) mod tests {
             fail_tickets: Vec::new(),
             transit_tickets: Default::default(),
             wrong_tickets: Vec::new(),
+            empty_tickets: Vec::new(),
             reject_admission: true,
             omit_admission_receipt: false,
         });
@@ -16120,6 +16622,7 @@ pub(crate) mod tests {
             fail_tickets: Vec::new(),
             transit_tickets: Default::default(),
             wrong_tickets: Vec::new(),
+            empty_tickets: Vec::new(),
             reject_admission: false,
             omit_admission_receipt: true,
         });

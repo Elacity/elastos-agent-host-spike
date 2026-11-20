@@ -3454,7 +3454,7 @@ impl ContentProvider {
                     cid,
                     path,
                     &transfer,
-                    request.get("min_distinct_holders").and_then(Value::as_u64),
+                    request.get("min_distinct_holders").cloned(),
                 )
                 .await;
                 if model_index {
@@ -3572,7 +3572,7 @@ impl ContentProvider {
         cid: &str,
         path: &str,
         transfer: &ContentFetchTransfer,
-        min_distinct_holders: Option<u64>,
+        min_distinct_holders: Option<Value>,
     ) -> Result<AvailabilityFallback, ProviderError> {
         let mut request = json!({
             "op": "fetch",
@@ -3582,10 +3582,11 @@ impl ContentProvider {
         if !path.is_empty() {
             request["path"] = Value::String(path.to_string());
         }
-        // The ordinary Get omits this field. When present, the availability
-        // provider must prove that many distinct holder DIDs.
-        if let Some(required) = min_distinct_holders {
-            request["min_distinct_holders"] = json!(required);
+        // The ordinary Get omits this field. When the caller set it, forward
+        // the value unchanged so a string, a negative, or a fraction is the
+        // availability provider's refusal and not a silent ordinary Get.
+        if let Some(required) = &min_distinct_holders {
+            request["min_distinct_holders"] = required.clone();
         }
         // A bounded read travels as its own request so the holder applies the
         // exact range or metadata bound once and returns only those bytes.
@@ -10054,7 +10055,7 @@ mod tests {
             TEST_CID,
             "",
             &transfer,
-            Some(2),
+            Some(json!(2)),
         )
         .await
         .unwrap();
@@ -10109,7 +10110,7 @@ mod tests {
             TEST_CID,
             "",
             &transfer,
-            Some(2),
+            Some(json!(2)),
         )
         .await
         .unwrap();
@@ -10157,7 +10158,7 @@ mod tests {
             TEST_CID,
             "",
             &transfer,
-            Some(2),
+            Some(json!(2)),
         )
         .await
         {
