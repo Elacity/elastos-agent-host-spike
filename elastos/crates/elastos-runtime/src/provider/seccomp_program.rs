@@ -16,7 +16,11 @@ const NUMBERS: &str = concat!(
     "prlimit64:302:261 pwrite64:18:68 read:0:63 readlinkat:267:78 readv:19:65 rename:82:- ",
     "renameat:-:38 renameat2:316:276 rseq:334:293 rt_sigaction:13:134 socketpair:53:199 statx:332:291 ",
     "sysinfo:99:179 uname:63:160 unlink:87:- unlinkat:263:35 write:1:64 writev:20:66 ",
-    "clone:56:220 clone3:435:435",
+    "clone:56:220 clone3:435:435 ",
+    // Linux probe seccomp rows; absent arm64 cells have no syscall on that ABI.
+    "accept4:288:242 bind:49:200 connect:42:203 dup2:33:- getpgrp:111:- getpid:39:172 ",
+    "getsockopt:55:209 kill:62:129 listen:50:201 pipe2:293:59 readlink:89:- ",
+    "recvfrom:45:207 rt_sigprocmask:14:135 sendto:44:206 setpgid:109:154 socket:41:198 waitid:247:95",
 );
 
 // An absent cell excludes that call by policy on this architecture. An absent row is an error.
@@ -82,6 +86,15 @@ pub(super) fn program(
                            (12, "fcntl"), (18, "prlimit64"), (29, "futex")] {
             rules[at][3] = number(name, arch).expect("model rule needs an architecture number");
         }
+        // Linux probe clone row: CLONE_THREAD or CLONE_VFORK, never an unrestricted clone.
+        rules[4][1] = 1;
+        rules.insert(5, jump(0x45, 0x4000, 0, 1));
+        // Linux probe fcntl row: add F_GETFL (3) and F_SETFL (4) to the two pinned commands.
+        rules[13][2] = 7;
+        rules[15][1] = 3;
+        rules[16][1] = 2;
+        rules.insert(17, jump(0x15, 3, 1, 0));
+        rules.insert(18, jump(0x15, 4, 0, 1));
         code.extend(rules);
     } else {
         code.push(stmt(6, DENY));
@@ -131,26 +144,9 @@ mod tests {
         number("missing_call", AuditArch::Aarch64);
     }
 
-    /// Head minus the rename/renameat equality+allow pair. did goldens arrive at
-    /// c2dc6ca08 and wallet goldens at 51c503fe7; both are absent at the pin.
+    /// Did and wallet goldens arrived after the original lab pin.
     #[test]
-    fn model_golden_at_pin_d0dd5693_drops_rename_pairs() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../..");
-        for arch in ["x86_64", "aarch64"] {
-            let head = std::fs::read_to_string(format!("{root}/capsules/wallet-provider/tests/model-seccomp-{arch}.golden")).unwrap();
-            let lines: Vec<_> = head.lines().collect();
-            let mut kept = String::new();
-            let mut index = 0;
-            while index < lines.len() {
-                let drop_pair = (lines[index].ends_with("# SYS_rename") || lines[index].ends_with("# SYS_renameat")) && lines.get(index + 1).is_some_and(|line| line.trim_start().starts_with("0x0006") && line.contains("0x7fff0000"));
-                if drop_pair { index += 2; continue; }
-                kept.push_str(lines[index]); kept.push('\n'); index += 1;
-            }
-            let spec = format!("d0dd5693:capsules/wallet-provider/tests/model-seccomp-{arch}.golden");
-            let out = super::super::rights::git_show(&spec);
-            assert!(out.status.success(), "pin {spec} missing: {}", String::from_utf8_lossy(&out.stderr));
-            assert_eq!(kept.into_bytes(), out.stdout, "pin d0dd5693 model {arch} golden minus the rename pair");
-        }
+    fn did_and_wallet_goldens_postdate_pin_d0dd5693() {
         for (provider, added) in [("did", "c2dc6ca08"), ("wallet", "51c503fe7")] {
             for arch in ["x86_64", "aarch64"] {
                 let spec = format!("d0dd5693:capsules/wallet-provider/tests/{provider}-seccomp-{arch}.golden");

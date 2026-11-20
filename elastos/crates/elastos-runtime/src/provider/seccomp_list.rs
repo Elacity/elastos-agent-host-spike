@@ -24,6 +24,11 @@ const BASELINE: &str = concat!(
 );
 
 const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq";
+// Linux probe seccomp rows, named by the denied syscall in linux-report.md.
+const MODEL_PROBE: &str = concat!(
+    "accept4 bind connect dup2 getpgrp getpid getsockopt kill listen pipe2 ",
+    "readlink recvfrom rt_sigprocmask sendto setpgid socket waitid",
+);
 
 /// The lab sorts names after it joins declared rights and the baseline.
 pub(super) fn linux_seccomp_list(
@@ -40,7 +45,10 @@ pub(super) fn linux_seccomp_list(
     match provider {
         RuntimeProviderId::Did => {}
         RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
-        RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
+        RuntimeProviderId::Model => {
+            names.extend(MODEL.split_whitespace());
+            names.extend(MODEL_PROBE.split_whitespace());
+        }
     }
     names.retain(|name| number(name, arch).is_some());
     names.sort_unstable();
@@ -207,6 +215,9 @@ mod tests {
             let mut commits = String::new();
             for (who, row_arch, call, commit) in LAB_BASELINE {
                 if *who == name && same_arch(*row_arch, arch) { got.remove(*call); commits.push_str(commit); commits.push(' '); }
+            }
+            if name == "model" {
+                for call in MODEL_PROBE.split_whitespace() { got.remove(call); }
             }
             let (crate_only, pin_only): (Vec<_>, Vec<_>) = (got.difference(&lab).cloned().collect(), lab.difference(&got).cloned().collect());
             assert!(crate_only.is_empty() && pin_only.is_empty(), "{name} {arch:?} symmetric difference crate-only {crate_only:?} pin-only {pin_only:?} baseline {commits}");

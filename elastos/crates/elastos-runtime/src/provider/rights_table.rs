@@ -25,11 +25,23 @@ pub(super) static RIGHTS: &[RightRow] = &[
         rules: &[r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#],
         linux_syscalls: "execve execveat",
     },
+    RightRow {
+        id: "model-gpu",
+        rules: &[
+            // macOS probe X4: engine descendants load libraries from these two trees.
+            r#"(allow file-read* (subpath "/usr/lib") (subpath "/System"))"#,
+            // macOS probe X5: the pinned engine initializes Metal at gpu_layers 0.
+            r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
+            // macOS probe X6: the only measured compiler service name.
+            r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
+        ],
+        linux_syscalls: "",
+    },
 ];
 
 const DID_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const WALLET_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
-const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
+const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable", "model-gpu"];
 
 /// The later caller derives this id from the Runtime's `components.json` key,
 /// never from the package manifest's `name`.
@@ -156,12 +168,11 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../../capsules/wallet-provider/tests/common/profile_generator.rs"
         ));
+        let declaration = ["pub(crate) const ", "CONTRACT_RIGHTS:"].concat();
+        let array_prefix = [declaration.as_str(), " [&str; "].concat();
         let declarations: Vec<_> = lab
             .lines()
-            .filter(|line| {
-                line.trim_start()
-                    .starts_with("pub(crate) const CONTRACT_RIGHTS:")
-            })
+            .filter(|line| line.trim_start().starts_with(declaration.as_str()))
             .collect();
         assert_eq!(
             declarations.len(),
@@ -170,7 +181,7 @@ mod tests {
         );
         let line = declarations[0].trim();
         let values = line
-            .strip_prefix("pub(crate) const CONTRACT_RIGHTS: [&str; ")
+            .strip_prefix(array_prefix.as_str())
             .and_then(|line| line.split_once("] = "))
             .map(|(_, values)| values.trim_end_matches(';'))
             .expect("lab CONTRACT_RIGHTS must be one complete array declaration line");
