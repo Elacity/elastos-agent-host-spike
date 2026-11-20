@@ -7663,6 +7663,8 @@ pub async fn production_after() {
                 ("elastos-server/src/api/gateway_home_system.rs", 2),
                 ("elastos-server/src/api/gateway_home_token.rs", 4),
                 ("elastos-server/src/api/gateway_model_service.rs", 1),
+                // The Bus request resolves its principal root from Runtime state.
+                ("elastos-server/src/api/gateway_provider_proxy.rs", 1),
                 ("elastos-server/src/api/gateway_transaction_effects.rs", 1),
             ]),
             "launch context construction sites"
