@@ -4055,7 +4055,7 @@ async fn restart_home_fixture() {
     crate::install_transaction::authorize_host_start(&data, &data.join("installed-runtime"))
         .unwrap();
     // DID admission reads release signers while the update journal still owns
-    // this Home. The installed update-hop checks the real helper's startup log.
+    // this Home. This restart fixture has no DID row, so it starts no helper.
     if restarting {
         assert!(
             crate::binaries::AdmittedProvider::admit(&data, "did-provider")
@@ -4476,6 +4476,97 @@ async fn home_launch_and_browser_paths_refuse_a_release_whose_record_differs_bef
     assert!(crate::install_transaction::acquire_installed_writer(&fixture.data).is_err());
     drop(admitted);
     assert!(crate::install_transaction::acquire_installed_writer(&fixture.data).is_ok());
+}
+
+#[test]
+fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
+    let fixture = PrivateFixture::new();
+    let source = fixture.publish_installed_release();
+    // A normal signed start has no journal. That absence never admits a
+    // different executable under the host-start reader.
+    crate::installed_release::read_signed_release_for_host_start(
+        &fixture.data,
+        &fixture.binary,
+        &source,
+        false,
+    )
+    .unwrap();
+    let other_binary = fixture.data.join("other-runtime");
+    fixture.file(&other_binary, b"other Runtime", 0o755);
+    assert!(
+        crate::installed_release::read_signed_release_for_host_start(
+            &fixture.data,
+            &other_binary,
+            &source,
+            false,
+        )
+        .is_err()
+    );
+
+    let writer = prepare_host_fence_release(&fixture, &fixture.binary, false);
+    let error = crate::installed_release::read_signed_release_for_host_start(
+        &fixture.data,
+        &fixture.binary,
+        &source,
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("Run `elastos update` again"),
+        "{error:#}"
+    );
+    assert!(crate::setup::installed_release_signers(&fixture.data).is_err());
+    drop(writer);
+
+    let fixture = PrivateFixture::new();
+    let source = fixture.publish_installed_release();
+    let writer = prepare_host_fence_release(&fixture, &fixture.binary, true);
+    writer.commit_checked(|| Ok(())).unwrap();
+    let claim = writer.claim_start(false).unwrap();
+    let wrong_generation = "00000000000000000000000000000000";
+    assert_ne!(claim.generation, wrong_generation);
+    assert!(
+        crate::install_transaction::authorize_host_start_with_generation(
+            &fixture.data,
+            &fixture.binary,
+            Some(wrong_generation),
+            std::process::id(),
+        )
+        .is_err()
+    );
+    let other_binary = fixture.data.join("alternate-bin/installed-runtime");
+    fs::create_dir(other_binary.parent().unwrap()).unwrap();
+    fixture.file(&other_binary, b"candidate fixture Runtime", 0o755);
+    assert_ne!(
+        std::env::var("ELASTOS_UPDATE_GENERATION").ok().as_deref(),
+        Some(claim.generation.as_str()),
+        "this test needs an unclaimed process"
+    );
+    let error = crate::installed_release::read_signed_release_for_host_start(
+        &fixture.data,
+        &fixture.binary,
+        &source,
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("claimed generation"),
+        "{error:#}"
+    );
+    let error = crate::setup::installed_release_signers(&fixture.data).unwrap_err();
+    assert!(
+        error.to_string().contains("claimed generation"),
+        "{error:#}"
+    );
+    assert!(
+        crate::installed_release::read_signed_release_for_host_start(
+            &fixture.data,
+            &other_binary,
+            &source,
+            false,
+        )
+        .is_err()
+    );
 }
 
 #[test]

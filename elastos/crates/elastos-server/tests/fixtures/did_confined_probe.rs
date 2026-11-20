@@ -3,6 +3,7 @@ use std::os::raw::c_char;
 
 const ROOT: &str = "@@ROOT@@";
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn readlinkat(dirfd: i32, path: *const c_char, buf: *mut c_char, bufsiz: usize) -> isize;
 }
@@ -11,7 +12,9 @@ fn main() {
     std::panic::set_hook(Box::new(|info| {
         let _ = std::fs::write(format!("{ROOT}/probe.error"), info.to_string());
     }));
-    // getpid and readlink are outside the DID seccomp grant; readlinkat is allowed.
+    // Linux reads its PID through the seccomp-admitted readlinkat call.
+    #[cfg(target_os = "linux")]
+    let pid = {
     let mut target = [0u8; 32];
     let count = unsafe {
         readlinkat(
@@ -24,7 +27,10 @@ fn main() {
     if count < 0 {
         panic!("readlinkat /proc/self: {}", std::io::Error::last_os_error());
     }
-    let pid = std::str::from_utf8(&target[..count as usize]).unwrap();
+    std::str::from_utf8(&target[..count as usize]).unwrap().to_string()
+    };
+    #[cfg(target_os = "macos")]
+    let pid = std::process::id().to_string();
     assert!(pid.bytes().all(|byte| byte.is_ascii_digit()));
     std::fs::write(format!("{ROOT}/child.pid"), pid).unwrap();
     let mut output = std::io::stdout();

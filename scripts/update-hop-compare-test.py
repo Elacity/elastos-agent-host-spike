@@ -1180,6 +1180,14 @@ class CliFixtureTests(unittest.TestCase):
         for name, provides in (("ipfs-provider", "elastos://ipfs/*"), ("localhost-provider", "localhost://*")):
             registry["external"][name]["provider_runtime"] = {"role": "provider", "substrate": "native",
                 "runtime_abi": "elastos.provider-stdio/v1", "execution": "native-provider", "provides": provides}
+        if observer.CLI_DID_SETUP:
+            did = support / "capsules/did-provider/capsule.json"
+            did.parent.mkdir(parents=True, exist_ok=True)
+            observer.write(did, {"schema": "elastos.capsule/v1", "name": "did-provider", "role": "provider",
+                                 "provides": "elastos://did/*", "authority": {"capabilities": []}})
+            registry["external"]["did-provider"]["provider_runtime"] = {
+                "role": "provider", "substrate": "native", "runtime_abi": "elastos.provider-stdio/v1",
+                "execution": "native-provider", "provides": "elastos://did/*"}
         registry["external"]["home"] = {"install_path": "capsules/home", "description": "Qualified source Home",
             "platforms": {"*": {"release_path": "home.tar.gz", "extract_path": "home", "install_path": "capsules/home"}}}
         registry["external"]["custody-provider"] = {"install_path": "bin/custody-provider", "platforms": {
@@ -1270,7 +1278,8 @@ class CliFixtureTests(unittest.TestCase):
             entries[name], capsule_paths, _ = observer.cli_qualified_home(support, "darwin-arm64", name)
             paths.extend(capsule_paths)
         mapping = {}
-        for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths]:
+        did_paths = [support / "capsules/did-provider/capsule.json"] if observer.CLI_DID_SETUP else []
+        for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths, *did_paths]:
             target = path.relative_to(support).as_posix()
             mapping[target] = self.add("setup/" + target, path.read_bytes(), 0o755 if target.startswith("bin/") else 0o600)
         mapping[observer.CLI_OPENER] = self.add("setup/opener", b"fixture no-op utility", 0o700)
@@ -1297,6 +1306,8 @@ class CliFixtureTests(unittest.TestCase):
                 components["capsules"][name] = {**entries[name], "cid": binding["cid"],
                     "sha256": "sha256:" + binding["sha256"], "size": binding["bytes"]}
             components["external"][name] = {"install_path": target, "platforms": {"darwin-arm64": selected}}
+            if name == "did-provider":
+                components["external"][name]["provider_runtime"] = observer.cli_json(support / "components.json")["external"][name]["provider_runtime"]
         if metadata_path is not None:
             qualified = observer.cli_json(support / "components.json")
             descriptor = qualified["external"]["localhost-provider"]
@@ -1361,6 +1372,28 @@ class CliFixtureTests(unittest.TestCase):
                 self.assertTrue(member.isfile())
                 self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 0))
                 self.assertEqual(package.extractfile(member).read(), (self.root / expected[member.name]).read_bytes())
+
+    def test_linux_did_helper_setup_requires_its_binary_and_manifest(self):
+        did = ("did-provider",)
+        native = (*(name for name in observer.CLI_NATIVE_SETUP if name != "did-provider"), *did)
+        components = (*(name for name in observer.CLI_SETUP_COMPONENTS if name != "did-provider"), *did)
+        artifacts = tuple(name + ".tar.gz" if name in observer.CLI_WEB_CAPSULES else name for name in components)
+        release_support = (*("bin/" + name for name in native),
+                           *("capsules/" + name + "/" for name in (*observer.CLI_WEB_CAPSULES, "localhost-provider", *did)))
+        with contextlib.ExitStack() as stack:
+            for name, value in (("CLI_DID_SETUP", did), ("CLI_NATIVE_SETUP", native),
+                                ("CLI_SETUP_COMPONENTS", components), ("CLI_SETUP_ARTIFACTS", artifacts),
+                                ("CLI_RELEASE_SUPPORT", release_support)):
+                stack.enter_context(patch.object(observer, name, value))
+            self.setup_fixture(initial_home=True)
+            mapping = observer.cli_admit_setup(self.root, self.manifest)
+            observer.cli_admit_home_support(self.root, self.manifest)
+            self.assertIn("bin/did-provider", mapping)
+            self.assertIn("capsules/did-provider/capsule.json", mapping)
+            missing = copy.deepcopy(self.manifest)
+            del missing["consumer"]["files"]["capsules/did-provider/capsule.json"]
+            with self.assertRaisesRegex(ValueError, "DID helper manifest is absent"):
+                observer.cli_admit_setup(self.root, missing)
 
     def test_setup_admission_refuses_incomplete_or_unmodeled_artifacts(self):
         self.setup_fixture()
@@ -1586,7 +1619,8 @@ class CliFixtureTests(unittest.TestCase):
         support = self.qualified_home_support()
         entry, paths, _ = observer.cli_qualified_home(support, "darwin-arm64")
         mapping = {}
-        for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths]:
+        did_paths = [support / "capsules/did-provider/capsule.json"] if observer.CLI_DID_SETUP else []
+        for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths, *did_paths]:
             target = path.relative_to(support).as_posix()
             mapping[target] = self.add("initial/" + target, path.read_bytes(), 0o755 if target.startswith("bin/") else 0o600)
         mapping[observer.CLI_OPENER] = self.add("initial/opener", b"fixture no-op utility", 0o700)
@@ -2321,11 +2355,15 @@ class CliFixtureTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "cannot install changed support from System"):
                         observer.cli_check_result(result(pinned), linux)
         # Only a Linux hop installs the default Ubuntu account layout.
+        home = lambda value: value["paths"]["m1-install"]["checks"]["initial-home"]  # noqa: E731
         mac = result()
         mac.update(platform="aarch64-darwin")
         mac["paths"]["m2-discovery"]["checks"].pop(observer.CLI_UBUNTU_CASE)
         self.assertEqual(observer.cli_check_result(mac, "aarch64-darwin")["next"], "0.8.0-alpha.10")
-        home = lambda value: value["paths"]["m1-install"]["checks"]["initial-home"]  # noqa: E731
+        mac_skipped = json.loads(json.dumps(mac))
+        home(mac_skipped)["system"]["did_provider_started"] = False
+        with self.assertRaisesRegex(ValueError, "did not start the confined DID helper"):
+            observer.cli_check_result(mac_skipped, "aarch64-darwin")
 
         # What alpha.6 recorded: its System refused changed support and kept Home, then its CLI
         # updated. For an alpha.8 pin that is a failure, whether recorded that way or as a restore.

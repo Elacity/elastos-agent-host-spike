@@ -5745,7 +5745,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn macos_confined_start_refuses_and_starts_nothing() {
+    async fn macos_widened_right_refuses_and_starts_nothing() {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("ran");
         let program = temp.path().join("mark.sh");
@@ -5756,19 +5756,25 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let root = temp.path().join("root");
+        let mut authority = committed_authority("did");
+        authority
+            .rights
+            .iter_mut()
+            .find(|right| right.id == "storage")
+            .unwrap()
+            .rules = vec![r#"(allow file-read* file-write* (subpath "/"))"#.to_string()];
         let error = ProviderBridge::spawn_confined(
             "did-provider",
-            &committed_authority("did"),
+            &authority,
             &program,
             &root,
             ProviderConfig::default(),
         )
         .await
         .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "provider start on macos is refused: the Seatbelt profile has no spawn path yet"
-        );
+        assert!(error
+            .to_string()
+            .contains("rule text differs from the Runtime template"));
         assert!(!marker.exists(), "the provider binary never runs");
         assert!(!root.exists(), "a refused start leaves no root");
     }

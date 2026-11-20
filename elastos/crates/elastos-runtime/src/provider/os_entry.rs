@@ -4,12 +4,11 @@
 //! aarch64) installs the admitted rows through the failure-record launcher.
 //! The caller passes the device and inode of the directory it opened. Linux
 //! opens the path again and refuses when that directory is different, before
-//! the plan and the fork. macOS renders those rows as a Seatbelt profile and
-//! stops without spawning.
+//! the plan and the fork. macOS checks the same directory identity, then starts
+//! the provider through `sandbox-exec` with the rendered Seatbelt profile.
 //! Every other OS refuses before creating a process. The launcher and the
-//! Linux installer are private children of this module. The server does not
-//! call this entry. The child path between fork and exec stays in
-//! `failure_record` and is unchanged here.
+//! Linux installer are private children of this module. The child path between
+//! fork and exec stays in `failure_record` and is unchanged here.
 
 use super::rights::AdmittedRights;
 use super::rights_table::{self, RuntimeProviderId};
@@ -31,7 +30,6 @@ pub(super) struct CheckedDirectory<'a> {
 /// The caller creates both pipes, passes the child ends to the launcher, and
 /// drops them after the call. The parent ends travel through this value so the
 /// launched handle carries the only remaining copies.
-#[allow(dead_code)] // macOS refuses before reading any field.
 pub(super) struct ChildStdio {
     pub stdin: i32,
     pub stdout: i32,
@@ -42,7 +40,6 @@ pub(super) struct ChildStdio {
 /// A provider process the OS arm started. `pid` is the launcher's, and the two
 /// parent ends are the protocol pipes. The successful pid belongs to the
 /// caller, which owns its reap.
-#[allow(dead_code)] // macOS refuses before this handle exists.
 #[derive(Debug)]
 pub(super) struct Launched {
     pub pid: libc::pid_t,
@@ -79,12 +76,7 @@ mod preexec_installer;
 ))]
 const UNSUPPORTED_OS: &str = "provider start is refused: this operating system has no confinement, so the provider binary does not start";
 
-#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
-const MACOS_NO_SPAWN: &str =
-    "provider start on macos is refused: the Seatbelt profile has no spawn path yet";
-
 /// Admit `authority` for `provider`, then hand the process to this OS.
-#[allow(dead_code)] // The server does not call this entry yet.
 pub(super) fn start_provider(
     provider: RuntimeProviderId,
     authority: &ProviderAuthority,
@@ -100,7 +92,6 @@ pub(super) fn start_provider(
     dispatch(provider, &admitted, executable, checked, stdio)
 }
 
-#[allow(dead_code)] // Only the OS arms call this, and those arms have no server caller yet.
 fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
     if admitted.rows().is_empty() {
         return Err("provider start is refused: the Runtime grant has no rights".to_string());
@@ -147,7 +138,6 @@ fn dispatch(
 }
 
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
-#[allow(dead_code)] // The server does not call this entry yet.
 fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
@@ -163,8 +153,85 @@ fn dispatch(
                 .to_string(),
         );
     }
-    let _ = (executable, checked.path, checked.dev, checked.ino, stdio);
-    Err(MACOS_NO_SPAWN.to_string())
+    macos_start(executable, checked, stdio, profile)
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+fn macos_start(
+    executable: &Path,
+    checked: CheckedDirectory<'_>,
+    stdio: ChildStdio,
+    profile: String,
+) -> Result<Launched, String> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::{Command, Stdio};
+
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(checked.path)
+        .map_err(|error| {
+            format!("provider start is refused: cannot reopen storage root: {error}")
+        })?;
+    let identity = directory
+        .metadata()
+        .map_err(|error| format!("provider start is refused: cannot stat storage root: {error}"))?;
+    if identity.dev() != checked.dev || identity.ino() != checked.ino {
+        return Err(
+            "provider start is refused: the reopened storage root is not the checked directory"
+                .into(),
+        );
+    }
+    let storage = std::fs::canonicalize(checked.path).map_err(|error| {
+        format!("provider start is refused: cannot resolve storage root: {error}")
+    })?;
+    let parent = storage
+        .parent()
+        .ok_or("provider start is refused: storage root has no parent")?;
+    let binary = std::fs::canonicalize(executable).map_err(|error| {
+        format!("provider start is refused: cannot resolve provider executable: {error}")
+    })?;
+    let duplicate = |fd| {
+        // Command maps this copy to fd 0 or 1. Keep the original copy closed
+        // across exec so the provider receives only the protocol descriptors.
+        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        if copy < 0 {
+            Err(format!(
+                "provider start is refused: cannot duplicate child pipe: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+        }
+    };
+    let input = duplicate(stdio.stdin)?;
+    let output = duplicate(stdio.stdout)?;
+    let child = Command::new("/usr/bin/sandbox-exec")
+        .arg("-p")
+        .arg(profile)
+        .arg("-D")
+        .arg(format!("PROVIDER_EXECUTABLE={}", binary.display()))
+        .arg("-D")
+        .arg(format!("STORAGE_PARENT={}", parent.display()))
+        .arg("-D")
+        .arg(format!("STORAGE_ROOT={}", storage.display()))
+        .arg(&binary)
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| {
+            format!("provider start is refused: cannot start sandbox-exec: {error}")
+        })?;
+    let pid = child.id() as libc::pid_t;
+    drop(child); // ForkChild owns waitpid from this point.
+    Ok(Launched {
+        pid,
+        to_child: stdio.to_child,
+        from_child: stdio.from_child,
+    })
 }
 
 /// The unsupported-OS arm. Real `dispatch` on an unsupported target calls this
@@ -544,21 +611,23 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_profile_path_refuses_before_spawn() {
+    fn macos_changed_storage_root_refuses_before_spawn() {
         let dir = tempfile::tempdir().unwrap();
         let (program, marker) = marker_program(dir.path());
         let mut authority = committed_authority("did");
         authority.rights.clear();
+        let mut checked = checked_directory(dir.path());
+        checked.ino += 1;
         assert_eq!(
             start_provider(
                 RuntimeProviderId::Did,
                 &authority,
                 &program,
-                checked_directory(dir.path()),
+                checked,
                 stdio(),
             )
             .unwrap_err(),
-            "provider start on macos is refused: the Seatbelt profile has no spawn path yet"
+            "provider start is refused: the reopened storage root is not the checked directory"
         );
         assert!(!marker.exists(), "the provider binary never runs");
     }

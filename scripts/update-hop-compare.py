@@ -1313,6 +1313,9 @@ def cli_admit_home_support(root, manifest):
     need(fixture["files"] == sorted(expected) and native_paths <= expected
          and CLI_OPENER in expected and "capsules/home/capsule.json" in expected and fixture["entrypoint"] in expected,
          "initial Home support closure is incomplete")
+    if CLI_DID_SETUP:
+        need("capsules/did-provider/capsule.json" in expected,
+             "installed DID helper manifest is absent from Home support")
     # Without a previous release, one support set persists across the update.
     need("previous" in manifest or all(any(target == path or target.startswith(path + "/") for path in manifest["preserve"]["support"])
                                        for target in native_paths), "initial Home native support preservation is incomplete")
@@ -1353,13 +1356,15 @@ CLI_WEB_CAPSULES = ("home", "home-gui", "system")
 # Home-profile providers whose status must match the running Runtime; the update
 # journey compares their startup warnings before and after the update.
 CLI_PROTECTED_PROVIDERS = ("protected-content-protect-provider", "protected-content-decrypt-provider")
-CLI_NATIVE_SETUP = ("ipfs-provider", "kubo", "localhost-provider", *CLI_PROTECTED_PROVIDERS)
-CLI_SETUP_COMPONENTS = ("home", "ipfs-provider", "kubo", "localhost-provider", "home-gui", "system", *CLI_PROTECTED_PROVIDERS)
+# The installed Home must start its confined DID helper on each release host.
+CLI_DID_SETUP = ("did-provider",)
+CLI_NATIVE_SETUP = ("ipfs-provider", "kubo", "localhost-provider", *CLI_DID_SETUP, *CLI_PROTECTED_PROVIDERS)
+CLI_SETUP_COMPONENTS = ("home", "ipfs-provider", "kubo", "localhost-provider", "home-gui", "system", *CLI_DID_SETUP, *CLI_PROTECTED_PROVIDERS)
 CLI_SETUP_ARTIFACTS = tuple(name + ".tar.gz" if name in CLI_WEB_CAPSULES else name for name in CLI_SETUP_COMPONENTS)
 CLI_HOME_CACHE = (".elastos-cid", ".elastos-artifact-sha256")
 CLI_LOCALHOST_METADATA = "localhost-provider-capsule-metadata.tar.gz"
 CLI_RELEASE_SUPPORT = (*("bin/" + name for name in CLI_NATIVE_SETUP),
-                       *("capsules/" + name + "/" for name in (*CLI_WEB_CAPSULES, "localhost-provider")))
+                       *("capsules/" + name + "/" for name in (*CLI_WEB_CAPSULES, "localhost-provider", *CLI_DID_SETUP)))
 
 
 def cli_localhost_metadata_info(descriptor, platform_name):
@@ -1431,7 +1436,7 @@ def cli_localhost_metadata_files(raw, selected):
 
 def cli_setup_files(manifest):
     return {target: relative for target, relative in manifest["consumer"]["files"].items()
-            if target.startswith(tuple("capsules/" + name + "/" for name in (*CLI_WEB_CAPSULES, "localhost-provider"))) or target in
+            if target.startswith(tuple("capsules/" + name + "/" for name in (*CLI_WEB_CAPSULES, "localhost-provider", *CLI_DID_SETUP))) or target in
             tuple("bin/" + name for name in CLI_NATIVE_SETUP)}
 
 
@@ -1495,7 +1500,7 @@ def cli_admit_previous(root, manifest, env):
     # fetch- or install-previous-release checked the archives (Kubo, capsules) by their signed hashes.
     published = cli_json(cli_path(root, previous["published_components"]))
     platform_name = cli_component_platform(manifest["platform"])
-    for name in ("ipfs-provider", "localhost-provider", *CLI_PROTECTED_PROVIDERS):
+    for name in ("ipfs-provider", "localhost-provider", *CLI_DID_SETUP, *CLI_PROTECTED_PROVIDERS):
         signed = cli_platform_entry(published["external"][name], platform_name)
         need(manifest["files"][previous["support"]["bin/" + name]]["sha256"] == signed["checksum"].removeprefix("sha256:"),
              "old native support differs from the published release")
@@ -1532,6 +1537,9 @@ def cli_admit_setup(root, manifest):
     need(all("bin/" + name in mapping for name in CLI_SETUP_COMPONENTS if name not in CLI_WEB_CAPSULES)
          and all("capsules/" + name + "/browser/index.html" in mapping for name in CLI_WEB_CAPSULES),
          "setup output inventory is incomplete")
+    if CLI_DID_SETUP:
+        need("capsules/did-provider/capsule.json" in mapping,
+             "DID helper manifest is absent from setup inventory")
     need(not any(Path(target).name in CLI_HOME_CACHE for target in mapping),
          "setup cache metadata belongs to installed setup")
     platform_name = cli_component_platform(manifest["platform"])
@@ -1935,6 +1943,13 @@ def cli_previous_layout(output, release, component_platform, artifact, executabl
             selected = cli_platform_entry(metadata, component_platform)
             need(selected["release_path"] == CLI_LOCALHOST_METADATA, "previous localhost metadata archive differs")
             os.replace(artifact(selected), output / CLI_LOCALHOST_METADATA)
+    if CLI_DID_SETUP:
+        # The published binary's capsule manifest comes from its signed source tree.
+        previous_manifest = subprocess.check_output(
+            ["git", "show", source["commit"] + ":capsules/did-provider/capsule.json"], cwd=repository)
+        manifest_path = support / "capsules/did-provider/capsule.json"
+        manifest_path.parent.mkdir(mode=0o700, parents=True)
+        manifest_path.write_bytes(previous_manifest)
     write(support / "components.json", {"schema": published["schema"], "capsules": capsules, "external": external,
                                         "profiles": {"home": {"components": list(CLI_SETUP_COMPONENTS)}}})
     shutil.rmtree(output / "artifacts")
@@ -2008,7 +2023,7 @@ def cli_install_previous_release(home_path, output, pin_path=None):
     # The fixture also pins optional providers that the Home profile leaves out.
     for argv, timeout in ((["/bin/bash", "install.sh", "--install-only"], 900),
                           ([str(runtime), "setup", "--profile", "home", "--with",
-                            ",".join((*CLI_PROTECTED_PROVIDERS, "custody-provider"))], 1800),
+                            ",".join((*CLI_DID_SETUP, *CLI_PROTECTED_PROVIDERS, "custody-provider"))], 1800),
                           ([str(runtime), "update", "--rollback-to", pin["head_cid"], "--yes"], 1800)):
         proc = subprocess.Popen(argv, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home_path),
                                            "ELASTOS_COLLABORATION_STARTUP_MODE": "isolated"}, cwd=home_path,
@@ -2082,7 +2097,7 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
     release_platform = cli_host_platform()
     component_platform = cli_component_platform(release_platform)
 
-    def qualify(support, metadata_archive):
+    def qualify(support, metadata_archive, did_manifest):
         """Admit one release's source-Home-shaped support before any signing."""
         support = support.resolve()
         capsules, paths = {}, []
@@ -2106,16 +2121,29 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
             need(metadata_archive is None, "localhost metadata archive input has no source descriptor")
         for path in (support / "bin" / name for name in CLI_NATIVE_SETUP):
             need(path.is_file() and not path.is_symlink(), "built refusal input is unavailable")
+        qualified = cli_json(support / "components.json")
+        did_manifest_bytes = None
+        if CLI_DID_SETUP:
+            need(did_manifest is not None and did_manifest.is_file() and not did_manifest.is_symlink(),
+                 "qualified DID helper manifest is unavailable")
+            did_manifest_bytes = did_manifest.read_bytes()
+            did = json.loads(did_manifest_bytes)
+            need(did.get("name") == "did-provider" and did.get("authority")
+                 and did.get("provides") == qualified["external"]["did-provider"]["provider_runtime"]["provides"],
+                 "qualified DID helper manifest differs from its runtime row")
         size = (sum((support / "bin" / name).stat().st_size for name in CLI_NATIVE_SETUP) + sum(path.stat().st_size for path in paths)
-                + sum(len(data) for data, _ in files_.values()) + len(raw or b""))
-        return {"support": support, "qualified": cli_json(support / "components.json"), "capsules": capsules, "paths": paths,
+                + sum(len(data) for data, _ in files_.values()) + len(raw or b"") + len(did_manifest_bytes or b""))
+        return {"support": support, "qualified": qualified, "capsules": capsules, "paths": paths,
+                "did_manifest": did_manifest_bytes,
                 "localhost": localhost_descriptor, "metadata_info": info, "metadata_raw": raw, "metadata_files": files_, "bytes": size}
 
-    sets = {"new": qualify(support_home, localhost_metadata)}
+    source_did_manifest = Path(__file__).resolve().parents[1] / "capsules/did-provider/capsule.json" if CLI_DID_SETUP else None
+    sets = {"new": qualify(support_home, localhost_metadata, source_did_manifest)}
     pin = cli_previous_pin()
     published = cli_previous_release(previous / "release.json", pin)
     previous_metadata = previous / CLI_LOCALHOST_METADATA
-    sets["old"] = qualify(previous / "support", previous_metadata if previous_metadata.exists() else None)
+    old_did_manifest = previous / "support/capsules/did-provider/capsule.json" if CLI_DID_SETUP else None
+    sets["old"] = qualify(previous / "support", previous_metadata if previous_metadata.exists() else None, old_did_manifest)
     for path in (runtime, next_runtime, system_runtime, build_receipt, previous / "install.sh", previous / "components.json"):
         need(path.is_file() and not path.is_symlink(), "built refusal input is unavailable")
     need(release_platform in published["platforms"]
@@ -2200,6 +2228,11 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
             relative = add(prefix + "home-support/" + target, path)
             content(relative, raw=True)
             mapping[target] = relative
+        if CLI_DID_SETUP:
+            target = "capsules/did-provider/capsule.json"
+            relative = add(prefix + "home-support/" + target, current["did_manifest"])
+            content(relative, raw=True)
+            mapping[target] = relative
         capsules, archives, external = dict(current["capsules"]), {}, {}
         for name in CLI_WEB_CAPSULES:
             archive = add(prefix + name + ".tar.gz", cli_home_archive(root, manifest, mapping, name))
@@ -2211,7 +2244,7 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
             external[name] = {"install_path": "capsules/" + name, "platforms": {component_platform: {
                 "release_path": name + ".tar.gz", "extract_path": name, "install_path": "capsules/" + name,
                 "cid": binding["cid"], "checksum": "sha256:" + binding["sha256"], "size": binding["bytes"]}}}
-        for name in ("ipfs-provider", "kubo", *CLI_PROTECTED_PROVIDERS):
+        for name in ("ipfs-provider", "kubo", *CLI_DID_SETUP, *CLI_PROTECTED_PROVIDERS):
             relative = native[name]
             descriptor = current["qualified"]["external"][name]
             if name != "kubo":
@@ -3329,8 +3362,10 @@ def cli_home_system_journey(processes, manifest, home_path, publish, root):
     warnings_after = cli_provider_warnings(home_path)
     log_after = runtime_log.read_text(errors="replace")
     new_log = log_after[len(log_before):] if log_after.startswith(log_before) else log_after
-    need("did-provider capsule from " in new_log,
-         "the updated Home did not start the DID helper")
+    did_provider_started = "did-provider capsule from " in new_log
+    need(did_provider_started, "the updated Home did not start the confined DID helper")
+    new_warnings = sorted(set(warnings_after) - set(warnings_before) | set(cli_provider_warnings_text(new_log)))
+    need(not new_warnings, "the updated Home added provider warnings: " + "; ".join(new_warnings))
     # This source's System refuses a tampered offer: the controller records the failure
     # while staging and the same Home process and generation keep running.
     home_before = {key: cli_private_json(coords_path)[key] for key in ("pid", "generation")}
@@ -3379,9 +3414,9 @@ def cli_home_system_journey(processes, manifest, home_path, publish, root):
             "published_system": {"phase": published["phase"], "from": manifest["old"]["version"],
                                  "to": published["current_version"], "host": published_host},
             "installer_required": installer_required,
-            "did_provider_started": True,
+            "did_provider_started": did_provider_started,
             "provider_warnings": {"before": warnings_before, "after": warnings_after,
-                                  "new": sorted(set(warnings_after) - set(warnings_before))}}, browser
+                                  "new": new_warnings}}, browser
 
 
 def cli_provider_warnings(home_path):
@@ -3389,6 +3424,10 @@ def cli_provider_warnings(home_path):
     start; newer ones append each start under a header, so a set difference against an earlier
     read still names only the warnings of the starts since then."""
     text = (home_path / CLI_DATA / "update-controller/runtime.log").read_text(errors="replace")
+    return cli_provider_warnings_text(text)
+
+
+def cli_provider_warnings_text(text):
     lines = (re.sub(r"\x1b\[[0-9;]*m", "", line) for line in text.splitlines())
     return sorted({match[1].strip() for line in lines
                    if "provider" in line and (match := re.search(r"\b(?:WARN|ERROR)\b(.*)", line))})
@@ -3783,9 +3822,11 @@ def cli_check_result(result, platform):
     it, each CLI refusal held, the update added no provider warnings, and the hop was undone explicitly."""
     need(result.get("schema") == "elastos.update-hop.result/v1" and result.get("status") == "passed",
          "update hop failed: " + str(result.get("failure", "status " + str(result.get("status")))))
+    need(platform in CLI_PLATFORMS and result.get("platform") == platform,
+         "the result is not for this host's release platform")
     home = result["paths"]["m1-install"]["checks"]["initial-home"]
     need(home["system"].get("did_provider_started") is True,
-         "the updated Home did not start the DID helper")
+         "the updated Home did not start the confined DID helper")
     new = home["system"]["provider_warnings"]["new"]
     need(not new, "the update added provider warnings: " + "; ".join(new))
     previous = result.get("previous_release")
@@ -3815,7 +3856,6 @@ def cli_check_result(result, platform):
          "a CLI refusal did not hold")
     # A Linux hop also proves the default Ubuntu account layout. The result names this runner's
     # release platform, so a missing or other platform cannot skip the Ubuntu case.
-    need(platform in CLI_PLATFORMS and result.get("platform") == platform, "the result is not for this host's release platform")
     ubuntu = result["paths"]["m2-discovery"]["checks"].get(CLI_UBUNTU_CASE, {})
     need(not platform.endswith("-linux") or (ubuntu.get("status") == "passed"
          and ubuntu["home"]["authenticated_health"] and ubuntu["update"]["to"] == next_version),

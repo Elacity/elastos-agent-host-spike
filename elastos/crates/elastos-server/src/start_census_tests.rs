@@ -164,6 +164,13 @@ fn places() -> Vec<Place> {
             P2_2,
         ),
         place(
+            "elastos-runtime/src/provider/os_entry.rs",
+            "macos_start",
+            "spawn()".to_string(),
+            1,
+            "admitted grant, checked storage, Seatbelt profile",
+        ),
+        place(
             "elastos-server/src/carrier.rs",
             "start_carrier_node_with_network",
             "spawn()".to_string(),

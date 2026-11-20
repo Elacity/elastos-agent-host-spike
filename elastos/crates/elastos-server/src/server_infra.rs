@@ -2224,7 +2224,7 @@ mod tests {
         let bin = data_dir.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let binary = bin.join("did-provider");
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let source = temp.path().join("did-probe.rs");
             let text = include_str!("../tests/fixtures/did_confined_probe.rs")
@@ -2242,7 +2242,7 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             fs::write(
                 &binary,
@@ -2280,7 +2280,7 @@ mod tests {
         (temp, data_dir, binary)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn did_probe_failure(data_dir: &Path) -> String {
         let path = data_dir.join("did/probe.error");
         match fs::read_to_string(&path) {
@@ -2367,7 +2367,7 @@ mod tests {
         assert!(!data_dir.join("marker").exists());
     }
 
-    #[cfg(any(target_os = "macos", elastos_unsupported_os_check))]
+    #[cfg(elastos_unsupported_os_check)]
     #[tokio::test]
     async fn did_os_refusal_keeps_child_and_route_absent() {
         let (_temp, data_dir, _) = did_fixture();
@@ -2381,13 +2381,6 @@ mod tests {
             error.to_string().contains(
                 "this operating system has no confinement, so the provider binary does not start"
             ),
-            "{error}"
-        );
-        #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
-        assert!(
-            error
-                .to_string()
-                .contains("Seatbelt profile has no spawn path yet"),
             "{error}"
         );
         assert!(registry
@@ -2443,6 +2436,39 @@ mod tests {
         bridge.shutdown().await.unwrap();
         assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[tokio::test]
+    async fn did_macos_admitted_row_answers_and_stays_confined() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
+            .unwrap();
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_some());
+        let answer = registry
+            .send_raw("did", &serde_json::json!({"op":"get_did"}))
+            .await
+            .unwrap();
+        assert_eq!(answer["data"]["did"], "did:key:zFixture");
+        registry
+            .send_raw("did", &serde_json::json!({"op":"set_nickname"}))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(data_dir.join("did/nickname")).unwrap(), b"Ada");
+        let outside = registry
+            .send_raw("did", &serde_json::json!({"op":"probe_outside_write"}))
+            .await
+            .unwrap();
+        assert_eq!(outside["data"]["outside_write_refused"], true);
+        assert!(!data_dir.join("outside").exists());
+        bridge.shutdown().await.unwrap();
+        assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
     }
 
     #[cfg(target_os = "linux")]

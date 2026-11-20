@@ -184,7 +184,9 @@ pub(crate) fn read_signed_release(
 }
 
 /// A controller-claimed Home may read its signed inputs during the update hop.
-/// The ordinary migration reader keeps its pending-recovery fence.
+/// With no journal, a normal Home still passes every signed-input check. Only
+/// the claimed restart may read while a journal is pending; the ordinary
+/// migration reader keeps its pending-recovery fence.
 pub(crate) fn read_signed_release_for_host_start(
     data: &Path,
     binary: &Path,
