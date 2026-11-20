@@ -49,11 +49,12 @@
 //! only after a granted dispatch. The guest does not run the test.
 //! A journal append writes the whole encoding with a revision precondition,
 //! only with a write grant for the agent's own journal. The guest asks the
-//! Runtime for exactly two grants, write and read, on that journal; they are
-//! held in memory and never stored. A lost reply is `settlement_unknown`;
+//! Runtime for write and read grants on that journal; they are held in memory
+//! and never stored. A lost reply is `settlement_unknown`;
 //! resume reads the head back and nothing is appended until it settles. The
 //! WASM guest runs that fold inside Wasmtime and exits. It submits one
-//! prepared document edit to the Runtime for owner approval through the Bus.
+//! prepared document edit to the Runtime for owner approval through a separate
+//! Bus submit grant, after its activation journal is stored and read back.
 //! Preview has no provider effect. It has no Home window.
 
 #[cfg(target_arch = "wasm32")]
@@ -3906,8 +3907,8 @@ struct JournalGrants {
 }
 
 /// Ask the Runtime for exactly two grants on this agent's own journal: write,
-/// then read. Nothing else is asked for. A refusal leaves that grant empty,
-/// returns its reason, and writes that reason into the journal. A denied ask,
+/// then read. This function asks for no other grant. A refusal leaves that
+/// grant empty, returns its reason, and writes that reason into the journal. A denied ask,
 /// an invalid ask, and an unknown outcome stay different reasons. Nothing is
 /// sent with an empty grant.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -4664,6 +4665,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut folded = journal.clone();
+        // This repeat-compaction check concerns the retained snapshot and
+        // skill. The earlier denied read added a separate refusal record.
+        folded.events.retain(|node| !is_refusal_record(node));
         let folded_epoch = folded.epoch;
         if compact(&mut folded, COMPACTION_SUMMARY)
             || folded.epoch != folded_epoch
@@ -5069,9 +5073,6 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         })?;
         let plan = preview_document_plan(&mut WasmBus, &seen, edit)
             .map_err(|reason| elastos::bus::types::BusError::Invalid(reason.to_string()))?;
-        // A refused ask leaves the demonstration running. An admitted agent
-        // with the signed submit ask creates one pending Inbox request here.
-        let _ = submit_document_plan(&mut WasmBus, &plan);
         let step = seen
             .steps
             .iter()
@@ -8295,6 +8296,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut cursor,
             grants.write.as_ref(),
         );
+        let journal_written = matches!(appended, AppendOutcome::Written);
         let followed = match (&grants.write, appended) {
             (None, AppendOutcome::Denied) => {
                 grants.write_reason.is_some()
@@ -8338,6 +8340,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             return Err(elastos::bus::types::BusError::Invalid(
                 "the journal append did not follow its grants".to_string(),
             ));
+        }
+        if journal_written {
+            // An admitted agent proposes only after its activation journal is
+            // stored and read back. A refused submit ask leaves it running.
+            let _ = submit_document_plan(&mut WasmBus, &plan);
         }
         Ok(())
     }
@@ -9763,6 +9770,10 @@ mod tests {
             proposed
         );
         assert_eq!(journal.steps[0].state, StepState::Prepared);
+        if let Some(path) = std::env::var_os("A15R_PREVIEW_STEP_PATH") {
+            std::fs::write(std::path::PathBuf::from(path), &proposed)
+                .expect("write the planner's exact preview step");
+        }
     }
 
     #[test]
