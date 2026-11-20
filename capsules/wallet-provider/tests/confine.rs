@@ -1042,6 +1042,8 @@ fn model_standin_suite(
     profile: &Path,
     binary: &Path,
 ) -> Vec<SuiteEntry> {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let mut record = Vec::new();
     let init = provider.send(&json!({
         "op": "init", "config": provider_init_config(MODEL_PROVIDER, base)
@@ -1087,6 +1089,10 @@ fn model_standin_suite(
     let model_bytes = b"model fixture\n";
     fs::write(&engine, engine_bytes).expect("engine fixture");
     fs::write(&model, model_bytes).expect("model fixture");
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o700))
+        .expect("the engine fixture must be owner-executable");
+    fs::set_permissions(&model, fs::Permissions::from_mode(0o600))
+        .expect("the model fixture must be owner-readable");
     let mut config = provider_init_config(MODEL_PROVIDER, base);
     config["extra"]["offers"] = json!([{
         "id": "confine-local-text",
@@ -1119,6 +1125,15 @@ fn model_standin_suite(
         },
         "enabled": true
     }]);
+    let mut unconfined = ConfinedProvider::spawn(Command::new(binary));
+    let accepted = unconfined.send(&json!({ "op": "init", "config": config.clone() }));
+    assert_eq!(
+        accepted["status"], "ok",
+        "{label}: the valid local offer must pass without confinement: {accepted}"
+    );
+    assert_serving(&accepted["data"]);
+    unconfined.shutdown();
+
     let mut local_provider = model_suite_start(profile, binary, base);
     let denied = local_provider.send(&json!({ "op": "init", "config": config }));
     assert_eq!(
@@ -1144,10 +1159,29 @@ fn model_standin_suite(
         &recovered,
     ));
     local_provider.shutdown();
+    assert!(
+        local_provider
+            .stderr()
+            .contains("invalid model provider init config: base_path is unavailable"),
+        "{label}: the confined local offer must stop where Seatbelt refuses base_path: {}",
+        local_provider.stderr()
+    );
 
-    // Store one real run, move its record outside the bound root, and keep
-    // its in-root pathname through a link. The exact profile must refuse
-    // that read; restoring the record must let the same request succeed.
+    record.extend(model_outside_run_read_entries(provider, base, label));
+    record.extend(model_standin_operations(provider, label));
+    record.push(model_hosted_connect_denial(profile, binary, base, label));
+    record
+}
+
+/// Store one real run, move its record outside the bound root, and keep its
+/// in-root pathname through a link. The exact profile must refuse that read;
+/// restoring the record must let the same request succeed. Both the B3 suite
+/// and the C0 journey send this action to the child their launcher returned.
+fn model_outside_run_read_entries(
+    provider: &mut ConfinedProvider,
+    base: &Path,
+    label: &str,
+) -> [SuiteEntry; 3] {
     let mut create_request = model_run_create_request();
     let request_id = create_request["runtime_binding"]["request_id"]
         .as_str()
@@ -1159,11 +1193,11 @@ fn model_standin_suite(
         created["status"], "ok",
         "{label}: store the outside-read run: {created}"
     );
-    record.push(suite_entry(
+    let create_entry = suite_entry(
         "runs_create for outside read",
         SuiteClass::Permitted,
         &created,
-    ));
+    );
     let run_id = created["data"]["run_id"]
         .as_str()
         .unwrap_or_else(|| panic!("{label}: the created run must name its id: {created}"));
@@ -1177,9 +1211,10 @@ fn model_standin_suite(
         1,
         "{label}: one stored run must leave one record"
     );
-    let outside_runs = storage_parent(MODEL_PROVIDER, base)
-        .join("outside")
-        .join("runs");
+    let outside = storage_parent(MODEL_PROVIDER, base).join("outside");
+    fs::create_dir_all(&outside)
+        .unwrap_or_else(|err| panic!("{label}: prepare the outside run directory: {err}"));
+    let outside_runs = outside.join("runs");
     fs::rename(&root_runs, &outside_runs)
         .unwrap_or_else(|err| panic!("{label}: move the run outside: {err}"));
     std::os::unix::fs::symlink(&outside_runs, &root_runs)
@@ -1189,11 +1224,11 @@ fn model_standin_suite(
         denied["code"], "journal_corrupt",
         "{label}: the outside run record must be refused: {denied}"
     );
-    record.push(suite_entry(
+    let denied_entry = suite_entry(
         "run record outside STORAGE_ROOT",
         SuiteClass::Denied,
         &denied,
-    ));
+    );
     fs::remove_file(&root_runs)
         .unwrap_or_else(|err| panic!("{label}: remove the run directory link: {err}"));
     fs::rename(&outside_runs, &root_runs)
@@ -1203,14 +1238,12 @@ fn model_standin_suite(
         restored["data"], created["data"],
         "{label}: the restored record must read back: {restored}"
     );
-    record.push(suite_entry(
+    let restored_entry = suite_entry(
         "runs_get after restoring the record",
         SuiteClass::Permitted,
         &restored,
-    ));
-    record.extend(model_standin_operations(provider, label));
-    record.push(model_hosted_connect_denial(profile, binary, base, label));
-    record
+    );
+    [create_entry, denied_entry, restored_entry]
 }
 
 /// With a Runtime socket named in the real init config, Seatbelt must refuse
@@ -5555,14 +5588,15 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
                 "the model must answer status: {status}"
             );
             assert_serving(&status["data"]);
-            let profile = profile_dir.join(format!("{MODEL_PROVIDER}-standin.sb"));
-            model_redirected_journal_denial(&profile, provider, &base, "model C0 journey");
-            let recovered = started.send(&json!({
-                "op": "init", "config": provider_init_config(MODEL_PROVIDER, &base)
-            }));
-            assert_eq!(
-                recovered["status"], "ok",
-                "the model must stay in service after the denial: {recovered}"
+            let record = model_outside_run_read_entries(&mut started, &base, "model C0 journey");
+            assert_suite_outcomes(
+                "model C0 journey started child",
+                &record,
+                &[
+                    ("runs_create for outside read", SuiteClass::Permitted),
+                    ("run record outside STORAGE_ROOT", SuiteClass::Denied),
+                    ("runs_get after restoring the record", SuiteClass::Permitted),
+                ],
             );
         }
         other => panic!("the journey names no provider whose leg it knows: {other}"),
