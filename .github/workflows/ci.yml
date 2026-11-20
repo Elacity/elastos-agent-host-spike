@@ -513,6 +513,8 @@ jobs:
           cargo fetch --locked
           cargo fmt -- --check
           RUST_TEST_THREADS=2 cargo test --locked --offline
+      - name: fetch Runtime componentize dependencies for offline lab tests
+        run: cargo +1.91.0 fetch --locked --manifest-path elastos/tools/componentize/Cargo.toml
       - name: wasm-capsule gate
         working-directory: lab/wasm-capsule
         run: |
