@@ -2909,16 +2909,10 @@ mod tests {
     use tempfile::TempDir;
 
     /// The committed `agent-host` fixture: a real bundle the walk accepts.
-    const AGENT_HOST_FILES: [(&str, &[u8]); 2] = [
-        (
-            "capsule.json",
-            include_bytes!("../../capsule-identity/fixtures/agent-host/capsule.json"),
-        ),
-        (
-            "asks.json",
-            include_bytes!("../../capsule-identity/fixtures/agent-host/asks.json"),
-        ),
-    ];
+    const AGENT_HOST_FILES: [(&str, &[u8]); 1] = [(
+        "capsule.json",
+        include_bytes!("../../capsule-identity/fixtures/agent-host/capsule.json"),
+    )];
 
     /// One signed fixture bundle in a fresh tempdir, its accepted publisher
     /// and the key that signed it. A second `Shared` is a second bundle with
@@ -2983,10 +2977,7 @@ mod tests {
     /// A second signed bundle with other bytes and so another lab CID.
     fn other_bundle() -> Shared {
         let other = Shared::new();
-        let asks = other.path().join("asks.json");
-        let mut bytes = fs::read(&asks).expect("read asks.json");
-        bytes.push(b'\n');
-        fs::write(&asks, &bytes).expect("change the second bundle");
+        flip_manifest_description(other.path());
         other
     }
 
@@ -3023,20 +3014,22 @@ mod tests {
     }
 
     /// Replaces the fixture's asks with exactly `asks`, in that order, before
-    /// the bundle is signed. The manifest gets the typed rows. `asks.json`
-    /// stays in the signed bytes and is not the schema.
+    /// the bundle is signed. The manifest gets the typed rows.
     fn declare_asks(root: &Path, asks: &[(&str, &str)]) {
-        let listed = asks
-            .iter()
-            .map(|(resource, kind)| json!({ "kind": kind, "resource": resource }))
-            .collect::<Vec<_>>();
-        let file = json!({ "schema": "elastos.agent-host.asks/v1", "asks": listed });
-        fs::write(
-            root.join("asks.json"),
-            serde_json::to_vec_pretty(&file).expect("encode the fixture asks"),
-        )
-        .expect("write the fixture asks");
         super::manifest_asks::write_typed_manifest_asks(root, asks);
+    }
+
+    /// Flips one letter of the manifest description. The walk still accepts
+    /// the bundle and its lab CID changes.
+    fn flip_manifest_description(root: &Path) {
+        let path = root.join("capsule.json");
+        let mut bytes = fs::read(&path).expect("read capsule.json");
+        let at = bytes
+            .windows(b"Journal".len())
+            .position(|window| window == b"Journal")
+            .expect("the manifest description names the journal");
+        bytes[at] ^= 0x20;
+        fs::write(&path, &bytes).expect("flip one byte of the manifest description");
     }
 
     /// A fresh Ed25519 test key. Nothing writes it or keeps a seed.
@@ -4059,10 +4052,7 @@ mod tests {
         let before = checked_bundle(shared.path())
             .expect("the walk names the bundle before the change")
             .cid();
-        let asks = shared.path().join("asks.json");
-        let mut bytes = fs::read(&asks).expect("read asks.json");
-        bytes[0] ^= 0x01;
-        fs::write(&asks, &bytes).expect("flip one byte of asks.json");
+        flip_manifest_description(shared.path());
         let mut standin = StandIn::new();
         let refused = standin.admit_resident(shared.path(), &sig, &shared.accepted, Start::Ok);
         let after = checked_bundle(shared.path())
@@ -4138,10 +4128,7 @@ mod tests {
         let mut standin = StandIn::new();
         admit_shared(&shared, &mut standin, Start::Ok);
         let admitted_cid = shared.cid();
-        let asks = shared.path().join("asks.json");
-        let mut bytes = fs::read(&asks).expect("read asks.json");
-        bytes[0] ^= 0x01;
-        fs::write(&asks, &bytes).expect("flip one byte of asks.json after admission");
+        flip_manifest_description(shared.path());
         let launch = standin.post_capsules(Caller::Shell, &json!({ "cid": admitted_cid }));
         let now = checked_bundle(shared.path())
             .expect("the walk names the changed bundle")

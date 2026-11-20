@@ -1776,24 +1776,41 @@ pub(crate) mod tests {
 
     /// Every file under `dir` as (relative path, SHA-256 of its bytes), sorted.
     /// Two calls that return the same vector mean the tree's names and bytes
-    /// did not change.
+    /// did not change. Any part of the tree the walk cannot read fails the
+    /// caller by name: a census that skips a subtree cannot prove a claim
+    /// about the whole tree. A root that does not exist yet is an empty tree
+    /// (callers snapshot a root before anything is written there); every
+    /// error inside an existing tree still fails.
     pub(crate) fn tree_hashes(dir: &std::path::Path) -> Vec<(String, String)> {
         use sha2::{Digest, Sha256};
+        match std::fs::symlink_metadata(dir) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(err) => panic!("cannot stat {}: {err}", dir.display()),
+            Ok(_) => {}
+        }
         fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()));
             for entry in entries {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
+                let entry = entry.unwrap_or_else(|err| {
+                    panic!("cannot read an entry of {}: {err}", dir.display())
+                });
+                let path = entry.path();
+                let is_dir = std::fs::metadata(&path)
+                    .unwrap_or_else(|err| panic!("cannot stat {}: {err}", path.display()))
+                    .is_dir();
+                if is_dir {
                     walk(root, &path, out);
                 } else {
                     let relative = path
                         .strip_prefix(root)
-                        .unwrap()
+                        .unwrap_or_else(|err| {
+                            panic!("{} is outside {}: {err}", path.display(), root.display())
+                        })
                         .to_string_lossy()
                         .into_owned();
-                    let bytes = std::fs::read(&path).unwrap();
+                    let bytes = std::fs::read(&path)
+                        .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
                     let digest = format!("{:x}", Sha256::digest(&bytes));
                     out.push((relative, digest));
                 }
@@ -2039,6 +2056,91 @@ pub(crate) mod tests {
             "the other agent's calls are untouched"
         );
         grants.abort();
+    }
+
+    /// A5 row 2, on disk. The same launch as row 1, then the Home's whole
+    /// `UsersAI` area is walked: each of two stored agents' format-2 journal
+    /// entry and `memory/notes.md` sits under the writing agent's own root,
+    /// and the area holds nothing else. No copy sits under the other agent's
+    /// root, and no stray file sits at the area root. Each file is the sealed
+    /// object its own agent wrote: its envelope names that agent, that root
+    /// and that URI, so the bytes under one root cannot be the other agent's
+    /// object.
+    #[tokio::test]
+    async fn an_agents_journal_and_memory_sit_only_under_its_own_root_on_disk() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let agents = home.agents.clone();
+        assert_eq!(agents.len(), 2, "two agents");
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        for agent in &agents {
+            let launched = home.launch(agent).await.unwrap().0;
+            assert_eq!(launched.status, "starting");
+            let end = home.wait_ended(&launched.id).await;
+            assert_eq!(
+                (end.status.as_str(), end.cause.as_deref()),
+                ("stopped", Some("completed"))
+            );
+        }
+        grants.abort();
+
+        // What the guest wrote through the bridge, as the row above reads it.
+        let suffixes = [
+            "/.AppData/Agents/agent-host/tasks/t1/journal",
+            "/memory/notes.md",
+        ];
+        let mut expected: Vec<(String, String, String, String)> = Vec::new();
+        for agent in &agents {
+            let root = home.root(agent);
+            for suffix in suffixes {
+                let uri = format!("{root}{suffix}");
+                let path =
+                    elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &uri)
+                        .expect("the guest's URI maps to a file path");
+                let name = path
+                    .strip_prefix(&home.data_dir)
+                    .expect("the object is inside the data directory")
+                    .to_string_lossy()
+                    .into_owned();
+                expected.push((name, agent.to_string(), root.clone(), uri));
+            }
+        }
+
+        // Every object is the sealed envelope of the agent that wrote it, and
+        // every name in the area is one of those objects.
+        let area = home.data_dir.join("UsersAI");
+        for (name, agent, root, uri) in &expected {
+            let path = home.data_dir.join(name);
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|err| panic!("{name} is not on disk under its own root: {err}"));
+            let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|err| panic!("{name} is not a sealed object: {err}"));
+            for (field, want) in [
+                ("principal_id", agent.as_str()),
+                ("localhost_root", root.as_str()),
+                ("object_uri", uri.as_str()),
+            ] {
+                assert_eq!(
+                    envelope.get(field).and_then(serde_json::Value::as_str),
+                    Some(want),
+                    "{name} is the object of another agent or another path"
+                );
+            }
+        }
+        let mut names: Vec<String> = tree_hashes(&area)
+            .into_iter()
+            .map(|(name, _)| format!("UsersAI/{name}"))
+            .collect();
+        let mut wanted: Vec<String> = expected.into_iter().map(|row| row.0).collect();
+        names.sort();
+        wanted.sort();
+        assert_eq!(
+            names, wanted,
+            "the UsersAI area holds each agent's own journal and notes, and nothing else"
+        );
     }
 
     /// A3-R proof row. Two agents of one Home are resident at once through the
