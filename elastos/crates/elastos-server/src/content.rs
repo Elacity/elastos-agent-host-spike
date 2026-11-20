@@ -29,6 +29,12 @@ use sha2::Digest;
 const AVAILABILITY_RECEIPT_SCHEMA: &str = "elastos.content.availability.receipt/v1";
 const AVAILABILITY_RECEIPT_DOMAIN: &str = "elastos.content.availability.receipt.v1";
 pub const MAX_FETCH_RECEIPT_ATTEMPTS: u8 = 8;
+const FETCH_RECEIPT_SET_SCHEMA: &str = "elastos.content.fetch.receipt-set/v1";
+const FETCH_RECEIPT_SET_DOMAIN: &str = "elastos.content.fetch.receipt-set.v1";
+/// One distinct-holder answer is the requester's own statement about what it
+/// fetched. The requester signs it with the node key that signs availability
+/// receipts; no holder countersigns it.
+pub(crate) const FETCH_RECEIPT_SET_ATTESTATION: &str = "requester-signed-not-holder-countersigned";
 const AVAILABILITY_DASHBOARD_SCHEMA: &str = "elastos.content.availability.dashboard/v1";
 const CONTENT_ADMISSION_DOMAIN: &str = "elastos.content.admission.v1";
 const CONTENT_ACCOUNTING_SCHEMA: &str = "elastos.content.accounting/v1";
@@ -219,6 +225,19 @@ struct ContentFetchResult {
 enum ContentFetchPayload {
     Bytes(String),
     Stream(Value),
+}
+
+/// The availability fallback's answer for one content fetch. A distinct-holder
+/// refusal keeps its code and receipts, so the caller reports what was and was
+/// not proven instead of a bare error.
+enum AvailabilityFallback {
+    Fetched(ContentFetchResult),
+    Unavailable,
+    Refused {
+        code: String,
+        message: String,
+        data: Value,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2774,6 +2793,7 @@ impl ModelPartReads {
             whole_max_bytes: None,
         };
         let fetched = ContentProvider::fetch_from_availability_provider(
+            None,
             registry,
             MODEL_PREPARATION_SOURCE,
             cid,
@@ -2784,14 +2804,22 @@ impl ModelPartReads {
         .await;
         if index_read {
             let outcome = match &fetched {
-                Ok(Some(_)) => "completed",
-                Ok(None) => "unavailable",
-                Err(_) => "failed",
+                Ok(AvailabilityFallback::Fetched(_)) => "completed",
+                Ok(AvailabilityFallback::Unavailable) => "unavailable",
+                Ok(AvailabilityFallback::Refused { .. }) | Err(_) => "failed",
             };
             tracing::warn!(target: "elastos::model_index_read", stage = "availability_fallback",
                 outcome, "model index read fallback settled");
         }
-        let ContentFetchPayload::Bytes(data) = fetched?
+        let fetched = match fetched {
+            Ok(AvailabilityFallback::Fetched(result)) => Some(result),
+            Ok(AvailabilityFallback::Unavailable) => None,
+            Ok(AvailabilityFallback::Refused { code, message, .. }) => {
+                anyhow::bail!("availability fetch refused ({code}): {message}")
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let ContentFetchPayload::Bytes(data) = fetched
             .ok_or_else(|| anyhow::anyhow!("Carrier availability is unavailable"))?
             .payload
         else {
@@ -3420,6 +3448,7 @@ impl ContentProvider {
             }
             Err(local_err) => {
                 let fallback = Self::fetch_from_availability_provider(
+                    Some(&self.data_dir),
                     &registry,
                     self.name(),
                     cid,
@@ -3430,16 +3459,27 @@ impl ContentProvider {
                 .await;
                 if model_index {
                     let outcome = match &fallback {
-                        Ok(Some(_)) => "completed",
-                        Ok(None) => "unavailable",
-                        Err(_) => "failed",
+                        Ok(AvailabilityFallback::Fetched(_)) => "completed",
+                        Ok(AvailabilityFallback::Unavailable) => "unavailable",
+                        Ok(AvailabilityFallback::Refused { .. }) | Err(_) => "failed",
                     };
                     tracing::warn!(target: "elastos::model_index_read", stage = "availability_fallback",
                         outcome, "model index read fallback settled");
                 }
                 match fallback {
-                    Ok(Some(result)) => result,
-                    Ok(None) => return Err(local_err),
+                    Ok(AvailabilityFallback::Fetched(result)) => result,
+                    Ok(AvailabilityFallback::Unavailable) => return Err(local_err),
+                    // A refusal that proved rows keeps them: the caller sees the
+                    // availability code, the receipts and their signed set.
+                    Ok(AvailabilityFallback::Refused {
+                        code,
+                        message,
+                        data,
+                    }) => {
+                        let mut response = provider_error(&code, &message);
+                        response["data"] = data;
+                        return Ok(response);
+                    }
                     Err(availability_err) => {
                         return Err(ProviderError::Provider(format!(
                             "{local_err}; availability fetch failed: {availability_err}"
@@ -3526,13 +3566,14 @@ impl ContentProvider {
     /// Read through the availability plane only. Content uses this after a
     /// local miss; model preparation uses it for a package its backend lacks.
     async fn fetch_from_availability_provider(
+        signer_data_dir: Option<&Path>,
         registry: &ProviderRegistry,
         source: &str,
         cid: &str,
         path: &str,
         transfer: &ContentFetchTransfer,
         min_distinct_holders: Option<u64>,
-    ) -> Result<Option<ContentFetchResult>, ProviderError> {
+    ) -> Result<AvailabilityFallback, ProviderError> {
         let mut request = json!({
             "op": "fetch",
             "cid": cid,
@@ -3576,7 +3617,7 @@ impl ContentProvider {
             .await
         {
             Ok(response) => response,
-            Err(ProviderError::NoProvider(_)) => return Ok(None),
+            Err(ProviderError::NoProvider(_)) => return Ok(AvailabilityFallback::Unavailable),
             Err(err) => return Err(err),
         };
         if response.get("status").and_then(|status| status.as_str()) == Some("error") {
@@ -3588,6 +3629,29 @@ impl ContentProvider {
                 .get("message")
                 .and_then(|value| value.as_str())
                 .unwrap_or("Carrier availability fetch failed");
+            // A distinct-holder refusal carries its receipts. Sign them with
+            // this requester's node key and hand the answer to the caller: the
+            // code and the rows stay visible, so the refusal names what was
+            // proven. Answers without rows keep the existing error shapes.
+            if min_distinct_holders.is_some() {
+                let mut data = response
+                    .get("data")
+                    .cloned()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({}));
+                let signer_data_dir = signer_data_dir.ok_or_else(|| {
+                    ProviderError::Provider(
+                        "distinct-holder answers require the requester node key".into(),
+                    )
+                })?;
+                if Self::attach_signed_fetch_receipt_set(signer_data_dir, cid, &mut data)? {
+                    return Ok(AvailabilityFallback::Refused {
+                        code: code.to_string(),
+                        message: message.to_string(),
+                        data,
+                    });
+                }
+            }
             let message = format!("availability fetch failed ({code}): {message}");
             // Only failures in transit stay typed as I/O, so a bounded reader
             // can repeat them; refusals and bad answers stay provider errors.
@@ -3620,11 +3684,56 @@ impl ContentProvider {
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
         availability["cid_verified"] = Value::Bool(whole_object);
-        Ok(Some(ContentFetchResult {
+        if min_distinct_holders.is_some() {
+            let signer_data_dir = signer_data_dir.ok_or_else(|| {
+                ProviderError::Provider(
+                    "distinct-holder answers require the requester node key".into(),
+                )
+            })?;
+            Self::attach_signed_fetch_receipt_set(signer_data_dir, cid, &mut availability)?;
+        }
+        Ok(AvailabilityFallback::Fetched(ContentFetchResult {
             payload,
             availability: Some(availability),
             transfer: provider_transfer_value(&response),
         }))
+    }
+
+    /// Sign one distinct-holder answer's receipts with this requester's node
+    /// key (the signer of availability receipts) and attach the set. An answer
+    /// without rows is left byte-for-byte unchanged, so the ordinary Get keeps
+    /// its existing shape.
+    fn attach_signed_fetch_receipt_set(
+        data_dir: &Path,
+        cid: &str,
+        answer: &mut Value,
+    ) -> Result<bool, ProviderError> {
+        let Some(receipts) = answer.get("receipts").filter(|value| value.is_array()) else {
+            return Ok(false);
+        };
+        let Some(required) = answer
+            .get("required_distinct_holders")
+            .and_then(Value::as_u64)
+            .and_then(|required| u8::try_from(required).ok())
+        else {
+            return Ok(false);
+        };
+        let receipts: Vec<FetchReceipt> =
+            serde_json::from_value(receipts.clone()).map_err(|err| {
+                ProviderError::Provider(format!("fetch receipt set decode failed: {err}"))
+            })?;
+        if receipts.is_empty() {
+            return Ok(false);
+        }
+        let (signing_key, _) = elastos_identity::load_or_create_did(data_dir).map_err(|err| {
+            ProviderError::Provider(format!("content receipt signer unavailable: {err}"))
+        })?;
+        let signed = sign_fetch_receipt_set(&signing_key, cid, required, receipts)?;
+        answer["receipt_set"] = serde_json::to_value(&signed).map_err(|err| {
+            ProviderError::Provider(format!("fetch receipt set encode failed: {err}"))
+        })?;
+        answer["receipt_attestation"] = json!(FETCH_RECEIPT_SET_ATTESTATION);
+        Ok(true)
     }
 
     async fn publish(&self, request: &Value) -> Result<Value, ProviderError> {
@@ -6092,6 +6201,146 @@ impl FetchReceipt {
         }
         Ok(receipt)
     }
+}
+
+impl<'de> Deserialize<'de> for FetchReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = FetchReceiptWire::deserialize(deserializer)?;
+        Self::new(
+            &wire.requested_cid,
+            &wire.peer_did,
+            wire.bytes_received,
+            wire.verified,
+            wire.result,
+            wire.attempt,
+            wire.time,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Peer DIDs, never addresses or tickets, with verified bytes for one CID.
+pub(crate) fn fetch_receipt_distinct_holders(receipts: &[FetchReceipt]) -> usize {
+    receipts
+        .iter()
+        .filter_map(FetchReceipt::peer_did_verified)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+/// One distinct-holder answer: the CID this requester fetched, the required
+/// and observed holder counts, the time, and one receipt per holder answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FetchReceiptSet {
+    pub schema: String,
+    pub requested_cid: String,
+    pub required_distinct_holders: u8,
+    pub observed_distinct_holders: u32,
+    pub checked_at: u64,
+    pub receipts: Vec<FetchReceipt>,
+}
+
+/// The signed set. It states what this requester observed after its own CID
+/// check: requester-signed, not holder-countersigned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedFetchReceiptSet {
+    pub payload: FetchReceiptSet,
+    pub signature: String,
+    pub signer_did: String,
+}
+
+/// Sign one distinct-holder answer with the requester's own node key, using the
+/// same signing helper as availability receipts. The holder count is computed
+/// here from verified peer DIDs, so the signed claim cannot drift from the rows.
+pub(crate) fn sign_fetch_receipt_set(
+    signing_key: &ed25519_dalek::SigningKey,
+    cid: &str,
+    required_distinct_holders: u8,
+    receipts: Vec<FetchReceipt>,
+) -> Result<SignedFetchReceiptSet, ProviderError> {
+    require_fetch_receipt_cid(cid).map_err(ProviderError::Provider)?;
+    let payload = FetchReceiptSet {
+        schema: FETCH_RECEIPT_SET_SCHEMA.to_string(),
+        requested_cid: cid.to_string(),
+        required_distinct_holders,
+        observed_distinct_holders: fetch_receipt_distinct_holders(&receipts) as u32,
+        checked_at: now_unix_secs(),
+        receipts,
+    };
+    let payload_value = serde_json::to_value(&payload).map_err(|err| {
+        ProviderError::Provider(format!("fetch receipt set encode failed: {err}"))
+    })?;
+    let canonical = serde_json::to_string(&payload_value).map_err(|err| {
+        ProviderError::Provider(format!("fetch receipt set encode failed: {err}"))
+    })?;
+    let (signature, signer_did) = crate::crypto::domain_separated_sign(
+        signing_key,
+        FETCH_RECEIPT_SET_DOMAIN,
+        canonical.as_bytes(),
+    );
+    Ok(SignedFetchReceiptSet {
+        payload,
+        signature,
+        signer_did,
+    })
+}
+
+/// Verify one signed receipt set against the requester's DID and return its
+/// receipts. The signature proves that requester wrote the set after its CID
+/// checks; it does not prove a holder agreed to it. The counts must match the
+/// rows and every receipt must name the set's CID.
+pub fn verify_signed_fetch_receipt_set(
+    signed: &SignedFetchReceiptSet,
+    requester_did: &str,
+) -> Result<Vec<FetchReceipt>, ProviderError> {
+    let envelope = serde_json::to_vec(signed).map_err(|err| {
+        ProviderError::Provider(format!("fetch receipt set encode failed: {err}"))
+    })?;
+    crate::crypto::verify_signed_json_envelope_against_dids(
+        &envelope,
+        FETCH_RECEIPT_SET_DOMAIN,
+        std::slice::from_ref(&requester_did.to_string()),
+    )
+    .map_err(|err| {
+        ProviderError::Provider(format!("fetch receipt set verification failed: {err}"))
+    })?;
+    let set = &signed.payload;
+    if set.schema != FETCH_RECEIPT_SET_SCHEMA {
+        return Err(ProviderError::Provider(
+            "fetch receipt set schema mismatch".into(),
+        ));
+    }
+    require_fetch_receipt_cid(&set.requested_cid).map_err(ProviderError::Provider)?;
+    if !(1..=MAX_FETCH_RECEIPT_ATTEMPTS).contains(&set.required_distinct_holders) {
+        return Err(ProviderError::Provider(
+            "fetch receipt set required holder count is invalid".into(),
+        ));
+    }
+    if set.receipts.is_empty() || set.checked_at == 0 {
+        return Err(ProviderError::Provider(
+            "fetch receipt set requires receipts and a time".into(),
+        ));
+    }
+    if set
+        .receipts
+        .iter()
+        .any(|receipt| receipt.requested_cid != set.requested_cid)
+    {
+        return Err(ProviderError::Provider(
+            "fetch receipt set receipt names another CID".into(),
+        ));
+    }
+    if u64::from(set.observed_distinct_holders)
+        != fetch_receipt_distinct_holders(&set.receipts) as u64
+    {
+        return Err(ProviderError::Provider(
+            "fetch receipt set observed holder count does not match its receipts".into(),
+        ));
+    }
+    Ok(set.receipts.clone())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9627,6 +9876,390 @@ mod tests {
         assert!(!safe
             .windows(token.len())
             .any(|window| window == token.as_bytes()));
+    }
+
+    fn two_verified_holder_receipts() -> Vec<FetchReceipt> {
+        let (_, second_peer) = elastos_identity::derive_did(&[22; 32]);
+        vec![
+            fetch_receipt(FetchResult::Ok, true, 1),
+            FetchReceipt::new(
+                TEST_CID,
+                &second_peer,
+                42,
+                true,
+                FetchResult::Ok,
+                2,
+                1_700_000_001,
+            )
+            .unwrap(),
+        ]
+    }
+
+    /// A valid CIDv0 that is not the set's CID.
+    const OTHER_CID: &str = "QmVQXWedLDxL2XRFTp62qxoHjP1hXNo9f9vCZgbhqCQ8d2";
+
+    fn signed_test_fetch_receipt_set() -> (SignedFetchReceiptSet, String) {
+        let (signing_key, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let signed =
+            sign_fetch_receipt_set(&signing_key, TEST_CID, 2, two_verified_holder_receipts())
+                .unwrap();
+        (signed, requester_did)
+    }
+
+    fn reparse_signed_set(value: Value) -> SignedFetchReceiptSet {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// The saved set round-trips through its JSON shape and verifies against
+    /// the requester's DID, returning the two verified holder receipts.
+    #[test]
+    fn signed_fetch_receipt_set_round_trip_verifies_for_the_requester() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let parsed: SignedFetchReceiptSet =
+            serde_json::from_str(&serde_json::to_string(&signed).unwrap()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&parsed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(parsed.payload.required_distinct_holders, 2);
+        assert_eq!(parsed.payload.observed_distinct_holders, 2);
+        assert_eq!(parsed.payload.requested_cid, TEST_CID);
+        assert_eq!(parsed.signer_did, requester_did);
+    }
+
+    /// A changed byte in one receipt refuses: the signature covers every row.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_changed_receipt() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["payload"]["receipts"][0]["bytes_received"] = json!(41);
+        assert!(
+            verify_signed_fetch_receipt_set(&reparse_signed_set(value), &requester_did).is_err()
+        );
+    }
+
+    /// Relabelling the whole set to another CID refuses: the CID is signed.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_changed_cid() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["payload"]["requested_cid"] = json!(OTHER_CID);
+        for index in 0..2 {
+            value["payload"]["receipts"][index]["requested_cid"] = json!(OTHER_CID);
+        }
+        assert!(
+            verify_signed_fetch_receipt_set(&reparse_signed_set(value), &requester_did).is_err()
+        );
+    }
+
+    /// The required and observed holder counts are signed facts.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_changed_count() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["payload"]["required_distinct_holders"] = json!(3);
+        assert!(verify_signed_fetch_receipt_set(
+            &reparse_signed_set(value.clone()),
+            &requester_did
+        )
+        .is_err());
+        value["payload"]["required_distinct_holders"] = json!(2);
+        value["payload"]["observed_distinct_holders"] = json!(3);
+        assert!(
+            verify_signed_fetch_receipt_set(&reparse_signed_set(value), &requester_did).is_err()
+        );
+    }
+
+    /// A changed signature byte refuses.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_changed_signature() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        let signature = value["signature"].as_str().unwrap().to_string();
+        let mut bytes = signature.into_bytes();
+        bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
+        value["signature"] = json!(String::from_utf8(bytes).unwrap());
+        assert!(
+            verify_signed_fetch_receipt_set(&reparse_signed_set(value), &requester_did).is_err()
+        );
+    }
+
+    /// A set signed by another key is that key's statement, not this
+    /// requester's: the DID pin refuses it even though the signature is valid.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_another_keys_set_for_this_did() {
+        let (other_key, other_did) = elastos_identity::derive_did(&[23; 32]);
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let other = sign_fetch_receipt_set(&other_key, TEST_CID, 2, two_verified_holder_receipts())
+            .unwrap();
+        verify_signed_fetch_receipt_set(&other, &other_did).unwrap();
+        assert_ne!(other_did, requester_did);
+        assert!(verify_signed_fetch_receipt_set(&other, &requester_did).is_err());
+    }
+
+    /// The ordinary Get keeps its answer shape: with the mode off nothing is
+    /// signed, and an answer without rows is left byte-for-byte unchanged.
+    #[tokio::test]
+    async fn ordinary_fetch_answer_is_unchanged_without_a_receipt_set() {
+        let (data_dir, _registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let mut answer = json!({
+            "status": "network_available",
+            "provider": "carrier-availability",
+            "policy": "carrier_provider_invoke",
+            "replicas": 1,
+            "cid_verified": true,
+            "checked_at": 1_700_000_000,
+        });
+        let before = answer.clone();
+        assert!(!ContentProvider::attach_signed_fetch_receipt_set(
+            data_dir.path(),
+            TEST_CID,
+            &mut answer,
+        )
+        .unwrap());
+        assert_eq!(answer, before);
+    }
+
+    /// A distinct-holder answer gains the requester's signed set and the
+    /// honest attestation label, replacing the self-attested one.
+    #[tokio::test]
+    async fn distinct_holder_answer_carries_a_requester_signed_set() {
+        let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(provider_ok(json!({
+                "data": base64::engine::general_purpose::STANDARD.encode(b"carrier bytes"),
+                "availability": {
+                    "status": "network_available",
+                    "provider": "carrier-availability",
+                    "policy": "carrier_provider_invoke_distinct_holders",
+                    "distinct_holders": 2,
+                    "required_distinct_holders": 2,
+                    "receipt_attestation": "self",
+                    "receipts": two_verified_holder_receipts(),
+                }
+            }))),
+        });
+        registry.register(availability).await;
+        let transfer = ContentFetchTransfer {
+            transfer: ProviderTransfer::Bytes,
+            range: None,
+            progress: None,
+            bounded_read: false,
+            max_bytes: None,
+            whole_max_bytes: None,
+        };
+        let answer = ContentProvider::fetch_from_availability_provider(
+            Some(data_dir.path()),
+            &registry,
+            "content-provider",
+            TEST_CID,
+            "",
+            &transfer,
+            Some(2),
+        )
+        .await
+        .unwrap();
+        let AvailabilityFallback::Fetched(result) = answer else {
+            panic!("expected a fetched answer");
+        };
+        let availability = result.availability.unwrap();
+        assert_eq!(
+            availability["receipt_attestation"],
+            FETCH_RECEIPT_SET_ATTESTATION
+        );
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(availability["receipt_set"].clone()).unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 2);
+    }
+
+    /// A distinct-holder refusal keeps its code and signed rows instead of
+    /// collapsing into an error string.
+    #[tokio::test]
+    async fn distinct_holder_refusal_answer_keeps_its_signed_set() {
+        let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(json!({
+                "status": "error",
+                "code": "carrier_fetch_distinct_holders",
+                "message": "Carrier content fetch verified 1 distinct holder(s); 2 required",
+                "data": {
+                    "distinct_holders": 1,
+                    "required_distinct_holders": 2,
+                    "receipt_attestation": "self",
+                    "receipts": [fetch_receipt(FetchResult::Ok, true, 1)],
+                }
+            })),
+        });
+        registry.register(availability).await;
+        let transfer = ContentFetchTransfer {
+            transfer: ProviderTransfer::Bytes,
+            range: None,
+            progress: None,
+            bounded_read: false,
+            max_bytes: None,
+            whole_max_bytes: None,
+        };
+        let answer = ContentProvider::fetch_from_availability_provider(
+            Some(data_dir.path()),
+            &registry,
+            "content-provider",
+            TEST_CID,
+            "",
+            &transfer,
+            Some(2),
+        )
+        .await
+        .unwrap();
+        let AvailabilityFallback::Refused { code, data, .. } = answer else {
+            panic!("expected a refusal answer");
+        };
+        assert_eq!(code, "carrier_fetch_distinct_holders");
+        assert_eq!(data["distinct_holders"], 1);
+        assert_eq!(data["receipt_attestation"], FETCH_RECEIPT_SET_ATTESTATION);
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(data["receipt_set"].clone()).unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+    }
+
+    /// A refusal with no holder answer keeps the existing retryable error and
+    /// signs nothing.
+    #[tokio::test]
+    async fn refusal_without_receipts_keeps_the_existing_error_shape() {
+        let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(json!({
+                "status": "error",
+                "code": crate::carrier::CARRIER_FETCH_IN_TRANSIT_CODE,
+                "message": "Carrier content fetch is in transit",
+                "data": null,
+            })),
+        });
+        registry.register(availability).await;
+        let transfer = ContentFetchTransfer {
+            transfer: ProviderTransfer::Bytes,
+            range: None,
+            progress: None,
+            bounded_read: false,
+            max_bytes: None,
+            whole_max_bytes: None,
+        };
+        let err = match ContentProvider::fetch_from_availability_provider(
+            Some(data_dir.path()),
+            &registry,
+            "content-provider",
+            TEST_CID,
+            "",
+            &transfer,
+            Some(2),
+        )
+        .await
+        {
+            Ok(_) => panic!("a refusal without receipts must stay an error"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, ProviderError::Io(_)));
+    }
+
+    /// Verify one saved lab run outside the runtime process. The run folder is
+    /// named by `ELASTOS_P26_RUN_DIR`; the script that writes it runs this with
+    /// `--ignored`. Every signature is checked against the DID the answer names.
+    #[test]
+    #[ignore = "reads a saved lab run folder from ELASTOS_P26_RUN_DIR"]
+    fn saved_lab_distinct_holder_run_verifies() {
+        let Some(run_dir) = std::env::var_os("ELASTOS_P26_RUN_DIR") else {
+            return;
+        };
+        let run_dir = PathBuf::from(run_dir);
+        let read_json = |name: &str| -> Value {
+            let path = run_dir.join(name);
+            serde_json::from_str(
+                &std::fs::read_to_string(&path)
+                    .unwrap_or_else(|err| panic!("{} unreadable: {err}", path.display())),
+            )
+            .unwrap_or_else(|err| panic!("{} is not JSON: {err}", path.display()))
+        };
+
+        let meta = read_json("meta.json");
+        let cid = meta["cid"].as_str().unwrap().to_string();
+        let requester_did = meta["requester_did"].as_str().unwrap().to_string();
+        let source_sha256 = meta["source_sha256"].as_str().unwrap().to_string();
+        let source_bytes = meta["source_bytes"].as_u64().unwrap();
+
+        // Each holder's signed availability receipt verifies against that
+        // holder's DID and names the fetched CID.
+        for holder in ["holder-a", "holder-b"] {
+            let signed: SignedAvailabilityReceipt = serde_json::from_str(
+                &std::fs::read_to_string(run_dir.join(format!("{holder}-receipt.json"))).unwrap(),
+            )
+            .unwrap();
+            let holder_did = meta[format!("{holder}_did")].as_str().unwrap().to_string();
+            crate::crypto::verify_signed_json_envelope_against_dids(
+                &serde_json::to_vec(&signed).unwrap(),
+                AVAILABILITY_RECEIPT_DOMAIN,
+                &[holder_did],
+            )
+            .unwrap();
+            assert_eq!(signed.payload.cid, cid);
+        }
+
+        // The fetch answer names the same CID, and the two receipts are two
+        // distinct verified holder DIDs with the source file's byte count.
+        let fetch = read_json("fetch.json");
+        assert_eq!(fetch["status"], "ok", "{fetch}");
+        let fetched = base64::engine::general_purpose::STANDARD
+            .decode(fetch["data"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(hex::encode(sha2::Sha256::digest(&fetched)), source_sha256);
+        let availability = &fetch["data"]["availability"];
+        assert_eq!(
+            availability["receipt_attestation"],
+            FETCH_RECEIPT_SET_ATTESTATION
+        );
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(availability["receipt_set"].clone()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(signed.payload.requested_cid, cid);
+        assert_eq!(signed.payload.required_distinct_holders, 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 2);
+        let mut peers: Vec<&str> = receipts
+            .iter()
+            .filter_map(FetchReceipt::peer_did_verified)
+            .collect();
+        peers.sort_unstable();
+        let mut expected = vec![
+            meta["holder-a_did"].as_str().unwrap(),
+            meta["holder-b_did"].as_str().unwrap(),
+        ];
+        expected.sort_unstable();
+        assert_eq!(peers, expected);
+        assert!(receipts
+            .iter()
+            .all(|receipt| receipt.verified && receipt.bytes_received == source_bytes));
+
+        // The refusal run names the distinct-holder code and keeps its one
+        // verified receipt, signed by the same requester.
+        let refusal = read_json("refusal.json");
+        assert_eq!(refusal["status"], "error", "{refusal}");
+        assert_eq!(refusal["code"], "carrier_fetch_distinct_holders");
+        let data = &refusal["data"];
+        assert_eq!(data["distinct_holders"], 1);
+        assert_eq!(data["required_distinct_holders"], 2);
+        assert_eq!(data["receipt_attestation"], FETCH_RECEIPT_SET_ATTESTATION);
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(data["receipt_set"].clone()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+        assert_eq!(receipts[0].requested_cid, signed.payload.requested_cid);
+        assert!(receipts[0].verified);
     }
 
     fn signed_test_availability_receipt(cid: &str, legacy: bool) -> Value {

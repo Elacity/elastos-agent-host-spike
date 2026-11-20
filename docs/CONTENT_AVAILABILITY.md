@@ -331,6 +331,20 @@ also carry the remote content provider's signed availability receipt; Carrier
 verifies and summarizes that receipt in the peer-selection proof when present,
 including safe peer-selection, quota, repair-worker, and accounting posture
 without exposing raw provider internals.
+A distinct-holder fetch records its answers as one receipt set. The set names
+the requested CID, the required and observed distinct holder counts, and one
+`FetchReceipt` per holder answer whose peer DID Carrier verified. The requester
+signs the set with its own node key under
+`elastos.content.fetch.receipt-set/v1` and labels it
+`requester-signed-not-holder-countersigned`: it is the requester's statement
+that it checked the returned bytes against the CID, not a holder
+countersignature. `verify_signed_fetch_receipt_set` accepts a set only for the
+requester DID it names, only when every receipt names the set's requested CID,
+and only when the observed count equals the distinct verified peer count. A
+refusal that reached fewer distinct holders than required carries the same
+signed set with its observed count, so the caller can see which holders
+answered.
+
 If only the local pin is proven, the honest state is
 `carrier_announced`; if requested replica/live-proof requirements are not met,
 the state is `repair_needed`. Repair-only local announcements omit fetch
