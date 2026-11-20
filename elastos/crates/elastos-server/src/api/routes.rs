@@ -2319,8 +2319,8 @@ pub(crate) mod tests {
     /// then each is launched by that stored id through `launch_capsule`. Each
     /// running instance is bound to its own stored id and record, neither
     /// instance is the other agent's id, and both run the one installed host.
-    /// This base has no per-agent "starts off" gate, so create leaves an agent
-    /// launchable.
+    /// A created agent starts off, so the owner turns each one on through
+    /// `POST /api/apps/system/agents/activate` before it launches.
     #[tokio::test]
     async fn two_route_created_ids_one_host() {
         if crate::agents::require_build().is_err() {
@@ -2401,6 +2401,16 @@ pub(crate) mod tests {
             rows[0]["record"]["localhost_root"], rows[1]["record"]["localhost_root"],
             "each stored record owns its own root"
         );
+        for id in [&a_id, &b_id] {
+            let (status, body) = post_system(
+                &app,
+                "/api/apps/system/agents/activate",
+                &token,
+                Some(serde_json::json!({ "agent_id": id, "active": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
 
         let launch_grant = gateway::issue_home_projection_launch_token_with_context(
             &data_dir,
