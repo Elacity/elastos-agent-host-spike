@@ -488,8 +488,6 @@ jobs:
             exit 1
           fi
 
-  # The lab stand-in is a separate cargo project, outside the elastos workspace.
-  # Without this job, tests/standin_contract.rs can stop compiling without a red check.
   lab-gates:
     name: lab-gates
     runs-on: macos-15
@@ -530,6 +528,8 @@ jobs:
         run: |
           python3 -I -m unittest discover -s py
 
+  # The lab stand-in is a separate cargo project, outside the elastos workspace.
+  # Without this job, tests/standin_contract.rs can stop compiling without a red check.
   lab-standin:
     name: lab-standin
     runs-on: ubuntu-24.04

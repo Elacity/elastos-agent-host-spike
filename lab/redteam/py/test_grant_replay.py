@@ -1211,7 +1211,8 @@ class GrantReplayProbe(unittest.TestCase):
     def test_immediate_timeout_after_unknown_is_refused(self):
         """Reserve, settle Unknown, then timeout_hold with nothing between them.
 
-        A refusal leaves no finding. An Ok panic records grant-binding-003.
+        A refusal keeps the finding and records the passing rerun. An Ok
+        panic records grant-binding-003.
         ``setUp`` raises ``real_error`` only for ``PROBE_NAMES``, so this
         method raises it itself. This method does not start cargo.
         """
@@ -2059,7 +2060,7 @@ class GrantReplayProbe(unittest.TestCase):
     def test_escaped_path_dependency_matches_cargo(self):
         """Cargo resolves the escaped path. The raw text does not name the crate.
 
-        The owner's detector reads that raw text. A pass writes
+        The detector resolves Cargo metadata. A pass writes
         grant-binding-002. A caught failure writes nothing to
         caught-escape.md, leaves grant-binding-002.md unchanged, and says
         the detector returned true. An error propagates. A false detector

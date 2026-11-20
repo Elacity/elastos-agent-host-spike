@@ -51,7 +51,7 @@ POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'sch
 # Every job the required check sums up: all but itself and cancel-on-failure.
 REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", "cargo-audit", "core-size", "engine-llama-amd64",
                   "engine-llama-arm64",
-                  "lint", "lab-standin", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
+                  "lint", "lab-gates", "lab-standin", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
                   "release-upstream-assets", "installed-app-paths", "source-home-linux", "source-home-linux-arm64",
                   "source-home-macos", "update-hop-linux")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
@@ -2073,6 +2073,7 @@ class ReleasePolicyTests(unittest.TestCase):
             "update-hop-linux": ("update-hop-linux", "ubuntu-24.04"),
             # Anders decides whether this becomes a required check (#311 D2).
             "cargo-audit": ("cargo-audit", "ubuntu-24.04"),
+            "lab-gates": ("lab-gates", "macos-15"),
             # Sash decides whether this becomes a required check (lab stand-in contract).
             "lab-standin": ("lab-standin", "ubuntu-24.04"),
             # Sash decides whether this becomes a required check (Runtime core size budget).
@@ -2128,14 +2129,14 @@ class ReleasePolicyTests(unittest.TestCase):
         expected = {
             "source-gate": None, "fork-gate": None, "pr-substance": None, "cargo-audit": None, "core-size": None, "test-behaviour": "source-gate",
             "engine-llama-amd64": "fork-gate", "engine-llama-arm64": "fork-gate", "lint": "fork-gate",
-            "lab-standin": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
+            "lab-gates": "fork-gate", "lab-standin": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
             "custody-harness-smoke": "fork-gate",
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
             "installed-app-paths": None, "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
             "source-home-linux-arm64": "[installed-app-paths, engine-llama-arm64]",
             "source-home-macos": "source-gate", "update-hop-linux": "[installed-app-paths, fork-gate]", "cancel-on-failure": None,
             "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, "
-                        "lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
+                        "lint, lab-gates, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
                         "release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, "
                         "update-hop-linux]",
         }
