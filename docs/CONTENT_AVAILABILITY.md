@@ -331,19 +331,35 @@ also carry the remote content provider's signed availability receipt; Carrier
 verifies and summarizes that receipt in the peer-selection proof when present,
 including safe peer-selection, quota, repair-worker, and accounting posture
 without exposing raw provider internals.
-A fetch that sets `min_distinct_holders` is a success only when that many
-holders were verified. A local copy does not answer it: the fetch uses the
-existing availability path and returns the signed receipt set, or the
-distinct-holders refusal, or the existing unavailable error when no holder
-answered. With the field absent, fetch stays local-first and that answer is
-unchanged. A local-only fetch still does not leave the machine, and a local
-copy is still not reported as a distinct-holder success. The requester signs
-the set with its node key under the domain label
+A fetch that sets `min_distinct_holders` is a success only when the signed
+receipt set's own receipts show at least that many distinct verified holder
+DIDs for the requested CID. Content counts those DIDs from the receipts. It
+does not read a holder-count field on the availability answer. When that
+answer says success but the receipts are missing, name another CID, show
+fewer distinct verified holders than the caller required, or cannot be
+signed, content does not return the bytes. If at least one receipt can be
+signed, the answer is the distinct-holders refusal together with the signed
+set of what was observed. If none can, the answer is the existing unavailable
+error. A local copy does not answer this fetch: content uses the existing
+availability path. With the field absent, fetch stays local-first and that
+answer is unchanged. A local-only fetch stays on this machine. With the field
+set, it returns an error on a local hit and on a local miss, and it does not
+call availability.
+The requester signs the set with its node key under the domain label
 `elastos.content.fetch.receipt-set.v1` and marks it
 `requester-signed-not-holder-countersigned`: its own statement after its CID
-check, not a holder countersignature. Readers use the verified nested payload
-for the CID, the counts and the receipts. The signed-mode answer does not
-repeat those values beside the signature.
+check, not a holder countersignature. `sign_fetch_receipt_set` refuses a
+receipt that names a CID other than the set's, and it writes
+`observed_distinct_holders` from the distinct verified holder DIDs in the
+receipts. `verify_signed_fetch_receipt_set` checks the signature against the
+requester DID, then refuses a schema other than
+`elastos.content.fetch.receipt-set/v1`, a requested CID that is not a
+canonical SHA2-256 CID, a required holder count outside 1 to 8, an empty
+receipt list, a set with no time, a receipt that names another CID, or an
+observed count that differs from the distinct verified holder DIDs in the
+list. Readers use that verified nested payload for the CID, the counts and
+the receipts. The signed-mode answer does not repeat those values beside the
+signature.
 
 If only the local pin is proven, the honest state is
 `carrier_announced`; if requested replica/live-proof requirements are not met,
