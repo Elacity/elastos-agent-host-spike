@@ -1002,9 +1002,9 @@ fn model_multiline_basic_string_escape_is_a_link() {
 }
 
 #[test]
-fn model_unknown_hex_escape_is_refused() {
+fn model_hex_escape_is_a_link() {
     // Cargo 1.95 accepts `\x69` in this package name and resolves it to this
-    // crate. Keep the historical row name so its F-GB-xhex plant stays bound.
+    // crate. Keep this row name so its F-GB-xhex plant stays bound.
     let hex =
         dependency_manifest("gb = { package = \"grant-bind\\x69ng\", version = \"1.2.3\" }\n");
     assert!(!hex.contains("grant-binding"));

@@ -20,10 +20,12 @@ An allow on a real profile is CRITICAL. Wallet or did:
 writes no finding.
 
 ``LoopbackNetworkProbe`` launches nc. It skips when ``/usr/bin/sandbox-exec``
-or ``/usr/bin/nc`` is missing. ``NetworkConnectClassifier`` launches nothing,
+or ``/usr/bin/nc`` is missing, or the host refuses a stock loopback bind.
+``NetworkConnectClassifier`` launches nothing,
 so those tests run either way.
 """
 
+import errno
 import os
 import shutil
 import socket
@@ -284,8 +286,16 @@ class LoopbackNetworkProbe(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # A missing binary skips this class only. The classifier class stays.
+        # A host that cannot bind a stock loopback listener cannot run the
+        # positive control or measure a deny. The classifier class still runs.
         require_probe_binaries()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            try:
+                listener.bind((LOOPBACK, 0))
+            except OSError as error:
+                if error.errno in (errno.EPERM, errno.EACCES):
+                    raise unittest.SkipTest("host prevents a stock loopback listener") from error
+                raise
 
     def test_nc_and_sandbox_present_or_skip(self):
         """Both pinned binaries exist, or this class skips with the missing path."""

@@ -30,15 +30,16 @@ A recorded allow keeps the gate green. The deny test is an expected
 failure and its docstring names that finding file (README guard b).
 Each confirmed allow is written before the next profile is classified.
 A later harness error still fails the gate. The plant still runs.
-A recorded allow is not a skip. This module skips only when
-``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing.
+A recorded allow is not a skip. This module skips a live probe when
+``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing, or when the
+unsandboxed helper proves that AppleSMC is absent on this runner.
 A profile error, a failed compile, a failed unsandboxed control,
 nonempty stderr, a ``class=`` line, and an exit other than 0 are harness
 errors. They are not a deny and they are not a skip.
 
-``PropProbe`` compiles and launches. It skips only when
-``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing, and the reason
-names that path. ``PropRules`` does not compile and does not launch.
+``PropProbe`` compiles and launches. Its skip reason names the missing
+tool or the proven absent device. ``PropRules`` does not compile and does
+not launch.
 """
 
 import ast
@@ -417,6 +418,28 @@ def run_unsandboxed(binary):
     return require_unsandboxed_allow(result)
 
 
+def absent_device_reason(binary):
+    """Skip only when the unsandboxed helper proves AppleSMC is absent.
+
+    A confined ``match=0`` alone cannot establish absence. Any other
+    unsandboxed result must be a complete allow or a harness error.
+    """
+    require_storage_path(binary)
+    completed = subprocess.run(
+        [binary], capture_output=True, text=True, timeout=HELPER_TIMEOUT,
+    )
+    result = sbx.Result(
+        exit_code=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        argv=[binary],
+    )
+    if result.exit_code == 0 and result.stderr == "" and result.stdout == MATCH_STDOUT:
+        return "missing IOKit device AppleSMC on this runner"
+    require_unsandboxed_allow(result)
+    return None
+
+
 def require_denied(profile):
     """The one helper. ``profile`` must deny the IOClass property set.
 
@@ -629,6 +652,9 @@ class PropProbe(unittest.TestCase):
         cls.addClassCleanup(shutil.rmtree, cls.parent, ignore_errors=True)
         cls.addClassCleanup(shutil.rmtree, cls.root, ignore_errors=True)
         cls.binary = compile_setprop(cls.parent, cls.root, HELPER_C)
+        cls.skip_reason = absent_device_reason(cls.binary)
+        if cls.skip_reason:
+            return
         observe(cls)
 
     def setUp(self):
@@ -936,8 +962,8 @@ class PropRules(unittest.TestCase):
         self.assertIsNone(present)
         self.launch_guard.assert_not_called()
 
-    def test_skip_is_only_a_missing_toolchain(self):
-        """``skipTest`` is only the missing compiler or ``sandbox-exec`` path."""
+    def test_skip_is_only_a_missing_toolchain_or_absent_device(self):
+        """The live probe skips only for a missing tool or proven absent SMC."""
         source = Path(__file__).read_text(encoding="utf-8")
         tree = ast.parse(source)
         calls = []
@@ -948,6 +974,7 @@ class PropRules(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         line = source.splitlines()[calls[0].lineno - 1]
         self.assertIn("skip_reason", line)
+        self.assertIn("cls.skip_reason = absent_device_reason(cls.binary)", source)
         with patch.object(os.path, "isfile", return_value=True):
             self.assertIsNone(skip_reason())
         self.launch_guard.assert_not_called()
@@ -955,7 +982,7 @@ class PropRules(unittest.TestCase):
     def test_missing_tools_skip_only_probe_class(self):
         """Each missing tool skips every probe while the classifier checks run."""
         classifier_names = (
-            "test_skip_is_only_a_missing_toolchain",
+            "test_skip_is_only_a_missing_toolchain_or_absent_device",
             "test_recorded_allow_does_not_skip",
         )
         probe_names = unittest.defaultTestLoader.getTestCaseNames(PropProbe)
@@ -1585,6 +1612,75 @@ class PropRules(unittest.TestCase):
             self.assertEqual(len(hits), 1)
         self.launch_guard.assert_not_called()
 
+    def test_absent_device_needs_unsandboxed_proof(self):
+        """Only a clean unsandboxed match=0 proves absence."""
+        binary = "/private/setprop"
+        cases = (
+            (0, MATCH_STDOUT, "", "missing IOKit device AppleSMC on this runner"),
+            (0, ALLOW_STDOUT, "", None),
+        )
+        for code, stdout, stderr, expected in cases:
+            with self.subTest(stdout=stdout), patch.object(
+                subprocess, "run",
+                return_value=subprocess.CompletedProcess([binary], code, stdout, stderr),
+            ) as ran:
+                self.assertEqual(absent_device_reason(binary), expected)
+                ran.assert_called_once_with(
+                    [binary], capture_output=True, text=True, timeout=HELPER_TIMEOUT,
+                )
+        for code, stdout, stderr in (
+            (0, DENY_STDOUT, ""),
+            (0, CLASS_STDOUT, ""),
+            (1, MATCH_STDOUT, ""),
+            (0, MATCH_STDOUT, "warning"),
+            (0, "malformed\n", ""),
+        ):
+            with self.subTest(code=code, stdout=stdout, stderr=stderr), patch.object(
+                subprocess, "run",
+                return_value=subprocess.CompletedProcess([binary], code, stdout, stderr),
+            ):
+                with self.assertRaises(HarnessError):
+                    absent_device_reason(binary)
+        self.launch_guard.assert_not_called()
+
+    def test_absent_device_skips_only_live_probe(self):
+        """The class skips after clean absence and errors on an unsandboxed deny."""
+        names = unittest.defaultTestLoader.getTestCaseNames(PropProbe)
+        reason = "missing IOKit device AppleSMC on this runner"
+        for stdout in (MATCH_STDOUT, DENY_STDOUT):
+            with self.subTest(stdout=stdout), patch.object(
+                os.path, "isfile", return_value=True,
+            ), patch(
+                __name__ + ".compile_setprop", return_value="/private/setprop",
+            ), patch.object(
+                subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    ["/private/setprop"], 0, stdout, "",
+                ),
+            ) as ran, patch.object(
+                sbx, "run", side_effect=AssertionError("confined helper started"),
+            ) as confined:
+                class Controlled(PropProbe):
+                    pass
+
+                result = unittest.TestResult()
+                unittest.TestSuite(Controlled(name) for name in names).run(result)
+                if stdout == MATCH_STDOUT:
+                    self.assertEqual(result.testsRun, len(names))
+                    self.assertEqual(
+                        [skip_reason for _case, skip_reason in result.skipped],
+                        [reason] * len(names),
+                    )
+                    self.assertEqual(result.errors, [])
+                else:
+                    self.assertEqual(result.testsRun, 0)
+                    self.assertEqual(result.skipped, [])
+                    self.assertEqual(len(result.errors), 1)
+                    self.assertIn("unsandboxed deny", result.errors[0][1])
+                ran.assert_called_once()
+                confined.assert_not_called()
+        self.launch_guard.assert_not_called()
+
     def test_unsandboxed_failure_is_an_error(self):
         """A failed unsandboxed control is a harness error, not an assertion failure.
 
@@ -2047,6 +2143,8 @@ class PropRules(unittest.TestCase):
         a grant is an expected failure. The plant still runs, including each
         wallet control that still denies, and nothing skips.
         """
+        # Python 3.15 Path.is_file calls os.path.isfile; keep data paths real.
+        real_isfile = os.path.isfile
         method_names = unittest.defaultTestLoader.getTestCaseNames(PropProbe)
         allowed_sets = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
         scenarios = [
@@ -2121,9 +2219,15 @@ class PropRules(unittest.TestCase):
                     START_SHA, {}, clear=True
                 ), patch.object(sbx, "REPO_ROOT", repo), patch.object(
                     sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
-                ), patch.object(os.path, "isfile", return_value=True), patch(
+                ), patch.object(
+                    os.path, "isfile",
+                    side_effect=lambda path: os.fspath(path) in (CC, sbx.SANDBOX_EXEC)
+                    or real_isfile(path),
+                ), patch(
                     __name__ + ".compile_setprop", side_effect=injected_compile
-                ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
+                ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch(
+                    __name__ + ".absent_device_reason", return_value=None
+                ), patch.object(
                     sbx, "run", side_effect=injected_sandbox
                 ), patch(__name__ + ".last_change", return_value="a" * 40), patch(
                     __name__ + ".pr_label", return_value="PR fixture"
