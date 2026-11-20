@@ -3592,13 +3592,29 @@ impl ContentProvider {
         if transfer.bounded_read {
             check_bounded_availability_payload(&response, transfer)?;
         }
-        let availability = response
+        let payload = provider_response_payload(&response, "availability provider", transfer)?;
+        let whole_object = path.is_empty() && !transfer.bounded_read && transfer.range.is_none();
+        if whole_object {
+            let bytes = match &payload {
+                ContentFetchPayload::Bytes(data) => base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?,
+                ContentFetchPayload::Stream(stream) => provider_stream_payload_bytes(stream)?,
+            };
+            if !verify_exact_content_cid(registry, cid, &bytes).await? {
+                return Err(ProviderError::Provider("availability CID mismatch".into()));
+            }
+        }
+        let mut availability = response
             .get("data")
             .and_then(|data| data.get("availability"))
-            .cloned();
+            .cloned()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        availability["cid_verified"] = Value::Bool(whole_object);
         Ok(Some(ContentFetchResult {
-            payload: provider_response_payload(&response, "availability provider", transfer)?,
-            availability,
+            payload,
+            availability: Some(availability),
             transfer: provider_transfer_value(&response),
         }))
     }
@@ -3975,27 +3991,7 @@ impl ContentProvider {
             .filter(|filename| !filename.trim().is_empty())
             .unwrap_or("content.bin");
         let registry = self.registry()?;
-        let ipfs_response = self
-            .invoke_provider(
-                &registry,
-                "ipfs",
-                "add_bytes",
-                json!({
-                    "op": "add_bytes",
-                    "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    "filename": filename,
-                    // Pin only after the CID is checked, so a wrong
-                    // expected CID never changes an existing pin.
-                    "pin": false,
-                }),
-                ProviderTransfer::Bytes,
-            )
-            .await?;
-        provider_response_ok(&ipfs_response, "content import_exact")?;
-        let imported_cid = provider_response_cid(&ipfs_response).map_err(|err| {
-            ProviderError::Provider(format!("content import_exact missing imported CID: {err}"))
-        })?;
-        if imported_cid != cid {
+        if !verify_exact_content_cid_with_filename(&registry, cid, &bytes, filename).await? {
             return Ok(provider_error(
                 "cid_mismatch",
                 "content import_exact produced a different CID; exact-CID import requires block-level compatible bytes",
@@ -8757,6 +8753,46 @@ fn provider_response_ok(response: &Value, operation: &str) -> Result<(), Provide
     Ok(())
 }
 
+pub(crate) async fn verify_exact_content_cid(
+    registry: &ProviderRegistry,
+    cid: &str,
+    bytes: &[u8],
+) -> Result<bool, ProviderError> {
+    verify_exact_content_cid_with_filename(registry, cid, bytes, "content.bin").await
+}
+
+async fn verify_exact_content_cid_with_filename(
+    registry: &ProviderRegistry,
+    cid: &str,
+    bytes: &[u8],
+    filename: &str,
+) -> Result<bool, ProviderError> {
+    if bytes.len() > IMPORT_EXACT_MAX_BYTES {
+        return Err(ProviderError::Provider(
+            "content exceeds exact-CID read limit".into(),
+        ));
+    }
+    let response = registry
+        .invoke_provider(ProviderInvocation {
+            source: "content-provider".into(),
+            target: "ipfs".into(),
+            op: "add_bytes".into(),
+            request: json!({
+                "op": "add_bytes",
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                "filename": filename,
+                "pin": false,
+            }),
+            transfer: ProviderTransfer::Bytes,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Local,
+        })
+        .await?;
+    provider_response_ok(&response, "content exact-CID check")?;
+    Ok(provider_response_cid(&response)? == cid)
+}
+
 fn provider_response_data(response: &Value, provider_name: &str) -> Result<String, ProviderError> {
     response
         .get("data")
@@ -9721,7 +9757,15 @@ mod tests {
                         .unwrap_or_default()
                         .to_string();
                     self.added_files.lock().await.push(filename);
-                    Ok(provider_ok(json!({ "cid": TEST_CID })))
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(request["data"].as_str().unwrap())
+                        .unwrap();
+                    let cid = if bytes == b"remote content" {
+                        "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw"
+                    } else {
+                        TEST_CID
+                    };
+                    Ok(provider_ok(json!({ "cid": cid })))
                 }
                 Some("cat") => {
                     let path = request
@@ -12515,11 +12559,9 @@ mod tests {
 
     #[tokio::test]
     async fn content_fetch_uses_availability_provider_when_local_backend_misses() {
+        let cid = "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw";
         let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
-        ipfs.missing_paths
-            .lock()
-            .await
-            .push("remote.md".to_string());
+        ipfs.missing_paths.lock().await.push(String::new());
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(provider_ok(json!({
@@ -12537,8 +12579,7 @@ mod tests {
         let response = content
             .send_raw(&json!({
                 "op": "fetch",
-                "cid": TEST_CID,
-                "path": "remote.md",
+                "cid": cid,
             }))
             .await
             .unwrap();
@@ -12556,13 +12597,43 @@ mod tests {
             response["data"]["availability"]["status"],
             "network_available"
         );
+        assert_eq!(response["data"]["availability"]["cid_verified"], true);
+
+        ipfs.missing_paths.lock().await.push("remote.md".into());
+        let path_response = content
+            .send_raw(&json!({ "op": "fetch", "cid": cid, "path": "remote.md" }))
+            .await
+            .unwrap();
+        assert_eq!(path_response["data"]["availability"]["cid_verified"], false);
 
         let requests = availability.requests.lock().await;
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["op"], "fetch");
-        assert_eq!(requests[0]["cid"], TEST_CID);
-        assert_eq!(requests[0]["uri"], format!("elastos://{TEST_CID}"));
-        assert_eq!(requests[0]["path"], "remote.md");
+        assert_eq!(requests[0]["cid"], cid);
+        assert_eq!(requests[0]["uri"], format!("elastos://{cid}"));
+        assert!(requests[0].get("path").is_none());
+        assert_eq!(requests[1]["path"], "remote.md");
+    }
+
+    #[tokio::test]
+    async fn content_fetch_refuses_availability_bytes_for_a_different_cid() {
+        let cid = "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw";
+        let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        ipfs.missing_paths.lock().await.push(String::new());
+        registry
+            .register(Arc::new(MockAvailabilityProvider {
+                requests: Mutex::new(Vec::new()),
+                response: Mutex::new(provider_ok(json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(b"other bytes"),
+                }))),
+            }))
+            .await;
+        let err = content
+            .send_raw(&json!({ "op": "fetch", "cid": cid }))
+            .await
+            .expect_err("different bytes must be refused");
+        assert!(err.to_string().contains("CID mismatch"));
+        assert!(ipfs.pinned.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -12737,6 +12808,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response["data"]["data"], encode(b"89ab"));
+        assert_eq!(response["data"]["availability"]["cid_verified"], false);
         assert_eq!(
             response["data"]["availability"]["provider"],
             "mock-availability"

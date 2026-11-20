@@ -4772,6 +4772,7 @@ impl CarrierAvailabilityProvider {
                                     "transport": "carrier-provider-plane",
                                     "node_did": replica.node_did,
                                     "remote_transfer": remote_transfer,
+                                    "cid_verified": path.is_empty() && bound.is_none(),
                                     "checked_at": now_secs(),
                                 }
                             }
@@ -4820,6 +4821,7 @@ impl CarrierAvailabilityProvider {
                                                         "transport": "carrier-provider-plane",
                                                         "node_did": replica.node_did,
                                                         "remote_transfer": remote_transfer,
+                                                        "cid_verified": path.is_empty() && bound.is_none(),
                                                         "checked_at": now_secs(),
                                                     }
                                                 }
@@ -5026,6 +5028,12 @@ async fn fetch_content_via_carrier_provider_invocation(
             bound.accepts(bytes.len() as u64),
             "holder returned {} bytes for a bounded read of {bound:?}",
             bytes.len()
+        );
+    }
+    if path.is_empty() && bound.is_none() {
+        anyhow::ensure!(
+            crate::content::verify_exact_content_cid(registry, cid, &bytes).await?,
+            "holder returned bytes for a different CID"
         );
     }
     Ok((bytes, remote_transfer))
@@ -9523,6 +9531,17 @@ pub(crate) mod tests {
             &self,
             request: &serde_json::Value,
         ) -> Result<serde_json::Value, ProviderError> {
+            if request.get("op").and_then(|value| value.as_str()) == Some("add_bytes") {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(request["data"].as_str().unwrap())
+                    .unwrap();
+                let cid = if bytes == b"carrier provider bytes" {
+                    "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp"
+                } else {
+                    "QmRSEtAyq7Xgr5YCFVWuYsBdqbR5X9fJDsdpNQuvm9yaic"
+                };
+                return Ok(serde_json::json!({ "status": "ok", "data": { "cid": cid } }));
+            }
             if request.get("op").and_then(|value| value.as_str()) != Some("cat") {
                 return Ok(serde_json::json!({
                     "status": "error",
@@ -9712,6 +9731,7 @@ pub(crate) mod tests {
         fail_tickets: Vec<String>,
         /// Connect tickets whose bounded fetch fails in transit.
         transit_tickets: StdMutex<Vec<String>>,
+        wrong_tickets: Vec<String>,
         reject_admission: bool,
         omit_admission_receipt: bool,
     }
@@ -9755,6 +9775,11 @@ pub(crate) mod tests {
                         "mock answer deadline passed",
                     )));
                 }
+                let bytes: &[u8] = if self.wrong_tickets.iter().any(|bad| bad == ticket) {
+                    b"wrong holder bytes"
+                } else {
+                    b"carrier provider bytes"
+                };
                 return Ok(serde_json::json!({
                     "status": "ok",
                     "data": {
@@ -9762,16 +9787,14 @@ pub(crate) mod tests {
                         "stream": {
                             "schema": "elastos.provider.stream/v1",
                             "encoding": "base64-chunks",
-                            "total_bytes": 22,
+                            "total_bytes": bytes.len(),
                             "completed": true,
                             "chunks": [
                                 {
                                     "index": 0,
                                     "offset": 0,
-                                    "length": 22,
-                                    "data": base64::engine::general_purpose::STANDARD.encode(
-                                        b"carrier provider bytes",
-                                    ),
+                                    "length": bytes.len(),
+                                    "data": base64::engine::general_purpose::STANDARD.encode(bytes),
                                 }
                             ],
                         }
@@ -15269,13 +15292,17 @@ pub(crate) mod tests {
         let registry = ProviderRegistry::new();
         let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
         registry.set_carrier_invoker(invoker.clone()).await;
+        registry
+            .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+            .await
+            .unwrap();
 
         let (bytes, remote_transfer) = fetch_content_via_carrier_provider_invocation(
             &registry,
             "did:key:z6MkholderFixture",
             "ticket:internal-secret",
-            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-            "docs/readme.md",
+            "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp",
+            "",
             None,
         )
         .await
@@ -15302,7 +15329,7 @@ pub(crate) mod tests {
         assert_eq!(requests[0]["target"], "content");
         assert_eq!(requests[0]["request"]["local_only"], true);
         assert_eq!(requests[0]["request"]["transfer"], "stream");
-        assert_eq!(requests[0]["request"]["path"], "docs/readme.md");
+        assert!(requests[0]["request"].get("path").is_none());
         assert_eq!(
             requests[0]["request"]["_runtime_invocation"]["transport"],
             "carrier-provider-plane"
@@ -15311,6 +15338,130 @@ pub(crate) mod tests {
             requests[0]["request"]["_runtime_invocation"]["transfer"],
             "stream"
         );
+    }
+
+    #[tokio::test]
+    async fn test_carrier_provider_invocation_refuses_different_bytes() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let registry = ProviderRegistry::new();
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            wrong_tickets: vec!["ticket:first".into(), "ticket:second".into()],
+            ..Default::default()
+        });
+        registry.set_carrier_invoker(invoker.clone()).await;
+        registry
+            .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+            .await
+            .unwrap();
+        for ticket in ["ticket:first", "ticket:second"] {
+            let result = fetch_content_via_carrier_provider_invocation(
+                &registry,
+                "did:key:z6MkholderFixture",
+                ticket,
+                cid,
+                "",
+                None,
+            )
+            .await;
+            assert!(result.unwrap_err().to_string().contains("different CID"));
+        }
+        let requests = invoker.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["ticket"], "ticket:first");
+        assert_eq!(requests[1]["ticket"], "ticket:second");
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_skips_mismatched_holders() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        for (seed, second_wrong) in [(73u8, true), (76u8, false)] {
+            let (local_sk, local_did) = elastos_identity::derive_did(&[seed; 32]);
+            let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+                .secret_key(iroh::SecretKey::from_bytes(&local_sk.to_bytes()))
+                .bind()
+                .await
+                .unwrap();
+            let memory_lookup = MemoryLookup::new();
+            endpoint
+                .address_lookup()
+                .unwrap()
+                .add(memory_lookup.clone());
+            let gossip = spawn_carrier_gossip(&endpoint);
+            let state = Arc::new(Mutex::new(GossipState::new(
+                endpoint.clone(),
+                gossip,
+                memory_lookup,
+                Some(local_sk),
+                Some(local_did),
+            )));
+            let now = now_secs();
+            let (first, first_did) =
+                signed_content_availability_message(cid, [seed + 1; 32], "ticket:first", "", now);
+            let (second, second_did) = signed_content_availability_message(
+                cid,
+                [seed + 2; 32],
+                "ticket:second",
+                "",
+                now - 1,
+            );
+            let topic = content_availability_topic_name(cid);
+            {
+                let mut guard = state.lock().await;
+                guard.joined_topics.insert(topic.clone());
+                guard
+                    .buffers
+                    .lock()
+                    .await
+                    .insert(topic, test_topic_buffer([first, second], 0));
+            }
+            let registry = Arc::new(ProviderRegistry::new());
+            let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+                wrong_tickets: if second_wrong {
+                    vec!["ticket:first".into(), "ticket:second".into()]
+                } else {
+                    vec!["ticket:first".into()]
+                },
+                ..Default::default()
+            });
+            registry.set_carrier_invoker(invoker.clone()).await;
+            registry
+                .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+                .await
+                .unwrap();
+            let provider = CarrierAvailabilityProvider::with_provider_registry(
+                state,
+                Arc::downgrade(&registry),
+            )
+            .with_discovery_wait(Duration::from_millis(20));
+            let response = provider
+                .send_raw(&serde_json::json!({"op": "fetch", "cid": cid}))
+                .await
+                .unwrap();
+            let requests = invoker.requests.lock().await;
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|request| request["ticket"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["ticket:first", "ticket:second"]
+            );
+            let reputation = provider.peer_reputation.lock().await;
+            assert_eq!(reputation[&first_did].failures, 1);
+            if second_wrong {
+                assert_eq!(response["status"], "error", "{response}");
+                assert!(response["data"].is_null());
+                assert_eq!(reputation[&second_did].failures, 1);
+            } else {
+                assert_eq!(response["status"], "ok", "{response}");
+                assert_eq!(
+                    response["data"]["data"],
+                    base64::engine::general_purpose::STANDARD.encode(b"carrier provider bytes")
+                );
+                assert_eq!(response["data"]["availability"]["cid_verified"], true);
+                assert_eq!(reputation[&second_did].successes, 1);
+            }
+            endpoint.close().await;
+        }
     }
 
     #[tokio::test]
@@ -15499,6 +15650,7 @@ pub(crate) mod tests {
             fail_ensure: false,
             fail_tickets: Vec::new(),
             transit_tickets: Default::default(),
+            wrong_tickets: Vec::new(),
             reject_admission: true,
             omit_admission_receipt: false,
         });
@@ -15558,6 +15710,7 @@ pub(crate) mod tests {
             fail_ensure: false,
             fail_tickets: Vec::new(),
             transit_tickets: Default::default(),
+            wrong_tickets: Vec::new(),
             reject_admission: false,
             omit_admission_receipt: true,
         });
@@ -16344,6 +16497,7 @@ pub(crate) mod tests {
             response["data"]["availability"]["policy"],
             "carrier_provider_invoke"
         );
+        assert_eq!(response["data"]["availability"]["cid_verified"], false);
         let requests = invoker.requests.lock().await;
         assert!(
             requests

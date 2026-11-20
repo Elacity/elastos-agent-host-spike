@@ -4366,10 +4366,84 @@ class CitationCheckTests(unittest.TestCase):
             "The principal is `Users/self`.\n"
             "Open `pkg/kept.rs:1`.\n"
             "Span `pkg/kept.rs:1-2`.\n"
-            "Call `pkg/kept.rs::kept`.\n"
+            "Call `pkg/kept.rs::kept` at `pkg/kept.rs:1`.\n"
         )
         files = {"pkg/kept.rs": b"fn kept(\nsecond\nthird\n"}
         got = check.problems(self._draft(body, files))
+        self.assertEqual(got, [])
+
+    def test_code_shaped_span_without_a_citation_is_refused(self):
+        body = "The body calls `verifier.reserve(4)`.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        expected = (
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `verifier.reserve(4)`" % line
+        )
+        self._assert_one(body, {}, expected)
+
+    def test_double_backtick_code_span_without_a_citation_is_refused(self):
+        body = "The body calls ``verifier.reserve(4)``.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        expected = (
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `verifier.reserve(4)`" % line
+        )
+        self._assert_one(body, {}, expected)
+
+    def test_backtick_runs_close_only_at_the_same_length(self):
+        body = "The body calls ``verifier.`reserve(4)``.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        expected = (
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `verifier.`reserve(4)`" % line
+        )
+        self._assert_one(body, {}, expected)
+
+    def test_indexing_and_operators_without_a_citation_are_refused(self):
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        for span in ("items[0]", "a + b"):
+            with self.subTest(span=span):
+                body = "The body uses `%s`.\n" % span
+                expected = (
+                    "refuse: line %d has a code-shaped span and no path:line "
+                    "citation: `%s`" % (line, span)
+                )
+                self._assert_one(body, {}, expected)
+
+    def test_function_location_does_not_support_a_code_span(self):
+        body = "The body calls `verifier.reserve(4)` at `pkg/kept.rs::kept`.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        got = check.problems(self._draft(body, {"pkg/kept.rs": b"fn kept() {}\n"}))
+        self.assertEqual(got, [
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `verifier.reserve(4)`" % line,
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `pkg/kept.rs::kept`" % line,
+        ])
+
+    def test_code_shaped_span_with_a_citation_on_its_line_passes(self):
+        body = "The body calls ``verifier.reserve(4)`` at `pkg/kept.rs:1`.\n"
+        files = {"pkg/kept.rs": b"one\n"}
+        got = check.problems(self._draft(body, files))
+        self.assertEqual(got, [])
+
+    def test_plain_backtick_words_pass(self):
+        body = "The guest keeps `PRINCIPAL_MARKER` and the file `capsule.json`.\n"
+        got = check.problems(self._draft(body, {}))
+        self.assertEqual(got, [])
+
+    def test_dotted_call_without_a_citation_is_refused(self):
+        body = "`self.adapters.dispatch` carries the call.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        expected = (
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `self.adapters.dispatch`" % line
+        )
+        self._assert_one(body, {}, expected)
+
+    def test_indented_code_line_is_not_prose(self):
+        body = "    let held = verifier.reserve(4);\n"
+        got = check.problems(self._draft(body, {}))
         self.assertEqual(got, [])
 
     def test_missing_path_is_refused(self):
@@ -4383,7 +4457,16 @@ class CitationCheckTests(unittest.TestCase):
         files = {rel + "/child.txt": b"fn child(\n"}
         expected = "refuse: path does not exist: " + rel
         for suffix in (":1", ":1-2", "::child"):
-            self._assert_one("See `" + rel + suffix + "`.\n", files, expected)
+            body = "See `" + rel + suffix + "`.\n"
+            got = check.problems(self._draft(body, files))
+            reasons = [expected]
+            if suffix == "::child":
+                line = len(PROPOSAL_SKELETON.splitlines()) + 2
+                reasons.append(
+                    "refuse: line %d has a code-shaped span and no path:line "
+                    "citation: `%s::child`" % (line, rel)
+                )
+            self.assertEqual(got, reasons)
         # A quote target that names a tree keeps only the structural reason.
         self._assert_one(
             self._quote_body(OWNED_QUOTE),
@@ -4416,11 +4499,15 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_missing_function_is_refused(self):
         expected = "refuse: function wanted is not in pkg/one.rs"
-        self._assert_one(
-            "See `pkg/one.rs::wanted`.\n",
-            {"pkg/one.rs": b"fn other(\n"},
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        got = check.problems(self._draft(
+            "See `pkg/one.rs::wanted`.\n", {"pkg/one.rs": b"fn other(\n"}
+        ))
+        self.assertEqual(got, [
             expected,
-        )
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `pkg/one.rs::wanted`" % line,
+        ])
 
     def test_non_utf8_file_is_refused(self):
         expected = "refuse: path is not utf-8 text: pkg/bad.rs"
@@ -6139,7 +6226,7 @@ class CitationCheckTests(unittest.TestCase):
         # from the pinned commit, even though the worktree has the file.
         source = b"// filler\nfn pinned_here(\n// third\n"
         body = (
-            "Call `pkg/pin.rs::pinned_here`.\n"
+            "Call `pkg/pin.rs::pinned_here` at `pkg/pin.rs:2`.\n"
             "Line `pkg/pin.rs:2` is the fn line.\n"
         )
         root = self._temp_root()
@@ -6155,7 +6242,7 @@ class CitationCheckTests(unittest.TestCase):
         worktree_only = "pkg/only.rs"
         (root / worktree_only).parent.mkdir(parents=True, exist_ok=True)
         (root / worktree_only).write_bytes(b"fn only_here(\n")
-        extended = body + "Also `" + worktree_only + "::only_here`.\n"
+        extended = body + "Also `" + worktree_only + "::only_here` at `pkg/pin.rs:2`.\n"
         (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
             "Pinned commit: " + sha + "\n" + PROPOSAL_SKELETON + extended,
             encoding="utf-8",
