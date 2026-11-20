@@ -1389,7 +1389,11 @@ fn model_unbound_exec_denial(profile: &Path, binary: &Path, label: &str) -> Suit
         .expect("list the model storage root")
         .map(|entry| entry.expect("model storage entry").path())
         .collect();
-    assert_eq!(entries, [copy.clone()], "{label}: the copy must stay alone");
+    assert_eq!(
+        entries,
+        std::slice::from_ref(&copy),
+        "{label}: the copy must stay alone"
+    );
     assert_eq!(
         fs::read(&copy).expect("read the refused copy"),
         before,
