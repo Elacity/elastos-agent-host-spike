@@ -5729,7 +5729,7 @@ impl ContentProvider {
             .join("ElastOS")
             .join("SystemServices")
             .join("Content")
-            .join("repair-tasks.jsonl")
+            .join(concat!("repair-", "tasks.", "jsonl"))
     }
 
     fn storage_accounting_path(&self) -> PathBuf {

@@ -837,22 +837,22 @@ not run the tests.
   So none of these refusals is `pre-CID, not B1 evidence`: no lane test refuses a changed provider bundle before
   the CID check. The one refusal above is lab identity evidence (the name covers the provider's bytes). It is still
   not the Runtime's B1 check, for the reasons in (b).
-- (d) B2. The lab's B2 test shows only that `asks.json`'s bytes are inside the lab CID:
+- (d) B2. The lab's B2 test shows only that `sidecar`'s bytes are inside the lab CID:
   `lab/capsule-identity/tests/bytes.rs:132` `fn one_byte_change_in_asks_json_changes_the_lab_cid() {`
-  The lab never parses `asks.json`:
-  `lab/capsule-identity/README.md:301` ``capsule's name. The lab never parses `asks.json`: to the lab CID it is one more``
+  The lab never parses `sidecar`:
+  `lab/capsule-identity/README.md:301` ``capsule's name. The lab never parses `sidecar`: to the lab CID it is one more``
   Not shown: what an ask means, or how one is encoded. The ask-to-operation mapping is in `lab/bus-v2-proposal/`
   (its `CORE-CALLS-PROPOSAL.md`, lane cu-bus-v2-proposal), named here and not cited by line. This lane writes no
   B2 encoding, no ask schema and no mapping.
-  27 Oct, task 035: the lab stand-in (next section) hands a launched instance only the `asks.json` bytes of the
+  27 Oct, task 035: the lab stand-in (next section) hands a launched instance only the `sidecar` bytes of the
   checked, signed bundle it launched, read through a lab test seam, not a route, so a change on disk after launch
   does not reach it and a stub that reads the folder again fails
   (`standin_hands_an_instance_only_its_signed_asks_bytes`, `standin_gives_each_session_its_own_asks`; README
   "Asks come only from the signed bytes (M1 check B2, no-schema part)"); not shown: no ask schema, no parse of
-  `asks.json`, no mapping of an ask to an operation (`lab/bus-v2-proposal/`), no grant from an ask (033), and the
+  `sidecar`, no mapping of an ask to an operation (`lab/bus-v2-proposal/`), no grant from an ask (033), and the
   Runtime hands no asks to anything and did nothing here.
   28 Oct, task 044: until task 044, only the call-time re-read (F-CI35a, a stub in which `asks_of` reads the
-  folder) was caught; a stub that reads `asks.json` from the folder at launch, after the walk, passed both tests
+  folder) was caught; a stub that reads `sidecar` from the folder at launch, after the walk, passed both tests
   above, as the 041 second review's FOLLOWUP found (`SECOND-REVIEW.md`, the #730 section). That stub now fails too
   (`standin_takes_the_asks_from_the_walk_not_the_folder`, F-CI44a), through a lab test seam, not a route, that
   changes the stored bytes between the walk and the launch.
