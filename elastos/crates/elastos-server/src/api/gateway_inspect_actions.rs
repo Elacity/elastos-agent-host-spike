@@ -434,6 +434,94 @@ pub(super) fn approve_agent_plan_request(
     Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
 
+/// Dispatch only the stored, freshly checked step. The claim is persisted
+/// before the provider call, so a stopped process leaves an unknown outcome.
+pub(super) async fn dispatch_approved_agent_plan(
+    state: &GatewayState,
+    context: &HomeLaunchTokenContext,
+    request_id: &str,
+) -> anyhow::Result<String> {
+    let registry = state
+        .provider_registry
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("agent plan provider registry unavailable"))?;
+    let mut record = store::claim_approved_agent_plan_for_dispatch(
+        &state.data_dir,
+        request_id,
+        context.principal_id(),
+        now_ts(),
+    )?;
+    let scheme = record.request["scheme"].as_str().unwrap_or_default();
+    let mut body = record.request["request"].clone();
+    body.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("claimed agent plan body is invalid"))?
+        .insert("op".to_string(), serde_json::json!(record.operation));
+    let response = match registry.send_raw(scheme, &body).await {
+        Ok(response) => response,
+        Err(err) => serde_json::json!({"status": "error", "message": err.to_string()}),
+    };
+    record.status = if response.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
+        "completed"
+    } else {
+        "failed"
+    }
+    .to_string();
+    record.result = Some(response);
+    record.updated_at = now_ts();
+    write_inspect_action_record(&state.data_dir, &record)?;
+    append_provider_effect_audit(
+        &state.data_dir,
+        ProviderEffectAuditInput {
+            capsule_id: &record.id,
+            event_type: if record.status == "completed" {
+                "agent_plan.dispatch.completed"
+            } else {
+                "agent_plan.dispatch.failed"
+            },
+            principal_id: &record.principal_id,
+            session_id: &record.session_id,
+            request_id,
+            result: &record.status,
+            reason: "Owner-approved agent plan dispatched through Runtime",
+        },
+    )?;
+    Ok(format!("Agent plan dispatch {}.", record.status))
+}
+
+pub(crate) fn agent_plan_result_for_requester(
+    data_dir: &FsPath,
+    request_id: &str,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let record = read_inspect_action_record(data_dir, request_id)?;
+    if record.kind != AGENT_PLAN_KIND
+        || record.principal_id != owner_id
+        || record.requester_id.as_deref() != Some(requester_id)
+        || record.id != capsule_id
+        || record.session_id != session_id
+    {
+        anyhow::bail!("agent plan result belongs to a different requester or activation");
+    }
+    if !matches!(record.status.as_str(), "completed" | "failed") {
+        anyhow::bail!("agent plan has no settled result");
+    }
+    let binding = record
+        .request_binding
+        .as_ref()
+        .filter(|binding| agent_plan::agent_plan_request_binding(&record).as_ref() == Some(binding))
+        .ok_or_else(|| anyhow::anyhow!("agent plan result binding is invalid"))?;
+    Ok(serde_json::json!({
+        "schema": "elastos.agent-plan.result/v1",
+        "request_id": record.request_id,
+        "status": record.status,
+        "request_binding": binding,
+        "dispatch_result": record.result,
+    }))
+}
+
 pub(super) fn deny_inspect_action_request(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,

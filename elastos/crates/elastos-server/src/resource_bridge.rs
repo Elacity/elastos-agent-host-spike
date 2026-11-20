@@ -844,6 +844,21 @@ fn submit_agent_plan_response(
         Ok(owner_id) => owner_id,
         Err(err) => return resource_error_response("submit_agent_plan_refused", &err.to_string()),
     };
+    if let Some(request_id) = plan.get("request_id").and_then(serde_json::Value::as_str) {
+        return match crate::api::gateway::agent_plan_result_for_requester(
+            data_dir,
+            request_id,
+            &owner_id,
+            requester_id,
+            &bridge_ctx.capsule_id,
+            &bridge_ctx.session_id,
+        ) {
+            Ok(receipt) => serde_json::json!({
+                "type": "resource_result", "result": {"status": "ok", "data": receipt},
+            }),
+            Err(err) => resource_error_response("agent_plan_result_refused", &err.to_string()),
+        };
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -7360,6 +7375,32 @@ mod tests {
             ctx.pending_store.list_pending().await.is_empty(),
             "a submission asks for no grant"
         );
+        let query = serde_json::json!({"request_id": request_id});
+        let pending = submit_with_write(&ctx, 78, &query).await;
+        assert_eq!(pending["response"]["code"], "agent_plan_result_refused");
+        let mut settled = stored.clone();
+        settled["status"] = serde_json::json!("completed");
+        settled["result"] = serde_json::json!({"status": "ok", "data": {"done": true}});
+        std::fs::write(
+            home.path()
+                .join("inspect-actions")
+                .join(format!("{request_id}.json")),
+            serde_json::to_vec_pretty(&settled).unwrap(),
+        )
+        .unwrap();
+        let receipt = submit_with_write(&ctx, 79, &query).await;
+        assert_eq!(
+            receipt["response"]["result"]["data"]["request_binding"],
+            *binding
+        );
+        assert_eq!(
+            receipt["response"]["result"]["data"]["dispatch_result"]["data"]["done"],
+            true
+        );
+        let mut other_activation = ctx.clone();
+        other_activation.session_id = "different-session".to_string();
+        let refused = submit_with_write(&other_activation, 80, &query).await;
+        assert_eq!(refused["response"]["code"], "agent_plan_result_refused");
     }
 
     #[tokio::test]

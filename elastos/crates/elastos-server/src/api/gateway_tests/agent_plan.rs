@@ -21,6 +21,71 @@ fn agent_plan_state(dir: &Path) -> GatewayState {
     }
 }
 
+struct AgentPlanProvider {
+    calls: Arc<TokioMutex<Vec<serde_json::Value>>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for AgentPlanProvider {
+    async fn handle(&self, _request: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+        Err(ProviderError::Provider("raw request required".to_string()))
+    }
+
+    fn schemes(&self) -> Vec<&'static str> {
+        vec!["availability", "localhost"]
+    }
+
+    fn name(&self) -> &'static str {
+        "agent-plan-test"
+    }
+
+    async fn send_raw(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        self.calls.lock().await.push(request.clone());
+        if request["hang"] == true {
+            std::future::pending::<()>().await;
+        }
+        Ok(json!({"status": "ok", "data": {"observed": request}}))
+    }
+}
+
+async fn agent_plan_dispatch_state(
+    dir: &Path,
+) -> (GatewayState, Arc<TokioMutex<Vec<serde_json::Value>>>) {
+    let mut state = agent_plan_state(dir);
+    let calls = Arc::new(TokioMutex::new(Vec::new()));
+    let registry = Arc::new(ProviderRegistry::new());
+    registry
+        .register(Arc::new(AgentPlanProvider {
+            calls: calls.clone(),
+        }))
+        .await;
+    state.provider_registry = Some(registry);
+    (state, calls)
+}
+
+async fn routed_agent_plan_state(dir: &Path) -> GatewayState {
+    agent_plan_dispatch_state(dir).await.0
+}
+
+fn dispatch_context(owner: &str) -> HomeLaunchTokenContext {
+    HomeLaunchTokenContext::for_test(
+        owner.to_string(),
+        "session:owner",
+        None,
+        "grant:owner",
+        crate::auth::PrincipalKind::Human,
+    )
+}
+
+fn set_approved(dir: &Path, request_id: &str) {
+    let mut record = read_record(dir, request_id);
+    record["status"] = json!("approved");
+    write_record(dir, request_id, &record);
+}
+
 fn read_plan() -> serde_json::Value {
     json!({ "steps": [{ "scheme": "availability", "operation": "status", "request": {} }] })
 }
@@ -153,7 +218,7 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     // The binding the card showed is approved as shown after one fresh
     // passkey, and nothing runs.
     let dir = tempfile::tempdir().unwrap();
-    let app = gateway_router(agent_plan_state(dir.path()));
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
     let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let created = submit(
@@ -181,16 +246,16 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("Approved agent plan"), "{body}");
+    assert!(body.contains("Agent plan dispatch completed"), "{body}");
     let record = read_record(dir.path(), request_id);
-    assert_eq!(record["status"], "approved");
+    assert_eq!(record["status"], "completed");
     assert_eq!(record["request_binding"], created["request_binding"]);
-    assert!(record["result"].is_null(), "approval runs nothing");
+    assert_eq!(record["result"]["status"], "ok");
 
     // A card hash other than the stored binding is refused and leaves the
     // record stale.
     let dir = tempfile::tempdir().unwrap();
-    let app = gateway_router(agent_plan_state(dir.path()));
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
     let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let created = submit(
@@ -225,7 +290,7 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     // A changed non-hash card field is stale even when its sha256 is the
     // same. A launch token alone cannot write the stale decision.
     let dir = tempfile::tempdir().unwrap();
-    let app = gateway_router(agent_plan_state(dir.path()));
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
     let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let created = submit(
@@ -266,7 +331,7 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     // A record changed after storing no longer matches the binding stored with
     // it, even when the click carries the old card value.
     let dir = tempfile::tempdir().unwrap();
-    let app = gateway_router(agent_plan_state(dir.path()));
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
     let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let created = submit(
@@ -303,7 +368,7 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     // A record whose stored binding was changed under the same step is refused
     // too: the whole stored binding is compared, not only the recomputed one.
     let dir = tempfile::tempdir().unwrap();
-    let app = gateway_router(agent_plan_state(dir.path()));
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
     let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let created = submit(
@@ -341,7 +406,7 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
 #[tokio::test]
 async fn a15r_approve_is_the_owners_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let app = gateway_router(agent_plan_state(dir.path()));
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
     let other = passkey_authority_with_name_role_credential(
         dir.path(),
@@ -437,7 +502,7 @@ async fn a15r_approve_is_the_owners_alone() {
 #[tokio::test]
 async fn a15r_approve_a_writing_step_needs_a_fresh_passkey() {
     let dir = tempfile::tempdir().unwrap();
-    let app = gateway_router(agent_plan_state(dir.path()));
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
     let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let created = submit(
@@ -513,16 +578,16 @@ async fn a15r_approve_a_writing_step_needs_a_fresh_passkey() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("Approved agent plan"), "{body}");
+    assert!(body.contains("Agent plan dispatch completed"), "{body}");
     let record = read_record(dir.path(), request_id);
-    assert_eq!(record["status"], "approved");
-    assert!(record["result"].is_null(), "approval runs nothing");
+    assert_eq!(record["status"], "completed");
+    assert_eq!(record["result"]["status"], "ok");
 }
 
 #[tokio::test]
 async fn a15r_double_clicks_claim_one_plan() {
     let dir = tempfile::tempdir().unwrap();
-    let app = gateway_router(agent_plan_state(dir.path()));
+    let app = gateway_router(routed_agent_plan_state(dir.path()).await);
     let owner = passkey_authority(dir.path());
     let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
     let created = submit(
@@ -574,5 +639,209 @@ async fn a15r_double_clicks_claim_one_plan() {
         1,
         "{outcomes:?}"
     );
-    assert_eq!(read_record(dir.path(), request_id)["status"], "approved");
+    assert_eq!(read_record(dir.path(), request_id)["status"], "completed");
+}
+
+#[tokio::test]
+async fn a15r_dispatch_once_stored_body_receipt_and_audit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let app = gateway_router(state.clone());
+    let owner = passkey_authority(dir.path());
+    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let plan = json!({"steps": [{"scheme": "availability", "operation": "status",
+        "request": {"literal": "stored-body"}}]});
+    let created = submit(
+        dir.path(),
+        &owner.principal_id,
+        "agent:v2:requester",
+        plan,
+        91,
+    );
+    let request_id = created["request_id"].as_str().unwrap();
+    let card = owner_card(&app, &token, request_id).await;
+    let passkey = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({"request_id": request_id}),
+    );
+    let (status, body) = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &card["request_binding"], Some(&passkey)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        *calls.lock().await,
+        vec![json!({"op": "status", "literal": "stored-body"})]
+    );
+    let receipt = super::gateway_inspect_actions::agent_plan_result_for_requester(
+        dir.path(),
+        request_id,
+        &owner.principal_id,
+        "agent:v2:requester",
+        "capsule:agent-host",
+        "session:agent-1",
+    )
+    .unwrap();
+    assert_eq!(receipt["schema"], "elastos.agent-plan.result/v1");
+    assert_eq!(receipt["request_binding"], created["request_binding"]);
+    assert_eq!(
+        receipt["dispatch_result"]["data"]["observed"]["literal"],
+        "stored-body"
+    );
+    assert_eq!(read_record(dir.path(), request_id)["status"], "completed");
+    let auth = crate::auth::load_auth_state(dir.path()).unwrap();
+    let audit = auth
+        .audit
+        .iter()
+        .find(|event| {
+            event.event_type == "agent_plan.dispatch.completed"
+                && event.challenge_id.as_deref() == Some(request_id)
+        })
+        .expect("signed effect audit");
+    assert_eq!(audit.result, "completed");
+    assert!(audit.signature.is_some());
+}
+
+#[tokio::test]
+async fn a15r_unapproved_zero_provider_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let created = submit(
+        dir.path(),
+        "person:owner",
+        "agent:requester",
+        read_plan(),
+        92,
+    );
+    let id = created["request_id"].as_str().unwrap();
+    let refused = super::gateway_inspect_actions::dispatch_approved_agent_plan(
+        &state,
+        &dispatch_context("person:owner"),
+        id,
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.to_string().contains("not approved"), "{refused}");
+    assert!(calls.lock().await.is_empty());
+    assert_eq!(read_record(dir.path(), id)["status"], "pending");
+}
+
+#[tokio::test]
+async fn a15r_replay_zero_after_restart_and_unknown_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let created = submit(
+        dir.path(),
+        "person:owner",
+        "agent:requester",
+        read_plan(),
+        93,
+    );
+    let id = created["request_id"].as_str().unwrap();
+    set_approved(dir.path(), id);
+    let context = dispatch_context("person:owner");
+    super::gateway_inspect_actions::dispatch_approved_agent_plan(&state, &context, id)
+        .await
+        .unwrap();
+    assert_eq!(calls.lock().await.len(), 1);
+    let (restarted, calls_after_restart) = agent_plan_dispatch_state(dir.path()).await;
+    assert!(
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(&restarted, &context, id)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.lock().await.len(), 1);
+    assert!(calls_after_restart.lock().await.is_empty());
+
+    let unknown = submit(
+        dir.path(),
+        "person:owner",
+        "agent:requester",
+        json!({"steps": [{"scheme": "availability", "operation": "status",
+            "request": {"hang": true}}]}),
+        94,
+    );
+    let unknown_id = unknown["request_id"].as_str().unwrap();
+    set_approved(dir.path(), unknown_id);
+    let id_for_task = unknown_id.to_string();
+    let state_for_task = state.clone();
+    let context_for_task = context.clone();
+    let task = tokio::spawn(async move {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state_for_task,
+            &context_for_task,
+            &id_for_task,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while calls.lock().await.len() != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provider reached after durable claim");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &restarted, &context, unknown_id
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(read_record(dir.path(), unknown_id)["status"], "dispatching");
+    assert!(read_record(dir.path(), unknown_id)["result"].is_null());
+    assert_eq!(calls.lock().await.len(), 2);
+    assert!(calls_after_restart.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_stale_zero_after_binding_or_gate_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let context = dispatch_context("person:owner");
+    let changed = submit(
+        dir.path(),
+        "person:owner",
+        "agent:requester",
+        read_plan(),
+        96,
+    );
+    let id = changed["request_id"].as_str().unwrap();
+    set_approved(dir.path(), id);
+    let mut record = read_record(dir.path(), id);
+    record["request"]["request"]["changed"] = json!(true);
+    write_record(dir.path(), id, &record);
+    assert!(
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(&state, &context, id)
+            .await
+            .is_err()
+    );
+    assert_eq!(read_record(dir.path(), id)["status"], "stale");
+    assert!(calls.lock().await.is_empty());
+
+    let changed = submit(
+        dir.path(),
+        "person:owner",
+        "agent:requester",
+        read_plan(),
+        97,
+    );
+    let id = changed["request_id"].as_str().unwrap();
+    set_approved(dir.path(), id);
+    let mut record = read_record(dir.path(), id);
+    record["plan"]["operation"] = json!("changed");
+    write_record(dir.path(), id, &record);
+    assert!(
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(&state, &context, id)
+            .await
+            .is_err()
+    );
+    assert!(calls.lock().await.is_empty());
 }

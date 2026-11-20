@@ -181,6 +181,48 @@ pub(super) fn claim_pending_agent_plan_for_owner(
     Ok(record)
 }
 
+/// A durable one-way claim. A stranded dispatching record has an unknown
+/// outcome and cannot be sent again after a restart.
+pub(super) fn claim_approved_agent_plan_for_dispatch(
+    data_dir: &Path,
+    request_id: &str,
+    owner_id: &str,
+    updated_at: u64,
+) -> anyhow::Result<InspectActionRequestRecord> {
+    let _guard = inspect_action_store_lock()?;
+    let mut record = read_inspect_action_record_unlocked(data_dir, request_id)?;
+    if record.kind != AGENT_PLAN_KIND || record.principal_id != owner_id {
+        anyhow::bail!("agent plan belongs to a different owner or kind");
+    }
+    if record.status != "approved" {
+        anyhow::bail!("agent plan is not approved for dispatch");
+    }
+    let step = &record.request;
+    let scheme = step["scheme"].as_str().unwrap_or_default();
+    let operation = step["operation"].as_str().unwrap_or_default();
+    let body = &step["request"];
+    let current = super::agent_plan::agent_plan_request_binding(&record);
+    let gate = crate::inspect_provider::plan_scheme(operation, scheme, body);
+    if record.operation != operation
+        || !body.is_object()
+        || body.get("op").is_some()
+        || record.request_binding != current
+        || current.as_ref().is_none_or(|binding| binding.truncated)
+        || gate.get("status").and_then(serde_json::Value::as_str) != Some("ok")
+        || gate.get("data") != Some(&record.plan)
+    {
+        record.status = "stale".to_string();
+        record.error = Some("agent plan binding or gate changed before dispatch".to_string());
+        record.updated_at = updated_at;
+        write_inspect_action_record_unlocked(data_dir, &record)?;
+        anyhow::bail!("agent plan binding or gate changed before dispatch");
+    }
+    record.status = "dispatching".to_string();
+    record.updated_at = updated_at;
+    write_inspect_action_record_unlocked(data_dir, &record)?;
+    Ok(record)
+}
+
 fn read_inspect_action_record_unlocked(
     data_dir: &Path,
     request_id: &str,
