@@ -500,11 +500,15 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
       - name: stand-in contract journeys
         working-directory: lab/agent-conformance
         run: |
           cargo test --locked --lib
           cargo test --locked --test standin_contract
+      - name: prepare stand-in probe component
+        run: bash scripts/build-component-capsule.sh lab/agent-conformance/probe
       # Rong's re-check gate (CI-LS1, 29 Oct): the stand-in effects journeys, plan approval,
       # and the model-provider process tests that include the stand-in must build on Linux.
       # The cleanup census runs the operator's lsof at /usr/sbin/lsof (src/census.rs); Ubuntu ships /usr/bin/lsof.
