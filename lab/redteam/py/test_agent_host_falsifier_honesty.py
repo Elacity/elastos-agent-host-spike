@@ -1,7 +1,7 @@
 """Static honesty probe over the merged agent-host falsifiers and asks.
 
 The agent-host re-score rests on examples/agent-host/falsifiers.json. This
-probe reads that file, asks.json and the files the edits name. It does not
+probe reads that file, capsule.json and the files the edits name. It does not
 run cargo and it does not apply a mutation to the repository. It checks:
 
 - falsifiers.json parses with the strict reader, each entry has its fields,
@@ -9,8 +9,7 @@ run cargo and it does not apply a mutation to the repository. It checks:
 - every ``caught`` entry names at least one test;
 - every edit's old text is found exactly once, each file's edits applied in
   order on the updated text, the way falsify.py's Mutation applies them;
-- asks.json has its closed schema, and every ask a known kind and an allowed
-  resource pattern.
+- capsule.json declares asks: each ask is a resource and Runtime actions.
 
 Whether a named test exists is task 004's check. This probe does not lex
 Rust and does not walk falsify.py's AST.
@@ -39,7 +38,6 @@ import copy
 import functools
 import io
 import json
-import re
 import sys
 import tempfile
 import unittest
@@ -57,10 +55,11 @@ COMMANDS = ("host", "e2e", "selftest")
 EXPECTS = ("caught", "compile_error", "survives")
 FIELDS = (("id", str), ("title", str), ("command", str), ("expect", str),
           ("edits", list), ("tests", list))
-# The declaration's schema, and the kinds proposal_kind in src/lib.rs accepts.
-ASKS_SCHEMA = "elastos.agent-host.asks/v1"
-ASK_KINDS = ("read", "edit", "restore", "run", "child", "init", "hosted", "journal-append")
-PRINCIPAL_MARKER = "<principal>"
+# The file the probe reads for asks, and the Runtime actions one ask may name.
+# One edit of ASK_FILE points the probe at the retired sidecar and the live
+# row goes red: that file's rows are kind and resource, not actions.
+ASK_FILE = "capsule.json"
+ASK_ACTIONS = ("read", "write", "execute", "message", "delete", "admin")
 
 Problem = collections.namedtuple("Problem", "rule entry file reason")
 
@@ -222,22 +221,21 @@ def anchor_problems(entries, read):
 
 
 def asks_problems(read):
-    """Problems for asks.json's closed shape and allowed resource patterns,
-    as enforced by agent-host's parse_asks and ask_resource_refusal."""
-    def problem(entry, reason):
-        return Problem("asks", entry, "asks.json", reason)
+    """Problems for the signed manifest's asks.
 
-    document, reason = _document(read, "asks.json")
+    The document may hold the rest of a capsule manifest. ``asks`` is a
+    non-empty list. Each ask has ``resource`` and ``actions`` and no other
+    field. A resource is a non-empty string that starts with ``localhost://``.
+    An action is one of the Runtime ask actions.
+    """
+    def problem(entry, reason):
+        return Problem("asks", entry, ASK_FILE, reason)
+
+    document, reason = _document(read, ASK_FILE)
     if reason is not None:
         return [problem("", reason)]
     if not isinstance(document, dict):
         return [problem("", "the document is not an object")]
-    if any(key not in ("schema", "asks") for key in document):
-        return [problem("", "asks unknown field")]
-    if "schema" not in document:
-        return [problem("", "schema is missing")]
-    if document["schema"] != ASKS_SCHEMA:
-        return [problem("", f"schema is {document['schema']!r}, not {ASKS_SCHEMA!r}")]
     if "asks" not in document:
         return [problem("", "asks is missing")]
     asks = document["asks"]
@@ -250,60 +248,28 @@ def asks_problems(read):
 
 
 def ask_reason(ask):
-    """Why one ask is malformed, or None."""
+    """Why one manifest ask is malformed, or None."""
     if not isinstance(ask, dict):
         return "the ask is not an object"
-    if any(key not in ("kind", "resource") for key in ask):
+    if any(key not in ("resource", "actions") for key in ask):
         return "asks entry field"
-    if "kind" not in ask:
-        return "kind is missing"
-    if ask["kind"] not in ASK_KINDS:
-        return f"kind {ask['kind']!r} is not a known kind"
     if "resource" not in ask:
         return "resource is missing"
-    if not isinstance(ask["resource"], str) or not ask["resource"]:
-        return f"resource {ask['resource']!r} is not a non-empty string"
+    if "actions" not in ask:
+        return "actions is missing"
     resource = ask["resource"]
-    # Rust char::is_whitespace uses Unicode White_Space. Python also treats
-    # these four ASCII separators as whitespace; the host accepts them.
-    if any(char.isspace() and char not in "\x1c\x1d\x1e\x1f" for char in resource):
-        return "asks whitespace"
-    lower = resource.translate(str.maketrans(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
-    if "://" in resource:
-        return "asks url"
-    if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", resource):
-        return "asks url scheme"
-    if ":" in resource:
-        return "asks host route"
-    if "users/" in lower:
-        return "asks users path"
-    if resource.startswith("/"):
-        return "asks absolute host path"
-    if resource.startswith("~"):
-        return "asks home host path"
-    if "\\" in resource:
-        return "asks backslash host path"
-    if "." in resource.split("/"):
-        return "asks current directory"
-    if ".." in resource.split("/"):
-        return "asks parent directory"
-    if any(word in lower for word in (
-            "secret", "password", "passwd", "token", "api_key", "api-key",
-            "apikey", "bearer ", "sk-", "ghp_", "xox", "-----begin")):
-        return "asks secret"
-    if resource.count(PRINCIPAL_MARKER) > 1:
-        return "asks repeated marker"
-    if PRINCIPAL_MARKER in resource and not resource.startswith(PRINCIPAL_MARKER):
-        return "asks misplaced marker"
-    if resource.startswith(PRINCIPAL_MARKER):
-        tail = resource[len(PRINCIPAL_MARKER):]
-        if tail and not tail.startswith("/"):
-            return "asks marker tail"
-        if not tail.endswith("/"):
-            return "asks marker directory"
-    elif not resource.endswith("/"):
-        return "asks literal directory"
+    if not isinstance(resource, str) or not resource:
+        return f"resource {resource!r} is not a non-empty string"
+    if not resource.startswith("localhost://"):
+        return "resource is not a localhost ask"
+    actions = ask["actions"]
+    if not isinstance(actions, list):
+        return "actions is not a list"
+    if not actions:
+        return "actions is empty"
+    for action in actions:
+        if action not in ASK_ACTIONS:
+            return f"action {action!r} is not a known action"
     return None
 
 
@@ -499,14 +465,14 @@ class AgentHostFalsifierHonesty(unittest.TestCase):
 
     def test_asks_json_conforms_to_schema(self):
         self.assert_clean("asks")
-        document = merged_document("asks.json")
-        document["asks"][0]["kind"] = "unspecified"
-        self.assertEqual(planted({"asks.json": json.dumps(document).encode()})["asks"], [Problem(
-            "asks", "ask 0", "asks.json", "kind 'unspecified' is not a known kind")])
+        document = merged_document(ASK_FILE)
+        document["asks"][0]["actions"] = ["edit"]
+        self.assertEqual(planted({ASK_FILE: json.dumps(document).encode()})["asks"], [Problem(
+            "asks", "ask 0", ASK_FILE, "action 'edit' is not a known action")])
 
     def test_source_pin_matches_snapshot(self):
         snapshot = merged_base()[0]
-        for name in ("falsifiers.json", "asks.json"):
+        for name in ("falsifiers.json", ASK_FILE):
             self.assertIsNotNone(snapshot.files.get(f"examples/agent-host/{name}"),
                                  f"{name} was not read")
         commit = snapshot.commit
@@ -578,17 +544,24 @@ GOOD_HOST = {"id": "ST1", "title": "host", "command": "host", "expect": "caught"
 GOOD_SELFTEST = {"id": "ST2", "title": "selftest", "command": "selftest", "expect": "caught",
                  "edits": [{"file": "falsify.py", "old": "return True", "new": "return False"}],
                  "tests": ["a case"]}
-GOOD_ASKS = {"schema": ASKS_SCHEMA, "asks": [{"kind": "read", "resource": "<principal>/"}]}
+GOOD_ASKS = {
+    "schema": "elastos.capsule/v1",
+    "name": "agent-host",
+    "asks": [{
+        "resource": "localhost://Users/self/.AppData/Agents/agent-host/*",
+        "actions": ["read", "write"],
+    }],
+}
 
 
 def tree(entries=(GOOD_HOST, GOOD_SELFTEST), **changed):
     """A fixture tree, name -> bytes (None: absent). A keyword changes one
     file: data, asks, source or runner."""
     files = {"falsifiers.json": json.dumps({"falsifiers": list(entries)}).encode(),
-             "asks.json": json.dumps(GOOD_ASKS).encode(),
+             ASK_FILE: json.dumps(GOOD_ASKS).encode(),
              "src/lib.rs": GOOD_SOURCE,
              "falsify.py": GOOD_RUNNER}
-    names = {"data": "falsifiers.json", "asks": "asks.json",
+    names = {"data": "falsifiers.json", "asks": ASK_FILE,
              "source": "src/lib.rs", "runner": "falsify.py"}
     files.update((names[key], value) for key, value in changed.items())
     return files
@@ -614,87 +587,46 @@ class ProbeControls(unittest.TestCase):
     """The rules on planted inputs, through the same functions the probes use."""
 
     def test_asks_schema_refusal_reasons(self):
-        """Closed objects and every resource restriction use the probe path.
-        Each invalid declaration reports its exact cause and ask index."""
-        for field in ("extra", "", "resource", "Schema"):
-            with self.subTest(root_field=field):
-                document = dict(GOOD_ASKS, **{field: 1})
-                self.assertEqual(problems_in(tree(asks=json.dumps(document).encode()), "asks"),
-                                 [Problem("asks", "", "asks.json", "asks unknown field")])
-        for field in ("extra", "", "schema", "Kind"):
-            for at in (0, 1):
-                with self.subTest(ask_field=field, at=at):
-                    document = copy.deepcopy(GOOD_ASKS)
-                    document["asks"] *= 2
-                    document["asks"][at] = dict(document["asks"][at], **{field: 1})
-                    self.assertEqual(
-                        problems_in(tree(asks=json.dumps(document).encode()), "asks"),
-                        [Problem("asks", f"ask {at}", "asks.json", "asks entry field")])
+        """Each malformed manifest ask reports its exact cause and ask index."""
 
-        for value in (None, 1, True, [], {}):
-            with self.subTest(schema_type=value):
-                document = dict(GOOD_ASKS, schema=value)
-                self.assertEqual(problems_in(tree(asks=json.dumps(document).encode()), "asks"),
-                                 [Problem("asks", "", "asks.json",
-                                          f"schema is {value!r}, not {ASKS_SCHEMA!r}")])
-            with self.subTest(kind_type=value):
-                document = dict(GOOD_ASKS, asks=[{"kind": value, "resource": "Models/"}])
-                self.assertEqual(problems_in(tree(asks=json.dumps(document).encode()), "asks"),
-                                 [Problem("asks", "ask 0", "asks.json",
-                                          f"kind {value!r} is not a known kind")])
+        def encoded(document):
+            return problems_in(tree(asks=json.dumps(document).encode()), "asks")
 
-        resources = [
-            ("https://api.example.com/", "asks url"),
-            ("Models/https://api.example.com/", "asks url"),
-            ("file:/tmp/", "asks url scheme"),
-            ("data:text/plain,x/", "asks url scheme"),
-            ("Git+SSH.v1-local:repo/", "asks url scheme"),
-            ("127.0.0.1:8080/v1/", "asks host route"),
-            ("[::1]:8080/", "asks host route"),
-            ("é:repo/", "asks host route"),
-            ("Users/self/", "asks users path"),
-            ("Models/uSeRs/self/", "asks users path"),
-            ("/tmp/", "asks absolute host path"),
-            ("~/tmp/", "asks home host path"),
-            ("tmp\\projects/", "asks backslash host path"),
-            ("./Models/", "asks current directory"),
-            ("Models/./", "asks current directory"),
-            ("../Models/", "asks parent directory"),
-            ("Models/../", "asks parent directory"),
-            ("<principal>/<principal>/", "asks repeated marker"),
-            ("Models/<principal>/", "asks misplaced marker"),
-            ("<principal>Models/", "asks marker tail"),
-            ("<principal>/Projects", "asks marker directory"),
-            ("<principal>", "asks marker directory"),
-            ("Models", "asks literal directory"),
-        ]
-        for word in ("secret", "password", "passwd", "token", "api_key", "api-key",
-                     "apikey", "sk-", "ghp_", "xox", "-----begin"):
-            resources.append((f"Models/{word.upper()}/", "asks secret"))
-        # This credential spelling reaches the earlier whitespace refusal.
-        resources.append(("Models/bearer value/", "asks whitespace"))
-        whitespace = ("\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004"
-                      "\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
-        for char in whitespace:
-            for resource in (char, char + "Models/", "Models" + char + "/", "Models/" + char):
-                resources.append((resource, "asks whitespace"))
-        for resource, reason in resources:
-            for at in (0, 1):
-                with self.subTest(resource=resource, at=at):
-                    document = copy.deepcopy(GOOD_ASKS)
-                    document["asks"] *= 2
-                    document["asks"][at] = {"kind": "read", "resource": resource}
-                    self.assertEqual(
-                        problems_in(tree(asks=json.dumps(document).encode()), "asks"),
-                        [Problem("asks", f"ask {at}", "asks.json", reason)])
-        for kind in ASK_KINDS:
-            for resource in ("<principal>/", "<principal>/Projects/", "Models/",
-                             "<principal>/.AppData/Agents/agent-host/", "Models/.cache/",
-                             "Models/a..b/", "Models/é/", "Models/sK-/",
-                             "Models/\x1c\x1d\x1e\x1f/"):
-                with self.subTest(kind=kind, resource=resource):
-                    document = dict(GOOD_ASKS, asks=[{"kind": kind, "resource": resource}])
-                    self.assertEqual(problems_in(tree(asks=json.dumps(document).encode())), [])
+        def problem(entry, reason):
+            return [Problem("asks", entry, ASK_FILE, reason)]
+
+        self.assertEqual(encoded({"name": "agent-host"}), problem("", "asks is missing"))
+        self.assertEqual(encoded({"asks": {}}), problem("", "asks is not a list"))
+        self.assertEqual(encoded({"asks": []}), problem("", "asks is empty"))
+        self.assertEqual(encoded({"asks": ["read"]}), problem("ask 0", "the ask is not an object"))
+        self.assertEqual(
+            encoded({"asks": [{"actions": ["read"]}]}),
+            problem("ask 0", "resource is missing"))
+        self.assertEqual(
+            encoded({"asks": [{"resource": "localhost://Public/a", "actions": ["read"], "kind": "read"}]}),
+            problem("ask 0", "asks entry field"))
+        self.assertEqual(
+            encoded({"asks": [{"resource": "", "actions": ["read"]}]}),
+            problem("ask 0", "resource '' is not a non-empty string"))
+        self.assertEqual(
+            encoded({"asks": [{"resource": 7, "actions": ["read"]}]}),
+            problem("ask 0", "resource 7 is not a non-empty string"))
+        self.assertEqual(
+            encoded({"asks": [{"resource": "Models/", "actions": ["read"]}]}),
+            problem("ask 0", "resource is not a localhost ask"))
+        self.assertEqual(
+            encoded({"asks": [{"resource": "localhost://Public/a"}]}),
+            problem("ask 0", "actions is missing"))
+        self.assertEqual(
+            encoded({"asks": [{"resource": "localhost://Public/a", "actions": "read"}]}),
+            problem("ask 0", "actions is not a list"))
+        self.assertEqual(
+            encoded({"asks": [{"resource": "localhost://Public/a", "actions": []}]}),
+            problem("ask 0", "actions is empty"))
+        self.assertEqual(
+            encoded({"asks": [{"resource": "localhost://Public/a", "actions": ["edit"]}]}),
+            problem("ask 0", "action 'edit' is not a known action"))
+        self.assertEqual(problems_in(tree()), [])
 
     def test_probe_refusal_reasons(self):
         """Each rule refuses each planted input with its own reason, and the
@@ -719,7 +651,7 @@ class ProbeControls(unittest.TestCase):
             return [Problem("anchor", entry, file, reason)]
 
         def ask(entry, reason):
-            return [Problem("asks", entry, "asks.json", reason)]
+            return [Problem("asks", entry, ASK_FILE, reason)]
 
         untested = {key: value for key, value in GOOD_HOST.items() if key != "tests"}
         cases = (
@@ -760,29 +692,29 @@ class ProbeControls(unittest.TestCase):
             ("an edit of a file that is not UTF-8",
              dict(edit(file="blob.bin"), **{"blob.bin": b"\xff"}),
              anchor("ST1", "blob.bin", "the file is not UTF-8")),
-            ("asks.json is missing", tree(asks=None), ask("", "the file does not exist")),
-            ("asks.json is not JSON", tree(asks=b"{"), ask("", "the file is not JSON")),
+            ("the manifest is missing", tree(asks=None), ask("", "the file does not exist")),
+            ("the manifest is not JSON", tree(asks=b"{"), ask("", "the file is not JSON")),
             ("the declaration is a list", asks([]), ask("", "the document is not an object")),
-            ("no schema", asks({"asks": GOOD_ASKS["asks"]}), ask("", "schema is missing")),
-            ("another schema", asks(dict(GOOD_ASKS, schema="elastos.agent-host.asks/v0")),
-             ask("", "schema is 'elastos.agent-host.asks/v0', not 'elastos.agent-host.asks/v1'")),
-            ("no asks", asks({"schema": ASKS_SCHEMA}), ask("", "asks is missing")),
-            ("asks is an object", asks(dict(GOOD_ASKS, asks={})), ask("", "asks is not a list")),
-            ("asks is empty", asks(dict(GOOD_ASKS, asks=[])), ask("", "asks is empty")),
-            ("an ask is a string", asks(dict(GOOD_ASKS, asks=["read"])),
+            ("no asks", asks({"schema": "elastos.capsule/v1"}), ask("", "asks is missing")),
+            ("asks is an object", asks({"asks": {}}), ask("", "asks is not a list")),
+            ("asks is empty", asks({"asks": []}), ask("", "asks is empty")),
+            ("an ask is a string", asks({"asks": ["read"]}),
              ask("ask 0", "the ask is not an object")),
-            ("an ask with no kind", asks(dict(GOOD_ASKS, asks=[{"resource": "Models/"}])),
-             ask("ask 0", "kind is missing")),
-            ("an unknown kind",
-             asks(dict(GOOD_ASKS, asks=[{"kind": "unspecified", "resource": "Models/"}])),
-             ask("ask 0", "kind 'unspecified' is not a known kind")),
-            ("an ask with no resource", asks(dict(GOOD_ASKS, asks=[{"kind": "read"}])),
+            ("an ask with no resource", asks({"asks": [{"actions": ["read"]}]}),
              ask("ask 0", "resource is missing")),
-            ("an empty resource", asks(dict(GOOD_ASKS, asks=[{"kind": "read", "resource": ""}])),
+            ("an empty resource", asks({"asks": [{"resource": "", "actions": ["read"]}]}),
              ask("ask 0", "resource '' is not a non-empty string")),
             ("a resource that is not a string",
-             asks(dict(GOOD_ASKS, asks=[{"kind": "read", "resource": 7}])),
+             asks({"asks": [{"resource": 7, "actions": ["read"]}]}),
              ask("ask 0", "resource 7 is not a non-empty string")),
+            ("a resource outside localhost",
+             asks({"asks": [{"resource": "Models/", "actions": ["read"]}]}),
+             ask("ask 0", "resource is not a localhost ask")),
+            ("actions is missing", asks({"asks": [{"resource": "localhost://Public/a"}]}),
+             ask("ask 0", "actions is missing")),
+            ("an unknown action",
+             asks({"asks": [{"resource": "localhost://Public/a", "actions": ["edit"]}]}),
+             ask("ask 0", "action 'edit' is not a known action")),
         )
         for label, files, want in cases:
             with self.subTest(label):
@@ -848,8 +780,8 @@ class ProbeControls(unittest.TestCase):
         value instead of reporting the JSON error.
 
         An unpaired surrogate is the same shape. ``json.loads`` decodes
-        ``\\ud800`` and ``\\udc00`` into ``str``, and the asks schema then
-        accepts ``Models/\\ud800/``. The reader refuses a high surrogate and
+        ``\\ud800`` and ``\\udc00`` into ``str``, and a localhost resource
+        then accepts that scalar. The reader refuses a high surrogate and
         a low surrogate with different reasons, in a value, a key, or a
         nested string. A valid pair (``\\ud800\\udc00``) is one scalar and
         stays accepted. When the committed bytes match a document that
@@ -870,8 +802,8 @@ class ProbeControls(unittest.TestCase):
             schema accepts. ``escape`` is JSON source, such as ``\\ud800``."""
             return (
                 document_with('"about": "' + escape + '"', {"falsifiers": [GOOD_HOST]}),
-                ('{"schema":"' + ASKS_SCHEMA
-                 + '","asks":[{"kind":"read","resource":"Models/' + escape + '/"}]}').encode(),
+                ('{"schema":"elastos.capsule/v1","asks":[{"resource":"localhost://Models/'
+                 + escape + '/","actions":["read"]}]}').encode(),
             )
 
         nested = documents('"note": {"kind": "read", "kind": "read"}')
@@ -905,19 +837,19 @@ class ProbeControls(unittest.TestCase):
         for label, raw, reason in cases:
             with self.subTest(label):
                 planted_files = tree()
-                planted_files["falsifiers.json"], planted_files["asks.json"] = raw
+                planted_files["falsifiers.json"], planted_files[ASK_FILE] = raw
                 self.assertEqual(problems_in(planted_files, "parse"), [Problem(
                     "parse", "", "falsifiers.json", reason)])
                 self.assertEqual(problems_in(planted_files, "asks"), [Problem(
-                    "asks", "", "asks.json", reason)])
+                    "asks", "", ASK_FILE, reason)])
 
         reviewer_high = (
-            '{"schema":"elastos.agent-host.asks/v1",'
-            '"asks":[{"kind":"read","resource":"Models/\\ud800/"}]}'
+            '{"schema":"elastos.capsule/v1",'
+            '"asks":[{"resource":"localhost://Models/\\ud800/","actions":["read"]}]}'
         ).encode()
         reviewer_low = (
-            '{"schema":"elastos.agent-host.asks/v1",'
-            '"asks":[{"kind":"read","resource":"Models/\\udc00/"}]}'
+            '{"schema":"elastos.capsule/v1",'
+            '"asks":[{"resource":"localhost://Models/\\udc00/","actions":["read"]}]}'
         ).encode()
         self.assertEqual(with_escape(r"\ud800")[1], reviewer_high)
         self.assertEqual(with_escape(r"\udc00")[1], reviewer_low)
@@ -929,7 +861,7 @@ class ProbeControls(unittest.TestCase):
         ):
             with self.subTest(label):
                 planted_files = tree()
-                planted_files["falsifiers.json"], planted_files["asks.json"] = with_escape(escape)
+                planted_files["falsifiers.json"], planted_files[ASK_FILE] = with_escape(escape)
                 self.assertEqual(problems_in(planted_files), [])
 
         held = "every merged agent-host falsifier anchor and the asks schema hold on "
@@ -972,7 +904,7 @@ class ProbeControls(unittest.TestCase):
                 problems, text = report_for(asks_bytes)
                 self.assertEqual(problems["parse"], [])
                 self.assertEqual(problems["asks"], [Problem(
-                    "asks", "", "asks.json", reason)])
+                    "asks", "", ASK_FILE, reason)])
                 self.assertNotIn(held, text)
                 self.assertIn("asks 1", text)
                 self.assertIn("files read that differ from HEAD: 0 of 4", text)
@@ -1269,7 +1201,7 @@ class ProbeControls(unittest.TestCase):
             # alone cannot detect a new snapshot taken after the probes.
             changed = Snapshot()
             _entries, problems = probe(changed.read)
-            self.assertEqual(problems["asks"], [Problem("asks", "", "asks.json", "schema is missing")])
+            self.assertEqual(problems["asks"], [Problem("asks", "", ASK_FILE, "asks is missing")])
             self.assertEqual(pin_problems(changed.files, changed.commit,
                                          committed_bytes(changed.commit, changed.files, changed.run).get), [])
 

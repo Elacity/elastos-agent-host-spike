@@ -1511,13 +1511,13 @@ ALIGNED_SPANS_DECIDED = (
     "elastos/crates/elastos-server/src/resource_bridge.rs:698",
     "elastos/crates/elastos-server/src/resource_bridge.rs:699",
     "elastos/crates/elastos-server/src/resource_bridge.rs:814",
-    "examples/agent-host/asks.json:4",
-    "examples/agent-host/asks.json:5",
-    "examples/agent-host/asks.json:6",
-    "examples/agent-host/asks.json:7",
-    "examples/agent-host/asks.json:8",
-    "examples/agent-host/asks.json:9",
-    "examples/agent-host/asks.json:12",
+    "examples/agent-host/capsule.json:15",
+    "examples/agent-host/capsule.json:16",
+    "examples/agent-host/capsule.json:17",
+    "examples/agent-host/capsule.json:18",
+    "examples/agent-host/capsule.json:19",
+    "examples/agent-host/capsule.json:20",
+    "examples/agent-host/capsule.json:21",
     "examples/agent-host/src/lib.rs:471-476",
     "examples/agent-host/src/lib.rs:532",
     "examples/agent-host/src/lib.rs:754",
@@ -1974,15 +1974,15 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "examples/agent-host/asks.json:4",
-            "examples/agent-host/asks.json:5",
-            "examples/agent-host/asks.json:6",
+            "examples/agent-host/capsule.json:15",
+            "examples/agent-host/capsule.json:16",
+            "examples/agent-host/capsule.json:17",
         ),
-        4,
+        15,
         (
-            '    {"kind": "read", "resource": "<principal>/"},',
-            '    {"kind": "edit", "resource": "<principal>/"},',
-            '    {"kind": "restore", "resource": "<principal>/"},',
+            '  "capabilities": [',
+            '    "localhost://Users/self/.AppData/Agents/agent-host/*"',
+            '  ],',
         ),
     ),
     (
@@ -1996,15 +1996,15 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "examples/agent-host/asks.json:7",
-            "examples/agent-host/asks.json:8",
-            "examples/agent-host/asks.json:9",
+            "examples/agent-host/capsule.json:18",
+            "examples/agent-host/capsule.json:19",
+            "examples/agent-host/capsule.json:20",
         ),
-        7,
+        18,
         (
-            '    {"kind": "run", "resource": "<principal>/Projects/"},',
-            '    {"kind": "child", "resource": "<principal>/Projects/"},',
-            '    {"kind": "init", "resource": "<principal>/Projects/"},',
+            '  "resources": {',
+            '    "memory_mb": 16,',
+            '    "cpu_shares": 10,',
         ),
     ),
     (
@@ -2300,11 +2300,11 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "examples/agent-host/asks.json:12",
+            "examples/agent-host/capsule.json:21",
         ),
-        12,
+        21,
         (
-            '    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}',
+            '    "gpu": false',
         ),
     ),
     (

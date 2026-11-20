@@ -707,10 +707,7 @@ The guest proposes. `examples/agent-host/src/lib.rs::propose_hosted` records a h
         Ok(id)
     }
 
-The asks file declares two hosted resources. `examples/agent-host/asks.json:10` declares `Models/`. `examples/agent-host/asks.json:11` declares `<principal>/.AppData/Models/`.
-
-    {"kind": "hosted", "resource": "Models/"},
-    {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
+The pinned manifest's capability list names the journal resource. Hosted model paths stay outside that list.
 
 The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect_request` is the one function that chooses the URL. A present `runtime_socket` uses `RUNTIME_HOSTED_EFFECT_URL`. The other branch uses `direct_url`. `capsules/model-provider/src/adapters.rs:44` sets that constant to `http://runtime.invalid/v1/hosted-effect`. `capsules/model-provider/src/adapters.rs:58` is `RUNTIME_HOSTED_EFFECT_URL`. The `direct_url` arm is `capsules/model-provider/src/adapters.rs:60`. That branch is request construction.
 
@@ -1066,11 +1063,11 @@ This section is design input for B2. B2 stays open.
 
 The proposal is the guest's record of the step. Admission is the Runtime's grant. Allowance is the Runtime's budget.
 
-The asks file declares three file asks. Each resource pattern is `<principal>/`. `examples/agent-host/asks.json:4` declares read. `examples/agent-host/asks.json:5` declares edit. `examples/agent-host/asks.json:6` declares restore.
+The pinned manifest names the journal resource in its capability list. The checker quotes that pinned commit. `examples/agent-host/capsule.json:15` opens the list. `examples/agent-host/capsule.json:16` is the journal resource. `examples/agent-host/capsule.json:17` closes the list.
 
-        {"kind": "read", "resource": "<principal>/"},
-        {"kind": "edit", "resource": "<principal>/"},
-        {"kind": "restore", "resource": "<principal>/"},
+      "capabilities": [
+        "localhost://Users/self/.AppData/Agents/agent-host/*"
+      ],
 
 `examples/agent-host/src/lib.rs::ask_kind_name` names Read as `read`, Edit as `edit`, and Restore as `restore`. `examples/agent-host/src/lib.rs:8187` is the Read arm. `examples/agent-host/src/lib.rs:8188` is the Edit arm. `examples/agent-host/src/lib.rs:8190` is the Restore arm.
 
@@ -1349,11 +1346,11 @@ The extension B2 leaves open is the guest body's operation. The guest body carri
 
 This group is design input for B2. B2 stays open.
 
-The asks file declares three project asks. Each resource pattern is `<principal>/Projects/`. `examples/agent-host/asks.json:7` declares run. `examples/agent-host/asks.json:8` declares child. `examples/agent-host/asks.json:9` declares init.
+The pinned manifest names its resource budget. The checker quotes that pinned commit. `examples/agent-host/capsule.json:18` opens the budget. `examples/agent-host/capsule.json:19` is the memory budget. `examples/agent-host/capsule.json:20` is the cpu budget.
 
-        {"kind": "run", "resource": "<principal>/Projects/"},
-        {"kind": "child", "resource": "<principal>/Projects/"},
-        {"kind": "init", "resource": "<principal>/Projects/"},
+      "resources": {
+        "memory_mb": 16,
+        "cpu_shares": 10,
 
 ask_kind_name names Run as `run`, Child as `child`, and Init as `init`. `examples/agent-host/src/lib.rs:8189` is the Run arm.
 
@@ -1643,9 +1640,9 @@ On the `model` scheme, provider_operation_action maps `offers_list`, `runs_get`,
                 "runs_create" | "runs_cancel" => Some(Action::Execute),
                 _ => None,
 
-The journal-append ask writes the whole encoding. `examples/agent-host/asks.json:12` is that row.
+The pinned manifest closes its resource budget with the gpu flag. `examples/agent-host/capsule.json:21` is that row.
 
-        {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}
+        "gpu": false
 
 ask_kind_name names JournalAppend as `journal-append`. `examples/agent-host/src/lib.rs:8194` is that match arm. declared_ask is true when the kind matches and ask_covers is true. ask_covers applies the declared pattern to the resource. The pattern is `<principal>/.AppData/Agents/agent-host/`.
 
