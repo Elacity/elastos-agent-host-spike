@@ -495,10 +495,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         } else if outcome == ReadOutcome::Kill {
             vec!["killed_worker_settlement_recorded_without_retry"]
         } else {
-            vec![
-                "two_instances_overlap_with_separate_grants",
-                "instance_grant_does_not_authorise_sibling",
-            ]
+            vec!["two_instances_overlap_with_separate_grants"]
         };
         for name in names {
             controller
@@ -741,11 +738,6 @@ fn cancelled_instance_settles_with_reason_sibling_completes() {
 
 #[test]
 fn two_instances_overlap_with_separate_grants() {
-    exercise_read(Effect::Instance1, ReadOutcome::Instances, false);
-}
-
-#[test]
-fn instance_grant_does_not_authorise_sibling() {
     exercise_read(Effect::Instance1, ReadOutcome::Instances, false);
 }
 

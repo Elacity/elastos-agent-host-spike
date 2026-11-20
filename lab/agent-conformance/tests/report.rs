@@ -1037,7 +1037,6 @@ fn instance_receipt_requires_both_launches_and_scope() {
     }
     for name in [
         "two_instances_overlap_with_separate_grants",
-        "instance_grant_does_not_authorise_sibling",
         "cancelled_instance_settles_with_reason_sibling_completes",
         "killed_worker_settlement_recorded_without_retry",
     ] {
