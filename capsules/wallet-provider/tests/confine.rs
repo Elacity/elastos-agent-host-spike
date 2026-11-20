@@ -7662,8 +7662,8 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
             Err(()) => return Err(format!("{name} parameter token must close: {form}")),
         };
         for token in tokens {
-            if !CANONICAL_PARAMS.contains(&token)
-                && !(name == MODEL_PROVIDER && measured_model_form(form))
+            if !(CANONICAL_PARAMS.contains(&token)
+                || (name == MODEL_PROVIDER && measured_model_form(form)))
             {
                 return Err(format!(
                     "{name} declares the non-canonical parameter token {token}; \
