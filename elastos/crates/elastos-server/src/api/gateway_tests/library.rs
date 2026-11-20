@@ -12785,3 +12785,332 @@ async fn a_publication_withdrawn_by_an_older_release_is_not_served_after_the_upd
     let (_, status) = post_library(app, &token, "status", json!({ "uri": uri })).await;
     assert_eq!(status["data"]["object"]["published"], false, "{status}");
 }
+
+async fn viewer_gate_route_status(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    token: &str,
+    origin: &'static str,
+    body: &[u8],
+) -> StatusCode {
+    app.clone()
+        .oneshot(
+            test_browser_request("localhost:61180", origin)
+                .method(method)
+                .uri(uri)
+                .header("x-elastos-home-token", token)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn viewer_gate_routes_keep_viewer_actor_and_content_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    write_test_capsule_manifest(dir.path(), GBA_EMULATOR_CAPSULE_ID);
+    write_test_viewer_capsule(
+        dir.path(),
+        "demo-rom",
+        GBA_EMULATOR_CAPSULE_ID,
+        "demo.gba",
+        "Demo ROM",
+    );
+    write_test_static_capsule(
+        dir.path(),
+        "archive-manager",
+        "viewer",
+        "Test Archive viewer",
+        "<!doctype html><title>Archive</title>",
+    );
+    write_test_viewer_capsule(
+        dir.path(),
+        "archive-item",
+        "archive-manager",
+        "item.zip",
+        "Archive item",
+    );
+    write_test_browser_capsule(dir.path(), "other-viewer", "viewer", "Other viewer", None);
+    let home_id = format!("ho{}", "me");
+    write_test_static_capsule(
+        dir.path(),
+        &home_id,
+        "app",
+        "Home",
+        "<!doctype html><title>Home</title>",
+    );
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let context = HomeLaunchTokenContext::for_test(
+        authority.principal_id.clone(),
+        authority.session_id.clone(),
+        Some(authority.proof_binding_id.clone()),
+        authority.grant_id.clone(),
+        crate::auth::PrincipalKind::Human,
+    );
+    let token = |resource: &str, viewer: &str| {
+        issue_home_projection_launch_token_with_context(dir.path(), resource, viewer, &context)
+            .unwrap()
+    };
+    let home = authority.home_token.clone();
+    let other_projection = token("other-viewer", "other-viewer");
+    let other_launch = token(
+        &format!("elastos://launch/{}", "cd".repeat(16)),
+        "other-viewer",
+    );
+    let gba = token(GBA_EMULATOR_CAPSULE_ID, GBA_EMULATOR_CAPSULE_ID);
+    let archive = token("archive-manager", "archive-manager");
+    let gba_item = token("demo-rom", GBA_EMULATOR_CAPSULE_ID);
+    let archive_item = token("archive-item", "archive-manager");
+    let gba_launch = token(
+        &format!("elastos://launch/{}", "ab".repeat(16)),
+        GBA_EMULATOR_CAPSULE_ID,
+    );
+    let archive_launch = token(
+        &format!("elastos://launch/{}", "ab".repeat(16)),
+        "archive-manager",
+    );
+    let home_request = test_browser_request("localhost:61180", "http://localhost:61180")
+        .uri("/api/viewers/gba-emulator/library")
+        .header("x-elastos-home-token", &home)
+        .body(Body::empty())
+        .unwrap();
+    assert!(
+        gateway_home_token::require_gateway_launch_for(
+            dir.path(),
+            home_request.headers(),
+            home_request.uri().path()
+        )
+        .is_ok(),
+        "the Home session reaches the viewer gate"
+    );
+
+    let library_token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let documents = format!("{root}/Documents");
+    let imports = format!("{documents}/Imports");
+    let zip_uri = format!("{documents}/Bundle.zip");
+    for (parent_uri, name) in [(&root, "Documents"), (&documents, "Imports")] {
+        let (status, _) = post_library(
+            app.clone(),
+            &library_token,
+            "mkdir",
+            json!({ "parent_uri": parent_uri, "name": name }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let zip_bytes = {
+        use std::io::Write as _;
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file("alpha.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"zip alpha").unwrap();
+        writer.finish().unwrap().into_inner()
+    };
+    let (status, _) = post_library(
+        app.clone(),
+        &library_token,
+        "write",
+        json!({
+            "uri": zip_uri,
+            "mime": "application/zip",
+            "data": base64::engine::general_purpose::STANDARD.encode(zip_bytes),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let storage = "/api/viewers/gba-emulator/storage/demo-rom/state/demo.ss1";
+    let save = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("PUT")
+                .uri(storage)
+                .header("x-elastos-home-token", gba.clone())
+                .header("if-none-match", "*")
+                .body(Body::from("save-state"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(save.status(), StatusCode::NO_CONTENT);
+
+    let encoded_zip = zip_uri.replace(':', "%3A").replace('/', "%2F");
+    let object_uri = format!("/api/viewers/archive-manager/library-object?uri={encoded_zip}");
+    let object_stat_uri = format!("{object_uri}&stat_only=true");
+    let extract = serde_json::to_vec(&json!({
+        "destination_uri": imports,
+        "entries": ["alpha.txt"],
+        "conflict_policy": "replace",
+    }))
+    .unwrap();
+    let routes = [
+        (
+            "library summary",
+            "GET",
+            "/api/viewers/gba-emulator/library",
+            &gba,
+            &gba_item,
+            &b""[..],
+        ),
+        (
+            "content",
+            "GET",
+            "/api/viewers/gba-emulator/content/demo-rom",
+            &gba,
+            &gba_item,
+            &b""[..],
+        ),
+        ("storage target", "GET", storage, &gba, &gba_item, &b""[..]),
+        (
+            "library object get",
+            "GET",
+            object_stat_uri.as_str(),
+            &archive,
+            &archive_item,
+            &b""[..],
+        ),
+        (
+            "library object post",
+            "POST",
+            object_uri.as_str(),
+            &archive,
+            &archive_item,
+            extract.as_slice(),
+        ),
+    ];
+    for (family, method, uri, projection, item, body) in routes {
+        let viewer = if family == "library object get" || family == "library object post" {
+            "archive-manager"
+        } else {
+            GBA_EMULATOR_CAPSULE_ID
+        };
+        let home_uri = uri.replacen(
+            &format!("/viewers/{viewer}/"),
+            &format!("/viewers/{home_id}/"),
+            1,
+        );
+        let home_actor_projection = token(viewer, &home_id);
+        let home_actor_request = test_browser_request("localhost:61180", "http://localhost:61180")
+            .uri(uri)
+            .header("x-elastos-home-token", &home_actor_projection)
+            .body(Body::empty())
+            .unwrap();
+        assert!(
+            gateway_home_token::require_gateway_launch_for(
+                dir.path(),
+                home_actor_request.headers(),
+                home_actor_request.uri().path()
+            )
+            .is_ok(),
+            "{family}: Home actor projection reaches the viewer gate"
+        );
+        let provider_calls_before = crate::auth::load_auth_state(dir.path())
+            .unwrap()
+            .audit
+            .iter()
+            .filter(|event| event.event_type == "library.viewer.requested")
+            .count();
+        for (case, token, origin) in [
+            ("Home session", &home, "http://localhost:61180"),
+            (
+                "Home session projection",
+                &home_actor_projection,
+                "http://localhost:61180",
+            ),
+            ("other viewer projection", &other_projection, "null"),
+            ("other viewer launch", &other_launch, "null"),
+        ] {
+            let status = viewer_gate_route_status(&app, method, uri, token, origin, body).await;
+            assert!(
+                status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN,
+                "{family}: {case}: {status}"
+            );
+        }
+        let home_status = viewer_gate_route_status(
+            &app,
+            method,
+            &home_uri,
+            &home,
+            "http://localhost:61180",
+            body,
+        )
+        .await;
+        assert_eq!(
+            home_status,
+            StatusCode::NOT_FOUND,
+            "{family}: Home is not a viewer"
+        );
+        assert_eq!(
+            crate::auth::load_auth_state(dir.path())
+                .unwrap()
+                .audit
+                .iter()
+                .filter(|event| event.event_type == "library.viewer.requested")
+                .count(),
+            provider_calls_before,
+            "{family}: refused tokens reached the object provider"
+        );
+        assert_eq!(
+            viewer_gate_route_status(&app, method, uri, projection, "null", body).await,
+            StatusCode::OK,
+            "{family}: viewer projection"
+        );
+        assert_eq!(
+            viewer_gate_route_status(&app, method, uri, item, "null", body).await,
+            StatusCode::OK,
+            "{family}: content item projection"
+        );
+        // The front door reserves launch-bound tokens for kept-launch reads.
+        assert_eq!(
+            viewer_gate_route_status(
+                &app,
+                method,
+                uri,
+                if viewer == "archive-manager" {
+                    &archive_launch
+                } else {
+                    &gba_launch
+                },
+                "null",
+                body
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "{family}: launch page"
+        );
+    }
+}
+
+#[tokio::test]
+async fn viewer_gate_refuses_home_even_if_manifest_role_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_id = ["ho", "me"].concat();
+    write_test_static_capsule(
+        dir.path(),
+        &home_id,
+        "viewer",
+        "Changed Home role",
+        "<!doctype html><title>Home</title>",
+    );
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let uri = format!("/api/viewers/{home_id}/library");
+    let status = viewer_gate_route_status(
+        &app,
+        "GET",
+        &uri,
+        &authority.home_token,
+        "http://localhost:61180",
+        b"",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

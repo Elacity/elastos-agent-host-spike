@@ -594,7 +594,7 @@ pub(crate) fn resolve_viewer_bound_capsule(
 }
 
 pub(crate) fn is_viewer_capsule(data_dir: &Path, viewer: &str) -> bool {
-    is_launchable_viewer_capsule(data_dir, viewer)
+    viewer != HOME_CAPSULE_ID && is_launchable_viewer_capsule(data_dir, viewer)
 }
 
 fn resolve_browser_capsule(data_dir: &Path, app: &str) -> Result<BrowserCapsule, StatusCode> {
