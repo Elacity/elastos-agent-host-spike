@@ -1117,9 +1117,26 @@ test("System startup and recovery stay ready while the background Carrier check 
       "configureAiProvider", "configurePasskeyAccess", "configureRecoveryAccess", "configureChainAccess",
       "configureActiveShell", "configureTechnicalDetails", "configureDeviceDidCopy",
       "configureRuntimeUpdate", "configureHomeRecoverySave"]) context[name] = () => {};
+    let agentsBound = 0;
+    context.document = {
+      querySelector(selector) {
+        assert.equal(selector, '.settings-content[data-settings="agents"].active');
+        return null;
+      },
+    };
+    context.bindAgents = (doc, request) => {
+      agentsBound += 1;
+      assert.equal(doc, context.document);
+      assert.equal(typeof request, "function");
+      return { load() { calls.push("agents"); } };
+    };
+    context.fetchJson = () => { throw new Error("boot reached fetchJson"); };
+    context.shellHeaders = () => { throw new Error("boot reached shellHeaders"); };
     vm.runInContext(boot, context);
     await context.boot();
     await context.initialRecoveryState;
+    assert.equal(agentsBound, 1);
+    assert.equal(calls.includes("agents"), false, "startup binds Agents and does not wait on the list");
     assert.deepEqual(calls, [checking ? "summary-checking" : "summary-offline",
       "shell", "accounts", "recovery", "chains"]);
   }
