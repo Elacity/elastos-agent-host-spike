@@ -193,6 +193,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             created_at: 5,
             updated_at: 5,
         },
+        active: true,
     }
 }
 
@@ -1175,6 +1176,38 @@ fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
 }
 
 #[test]
+fn the_list_returns_whether_each_agent_is_on() {
+    let home = Home::new();
+    turn_on(&home);
+    let created = create_one(&home, "request-list");
+    let caller = home.caller();
+    let off = serde_json::json!({ "agents": list_in_any_build(home.path(), &caller).unwrap() });
+    assert_eq!(off["agents"][0]["agent_id"], json!(created.agent_id));
+    assert_eq!(
+        off["agents"][0]["active"],
+        json!(false),
+        "the_list_returns_whether_each_agent_is_on"
+    );
+    write_change(&home, Operation::SetActive, |file| {
+        let agent = &mut file.agents[0];
+        agent.active = true;
+        agent.record.updated_at = 10;
+    })
+    .unwrap();
+    // On disk an agent that is on omits the field. The list still says on.
+    let stored: Value = serde_json::from_slice(&home.agent_bytes()).unwrap();
+    assert!(stored["agents"][0].get("active").is_none());
+    let on = serde_json::json!({
+        "agents": list_in_any_build(home.path(), &home.caller()).unwrap()
+    });
+    assert_eq!(
+        on["agents"][0]["active"],
+        json!(true),
+        "the_list_returns_whether_each_agent_is_on"
+    );
+}
+
+#[test]
 fn a_failed_save_leaves_neither_the_record_nor_the_protection() {
     let home = Home::new();
     turn_on(&home);
@@ -2016,6 +2049,7 @@ fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-1");
+    crate::agents::set_active(home.path(), &home.caller(), &agent.agent_id, true, 10).unwrap();
     let stored = crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id).unwrap();
     assert_eq!(stored.record.principal_id, agent.agent_id);
     assert_eq!(stored.record.owner.as_deref(), Some(OWNER_ID));
@@ -2066,6 +2100,30 @@ fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
             .unwrap_err()
             .to_string(),
         NOT_ENABLED
+    );
+}
+
+/// A file with no `active` field is the shape from before this change.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn existing_agent_records_keep_their_behaviour() {
+    let (host, host_cid) = host_capsule(crate::agent_admission::tests::AGENT_HOST, b"old-record");
+    let (home, agents) = home_with_agents(1, &host_cid);
+    let raw = home.agent_bytes();
+    assert!(!raw.windows(8).any(|window| window == b"\"active\""));
+    assert!(parse_strict(&raw).unwrap().agents[0].active);
+    assert_eq!(
+        admit_walked(
+            home.path(),
+            home.path(),
+            host.path(),
+            Some(OWNER_ID),
+            Some(&agents[0])
+        )
+        .unwrap()
+        .unwrap()
+        .actor(),
+        agents[0]
     );
 }
 
@@ -2131,7 +2189,7 @@ pub(crate) fn home_with_agents(
     crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();
     let agents = (0..count)
         .map(|index| {
-            crate::agents::create(
+            let agent_id = crate::agents::create(
                 home.path(),
                 &caller,
                 &crate::agents::CreateRequest {
@@ -2151,7 +2209,9 @@ pub(crate) fn home_with_agents(
                 1,
             )
             .unwrap()
-            .agent_id
+            .agent_id;
+            crate::agents::set_active(home.path(), &caller, &agent_id, true, 1).unwrap();
+            agent_id
         })
         .collect();
     (home, agents)

@@ -9,9 +9,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::local_http::LoopbackHttpBaseUrl;
+use crate::model_budget::{AgentKey, ModelBudget, Refusal as BudgetRefusal, RunKey};
 use crate::provider_resource::{
     build_capability_resource, ensure_generic_wallet_capability, is_wallet_resource,
     provider_operation_action, WALLET_STATUS_RESOURCE,
@@ -22,6 +24,9 @@ use elastos_common::localhost::{
     rooted_localhost_uri,
 };
 use elastos_common::AuthorityBound;
+use elastos_model_contract::{
+    model_input_hash, RuntimeCreateBinding, RUNTIME_CREATE_BINDING_SCHEMA,
+};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -315,11 +320,25 @@ pub struct BridgeContext {
     /// Model-token ceiling admission recorded for this capsule. `None` is not
     /// an admitted agent, and the model rule does not apply.
     pub model_token_ceiling: Option<u64>,
+    pub(crate) model_budget: Option<ModelDispatchBudget>,
     /// The stop requested for this activation, if any (M1-R A10-R). The wait
     /// loop reads it, so a guest held in a capability wait leaves at once
     /// instead of waiting out the shell's polls; it records that it left for
     /// the stop, and the activation's own end then denies the request.
     pub stop: Option<Arc<ActivationStopFlag>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModelOfferBound {
+    tokens: u64,
+    revision: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModelDispatchBudget {
+    pub(crate) agent: AgentKey,
+    pub(crate) account: Arc<ModelBudget>,
+    pub(crate) offers: Arc<StdRwLock<HashMap<String, ModelOfferBound>>>,
 }
 
 /// Spawn a resource bridge handler for a microVM capsule.
@@ -642,7 +661,7 @@ async fn authorize_and_dispatch_resource_invoke(
     bridge_ctx: &BridgeContext,
 ) -> serde_json::Value {
     let token_b64 = request["token"].as_str().unwrap_or("");
-    let dispatch = match resource_invoke_dispatch(
+    let mut dispatch = match resource_invoke_dispatch(
         request,
         bridge_ctx.principal_id.as_deref(),
         bridge_ctx.data_dir.as_deref(),
@@ -769,6 +788,30 @@ async fn authorize_and_dispatch_resource_invoke(
         if let Some(refusal) = model_budget_refusal(bridge_ctx) {
             return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
         }
+        if dispatch.operation == "runs_create" {
+            if bridge_ctx.model_token_ceiling.is_some() && bridge_ctx.model_budget.is_none() {
+                return finish_component_invoke(
+                    bridge_ctx,
+                    &audit_id,
+                    &dispatch,
+                    "denied",
+                    resource_error_response(
+                        "denied",
+                        "model_budget_exceeded: agent account unavailable",
+                    ),
+                );
+            }
+            if let Some(ref budget) = bridge_ctx.model_budget {
+                match reserve_model_create(budget, bridge_ctx, &dispatch.request, &token) {
+                    Ok(request) => dispatch.request = request,
+                    Err(refusal) => {
+                        return finish_component_invoke(
+                            bridge_ctx, &audit_id, &dispatch, "denied", refusal,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     match bridge_ctx
@@ -776,16 +819,20 @@ async fn authorize_and_dispatch_resource_invoke(
         .send_raw(&dispatch.scheme, &dispatch.request)
         .await
     {
-        Ok(result) => finish_component_invoke(
-            bridge_ctx,
-            &audit_id,
-            &dispatch,
-            invoke_outcome(&result),
-            serde_json::json!({
-                "type": "resource_result",
-                "result": result,
-            }),
-        ),
+        Ok(result) => {
+            if dispatch.scheme == "model" && dispatch.operation == "offers_list" {
+                if let Some(ref budget) = bridge_ctx.model_budget {
+                    cache_model_offers(budget, &result);
+                }
+            }
+            finish_component_invoke(
+                bridge_ctx,
+                &audit_id,
+                &dispatch,
+                invoke_outcome(&result),
+                serde_json::json!({"type": "resource_result", "result": result}),
+            )
+        }
         Err(e) => {
             tracing::warn!(
                 "Bridge resource_invoke failed for {}/{}: {}",
@@ -1194,9 +1241,8 @@ fn provider_error_result(code: &str, message: &str) -> serde_json::Value {
     })
 }
 
-/// Why an admitted agent's model invoke is refused. One reason: the signed
-/// ceiling is 0. The request body is not a source of the ceiling, and it is
-/// not compared with the ceiling. A spend bound is a later slice.
+/// Why an admitted agent's model invoke is refused before dispatch when the
+/// signed ceiling is 0. The request body is not a source of the ceiling.
 enum ModelBudgetRefusal {
     SignedCeiling(u64),
 }
@@ -1218,6 +1264,118 @@ impl ModelBudgetRefusal {
 fn model_budget_refusal(ctx: &BridgeContext) -> Option<serde_json::Value> {
     let held = ctx.model_token_ceiling?;
     (held == 0).then(|| ModelBudgetRefusal::SignedCeiling(held).response())
+}
+
+/// The provider's offer policy is held by Runtime after a successful list.
+/// Reserve the whole permitted input byte count plus 1,024 tokens for message
+/// framing as a conservative input bound. The provider checks the serialized
+/// input against this byte limit before dispatch.
+/// Hosted output uses the provider adapter's `max(1, inline_bytes / 4)` rule;
+/// local context limits may be larger, so take the larger output allowance.
+fn cache_model_offers(budget: &ModelDispatchBudget, result: &serde_json::Value) {
+    if result["status"] != "ok" {
+        return;
+    }
+    let Some(offers) = result["data"]["offers"].as_array() else {
+        return;
+    };
+    let revisions = &result["data"]["offer_revisions"];
+    let mut held = budget.offers.write().unwrap_or_else(|err| err.into_inner());
+    held.clear();
+    for offer in offers {
+        let (Some(id), Some(input), Some(output), Some(revision)) = (
+            offer["id"].as_str(),
+            offer["policy"]["input_bytes_limit"].as_u64(),
+            offer["policy"]["inline_output_bytes_limit"].as_u64(),
+            offer["id"].as_str().and_then(|id| revisions[id].as_str()),
+        ) else {
+            continue;
+        };
+        let output = (output / 4)
+            .max(1)
+            .max(offer["context"]["max_output_tokens"].as_u64().unwrap_or(0));
+        if let Some(tokens) = input.checked_add(1_024).and_then(|n| n.checked_add(output)) {
+            held.insert(
+                id.to_string(),
+                ModelOfferBound {
+                    tokens,
+                    revision: revision.to_string(),
+                },
+            );
+        }
+    }
+}
+
+fn reserve_model_create(
+    budget: &ModelDispatchBudget,
+    ctx: &BridgeContext,
+    request: &serde_json::Value,
+    token: &CapabilityToken,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let invalid = |message: &str| resource_error_response("invalid_resource_invoke", message);
+    let (Some(offer_id), Some(operation), Some(request_id), Some(input)) = (
+        request["offer_id"].as_str(),
+        request["operation"].as_str(),
+        request["request_id"].as_str(),
+        request.get("input"),
+    ) else {
+        return Err(invalid(
+            "model runs_create needs offer_id, operation, request_id and input",
+        ));
+    };
+    let bound = budget
+        .offers
+        .read()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(offer_id)
+        .cloned()
+        .ok_or_else(|| invalid("model offer must be listed before a run"))?;
+    let binding = RuntimeCreateBinding {
+        schema: RUNTIME_CREATE_BINDING_SCHEMA.to_string(),
+        principal_id: budget.agent.principal().to_string(),
+        session_id: ctx.capsule_id.clone(),
+        capsule_id: ctx.capsule_id.clone(),
+        grant_id: token.id().to_string(),
+        request_id: request_id.to_string(),
+        offer_id: offer_id.to_string(),
+        operation: operation.to_string(),
+        input_hash: model_input_hash(input).map_err(|_| invalid("invalid model input"))?,
+    };
+    binding
+        .validate(offer_id, operation, input)
+        .map_err(|_| invalid("invalid model run binding"))?;
+    budget
+        .account
+        .reserve(
+            &budget.agent,
+            &RunKey::of(&binding, &bound.revision),
+            bound.tokens,
+        )
+        .map_err(|refusal| match refusal {
+            BudgetRefusal::ConflictingRetry => resource_error_response(
+                "invalid_resource_invoke",
+                "request_id conflicts with an existing model hold",
+            ),
+            BudgetRefusal::OverCap {
+                asked,
+                held,
+                ceiling,
+            } => resource_error_response(
+                "denied",
+                &format!(
+                    "model_budget_exceeded: run needs {asked} tokens; {held} of {ceiling} held"
+                ),
+            ),
+            _ => resource_error_response(
+                "denied",
+                "model_budget_exceeded: agent account unavailable",
+            ),
+        })?;
+    Ok(serde_json::json!({
+        "op": "runs_create", "offer_id": offer_id, "operation": operation,
+        "input": input, "runtime_binding": binding,
+        "expected_execution_binding_hash": bound.revision,
+    }))
 }
 
 fn resource_error_response(code: &str, message: &str) -> serde_json::Value {
@@ -2223,6 +2381,7 @@ mod tests {
             data_dir: None,
             launch: None,
             model_token_ceiling: None,
+            model_budget: None,
             stop: None,
         }
     }

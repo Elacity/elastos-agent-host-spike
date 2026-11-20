@@ -1,5 +1,5 @@
 //! Every byte of a bundle is its identity (PRINCIPLES 13): one byte changed
-//! in the manifest, in any payload file or in agent-host's `asks.json`, or a
+//! in the manifest, in any payload file or in agent-host's manifest ask, or a
 //! file added or removed, changes the lab CID. Each test names a bundle
 //! before and after one change, so a byte the name leaves out cannot hide
 //! behind a pin that differs anyway; then `check_name` refuses the old name
@@ -129,22 +129,30 @@ fn adding_or_removing_a_payload_file_changes_the_lab_cid() {
 }
 
 #[test]
-fn one_byte_change_in_asks_json_changes_the_lab_cid() {
-    // M1 check B2: the asks a capsule declares are inside its name. The lab
-    // never parses asks.json; to the lab CID it is one more payload file.
+fn one_byte_change_in_a_manifest_ask_changes_the_lab_cid() {
+    // M1 check B2: the asks a capsule declares sit in the signed manifest, so
+    // one byte of an ask is inside the lab CID. The changed manifest still
+    // parses and validates, so the walk names it rather than refusing it.
+    const JOURNAL: &str = "localhost://Users/self/.AppData/Agents/agent-host/*";
     let bundle = assemble(&AGENT_HOST);
     let before = named(bundle.path());
-    let asks = read_fixture(&AGENT_HOST, "asks.json");
-    let at = inside_string_value(&asks, "Models/");
-    let changed = change_one_byte(bundle.path(), "asks.json", at);
-    serde_json::from_slice::<serde_json::Value>(&changed).expect("asks.json is still JSON");
+    assert_eq!(before.to_string(), AGENT_HOST_LAB_CID);
+    let manifest = read_fixture(&AGENT_HOST, MANIFEST_FILE);
+    let at = inside_string_value(&manifest, JOURNAL) + "localhost://".len();
+    let changed = change_one_byte(bundle.path(), MANIFEST_FILE, at);
+    let parsed: CapsuleManifest =
+        serde_json::from_slice(&changed).unwrap_or_else(|reason| panic!("parse: {reason}"));
+    parsed
+        .validate()
+        .unwrap_or_else(|reason| panic!("validate: {reason}"));
+    assert_eq!(parsed.asks.len(), 1);
+    assert_ne!(parsed.asks[0].resource, JOURNAL);
     let after = named(bundle.path());
 
     assert_ne!(
         after, before,
-        "a one-byte change in asks.json did not change the lab CID"
+        "a one-byte change in a manifest ask did not change the lab CID"
     );
-    assert_eq!(before.to_string(), AGENT_HOST_LAB_CID);
     assert_ne!(after.to_string(), AGENT_HOST_LAB_CID);
     assert_name_mismatch(bundle.path(), AGENT_HOST_LAB_CID, after);
 }
