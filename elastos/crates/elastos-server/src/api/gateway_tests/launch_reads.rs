@@ -21,10 +21,19 @@ async fn read(
     uri: &str,
     token: Option<&str>,
 ) -> (StatusCode, Option<String>, Vec<u8>) {
+    read_at_origin(app, uri, token, "null").await
+}
+
+async fn read_at_origin(
+    app: &Router,
+    uri: &str,
+    token: Option<&str>,
+    origin: &str,
+) -> (StatusCode, Option<String>, Vec<u8>) {
     let mut request = Request::builder()
         .uri(uri)
         .header(HOST, "localhost:61180")
-        .header("origin", "null");
+        .header("origin", origin);
     if let Some(token) = token {
         request = request.header("x-elastos-home-token", token);
     }
@@ -42,6 +51,158 @@ async fn read(
         .await
         .unwrap();
     (status, store, body.to_vec())
+}
+
+/// The Home session reaches the router with its own browser origin. It cannot
+/// read either kind of kept launch, including a path the Runtime would refuse.
+#[tokio::test]
+async fn a_home_session_cannot_read_launch_content_or_nonplain_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let home = issue_home_launch_token(dir.path(), "home").unwrap();
+    let before = launch_reads_audited(dir.path()).len();
+    for uri in [
+        format!("/api/viewers/{PAGE}/launch/output/playlist.json"),
+        format!("/api/viewers/{PAGE}/launch/content/images/01.png"),
+        format!("/api/viewers/{PAGE}/launch/output/a%20b"),
+        format!("/api/viewers/{PAGE}/launch/content/x%2F..%2Fcapsule.json"),
+    ] {
+        let (status, _, body) =
+            read_at_origin(&app, &uri, Some(&home), "http://localhost:61180").await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::NOT_FOUND, b"not_found".to_vec()),
+            "{uri}"
+        );
+        assert_eq!(launch_reads_audited(dir.path()).len(), before, "{uri}");
+    }
+}
+
+/// A page token for this launch stays with the viewer named by that token.
+#[tokio::test]
+async fn another_viewers_page_token_cannot_read_launch_content_or_nonplain_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let token = page_token(
+        dir.path(),
+        &format!("elastos://launch/{}", launch_id()),
+        "other-viewer",
+    );
+    let before = launch_reads_audited(dir.path()).len();
+    for uri in [
+        format!("/api/viewers/{PAGE}/launch/content/images/01.png"),
+        format!("/api/viewers/{PAGE}/launch/output/a%20b"),
+        format!("/api/viewers/{PAGE}/launch/content/x%2F..%2Fcapsule.json"),
+    ] {
+        let (status, _, body) = read(&app, &uri, Some(&token)).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::NOT_FOUND, b"not_found".to_vec()),
+            "{uri}"
+        );
+        assert_eq!(launch_reads_audited(dir.path()).len(), before, "{uri}");
+    }
+}
+
+/// The gateway carries the token's launch id to the Runtime. A token for a
+/// different launch cannot select the kept launch under either read kind.
+#[tokio::test]
+async fn another_launch_token_cannot_read_the_kept_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = library_test_state(dir.path()).await;
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let runtime = start_fake_runtime(dir.path(), bus, "launch-reads-other").await;
+    *runtime.readable_launch_id.lock().await = Some(launch_id());
+    let app = gateway_router(state);
+    let other_id = "cd".repeat(16);
+    let token = page_token(dir.path(), &format!("elastos://launch/{other_id}"), PAGE);
+    for (uri, rest) in [
+        (
+            format!("/api/viewers/{PAGE}/launch/output/playlist.json"),
+            "output/playlist.json",
+        ),
+        (
+            format!("/api/viewers/{PAGE}/launch/content/images/01.png"),
+            "content/images/01.png",
+        ),
+    ] {
+        let (status, _, body) = read(&app, &uri, Some(&token)).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::NOT_FOUND, b"not_found".to_vec()),
+            "{uri}"
+        );
+        let asks = runtime.kept_launch_reads.lock().await;
+        assert_eq!(
+            asks.last().unwrap()["path"],
+            format!("/api/launch/{other_id}/{rest}")
+        );
+    }
+    let asked = runtime.kept_launch_reads.lock().await.len();
+    for uri in [
+        format!("/api/viewers/{PAGE}/launch/output/a%20b"),
+        format!("/api/viewers/{PAGE}/launch/content/x%2F..%2Fcapsule.json"),
+    ] {
+        let (status, _, body) = read(&app, &uri, Some(&token)).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::NOT_FOUND, b"not_found".to_vec()),
+            "{uri}"
+        );
+        assert_eq!(runtime.kept_launch_reads.lock().await.len(), asked, "{uri}");
+    }
+}
+
+/// Without Runtime coordinates, the router still records the bound id it selected.
+/// This keeps the id handoff observable when the test host cannot start HTTP.
+#[tokio::test]
+async fn another_launch_token_keeps_its_bound_id_without_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let other_id = "cd".repeat(16);
+    let token = page_token(dir.path(), &format!("elastos://launch/{other_id}"), PAGE);
+    for (uri, rest) in [
+        (
+            format!("/api/viewers/{PAGE}/launch/output/playlist.json"),
+            "output:playlist.json",
+        ),
+        (
+            format!("/api/viewers/{PAGE}/launch/content/images/01.png"),
+            "content:images/01.png",
+        ),
+    ] {
+        let (status, _, body) = read(&app, &uri, Some(&token)).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::NOT_FOUND, b"not_found".to_vec()),
+            "{uri}"
+        );
+        let audit = crate::auth::load_auth_state(dir.path()).unwrap();
+        let record = audit
+            .audit
+            .iter()
+            .rfind(|event| event.event_type == "viewer.launch.read")
+            .expect("the launch read is audited");
+        assert_eq!(
+            record.challenge_id.as_deref(),
+            Some(format!("{other_id}:{rest}").as_str())
+        );
+    }
+    for uri in [
+        format!("/api/viewers/{PAGE}/launch/output/a%20b"),
+        format!("/api/viewers/{PAGE}/launch/content/images//01.png"),
+    ] {
+        let (status, _, body) = read(&app, &uri, Some(&token)).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::NOT_FOUND, b"not_found".to_vec()),
+            "{uri}"
+        );
+    }
+    assert_eq!(
+        launch_reads_audited(dir.path()),
+        ["not_found", "not_found", "not_found", "not_found"]
+    );
 }
 
 fn launch_reads_audited(dir: &std::path::Path) -> Vec<String> {

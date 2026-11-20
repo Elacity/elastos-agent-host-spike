@@ -592,7 +592,7 @@ fn rows() -> Vec<AuthorityRow> {
             "viewer_launch_read",
             "require_launch_bound_token",
             1,
-            "app-grant:OPEN; conditional: admits Home when the viewer resolves to home",
+            "app-grant:launch-bound page token; require_launch_bound_token checks the viewer actor and bound launch id",
         ),
         row(AUTH, "passkey_add_begin_inner", "require_passkey_add_launch", 1,
             "runtime-admin:require_hosted_step_up_launch+active admin passkey"),
@@ -1205,6 +1205,91 @@ fn existing_documents_home_token_refusal_remains_present() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_tests/documents.rs");
     let text = fs::read_to_string(path).unwrap();
     assert!(text.contains(&["async fn ", name.as_str(), "("].concat()));
+}
+
+#[test]
+fn viewer_launch_read_starts_with_its_bound_gate_and_existing_rows_remain() {
+    let sources = source::production_sources();
+    let raw = &sources["elastos-server/src/api/viewer_gateway.rs"];
+    let code = source::code_only(raw);
+    let function = ["viewer", "_launch", "_read"].concat();
+    let start = code
+        .find(&format!("async fn {function}("))
+        .expect("launch read function in production source");
+    let end = code[start..]
+        .find("async fn kept_launch_from_runtime(")
+        .map(|offset| start + offset)
+        .expect("next production function");
+    let body = &code[start..end];
+    let first = gate_decisions()
+        .keys()
+        .chain(wrapper_decisions().keys())
+        .filter_map(|gate| body.find(&format!("{gate}(")).map(|at| (at, *gate)))
+        .min_by_key(|(at, _)| *at)
+        .expect("launch read authority call");
+    let gate = ["require", "_launch", "_bound_token"].concat();
+    assert_eq!(first.1, gate, "first launch read authority call");
+    let runtime_read = [
+        "kept_launch",
+        "_from_runtime",
+        "(data_dir, &id, Some(&token), kind, rest)",
+    ]
+    .concat();
+    assert!(
+        body.contains(&runtime_read),
+        "launch read uses the bound id"
+    );
+    let row = rows()
+        .into_iter()
+        .find(|row| row.function == function)
+        .expect("launch read inventory row");
+    assert_eq!(row.gate, gate);
+    assert!(row
+        .authority
+        .starts_with("app-grant:launch-bound page token"));
+    assert!(row.authority.contains(&gate));
+    let verifier = source::code_only(&sources["elastos-server/src/api/gateway_home_token.rs"]);
+    let gate_start = verifier
+        .find(&format!("fn {gate}("))
+        .expect("launch-bound gate definition");
+    let gate_end = verifier[gate_start..]
+        .find("pub(crate) fn require_home_token(")
+        .map(|offset| gate_start + offset)
+        .expect("next token gate definition");
+    let gate_body = &verifier[gate_start..gate_end];
+    assert!(gate_body.contains("LaunchBound::Required"));
+    let home_gate = ["require", "_home", "_token_context"].concat();
+    assert!(
+        !gate_body.contains(&format!("{home_gate}(")),
+        "launch-bound gate also accepts a Home session"
+    );
+    assert_eq!(
+        rows()
+            .iter()
+            .filter(|row| row.authority.contains("OPEN"))
+            .count(),
+        7
+    );
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_tests/launch_reads.rs");
+    let text = fs::read_to_string(path).unwrap();
+    for name in [
+        [
+            "a_pages_token_reads_its_kept_launch_",
+            "through_the_runtime_as_the_shell",
+        ]
+        .concat(),
+        [
+            "anything_else_is_not_found_",
+            "and_the_runtime_is_not_asked",
+        ]
+        .concat(),
+    ] {
+        assert!(
+            text.contains(&["async fn ", name.as_str(), "("].concat()),
+            "{name}"
+        );
+    }
 }
 
 #[tokio::test]

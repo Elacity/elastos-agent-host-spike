@@ -2317,6 +2317,7 @@ async fn services_contact_fixture(
             pending_capabilities: Arc::new(TokioMutex::new(HashMap::new())),
             capabilities_start_pending: false,
             kept_launch_reads: runtime.kept_launch_reads.clone(),
+            readable_launch_id: runtime.readable_launch_id.clone(),
         },
         send_failure: Arc::new(TokioMutex::new(String::new())),
     };
