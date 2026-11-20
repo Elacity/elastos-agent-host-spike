@@ -9220,6 +9220,7 @@ pub(crate) fn verify_carrier_content_cid(cid: &str, bytes: &[u8]) -> Result<bool
 const UNIXFS_CHUNK_BYTES: usize = 262_144;
 const UNIXFS_FILE_LINKS: usize = 174;
 
+#[derive(Clone)]
 struct FileCidNode {
     cid: cid::Cid,
     file_size: u64,
@@ -9304,8 +9305,20 @@ fn file_parent(children: &[FileCidNode], version: cid::Version) -> FileCidNode {
     }
 }
 
+fn file_cid_from_leaves(mut level: Vec<FileCidNode>, version: cid::Version) -> cid::Cid {
+    while level.len() > 1 {
+        // Kubo keeps one-link intermediate nodes when a balanced level opens;
+        // promoting a trailing singleton changes the file CID.
+        level = level
+            .chunks(UNIXFS_FILE_LINKS)
+            .map(|children| file_parent(children, version))
+            .collect();
+    }
+    level.pop().expect("file has one root").cid
+}
+
 fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
-    let mut level: Vec<FileCidNode> = if bytes.is_empty() {
+    let level: Vec<FileCidNode> = if bytes.is_empty() {
         vec![file_leaf(bytes, version, raw)]
     } else {
         bytes
@@ -9313,13 +9326,7 @@ fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
             .map(|chunk| file_leaf(chunk, version, raw))
             .collect()
     };
-    while level.len() > 1 {
-        level = level
-            .chunks(UNIXFS_FILE_LINKS)
-            .map(|children| file_parent(children, version))
-            .collect();
-    }
-    level.pop().expect("file has one root").cid
+    file_cid_from_leaves(level, version)
 }
 
 async fn verify_exact_content_cid_with_filename(
@@ -10036,6 +10043,92 @@ mod tests {
             &bytes,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_zero_file_boundaries() {
+        // Generated with pinned Kubo 0.40.1 from an all-zero stream:
+        // `ipfs add --only-hash --quieter --pin=false --hash=sha2-256
+        // --chunker=size-262144 --max-file-links=174`, once with
+        // `--cid-version=0 --raw-leaves=false` and once with
+        // `--cid-version=1 --raw-leaves=true`.
+        let vectors = [
+            (
+                0,
+                "QmbFMke1KXqnYyBBWxB74N4c5SBnJMVAiMNRcGu6x1AwQH",
+                "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+            ),
+            (
+                1,
+                "QmS9JArPwa55ePgDnyg6TzX24mYTS1b1vLqWNebyVotKxQ",
+                "bafkreidogqfzz75tpkmjzjke425xqcrmpcib2p5tg44hnbirumdbpl5adu",
+            ),
+            (
+                UNIXFS_CHUNK_BYTES,
+                "QmRk1rduJvo5DfEYAaLobS2za9tDszk35hzaNSDCJ74DA7",
+                "bafkreiekhhjkxu4ztk3tyng3er3ijhg56mb44oe3gwbgquhzu4afrg2ksa",
+            ),
+            (
+                UNIXFS_CHUNK_BYTES + 1,
+                "QmbVuw4C4vcmVKqxoWtgDVobvcHrSn51qsmQmyxjk4sB2Q",
+                "bafybeigllfqgfpqydppr6cmv56g7ax4wyhruzswvcefv6j5kj77nzttfki",
+            ),
+            (
+                174 * UNIXFS_CHUNK_BYTES,
+                "QmY4HSz1oVGdUzb8poVYPLsoqBZjH6LZrtgnme9wWn2Qko",
+                "bafybeibxsa3ioclowpaq7b6gxl65gzqneopfr3fnhedak6sqr4bjz5lnyq",
+            ),
+            (
+                174 * UNIXFS_CHUNK_BYTES + 1,
+                "QmehMASWcBsX7VcEQqs6rpR5AHoBfKyBVEgmkJHjpPg8jq",
+                "bafybeihqwzd3o6q6v3pmwhzjy22vokhr767burokmqemg63hptx2nqd7ym",
+            ),
+            (
+                175 * UNIXFS_CHUNK_BYTES,
+                "QmaL1KiQRV8secNszpjjFPg722T53c77k2dz5UsNua59ZT",
+                "bafybeigfps5vzivfspwgm3uwsfyl5s6bn3ysh7uqidgauxgopw4yi66lse",
+            ),
+        ];
+        for (size, legacy_cid, raw_cid) in vectors {
+            let mut bytes = vec![0; size];
+            assert!(
+                verify_carrier_content_cid(legacy_cid, &bytes).unwrap(),
+                "legacy Kubo vector for {size} bytes"
+            );
+            assert!(
+                verify_carrier_content_cid(raw_cid, &bytes).unwrap(),
+                "raw-leaf Kubo vector for {size} bytes"
+            );
+            if size == 174 * UNIXFS_CHUNK_BYTES + 1 {
+                bytes[0] ^= 1;
+                assert!(!verify_carrier_content_cid(legacy_cid, &bytes).unwrap());
+                assert!(!verify_carrier_content_cid(raw_cid, &bytes).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_three_file_link_layers() {
+        // This represents a 7,936,933,888-byte all-zero file without allocating
+        // it. Kubo 0.40.1 computed both CIDs from the complete streamed input.
+        const CHUNKS: usize = 174 * 174 + 1;
+        let chunk = vec![0; UNIXFS_CHUNK_BYTES];
+        for (version, raw, expected) in [
+            (
+                cid::Version::V0,
+                false,
+                "QmaTv4QL4SrnRDVUXJ9C6FgK2eDzXm2nYEgaAxdtZHoWMf",
+            ),
+            (
+                cid::Version::V1,
+                true,
+                "bafybeibqr5nnenx3ea57tdg3kla3rkb7hvbv7meogyxrubwrc5vmicaw5u",
+            ),
+        ] {
+            let leaf = file_leaf(&chunk, version, raw);
+            let cid = file_cid_from_leaves(vec![leaf; CHUNKS], version);
+            assert_eq!(cid.to_string(), expected);
+        }
     }
 
     fn fetch_receipt(result: FetchResult, verified: bool, attempt: u8) -> FetchReceipt {
