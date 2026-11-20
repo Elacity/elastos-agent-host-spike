@@ -4767,8 +4767,9 @@ impl CarrierAvailabilityProvider {
                 .into_iter()
                 .find(|replica| !tried.contains(&replica.node_did));
             if let Some(mut replica) = next {
-                // Checked on every pass, including after "not enough holders
-                // yet". A filter that does not use the tried key cannot spin.
+                // The cap bounds every pass, including after "not enough
+                // holders yet". The deadline stops a holder already tried.
+                // It does not skip an announced holder that has not been tried.
                 if fetch_walk_should_stop(
                     fetch_attempts,
                     tried.len(),
@@ -4968,6 +4969,8 @@ impl CarrierAvailabilityProvider {
                     }
                 }
             }
+            // No announced holder is left untried. The deadline ends the wait
+            // for another announcement.
             if tokio::time::Instant::now() >= deadline {
                 break;
             }
@@ -5044,8 +5047,10 @@ fn distinct_holder_count(receipts: &[FetchReceipt]) -> usize {
 
 /// Stops one pass of the holder walk. The cap counts passes, not only new
 /// peer DIDs, so a filter that keeps returning one holder cannot spin. The
-/// deadline is checked on every pass while the mode is on, and on a repeated
-/// candidate in either mode. Mode off still walks each new holder.
+/// deadline stops a candidate the walk already tried. It does not skip an
+/// announced holder that has not been tried, in either mode: that holder
+/// still runs after the window. `required_distinct` is accepted so a caller
+/// can show the mode, and the decision does not branch on it.
 fn fetch_walk_should_stop(
     fetch_attempts: usize,
     tried_len: usize,
@@ -5058,7 +5063,9 @@ fn fetch_walk_should_stop(
     {
         return true;
     }
-    (candidate_already_tried || required_distinct > 0) && tokio::time::Instant::now() >= deadline
+    // The mode is not a stop. An untried announced holder runs after the window.
+    let _ = required_distinct;
+    candidate_already_tried && tokio::time::Instant::now() >= deadline
 }
 
 /// A verified empty answer cannot be recorded: `FetchReceipt::Ok` requires
@@ -10046,6 +10053,9 @@ pub(crate) mod tests {
         wrong_tickets: Vec<String>,
         /// Connect tickets whose fetch answer is zero bytes.
         empty_tickets: Vec<String>,
+        /// Connect tickets that wait before answering a fetch. The wait can
+        /// outlast the caller's discovery window.
+        delay_tickets: Vec<(String, Duration)>,
         reject_admission: bool,
         omit_admission_receipt: bool,
     }
@@ -10074,6 +10084,13 @@ pub(crate) mod tests {
                 "request": request,
             }));
             if invocation.transfer == ProviderTransfer::Stream {
+                if let Some((_, delay)) = self
+                    .delay_tickets
+                    .iter()
+                    .find(|(name, _)| name.as_str() == ticket)
+                {
+                    tokio::time::sleep(*delay).await;
+                }
                 if self.fail_tickets.iter().any(|dead| dead == ticket) {
                     return Err(ProviderError::Provider("mock remote fetch failed".into()));
                 }
@@ -16012,6 +16029,7 @@ pub(crate) mod tests {
             !fetch_walk_should_stop(1, 1, true, 2, ahead),
             "one repeat is still inside the attempt cap"
         );
+        // The cap stops a repeat while the window is still open, in either mode.
         assert!(fetch_walk_should_stop(
             MAX_CARRIER_REPLICATION_CANDIDATES,
             1,
@@ -16019,12 +16037,85 @@ pub(crate) mod tests {
             2,
             ahead,
         ));
+        assert!(fetch_walk_should_stop(
+            MAX_CARRIER_REPLICATION_CANDIDATES,
+            1,
+            true,
+            0,
+            ahead,
+        ));
+        // The cap also bounds a holder that has not been tried.
+        assert!(fetch_walk_should_stop(
+            MAX_CARRIER_REPLICATION_CANDIDATES,
+            1,
+            false,
+            2,
+            ahead,
+        ));
+        // A repeat stops after the deadline, in either mode.
         assert!(fetch_walk_should_stop(1, 1, true, 2, past));
-        // Mode off keeps walking a new holder after the deadline.
-        assert!(!fetch_walk_should_stop(1, 1, false, 0, past));
-        // The same holder handed back again stops, in either mode.
         assert!(fetch_walk_should_stop(1, 1, true, 0, past));
-        assert!(fetch_walk_should_stop(1, 1, false, 2, past));
+        // The deadline never skips an announced holder that has not been tried.
+        assert!(!fetch_walk_should_stop(1, 1, false, 2, past));
+        assert!(!fetch_walk_should_stop(1, 1, false, 0, past));
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_tries_announced_holder_after_slow_holder() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let discovery = Duration::from_millis(40);
+        let hold = Duration::from_millis(150);
+        assert!(hold > discovery);
+        // The slow holder is announced first in rank, so it is tried first
+        // and uses the whole discovery window. The second holder is already
+        // announced before the fetch starts.
+        let (slow, slow_did) =
+            signed_content_availability_message(cid, [108; 32], "ticket:slow", "", now);
+        let (honest, honest_did) =
+            signed_content_availability_message(cid, [109; 32], "ticket:honest", "", now - 1);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            delay_tickets: vec![("ticket:slow".to_string(), hold)],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(110, cid, vec![slow, honest], invoker.clone()).await;
+        let provider = provider.with_discovery_wait(discovery);
+        let started = std::time::Instant::now();
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2
+            }))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() >= hold,
+            "the first holder must use up the discovery window, elapsed {:?}",
+            started.elapsed()
+        );
+        assert_eq!(response["status"], "ok", "{response}");
+        let availability = &response["data"]["availability"];
+        assert_eq!(availability["distinct_holders"], 2);
+        assert_eq!(availability["required_distinct_holders"], 2);
+        let receipts = availability["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 2, "{availability}");
+        assert_eq!(receipts[0]["peer_did"], slow_did);
+        assert_eq!(receipts[0]["attempt"], 1);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["bytes_received"], 22);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        assert_eq!(receipts[1]["peer_did"], honest_did);
+        assert_eq!(receipts[1]["attempt"], 2);
+        assert_eq!(receipts[1]["verified"], true);
+        assert_eq!(receipts[1]["bytes_received"], 22);
+        assert_eq!(receipts[1]["result"]["status"], "ok");
+        let requests = invoker.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["ticket"], "ticket:slow");
+        assert_eq!(requests[1]["ticket"], "ticket:honest");
+        endpoint.close().await;
     }
 
     #[tokio::test]
@@ -16562,6 +16653,7 @@ pub(crate) mod tests {
             transit_tickets: Default::default(),
             wrong_tickets: Vec::new(),
             empty_tickets: Vec::new(),
+            delay_tickets: Vec::new(),
             reject_admission: true,
             omit_admission_receipt: false,
         });
@@ -16623,6 +16715,7 @@ pub(crate) mod tests {
             transit_tickets: Default::default(),
             wrong_tickets: Vec::new(),
             empty_tickets: Vec::new(),
+            delay_tickets: Vec::new(),
             reject_admission: false,
             omit_admission_receipt: true,
         });
