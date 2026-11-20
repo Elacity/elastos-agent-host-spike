@@ -8,6 +8,7 @@ export ELASTOS_COLLABORATION_STARTUP_MODE=isolated
 # the third fetches it with min_distinct_holders 2 and keeps its signed
 # receipt set. Every saved file is checked outside the runtime process by the
 # #[ignore]d server test `saved_lab_distinct_holder_run_verifies`.
+# The script cleans up on exit and on INT/TERM.
 #
 # Hosts are changeable through three variables; this script orchestrates one
 # machine only:
@@ -23,7 +24,6 @@ TARGET_DIR="${P26_TARGET_DIR:-${ROOT}/target-build}"
 EVIDENCE_DIR="${P26_EVIDENCE_DIR:-${HOME}/Sparks/office/evidence/m3-p26-s4}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${EVIDENCE_DIR}/run-${STAMP}"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/elastos-p26-XXXXXX")"
 
 HOLDER_A_HOST="${P26_HOLDER_A_HOST:-127.0.0.1}"
 HOLDER_B_HOST="${P26_HOLDER_B_HOST:-127.0.0.1}"
@@ -49,6 +49,7 @@ declare -A HOME_DIR XDG_DIR DATA_DIR LOG_PATH COORDS_PATH API_URL ATTACH_SECRET 
 
 cleanup() {
     local status=$?
+    trap - EXIT INT TERM
     for name in holder-a holder-b requester; do
         local pid="${PID[$name]:-}"
         if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
@@ -70,7 +71,8 @@ cleanup() {
     fi
     exit "${status}"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/elastos-p26-XXXXXX")"
 
 fail() {
     echo "[p26] FAIL: $*" >&2
@@ -350,6 +352,16 @@ def mask_string(text):
     text = secret_fragment.sub('"<masked-key>": "<masked>"', text)
     return base32_ticket.sub("<masked>", text)
 
+def token_shape(text):
+    return bool(
+        bearer.search(text)
+        or base32_ticket.search(text)
+        or secret_fragment.search(text)
+        or "attach_secret" in text
+        or '"token"' in text
+        or '"ticket"' in text
+    )
+
 def walk(value):
     if isinstance(value, dict):
         return {
@@ -362,17 +374,37 @@ def walk(value):
         return mask_string(value)
     return value
 
+def is_binary(name, data):
+    if name.endswith(".bin"):
+        return True
+    return b"\0" in data
+
+hits = []
 for name in sorted(os.listdir(run_dir)):
     path = os.path.join(run_dir, name)
     if not os.path.isfile(path) or name == "RUN.md":
         continue
-    text = open(path, "r", encoding="utf-8", errors="replace").read()
+    data = open(path, "rb").read()
+    if is_binary(name, data):
+        # Scan only. Rewriting these bytes changes the saved source.
+        if token_shape(data.decode("latin-1")):
+            hits.append(name)
+        continue
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        if token_shape(data.decode("latin-1")):
+            hits.append(name)
+        continue
     try:
         masked = json.dumps(walk(json.loads(text)), indent=2, sort_keys=True) + "\n"
     except json.JSONDecodeError:
         masked = "\n".join(mask_string(line) for line in text.splitlines()) + "\n"
     if masked != text:
         open(path, "w", encoding="utf-8").write(masked)
+if hits:
+    sys.stderr.write("binary file holds a token shape: %s\n" % ", ".join(hits))
+    sys.exit(1)
 PY
     local hits
     hits="$(grep -rEn '"token"|"ticket"|attach_secret|Bearer |[a-z2-7]{120,}' "${RUN_DIR}" \
@@ -489,8 +521,10 @@ content_post requester "fetch" "$(jq -nc --arg cid "${CID}" '{cid:$cid,min_disti
     >"${RUN_DIR}/fetch.json"
 jq -e '.status == "ok"' "${RUN_DIR}/fetch.json" >/dev/null \
     || fail "distinct-holder fetch failed: $(jq -c '{code,message}' "${RUN_DIR}/fetch.json")"
-jq -e '.data.availability | (.distinct_holders == 2 and .required_distinct_holders == 2 and (.receipts | length) == 2)' \
+jq -e --arg cid "${CID}" '.data.availability.receipt_set.payload | (.requested_cid == $cid and .observed_distinct_holders == 2 and .required_distinct_holders == 2 and (.receipts | length) == 2)' \
     "${RUN_DIR}/fetch.json" >/dev/null || fail "fetch answer does not name two distinct holders"
+jq -e '.data.availability | ((.receipts | not) and (.distinct_holders | not) and (.required_distinct_holders | not) and (.receipt_set.signature | length) > 0)' \
+    "${RUN_DIR}/fetch.json" >/dev/null || fail "fetch answer repeated unsigned holder counts"
 FETCH_SHA256="$(jq -r '.data.data' "${RUN_DIR}/fetch.json" | python3 -c 'import base64,hashlib,sys;print(hashlib.sha256(base64.b64decode(sys.stdin.read())).hexdigest())')"
 [[ "${FETCH_SHA256}" == "${SOURCE_SHA256}" ]] || fail "fetched bytes differ from the source file"
 
@@ -520,8 +554,10 @@ content_post requester "fetch" "$(jq -nc --arg cid "${CID_2}" '{cid:$cid,min_dis
     >"${RUN_DIR}/refusal.json"
 jq -e '.status == "error" and .code == "carrier_fetch_distinct_holders"' "${RUN_DIR}/refusal.json" >/dev/null \
     || fail "refusal answer did not use the distinct-holders code: $(jq -c '{status,code}' "${RUN_DIR}/refusal.json")"
-jq -e '.data | (.distinct_holders == 1 and .required_distinct_holders == 2 and (.receipts | length) == 1 and (.receipt_set.signature | length) > 0)' \
+jq -e '.data.receipt_set.payload | (.observed_distinct_holders == 1 and .required_distinct_holders == 2 and (.receipts | length) == 1)' \
     "${RUN_DIR}/refusal.json" >/dev/null || fail "refusal answer lost its receipt or signed set"
+jq -e '.data | ((.receipts | not) and (.distinct_holders | not) and (.required_distinct_holders | not) and (.receipt_set.signature | length) > 0)' \
+    "${RUN_DIR}/refusal.json" >/dev/null || fail "refusal answer repeated unsigned holder counts"
 
 echo "[p26] write the run record"
 python3 - "${RUN_DIR}" "${CID}" "${CID_2}" "${SOURCE_SHA256}" "${SOURCE_BYTES}" \
@@ -559,16 +595,26 @@ cp "${LOG_PATH[requester]}" "${RUN_DIR}/requester.log"
 
 sanitize_and_scan
 
+SAVED_SOURCE_SHA256="$(sha256_of "${RUN_DIR}/source.bin")"
+RECORDED_SOURCE_SHA256="$(jq -r '.source_sha256' "${RUN_DIR}/meta.json")"
+FETCHED_SHA256="$(jq -r '.data.data' "${RUN_DIR}/fetch.json" | python3 -c 'import base64,hashlib,sys; print(hashlib.sha256(base64.b64decode(sys.stdin.read())).hexdigest())')"
+[[ "${SAVED_SOURCE_SHA256}" == "${RECORDED_SOURCE_SHA256}" && "${SAVED_SOURCE_SHA256}" == "${FETCHED_SHA256}" ]] \
+    || fail "saved source sha256 ${SAVED_SOURCE_SHA256} does not match recorded ${RECORDED_SOURCE_SHA256} or fetched ${FETCHED_SHA256}"
+TREE_NOTE="clean tree"
+if [[ -n "$(git -C "${ROOT}" status --porcelain)" ]]; then
+    TREE_NOTE="working tree changes included"
+fi
+
 cat >"${RUN_DIR}/RUN.md" <<EOF
 # P2-6 slice 5: three Homes fetch one CID from two holders
 
-- Head commit: ${HEAD_COMMIT} (branch ${BRANCH}, working tree changes included)
+- Head commit: ${HEAD_COMMIT} (branch ${BRANCH}, ${TREE_NOTE})
 - elastos binary: ${ELASTOS_BIN}, sha256 ${BIN_SHA256}
 - Host: $(uname -srm)
 - Homes: holder-a=${HOLDER_A_HOST}, holder-b=${HOLDER_B_HOST}, requester=${REQUESTER_HOST}
 - Node DIDs: holder-a ${NODE_DID[holder-a]}; holder-b ${NODE_DID[holder-b]}; requester ${NODE_DID[requester]}
 - CID: ${CID}; refusal CID: ${CID_2}
-- Source file: ${SOURCE_BYTES} bytes, sha256 ${SOURCE_SHA256}
+- Source file: ${SOURCE_BYTES} bytes, sha256 ${SOURCE_SHA256}. The saved source.bin hash equals this record and the fetched bytes.
 - Capabilities: holders \`elastos://content/*\` write (publish and ensure); requester \`elastos://content/fetch\` read; peer operations \`elastos://peer/*\` message, which is the action every peer operation requires. Each was requested and granted by the Home's own shell session (\`/api/capability/request\` then \`/api/capability/grant\`), and \`enforce_capability\` in the provider proxy checks the token before the provider runs.
 - Commands: \`bash scripts/p26-three-home-fetch.sh\` (build, three Homes, publish, fetch, verify, refusal). Hosts are set by P26_HOLDER_A_HOST, P26_HOLDER_B_HOST, P26_REQUESTER_HOST.
 - Verification: \`ELASTOS_P26_RUN_DIR=<this folder> cargo test --locked -p elastos-server --lib --target-dir target-build content::tests::saved_lab_distinct_holder_run_verifies -- --ignored --exact --nocapture\`; output is verify.txt.

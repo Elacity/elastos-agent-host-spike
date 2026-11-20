@@ -331,19 +331,19 @@ also carry the remote content provider's signed availability receipt; Carrier
 verifies and summarizes that receipt in the peer-selection proof when present,
 including safe peer-selection, quota, repair-worker, and accounting posture
 without exposing raw provider internals.
-A distinct-holder fetch records its answers as one receipt set. The set names
-the requested CID, the required and observed distinct holder counts, and one
-`FetchReceipt` per holder answer whose peer DID Carrier verified. The requester
-signs the set with its own node key under
-`elastos.content.fetch.receipt-set/v1` and labels it
-`requester-signed-not-holder-countersigned`: it is the requester's statement
-that it checked the returned bytes against the CID, not a holder
-countersignature. `verify_signed_fetch_receipt_set` accepts a set only for the
-requester DID it names, only when every receipt names the set's requested CID,
-and only when the observed count equals the distinct verified peer count. A
-refusal that reached fewer distinct holders than required carries the same
-signed set with its observed count, so the caller can see which holders
-answered.
+A fetch that sets `min_distinct_holders` is a success only when that many
+holders were verified. A local copy does not answer it: the fetch uses the
+existing availability path and returns the signed receipt set, or the
+distinct-holders refusal, or the existing unavailable error when no holder
+answered. With the field absent, fetch stays local-first and that answer is
+unchanged. A local-only fetch still does not leave the machine, and a local
+copy is still not reported as a distinct-holder success. The requester signs
+the set with its node key under the domain label
+`elastos.content.fetch.receipt-set.v1` and marks it
+`requester-signed-not-holder-countersigned`: its own statement after its CID
+check, not a holder countersignature. Readers use the verified nested payload
+for the CID, the counts and the receipts. The signed-mode answer does not
+repeat those values beside the signature.
 
 If only the local pin is proven, the honest state is
 `carrier_announced`; if requested replica/live-proof requirements are not met,
