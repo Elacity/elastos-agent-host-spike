@@ -1770,8 +1770,10 @@ pub(crate) mod tests {
     /// error inside an existing tree still fails.
     pub(crate) fn tree_hashes(dir: &std::path::Path) -> Vec<(String, String)> {
         use sha2::{Digest, Sha256};
-        if !dir.exists() {
-            return Vec::new();
+        match std::fs::symlink_metadata(dir) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(err) => panic!("cannot stat {}: {err}", dir.display()),
+            Ok(_) => {}
         }
         fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
             let entries = std::fs::read_dir(dir)
